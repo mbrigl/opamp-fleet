@@ -19,10 +19,10 @@ pub const ISSUED_CERT_FILE: &str = "client-cert.pem";
 /// leaves is a CSR over its public half.
 pub const ISSUED_KEY_FILE: &str = "client-key.pem";
 /// The key a request in flight asks to be certified, kept apart from [`ISSUED_KEY_FILE`] so the
-/// certificate in force keeps its own key until the new one is proved (ADR-0039 clause 11).
+/// certificate in force keeps its own key until the new one is proved (ADR-0059 clause 11).
 pub const PENDING_KEY_FILE: &str = "client-key.pending.pem";
 /// The request in flight, re-sent unchanged until it is answered — the enrolment queue knows a
-/// request by its public key (ADR-0039 clause 21).
+/// request by its public key (ADR-0059 clause 21).
 pub const PENDING_CSR_FILE: &str = "client-csr.pending.pem";
 
 /// The trust and the identity in force.

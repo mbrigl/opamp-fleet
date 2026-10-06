@@ -21,7 +21,7 @@ than anywhere else, and none beats one that has stopped being true.
 ```text
  operator ── REST / bundled UI ──▶ Operator plane :4321 ─┐
                                                          │  Server (Linux)
- Client ──── OpAMP, mTLS + credential ──▶ Agent plane :4320 ─┘   │
+ Client ──── OpAMP, mTLS ──────────────▶ Agent plane :4320 ─┘   │
    │  ▲                                                          ├─▶ config_dir: fleet state,
    │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients    │   register, audit record
    │                                                             └─▶ packages_dir: artifacts
@@ -34,13 +34,13 @@ than anywhere else, and none beats one that has stopped being true.
 
 - **Operators** drive the fleet through the REST API on the Operator plane, guarded by
   `[rest.auth]` beyond the loopback; the bundled UI uses the same API
-  ([ADR-0039](adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)).
-- **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — with a client
-  certificate in the TLS 1.3 handshake and the fleet credential on every request
+  ([ADR-0059](adr/0059-admission-by-a-client-certificate-alone.md)).
+- **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — admitted by the client
+  certificate in the TLS 1.3 handshake alone
   ([ADR-0054](adr/0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
-  ADR-0039). A Client in Gateway Mode carries other Clients' Agents over its own upstream
+  ADR-0059). A Client in Gateway Mode carries other Clients' Agents over its own upstream
   connections and refuses what the Server revoked
-  ([ADR-0055](adr/0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)).
+  ([ADR-0064](adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)).
 - **Managed Processes** run on the Client's host under a Supervisor each; a Collector reports
   through its own `opampextension` to the Supervisor Endpoint, which admits only the process its
   Supervisor started ([ADR-0053](adr/0053-the-supervisor-endpoint-admits-only-its-own-process.md)).
@@ -101,20 +101,20 @@ core module names an adapter or a technology, and when a module has no role.
   Operator plane asking for none — and tells a member's certificate from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
   ([ADR-0054](adr/0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
-- **Server admission** — `transport::Admission` requires the fleet credential and the client
-  certificate on every request to `/v1/opamp`, admits a bootstrap certificate only while the
+- **Server admission** — `transport::Admission` requires the client certificate on every request
+  to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Two core
   modules hold the state behind it: `enrolment`, the operator-opened window and the queue of
   requests an operator approves through `api`, and `throttle`, the per-address back-off after
   repeated failures, which both planes use
-  ([ADR-0039](adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md)). `revocation`
+  ([ADR-0059](adr/0059-admission-by-a-client-certificate-alone.md)). `revocation`
   holds the register of issued certificates, the revocation list and the hosts, behind the
-  `LedgerStore` port ([ADR-0049](adr/0049-revocation-ends-sessions-and-follows-renewal.md)).
+  `LedgerStore` port ([ADR-0065](adr/0065-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
   `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under
-  `config_dir/audit/` ([ADR-0052](adr/0052-an-append-only-audit-record-chained-by-hash.md)).
+  `config_dir/audit/` ([ADR-0063](adr/0063-an-append-only-audit-record-chained-by-hash.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
-  implements for the CSR flow and the renewal proof (ADR-0039), and
+  implements for the CSR flow and the renewal proof (ADR-0059), and
   `Clock`, which `clock::SystemClock` implements. The `[connection_offer]` and
   `[telemetry_offer]` sections become the fleet's offers in `config`.
 - **REST views** — what the REST API reads and returns is shaped in `api`, which derives its
@@ -138,9 +138,9 @@ core module names an adapter or a technology, and when a module has no role.
   and the Supervisor Endpoint use the same `opamp` building blocks
   ([ADR-0036](adr/0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)). The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
-  ([ADR-0055](adr/0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)).
+  ([ADR-0064](adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
-  ([ADR-0055](adr/0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)). The transports, the Gateway, telemetry
+  ([ADR-0064](adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
 - **Client self-update** — `update` is the Client updating itself
   ([ADR-0044](adr/0044-the-client-updates-itself-from-a-signed-package.md)). It owns the port `SelfUpdater` and
@@ -185,4 +185,4 @@ the fleet from them and shows each Agent disconnected until it reports. The Clie
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,
 and per Supervisor a directory with `config/` and `program/`. An installed Client runs from
 `versions/<version>/` through the `current` pointer
-([ADR-0046](adr/0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).
+([ADR-0061](adr/0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)).

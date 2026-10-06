@@ -24,47 +24,30 @@ pub struct TestServer {
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn() -> TestServer {
-    spawn_with(None, None).await
-}
-
-/// The same real router, with the OpAMP endpoint's credential check active (ADR-0017).
-#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
-pub async fn spawn_with_auth(auth: Option<fleet_server::transport::OpampAuth>) -> TestServer {
-    spawn_with(auth, None).await
+    spawn_with(None).await
 }
 
 /// The same real router with a tightened message size limit, for the tests that drive the
 /// Baseline's size rules without moving megabytes around.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_limit(limit: usize) -> TestServer {
-    spawn_full(None, None, limit, DEFAULT_STALE_AFTER).await
+    spawn_full(None, limit, DEFAULT_STALE_AFTER).await
 }
 
 /// The same real router with a tightened staleness budget (ADR-0026), for the tests that need an
 /// Agent to fall silent without waiting out the real one.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_stale_after(stale_after: std::time::Duration) -> TestServer {
-    spawn_full(
-        None,
-        None,
-        opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
-        stale_after,
-    )
-    .await
+    spawn_full(None, opamp::frame::DEFAULT_MAX_MESSAGE_SIZE, stale_after).await
 }
 
 /// The Server's own default, restated here so a scaffolded Server behaves like a real one.
 const DEFAULT_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// The full shape: optional credential check (ADR-0017) and optional connection-settings offer
-/// (ADR-0018).
+/// The full shape: an optional connection-settings offer (ADR-0060).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
-pub async fn spawn_with(
-    auth: Option<fleet_server::transport::OpampAuth>,
-    offer: Option<fleet_server::fleet::ConnectionOffer>,
-) -> TestServer {
+pub async fn spawn_with(offer: Option<fleet_server::fleet::ConnectionOffer>) -> TestServer {
     spawn_full(
-        auth,
         offer,
         opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
         DEFAULT_STALE_AFTER,
@@ -73,7 +56,6 @@ pub async fn spawn_with(
 }
 
 async fn spawn_full(
-    auth: Option<fleet_server::transport::OpampAuth>,
     offer: Option<fleet_server::fleet::ConnectionOffer>,
     limit: usize,
     stale_after: std::time::Duration,
@@ -88,11 +70,7 @@ async fn spawn_full(
             .with_max_message_size(limit)
             .with_stale_after(stale_after),
     );
-    let (addr, rest_addr) = serve(
-        state.clone(),
-        fleet_server::transport::Admission::new(auth, false),
-    )
-    .await;
+    let (addr, rest_addr) = serve(state.clone(), fleet_server::transport::Admission::open()).await;
     TestServer {
         addr,
         rest_addr,

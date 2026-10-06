@@ -265,13 +265,11 @@ impl Package {
         entry: &Entry,
         signature: &[u8],
         download_base: &str,
-        headers: Option<Headers>,
     ) -> PackageAvailable {
         let (download_url, headers) = match &entry.source {
             Some(source) => (
                 source.url.clone(),
-                // The Server's own credential has no business at someone else's address; what
-                // travels is what the operator said that source needs.
+                // What travels is what the operator said that source needs.
                 (!source.headers.is_empty()).then(|| Headers {
                     headers: source
                         .headers
@@ -288,7 +286,7 @@ impl Package {
                     "{download_base}/api/v1/packages/{}/{}/file?os={}&arch={}",
                     self.id.agent_type, self.id.version, entry.platform.os, entry.platform.arch
                 ),
-                headers,
+                None,
             ),
         };
         let file = DownloadableFile {
@@ -706,7 +704,6 @@ impl PackageStore {
         deployment: Option<&Deployment>,
         description: Option<&AgentDescription>,
         download_base: &str,
-        headers: Option<Headers>,
     ) -> Option<PackagesAvailable> {
         let sets = self.sets.read().expect("sets lock");
         let (set, entry) = assigned_entry(&sets, assigned, description)?;
@@ -717,7 +714,7 @@ impl PackageStore {
         Some(PackagesAvailable {
             packages: [(
                 set.id.agent_type.clone(),
-                set.to_available(entry, signature, download_base, headers),
+                set.to_available(entry, signature, download_base),
             )]
             .into(),
             all_packages_hash: aggregate_hash(set, entry),
@@ -1096,7 +1093,7 @@ mod tests {
         let held = assigned.map(|id| signed_channel(store, id));
         let deployment = held.as_ref();
         store
-            .offer_for_assigned(assigned, deployment, Some(description), "", None)
+            .offer_for_assigned(assigned, deployment, Some(description), "")
             .map(|offer| {
                 offer
                     .packages
@@ -1176,7 +1173,7 @@ mod tests {
         let linux = agent("linux", "amd64", &[]);
         assert!(
             store
-                .offer_for_assigned(Some(&set), Some(&unsigned), Some(&linux), "", None)
+                .offer_for_assigned(Some(&set), Some(&unsigned), Some(&linux), "")
                 .is_none(),
             "an unsigned entry was offered"
         );
@@ -1186,7 +1183,7 @@ mod tests {
         let signed = signed_channel(&store, &set);
         assert!(store.unsigned_in(&signed).is_empty());
         assert!(store
-            .offer_for_assigned(Some(&set), Some(&signed), Some(&linux), "", None)
+            .offer_for_assigned(Some(&set), Some(&signed), Some(&linux), "")
             .is_some());
     }
 
@@ -1636,7 +1633,6 @@ mod tests {
                 Some(&signed_channel(&store, &set)),
                 Some(&agent("linux", "amd64", &[])),
                 "https://fleet.example",
-                None,
             )
             .expect("an offer");
         let url = &offer.packages["otelcol"]

@@ -1,4 +1,4 @@
-//! The audit record's port (ADR-0052): what a security decision records, and the trait it is
+//! The audit record's port (ADR-0063): what a security decision records, and the trait it is
 //! recorded through. The record itself — the hash chain, the file, the writer — is the adapter
 //! [`crate::audit_log::AuditLog`].
 
@@ -117,7 +117,7 @@ impl Entry {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Unavailable;
 
-/// The record every security decision goes to (ADR-0052 clause 6).
+/// The record every security decision goes to (ADR-0063 clause 6).
 pub trait Audit: Send + Sync {
     /// Records one decision; without a record the caller does not take it.
     ///

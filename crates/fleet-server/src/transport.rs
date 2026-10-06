@@ -26,11 +26,9 @@ use tokio::sync::watch;
 use tracing::{debug, info};
 
 use crate::audit::{Audit, Entry};
-use crate::config::AuthConfig;
-use crate::credentials::Credentials;
 use crate::enrolment::{Enrolment, Requester, Submitted};
 use crate::fleet::{bad_request, unavailable, AppState, ConnId, Transport};
-use crate::revocation::{credential_hash, CertId, Presented, Revocations};
+use crate::revocation::{CertId, Presented, Revocations};
 use crate::throttle::Throttle;
 use crate::tls::{Issuers, Peer};
 
@@ -38,37 +36,13 @@ use crate::tls::{Issuers, Peer};
 /// both from the shared crate, because the Gateway serves the same endpoint (ADR-0011).
 pub use opamp::endpoint::{OPAMP_PATH, PROTOBUF_CONTENT_TYPE};
 
-/// The OpAMP endpoint's credential check (ADR-0017), precomputed from the `[auth]` section — Bearer
-/// and Basic alike. The comparison itself lives in [`crate::credentials`], shared with the Operator
-/// plane's own check (ADR-0017).
-pub struct OpampAuth(Arc<Credentials>);
-
-impl OpampAuth {
-    /// # Errors
-    /// Returns an error naming an entry of `[auth]` that is not a hash this Server keeps.
-    pub fn from_config(auth: &AuthConfig) -> Result<Self, String> {
-        Ok(OpampAuth(Arc::new(auth.credentials()?)))
-    }
-
-    /// The check itself, shared with the revocation list, which revokes only a credential this
-    /// check accepts (ADR-0049 clause 5).
-    #[must_use]
-    pub fn credentials(&self) -> Arc<Credentials> {
-        self.0.clone()
-    }
-}
-
-/// What a peer must prove to reach `/v1/opamp` (ADR-0039): **both** a fleet credential and a
-/// client certificate the handshake verified. A certificate from the bootstrap CA admits an
-/// enrolling host, and only while an operator holds the enrolment window open. Repeated failures
-/// from one peer address are throttled before the credential is even compared.
-///
-/// The rule is deliberately not "either one". Header authorization is what the Baseline expects an
-/// Agent to carry and client certificates are what it adds on top — so stacking them is the
-/// protocol's own layering.
+/// What a peer must prove to reach `/v1/opamp` (ADR-0059 clauses 1, 6): a client certificate the
+/// handshake verified, not revoked — the whole of admission. No `Authorization` header is read; one
+/// that is sent is ignored, never refused, and no refusal carries a `WWW-Authenticate` challenge. A
+/// certificate from the bootstrap CA admits an enrolling host, and only while an operator holds the
+/// enrolment window open. Repeated failures from one peer address are throttled.
 #[derive(Default)]
 pub struct Admission {
-    auth: Option<OpampAuth>,
     /// The connection must have carried a certificate. The certificate itself is already verified
     /// — rustls refuses one it cannot chain — so this is a presence check, never a second
     /// verification.
@@ -83,20 +57,18 @@ pub struct Admission {
 }
 
 /// How often a plain-HTTP peer's admission is recorded: once per address and certificate per
-/// hour, so a poll every few seconds does not crowd the record (ADR-0052 clause 1).
+/// hour, so a poll every few seconds does not crowd the record (ADR-0063 clause 1).
 const ADMITTED_EVERY: Duration = Duration::from_secs(3600);
 
 /// The plain-HTTP peers remembered as recorded at most.
 const ADMITTED_MAX: usize = 100_000;
 
-/// The proofs that admitted a connection (ADR-0049 clause 9): the certificate, with when it
-/// expires, and the hash of the credential. A WebSocket session ends when either is revoked, or when
-/// the certificate expires.
+/// What admitted a connection (ADR-0065 clause 9): the certificate, with when it expires. A
+/// WebSocket session ends when it is revoked, or when it expires.
 #[derive(Clone, Debug, Default)]
 pub struct Proofs {
     pub certificate: Option<(CertId, u64)>,
-    pub credential: Option<String>,
-    /// The host the certificate was issued to, when it names one (ADR-0039 clause 7).
+    /// The host the certificate was issued to, when it names one (ADR-0059 clause 7).
     pub host: Option<String>,
 }
 
@@ -105,23 +77,18 @@ impl Proofs {
         self.certificate
             .as_ref()
             .is_some_and(|(id, _)| revocations.is_certificate_revoked(id))
-            || self
-                .credential
-                .as_ref()
-                .is_some_and(|hash| revocations.is_credential_revoked(hash))
     }
 }
 
 impl Admission {
     /// No proof required — what a test that is not about admission serves with. A Server never
-    /// does: its configuration requires both proofs (ADR-0039).
+    /// does: its configuration requires the client CA (ADR-0059).
     pub fn open() -> Self {
         Admission::default()
     }
 
-    pub fn new(auth: Option<OpampAuth>, require_client_certificate: bool) -> Self {
+    pub fn new(require_client_certificate: bool) -> Self {
         Admission {
-            auth,
             require_client_certificate,
             ..Admission::default()
         }
@@ -136,14 +103,14 @@ impl Admission {
         self
     }
 
-    /// Throttles repeated failures from one peer address (ADR-0039 clause 24).
+    /// Throttles repeated failures from one peer address (ADR-0059 clause 24).
     #[must_use]
     pub fn with_throttle(mut self, throttle: Arc<Throttle>) -> Self {
         self.throttle = Some(throttle);
         self
     }
 
-    /// Records every decision in `audit` (ADR-0052).
+    /// Records every decision in `audit` (ADR-0063).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
         self.audit = audit;
@@ -192,7 +159,7 @@ impl Admission {
         );
     }
 
-    /// Refuses a revoked certificate or credential (ADR-0049 clause 8).
+    /// Refuses a revoked certificate (ADR-0065 clause 8).
     #[must_use]
     pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
         self.revocations = revocations;
@@ -200,28 +167,18 @@ impl Admission {
     }
 
     fn required(&self) -> bool {
-        self.auth.is_some()
-            || self.require_client_certificate
-            || self.throttle.is_some()
-            || self.revocations.is_some()
-    }
-
-    /// `401`, with the challenge when a credential is required.
-    fn unauthorized(&self, text: &'static str) -> Response {
-        match &self.auth {
-            Some(auth) => (
-                StatusCode::UNAUTHORIZED,
-                [(header::WWW_AUTHENTICATE, auth.0.challenge().to_string())],
-                text,
-            )
-                .into_response(),
-            None => (StatusCode::UNAUTHORIZED, text).into_response(),
-        }
+        self.require_client_certificate || self.throttle.is_some() || self.revocations.is_some()
     }
 }
 
-/// What the package download route asks of a peer (ADR-0039 clause 23): it sits outside the
-/// credential check, behind the same handshake, and a bootstrap certificate is not enough.
+/// `401` without a challenge: the Agent plane admits by certificate, which no header can supply
+/// (ADR-0059 clause 1).
+fn unauthorized(text: &'static str) -> Response {
+    (StatusCode::UNAUTHORIZED, text).into_response()
+}
+
+/// What the package download route asks of a peer (ADR-0059 clause 23): the same handshake as
+/// `/v1/opamp`, and a certificate from the client CA — a bootstrap certificate is not enough.
 #[derive(Clone, Default)]
 pub struct DownloadGuard {
     require_client_certificate: bool,
@@ -298,11 +255,7 @@ async fn admit_download(
             throttle.failed(peer);
         }
         let _ = record("download.refused", "refused");
-        return (
-            StatusCode::UNAUTHORIZED,
-            "the package download requires a certificate of the fleet",
-        )
-            .into_response();
+        return unauthorized("the package download requires a certificate of the fleet");
     }
     if record("download.admitted", "admitted") == Some(Err(crate::audit::Unavailable)) {
         return busy();
@@ -310,7 +263,7 @@ async fn admit_download(
     next.run(request).await
 }
 
-/// Where a Gateway fetches the revoked certificates it refuses (ADR-0056 clause 12).
+/// Where a Gateway fetches the revoked certificates it refuses (ADR-0065 clause 12).
 pub const GATEWAY_REVOCATIONS_PATH: &str = "/v1/gateway/revocations";
 
 pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
@@ -325,14 +278,14 @@ pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
     let mut router = opamp::server::router(Arc::new(Fleet(state)), settings).merge(gateways);
     if admission.required() {
         // The outermost layer: every plain-HTTP POST and the upgrade GET — checked before the
-        // WebSocket upgrade completes — answers 401 when a required proof is missing.
+        // WebSocket upgrade completes — answers 401 without a certificate that admits.
         router = router.layer(middleware::from_fn_with_state(Arc::new(admission), admit));
     }
     router
 }
 
 /// The revoked certificates of the client CA, chains resolved, for a host marked as a Gateway
-/// (ADR-0056 clause 12). Admitted as `/v1/opamp` is, by the layer around both; what is checked
+/// (ADR-0065 clause 12). Admitted as `/v1/opamp` is, by the layer around both; what is checked
 /// here is that the member is a Gateway. The `ETag` is the SHA-256 of the body, so it changes with
 /// the list and survives a restart.
 async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Request) -> Response {
@@ -357,7 +310,19 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
                     .and_then(|proofs| proofs.host.clone()),
                 _ => None,
             };
-            if !host.is_some_and(|host| revocations.is_gateway(&host)) {
+            if !host
+                .as_ref()
+                .is_some_and(|host| revocations.is_gateway(host))
+            {
+                // A member asking for what only a Gateway is handed is a refusal like any other
+                // (ADR-0063 clause 1).
+                state.audit_refusal(
+                    Entry::new("gateway_list.refused", "refused")
+                        .peer(peer_ip(&request))
+                        .with("plane", "agent")
+                        .with("host", host)
+                        .with("check", "not a gateway"),
+                );
                 return forbidden();
             }
             revocations
@@ -394,8 +359,8 @@ pub fn peer_ip(request: &Request) -> Option<std::net::IpAddr> {
         .map(|ConnectInfo(addr)| addr.ip())
 }
 
-/// The answer while the Server cannot take a decision now — too many password hashes under way,
-/// or the audit record unavailable: `503`, try again in a second.
+/// The answer while the Server cannot take a decision now — too many password hashes under way on
+/// the Operator plane, or the audit record unavailable: `503`, try again in a second.
 pub fn busy() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -420,9 +385,10 @@ async fn admit(
     mut request: Request,
     next: Next,
 ) -> Response {
-    // What this gate proves is *fleet membership*, not which Agent is speaking: the credential and
-    // the client certificate are fleet-wide, and `instance_uid` stays self-asserted behind them
-    // (ADR-0039). Admission is the trust boundary; there is no authorization between admitted Agents.
+    // What this gate proves is *fleet membership* and the host, not which Agent is speaking:
+    // `instance_uid` stays self-asserted behind the certificate (ADR-0059 clauses 7, 14). Admission
+    // is the trust boundary; the host is the only bound between admitted Agents. An
+    // `Authorization` header is not read here or anywhere behind it (ADR-0059 clause 1).
     let peer = peer_ip(&request);
     let record_refusal = |event: &str, outcome: &str, check: &str| {
         if let Some(audit) = &admission.audit {
@@ -477,26 +443,20 @@ async fn admit(
         Some(Err(_)) => {
             return refuse(
                 "certificate",
-                admission.unauthorized("the OpAMP endpoint requires authentication"),
+                unauthorized("the OpAMP endpoint requires a certificate of the fleet"),
             )
         }
     };
-    let credential = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(credential_hash);
     if let Some(revocations) = &admission.revocations {
         let proofs = Proofs {
             certificate: presented
                 .as_ref()
                 .map(|facts| (facts.id.clone(), facts.not_after_ms)),
-            credential: credential.clone(),
             host: None,
         };
-        // Which proof was revoked is not said (ADR-0049 clause 8).
+        // That the certificate was revoked is not said (ADR-0065 clause 8).
         if proofs.revoked(revocations) {
-            debug!("refused: a revoked certificate or credential");
+            debug!("refused: a revoked certificate");
             if let Some(audit) = &admission.audit {
                 audit.refusal(
                     Entry::new("admission.revoked_proof", "refused")
@@ -509,36 +469,7 @@ async fn admit(
             }
             return refuse(
                 "revoked",
-                admission.unauthorized("the OpAMP endpoint requires authentication"),
-            );
-        }
-    }
-    // The attempt counts before a password is hashed, so attempts sent at once cannot all pass the
-    // back-off check first (ADR-0039 clause 2).
-    let _attempt = match (&admission.throttle, peer) {
-        (Some(throttle), Some(peer)) => match throttle.begin(peer) {
-            Some(attempt) => Some(attempt),
-            None => {
-                record_refusal("admission.throttled", "throttled", "attempts");
-                return throttled(throttle.retry_after(peer).unwrap_or(1));
-            }
-        },
-        _ => None,
-    };
-    if let Some(auth) = &admission.auth {
-        let verdict = auth.0.check(request.headers()).await;
-        if verdict == crate::credentials::Verdict::Busy {
-            return busy();
-        }
-        if verdict == crate::credentials::Verdict::Refused {
-            return refuse(
-                "credential",
-                (
-                    StatusCode::UNAUTHORIZED,
-                    [(header::WWW_AUTHENTICATE, auth.0.challenge().to_string())],
-                    "the OpAMP endpoint requires authentication",
-                )
-                    .into_response(),
+                unauthorized("the OpAMP endpoint requires a certificate of the fleet"),
             );
         }
     }
@@ -546,9 +477,9 @@ async fn admit(
         .map(|cert| admission.issuers.classify(cert.as_ref()))
         .unwrap_or(Peer::Member);
     if let Peer::Enrolling { .. } = &classified {
-        // A bootstrap certificate opens nothing outside an enrolment window (ADR-0039 clause 21).
-        // The credential was right, so this is no guess and counts as no failure: hosts that
-        // wait for an operator must not throttle the members behind the same address.
+        // A bootstrap certificate opens nothing outside an enrolment window (ADR-0059 clause 21).
+        // The handshake proved the certificate, so this is no guess and counts as no failure:
+        // hosts that wait for an operator must not throttle the members behind the same address.
         if !admission.enrolment.as_ref().is_some_and(|e| e.is_open()) {
             debug!("refused: a bootstrap certificate outside an enrolment window");
             record_refusal("admission.refused", "refused", "enrolment_window");
@@ -580,7 +511,7 @@ async fn admit(
                         .and_then(|facts| admission.issuers_role(&facts.id.issuer)),
                 )
                 .with("serial", serial.map(str::to_string));
-            // Not admitted without its record (ADR-0052 clause 6).
+            // Not admitted without its record (ADR-0063 clause 6).
             if audit.record(entry).is_err() {
                 return busy();
             }
@@ -593,7 +524,6 @@ async fn admit(
     request.extensions_mut().insert(Proofs {
         host: presented.as_ref().and_then(|facts| facts.host.clone()),
         certificate: presented.map(|facts| (facts.id, facts.not_after_ms)),
-        credential,
     });
     next.run(request).await
 }
@@ -605,7 +535,7 @@ struct Fleet(Arc<AppState>);
 /// One connection as the fleet sees it.
 struct Carrier {
     transport: Transport,
-    /// Set on an enrolment connection (ADR-0039 clause 21): the bootstrap certificate it carried,
+    /// Set on an enrolment connection (ADR-0059 clause 21): the bootstrap certificate it carried,
     /// where from, and the key its request asks to be certified, once it has sent one.
     enrolling: Option<Enrolling>,
     /// This connection's identity — what the duplicate detection tells connections apart by. Plain
@@ -615,7 +545,7 @@ struct Carrier {
     /// (ADR-0009), so all of them are marked unreachable when it goes.
     seen: Vec<InstanceUid>,
     /// What admitted the connection: re-checked before a CSR is signed, and the presented
-    /// certificate is the predecessor of one it renews (ADR-0049 clauses 2, 4).
+    /// certificate is the predecessor of one it renews (ADR-0065 clauses 2, 4).
     proofs: Proofs,
     /// Why the session was ended, once its [`Guard`] has ended it.
     ended: Arc<Mutex<Option<&'static str>>>,
@@ -641,7 +571,7 @@ enum Pushes {
 }
 
 /// A WebSocket session's outbound side, and what ends it: a revocation of what admitted it, or the
-/// expiry of its certificate (ADR-0049 clauses 9, 10).
+/// expiry of its certificate (ADR-0065 clauses 9, 10).
 struct Session {
     pushes: Pushes,
     guard: Option<Guard>,
@@ -880,7 +810,7 @@ impl Handler for Fleet {
         if csr {
             if let Some(revocations) = self.0.revocations() {
                 // A session whose proof was revoked a moment ago is not handed a certificate
-                // before its guard closes it (ADR-0049 clause 4).
+                // before its guard closes it (ADR-0065 clause 4).
                 if carrier.proofs.revoked(revocations) {
                     return Reply::Send(bad_request("this connection is no longer admitted"));
                 }
@@ -888,7 +818,7 @@ impl Handler for Fleet {
         }
         // The connection's own certificate, whatever the message claims to be: behind a Gateway
         // that is the Gateway's, so revoking it reaches what was renewed through it without a
-        // renewal proof (ADR-0049 clauses 2, 11).
+        // renewal proof (ADR-0065 clauses 2, 11).
         let presented = carrier
             .proofs
             .certificate
@@ -963,7 +893,7 @@ impl Handler for Fleet {
 }
 
 impl Fleet {
-    /// One message on an enrolment connection (ADR-0039 clause 21). Nothing in it is read but the
+    /// One message on an enrolment connection (ADR-0059 clause 21). Nothing in it is read but the
     /// certificate signing request: no Agent record is created and nothing is offered but the
     /// issued certificate.
     fn enrol(&self, enrolling: &Enrolling, report: &AgentToServer) -> ServerToAgent {

@@ -1,11 +1,11 @@
-//! Gateway Mode (ADR-0009): the Client at a network boundary.
+//! Gateway Mode (ADR-0064): the Client at a network boundary.
 //!
 //! It is an OpAMP **server** downstream and an OpAMP **client** upstream, and it folds many
 //! downstream connections onto a small pool of upstream ones. What it does *not* do is as
-//! load-bearing as what it does: it forwards messages unchanged, makes no authentication decision
-//! of its own — the one refusal beyond its handshake is a certificate its Server revoked
-//! ([`revocations`]) — and never speaks in an Agent's name, not even to say the goodbye a vanished
-//! Agent did not send.
+//! load-bearing as what it does: it forwards messages unchanged, holds no admission policy of its
+//! own — the one refusal beyond its handshake is a certificate its Server revoked
+//! ([`revocations`]) — forwards no `Authorization`, and never speaks in an Agent's name, not even to
+//! say the goodbye a vanished Agent did not send.
 //!
 //! Three pieces: this module serves the downstream endpoint on both transports (a downstream Client
 //! picks its transport by URL scheme, so serving only one would silently exclude half of them),
@@ -55,10 +55,10 @@ const EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30)
 struct Forwarding {
     pool: Pool,
     registry: Arc<Registry>,
-    /// The most distinct Agents one downstream connection may carry (ADR-0009): past it a report
+    /// The most distinct Agents one downstream connection may carry (ADR-0064): past it a report
     /// for a *new* Agent is dropped, so a single peer cannot grow the routing state without bound.
     max_agents: usize,
-    /// What the Server revoked, which this Gateway refuses (ADR-0055 clause 14).
+    /// What the Server revoked, which this Gateway refuses (ADR-0064 clause 14).
     revocations: RevocationList,
 }
 
@@ -82,7 +82,7 @@ impl Default for Timings {
 
 /// Serves the downstream endpoint until `shutdown` fires.
 ///
-/// Mutual TLS is per hop (ADR-0055): the downstream hop serves TLS 1.3 from `[gateway.tls]`, and
+/// Mutual TLS is per hop (ADR-0064): the downstream hop serves TLS 1.3 from `[gateway.tls]`, and
 /// every downstream Agent must present a certificate that chains to its `client_ca_file` — the
 /// access-control boundary of the hop. Both are required; a Gateway without them does not start.
 /// Downstream Agents travel upstream under this Gateway's own member certificate, so that CA must
@@ -156,7 +156,7 @@ pub async fn run_on_timed(
     let registry = Arc::new(Registry::new());
     let revocations = RevocationList::new(timings.revocation_max_age);
     // Its first peers are not refused for want of a list, nor kept waiting for a Server that does
-    // not answer (ADR-0055 clause 14).
+    // not answer (ADR-0064 clause 14).
     let _ = tokio::time::timeout(
         REVOCATION_FIRST_WAIT,
         revocations::update(&revocations, &config),
@@ -178,7 +178,7 @@ pub async fn run_on_timed(
     let app = opamp::server::router(handler, Settings::new(config.max_message_size_bytes));
 
     let upstream_cap = gateway.upstream_connections;
-    // Mutual TLS 1.3 and nothing less (ADR-0055); the load refused a Gateway without it.
+    // Mutual TLS 1.3 and nothing less (ADR-0064); the load refused a Gateway without it.
     let tls = gateway
         .tls
         .as_ref()
@@ -204,9 +204,9 @@ pub async fn run_on_timed(
         .map_err(|e| format!("the gateway endpoint stopped: {e}"))
 }
 
-/// The material the downstream endpoint serves with (ADR-0055): a client certificate that chains
-/// to `client_ca_file` is **mandatory** in the handshake. The Gateway trusts the fleet's client CA
-/// and never a bootstrap CA, so a host enrols with the Server directly (ADR-0039 clause 25).
+/// The material the downstream endpoint serves with (ADR-0064 clause 11): a client certificate
+/// that chains to `client_ca_file` is **mandatory** in the handshake. The Gateway trusts the fleet's
+/// client CA and never a bootstrap CA, so a host enrols with the Server directly (ADR-0059 clause 25).
 fn server_tls(tls: &GatewayTlsConfig) -> Result<ServerTls, String> {
     let ca_file = tls
         .client_ca_file
@@ -228,16 +228,13 @@ fn server_tls(tls: &GatewayTlsConfig) -> Result<ServerTls, String> {
 struct Downstream {
     transport: Transport,
     peer: String,
-    /// Forwarded upstream with every report — the Gateway makes no authentication decision of its
-    /// own (ADR-0009).
-    authorization: Option<String>,
     /// Where the registry routes this socket's replies; `None` on plain HTTP, whose one reply
     /// comes back through a `oneshot` instead.
     replies: Option<mpsc::Sender<ServerToAgent>>,
     /// Every Agent this peer turned out to carry, so all of them are released when it goes. A set,
     /// not a list: membership is checked per report, and the cap bounds how large it grows.
     carried: HashSet<InstanceUid>,
-    /// Why the socket was ended from this side, for its close frame (ADR-0055 clause 14).
+    /// Why the socket was ended from this side, for its close frame (ADR-0064 clause 14).
     ended: Arc<Mutex<Option<&'static str>>>,
     /// The certificate it was admitted with, which every report is judged by again.
     certificate: Vec<u8>,
@@ -283,7 +280,7 @@ impl Handler for Forwarding {
         &self,
         request: &RequestInfo<'_>,
     ) -> Result<(Downstream, Option<Replies>), Rejection> {
-        // The one refusal beyond the handshake, and it is the Server's (ADR-0055 clause 14).
+        // The one refusal beyond the handshake, and it is the Server's (ADR-0064 clause 14).
         let certificate = request
             .extensions
             .get::<PeerCertificate>()
@@ -307,11 +304,8 @@ impl Handler for Forwarding {
                 })
             }
         }
-        let authorization = request
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
+        // An `Authorization` the peer sends is ignored, never refused, and nothing is forwarded in
+        // its place (ADR-0064 clause 11).
         let peer = request
             .peer
             .map_or_else(|| "unknown".to_string(), |peer| peer.to_string());
@@ -339,7 +333,6 @@ impl Handler for Forwarding {
             Downstream {
                 transport: request.transport,
                 peer,
-                authorization,
                 replies,
                 carried: HashSet::new(),
                 ended,
@@ -356,7 +349,7 @@ impl Handler for Forwarding {
     async fn on_message(&self, downstream: &mut Downstream, report: AgentToServer) -> Reply {
         match downstream.transport {
             Transport::WebSocket => self.forward_from_socket(downstream, report).await,
-            Transport::Http => self.forward_exchange(downstream, report).await,
+            Transport::Http => self.forward_exchange(report).await,
         }
     }
 
@@ -364,7 +357,7 @@ impl Handler for Forwarding {
         vec![reply]
     }
 
-    /// An unreadable report is dropped, never answered: the Gateway invents nothing (ADR-0009). A
+    /// An unreadable report is dropped, never answered: the Gateway invents nothing (ADR-0064). A
     /// plain-HTTP exchange still needs a response, and it says why.
     fn on_unreadable(&self, downstream: &mut Downstream, error: &Unreadable) -> Reply {
         warn!(peer = %downstream.peer, %error, "dropping an unreadable downstream report");
@@ -375,7 +368,7 @@ impl Handler for Forwarding {
     }
 
     /// The peer is gone. Its Agents stop being routable here — and nothing is said upstream on
-    /// their behalf, because they said nothing (ADR-0009 rule 10).
+    /// their behalf, because they said nothing (ADR-0064 clause 10).
     fn on_closed(&self, downstream: Downstream) {
         if downstream.transport == Transport::WebSocket {
             let count = downstream.carried.len();
@@ -418,18 +411,14 @@ impl Forwarding {
         if let Some(replies) = &downstream.replies {
             self.registry.attach(uid, replies.clone());
         }
-        if let Err(e) = self
-            .pool
-            .forward(uid, &report, downstream.authorization.as_deref())
-            .await
-        {
+        if let Err(e) = self.pool.forward(uid, &report).await {
             warn!(agent = %uid, error = %e, "cannot forward a report upstream");
         }
         Reply::Nothing
     }
 
     /// The plain-HTTP half: one report in, one reply out, with the pool in between.
-    async fn forward_exchange(&self, downstream: &Downstream, report: AgentToServer) -> Reply {
+    async fn forward_exchange(&self, report: AgentToServer) -> Reply {
         let Some(uid) = InstanceUid::from_wire(&report.instance_uid) else {
             return Reply::Refuse(
                 StatusCode::BAD_REQUEST,
@@ -438,11 +427,7 @@ impl Forwarding {
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         self.registry.expect_once(uid, reply_tx);
-        if let Err(e) = self
-            .pool
-            .forward(uid, &report, downstream.authorization.as_deref())
-            .await
-        {
+        if let Err(e) = self.pool.forward(uid, &report).await {
             warn!(agent = %uid, error = %e, "cannot forward a report upstream");
             return Reply::Refuse(StatusCode::BAD_GATEWAY, "cannot reach the Server".into());
         }

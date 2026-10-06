@@ -1,4 +1,4 @@
-//! Enrolment and the renewals after it, end to end (ADR-0039 clauses 9, 11, 21 and 22): the real
+//! Enrolment and the renewals after it, end to end (ADR-0059 clauses 9, 11, 21 and 22): the real
 //! Client binary enrols with a bootstrap certificate over mutual TLS, an operator approves its
 //! request, and it renews what it was issued — each step costing the register exactly one
 //! certificate.
@@ -105,14 +105,14 @@ async fn past(state: &AppState, after: u64) {
 
 /// A host enrols with a bootstrap certificate and an operator's approval, and then renews, over the
 /// WebSocket transport: the approval issues one certificate and the renewal one more.
-/// Verifies: ADR-0039, ADR-0056
+/// Verifies: ADR-0059, ADR-0065
 #[tokio::test]
 async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_websocket() {
     enrol_and_renew("wss").await;
 }
 
 /// The same over plain HTTP polling.
-/// Verifies: ADR-0039, ADR-0056
+/// Verifies: ADR-0059, ADR-0065
 #[tokio::test]
 async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_http() {
     enrol_and_renew("https").await;
@@ -120,7 +120,7 @@ async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_http() {
 
 /// With heartbeats off, the request still reaches the queue at once: it never waits for a message
 /// that would carry it, and the certificate is pushed to the host on approval.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0059
 #[tokio::test]
 async fn an_enrolment_needs_no_heartbeat() {
     let served = Served::start(60).await;
@@ -229,7 +229,6 @@ impl Served {
                     fleet_server::fs::FsLedgerStore::open(pki.join("revocation")).expect("ledger"),
                 ),
                 clock,
-                Arc::new(|_: &str| false),
                 vec![
                     client_ca.authority("client"),
                     bootstrap_ca.authority("bootstrap"),
@@ -269,15 +268,7 @@ impl Served {
             }),
         )
         .expect("server material");
-        let auth = fleet_server::transport::OpampAuth::from_config(
-            &toml::from_str::<fleet_server::config::AuthConfig>(&format!(
-                "bearer_tokens = [{:?}]",
-                fleet_server::credentials::bearer_entry("test-fleet-token")
-            ))
-            .expect("auth config"),
-        )
-        .expect("auth");
-        let admission = fleet_server::transport::Admission::new(Some(auth), true)
+        let admission = fleet_server::transport::Admission::new(true)
             .with_enrolment(planes.issuers, Some(enrolment.clone()))
             .with_revocations(Some(revocations.clone()));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -312,7 +303,6 @@ impl Served {
             &config_path,
             format!(
                 "endpoint = \"{scheme}://localhost:{}/v1/opamp\"\nstate_dir = {:?}\n{settings}\n\
-                 [auth]\nbearer_token = \"test-fleet-token\"\n\n\
                  [tls]\nca_file = {:?}\ncert_file = {:?}\nkey_file = {:?}\n",
                 self.port,
                 self.state_dir.display().to_string(),

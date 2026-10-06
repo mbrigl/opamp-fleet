@@ -114,7 +114,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: ADR-0051, ADR-0055, G-1, G-6, G-14
+// Verifies: ADR-0051, ADR-0064, G-1, G-6, G-14
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -166,7 +166,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         stub_block = stub_block,
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
         .expect("write supervisor.toml");
 
     // Both owned Supervisors have their program staged before the Client starts, so they run at
@@ -580,7 +580,7 @@ async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path())).expect("write");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path())).expect("write");
     let written = std::fs::read(&config_path).expect("read");
     stage_owned_program(&state_dir, "stub", &program);
     let _client = spawn_client(&config_path);

@@ -329,7 +329,7 @@ pub trait CertificateSigner: Send + Sync {
     /// Returns an error when the request does not parse or cannot be signed.
     fn sign(&self, csr_pem: &str, host: &str) -> Result<Signed, String>;
 
-    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0039
+    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0059
     /// clause 27); `Ok(None)` when it carries none.
     ///
     /// # Errors
@@ -378,8 +378,7 @@ pub struct PackageOffering {
 impl PackageOffering {
     /// `download_base` is the advertised absolute URL, or empty for a path the Client resolves
     /// against its own endpoint — which is the Agent plane, where the download is served
-    /// (ADR-0012). It sits outside Admission (ADR-0017): the artifact's content hash and signature
-    /// are what protect it, so no credential rides it.
+    /// (ADR-0012), behind the same handshake as `/v1/opamp` (ADR-0059 clause 23).
     pub fn with_deployments(
         store: PackageStore,
         deployments: DeploymentStore,
@@ -428,17 +427,14 @@ pub struct AppState {
     /// The authority that signs Agent CSRs (ADR-0017); `None` signs nothing and leaves
     /// `AcceptsConnectionSettingsRequest` undeclared.
     client_ca: Option<Box<dyn CertificateSigner>>,
-    /// The enrolment window and its queue (ADR-0039); `None` while `[enrolment]` is not set, and no
+    /// The enrolment window and its queue (ADR-0059); `None` while `[enrolment]` is not set, and no
     /// host enrols.
     enrolment: Option<Arc<Enrolment>>,
-    /// What the client CA signed and what is revoked (ADR-0049); `None` only where a test serves
+    /// What the client CA signed and what is revoked (ADR-0065); `None` only where a test serves
     /// without it.
     revocations: Option<Arc<Revocations>>,
-    /// The audit record every security decision goes to (ADR-0052); `None` only in tests.
+    /// The audit record every security decision goes to (ADR-0063); `None` only in tests.
     audit: Option<Arc<dyn Audit>>,
-    /// The connection-settings hash last recorded as offered to each Agent, so a rotation is
-    /// recorded once per offer and not once per poll.
-    offered: Mutex<HashMap<InstanceUid, Vec<u8>>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
     /// Where Agents send their own telemetry (ADR-0025); empty offers no destination.
@@ -460,8 +456,8 @@ pub struct AppState {
     /// this ceiling is refused `Unavailable` rather than admitted, so a peer cycling fresh UIDs —
     /// each of which would pin an in-memory record and a persisted file — cannot exhaust memory or
     /// disk (a self-asserted UID is free to mint, ADR-0017). Existing Agents keep reporting; only
-    /// growth past the ceiling is refused. The real defence against an anonymous flood is admission
-    /// (`[auth]`, ADR-0017); this is the backstop that bounds the damage while it is off.
+    /// growth past the ceiling is refused. The real defence against a flood is admission by client
+    /// certificate (ADR-0059); this is the backstop that bounds what an admitted peer can do.
     max_agents: usize,
 }
 
@@ -514,7 +510,6 @@ impl AppState {
             enrolment: None,
             revocations: None,
             audit: None,
-            offered: Mutex::new(HashMap::new()),
             clock,
             telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
@@ -616,7 +611,7 @@ impl AppState {
     }
 
     /// Sets the most Agent records the fleet holds at once — the backstop against a peer minting
-    /// fresh UIDs to exhaust memory and disk on an endpoint left without `[auth]` (ADR-0017).
+    /// fresh UIDs to exhaust memory and disk (ADR-0059 clause 14).
     #[must_use]
     pub fn with_max_agents(mut self, max_agents: usize) -> Self {
         self.max_agents = max_agents;
@@ -654,7 +649,7 @@ impl AppState {
         self
     }
 
-    /// Arms enrolment (ADR-0039): a host with a bootstrap certificate may ask for its first one,
+    /// Arms enrolment (ADR-0059): a host with a bootstrap certificate may ask for its first one,
     /// and an operator decides.
     #[must_use]
     pub fn with_enrolment(mut self, enrolment: Option<Arc<Enrolment>>) -> Self {
@@ -662,7 +657,7 @@ impl AppState {
         self
     }
 
-    /// Arms the register and the revocation list (ADR-0049).
+    /// Arms the register and the revocation list (ADR-0065).
     #[must_use]
     pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
         self.revocations = revocations;
@@ -674,7 +669,7 @@ impl AppState {
         self.revocations.as_ref()
     }
 
-    /// Arms the audit record (ADR-0052).
+    /// Arms the audit record (ADR-0063).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
         self.audit = audit;
@@ -687,7 +682,7 @@ impl AppState {
     }
 
     /// Records a decision this Server is about to act on; without a record it is not taken
-    /// (ADR-0052 clause 6).
+    /// (ADR-0063 clause 6).
     fn audited(&self, entry: Entry) -> Result<(), String> {
         match &self.audit {
             Some(audit) => audit
@@ -698,14 +693,14 @@ impl AppState {
     }
 
     /// Records a refusal; it is refused either way.
-    fn audit_refusal(&self, entry: Entry) {
+    pub(crate) fn audit_refusal(&self, entry: Entry) {
         if let Some(audit) = &self.audit {
             audit.refusal(entry);
         }
     }
 
-    /// Records a certificate the client CA signed, before it is offered (ADR-0049 clause 2,
-    /// ADR-0052 clause 1).
+    /// Records a certificate the client CA signed, before it is offered (ADR-0065 clause 2,
+    /// ADR-0063 clause 1).
     fn record_issued(
         &self,
         signed: &Signed,
@@ -748,7 +743,7 @@ impl AppState {
         }
     }
 
-    /// What a CSR renews, and the host the new certificate is for (ADR-0039 clause 27). A renewal
+    /// What a CSR renews, and the host the new certificate is for (ADR-0059 clause 27). A renewal
     /// proof names the certificate whose key signed the new one — through a Gateway too — and the
     /// host carries on from it; without one, the certificate the connection presented is renewed.
     /// A certificate that names no host — one an operator provisioned — gets a host derived from
@@ -793,7 +788,7 @@ impl AppState {
         self.enrolment.as_ref()
     }
 
-    /// Approves one pending enrolment request: the client CA signs it (ADR-0039 clause 22).
+    /// Approves one pending enrolment request: the client CA signs it (ADR-0059 clause 22).
     ///
     /// # Errors
     /// Returns [`DecisionError::NotFound`] when enrolment is off or the id is unknown, and
@@ -803,14 +798,14 @@ impl AppState {
         let signer = self.client_ca.as_deref().ok_or_else(|| {
             DecisionError::Sign("this Server issues no client certificates".into())
         })?;
-        // A new host: its identity is minted here and carried by every renewal (ADR-0039 clause 7).
+        // A new host: its identity is minted here and carried by every renewal (ADR-0059 clause 7).
         let host = InstanceUid::default().to_string();
         enrolment.approve(id, signer, &host, &|signed, instance_uid| {
             self.record_issued(signed, instance_uid, None)
         })
     }
 
-    /// What an enrolment connection is told (ADR-0039 clause 21): the capabilities that say it may
+    /// What an enrolment connection is told (ADR-0059 clause 21): the capabilities that say it may
     /// send a CSR, and — once its request is approved — the issued certificate, as an ordinary
     /// connection-settings offer with no private key in it.
     pub fn enrolment_answer(
@@ -1253,8 +1248,8 @@ impl AppState {
 
     /// Forgets everything this Server knows about one Agent (ADR-0026): the record is dropped and
     /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
-    /// credential revoked, since a credential here proves fleet membership and never which Agent
-    /// is speaking (ADR-0017). A Client still running therefore reappears on its next
+    /// certificate revoked, since a certificate here proves fleet membership and its host, never
+    /// which Agent is speaking (ADR-0059 clause 7). A Client still running therefore reappears on its next
     /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
     ///
     /// Refused while the Agent is still reporting: the record holds the hashes that gate
@@ -1393,7 +1388,7 @@ impl AppState {
 
     /// [`process`](Self::process) for a connection that presented a certificate: the host it was
     /// issued to binds the Agents it reports for, and a CSR without a renewal proof renews it
-    /// (ADR-0049 clause 2, ADR-0039 clauses 7 and 27).
+    /// (ADR-0065 clause 2, ADR-0059 clauses 7 and 27).
     pub fn process_presented(
         &self,
         msg: AgentToServer,
@@ -1418,7 +1413,7 @@ impl AppState {
         let mut reply_flags = 0u64;
         let mut identification = None;
 
-        // An instance_uid belongs to the host whose certificate first reported it (ADR-0039
+        // An instance_uid belongs to the host whose certificate first reported it (ADR-0059
         // clause 7): a certificate of another host does not speak for it, nor re-keys it. Such a
         // reporter is re-keyed — it gets an identity of its own, never the one it claimed.
         if let (Some(host), Some(revocations)) =
@@ -1467,7 +1462,7 @@ impl AppState {
             identification = Some(AgentIdentification {
                 new_instance_uid: new_uid.as_bytes().to_vec(),
             });
-            // A re-key the Agent asked for keeps its host (ADR-0039 clause 7).
+            // A re-key the Agent asked for keeps its host (ADR-0059 clause 7).
             if let Some(revocations) = &self.revocations {
                 if let Err(e) = revocations.rebind(uid.as_bytes(), new_uid.as_bytes()) {
                     warn!(error = %e, "cannot move the host binding to the new instance_uid");
@@ -1576,47 +1571,6 @@ impl AppState {
             if status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32 {
                 warn!(agent = %uid, error = %status.error_message, "connection settings rejected");
             }
-            let settled = status.status == opamp::proto::ConnectionSettingsStatuses::Applied as i32
-                || status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32;
-            let changed = record
-                .connection_settings_status
-                .as_ref()
-                .is_none_or(|previous| {
-                    previous.status != status.status
-                        || previous.last_connection_settings_hash
-                            != status.last_connection_settings_hash
-                });
-            let rotated = self
-                .offered
-                .lock()
-                .expect("offered lock")
-                .get(&uid)
-                .is_some_and(|hash| *hash == status.last_connection_settings_hash);
-            // An acknowledgement of the standing offer when it carries a credential — recorded
-            // whether or not this Server's memory of having offered it survived a restart.
-            let credential_offered = self
-                .connection_offer
-                .as_ref()
-                .is_some_and(|offer| offer.settings.headers.is_some());
-            if settled && changed && (rotated || credential_offered) {
-                self.audit_refusal(
-                    Entry::new(
-                        "rotation.acknowledged",
-                        if status.status == opamp::proto::ConnectionSettingsStatuses::Applied as i32
-                        {
-                            "applied"
-                        } else {
-                            "failed"
-                        },
-                    )
-                    .with("instance_uid", uid.to_string())
-                    .with("hash", hex::encode(&status.last_connection_settings_hash))
-                    .with(
-                        "error",
-                        (!status.error_message.is_empty()).then(|| status.error_message.clone()),
-                    ),
-                );
-            }
             record.connection_settings_status = Some(status);
         }
         if let Some(statuses) = msg.package_statuses {
@@ -1690,20 +1644,37 @@ impl AppState {
         {
             None => None,
             Some(request) => {
-                let outcome = match &self.client_ca {
+                // `Ok(Err(..))` is a request the Server refuses; `Err(..)` a record it cannot write,
+                // which the Agent retries (ADR-0063 clause 6).
+                let outcome: Result<Result<Signed, String>, String> = match &self.client_ca {
                     // The Baseline's MUST when the Server cannot act on the request. An Agent
                     // reaching here ignored the undeclared capability, so it is a client error.
-                    None => Err("this Server issues no client certificates".to_string()),
-                    Some(ca) => String::from_utf8(request.csr.clone())
+                    None => Ok(Err("this Server issues no client certificates".to_string())),
+                    Some(ca) => match String::from_utf8(request.csr.clone())
                         .map_err(|_| "the certificate signing request is not PEM".to_string())
                         .and_then(|csr| {
                             // The message's own instance_uid, before any re-key (ADR-0050).
                             ca.check_claims(&csr, &sender)?;
                             let (predecessor, host) = self.renews(ca.as_ref(), &csr, presented)?;
-                            let signed = ca.sign(&csr, &host)?;
-                            self.record_issued(&signed, &sender, predecessor)?;
-                            Ok(signed)
-                        }),
+                            Ok((ca.sign(&csr, &host)?, predecessor))
+                        }) {
+                        Err(e) => Ok(Err(e)),
+                        Ok((signed, predecessor)) => self
+                            .record_issued(&signed, &sender, predecessor)
+                            .map(|()| Ok(signed)),
+                    },
+                };
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        warn!(agent = %uid, error = %e, "held back a certificate: the audit record is unavailable");
+                        self.persist_if_dirty(&uid, record);
+                        return Processed {
+                            reply: unavailable(&e),
+                            uid: Some(uid),
+                            disconnected: false,
+                        };
+                    }
                 };
                 match outcome {
                     Ok(signed) => {
@@ -1801,7 +1772,7 @@ impl AppState {
         let connection_settings = if disconnected {
             None
         } else {
-            self.settings_offer(&uid, record, issued)
+            self.settings_offer(record, issued)
         };
 
         // The package offer (ADR-0019), gated by capability and the reported
@@ -1867,7 +1838,6 @@ impl AppState {
             deployment.as_ref(),
             description,
             &offering.download_base,
-            None,
         )
     }
 
@@ -1896,11 +1866,10 @@ impl AppState {
     ///
     /// `issued` is a certificate just signed for this Agent (ADR-0017). It overrides the hash gate
     /// — the Agent asked for it in this very exchange — and rides whatever else the standing offer
-    /// carries, so one message can hand over a certificate and the endpoint or credential that go
+    /// carries, so one message can hand over a certificate and the endpoint or heartbeat that go
     /// with it, exactly as the Baseline describes.
     fn settings_offer(
         &self,
-        uid: &InstanceUid,
         record: &AgentRecord,
         issued: Option<TlsCertificate>,
     ) -> Option<ConnectionSettingsOffers> {
@@ -1945,29 +1914,7 @@ impl AppState {
         if settings.is_none() && telemetry.is_empty() {
             return None;
         }
-        let carries_credential = settings
-            .as_ref()
-            .is_some_and(|settings| settings.headers.is_some());
-        let offer = gate(record, compose_settings_offer(settings, telemetry))?;
-        if carries_credential {
-            let fresh = self.offered.lock().expect("offered lock").get(uid) != Some(&offer.hash);
-            if fresh {
-                // A credential is not handed out unrecorded (ADR-0052 clause 6): without a record
-                // there is no offer this time, and the next report asks again.
-                self.audited(
-                    Entry::new("rotation.offered", "offered")
-                        .with("instance_uid", uid.to_string())
-                        .with("hash", hex::encode(&offer.hash)),
-                )
-                .ok()?;
-                let mut offered = self.offered.lock().expect("offered lock");
-                if offered.len() >= 100_000 {
-                    offered.clear();
-                }
-                offered.insert(*uid, offer.hash.clone());
-            }
-        }
-        Some(offer)
+        gate(record, compose_settings_offer(settings, telemetry))
     }
 
     /// The unsolicited offer a WebSocket loop pushes when a rollout act changes an assignment;
@@ -2890,16 +2837,23 @@ pub fn bad_request(message: &str) -> ServerToAgent {
     }
 }
 
+/// How long an Agent told `Unavailable` waits before it asks again.
+pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
-/// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up.
-/// Used when a new Agent arrives past the record ceiling.
+/// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
+/// and with `retry_info` says when.
 pub fn unavailable(message: &str) -> ServerToAgent {
     ServerToAgent {
         capabilities: SERVER_CAPABILITIES,
         error_response: Some(ServerErrorResponse {
             r#type: ServerErrorResponseType::Unavailable as i32,
             error_message: message.to_string(),
-            ..Default::default()
+            details: Some(opamp::proto::server_error_response::Details::RetryInfo(
+                opamp::proto::RetryInfo {
+                    retry_after_nanoseconds: RETRY_AFTER.as_nanos() as u64,
+                },
+            )),
         }),
         ..Default::default()
     }
@@ -3004,7 +2958,7 @@ mod tests {
 
     /// The offered interval wins over the configured default: it is the period this Server actually
     /// asked for, so it is the one silence should be measured against.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn an_offered_heartbeat_interval_sets_the_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3013,8 +2967,7 @@ mod tests {
                 "heartbeat_interval_secs = 10\n",
             )
             .expect("offer config"),
-        )
-        .expect("offer");
+        );
         let state = AppState::new(dir.path().join("configs"))
             .expect("state")
             .with_connection_offer(Some(offer))
@@ -3173,6 +3126,23 @@ mod tests {
             !snapshot[0].connected,
             "connectedness is runtime-only and never restored"
         );
+    }
+
+    /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
+    /// be written — tells the Agent when to ask again, so it retries instead of giving up or
+    /// hammering (ADR-0059 clause 21, ADR-0063 clause 6).
+    /// Verifies: ADR-0059, ADR-0063
+    #[test]
+    fn unavailable_tells_the_agent_when_to_retry() {
+        let reply = unavailable("busy");
+        let error = reply.error_response.expect("an error");
+        assert_eq!(error.r#type, ServerErrorResponseType::Unavailable as i32);
+        match error.details {
+            Some(opamp::proto::server_error_response::Details::RetryInfo(info)) => {
+                assert_eq!(info.retry_after_nanoseconds, RETRY_AFTER.as_nanos() as u64);
+            }
+            other => panic!("no retry_info: {other:?}"),
+        }
     }
 
     /// A new `instance_uid` past the record ceiling is refused `Unavailable` and leaves no record,
@@ -3517,7 +3487,7 @@ mod tests {
 
     /// A certificate of one host does not speak for another host's Agent: the reporter is re-keyed
     /// to an identity of its own, and the Agent it claimed keeps its record.
-    /// Verifies: ADR-0039, G-17
+    /// Verifies: ADR-0059, G-17
     #[test]
     fn a_host_cannot_report_for_another_hosts_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3527,7 +3497,6 @@ mod tests {
                     crate::fs::FsLedgerStore::open(dir.path().join("revocation")).expect("ledger"),
                 ),
                 Arc::new(crate::clock::SystemClock),
-                Arc::new(|_: &str| false),
                 Vec::new(),
             )
             .expect("revocations"),

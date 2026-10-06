@@ -14,7 +14,7 @@
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 
-use dialoguer::{Confirm, Input, Password, Select};
+use dialoguer::{Confirm, Input};
 
 use crate::config::ClientConfig;
 
@@ -33,15 +33,14 @@ pub struct Answers {
     /// of the fleet's Clients this is. Not its `service.name`: that is the Agent *type*, the
     /// constant `supervisor` (ADR-0023), the same on every host and nothing to ask about.
     pub name: String,
-    /// The `[auth]` block (ADR-0039). The questionnaire always asks for it; `None` only where no
-    /// question was put — a packaged install — and the file then fails the install's validation
-    /// and stays on disk to be completed (ADR-0046).
-    pub auth: Option<Auth>,
     /// A private CA for a `wss://` / `https://` endpoint (ADR-0038), or `None` for the built-in
     /// webpki roots.
     pub ca_file: Option<PathBuf>,
-    /// The client certificate and key this Client presents (ADR-0039): a bootstrap certificate to
+    /// The client certificate and key this Client presents (ADR-0059): a bootstrap certificate to
     /// enrol with, or one already issued. Written as `[tls] cert_file` and `key_file` either way.
+    /// The questionnaire always asks for it; `None` only where no question was put — a packaged
+    /// install — and the file then fails the install's validation and stays on disk to be
+    /// completed (ADR-0061).
     pub identity: Option<(PathBuf, PathBuf)>,
     /// The hex Ed25519 key packages are verified against (ADR-0042); `None` takes no package until
     /// one is set.
@@ -53,19 +52,11 @@ pub struct Answers {
     pub self_update_package: Option<String>,
 }
 
-/// The one authentication scheme the file names (ADR-0017): a bearer token, or a username and
-/// password together. Never both, which is what the `[auth]` block refuses at load.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Auth {
-    Bearer(String),
-    Basic { username: String, password: String },
-}
-
 /// Ask, write, and report — the whole of `--interactive` (ADR-0014).
 ///
-/// A file that already exists is kept, not overwritten and not merged: it may hold a credential
-/// that was typed once, and a re-install that eats it is a worse failure than one that declines to
-/// write. The written file is left on disk even when it fails to load afterwards, so a typo is
+/// A file that already exists is kept, not overwritten and not merged: it holds answers typed once
+/// and edits made since, and a re-install that eats them is a worse failure than one that declines
+/// to write. The written file is left on disk even when it fails to load afterwards, so a typo is
 /// corrected by editing rather than by answering everything again.
 ///
 /// # Errors
@@ -101,9 +92,9 @@ pub fn run(path: &Path) -> Result<(), String> {
 /// they need is the same file, rendered by the same [`render`] and created by the same
 /// [`write_new`], so the never-overwrite rule and the `0600` mode are not restated here.
 ///
-/// Only the endpoint is taken. ADR-0014 put the credential behind a hidden prompt so that it never
-/// reaches a process list, and an MSI property is written to the installer log — so the rest of the
-/// questionnaire has no non-interactive twin on purpose.
+/// Only the endpoint and the self-update consent are taken. The client identity is a pair of files
+/// the operator puts on the host, so it has no non-interactive twin: a file written from these
+/// answers alone fails the install's validation and stays on disk to be completed (ADR-0061).
 ///
 /// # Errors
 /// Returns an error if the endpoint is not one the loader would accept, or if the file cannot be
@@ -122,7 +113,6 @@ pub fn run_with_endpoint(
     let answers = Answers {
         endpoint: endpoint.trim().to_string(),
         name: ClientConfig::default().name,
-        auth: None,
         ca_file: None,
         identity: None,
         verification_key: None,
@@ -135,8 +125,9 @@ pub fn run_with_endpoint(
 
 /// Whether a configuration is already there — in which case it is kept, whichever path asked.
 ///
-/// ADR-0014's rule is that a file holding a credential somebody typed once is never overwritten by
-/// a later install, and a packaged re-install is exactly the later install it had in mind.
+/// ADR-0061's rule is that a file somebody answered or edited is never overwritten by a later
+/// install, and a packaged re-install is exactly the later install it had in mind. A leftover
+/// `[auth]` in it is no reason to fail or to warn: the Client ignores the section.
 fn keeping_existing(path: &Path) -> bool {
     if path.exists() {
         println!("keeping the configuration already at {}", path.display());
@@ -172,40 +163,6 @@ pub fn ask() -> Result<Answers, String> {
         .interact_text()
         .map_err(prompt_failed)?;
 
-    // The credential is typed into a hidden prompt rather than passed as a flag: a flag would
-    // stand in the shell history and in the process list of every host it was run on. There is
-    // no "none": the Server admits no Agent without it (ADR-0039, ADR-0046).
-    let scheme = Select::new()
-        .with_prompt("The fleet credential")
-        .items(["bearer token", "username and password"])
-        .default(0)
-        .interact()
-        .map_err(prompt_failed)?;
-    let auth = Some(if scheme == 0 {
-        Auth::Bearer(not_empty(
-            Password::new()
-                .with_prompt("Bearer token")
-                .interact()
-                .map_err(prompt_failed)?,
-            "the bearer token",
-        )?)
-    } else {
-        Auth::Basic {
-            username: Input::new()
-                .with_prompt("Username")
-                .validate_with(|input: &String| not_empty(input.clone(), "the username").map(drop))
-                .interact_text()
-                .map_err(prompt_failed)?,
-            password: not_empty(
-                Password::new()
-                    .with_prompt("Password")
-                    .interact()
-                    .map_err(prompt_failed)?,
-                "the password",
-            )?,
-        }
-    });
-
     // Only worth asking when the endpoint is one TLS applies to: a private CA behind `ws://` is a
     // question with no consequence.
     let ca_file = if is_tls_endpoint(&endpoint)
@@ -231,8 +188,9 @@ pub fn ask() -> Result<Answers, String> {
         None
     };
 
-    // The client identity (ADR-0039): a bootstrap certificate this host enrols with, or one an
+    // The client identity (ADR-0059): a bootstrap certificate this host enrols with, or one an
     // operator already issued. Both are a certificate and its key; the Server tells them apart.
+    // There is no answer without one, and no question asks for a credential (ADR-0061).
     let readable = |input: &String| {
         if Path::new(input.trim()).is_file() {
             Ok(())
@@ -297,7 +255,6 @@ pub fn ask() -> Result<Answers, String> {
     Ok(Answers {
         endpoint: endpoint.trim().to_string(),
         name: name.trim().to_string(),
-        auth,
         ca_file,
         identity,
         verification_key,
@@ -305,19 +262,11 @@ pub fn ask() -> Result<Answers, String> {
     })
 }
 
-/// An answer that must not be empty, or the sentence that says so.
-fn not_empty(value: String, what: &str) -> Result<String, String> {
-    if value.trim().is_empty() {
-        Err(format!("{what} cannot be empty"))
-    } else {
-        Ok(value)
-    }
-}
-
 /// Render the answers as `supervisor.toml`. Pure, so what lands on disk is testable without a tty.
 ///
-/// Values go through `toml`'s own string encoder rather than into `"{}"`: a password may contain
-/// a quote or a backslash, and a Windows CA path is full of them.
+/// Values go through `toml`'s own string encoder rather than into `"{}"`: a name may contain a
+/// quote, and a Windows path is full of backslashes. The file has no `[auth]` section: the Client
+/// sends no credential (ADR-0061 clause 17).
 #[must_use]
 pub fn render(answers: &Answers) -> String {
     let mut out = String::new();
@@ -329,23 +278,6 @@ pub fn render(answers: &Answers) -> String {
     out.push_str(&format!("endpoint = {}\n", toml_string(&answers.endpoint)));
     out.push_str(&format!("name = {}\n", toml_string(&answers.name)));
     out.push_str(commented_top_level_keys());
-
-    if let Some(auth) = &answers.auth {
-        out.push_str(
-            "\n# Authentication toward the Server. The Server may rotate this\n\
-             # credential on its own; the rotated value lives in the state directory\n\
-             # and wins over what stands here.\n[auth]\n",
-        );
-        match auth {
-            Auth::Bearer(token) => {
-                out.push_str(&format!("bearer_token = {}\n", toml_string(token)));
-            }
-            Auth::Basic { username, password } => {
-                out.push_str(&format!("username = {}\n", toml_string(username)));
-                out.push_str(&format!("password = {}\n", toml_string(password)));
-            }
-        }
-    }
 
     if answers.ca_file.is_some() || answers.identity.is_some() {
         out.push_str(
@@ -410,7 +342,7 @@ pub fn render(answers: &Answers) -> String {
 }
 
 /// The top-level keys that are right on a fresh host, as comments — and they are emitted **before
-/// the first table**, which is not cosmetic: a top-level key written after `[auth]` or
+/// the first table**, which is not cosmetic: a top-level key written after `[tls]` or
 /// `[self_update]` belongs to that table, so an operator who uncomments `poll_interval_secs` under
 /// one would be setting a key the section does not have and the load would refuse the file. The
 /// commented *tables* at the end of `render` are safe wherever they stand, being tables themselves.
@@ -427,8 +359,9 @@ fn commented_top_level_keys() -> &'static str {
 /// Create the file, never replacing one that is there, and never wider than its owner on Unix.
 ///
 /// `create_new` is what makes "do not overwrite" a property of the syscall rather than of a check
-/// that raced. The mode is set in the same call for the same reason: the file may hold a bearer
-/// token before any later `set_permissions` could narrow it.
+/// that raced. The mode is set in the same call for the same reason: the file names where the
+/// private key lies and may hold `[packages] archive_key` (ADR-0061 clause 18), before any later
+/// `set_permissions` could narrow it.
 ///
 /// # Errors
 /// Returns an error if the parent cannot be created or the file already exists.
@@ -488,7 +421,6 @@ mod tests {
         Answers {
             endpoint: "wss://fleet.example.com/v1/opamp".to_string(),
             name: "host-01".to_string(),
-            auth: None,
             ca_file: None,
             identity: None,
             verification_key: None,
@@ -496,10 +428,10 @@ mod tests {
         }
     }
 
-    /// What the questionnaire writes holds everything the Client needs at startup — the
-    /// credential, the identity, the key — so an install never registers a service that would
-    /// refuse to start (ADR-0046).
-    /// Verifies: ADR-0046
+    /// What the questionnaire writes holds everything the Client needs at startup — the identity
+    /// and the key — so an install never registers a service that would refuse to start
+    /// (ADR-0061).
+    /// Verifies: ADR-0061
     #[test]
     fn a_complete_answer_writes_a_file_the_client_starts_with() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -509,7 +441,6 @@ mod tests {
         std::fs::write(&key, "key").expect("write");
         let path = dir.path().join(FILE_NAME);
         let given = Answers {
-            auth: Some(Auth::Bearer("a-long-random-token".to_string())),
             identity: Some((cert.clone(), key.clone())),
             verification_key: Some(hex::encode([7u8; 32])),
             ..answers()
@@ -531,7 +462,7 @@ mod tests {
 
     /// The questionnaire suggests the loader's default, and that default is one its own endpoint
     /// rule accepts: TLS, to the loopback literal — never a plaintext or a host-name answer.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[test]
     fn the_suggested_endpoint_is_tls_on_the_loopback() {
         let suggested = ClientConfig::default().endpoint;
@@ -540,26 +471,24 @@ mod tests {
         validate_endpoint(&suggested).expect("the suggestion passes the questionnaire's rule");
     }
 
-    /// A packaged install has an endpoint and no terminal: the file it writes carries no credential
-    /// and no identity, fails the validation the Client applies at startup, and stays on disk to be
-    /// completed rather than answered again (ADR-0046).
-    /// Verifies: ADR-0046
+    /// A packaged install has an endpoint and no terminal: the file it writes carries no identity,
+    /// fails the validation the Client applies at startup, and stays on disk to be completed rather
+    /// than answered again (ADR-0061).
+    /// Verifies: ADR-0061
     #[test]
     fn installer_answers_alone_fail_validation_and_stay_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
         run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", None).expect("write");
         let loaded = ClientConfig::load(&path).expect("it parses");
-        assert!(
-            loaded.check_admission().is_err(),
-            "no credential, no identity"
-        );
+        let err = loaded.check_admission().expect_err("no identity");
+        assert!(err.contains("cert_file and key_file"), "{err}");
         assert!(path.exists(), "left on disk to be completed");
     }
 
     /// The endpoint rule is the startup rule: plaintext only to a loopback literal, and the name
-    /// `localhost` is not one (ADR-0046).
-    /// Verifies: ADR-0046, ADR-0047
+    /// `localhost` is not one (ADR-0061).
+    /// Verifies: ADR-0061, ADR-0062
     #[test]
     fn a_plaintext_endpoint_is_accepted_only_on_a_loopback_literal() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -578,13 +507,12 @@ mod tests {
 
     /// The point of the whole exercise: what the questionnaire writes must load, and must load as
     /// the answers that were given.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[test]
     fn the_rendered_file_loads_as_what_was_answered() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
         let given = Answers {
-            auth: Some(Auth::Bearer("a-long-random-token".to_string())),
             ca_file: Some(PathBuf::from("/etc/ssl/private-ca.pem")),
             self_update_package: Some("our-own-client".to_string()),
             ..answers()
@@ -594,10 +522,6 @@ mod tests {
         let loaded = ClientConfig::load(&path).expect("the written file loads");
         assert_eq!(loaded.endpoint, given.endpoint);
         assert_eq!(loaded.name, given.name);
-        assert_eq!(
-            loaded.authorization_value().expect("authorization"),
-            Some("Bearer a-long-random-token".to_string())
-        );
         // The name that was answered, not the default — an operator whose Set is named otherwise
         // must get that name written verbatim.
         assert_eq!(loaded.self_update_package(), Some("our-own-client"));
@@ -607,30 +531,35 @@ mod tests {
         );
     }
 
+    /// No answer puts an `[auth]` section in the file: the questionnaire asks for no credential,
+    /// and the Client sends none (ADR-0061 clause 17).
+    /// Verifies: ADR-0061
     #[test]
-    fn a_basic_credential_round_trips_as_the_header_it_becomes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join(FILE_NAME);
+    fn a_rendered_file_has_no_auth_section() {
         let given = Answers {
-            auth: Some(Auth::Basic {
-                username: "fleet".to_string(),
-                password: "a-strong-password".to_string(),
-            }),
+            ca_file: Some(PathBuf::from("/etc/ssl/private-ca.pem")),
+            identity: Some((PathBuf::from("/c.pem"), PathBuf::from("/k.pem"))),
+            verification_key: Some(hex::encode([7u8; 32])),
             ..answers()
         };
-        write_new(&path, &render(&given)).expect("write");
-
-        let loaded = ClientConfig::load(&path).expect("load");
-        // base64("fleet:a-strong-password")
-        assert_eq!(
-            loaded.authorization_value().expect("authorization"),
-            Some("Basic ZmxlZXQ6YS1zdHJvbmctcGFzc3dvcmQ=".to_string())
-        );
+        for rendered in [
+            render(&given),
+            render(&answers()),
+            render(&Answers {
+                self_update_package: None,
+                ..given.clone()
+            }),
+        ] {
+            assert!(!rendered.contains("[auth]"), "{rendered}");
+            for key in ["bearer_token", "username", "password"] {
+                assert!(!rendered.contains(key), "{key} in {rendered}");
+            }
+        }
     }
 
     /// ADR-0023 clause 18: the packaged path has to produce a file the loader accepts, carrying the
     /// endpoint that was given — the same guarantee the questionnaire has, without a terminal.
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0062
     #[test]
     fn an_endpoint_given_is_written_and_loads() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -645,9 +574,7 @@ mod tests {
 
         let loaded = ClientConfig::load(&path).expect("the written file loads");
         assert_eq!(loaded.endpoint, "wss://fleet.example.com/v1/opamp");
-        // No credential is invented — one is never accepted on a command line — while the
-        // self-update consent the installer passed *is* written, standing by default (ADR-0021).
-        assert_eq!(loaded.authorization_value().expect("authorization"), None);
+        // The self-update consent the installer passed is written, standing by default (ADR-0021).
         assert_eq!(loaded.self_update_package(), Some("supervisor"));
     }
 
@@ -669,7 +596,7 @@ mod tests {
 
     /// The file is validated *before* it exists, not after. An install that wrote an unusable file
     /// and then failed to load it would leave the operator fixing a file they never typed.
-    /// Verifies: ADR-0046, ADR-0047
+    /// Verifies: ADR-0061, ADR-0062
     #[test]
     fn a_bad_endpoint_is_refused_before_anything_is_written() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -680,9 +607,9 @@ mod tests {
         assert!(!path.exists(), "nothing may be left behind");
     }
 
-    /// ADR-0014 point 16 holds on the packaged path too: a `.deb` reinstalled over a configured host
-    /// must not eat the credential somebody typed into the first install.
-    /// Verifies: ADR-0046, ADR-0047
+    /// ADR-0061 clause 16 holds on the packaged path too: a `.deb` reinstalled over a configured
+    /// host must not eat what somebody answered into the first install, or edited since.
+    /// Verifies: ADR-0061, ADR-0062
     #[test]
     fn an_endpoint_given_never_overwrites_an_existing_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -696,32 +623,29 @@ mod tests {
         assert_eq!(loaded.endpoint, "wss://kept/v1/opamp");
     }
 
-    /// A password is not a well-behaved identifier. Rendering it into `"{}"` would produce a file
-    /// that either fails to parse or parses as a different secret.
+    /// An answer is not a well-behaved identifier. Rendering it into `"{}"` would produce a file
+    /// that either fails to parse or parses as a different value.
     #[test]
-    fn quotes_and_backslashes_in_a_secret_survive() {
+    fn quotes_and_backslashes_in_an_answer_survive() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
         let nasty = r#"a"b\c	d"#;
         let given = Answers {
-            auth: Some(Auth::Bearer(nasty.to_string())),
+            name: nasty.to_string(),
             ca_file: Some(PathBuf::from(r"C:\ProgramData\opamp\ca.pem")),
             ..answers()
         };
         write_new(&path, &render(&given)).expect("write");
 
         let loaded = ClientConfig::load(&path).expect("load");
-        assert_eq!(
-            loaded.authorization_value().expect("authorization"),
-            Some(format!("Bearer {nasty}"))
-        );
+        assert_eq!(loaded.name, nasty);
         assert_eq!(
             loaded.tls.expect("tls").ca_file,
             Some(PathBuf::from(r"C:\ProgramData\opamp\ca.pem"))
         );
     }
 
-    /// A declined section is absent rather than empty — a bare `[auth]` would fail the load.
+    /// A declined section is absent rather than empty — a bare `[tls]` would say nothing.
     /// `[self_update]` is the one exception and it is the point of ADR-0021: absent now *means*
     /// consent, so both answers are written out. The consent names its package; the withdrawal says
     /// `enabled = false`. A reader of the file can tell which was answered either way.
@@ -737,7 +661,7 @@ mod tests {
         let path = dir.path().join(FILE_NAME);
         write_new(&path, &rendered).expect("write");
         let loaded = ClientConfig::load(&path).expect("load");
-        assert!(loaded.auth.is_none());
+        assert!(loaded.leftover_auth.is_none());
         assert!(loaded.tls.is_none());
         assert_eq!(loaded.self_update_package(), Some("supervisor"));
 
@@ -764,15 +688,12 @@ mod tests {
     fn the_commented_tail_is_inert_and_uncommenting_it_works() {
         // Every table this file can carry, present at once. That is the combination the ordering
         // has to survive: a commented top-level key written *after* a table belongs to that table,
-        // so uncommenting `poll_interval_secs` under `[auth]` or `[self_update]` would set a key
+        // so uncommenting `poll_interval_secs` under `[tls]` or `[self_update]` would set a key
         // those sections do not have and `deny_unknown_fields` would refuse the whole file. The
         // rendered order — scalars, commented scalars, then tables — is what keeps it inert.
         let given = Answers {
-            auth: Some(Auth::Basic {
-                username: "u".to_string(),
-                password: "p".to_string(),
-            }),
             ca_file: Some(PathBuf::from("/etc/ssl/private-ca.pem")),
+            identity: Some((PathBuf::from("/c.pem"), PathBuf::from("/k.pem"))),
             ..answers()
         };
         let rendered = render(&given);
@@ -797,12 +718,12 @@ mod tests {
         assert_eq!(loaded.heartbeat_interval_secs, 30);
         assert_eq!(loaded.max_message_size_bytes, 67_108_864);
         // The keys landed at the top level, not inside whichever table happened to precede them.
-        assert!(loaded.auth.is_some());
+        assert!(loaded.tls.is_some());
         assert_eq!(loaded.self_update_package(), Some("supervisor"));
     }
 
-    /// The refusal that protects a credential typed once (ADR-0014).
-    /// Verifies: ADR-0046
+    /// The refusal that protects answers typed once (ADR-0061).
+    /// Verifies: ADR-0061
     #[test]
     fn an_existing_file_is_never_overwritten() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -819,7 +740,7 @@ mod tests {
     /// `run` on an existing file is not an error — a re-install keeps what is there and carries
     /// on, which is what makes `service install` idempotent (ADR-0014). Reached without a tty
     /// precisely because the existing-file branch returns before the terminal is consulted.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[test]
     fn run_keeps_an_existing_file_without_asking() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -835,7 +756,7 @@ mod tests {
     /// Without a terminal there is nobody to answer, and blocking a provisioning run forever is
     /// the failure mode this refuses (ADR-0014). Under `cargo test` stdin is not a tty, which is
     /// exactly the condition being asserted.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[test]
     fn interactive_without_a_terminal_fails_instead_of_blocking() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -845,7 +766,7 @@ mod tests {
         assert!(!path.exists(), "nothing was written");
     }
 
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[test]
     fn the_file_is_not_readable_by_the_rest_of_the_machine() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -861,12 +782,12 @@ mod tests {
             assert_eq!(
                 mode & 0o777,
                 0o600,
-                "a file holding a token is the owner's alone"
+                "a file naming the private key is the owner's alone"
             );
         }
     }
 
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0062
     #[test]
     fn an_endpoint_is_validated_by_the_loaders_own_rule() {
         assert!(validate_endpoint("wss://fleet.example.com/v1/opamp").is_ok());
@@ -875,7 +796,7 @@ mod tests {
         assert!(err.contains("must start with"), "{err}");
     }
 
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[test]
     fn a_private_ca_is_only_asked_about_where_tls_applies() {
         assert!(is_tls_endpoint("wss://x/v1/opamp"));

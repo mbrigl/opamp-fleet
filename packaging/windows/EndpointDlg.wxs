@@ -42,8 +42,14 @@
         <Control Id="SelfUpdateNote" Type="Text" X="33" Y="126" Width="307" Height="30" NoPrefix="yes"
                  Text="This is how the fleet patches the Client itself; without it this host is the one machine you update by hand. The Client only ever takes a package named after itself — anything else is refused and reported." />
 
-        <Control Id="CredentialNote" Type="Text" X="20" Y="160" Width="320" Height="44" NoPrefix="yes"
-                 Text="A credential is deliberately not asked for here: what is typed into an installer is written to the Windows Installer log. If the Server needs one, add it to supervisor.toml in the installation folder afterwards, or run &quot;supervisor service install --interactive&quot; from an elevated prompt." />
+        <!--
+          The client identity is not asked for (ADR-0062 clause 15): it is a pair of files the
+          operator puts on the host. The configuration lives under %ProgramData%, not in
+          INSTALLFOLDER (ADR-0061). No square brackets in the text: a control's Text is a formatted
+          string, and [name] would be replaced by the property of that name.
+        -->
+        <Control Id="IdentityNote" Type="Text" X="20" Y="160" Width="320" Height="44" NoPrefix="yes"
+                 Text="The client certificate and its key — a bootstrap certificate to enrol with, or one already issued — are files you put on this host. Name them as cert_file and key_file in the tls section of %ProgramData%\opamp-fleet\supervisor.toml afterwards, or run &quot;supervisor service install --interactive&quot; from an elevated prompt." />
 
         <Control Id="StartNote" Type="Text" X="20" Y="207" Width="320" Height="25" NoPrefix="yes"
                  Text="The service is registered but not started, so that a Client which is not yet fully configured never runs against the wrong Server." />

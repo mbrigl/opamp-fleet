@@ -60,7 +60,7 @@ fn write_config(dir: &Path, marker: &Path) -> std::path::PathBuf {
         marker = marker.to_string_lossy(),
     );
     let path = dir.join("supervisor.toml");
-    std::fs::write(&path, config + &common::credentials(dir)).expect("write supervisor.toml");
+    std::fs::write(&path, config + &common::client_identity(dir)).expect("write supervisor.toml");
     path
 }
 
@@ -85,7 +85,7 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, config + &common::credentials(dir.path()))
+    std::fs::write(&config_path, config + &common::client_identity(dir.path()))
         .expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
@@ -145,7 +145,7 @@ fn a_command_supervisor_runs_its_program_from_inside_an_unpacked_tree() {
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, config + &common::credentials(dir.path()))
+    std::fs::write(&config_path, config + &common::client_identity(dir.path()))
         .expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
@@ -194,7 +194,7 @@ fn a_collector_supervisor_passes_each_config_entry_as_a_config_flag() {
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
         .expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);
@@ -238,7 +238,7 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path()))
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
         .expect("write supervisor.toml");
 
     let mut client = spawn_client(&config_path);

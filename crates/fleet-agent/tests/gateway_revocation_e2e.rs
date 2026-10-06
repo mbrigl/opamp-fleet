@@ -1,4 +1,4 @@
-//! A Gateway refuses what its Server revoked, end to end (ADR-0055 clause 14, ADR-0056 clause 12):
+//! A Gateway refuses what its Server revoked, end to end (ADR-0064 clause 14, ADR-0065 clause 12):
 //! the real Server on mutual TLS with its register, the real Gateway fetching the list from it,
 //! and a downstream peer whose certificate the Server revokes.
 
@@ -19,7 +19,6 @@ use rcgen::{CertificateParams, IsCa, Issuer, KeyPair};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-const TOKEN: &str = "the-fleet-token-of-at-least-32-chars";
 const REFRESH: Duration = Duration::from_millis(200);
 const MAX_AGE: Duration = Duration::from_secs(2);
 
@@ -91,7 +90,6 @@ impl Fleet {
                     fleet_server::fs::FsLedgerStore::open(pki.join("revocation")).expect("ledger"),
                 ),
                 clock,
-                Arc::new(|_: &str| true),
                 vec![fleet_server::revocation::Authority {
                     role: "client".to_string(),
                     subject: facts.id.issuer,
@@ -143,15 +141,7 @@ impl Fleet {
         ))
         .expect("tls config");
         let planes = fleet_server::tls::server_tls(&tls, None).expect("server material");
-        let auth = fleet_server::transport::OpampAuth::from_config(
-            &toml::from_str::<fleet_server::config::AuthConfig>(&format!(
-                "bearer_tokens = [{:?}]",
-                fleet_server::credentials::bearer_entry(TOKEN)
-            ))
-            .expect("auth config"),
-        )
-        .expect("auth");
-        let admission = fleet_server::transport::Admission::new(Some(auth), true)
+        let admission = fleet_server::transport::Admission::new(true)
             .with_enrolment(planes.issuers, None)
             .with_revocations(Some(revocations.clone()));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -168,8 +158,6 @@ impl Fleet {
         let config: ClientConfig = toml::from_str(&format!(
             r#"
             endpoint = "wss://{server}/v1/opamp"
-            [auth]
-            bearer_token = "{TOKEN}"
             [tls]
             ca_file = {:?}
             cert_file = {:?}
@@ -247,7 +235,6 @@ impl Fleet {
         client
             .post(format!("https://{}/v1/opamp", self.gateway))
             .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {TOKEN}"))
             .body(report.encode_to_vec())
             .send()
             .await
@@ -285,15 +272,11 @@ impl Fleet {
                 opamp::tls::private_key(key.as_bytes()).expect("key"),
             )
             .expect("client config");
-        let mut request =
+        let request =
             tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
                 format!("wss://{}/v1/opamp", self.gateway),
             )
             .expect("request");
-        request.headers_mut().insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {TOKEN}").parse().expect("header"),
-        );
         tokio_tungstenite::connect_async_tls_with_config(
             request,
             None,
@@ -326,7 +309,7 @@ async fn closed_with(
 
 /// A certificate the Server revokes is refused behind the Gateway within one refresh, and the
 /// session it holds there is closed with `1008` and the reason `revoked`; another is unaffected.
-/// Verifies: ADR-0055, ADR-0056, G-15
+/// Verifies: ADR-0064, ADR-0065, G-15
 #[tokio::test]
 async fn a_certificate_the_server_revokes_is_refused_behind_the_gateway() {
     let fleet = Fleet::start(true).await;
@@ -374,7 +357,7 @@ async fn a_certificate_the_server_revokes_is_refused_behind_the_gateway() {
 }
 
 /// A Gateway whose host the operator has not marked is handed no list, and so admits nobody.
-/// Verifies: ADR-0055, ADR-0056
+/// Verifies: ADR-0064, ADR-0065
 #[tokio::test]
 async fn an_unmarked_gateway_admits_nobody() {
     let fleet = Fleet::start(false).await;
@@ -387,7 +370,7 @@ async fn an_unmarked_gateway_admits_nobody() {
 
 /// A Gateway that cannot renew its list for longer than the maximum age admits nobody, and ends
 /// the sessions it holds with `1008` and the reason `revocation list stale`.
-/// Verifies: ADR-0055
+/// Verifies: ADR-0064
 #[tokio::test]
 async fn a_gateway_whose_list_goes_stale_admits_nobody() {
     let fleet = Fleet::start(true).await;

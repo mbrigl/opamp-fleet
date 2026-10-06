@@ -1,19 +1,25 @@
-# ADR-0047: The fleet's own agent is called `supervisor`, and a release ships it as `.tar.gz` archives and native installers that run its own install and write nothing the Client would refuse
+# ADR-0062: The fleet's own agent is called `supervisor`, and a release ships it as `.tar.gz` archives and native installers that run its own install and write nothing the Client would refuse
 
-- **Status:** ⚪ superseded by [ADR-0062](0062-releases-installers-and-the-name-supervisor-secure-by-default.md)
-- **Date:** 2026-10-03
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
 - **Applies to:** .github/workflows/release.yml, packaging/, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of crates/fleet-agent/Cargo.toml, the program, Agent type and configuration-file names of the Client, `service install --endpoint`
-- **Supersedes:** [ADR-0023](0023-releases-installers-and-the-name-supervisor.md)
+- **Supersedes:** [ADR-0047](0047-releases-installers-and-the-name-supervisor-secure-by-default.md)
 
 ## Context
 
-Supersedes [ADR-0023](0023-releases-installers-and-the-name-supervisor.md) because the
-[specification](../SPECIFICATION.md) puts security before convenience (Strategy, "Security before
-convenience"; Q-1, "Secure by default"): plaintext is accepted on the loopback alone, a host name is
-never the loopback, and a Client without a credential and a certificate is refused at startup.
-Clauses 13, 16 and 18, and the third force below, change with it; the rest of the decision stands
-as it was.
+Supersedes [ADR-0047](0047-releases-installers-and-the-name-supervisor-secure-by-default.md)
+because the Agent plane admits a peer by its client certificate alone
+([ADR-0059](0059-admission-by-a-client-certificate-alone.md), superseding
+[ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md)), resting on the
+specification change drafted with it (Strategy "Security before convenience", Q-1, the Gateway Mode
+paragraph and G-15). There is no fleet credential any more, so no installer asks for one or names
+one in the steps it prints. Clauses 13, 14, 15 and 18, and the third force below, change with it;
+the rest of the decision stands as it was.
+
+The [specification](../SPECIFICATION.md) puts security before convenience (Strategy, "Security
+before convenience"; Q-1, "Secure by default"): plaintext is accepted on the loopback alone, a host
+name is never the loopback, and a Client without a client certificate is refused at startup.
 
 An operator needs something to install, and a fleet needs something to hand its Server. They are
 different questions. The fleet needs one artifact per platform that the Client itself can open and
@@ -25,7 +31,7 @@ archives, for exactly that reason.
 
 Three forces constrain both:
 
-- **`service install` owns the install** ([ADR-0014](0014-the-client-as-an-installed-service.md)):
+- **`service install` owns the install** ([ADR-0061](0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)):
   the versioned layout, the `current` pointer, the registration with its single-token name, display
   name and Windows recovery actions. A native package that registered a service of its own would
   write a second registration missing all of that.
@@ -33,9 +39,9 @@ Three forces constrain both:
   version directories and swings `current`. If `dpkg`, `rpm` or the MSI owned those paths, every
   fleet update would leave the host in a state `dpkg -V` reports as modified and the next
   `apt upgrade` silently reverts.
-- **A Client with no configuration is a defect, not a default.** It holds no credential and no
-  certificate, so it is refused at startup and manages nothing
-  ([ADR-0014](0014-the-client-as-an-installed-service.md)); a package installed on a thousand
+- **A Client with no configuration is a defect, not a default.** It holds no client certificate,
+  so it is refused at startup and manages nothing
+  ([ADR-0061](0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)); a package installed on a thousand
   hosts must not manufacture that state a thousand times.
 
 And one force on the name. The Baseline reserves `service.name` for the Agent *type* and recommends
@@ -73,7 +79,7 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
    The configuration file is **`supervisor.toml`**, and the `--config` default with it. What names
    an *installation* — the install path, the service, the dpkg/rpm package, the `PATH` symlink — is
    the product's name, not the program's
-   ([ADR-0014](0014-the-client-as-an-installed-service.md) clauses 2–4). The program's name is not
+   ([ADR-0061](0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md) clauses 2–4). The program's name is not
    derived from the product's, so one published package serves every variant build: the member a
    self-update extracts is the same in all of them. Two names deliberately stay where they are: the
    Cargo package `fleet-agent`, a build-time identifier that never leaves the repository, and the OTLP
@@ -196,8 +202,8 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
 
 13. **No installer starts the service it registers.** The Linux post-install and the MSI register the
     service and leave it stopped — knowingly departing from Debian Policy and `dh_installsystemd` —
-    because a Client with no configuration holds no credential and no certificate and is refused
-    at startup, at fleet scale where nobody watches a terminal. The one exception is an upgrade of a
+    because a Client with no configuration holds no client certificate and is refused at startup,
+    at fleet scale where nobody watches a terminal. The one exception is an upgrade of a
     Linux host whose service was running: it is restarted, so a configured host finishes the
     upgrade on the delivered binary. The post-install prints the two remaining steps:
 
@@ -208,11 +214,13 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
 
     The second `service install` is a re-install, which is idempotent and writes the configuration
     that `service install` refuses to overwrite once it exists. The first step is `--interactive`,
-    which asks for the credential behind a hidden prompt, and not `--endpoint` alone: a
-    configuration holding only an endpoint is one the Client refuses at startup, so printing it as
-    the whole first step would present an unauthenticated Client as the default. The post-install
-    names `--endpoint` only together with the credential and the certificate the operator adds
-    before the start.
+    which asks for the client identity — a bootstrap certificate or an issued one, and its key —
+    and not `--endpoint` alone: a configuration holding only an endpoint is one the Client refuses
+    at startup, so printing it as the whole first step would present an unauthenticated Client as
+    the default. The alternative it prints for writing the file by hand names the endpoint together
+    with `[tls] cert_file` and `key_file`, the identity the operator adds before the start, and
+    names no credential and no `[auth]` section, because the Client reads none
+    ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)).
 
 14. **The CLI on `PATH` is a symlink through `current`, and a package removal takes the layout.**
     `/usr/bin/<PRODUCT_NAME>` → `/opt/<PRODUCT_NAME>/current/supervisor`, so the operator's first
@@ -226,11 +234,11 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
     | `%posttrans` (rpm only) | `ln -sfn` again — rpm erases the old package's files *after* the new `%post`, which may take the link; dpkg removes them during unpack and needs nothing |
     | `postrm` / `%postun`, real removal only | remove the symlink (only if it is one), and the layout root `/opt/<PRODUCT_NAME>` with every staged version and `current`; on dpkg **purge**, also the data root `/var/lib/<PRODUCT_NAME>` |
 
-    A removal keeps the data root — the Agent's identity and a credential the operator typed are not
-    binaries, and a reinstall picks them up — while the layout goes, so a reinstall comes up on the
+    A removal keeps the data root — the Agent's identity and the configuration the operator wrote
+    are not binaries, and a reinstall picks them up — while the layout goes, so a reinstall comes up on the
     package it installed rather than on a surviving `current`. Purge is dpkg's "leave nothing"; rpm
     has none. `service uninstall` itself still deletes nothing
-    ([ADR-0014](0014-the-client-as-an-installed-service.md)); this cleanup is the package's. Re-staging
+    ([ADR-0061](0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)); this cleanup is the package's. Re-staging
     **skips the write when the staged binary already holds the running bytes**, because
     `service install` invoked through the symlink runs from the very file it would overwrite and Linux
     refuses that (`ETXTBSY`). Symlink and cleanup name the default system roots only — the only roots
@@ -252,7 +260,7 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
 
     `INSTALLFOLDER` is **one directory the operator configures**, holding only the delivered payload.
     The layout and the state directory go to `%ProgramData%\<PRODUCT_NAME>` and no root reaches the
-    command line ([ADR-0014](0014-the-client-as-an-installed-service.md)), so an uninstall empties the
+    command line ([ADR-0061](0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)), so an uninstall empties the
     folder and the configuration survives where Windows expects data to. All names are upper-case and
     listed `Secure`: Windows Installer resets private properties between the UI and execute sequences,
     and `Secure` lets the same MSI run unattended:
@@ -270,7 +278,11 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
     (`REMOVE="ALL"`), best-effort, before `RemoveFiles`. **The `UpgradeCode` is minted once and never
     changed** — it is how Windows Installer recognises 1.2.4 as an upgrade of 1.2.3, and a new one
     strands every installed host — paired with `MajorUpgrade`, with the `ProductCode` regenerated per
-    build. The MSI asks for no credential: a value typed into an installer is written to its log.
+    build. The MSI asks for no client identity: the certificate and its key are files the
+    operator puts on the host, and `EndpointDlg` says that they are added to `supervisor.toml`
+    afterwards, or through `service install --interactive` from an elevated prompt. It mentions no
+    credential, because the Client reads none
+    ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)).
 
 16. **The endpoint dialog is prefilled with the development Server, interactively only.** A
     `SetProperty` in the UI sequence, conditioned on `ENDPOINT` unset and the product not installed,
@@ -309,13 +321,13 @@ artifact — plus a `.deb`, `.rpm` and `.msi` that deliver the same binary and r
     `http://` endpoint whose host is not `127.0.0.1` or `::1` is refused, naming the setting, and
     `localhost` is no exception. It conflicts with `--interactive`; it
     carries the self-update answer ([ADR-0021](0021-the-client-updates-itself.md) clause 3). It
-    deliberately has no siblings for the credential or the CA file: a credential belongs behind a
-    hidden prompt, never in a process list, shell history or installer log. The installers do not
-    write TOML themselves; one flag on the command that owns the file is the smaller thing. **The
-    same rule binds every default an installer supplies:** no installer writes, prefills or prints a
-    value the Client would refuse at startup, and none writes a setting that stands in for a
-    credential or a certificate, so a configuration an installer leaves incomplete is one the
-    Client refuses at startup, never one it runs on unauthenticated.
+    has no siblings for the CA file or the client identity, and it takes no credential, since
+    there is none ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)). The installers
+    do not write TOML themselves; one flag on the command that owns the file is the smaller thing.
+    **The same rule binds every default an installer supplies:** no installer writes, prefills or
+    prints a value the Client would refuse at startup, and none writes a setting that stands in for
+    a client certificate, so a configuration an installer leaves incomplete is one the Client
+    refuses at startup, never one it runs on unauthenticated.
 
 **Out of scope:** signing (an Authenticode certificate for the MSI, a GPG key for the RPM, the
 archives); hosting apt and yum repositories; preseeding the endpoint on Linux; a macOS `.pkg`, which
@@ -431,7 +443,7 @@ the fleet; publishing variant builds.
 - Negative — `apt install` leaves a stopped service, which a Debian user does not expect; a
   click-through MSI install on a production host gets a loopback configuration rather than a
   warning; and an endpoint-only configuration, from `--endpoint` or the MSI, starts nothing until
-  the operator adds the credential and the certificate by hand.
+  the operator adds the client certificate and its key by hand.
 - Negative — the prefill reaches a development Server only when that Server presents a
   certificate the Client trusts for `127.0.0.1`.
 - Negative — a platform is spelled `linux_amd64` in a file name and `linux-amd64` as a tag; the
@@ -473,9 +485,14 @@ the fleet; publishing variant builds.
 - [`tests/linux_post_install.rs`](../../crates/fleet-agent/tests/linux_post_install.rs)
   `the_post_install_prints_no_endpoint_the_client_refuses_at_startup` reads
   `packaging/linux/postinst` as text and holds every endpoint it prints to the same rule
-  (clauses 13, 18); `the_post_install_steps_ask_for_the_credential` checks that its first step is
-  `service install --interactive`, that no endpoint-only step is offered, and that the manual
-  alternative names the credential and the certificate (clause 13).
+  (clauses 13, 18). `the_post_install_steps_ask_for_the_client_identity` checks that its first
+  step is `service install --interactive`, that no endpoint-only step is offered, that the manual
+  alternative names `cert_file` and `key_file`, and that the printed text names neither `[auth]`
+  nor a credential (clause 13).
+- [`tests/msi_exe_command.rs`](../../crates/fleet-agent/tests/msi_exe_command.rs):
+  `the_endpoint_dialog_names_the_identity_and_no_credential`, which reads
+  `packaging/windows/EndpointDlg.wxs` as text and asserts that its note names the client
+  certificate and mentions no credential (clause 15).
 - `--endpoint` (clause 18): `install_takes_an_endpoint_without_a_terminal` and
   `an_endpoint_and_interactive_are_refused_together` in [`cli.rs`](../../crates/fleet-agent/src/cli.rs);
   `an_endpoint_given_is_written_and_loads`, `a_bad_endpoint_is_refused_before_anything_is_written`,

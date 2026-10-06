@@ -1,63 +1,64 @@
-# ADR-0039: Admission requires a fleet credential and a client certificate in the handshake, every enrolment is approved by an operator, the Operator plane is guarded beyond the loopback, and server.toml holds no credential that authenticates on its own
+# ADR-0059: Admission by a client certificate alone — required in the handshake, every enrolment approved by an operator, the Operator plane guarded beyond the loopback, and server.toml holding no credential that authenticates on its own
 
-- **Status:** ⚪ superseded by [ADR-0059](0059-admission-by-a-client-certificate-alone.md)
-- **Date:** 2026-10-04
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
-- **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `credentials.rs`, `tls.rs` and `ca.rs`, enrolment in `crates/fleet-server/src/enrolment.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the Operator plane's guard and the `/api/v1/enrolment/window` and `/api/v1/enrolments` routes in `crates/fleet-server/src/api.rs`, the admission of the package download route, the Client's credential, identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the host a certificate is issued to and the renewal proof in `crates/fleet-core/src/renewal.rs`, `crates/fleet-server/src/revocation.rs` and `fleet.rs`, the `/api/v1/hosts` routes, the identity the Client presents on a download in `crates/fleet-agent/src/packages.rs`, the `[auth]`, `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml` and `supervisor.toml`, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`
-- **Supersedes:** [ADR-0017](0017-admission-and-authentication.md)
+- **Applies to:** Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential in `crates/fleet-server/src/credentials.rs`, enrolment in `crates/fleet-server/src/enrolment.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the Operator plane's guard and the `/api/v1/enrolment/window` and `/api/v1/enrolments` routes in `crates/fleet-server/src/api.rs`, the admission of the package download route, the Client's identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the host a certificate is issued to and the renewal proof in `crates/fleet-core/src/renewal.rs`, `crates/fleet-server/src/revocation.rs` and `fleet.rs`, the `/api/v1/hosts` routes, the identity the Client presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`
+- **Supersedes:** [ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md)
 
 ## Context
 
-Supersedes [ADR-0017](0017-admission-and-authentication.md) because the
-[specification](../SPECIFICATION.md) puts security before convenience (Strategy "Security before
-convenience", Q-1 "Secure by default"). Admission no longer depends on what is configured: both
-proofs are required, the certificate in the TLS handshake, and a certificate is issued on first
-enrolment only after an operator approves it.
+Supersedes [ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md) because
+its second proof, the fleet credential, proves nothing the client certificate does not prove
+better, and costs more than any other part of admission. The credential is one value for the whole
+fleet. It proves that a peer belongs to the fleet, never which host or Agent it is, and every host
+keeps it in clear beside its private key, so whoever takes a host takes both proofs at once. The
+client certificate proves membership too, and also the host: it is issued per host, lives 30 days,
+is renewed automatically and can be revoked one at a time. ADR-0039 kept the credential because
+behind a terminating Gateway it was "the only per-Agent proof that reaches the Server", but a
+credential every Agent shares does not tell one Agent from another there either. Carrying it costs
+a configuration section on both ends, a secret in clear in `supervisor.toml`, its rotation through
+connection-settings offers, its revocation by hash, and a Gateway pool partitioned by the
+credential each peer presented. This ADR rests on a change to the
+[specification](../SPECIFICATION.md) drafted with it: its Strategy *Security before convenience*
+and Q-1 *Secure by default* ask for both proofs today.
 
-`server.toml` holds every admission credential verbatim: the fleet's Bearer tokens and Basic
-passwords in `[auth]`, and the operators' passwords in `[rest.auth]`. The file reaches backups,
-diffs and configuration management, and anyone who reads it can admit a host or act as an
-operator. The specification puts security before convenience (Strategy *Security before
-convenience*, Q-1 *Secure by default*); measure H7 of [`HARDENING.md`](../HARDENING.md) asks that no
-credential in `server.toml` authenticate on its own.
-
-The two schemes need two answers. A Bearer token is a long random value an operator generates, so
-a plain SHA-256 is as strong as its entropy, and a password hash per plain-HTTP poll would make
-admission itself a denial-of-service lever. A Basic password is chosen by a person and needs a
-password hash: Argon2id, at least the parameters OWASP names as its minimum (`m=19456`, `t=2`,
-`p=1`). The comparison in constant time, which the plaintext form had, must survive.
+The Operator plane keeps its own credential. A browser cannot present a client certificate an
+operator does not already manage, and `server.toml` must still hold no credential that
+authenticates on its own. A Basic password is chosen by a person and needs a password hash:
+Argon2id, at least the parameters OWASP names as its minimum (`m=19456`, `t=2`, `p=1`), compared
+in constant time.
 
 Goal 17 of the [specification](../SPECIFICATION.md) asks for TLS on both ends, mutual TLS, and a
 Server that accepts only authenticated Agent identities. TLS
-([ADR-0012](0012-transports-tls-and-the-servers-two-planes.md)) protects the channel and
-authenticates nobody. The Baseline treats authentication as transport-level HTTP: methods MAY be
-used, `401` MUST be returned on failure, and its own example of the credential is
-`Authorization: Basic …` in `ConnectionSettings.headers`. On certificates the upstream text is
-explicit about the layering: Agents *"will use some sort of header-based authorization mechanism
-… and **optionally also** client-side certificates."* Its CSR flow — a regular TLS connection, a
-keypair and CSR generated by the Agent, a certificate issued by the Server as a local CA or by a
-CA it proxies to, `BadRequest` when issuance fails — keeps the private key on the host, and it
-answers the bootstrap chicken-and-egg with *"a bootstrap client certificate that is already trusted
-by the Server"*, whose distribution it leaves out of scope.
+([ADR-0054](0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md))
+protects the channel and authenticates nobody. The Baseline treats authentication as
+transport-level: methods MAY be used and `401` MUST be returned on failure. Its CSR flow — a
+regular TLS connection, a keypair and CSR generated by the Agent, a certificate issued by the
+Server as a local CA or by a CA it proxies to, `BadRequest` when issuance fails — keeps the private
+key on the host, and it answers the bootstrap chicken-and-egg with *"a bootstrap client certificate
+that is already trusted by the Server"*, whose distribution it leaves out of scope.
 
 Forces that shape the answer:
 
-- **Ecosystem practice is static headers, both schemes.** `opamp-go` clients send static headers;
-  the Collector's `opampextension` sets `headers` or delegates to `basicauthextension` or
-  `bearertokenauthextension`.
+- **Ecosystem practice is static headers, with client certificates optional.** `opamp-go` clients
+  send static headers; the Collector's `opampextension` sets `headers` or delegates to
+  `basicauthextension` or `bearertokenauthextension`. Every peer of the Agent plane already presents
+  a client certificate in the handshake, so admitting on it alone excludes no client.
 - **Authorization and tenancy are non-goals** of the specification: *that* a peer belongs to the
   fleet is in scope, *which* Agent may do *what* is not.
 - **`instance_uid` is self-asserted.** An Agent chooses it, and the Server may re-key it at any time
   with `AgentIdentification`. A certificate whose validity depended on matching it would die on a
   re-key the Server itself initiated.
 - **A Gateway terminates.** A Client in Gateway Mode reads OpAMP to fold many Agents onto few
-  connections ([ADR-0040](0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md)), so the
-  certificate the Server sees belongs to the Gateway; a header survives the hop, a peer certificate
-  cannot.
+  connections ([ADR-0064](0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)), so the certificate the Server sees belongs to the Gateway. The Gateway's
+  own handshake is what proves a downstream peer.
+- **A Client updates itself.** A Client of this version may start with a `supervisor.toml` written
+  for the previous one, by the self-update of ADR-0044, with nobody at the host.
 - **The Agent plane serves one route besides `/v1/opamp`:** the package download
-  ([ADR-0038](0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md) clause 8). A
-  handshake that requires a certificate requires it there too, so the Client's downloader must
-  present one — to the Server, never to a mirror
+  ([ADR-0054](0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
+  clause 8). A handshake that requires a certificate requires it there too, so the Client's
+  downloader must present one — to the Server, never to a mirror
   ([ADR-0042](0042-signed-package-delivery-from-allowed-sources.md)).
 - **An approval means something only when the enrolling peer can be told apart.** A bootstrap
   certificate that chains to the same CA as an issued one is indistinguishable from it; a CA of its
@@ -72,54 +73,45 @@ Forces that shape the answer:
 
 ## Decision
 
-We will admit a peer to `/v1/opamp` only when both proofs succeed — a static Basic or Bearer
-credential and a client certificate required in the TLS handshake — issue a peer's first
-certificate only through an enrolment an operator opens and approves, treat what admission proves
-as fleet membership and the host a certificate was issued to, and guard the Operator plane
-with a separate set of Basic credentials that is required beyond the loopback — every one of them
+We will admit a peer to the Agent plane on one proof, a client certificate required in the TLS
+handshake, issue a peer's first certificate only through an enrolment an operator opens and
+approves, treat what admission proves as fleet membership and the host a certificate was issued
+to, and guard the Operator plane with Basic credentials that are required beyond the loopback and
 kept in `server.toml` only as a hash.
 
 LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never loopback,
 `localhost` included.
 
-1. **The Agent plane's credential is `[auth]`, and it is required.** `server.toml`'s `[auth]` holds
-   `bearer_tokens = ["sha256:<hex>"]` and/or an `[auth.basic_users]` table of
-   `user = "$argon2id$…"` (clause 26); a
-   configuration without the section, or a section with no credential, is refused at startup with
-   a message naming `[auth]`. Every request to `/v1/opamp` — each plain-HTTP `POST` and the
-   WebSocket upgrade `GET`, checked before the upgrade completes — must carry an `Authorization`
-   header matching a configured credential, or is answered `401` with a `WWW-Authenticate`
-   challenge naming exactly the configured schemes (`Basic realm="opamp"`, `Bearer`). Several
-   accepted credentials are what make overlapping rotation possible.
+1. **The Agent plane has no credential of its own.** `server.toml` has no `[auth]` section; one
+   that is present is refused at startup with a message naming `[auth]` and saying that the Agent
+   plane admits by client certificate alone. `/v1/opamp` and the download route read no
+   `Authorization` header. One that is sent is ignored, never refused, so a Client of the previous
+   version is admitted on its certificate. The Agent plane sends no `WWW-Authenticate` challenge.
 
-2. **One credential primitive for both planes.** A presented Bearer token is hashed with SHA-256
-   and compared against each configured hash in constant time with `constant_time_eq`; a presented
-   Basic password is verified against the named user's Argon2id hash, and an unknown user costs
-   the same verification against a hash made at startup at the highest cost any user's hash has,
-   so the answer's timing does not tell which users exist. A password hash runs on a blocking
-   thread, at most four at once per plane; past that a request is answered `503` with
-   `Retry-After: 1`. Before a credential is checked, the attempt is counted against the throttle
-   of clause 24 — failures and attempts under way together may not exceed `max_failures` — and an
-   IPv6 peer is counted by its /64 ([`credentials.rs`](../../crates/fleet-server/src/credentials.rs)). A Basic verification
-   that succeeded is remembered for ten minutes by the SHA-256 of the whole header value, in a table
-   of at most 1 024 entries, so an Agent polling with Basic pays the password hash once and not per
-   request; a failed one is never remembered and counts toward the throttle of clause 24. The planes
-   differ in what they pair the check with, never in how it compares.
+2. **The Operator plane's credential primitive.** A presented Basic password is verified against
+   the named user's Argon2id hash, and an unknown user costs the same verification against a hash
+   made at startup at the highest cost any user's hash has, so the answer's timing does not tell
+   which users exist. A password hash runs on a blocking thread, at most four at once; past that a
+   request is answered `503` with `Retry-After: 1`. Before a credential is checked, the attempt is
+   counted against the throttle of clause 24 — failures and attempts under way together may not
+   exceed `max_failures` — and an IPv6 peer is counted by its /64
+   ([`credentials.rs`](../../crates/fleet-server/src/credentials.rs)). A verification that succeeded
+   is remembered for ten minutes by the SHA-256 of the whole header value, in a table of at most
+   1 024 entries, and compared in constant time with `constant_time_eq`; a failed one is never
+   remembered and counts toward the throttle of clause 24.
 
-3. **The Client sends exactly one credential, and it must have one.** `supervisor.toml`'s `[auth]`
-   holds either `bearer_token` or `username`/`password`; both at once, or neither, are refused at
-   startup with a message naming `[auth]`. The resulting `Authorization` header rides every
-   plain-HTTP request and the WebSocket upgrade. A `401` is logged as a credential failure and
-   retried with the transport's backoff, so fixing credentials on either side needs no restart
-   choreography. A Server-rotated credential outranks `[auth]`
-   ([ADR-0018](0018-connection-settings-and-server-capabilities.md)). The credential never leaves
-   the host in plaintext: the communication layer refuses `ws://` and `http://` to a host that is
-   not LOOPBACK ([ADR-0036](0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)).
+3. **The Client sends no credential.** `supervisor.toml` has no `[auth]` section. One that is
+   present is ignored, with one notice at startup naming the section, and nothing from it is sent;
+   a Client updated by the Server must keep connecting. An `Authorization` header persisted with
+   earlier connection settings is dropped when they are loaded ([ADR-0060](0060-connection-settings-offered-without-a-credential-and-server-capabilities.md)). A `401` is logged as an
+   admission failure and retried with the transport's backoff. The communication layer refuses
+   `ws://` and `http://` to a host that is not LOOPBACK
+   ([ADR-0057](0057-the-whole-opamp-communication-layer-in-the-opamp-crate-reading-websocket-frames-itself.md)).
 
-4. **A credential-bearing offer reaches only admitted members.** A `[connection_offer]` carrying a
-   credential and a `[telemetry_offer]` carrying headers are sent only on a connection that passed
-   both proofs with a certificate from the client CA. An enrolment connection (clause 21) receives
-   neither.
+4. **What the Server offers reaches only admitted members.** A connection-settings offer and a
+   `[telemetry_offer]` carrying headers are sent only on a connection whose certificate was issued
+   by the client CA. An enrolment connection (clause 21) receives no offer but the certificate it
+   asked for.
 
 5. **Client certificates on both transports, required in the TLS handshake.** `[tls]
    client_ca_file` in `server.toml` is required; a configuration without it is refused at startup
@@ -131,10 +123,11 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    presents its identity on `wss://` (its rustls `ClientConfig`) and on `https://` (a reqwest
    `Identity::from_pem`).
 
-6. **Both proofs must always succeed.** A request needs a valid credential **and** a connection
-   bearing a valid certificate. No configuration drops either proof, and neither stands in for the
-   other. Behind a terminating Gateway the credential is the only per-Agent proof that reaches the
-   Server (clause 13).
+6. **The certificate is the whole of admission.** A connection is a member's when its certificate
+   was issued directly by the client CA, is valid and is not revoked ([ADR-0065](0065-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)); any other
+   certificate that passes the handshake makes an enrolment connection (clause 19). No
+   configuration admits a peer without a certificate. Behind a Gateway, the Gateway's handshake
+   proves the downstream peer (clause 13).
 
 7. **A certificate proves membership and its host, not an Agent's identity.** The Server does not
    require the subject to match `instance_uid`, `service.instance.name`, or anything else an Agent
@@ -180,9 +173,8 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 10. **A bootstrap certificate carries a host to its first CSR, and an operator approves it.** It is
     issued by the bootstrap CA, never by the client CA, and the Server tells it apart from an issued
     one by that issuer. It may be one certificate for the whole fleet, because it opens nothing on
-    its own: it needs the credential beside it (clause 6), an open enrolment window (clause 20) and
-    an operator's approval (clause 21). A short validity limits its reach; distributing it is the
-    operator's.
+    its own: it needs an open enrolment window (clause 20) and an operator's approval (clause 21).
+    A short validity limits its reach; distributing it is the operator's.
 
 11. **Renewal starts at two thirds of the validity, and the old certificate stays until the new one
     is proved.** The Client asks again once its certificate is two thirds through its life and
@@ -197,13 +189,13 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     so no OpenSSL and no cmake enter the build. `ring` compiles C and assembly in its build script,
     so a C compiler is needed either way; what this keeps is the absence of system libraries.
 
-13. **Mutual TLS is per hop; the credential travels end to end.** Between an Agent and the Server
-    through a Gateway there are two mutual-TLS connections, each proving the peer at that hop. The
-    Gateway holds its own client identity for the upstream leg, obtained through the same CSR flow,
-    and forwards the Agent's `Authorization` unchanged
-    ([ADR-0040](0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md), which also owns
-    the Gateway's downstream TLS keys). The Gateway makes no authentication decision of its own
-    beyond its handshake; the credential is checked by the Server.
+13. **Mutual TLS is per hop, and a Gateway's handshake admits the peers behind it.** Between an
+    Agent and the Server through a Gateway there are two mutual-TLS connections, each proving the
+    peer at that hop. The Gateway holds its own client identity for the upstream leg, obtained
+    through the same CSR flow, and admits a downstream peer by its handshake against the fleet's
+    client CA and the Server's revocation list ([ADR-0064](0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md), which also owns the Gateway's downstream
+    TLS keys). The Server admits the Gateway, and the Gateway's mark (clause 7) lets its
+    certificate speak for the Agents it carries.
 
 14. **Admission is a fleet-wide trust boundary, and within it the host is the only bound between
     Agents.** A report's `instance_uid` is self-asserted; an admitted peer may report under any
@@ -237,11 +229,8 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     startup naming the setting. A TLS-terminating proxy in front reaches the plane on a LOOPBACK
     `listen`.
 
-18. **The two credential sets stay separate, and neither carries roles.** The fleet's `[auth]`
-    credential lives on every host and is rotated through offers; it is never the operator's
-    password. Every authenticated operator can do everything the plane offers. Passwords and tokens
-    are stored verbatim in `server.toml` in both sections, which change format together or not at
-    all.
+18. **The operators' credential is the only one, and it carries no roles.** It never reaches an
+    Agent's host. Every authenticated operator can do everything the plane offers.
 
 19. **Enrolment has a CA of its own.** `[enrolment] bootstrap_ca_file` in `server.toml` names the
     CA that issues bootstrap certificates. The handshake accepts a certificate from the client CA or
@@ -262,10 +251,9 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     included; that host enrols again in the next window.
 
 21. **An enrolment connection may only send a CSR, and the CSR waits for an operator.** It is
-    admitted only with the credential and while the window is open. Without the credential it is
-    answered `401` with the challenge of clause 1; with it but outside a window it is answered
-    `503`, which clause 24 does not count, so hosts waiting for an operator cannot throttle the
-    members behind the same address. The Server reads nothing from its messages but
+    admitted only while the window is open; outside a window it is answered `503`, which clause 24
+    does not count, so hosts waiting for an operator cannot throttle the members behind the same
+    address. The Server reads nothing from its messages but
     `connection_settings_request.opamp.certificate_request`: it creates no Agent record, assigns
     nothing and makes no offer but the issued certificate. A message without a CSR is answered with
     the Server's capabilities and nothing else, so the Client learns it may send one. The CSR enters
@@ -286,12 +274,12 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     stays automatic (clause 9) and never enters the queue.
 
 23. **The package download is reached with a client certificate.** Its route on the Agent plane
-    sits behind the same handshake as `/v1/opamp` and outside the credential check
-    ([ADR-0038](0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md) clause 8). The
-    route requires a certificate from the client CA; a bootstrap certificate is answered `401`. The
-    Client presents its certificate only to the Server's own origin — the scheme, host and port of
-    its OpAMP endpoint — and presents none to any other host or on a redirect hop that leaves that
-    origin ([ADR-0042](0042-signed-package-delivery-from-allowed-sources.md)).
+    sits behind the same handshake as `/v1/opamp`
+    ([ADR-0054](0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
+    clause 8). The route requires a certificate from the client CA; a bootstrap certificate is
+    answered `401`. The Client presents its certificate only to the Server's own origin — the
+    scheme, host and port of its OpAMP endpoint — and presents none to any other host or on a
+    redirect hop that leaves that origin ([ADR-0042](0042-signed-package-delivery-from-allowed-sources.md)).
 
 24. **Repeated admission failures from one peer address are throttled.** `[admission_throttle]` in
     `server.toml` sets `max_failures` (default 10), `window_secs` (default 60) and `backoff_secs`
@@ -299,31 +287,26 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     peer's IP address. A peer address with `max_failures` failures within `window_secs` is in
     back-off for `backoff_secs`: each plain-HTTP request is answered `429` with `Retry-After` set to
     the remaining seconds, and each WebSocket upgrade `GET` is refused the same way before the
-    upgrade completes, both before the credential is compared. A success clears nothing — behind a
-    shared address a member's success would wipe a guesser's count — so failures only age out of
-    the window. The Operator plane counts its own `401`s the same way in a table of its own. Each
-    table holds a bounded number of addresses; when it is full, the address heard from least
-    recently that is not in back-off is dropped first.
+    upgrade completes. A success clears nothing — behind a shared address a member's success would
+    wipe a guesser's count — so failures only age out of the window. The Operator plane counts its
+    own `401`s the same way in a table of its own. Each table holds a bounded number of addresses;
+    when it is full, the address heard from least recently that is not in back-off is dropped first.
+    On the Agent plane a `401` follows a handshake that succeeded — a revoked certificate, or a
+    bootstrap certificate on the download route — so the throttle no longer stops guessing; it
+    bounds what a refused host that keeps retrying costs in handshakes, revocation lookups and
+    audit entries ([ADR-0063](0063-an-append-only-audit-record-chained-by-hash.md)).
 
 25. **Enrolment happens directly against the Server.** A Gateway's downstream handshake trusts the
-    fleet's client CA and never the bootstrap CA
-    ([ADR-0040](0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md)), so a CSR a
-    Gateway forwards comes from a peer that already holds a client certificate and is signed as a
-    renewal. A host behind a Gateway enrols by connecting to the Server once, or is provisioned a
+    fleet's client CA and never the bootstrap CA ([ADR-0064](0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)), so a CSR a Gateway forwards comes from
+    a peer that already holds a client certificate and is signed as a renewal. A host behind a Gateway enrols by connecting to the Server once, or is provisioned a
     client certificate by an operator.
 
-26. **No credential in `server.toml` authenticates on its own.** A Bearer entry is `sha256:`
-    followed by the 64 hex digits of the token's SHA-256; a Basic entry, in `[auth.basic_users]`
-    and `[rest.auth] basic_users` alike, is an Argon2id PHC string with at least `m=19456`, `t=2`
-    and `p=1`, a 32-byte output and a 16-byte salt. Any other value is refused at startup with a message naming the section and the
-    entry — the user, or the position in `bearer_tokens` — and never echoing the value. `server
-    hash-credential --bearer` and `server hash-credential --basic` read the secret from standard
-    input, without echo on a terminal, and print the line to paste; `--bearer` refuses a token
-    shorter than 32 characters, since its strength is its entropy alone. The hashing adds the
-    RustCrypto `argon2` crate and no system dependency. The Client's own credential in
-    `supervisor.toml` stays in clear, because the Client must present it; that file is written
-    owner-only ([ADR-0046](0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
-    clause 18).
+26. **No credential in `server.toml` authenticates on its own.** An entry of `[rest.auth]
+    basic_users` is an Argon2id PHC string with at least `m=19456`, `t=2` and `p=1`, a 32-byte
+    output and a 16-byte salt. Any other value is refused at startup with a message naming the
+    section and the user, and never echoing the value. `server hash-credential --basic` reads the
+    password from standard input, without echo on a terminal, and prints the line to paste. The
+    hashing adds the RustCrypto `argon2` crate and no system dependency.
 
 27. **A renewal proves which certificate it renews.** A Client that holds a certificate and its key
     adds to its CSR the SAN URI `urn:opamp-fleet:renewal:v1:` followed by the base64url, without
@@ -332,57 +315,64 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     prefixed by its length as four big-endian bytes. The Server accepts the proof only when the
     certificate was issued by the client CA, is valid now, is not revoked, and its key verifies the
     signature; the new certificate is then issued to that certificate's host, with it as the
-    predecessor ([ADR-0049](0049-revocation-ends-sessions-and-follows-renewal.md) clause 2). This
+    predecessor ([ADR-0065](0065-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md) clause 2). This
     holds through a Gateway, which presents its own certificate. A proof that does not hold is
     answered `BadRequest`. A CSR without a proof — a third-party client's — renews the certificate
     its connection presented, and its host.
 
-**Out of scope:** credential references by environment variable, which leak through process
-listings and unit files; per-Agent credentials or identity beyond the host; an opt-in strict mode
-binding certificate subject to `instance_uid` where Gateway Mode and re-keying are off; verifying an `instance_uid` a
-CSR carries against its sender; proxying a CSR to an external CA (it would sit behind
-`[client_ca]`); certificate revocation, for which short validity plus renewal stands in; how an
-installer obtains and writes the bootstrap certificate, which the ADR on the installed service
-decides; a view of the pending requests in the bundled UI; counting failed TLS handshakes, and the
-`Unavailable` answer of an overloaded Server, which belong to the connection caps; Bearer tokens on
-the Operator plane (an additive key); hashed or referenced credential storage; an audit record of
-operator actions.
+**Out of scope:** per-Agent identity beyond the host; an opt-in strict mode binding certificate
+subject to `instance_uid` where Gateway Mode and re-keying are off; proxying a CSR to an external
+CA (it would sit behind `[client_ca]`); how an installer obtains and writes the bootstrap
+certificate, which [ADR-0061](0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md) decides; a view of the pending requests in the bundled UI; counting
+failed TLS handshakes, and the `Unavailable` answer of an overloaded Server, which belong to the
+connection caps; Bearer tokens on the Operator plane (an additive key); enrolment by a per-host
+token, which a fleet that outgrows approval one host at a time may need.
 
 ## Alternatives considered
 
-- **Plaintext credentials accepted with a warning** — the secret stays in backups and diffs, and a
-  warning is read after the file has travelled; the specification asks for a refusal.
-- **SHA-256 for Basic passwords as well** — a person's password falls to a dictionary run against a
-  leaked fast hash in minutes.
-- **Argon2id for Bearer tokens as well** — a password hash per plain-HTTP poll, for every Agent,
-  makes admission a denial-of-service lever and buys nothing for a value that is random already.
-- **Credentials only by file reference, unhashed** — moves the secret out of `server.toml` but
-  leaves it usable wherever that file travels; a hash is useless to whoever reads it.
-
-- **Mutual TLS as the only authentication** — forecloses Gateway Mode, where the credential is the
-  only per-Agent proof that survives the hop.
-- **Admission where any one configured proof suffices** — reads as the friendlier migration, but
-  while `[auth]` is configured a leaked token walks past the mutual TLS that was just installed, and
-  it inverts the specification's layering.
-- **Optional proofs, required only by being configured** — the posture this ADR supersedes. An open
-  default is convenient in a lab and admits anyone wherever an operator forgot a section; the
-  specification puts security before convenience and asks for a refusal that names the setting.
+- **Keep the fleet credential as a second required proof** (ADR-0039). Rejected: it is one value
+  for every host, so it identifies nobody, and it lies in clear beside the private key it is meant
+  to back up. It costs a section on both ends, its rotation through offers, its revocation by hash
+  and a Gateway pool partitioned by credential, and a fleet gains nothing from it that the
+  certificate does not give.
+- **Keep the credential optional, checked when configured.** Rejected: two admission paths to
+  test and document, and every piece of machinery the credential needs stays in the tree for a
+  proof that still identifies nobody.
+- **Per-Agent or per-group credentials.** Rejected: identity management that brushes against the
+  authorization and tenancy non-goal, beside a certificate that is already per host, short-lived
+  and renewed without an operator.
+- **A bootstrap token in a header instead of a bootstrap certificate.** Rejected: the token rides
+  in HTTP, so the handshake would have to admit peers without a certificate. A listener has one
+  client-certificate rule, so that means an optional certificate for the whole Agent plane or a
+  third listener for enrolment. A token for the whole fleet has to be distributed exactly as the
+  bootstrap certificate is.
+- **A single-use enrolment token per host instead of the window and the approval.** Issuing the
+  token would be the approval, and automation could fetch one per host. Not chosen: the handshake
+  would again admit peers without a certificate, every host would need a secret of its own
+  delivered to it, and a token intercepted on the way enrols a stranger unseen, where an approval
+  shows the operator the key's fingerprint. It stays open as a follow-up.
+- **Refuse a leftover `[auth]` on the Client at startup**, as the Server does. Rejected: a Client
+  updated by the Server starts with the old file and nobody at the host, so the whole fleet would
+  stop at once. A section that is ignored weakens nothing.
+- **Ignore a leftover `[auth]` on the Server too.** Rejected: an operator is present at a Server
+  upgrade, and a section that silently does nothing would make that operator believe the fleet
+  still needs the credential.
+- **Optional proofs, required only by being configured** — an open default is convenient in a lab
+  and admits anyone wherever an operator forgot a section; the specification puts security before
+  convenience and asks for a refusal that names the setting.
 - **Warning instead of refusing an exposed Operator plane** — a warning is read after the plane has
   been reachable; the specification asks for a refusal.
-- **The credential as the bootstrap instead of a bootstrap certificate** — the "any one proof" rule
-  narrowed to one message type, needing a per-message exception in admission that exists for no
-  other purpose; the specification answers the question with a certificate.
 - **A bootstrap certificate from the client CA** — indistinguishable from an issued one at the
   handshake, so no approval can be asked of it and every leaked bootstrap pair is a member.
 - **Approval without a window** — a pending queue that accepts requests at any time is a standing
   invitation; a window that closes by itself bounds both the queue and an operator's attention.
-- **A single-use bootstrap credential per host** — a per-host secret store and its distribution;
-  the window and the approval bound the same risk with one certificate for the fleet.
 - **A persisted enrolment queue** — a request that outlives a restart outlives the window it was
   made in.
 - **A download listener of its own instead of a certificate on the download** — a third listener
   serving artifacts to anyone who reaches it, where the Agent plane's handshake already proves the
   peer.
+- **Rejecting a report whose `sequence_num` regresses** — an Agent restart legitimately resets it,
+  and a forger can imitate a restart; it authorizes nothing.
 - **Operator-provisioned certificates only, no CSR flow** — leaves every host's certificate to be
   created, delivered and renewed by hand, the errand the specification exists to remove. It
   survives as clause 8's first source.
@@ -392,30 +382,27 @@ operator actions.
 - **Binding the certificate subject to `instance_uid`, or trust-on-first-use pinning of the two** —
   a re-key, a renewal or an Agent moving between Gateways would read as impersonation, and one
   Gateway certificate legitimately carries many UIDs.
-- **Rejecting a report whose `sequence_num` regresses** — an Agent restart legitimately resets it,
-  and a forger can imitate a restart; it authorizes nothing.
-- **Per-Agent credentials from a store** — identity management that brushes against the deferred
-  authorization and tenancy non-goal.
-- **Hashing the stored passwords** — the right end state, but one section hashed and the other not would
-  leave two formats in one file, and a KDF per request is its own denial-of-service question.
-- **Pluggable authenticators (OIDC, JWT, external IdP)** — static credentials answer "belongs to
-  the fleet"; a validator can be added behind the same seam later.
+- **Plaintext operator passwords accepted with a warning** — the secret stays in backups and diffs,
+  and a warning is read after the file has travelled; the specification asks for a refusal.
+- **SHA-256 for Basic passwords** — a person's password falls to a dictionary run against a leaked
+  fast hash in minutes.
+- **Operator passwords only by file reference, unhashed** — moves the secret out of `server.toml`
+  but leaves it usable wherever that file travels; a hash is useless to whoever reads it.
+- **Pluggable authenticators (OIDC, JWT, external IdP)** — a validator can be added behind the
+  Operator plane's seam later.
 - **A login page with a session cookie on the Operator plane** — a session store, logout, cookie
   policy and CSRF protection inside a Server whose UI is an operational page; Basic gives the same
   browser experience for none of it.
 - **Bearer only on the Operator plane** — a browser cannot send one without JavaScript holding a
   token, which drags the UI into session management.
-- **Reusing `[auth]` for the Operator plane** — makes the fleet credential, present on every host,
-  the operator's password.
 - **Leaving operator authentication to a reverse proxy** — a property depending on an artifact this
   project neither ships nor tests.
 
 ## Sources / Prior art
 
 - [OpAMP specification](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md) —
-  authentication MAY, `401` MUST, connection-settings `headers` *"typically used to set access
-  tokens or other authorization headers"*; the client-certificate CSR flow, its `BadRequest` MUST,
-  its restriction to the OpAMP connection, the bootstrap certificate, and the "header-based
+  authentication MAY, `401` MUST; the client-certificate CSR flow, its `BadRequest` MUST, its
+  restriction to the OpAMP connection, the bootstrap certificate, and the "header-based
   authorization … and optionally also client-side certificates" layering; `instance_uid` chosen by
   the Agent and assignable by the Server; throttling with `retry_info` and `Retry-After`.
 - The vendored Baseline schema: `TLSCertificate`, `ConnectionSettingsRequest`.
@@ -425,7 +412,7 @@ operator actions.
   [`basicauthextension`](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/basicauthextension),
   [`bearertokenauthextension`](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/bearertokenauthextension)
   — the ecosystem's static Basic and Bearer building blocks.
-- [RFC 7617](https://datatracker.ietf.org/doc/html/rfc7617) (Basic), RFC 6750 (Bearer),
+- [RFC 7617](https://datatracker.ietf.org/doc/html/rfc7617) (Basic),
   [RFC 9110 §11](https://datatracker.ietf.org/doc/html/rfc9110#name-http-authentication) (`401`,
   `WWW-Authenticate`, `realm`), [RFC 6585 §4](https://datatracker.ietf.org/doc/html/rfc6585#section-4)
   (`429`) and [RFC 9110 §10.2.3](https://datatracker.ietf.org/doc/html/rfc9110#name-retry-after)
@@ -442,8 +429,7 @@ operator actions.
   (`from_pem` under rustls takes key and certificate in one buffer);
   [`RustlsConfig::from_config`](https://docs.rs/axum-server/latest/axum_server/tls_rustls/struct.RustlsConfig.html)
   and the [`axum-server-mtls`](https://lib.rs/crates/axum-server-mtls) pattern for carrying the
-  peer certificate into request extensions; rustls'
-  [`WebPkiClientVerifier`](https://docs.rs/rustls/latest/rustls/server/struct.WebPkiClientVerifier.html)
+  peer certificate into request extensions; rustls' [`WebPkiClientVerifier`](https://docs.rs/rustls/latest/rustls/server/struct.WebPkiClientVerifier.html)
   without `allow_unauthenticated`.
 - [Kubernetes `certificates.k8s.io`](https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/)
   and [`client-go` certificate rotation](https://github.com/kubernetes/client-go/blob/master/util/certificate/csr/csr.go)
@@ -457,30 +443,50 @@ operator actions.
   operational UI; [Grafana](https://grafana.com/docs/grafana/latest/setup-grafana/configure-security/)
   and [BindPlane](https://docs.bindplane.com/) — session logins where the UI is the product.
 - [`HARDENING.md`](../HARDENING.md) — H5 (enrolment as an approval), H7 (credential storage, and
-  why Basic and Bearer need different answers), H9 (the handshake-level certificate requirement),
+  why a Basic password needs a password hash), H9 (the handshake-level certificate requirement),
   H10 (throttling), H15 (operator audit).
 
 ## Consequences
 
-- Positive: goal 17 and Q-1 hold for every configuration — encrypted channel, proved peer, a proof
-  this project issues and renews rather than one an operator distributes by hand; no configuration
-  admits an Agent without both a client certificate and a fleet credential; every mainstream OpAMP
-  client can present the required header.
-- Positive: a peer without a certificate dies in the handshake, before any handler parses a byte
-  of its request; the route check is a second line rather than the only one.
-- Positive: a leaked fleet credential no longer yields certificates. A first certificate needs a
-  bootstrap certificate, the credential, an open window and an operator's approval.
+- Positive: goal 17 holds for every configuration — encrypted channel, a peer proved in the
+  handshake by a certificate this project issues and renews, no configuration that admits a peer
+  without one.
 - Positive: a configuration that would weaken admission fails loudly at startup, naming the
   setting, never silently as an open endpoint.
 - Positive: the trust model is explicit — one fleet is one trust domain — and the Operator plane
   can be published to a network only behind TLS and a password.
+- Positive: a copy of `server.toml` admits no host and signs in no operator.
+- Positive: a peer without a certificate dies in the handshake, before any handler parses a byte
+  of its request; the route check is a second line rather than the only one.
+- Positive: no secret for the Agent plane exists anywhere. Nothing in `supervisor.toml` admits a
+  host, and the Client holds no credential in clear; its only secret is the private key, which
+  never leaves it.
+- Positive: the credential's machinery goes — the Agent plane's `[auth]`, `hash-credential
+  --bearer`, the credential in connection-settings offers ([ADR-0060](0060-connection-settings-offered-without-a-credential-and-server-capabilities.md)), its revocation by hash
+  ([ADR-0065](0065-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)), its audit events ([ADR-0063](0063-an-append-only-audit-record-chained-by-hash.md)), and the Gateway pool partitioned by credential
+  ([ADR-0064](0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)).
+- Positive: a compromised host reports only for its own Agents and holds at most three valid
+  certificates; it cannot take over another host's Agent record or its renewals.
+- Negative / trade-offs: one proof. A stolen certificate and key admit until the certificate is
+  revoked or expires.
+- Negative / trade-offs: behind a Gateway the Server relies on the Gateway's handshake for the
+  peers it carries. A compromised Gateway, or a compromised peer behind one, can poison the record
+  of any Agent behind a Gateway. Accepted within one fleet; it is not a cross-fleet or
+  unauthenticated exposure.
+- Negative / trade-offs: the Server is upgraded before its Clients. A Server of the previous version
+  demands the credential a Client of this version no longer sends; a Server of this version
+  refuses to start while `server.toml` keeps `[auth]` or a credential key in `[connection_offer]`
+  ([ADR-0060](0060-connection-settings-offered-without-a-credential-and-server-capabilities.md)
+  clause 1), and the manual says to delete them.
+- Negative / trade-offs: an operator marks each Gateway by hand; until then the first Agents it
+  carries bind to the Gateway's host, and the mark is the remedy.
 - Negative / trade-offs: the Server is a CA, and its signing key can mint fleet members.
-- Negative / trade-offs: no lab runs without setup. Every Server needs TLS material, a client CA
-  and a credential, and every Client a credential and a certificate.
-- Negative / trade-offs: an expired certificate locks a host out, credential or not. A Client
-  switched off longer than its validity comes back unable to connect; recovery is the operator's —
-  delete its stored pair so it presents a bootstrap certificate, open a window, approve its
-  request — and is written in the manual.
+- Negative / trade-offs: no lab runs without setup. Every Server needs TLS material and a client CA,
+  and every Client a certificate.
+- Negative / trade-offs: an expired certificate locks a host out. A Client switched off longer than
+  its validity comes back unable to connect; recovery is the operator's — delete its stored pair so
+  it presents a bootstrap certificate, open a window, approve its request — and is written in the
+  manual.
 - Negative / trade-offs: a bootstrap certificate still has to be distributed, mitigated by it being
   one for the fleet and opening nothing without a window and an approval.
 - Negative / trade-offs: every first enrolment needs an operator at the API while a window is
@@ -491,53 +497,24 @@ operator actions.
 - Negative / trade-offs: a Gateway whose client CA names the bootstrap CA would turn enrolment
   through it into automatic issuance; the Server cannot see this, and the rule lives in the
   Gateway's configuration and the manual.
-- Negative / trade-offs: behind a Gateway the Server proves which Gateway a message came through,
-  never which Agent produced it; the credential stays load-bearing in gatewayed fleets.
-- Positive: a compromised host reports only for its own Agents and holds at most three valid
-  certificates; it cannot take over another host's Agent record or its renewals.
-- Negative / trade-offs: a compromised Gateway, or a compromised peer behind one, can still poison
-  the record of any Agent behind a Gateway. Accepted within one fleet; it is not a cross-fleet or
-  unauthenticated exposure.
-- Negative / trade-offs: an operator marks each Gateway by hand; until then the first Agents it
-  carries bind to the Gateway's host, and the mark is the remedy.
-- Positive: a copy of `server.toml` admits no host and signs in no operator.
-- Negative / trade-offs: a Server upgraded with plaintext credentials refuses to start until each is
-  hashed; browsers cache Basic credentials and offer no clean logout.
-- Follow-ups: an audit record of operator actions; a strict per-Agent identity mode; an external-CA backend; a
-  revocation story if a fleet must eject a host faster than a certificate expires; checking an
-  `instance_uid` a CSR carries; a view of pending enrolments in the bundled UI.
+- Negative / trade-offs: browsers cache Basic credentials and offer no clean logout.
+- Follow-ups: enrolment by a per-host token; a strict per-Agent identity mode; an external-CA
+  backend; a view of pending enrolments in the bundled UI.
 
 ## Enforcement
 
-- [`crates/fleet-server/src/credentials.rs`](../../crates/fleet-server/src/credentials.rs) —
-  `a_bearer_token_is_admitted_by_its_hash`, `a_basic_password_is_verified_against_its_argon2id_hash`,
-  `an_unknown_user_costs_the_same_verification`, `a_basic_verification_is_remembered_and_bounded`,
-  `password_hashes_are_bounded_and_off_the_async_workers`,
-  `the_comparison_hash_matches_the_costliest_user` (clause 2).
-- [`crates/fleet-server/src/throttle.rs`](../../crates/fleet-server/src/throttle.rs) —
-  `attempts_under_way_count_and_a_slash_64_is_one_peer` (clause 2).
 - [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
-  `a_plaintext_credential_is_refused_naming_its_entry`, `a_weak_argon2id_hash_is_refused`
-  (clause 26).
-- The tests below verify the clauses that stand unchanged.
-
-- [`crates/fleet-server/tests/auth.rs`](../../crates/fleet-server/tests/auth.rs) —
-  `a_request_without_credentials_is_answered_401_with_a_challenge`,
-  `both_configured_schemes_authenticate_a_plain_http_exchange`,
-  `the_websocket_upgrade_is_checked_before_it_completes` (clause 1).
-- [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
-  `the_credential_and_the_client_ca_are_required_at_startup` (clauses 1, 5, 19),
-  `an_empty_auth_section_is_rejected`, `auth_precomputes_the_accepted_headers_and_the_challenge`
-  (clauses 1, 2), `rest_auth_precomputes_the_accepted_headers_and_the_basic_challenge`,
+  `an_auth_section_is_refused_at_startup` (clause 1);
+  `the_client_ca_is_required_at_startup` (clauses 5, 19); `rest_auth_verifies_its_hashes_and_carries_the_basic_challenge`,
   `an_unusable_rest_auth_section_is_rejected`,
   `the_operator_plane_requires_authentication_off_the_loopback` (clause 15),
-  `a_server_without_tls_is_refused_at_startup` (clause 17).
-- [`crates/fleet-agent/src/config.rs`](../../crates/fleet-agent/src/config.rs) —
-  `auth_yields_exactly_one_authorization_scheme` (clause 3).
+  `a_server_without_tls_is_refused_at_startup` (clause 17),
+  `a_plaintext_credential_is_refused_naming_its_entry`, which holds the Basic cases alone,
+  `a_weak_argon2id_hash_is_refused` (clause 26).
 - [`crates/fleet-server/tests/mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs) —
-  `a_client_certificate_is_required_in_the_handshake_on_the_agent_plane` (clauses 5, 23),
-  `a_certificate_does_not_stand_in_for_the_credential` (clauses 6, 10),
-  `a_csr_is_answered_with_an_issued_certificate`,
+  `a_member_is_admitted_on_its_certificate_alone` and `an_authorization_header_is_ignored`
+  over both transports (clauses 1, 6); `a_client_certificate_is_required_in_the_handshake_on_the_agent_plane`
+  (clauses 5, 23), `a_csr_is_answered_with_an_issued_certificate`,
   `a_csr_to_a_server_that_signs_nothing_is_a_bad_request` (clause 9),
   `a_bootstrap_ca_sharing_its_subject_with_the_client_ca_is_refused` (clause 19),
   `a_bootstrap_certificate_is_refused_outside_an_enrolment_window` (clauses 10, 21, 24),
@@ -545,16 +522,29 @@ operator actions.
   `a_rejected_request_is_refused_and_closing_the_window_shuts_enrolment` (clauses 20, 21),
   `an_unknown_enrolment_request_is_answered_404` (clause 22),
   `repeated_failures_from_one_address_are_throttled`,
-  `the_operator_plane_counts_its_failures_in_a_table_of_its_own` (clause 24).
+  `the_operator_plane_counts_its_failures_in_a_table_of_its_own` (clause 24),
+  `an_operator_sees_each_host_and_can_mark_a_gateway` (clause 7).
+- [`crates/fleet-server/src/credentials.rs`](../../crates/fleet-server/src/credentials.rs) —
+  `a_basic_password_is_verified_against_its_argon2id_hash`,
+  `an_unknown_user_costs_the_same_verification`, `a_basic_verification_is_remembered_and_bounded`,
+  `password_hashes_are_bounded_and_off_the_async_workers`,
+  `the_comparison_hash_matches_the_costliest_user` (clause 2).
+- [`crates/fleet-server/src/throttle.rs`](../../crates/fleet-server/src/throttle.rs) —
+  `attempts_under_way_count_and_a_slash_64_is_one_peer` (clause 2),
+  `a_peer_that_fails_too_often_waits_out_the_back_off`, `a_full_table_keeps_an_address_in_back_off`,
+  `the_table_is_bounded_and_drops_the_oldest` (clause 24).
+- [`crates/fleet-server/src/main.rs`](../../crates/fleet-server/src/main.rs) —
+  `hash_credential_hashes_a_basic_password_alone` (clause 26).
+- [`crates/fleet-agent/src/config.rs`](../../crates/fleet-agent/src/config.rs) —
+  `a_leftover_auth_section_is_ignored_with_a_notice` (clause 3);
+  [`config_file.rs`](../../crates/fleet-agent/src/config_file.rs)
+  `admission_needs_a_client_identity_and_nothing_else` (clause 5).
 - [`crates/fleet-server/src/tls.rs`](../../crates/fleet-server/src/tls.rs) —
-  `a_certificate_not_issued_by_the_client_ca_only_enrols` (clauses 19, 21).
+  `a_certificate_not_issued_by_the_client_ca_only_enrols` (clauses 6, 19, 21).
 - [`crates/fleet-server/src/enrolment.rs`](../../crates/fleet-server/src/enrolment.rs) —
   `the_window_is_closed_by_default_and_bounded`, `closing_the_window_expires_every_request`
   (clause 20), `a_request_waits_for_an_operator_and_is_answered_once_decided`,
   `the_queue_is_bounded` (clauses 21, 22).
-- [`crates/fleet-server/src/throttle.rs`](../../crates/fleet-server/src/throttle.rs) —
-  `a_peer_that_fails_too_often_waits_out_the_back_off`, `a_full_table_keeps_an_address_in_back_off`,
-  `the_table_is_bounded_and_drops_the_oldest` (clause 24).
 - [`crates/fleet-server/src/ca.rs`](../../crates/fleet-server/src/ca.rs) —
   `signs_a_request_into_a_certificate`, `the_request_cannot_dictate_the_certificates_powers`,
   `refuses_a_request_that_does_not_parse` (clauses 7, 9),
@@ -562,9 +552,8 @@ operator actions.
 - [`crates/fleet-server/src/revocation.rs`](../../crates/fleet-server/src/revocation.rs) —
   `a_host_is_bounded_and_speaks_only_for_its_own_agents` (clause 7).
 - [`crates/fleet-server/src/fleet.rs`](../../crates/fleet-server/src/fleet.rs) —
-  `a_host_cannot_report_for_another_hosts_agent` (clauses 7, 14).
-- [`crates/fleet-server/tests/mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs) —
-  `an_operator_sees_each_host_and_can_mark_a_gateway` (clause 7).
+  `a_host_cannot_report_for_another_hosts_agent` (clauses 7, 14),
+  `unavailable_tells_the_agent_when_to_retry` (clause 21).
 - [`crates/fleet-agent/tests/certificate_renewal_e2e.rs`](../../crates/fleet-agent/tests/certificate_renewal_e2e.rs) —
   `a_client_renews_each_certificate_before_it_expires` (clauses 9, 11, 27).
 - [`crates/fleet-agent/src/csr.rs`](../../crates/fleet-agent/src/csr.rs) —
@@ -576,8 +565,7 @@ operator actions.
   `the_client_certificate_goes_to_the_servers_origin_alone` (clause 23).
 - [`crates/fleet-agent/tests/gateway_tls.rs`](../../crates/fleet-agent/tests/gateway_tls.rs) —
   `a_downstream_agent_with_a_certificate_reaches_the_server_over_tls`,
-  `a_downstream_peer_without_a_certificate_is_refused`,
-  `each_downstream_peer_is_admitted_on_its_own_credential` (clause 13).
+  `a_downstream_peer_without_a_certificate_is_refused` (clause 13).
 - [`crates/fleet-server/tests/rest_auth.rs`](../../crates/fleet-server/tests/rest_auth.rs) —
   `a_request_without_credentials_is_answered_401_with_a_basic_challenge`,
   `the_configured_operator_reaches_the_api`, `the_ui_and_the_api_docs_are_guarded_too`,
@@ -586,5 +574,6 @@ operator actions.
   `a_cross_site_state_changing_post_is_refused` (clause 16).
 
 **Not mechanically decidable:** clause 14 decides what is *not* built beyond the host — no test
-can show the absence of a per-Agent authorization the design rejects; clause 12 is a dependency choice; and
-clause 25 rests on a Gateway's client CA, which the Server cannot see. Review holds them.
+can show the absence of a per-Agent authorization the design rejects; clause 12 is a dependency
+choice; and clause 25 rests on a Gateway's client CA, which the Server cannot see. Review holds
+them.

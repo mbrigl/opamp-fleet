@@ -83,9 +83,9 @@ impl PackageOffering {
     }
 }
 
-/// The **Agent plane** (ADR-0038): the OpAMP endpoint, guarded by Admission (ADR-0039), and the
-/// package download route beside it — outside the credential check, behind the same handshake, and
-/// reached only with a certificate of the fleet (ADR-0039 clause 23).
+/// The **Agent plane** (ADR-0038): the OpAMP endpoint, guarded by Admission (ADR-0059), and the
+/// package download route beside it — behind the same handshake, and reached only with a
+/// certificate of the fleet (ADR-0059 clause 23).
 ///
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its

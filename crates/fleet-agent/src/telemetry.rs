@@ -461,7 +461,7 @@ fn endpoint_of(settings: Option<&TelemetryConnectionSettings>) -> Option<String>
 /// Client logs, so plaintext is refused anywhere but on the host itself: the loopback literals
 /// `127.0.0.1` and `::1` (ADR-0048). A private address is not a private network, and a name is
 /// not an address. `tls` and `proxy` are refused for the same reasons they are on the OpAMP
-/// settings (ADR-0039).
+/// settings (ADR-0060 clause 8).
 fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), String> {
     let endpoint = &settings.destination_endpoint;
     if endpoint.starts_with("http://") && opamp::endpoint::check_url(endpoint).is_err() {

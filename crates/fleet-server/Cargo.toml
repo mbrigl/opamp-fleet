@@ -34,7 +34,7 @@ libc.workspace = true
 flate2.workspace = true
 base64.workspace = true
 constant_time_eq.workspace = true
-# ADR-0039: which CA issued the certificate a connection carries — the client CA's member, or the
+# ADR-0059: which CA issued the certificate a connection carries — the client CA's member, or the
 # bootstrap CA's enrolling host. The parser rcgen itself uses, already in the tree.
 x509-parser = { workspace = true, features = ["verify"] }
 # The configuration the listener of `opamp` serves with (ADR-0036).

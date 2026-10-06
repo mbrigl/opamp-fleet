@@ -104,15 +104,14 @@ only as the protocol and its agents actually allow.
   it reaches, so a flaw in it is a flaw on all of them at once. Where security and convenience
   conflict, security wins, and the operator meets a refusal that says what to fix, not a warning.
   Every connection that leaves the host is TLS 1.3; plaintext is accepted on the loopback alone. An
-  Agent proves fleet membership twice, with a client certificate in the TLS handshake and with a
-  fleet credential, and it obtains its certificate in a separate enrolment that is time-limited and
-  approved. This is done with the protocol's own means — connection headers, client certificates,
-  the CSR flow, and the `ConnectionSettings` offers that let the Server rotate a Client's
-  credentials — never through a private side channel. Software is installed only when it is signed
-  with a key the operator holds and fetched from a source the operator allowed. No vulnerability can
-  be ruled out, so the project shrinks the chance of one and the damage it can do: every input from
-  the network is bounded before it is parsed, the parsers are fuzzed, and the dependencies are
-  checked before they are merged.
+  Agent proves fleet membership with a client certificate in the TLS handshake, issued to its host,
+  and it obtains that certificate in a separate enrolment that is time-limited and approved. This is
+  done with the protocol's own means — client certificates, the CSR flow, and the
+  `ConnectionSettings` offers that let the Server renew a Client's certificate — never through a
+  private side channel. Software is installed only when it is signed with a key the operator holds
+  and fetched from a source the operator allowed. No vulnerability can be ruled out, so the project
+  shrinks the chance of one and the damage it can do: every input from the network is bounded before
+  it is parsed, the parsers are fuzzed, and the dependencies are checked before they are merged.
 - **Close the loop before widening it.** A working control loop — configure, apply, report back — for
   one managed process comes first. Targeting a subset of the fleet and updating an agent's software
   are core goals, built on top of that loop once it holds, not before it.
@@ -175,11 +174,11 @@ Use these exact words in code, comments, documentation, and ADRs.
   the mode that closes the control loop for a machine's own agents. Every Supervisor also exposes a
   **Supervisor Endpoint** — that is part of what a Supervisor *is*, not a separate mode to enable.
 - **Gateway Mode** — the Client accepts OpAMP connections from other Clients and forwards their
-  messages upstream over a **Connection Pool**, so a large number of agents reaches the Server over a
-  small number of connections. A Gateway forwards messages unchanged and holds **no authentication
-  policy of its own**: it passes the connecting peer's headers and remote address upstream so that all
-  authentication policy stays on the Server, and the one refusal it makes is the Server's — a
-  certificate the Server has revoked. Agents behind a Gateway remain distinct Agents.
+  messages upstream over a **Connection Pool**, so a large number of agents reaches the Server over
+  a small number of connections. A Gateway forwards messages unchanged and holds **no authentication
+  policy of its own**: it admits a connecting Client by a client certificate from the fleet's client
+  CA in its handshake, as the Server would, and the one refusal it makes beyond that is the Server's
+  — a certificate the Server has revoked. Agents behind a Gateway remain distinct Agents.
 - **Supervisor Endpoint** — the OpAMP endpoint a Supervisor exposes on the loopback interface so that
   a Managed Process carrying an OpAMP client of its own can report to it. It exists because such a
   client — notably the OpenTelemetry Collector's `opampextension` — is a **client only** and therefore
@@ -308,8 +307,9 @@ Use these exact words in code, comments, documentation, and ADRs.
     `instance_uid` and behaves identically either way.
 15. **G-15** — **A Gateway scales connections, not identities.** Many Clients reaching the Server
     through a Client in Gateway Mode appear as their own Agents, fully manageable, while sharing a
-    small Connection Pool — and the Gateway makes no authentication decision of its own: it refuses
-    only what the Server has revoked, and admits no one while it cannot learn what that is.
+    small Connection Pool — and the Gateway makes no authentication decision of its own: it admits
+    a Client by a certificate from the fleet's client CA, as the Server does, refuses what the
+    Server has revoked, and admits no one while it cannot learn what that is.
 16. **G-16** — **A Collector reports through its own OpAMP client.** A Collector carrying the
     `opampextension` connects to its Supervisor's Supervisor Endpoint, which relays its description,
     health, and effective configuration upstream — so the Collector's own reporting, rather than
@@ -322,8 +322,7 @@ Use these exact words in code, comments, documentation, and ADRs.
 
 1. **Q-1** — **Secure by default.** Whatever its configuration, neither end sends a credential, a
    configuration or a package unencrypted beyond the loopback, admits an Agent onto the Server
-   or a Gateway without both a client certificate and a fleet credential, or installs a package
-   without a valid signature. A
+   or a Gateway without a client certificate, or installs a package without a valid signature. A
    configuration that would do any of these is refused at startup, naming the setting.
 2. **Q-2** — **Untrusted input is bounded and fuzzed.** Every parser that reads bytes from the
    network or from a downloaded artifact enforces its size limit before it allocates, and has a fuzz

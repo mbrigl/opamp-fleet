@@ -263,8 +263,8 @@ pub enum OfferOutcome {
 ///    telemetry destination cannot be proved that way and is not: a receiver that is momentarily
 ///    down is not an offer that is wrong.
 /// 2. **Persist, then apply telemetry from what was persisted** — never from the raw offer. An
-///    offer that says nothing about telemetry — an endpoint move, a credential rotation, a
-///    certificate — would otherwise compare against `metrics: None, traces: None, logs: None` and
+///    offer that says nothing about telemetry — an endpoint move, a heartbeat, a certificate —
+///    would otherwise compare against `metrics: None, traces: None, logs: None` and
 ///    tear down exporters the Server never mentioned. `merge` is what puts those back. What it no
 ///    longer puts back is a signal left out of an offer that *does* name one: that is a stop, and
 ///    ADR-0025 is where the difference is decided.
@@ -355,30 +355,31 @@ pub async fn process_connection_offer(
     }
 }
 
-/// The upstream connection `supervisor.toml` describes, with the credential and the identity in
-/// force (ADR-0017, ADR-0018).
+/// The upstream connection `supervisor.toml` describes, with the client identity in force
+/// (ADR-0059).
 ///
 /// # Errors
-/// Returns an error when the credential or a TLS file cannot be read.
+/// Returns an error when a TLS file cannot be read.
 pub fn connection(config: &ClientConfig) -> Result<Connection, String> {
-    connection_with(config, crate::tls::client_tls(config)?)
+    Ok(connection_with(config, crate::tls::client_tls(config)?))
 }
 
 /// The same connection with other TLS material — a candidate certificate under test.
 ///
-/// # Errors
-/// Returns an error when the credential cannot be read.
-pub fn connection_with(config: &ClientConfig, tls: ClientTls) -> Result<Connection, String> {
-    Ok(Connection {
+/// It carries no `Authorization`: the Server admits by the client certificate alone, and this
+/// Client sends no credential upstream (ADR-0059 clause 3).
+#[must_use]
+pub fn connection_with(config: &ClientConfig, tls: ClientTls) -> Connection {
+    Connection {
         endpoint: config.endpoint.clone(),
-        authorization: config.authorization_value()?,
+        authorization: None,
         tls,
         max_message_size: config.max_message_size_bytes,
         // The heartbeat (ReportsHeartbeat, Baseline default 30 s; 0 disables).
         heartbeat: (config.heartbeat_interval_secs > 0)
             .then(|| Duration::from_secs(config.heartbeat_interval_secs)),
         poll: Duration::from_secs(config.poll_interval_secs.max(1)),
-    })
+    }
 }
 
 /// Runs the Engine's Agents over the connection `config` describes, on the transport its endpoint

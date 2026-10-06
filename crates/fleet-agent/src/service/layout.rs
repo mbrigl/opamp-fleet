@@ -309,7 +309,7 @@ pub fn stage_current_exe(layout: &Layout) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0046, ADR-0047
+    /// Verifies: ADR-0061, ADR-0062
     #[test]
     fn the_directory_name_is_base_plus_hash_never_the_prerelease() {
         assert_eq!(
@@ -339,7 +339,7 @@ mod tests {
     /// Runs on every platform, because the pointer is *not* the same thing on every platform: a
     /// symlink on Unix, a junction created through `cmd` on Windows (ADR-0014). Gating this to Unix
     /// left the mechanism with the more moving parts as the untested one.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[test]
     fn set_current_points_and_repoints() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -386,7 +386,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[cfg(unix)]
     #[test]
     fn stage_writes_binary_manifest_and_pointer() {
@@ -423,7 +423,7 @@ mod tests {
     /// (ADR-0023); rewriting it would be refused (`ETXTBSY`), so identical bytes must be left
     /// alone. Observed via the modification time: pinned to the epoch, it only stays there when
     /// no write happened.
-    /// Verifies: ADR-0046, ADR-0047
+    /// Verifies: ADR-0061, ADR-0062
     #[cfg(unix)]
     #[test]
     fn restaging_identical_bytes_leaves_the_staged_binary_untouched() {
@@ -455,7 +455,7 @@ mod tests {
 
     /// The skip is by content, never by presence: a staged binary holding the wrong bytes — a
     /// torn write, a tamper — is replaced, which is the idempotent re-install staging promises.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[cfg(unix)]
     #[test]
     fn restaging_replaces_a_staged_binary_with_different_bytes() {
@@ -478,7 +478,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[cfg(unix)]
     #[test]
     fn a_torn_pointer_is_healed_a_correct_one_left_alone() {
@@ -517,7 +517,7 @@ mod tests {
     /// path `current_exe` hands back — the pointer, not the version directory behind it. The
     /// layout is invisible from there, so the resolution has to happen before anything looks for
     /// it. Provoked here with a symbolic link, which is what the pointer is on this platform anyway.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[cfg(unix)]
     #[test]
     fn the_layout_is_found_from_the_pointer_the_service_was_registered_against() {

@@ -83,7 +83,7 @@ fn restrict_args(path: &std::path::Path) -> Vec<std::ffi::OsString> {
 /// Cuts a system-scope data root off from what `%ProgramData%` lets every local user do.
 ///
 /// Every folder created under `%ProgramData%` inherits `BUILTIN\Users:(OI)(CI)(RX)`: any local
-/// user could read the configuration with the fleet credential in it, the private key and the
+/// user could read the configuration and the archive key it may hold, the private key and the
 /// stored connection settings. On Unix the Client writes those `0600` in a `0700` directory itself;
 /// here the install removes the inherited rights and leaves the directory to LocalSystem and the
 /// Administrators, before the handover grants the service account its own. A user-scope install
@@ -139,7 +139,7 @@ mod tests {
 
     /// The data root keeps no inherited right — `BUILTIN\Users` read among them — and full control
     /// only for LocalSystem and the Administrators, each granted by SID.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[test]
     fn the_data_root_is_cut_off_from_what_every_local_user_inherits() {
         let args: Vec<String> = restrict_args(std::path::Path::new(r"C:\ProgramData\opamp-fleet"))

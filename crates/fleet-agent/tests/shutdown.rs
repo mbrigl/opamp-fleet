@@ -9,7 +9,7 @@ mod common;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Verifies: ADR-0046
+/// Verifies: ADR-0061
 #[test]
 fn sigterm_shuts_the_client_down_cleanly() {
     let dir = tempfile::tempdir().expect("create a tempdir");
@@ -21,7 +21,7 @@ fn sigterm_shuts_the_client_down_cleanly() {
         format!(
             "endpoint = \"http://127.0.0.1:9\"\nstate_dir = \"{}\"\n{}",
             dir.path().join("state").display(),
-            common::credentials(dir.path())
+            common::client_identity(dir.path())
         ),
     )
     .expect("write the config");

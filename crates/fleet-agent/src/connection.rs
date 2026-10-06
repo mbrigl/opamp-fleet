@@ -1,4 +1,4 @@
-//! Server-offered connection settings (ADR-0018): persistence, their precedence over
+//! Server-offered connection settings (ADR-0060): persistence, their precedence over
 //! `supervisor.toml`, and the verify-by-actually-connecting the Baseline requires.
 //!
 //! The persisted file is the Baseline's own `ConnectionSettingsOffers` protobuf — the merged
@@ -20,11 +20,33 @@ const SETTINGS_FILE: &str = "connection-settings.pb";
 
 /// The persisted settings in force, or `None` on a fresh state dir (an unreadable file is
 /// dropped with a warning — `supervisor.toml` then applies, never a half-read override).
+///
+/// The settings carry no `headers`: a file may hold an `Authorization` header from a credential
+/// rotation, and it is dropped here, so it is never sent (ADR-0060 clause 9). The file is then
+/// rewritten without it, best-effort, so the credential leaves the disk and the warning appears
+/// once; a failed rewrite is warned about and never fails the load.
 pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
     let path = state_dir.join(SETTINGS_FILE);
     let bytes = std::fs::read(&path).ok()?;
     match ConnectionSettingsOffers::decode(bytes.as_slice()) {
-        Ok(stored) => Some(stored),
+        Ok(mut stored) => {
+            if let Some(headers) = stored.opamp.as_mut().and_then(|s| s.headers.take()) {
+                let keys: Vec<&str> = headers.headers.iter().map(|h| h.key.as_str()).collect();
+                warn!(
+                    file = %path.display(),
+                    headers = %keys.join(", "),
+                    "persisted connection headers dropped; this Client sends none"
+                );
+                if let Err(e) = store(state_dir, &stored) {
+                    warn!(
+                        file = %path.display(),
+                        error = %e,
+                        "could not rewrite connection settings without the dropped headers"
+                    );
+                }
+            }
+            Some(stored)
+        }
         Err(e) => {
             warn!(file = %path.display(), error = %e, "unreadable connection settings; ignoring");
             None
@@ -32,13 +54,12 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
     }
 }
 
-/// Persists the settings now in force, losslessly as the received protobuf.
+/// Persists the settings now in force as the Baseline's own protobuf.
 ///
-/// The file holds the Server-rotated `Authorization` value (ADR-0018), which outranks the one in
-/// `supervisor.toml` — so it is written no wider than its owner, and the state directory holding it no
-/// wider than `0700`. On a multi-user host the default umask would otherwise leave the live fleet
-/// credential world-readable. On Windows the directory ACL under `%ProgramData%` protects it
-/// (ADR-0014); there is no mode to set.
+/// The file outranks `supervisor.toml` (ADR-0060 clause 9) — it decides where this Client connects
+/// and which certificate it presents — so it is written no wider than its owner, and the state
+/// directory holding it no wider than `0700`. On Windows the directory ACL under `%ProgramData%`
+/// protects it (ADR-0014); there is no mode to set.
 pub fn store(state_dir: &Path, settings: &ConnectionSettingsOffers) -> std::io::Result<()> {
     crate::storage::create_private_dir(state_dir)?;
     crate::storage::write_private(&state_dir.join(SETTINGS_FILE), &settings.encode_to_vec())
@@ -46,8 +67,9 @@ pub fn store(state_dir: &Path, settings: &ConnectionSettingsOffers) -> std::io::
 
 /// Folds a verified offer over what was already in force.
 ///
-/// The **OpAMP** settings carry only what changes — a headers-only rotation must not erase a
-/// previously offered endpoint, and vice versa. The **own-telemetry** destinations do not: an offer
+/// The **OpAMP** settings carry only what changes — a heartbeat-only offer must not erase a
+/// previously offered endpoint, and vice versa. Offered `headers` are never folded in: this Client
+/// applies none (ADR-0060 clause 8). The **own-telemetry** destinations do not: an offer
 /// that names any of them states all three (ADR-0025). The two rules live in one function because
 /// one message carries both, and the difference between them is the whole of what this fold does.
 pub fn merge(
@@ -62,7 +84,7 @@ pub fn merge(
     // The own-telemetry destinations do not fold per signal (ADR-0025). An offer that names any of
     // the three states all three: a signal it leaves out is *stopped*, and a signal whose endpoint
     // it offers empty is withdrawn. An offer that names none of them says nothing about telemetry
-    // — an OpAMP endpoint move, a credential rotation, a certificate — and leaves all three alone.
+    // — an OpAMP endpoint move, a heartbeat, a certificate — and leaves all three alone.
     //
     // The line is between messages, not between fields, and that is what keeps it compatible with
     // the schema's per-field "if this field is not set … the settings are unchanged": unchanged
@@ -95,7 +117,7 @@ pub fn merge(
             offer.own_logs.as_ref(),
             stored.and_then(|s| s.own_logs.as_ref()),
         ),
-        // Built only when one of the two sides actually has OpAMP settings (ADR-0018 clause 9).
+        // Built only when one of the two sides actually has OpAMP settings (ADR-0060 clause 9).
         // Emitting a block unconditionally would have a telemetry-only offer persist the claim that
         // the Server offered OpAMP settings it never offered — a lie in the one file an operator is
         // told to inspect and delete, and one that makes the honest assertion untestable.
@@ -103,10 +125,9 @@ pub fn merge(
             destination_endpoint: pick(|s| !s.destination_endpoint.is_empty())
                 .map(|s| s.destination_endpoint)
                 .unwrap_or_default(),
-            headers: pick(|s| s.headers.is_some()).and_then(|s| s.headers),
-            // The issued client identity (ADR-0017). Folded like every other field: a later offer
+            // The issued client identity (ADR-0059). Folded like every other field: a later offer
             // that says nothing about the certificate leaves the one in force alone, which is what
-            // makes an endpoint or credential rotation safe for a fleet already on mutual TLS.
+            // makes an endpoint move safe for a fleet already on mutual TLS.
             certificate: pick(|s| s.certificate.is_some()).and_then(|s| s.certificate),
             heartbeat_interval_seconds: pick(|s| s.heartbeat_interval_seconds != 0)
                 .map(|s| s.heartbeat_interval_seconds)
@@ -118,25 +139,31 @@ pub fn merge(
 }
 
 /// What to report for an offer that has been verified and applied: `Ok` when the Client honoured
-/// all of it, `Err` naming the fields it dropped (ADR-0017).
+/// all of it, `Err` naming the fields it dropped (ADR-0060 clause 8).
 ///
 /// The Client applies what it understands and then says so. Reporting `APPLIED` for an offer whose
-/// `tls` or `proxy` it silently discarded — which is what it used to do — tells the Server the
-/// settings are in force when they are not, and the Server has no way to find out. `FAILED` with
-/// the field names is the honest answer; the hash is echoed either way, so this does not put the
-/// Server into a re-offer loop.
+/// `tls`, `proxy` or `headers` it discarded tells the Server the settings are in force when they
+/// are not, and the Server has no way to find out. `FAILED` with the field names is the honest
+/// answer; the hash is echoed either way, so this does not put the Server into a re-offer loop.
 ///
-/// Neither field is honoured on purpose. `TLSConnectionSettings` is mostly a way to weaken
+/// None of the three is honoured, on purpose. `TLSConnectionSettings` is mostly a way to weaken
 /// verification — `insecure_skip_verify` would let a Server switch off the check that proves it is
 /// the Server — and trust here is an operator's file (ADR-0012). `ProxyConnectionSettings` has
-/// nothing on this Client to configure. Both are `[Development]` upstream.
+/// nothing on this Client to configure. Offered `headers` have no reader on the Agent plane, which
+/// admits by client certificate alone (ADR-0059): an applied one would be a value the Server plants
+/// on every connection of the fleet. They are named by their keys, never their values — the
+/// message travels to the Server and into the log file.
 pub fn unhonoured(settings: &OpAmpConnectionSettings) -> Result<(), String> {
     let mut dropped = Vec::new();
     if settings.tls.is_some() {
-        dropped.push("tls");
+        dropped.push("tls".to_string());
     }
     if settings.proxy.is_some() {
-        dropped.push("proxy");
+        dropped.push("proxy".to_string());
+    }
+    if let Some(headers) = &settings.headers {
+        let keys: Vec<&str> = headers.headers.iter().map(|h| h.key.as_str()).collect();
+        dropped.push(format!("headers ({})", keys.join(", ")));
     }
     if dropped.is_empty() {
         return Ok(());
@@ -148,27 +175,15 @@ pub fn unhonoured(settings: &OpAmpConnectionSettings) -> Result<(), String> {
     ))
 }
 
-/// The `Authorization` value an offer carries, if any.
-pub fn offered_authorization(settings: &OpAmpConnectionSettings) -> Option<&str> {
-    settings.headers.as_ref()?.headers.iter().find_map(|h| {
-        h.key
-            .eq_ignore_ascii_case("authorization")
-            .then_some(h.value.as_str())
-    })
-}
-
-/// Applies persisted settings over the loaded `supervisor.toml` (ADR-0018): the Server's word wins
-/// where it spoke — endpoint, credential, heartbeat (on plain HTTP the same value is the polling
-/// interval, the Baseline's MUST) — and the file's word stays everywhere else.
+/// Applies persisted settings over the loaded `supervisor.toml` (ADR-0060): the Server's word wins
+/// where it spoke — endpoint and heartbeat (on plain HTTP the same value is the polling interval,
+/// the Baseline's MUST) — and the file's word stays everywhere else.
 pub fn apply(config: &mut ClientConfig, stored: &ConnectionSettingsOffers) {
     let Some(settings) = &stored.opamp else {
         return;
     };
     if !settings.destination_endpoint.is_empty() {
         config.endpoint = settings.destination_endpoint.clone();
-    }
-    if let Some(authorization) = offered_authorization(settings) {
-        config.authorization_override = Some(authorization.to_string());
     }
     if settings.heartbeat_interval_seconds != 0 {
         config.heartbeat_interval_secs = settings.heartbeat_interval_seconds;
@@ -179,7 +194,8 @@ pub fn apply(config: &mut ClientConfig, stored: &ConnectionSettingsOffers) {
 /// Verifies an offer by actually connecting (the Baseline's MUST) with the candidate settings:
 /// offered fields, falling back to the current ones. A WebSocket candidate must complete its
 /// handshake; a plain-HTTP candidate must complete a real exchange, fed by `probe_report`. The
-/// current TLS trust override applies to the candidate too.
+/// current TLS trust override applies to the candidate too. Offered `headers` are never used, and
+/// no `Authorization` is sent (ADR-0060 clauses 5, 8).
 pub async fn verify(
     settings: &OpAmpConnectionSettings,
     config: &ClientConfig,
@@ -192,7 +208,7 @@ pub async fn verify(
     };
     // A move to another TLS endpoint is taken only where this Client's own CA file can vouch for
     // it: under the public roots alone, a Server could move the fleet to any host a public CA
-    // ever certified, and keep it there (ADR-0041 clause 5).
+    // ever certified, and keep it there (ADR-0060 clause 5).
     let moves = endpoint != config.endpoint;
     let over_tls = endpoint.starts_with("wss://") || endpoint.starts_with("https://");
     if moves && over_tls && config.ca_file().is_none() {
@@ -201,12 +217,8 @@ pub async fn verify(
              ca_file, so that only a server certificate from the fleet's own CA is trusted"
         ));
     }
-    let authorization = match offered_authorization(settings) {
-        Some(offered) => Some(offered.to_string()),
-        None => config.authorization_value()?,
-    };
-    // An offered client certificate is proved the same way the endpoint and the credential are:
-    // by connecting with it (ADR-0017). Until that succeeds the one in force stays in force, so a
+    // An offered client certificate is proved the same way the endpoint is: by connecting with it
+    // (ADR-0060 clause 5). Until that succeeds the one in force stays in force, so a
     // certificate that cannot authenticate costs nothing.
     let candidate_cert = settings
         .certificate
@@ -215,37 +227,56 @@ pub async fn verify(
         .filter(|cert| !cert.is_empty());
 
     let tls = crate::tls::client_tls_for(config, candidate_cert)?;
-    let mut candidate = crate::transport::connection_with(config, tls)?;
+    let mut candidate = crate::transport::connection_with(config, tls);
     candidate.endpoint = endpoint;
-    candidate.authorization = authorization;
     opamp::client::connection::probe(&candidate, probe_report).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opamp::proto::{Header, Headers};
+    use opamp::proto::{Header, Headers, TlsCertificate};
 
     fn offer_with(
         hash: &[u8],
         endpoint: &str,
-        authorization: Option<&str>,
+        certificate: Option<&str>,
         heartbeat: u64,
     ) -> ConnectionSettingsOffers {
         ConnectionSettingsOffers {
             hash: hash.to_vec(),
             opamp: Some(OpAmpConnectionSettings {
                 destination_endpoint: endpoint.to_string(),
-                headers: authorization.map(|value| Headers {
-                    headers: vec![Header {
-                        key: "Authorization".to_string(),
-                        value: value.to_string(),
-                    }],
+                certificate: certificate.map(|pem| TlsCertificate {
+                    cert: pem.as_bytes().to_vec(),
+                    ..Default::default()
                 }),
                 heartbeat_interval_seconds: heartbeat,
                 ..Default::default()
             }),
             ..Default::default()
+        }
+    }
+
+    /// The certificate an OpAMP settings block carries, as text.
+    fn certificate_of(settings: &OpAmpConnectionSettings) -> Option<String> {
+        let certificate = settings.certificate.as_ref()?;
+        Some(String::from_utf8_lossy(&certificate.cert).into_owned())
+    }
+
+    /// Offered headers: an `Authorization` the Server plants, and one more.
+    fn planted_headers() -> Headers {
+        Headers {
+            headers: vec![
+                Header {
+                    key: "Authorization".to_string(),
+                    value: "Bearer planted-value".to_string(),
+                },
+                Header {
+                    key: "X-Fleet".to_string(),
+                    value: "other-value".to_string(),
+                },
+            ],
         }
     }
 
@@ -263,7 +294,7 @@ mod tests {
     /// Clause 6: what is persisted says only what was offered. A telemetry-only offer against a
     /// fresh state directory must not leave behind an empty `opamp` block claiming the Server
     /// offered settings it never sent.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn merge_leaves_opamp_absent_when_neither_side_has_one() {
         let merged = merge(None, &telemetry_only(b"t1", "https://x/v1/metrics"));
@@ -300,8 +331,8 @@ mod tests {
         );
     }
 
-    /// Rule 2: an offer that names none of the three says nothing about telemetry. A credential
-    /// rotation must not take the exporters down with it — that is what keeps the classes of
+    /// Rule 2: an offer that names none of the three says nothing about telemetry. An issued
+    /// certificate must not take the exporters down with it — that is what keeps the classes of
     /// ADR-0018 independent, and it is the schema's own "not set means unchanged", held at the
     /// level it still holds at.
     /// Verifies: ADR-0048
@@ -313,7 +344,7 @@ mod tests {
             ..Default::default()
         });
 
-        let merged = merge(Some(&stored), &offer_with(b"h2", "", Some("Bearer new"), 0));
+        let merged = merge(Some(&stored), &offer_with(b"h2", "", Some("issued"), 0));
 
         assert_eq!(
             merged.own_metrics.expect("metrics").destination_endpoint,
@@ -342,11 +373,11 @@ mod tests {
     }
 
     /// And the fold still works the other way: a telemetry-only offer arriving over settings
-    /// already in force leaves the OpAMP endpoint and credential exactly where they were.
-    /// Verifies: ADR-0041
+    /// already in force leaves the OpAMP endpoint, heartbeat and certificate exactly where they were.
+    /// Verifies: ADR-0060
     #[test]
     fn merge_of_a_telemetry_only_offer_carries_the_opamp_settings_in_force_forward() {
-        let stored = offer_with(b"h1", "wss://server/v1/opamp", Some("Bearer t"), 20);
+        let stored = offer_with(b"h1", "wss://server/v1/opamp", Some("issued"), 20);
         let merged = merge(
             Some(&stored),
             &telemetry_only(b"t2", "https://x/v1/metrics"),
@@ -355,17 +386,17 @@ mod tests {
         let opamp = merged.opamp.expect("the settings in force survive");
         assert_eq!(opamp.destination_endpoint, "wss://server/v1/opamp");
         assert_eq!(opamp.heartbeat_interval_seconds, 20);
-        assert_eq!(offered_authorization(&opamp), Some("Bearer t"));
+        assert_eq!(certificate_of(&opamp).as_deref(), Some("issued"));
         assert!(merged.own_metrics.is_some());
         assert_eq!(merged.hash, b"t2", "the new offer's hash is acknowledged");
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn load_store_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(load(dir.path()).is_none(), "fresh state dir holds nothing");
-        let settings = offer_with(b"h1", "wss://x/v1/opamp", Some("Bearer t"), 20);
+        let settings = offer_with(b"h1", "wss://x/v1/opamp", Some("issued"), 20);
         store(dir.path(), &settings).expect("store");
         let restored = load(dir.path()).expect("restored");
         assert_eq!(restored.hash, b"h1");
@@ -375,9 +406,9 @@ mod tests {
         );
     }
 
-    /// The persisted file holds the live, Server-rotated credential, so it — and the directory it
-    /// sits in — must not be readable by another user on the host.
-    /// Verifies: ADR-0041
+    /// The persisted file outranks `supervisor.toml` — it decides where this Client connects and
+    /// what it presents — so it, and the directory it sits in, are no one else's on the host.
+    /// Verifies: ADR-0060
     #[cfg(unix)]
     #[test]
     fn stored_settings_and_their_directory_are_owner_only() {
@@ -387,7 +418,7 @@ mod tests {
         let state_dir = dir.path().join("state");
         store(
             &state_dir,
-            &offer_with(b"h1", "wss://x/v1/opamp", Some("Bearer secret"), 20),
+            &offer_with(b"h1", "wss://x/v1/opamp", Some("issued"), 20),
         )
         .expect("store");
 
@@ -397,11 +428,7 @@ mod tests {
             .expect("file metadata")
             .permissions()
             .mode();
-        assert_eq!(
-            file_mode & 0o777,
-            0o600,
-            "the credential file is owner-only"
-        );
+        assert_eq!(file_mode & 0o777, 0o600, "the settings file is owner-only");
         let dir_mode = state_dir
             .metadata()
             .expect("dir metadata")
@@ -410,12 +437,12 @@ mod tests {
         assert_eq!(dir_mode & 0o777, 0o700, "the state directory is owner-only");
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn merge_keeps_unchanged_fields_from_the_previous_settings() {
-        let stored = offer_with(b"h1", "wss://old/v1/opamp", Some("Bearer old"), 30);
-        // A headers-only rotation: new credential, no endpoint, no heartbeat.
-        let offer = offer_with(b"h2", "", Some("Bearer new"), 0);
+        let stored = offer_with(b"h1", "wss://old/v1/opamp", Some("old"), 30);
+        // A certificate-only offer: a new certificate, no endpoint, no heartbeat.
+        let offer = offer_with(b"h2", "", Some("new"), 0);
         let merged = merge(Some(&stored), &offer);
         let settings = merged.opamp.expect("opamp");
         assert_eq!(merged.hash, b"h2", "the merged hash is the new offer's");
@@ -423,14 +450,14 @@ mod tests {
             settings.destination_endpoint, "wss://old/v1/opamp",
             "the endpoint carries over"
         );
-        assert_eq!(offered_authorization(&settings), Some("Bearer new"));
+        assert_eq!(certificate_of(&settings).as_deref(), Some("new"));
         assert_eq!(
             settings.heartbeat_interval_seconds, 30,
             "the heartbeat carries over"
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn apply_overrides_client_toml_where_the_server_spoke() {
         let mut config = ClientConfig {
@@ -439,24 +466,15 @@ mod tests {
             poll_interval_secs: 30,
             ..ClientConfig::default()
         };
-        let stored = offer_with(b"h1", "wss://server/v1/opamp", Some("Bearer rotated"), 12);
+        let stored = offer_with(b"h1", "wss://server/v1/opamp", Some("issued"), 12);
         apply(&mut config, &stored);
         assert_eq!(config.endpoint, "wss://server/v1/opamp");
-        assert_eq!(
-            config.authorization_override,
-            Some("Bearer rotated".to_string())
-        );
         // On plain HTTP the offered interval is the polling interval too (the Baseline's MUST).
         assert_eq!(config.heartbeat_interval_secs, 12);
         assert_eq!(config.poll_interval_secs, 12);
-        // The rotated credential wins over the file's [auth].
-        assert_eq!(
-            config.authorization_value().expect("value"),
-            Some("Bearer rotated".to_string())
-        );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn apply_leaves_untouched_what_the_offer_omits() {
         let mut config = ClientConfig {
@@ -464,18 +482,18 @@ mod tests {
             heartbeat_interval_secs: 30,
             ..ClientConfig::default()
         };
-        // Endpoint-only offer: heartbeat and credential stay whatever the file said.
+        // Endpoint-only offer: the heartbeat and polling intervals stay whatever the file said.
         let stored = offer_with(b"h1", "wss://server/v1/opamp", None, 0);
         apply(&mut config, &stored);
         assert_eq!(config.endpoint, "wss://server/v1/opamp");
         assert_eq!(config.heartbeat_interval_secs, 30);
-        assert_eq!(config.authorization_override, None);
+        assert_eq!(config.poll_interval_secs, 30);
     }
 
     /// An offer's `tls` and `proxy` are not taken: what is stored carries neither, so the
     /// connection keeps the operator's trust, and the report names both rather than claiming the
     /// offer was applied whole.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn offered_tls_and_proxy_are_neither_stored_nor_claimed() {
         use opamp::proto::{ProxyConnectionSettings, TlsConnectionSettings};
@@ -508,6 +526,136 @@ mod tests {
         assert!(reported.contains("tls and proxy"), "{reported}");
     }
 
+    /// Offered `headers` are dropped like `tls` and `proxy`: the rest of the offer is stored and
+    /// applied, nothing of the headers is, and the report names them by their keys, never by a
+    /// value.
+    /// Verifies: ADR-0060
+    #[test]
+    fn offered_headers_are_neither_stored_nor_claimed() {
+        let mut offer = offer_with(b"h1", "wss://server.example/v1/opamp", Some("issued"), 15);
+        if let Some(settings) = offer.opamp.as_mut() {
+            settings.headers = Some(planted_headers());
+        }
+        let stored = merge(None, &offer);
+        let settings = stored.opamp.as_ref().expect("the OpAMP half");
+        assert!(settings.headers.is_none(), "offered headers were stored");
+        assert_eq!(
+            settings.destination_endpoint,
+            "wss://server.example/v1/opamp"
+        );
+        assert_eq!(certificate_of(settings).as_deref(), Some("issued"));
+        assert_eq!(settings.heartbeat_interval_seconds, 15);
+
+        let reported = unhonoured(offer.opamp.as_ref().expect("offer")).expect_err("named");
+        assert!(reported.contains("headers"), "{reported}");
+        assert!(reported.contains("Authorization"), "{reported}");
+        assert!(reported.contains("X-Fleet"), "{reported}");
+        assert!(!reported.contains("planted-value"), "{reported}");
+        assert!(!reported.contains("other-value"), "{reported}");
+    }
+
+    /// A persisted file holds the `Authorization` header of a credential rotation. Loading it drops
+    /// the header and keeps the rest, so nothing of it is ever sent, and rewrites the file without
+    /// it, so the credential leaves the disk.
+    /// Verifies: ADR-0060
+    #[test]
+    fn a_persisted_authorization_header_is_dropped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut earlier = offer_with(b"h1", "wss://x/v1/opamp", None, 20);
+        if let Some(settings) = earlier.opamp.as_mut() {
+            settings.headers = Some(planted_headers());
+        }
+        // Written past `store`, headers included.
+        std::fs::write(dir.path().join(SETTINGS_FILE), earlier.encode_to_vec()).expect("write");
+
+        let loaded = load(dir.path()).expect("loaded");
+        assert_eq!(
+            loaded.hash, b"h1",
+            "the hash still reports the settings applied"
+        );
+        let settings = loaded.opamp.as_ref().expect("opamp");
+        assert!(
+            settings.headers.is_none(),
+            "a persisted header survived the load"
+        );
+        assert_eq!(settings.destination_endpoint, "wss://x/v1/opamp");
+
+        let mut config = ClientConfig::default();
+        apply(&mut config, &loaded);
+        let connection = crate::transport::connection(&config).expect("connection");
+        assert_eq!(connection.authorization, None);
+
+        // The planted credential has left the disk: the file was rewritten without the headers, so
+        // a second load finds none to drop and has nothing to warn about.
+        let on_disk = std::fs::read(dir.path().join(SETTINGS_FILE)).expect("read back");
+        assert!(
+            !on_disk
+                .windows(b"planted-value".len())
+                .any(|w| w == b"planted-value"),
+            "the persisted credential is still on disk"
+        );
+        let reread = ConnectionSettingsOffers::decode(on_disk.as_slice()).expect("decode");
+        assert!(reread.opamp.as_ref().expect("opamp").headers.is_none());
+        assert_eq!(reread, loaded, "the rewrite keeps every other setting");
+    }
+
+    /// Accepts one connection on `listener` and returns its request head, lower-cased; answers a
+    /// plain `200` so that a plain-HTTP probe completes.
+    async fn request_head(listener: tokio::net::TcpListener) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut head = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = socket.read(&mut buf).await.expect("read");
+            if n == 0 {
+                break;
+            }
+            head.extend_from_slice(&buf[..n]);
+        }
+        let _ = socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        String::from_utf8_lossy(&head).to_ascii_lowercase()
+    }
+
+    /// The verification connect carries no `Authorization` on either transport — not one an offer
+    /// planted in its `headers`, and not one a leftover `[auth]` in the file still names.
+    /// Verifies: ADR-0060, ADR-0059
+    #[tokio::test]
+    async fn verify_sends_no_authorization_even_when_one_is_offered() {
+        for scheme in ["ws", "http"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let seen = tokio::spawn(request_head(listener));
+
+            let config: ClientConfig = toml::from_str(&format!(
+                "endpoint = \"{scheme}://127.0.0.1:{port}/v1/opamp\"\n\
+                 [auth]\nbearer_token = \"leftover\"\n"
+            ))
+            .expect("config");
+            let offered = OpAmpConnectionSettings {
+                headers: Some(planted_headers()),
+                ..Default::default()
+            };
+            // The WebSocket handshake fails against a plain 200; what matters is what was sent.
+            let _ = verify(&offered, &config, || Some(AgentToServer::default())).await;
+
+            let head = tokio::time::timeout(std::time::Duration::from_secs(5), seen)
+                .await
+                .expect("the probe reached the listener")
+                .expect("listener");
+            assert!(
+                head.starts_with("get") || head.starts_with("post"),
+                "{head}"
+            );
+            assert!(!head.contains("authorization"), "{scheme}: {head}");
+            assert!(!head.contains("x-fleet"), "{scheme}: {head}");
+        }
+    }
+
     fn endpoint_only(endpoint: &str) -> OpAmpConnectionSettings {
         OpAmpConnectionSettings {
             destination_endpoint: endpoint.to_string(),
@@ -521,7 +669,7 @@ mod tests {
 
     /// A move to another TLS endpoint is refused without the Client's own CA file: the public
     /// roots would let any publicly certified host take the fleet.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[tokio::test]
     async fn an_offered_move_needs_the_clients_own_ca() {
         let config: ClientConfig =
@@ -538,7 +686,7 @@ mod tests {
 
     /// An offered plaintext endpoint off the loopback is refused before anything is dialled, on
     /// either transport: the probe report a plain-HTTP exchange would send is never built.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[tokio::test]
     async fn verify_refuses_a_plaintext_endpoint_off_loopback_without_connecting() {
         let config = ClientConfig::default();
@@ -557,7 +705,7 @@ mod tests {
 
     /// A host name never counts as the loopback, not even `localhost`: an offered plaintext
     /// endpoint naming one is refused, and the listener behind it is never dialled.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[tokio::test]
     async fn verify_refuses_a_plaintext_endpoint_on_a_host_name() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -585,7 +733,7 @@ mod tests {
 
     /// The verification connect presents the client certificate in force: a listener that
     /// requires one admits the probe with it and refuses the same probe without it.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[tokio::test]
     async fn verify_presents_the_client_certificate_in_force() {
         use opamp::server::listen::{ClientAuth, Handle, Listener, ServerTls};

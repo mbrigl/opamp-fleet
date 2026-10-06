@@ -81,13 +81,13 @@ with its risk in [ADR-0007](docs/adr/0007-action-references.md) and held by
 ## Fleet trust model
 
 **Admission is a fleet-wide trust boundary; within it the host is the only bound between Agents**
-([ADR-0039](docs/adr/0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clauses 7, 14
-and 27). A peer reaches the OpAMP endpoint by proving *fleet membership* — the fleet credential and
-a client certificate. The certificate also names the **host** it was issued to, and an
+([ADR-0059](docs/adr/0059-admission-by-a-client-certificate-alone.md) clauses 7, 14
+and 27). A peer reaches the OpAMP endpoint by proving *fleet membership* with a client certificate
+in the TLS handshake, the one proof the Agent plane admits by. The certificate also names the **host** it was issued to, and an
 `instance_uid` first reported with one host's certificate is not spoken for by another's: such a
 reporter is re-keyed to an identity of its own. A certificate is not bound to one `instance_uid`,
 which is self-asserted and which the Server may re-key, and a Gateway
-([ADR-0040](docs/adr/0040-client-modes-and-a-gateway-that-admits-over-mutual-tls.md)) forwards many
+([ADR-0064](docs/adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)) forwards many
 Agents' reports under its own certificate.
 
 The consequence, which is a design property rather than a defect: **a host marked as a Gateway, or
@@ -98,7 +98,7 @@ a peer behind one, can report under any `instance_uid`** and update that Agent's
 **What this means for operators:** treat one fleet (one Server, one shared admission) as a single
 trust domain, mark only real Gateways as such (`PUT /api/v1/hosts/{host}/gateway`), and do not
 place mutually distrusting Agents behind one Gateway or in one fleet; isolate them by separate
-Server instance or network segment. The alternatives that were weighed are in ADR-0039.
+Server instance or network segment. The alternatives that were weighed are in ADR-0059.
 
 ## Supported versions
 

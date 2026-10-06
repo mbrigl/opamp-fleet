@@ -84,7 +84,7 @@ pub async fn run<S: Session, X: StopSignal>(
             {
                 warn!(
                     endpoint = %settings.endpoint,
-                    "the server rejected the credentials (HTTP 401)"
+                    "admission failed: the server refused this client (HTTP 401)"
                 );
             }
             Err(Connect::Refused(e)) => {

@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
 use serde::Deserialize;
 
 /// `supervisor.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
@@ -56,13 +55,12 @@ pub struct ClientConfig {
     pub gateway: Option<GatewayConfig>,
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
-    /// Optional authentication toward the Server (ADR-0017); absent means no `Authorization`
-    /// header, as before.
-    pub auth: Option<AuthConfig>,
-    /// A Server-rotated `Authorization` value (ADR-0018), applied from the persisted connection
-    /// settings at startup — never from the file, and it wins over `[auth]`.
-    #[serde(skip)]
-    pub authorization_override: Option<String>,
+    /// An `[auth]` section a file written for an earlier version still holds. The Client sends
+    /// no credential (ADR-0059 clause 3): the section is read only so that it does not fail the
+    /// load — whatever keys it has — and nothing in it is kept. Its presence is what
+    /// [`leftover_auth_notice`](Self::leftover_auth_notice) reports, once, at startup.
+    #[serde(default, rename = "auth")]
+    pub leftover_auth: Option<serde::de::IgnoredAny>,
     /// Package verification (ADR-0019); absent means unsigned packages are accepted on their
     /// content hash alone.
     pub packages: Option<PackagesConfig>,
@@ -470,56 +468,11 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
     }
 }
 
-/// The `[auth]` block (ADR-0017): exactly one scheme — `bearer_token`, or `username` and
-/// `password` together. Mixing or halving them fails loudly at startup (ADR-0011).
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthConfig {
-    pub bearer_token: Option<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
-}
-
-/// Names what is configured, never the secret itself.
-impl std::fmt::Debug for AuthConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redacted = |value: &Option<String>| {
-            if value.is_some() {
-                "<redacted>"
-            } else {
-                "None"
-            }
-        };
-        f.debug_struct("AuthConfig")
-            .field("bearer_token", &redacted(&self.bearer_token))
-            .field("username", &self.username)
-            .field("password", &redacted(&self.password))
-            .finish()
-    }
-}
-
-impl AuthConfig {
-    /// The `Authorization` header value this block yields, sent on every plain-HTTP request and
-    /// on the WebSocket upgrade.
-    pub fn authorization(&self) -> Result<String, String> {
-        match (&self.bearer_token, &self.username, &self.password) {
-            (Some(token), None, None) => Ok(format!("Bearer {token}")),
-            (None, Some(user), Some(password)) => {
-                let encoded =
-                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
-                Ok(format!("Basic {encoded}"))
-            }
-            (Some(_), _, _) => Err(
-                "[auth] must set either bearer_token or username/password, not both".to_string(),
-            ),
-            _ => Err("[auth] needs bearer_token, or username and password together".to_string()),
-        }
-    }
-}
-
-/// Keys whose values are credentials: `[auth]`'s `bearer_token` and `password`, and
-/// `[packages]`'s `archive_key`. Paths and public keys are not on the list — a path locates a
-/// secret, it is not one, and the `verification_key` is the *public* half of the signing pair.
+/// Keys whose values are secrets: `[packages]`'s `archive_key`, and the `bearer_token` and
+/// `password` a leftover `[auth]` section may still hold — the Client ignores the section
+/// (ADR-0059 clause 3), but the file's text is reported as it stands, so its values stay masked.
+/// Paths and public keys are not on the list — a path locates a secret, it is not one, and the
+/// `verification_key` is the *public* half of the signing pair.
 const SECRET_KEYS: &[&str] = &["bearer_token", "password", "archive_key"];
 
 /// The file's text with every secret value replaced by `***`, for reporting it off the host —
@@ -574,9 +527,7 @@ pub struct PackagesConfig {
     /// The key that opens an encrypted `.7z` package artifact (ADR-0019). Unset means artifacts are
     /// expected unencrypted; an encrypted one then fails to install, naming this key.
     ///
-    /// One secret for the fleet — a single archive serves every Agent — and never the OpAMP
-    /// credential from `[auth]`, which the Server rotates on its own (ADR-0018): a rotation would
-    /// leave every packed archive unopenable.
+    /// One secret for the fleet — a single archive serves every Agent.
     pub archive_key: Option<String>,
 }
 
@@ -765,7 +716,7 @@ pub struct GatewayConfig {
     /// is refused at load.
     #[serde(default = "default_max_carried_agents")]
     pub max_carried_agents: usize,
-    /// TLS for the downstream hop, required (ADR-0040). Mutual TLS is per hop: what this verifies
+    /// TLS for the downstream hop, required (ADR-0064). Mutual TLS is per hop: what this verifies
     /// is the Agents connecting *here*, and the identity presented *upstream* is the Client's own.
     /// An `Option` only so its absence can be named at load.
     pub tls: Option<GatewayTlsConfig>,
@@ -780,7 +731,7 @@ pub struct GatewayTlsConfig {
     pub cert_file: PathBuf,
     /// PEM private key for it.
     pub key_file: PathBuf,
-    /// PEM bundle a downstream Agent's client certificate must chain to, required (ADR-0040): a
+    /// PEM bundle a downstream Agent's client certificate must chain to, required (ADR-0064): a
     /// peer without one fails the handshake. An `Option` only so its absence can be named.
     pub client_ca_file: Option<PathBuf>,
 }
@@ -807,7 +758,7 @@ impl GatewayConfig {
             ));
         }
         // A Gateway admits Agents, so the downstream hop is mutual TLS 1.3 and nothing less — on the
-        // loopback too (ADR-0040).
+        // loopback too (ADR-0064).
         match &self.tls {
             None => Err(
                 "[gateway.tls] is required — a Gateway admits Agents over mutual TLS only; set \
@@ -937,8 +888,7 @@ impl Default for ClientConfig {
             attributes: BTreeMap::new(),
             gateway: None,
             tls: None,
-            auth: None,
-            authorization_override: None,
+            leftover_auth: None,
             packages: None,
             self_update: SelfUpdateConfig::default(),
             package_key: None,
@@ -975,11 +925,6 @@ impl ClientConfig {
         config
             .transport()
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        if let Some(auth) = &config.auth {
-            // A half-configured block must fail now, not at the first exchange.
-            auth.authorization()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-        }
         if let Some(tls) = &config.tls {
             tls.check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1108,13 +1053,15 @@ impl ClientConfig {
         self.attributes.clone()
     }
 
-    /// The `Authorization` value this Client sends, if any: a Server-rotated credential
-    /// (ADR-0018) wins over the `[auth]` block (ADR-0017).
-    pub fn authorization_value(&self) -> Result<Option<String>, String> {
-        if let Some(rotated) = &self.authorization_override {
-            return Ok(Some(rotated.clone()));
-        }
-        self.auth.as_ref().map(|a| a.authorization()).transpose()
+    /// The one startup notice a leftover `[auth]` section earns (ADR-0059 clause 3), or `None`
+    /// when the file has none. The section is ignored and nothing from it is sent; it is not a
+    /// reason to refuse the file, since a Client the Server updated must keep connecting.
+    #[must_use]
+    pub fn leftover_auth_notice(&self) -> Option<&'static str> {
+        self.leftover_auth.is_some().then_some(
+            "[auth] is ignored: the Server admits this Client by its client certificate alone, \
+             and nothing from the section is sent — it can be deleted from the file",
+        )
     }
 
     /// The transport the endpoint names, held to the specification's rule: `wss://` or `https://`,
@@ -1228,7 +1175,7 @@ mod tests {
     /// ADR-0014. The log is on by default with a bound that cannot be removed, and `[logging]` is
     /// the machine's — so a typo in it fails startup rather than quietly disabling the one thing
     /// that would have explained the next failure.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0061
     #[test]
     fn the_log_file_is_on_by_default_and_its_retention_is_not_optional() {
         let defaults = ClientConfig::default().logging;
@@ -1273,7 +1220,7 @@ mod tests {
     /// configuration is ordinarily the defaults and a warning; a missing one with the *old* name
     /// beside it is an upgraded host that would otherwise come up on the development endpoint and
     /// manage nothing, which is the failure nobody sees.
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0062
     #[test]
     fn the_configurations_old_name_beside_the_new_one_is_refused_rather_than_defaulted() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1412,7 +1359,7 @@ mod tests {
     /// A single downstream connection's Agent cap bounds the routing state one peer can create; it
     /// has a generous default, and zero is a bound that could carry nothing rather than "unlimited",
     /// so it fails startup.
-    /// Verifies: ADR-0055
+    /// Verifies: ADR-0064
     #[test]
     fn the_gateway_agent_cap_defaults_and_rejects_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1441,8 +1388,8 @@ mod tests {
     }
 
     /// A Gateway admits Agents, so it never serves without TLS, nor without a client CA to verify
-    /// them against — on the loopback neither (ADR-0040).
-    /// Verifies: ADR-0055, Q-1
+    /// them against — on the loopback neither (ADR-0064).
+    /// Verifies: ADR-0064, Q-1
     #[test]
     fn a_gateway_without_mutual_tls_is_refused_at_load() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1943,37 +1890,40 @@ mod tests {
         assert!(toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").is_err());
     }
 
-    /// Verifies: ADR-0039
+    /// A file written for an earlier version may still hold `[auth]`, with any of the keys it
+    /// took then. It loads — a Client the Server updated must keep connecting — the notice names
+    /// the section, and nothing from it reaches the connection: no `Authorization` value, and the
+    /// effective configuration reported upstream carries none of its secrets.
+    /// Verifies: ADR-0059, ADR-0061
     #[test]
-    fn auth_yields_exactly_one_authorization_scheme() {
-        let bearer: ClientConfig = toml::from_str("[auth]\nbearer_token = \"tok\"").expect("parse");
-        assert_eq!(
-            bearer.auth.expect("auth").authorization().expect("value"),
-            "Bearer tok"
-        );
-
-        let basic: ClientConfig =
-            toml::from_str("[auth]\nusername = \"fleet\"\npassword = \"secret\"").expect("parse");
-        assert_eq!(
-            basic.auth.expect("auth").authorization().expect("value"),
-            // base64("fleet:secret")
-            "Basic ZmxlZXQ6c2VjcmV0"
-        );
-
-        // Mixing the schemes, halving Basic, or an empty block all fail loudly.
-        for bad in [
-            "[auth]\nbearer_token = \"tok\"\nusername = \"fleet\"\npassword = \"s\"",
-            "[auth]\nusername = \"fleet\"",
-            "[auth]\npassword = \"secret\"",
-            "[auth]",
+    fn a_leftover_auth_section_is_ignored_with_a_notice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(crate::config_init::FILE_NAME);
+        for section in [
+            "[auth]\nbearer_token = \"s3cret\"\n",
+            "[auth]\nusername = \"fleet\"\npassword = \"s3cret\"\n",
+            "[auth]\nbearer_token = \"s3cret\"\nusername = \"fleet\"\n",
+            "[auth]\n",
         ] {
-            let cfg: ClientConfig = toml::from_str(bad).expect("parses; the mix is semantic");
-            assert!(
-                cfg.auth.expect("auth").authorization().is_err(),
-                "{bad:?} should be rejected"
-            );
+            std::fs::write(
+                &path,
+                format!("endpoint = \"wss://fleet:4320/v1/opamp\"\n{section}"),
+            )
+            .expect("write");
+            let config = ClientConfig::load(&path).expect("a leftover [auth] still loads");
+
+            let notice = config.leftover_auth_notice().expect("a notice");
+            assert!(notice.contains("[auth]"), "{notice}");
+
+            let connection = crate::transport::connection(&config).expect("connection");
+            assert_eq!(connection.authorization, None, "{section:?} was sent");
+            let source = config.source.expect("source");
+            assert!(!source.contains("s3cret"), "{source}");
         }
-        assert!(toml::from_str::<ClientConfig>("[auth]\ntoken = \"x\"").is_err());
+
+        std::fs::write(&path, "endpoint = \"wss://fleet:4320/v1/opamp\"\n").expect("write");
+        let clean = ClientConfig::load(&path).expect("loads");
+        assert_eq!(clean.leftover_auth_notice(), None, "no section, no notice");
     }
 
     #[test]

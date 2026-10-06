@@ -510,10 +510,10 @@ fn replace_file(path: &Path, new_text: String) -> Result<String, String> {
 /// Writes the new configuration to the temporary file the caller then renames over `supervisor.toml`.
 ///
 /// On Unix the temp file inherits the mode of the file it will replace — created with it, never
-/// widened after — so the rename cannot loosen permissions. `supervisor.toml` holds the OpAMP
-/// credential in cleartext and is created `0600` (`config_init::write_new`); writing the temp file
-/// at the default umask (`0644`) and renaming it over the original, as this did before, left that
-/// credential world-readable after every Server-driven reconfigure (ADR-0022). A file that does not
+/// widened after — so the rename cannot loosen permissions. `supervisor.toml` may hold
+/// `[packages] archive_key` in cleartext and is created `0600` (`config_init::write_new`); writing
+/// the temp file at the default umask (`0644`) and renaming it over the original, as this did
+/// before, left that secret world-readable after every Server-driven reconfigure (ADR-0022). A file that does not
 /// exist yet falls back to `0600`, the same floor `write_new` uses. The operator's own mode, if
 /// they widened or narrowed it deliberately, is preserved.
 fn write_replacement(tmp: &Path, target: &Path, contents: &str) -> Result<(), String> {
@@ -936,7 +936,7 @@ mod tests {
     }
 
     /// A delivered set reaches no key of `supervisor.toml` but the `[[supervisor]]` array: whatever
-    /// else it names — the credential, trust, the verification key, the allowed sources, the
+    /// else it names — an `[auth]` section, trust, the verification key, the allowed sources, the
     /// operator's consent in `[supervisors]`, self-update, Gateway Mode — the file keeps the
     /// operator's values and gains none of the offered ones.
     /// Verifies: ADR-0051
@@ -945,8 +945,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("supervisor.toml");
         let operator = "endpoint = \"wss://fleet.example:4320/v1/opamp\"\n\n\
-                        [auth]\nbearer_token = \"operator-token\"\n\n\
-                        [packages]\nverification_key = \"aa\"\n";
+                        [packages]\nverification_key = \"aa\"\n\
+                        archive_key = \"operator-secret\"\n";
         std::fs::write(&path, operator).expect("write");
 
         let offer = offer_of(&[(
@@ -998,7 +998,7 @@ mod tests {
         }
         let parsed: ClientConfig = toml::from_str(&text).expect("the file parses");
         assert_eq!(parsed.endpoint, "wss://fleet.example:4320/v1/opamp");
-        assert!(text.contains("operator-token"));
+        assert!(text.contains("operator-secret"));
         assert!(text.contains("verification_key = \"aa\""));
         assert_eq!(parsed.supervisors.len(), 1);
     }
@@ -1056,9 +1056,9 @@ mod tests {
         }
     }
 
-    /// `supervisor.toml` holds the OpAMP credential in cleartext and is created `0600`; the rewrite must
+    /// `supervisor.toml` may hold the archive key in cleartext and is created `0600`; the rewrite must
     /// not widen it. Before the fix, writing the temp file at the default umask and renaming it over
-    /// the original left the file (and the credential) world-readable after a Server reconfigure.
+    /// the original left the file (and the secret) world-readable after a Server reconfigure.
     #[cfg(unix)]
     #[test]
     fn the_rewrite_keeps_the_files_restrictive_mode() {
@@ -1069,7 +1069,7 @@ mod tests {
         std::fs::write(
             &path,
             "endpoint = \"wss://fleet.example:4320/v1/opamp\"\n\n\
-             [auth]\nbearer_token = \"a-long-secret\"\n\n\
+             [packages]\narchive_key = \"a-long-secret\"\n\n\
              [[supervisor]]\ntype = \"command\"\nname = \"old\"\ncommand = \"old\"\n",
         )
         .expect("write");

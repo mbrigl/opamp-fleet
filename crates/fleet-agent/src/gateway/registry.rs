@@ -1,4 +1,4 @@
-//! Where a `ServerToAgent` goes on its way down (ADR-0009 rule 13).
+//! Where a `ServerToAgent` goes on its way down (ADR-0064 clause 13).
 //!
 //! The Gateway routes by `instance_uid` and nothing else, in both directions. Upward that needs no
 //! lookup — a report leaves on its own Agent's connection. Downward it does: the pool's reader
@@ -57,7 +57,7 @@ impl Registry {
     /// Releases every Agent a departing WebSocket peer carried.
     ///
     /// Nothing is sent upstream about it: a downstream Client that vanished said no goodbye, and
-    /// this Gateway does not say one for it (ADR-0009 rule 10).
+    /// this Gateway does not say one for it (ADR-0064 clause 10).
     pub fn detach_all(&self, uids: impl IntoIterator<Item = InstanceUid>) {
         let mut routes = self.routes.lock().expect("registry lock");
         for uid in uids {

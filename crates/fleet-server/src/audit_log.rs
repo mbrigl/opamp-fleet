@@ -1,4 +1,4 @@
-//! The audit record on disk (ADR-0052), the adapter behind [`crate::audit::Audit`]: one JSON line
+//! The audit record on disk (ADR-0063), the adapter behind [`crate::audit::Audit`]: one JSON line
 //! per security decision, each carrying the SHA-256 of the line before it, written by one task in
 //! the order the decisions were taken.
 //!
@@ -450,7 +450,7 @@ mod tests {
         )
     }
 
-    /// Verifies: ADR-0052
+    /// Verifies: ADR-0063
     #[tokio::test]
     async fn each_entry_carries_the_hash_of_the_one_before() {
         let memory = Memory::default();
@@ -481,7 +481,7 @@ mod tests {
         .is_err());
     }
 
-    /// Verifies: ADR-0052
+    /// Verifies: ADR-0063
     #[tokio::test]
     async fn the_chain_survives_a_restart_and_a_rotation() {
         let memory = Memory::default();
@@ -523,7 +523,7 @@ mod tests {
         assert!(chain_of(&memory).is_ok(), "{lines:#?}");
     }
 
-    /// Verifies: ADR-0052
+    /// Verifies: ADR-0063
     #[tokio::test]
     async fn a_truncated_file_is_recorded_as_a_broken_chain() {
         let memory = Memory::default();
@@ -553,7 +553,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0052
+    /// Verifies: ADR-0063
     #[tokio::test]
     async fn refusals_beyond_ten_a_second_are_aggregated_with_their_count() {
         let memory = Memory::default();
@@ -582,7 +582,7 @@ mod tests {
         assert!(aggregate.contains("\"count\":15"), "{aggregate}");
     }
 
-    /// Verifies: ADR-0052
+    /// Verifies: ADR-0063
     #[tokio::test]
     async fn a_write_that_fails_refuses_until_one_succeeds() {
         let memory = Memory::default();

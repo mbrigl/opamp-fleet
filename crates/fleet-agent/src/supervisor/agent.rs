@@ -1250,7 +1250,7 @@ pub struct PackageDownload {
 /// Written by hand rather than derived, because a header value is a credential.
 ///
 /// This struct travels inside `Handled`, which derives `Debug`; a single `debug!(?handled)` added
-/// later would otherwise put a fleet credential in the log file that ADR-0014 writes to disk in
+/// later would otherwise put a download credential in the log file that ADR-0014 writes to disk in
 /// service mode. Keys are printed — they are what a diagnosis needs — and values never are.
 impl std::fmt::Debug for PackageDownload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1283,7 +1283,7 @@ mod tests {
 
     /// ADR-0018 clause 4: an offer that names a telemetry destination is actionable, whether or not
     /// it carries OpAMP settings — and one that carries nothing this Client applies is not.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn an_offer_carries_settings_when_it_names_anything_this_client_applies() {
         assert!(carries_settings(&ConnectionSettingsOffers {
@@ -1532,7 +1532,7 @@ mod tests {
     /// The Client's own Agent is one *kind* of thing across the whole fleet, so its type is the
     /// constant `supervisor` (ADR-0023) and not whatever the operator called this instance — which
     /// is what lets one Selector on the type aim at every Client in the fleet at once (ADR-0024).
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0062
     #[test]
     fn the_clients_own_agent_reports_its_type_and_its_configured_name_separately() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1554,7 +1554,7 @@ mod tests {
     /// gave the program, its service and its configuration file the same word, so what began as
     /// the Agent's *role* is now the one name this thing has anywhere — which is the point, and
     /// which is why the two constants are asserted to agree rather than to differ.
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0062
     #[test]
     fn the_clients_own_agent_type_is_the_one_name_this_program_has() {
         assert_eq!(CLIENT_AGENT_TYPE, "supervisor");
@@ -2452,7 +2452,7 @@ mod tests {
     /// ADR-0018 clause 14: once the Server has declared its capabilities, package status stops going
     /// to one that cannot take it. The Baseline makes this a MUST in both directions, and until now
     /// only two of seven Server bits changed any behaviour here.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn package_statuses_stop_once_the_server_says_it_accepts_none() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2488,7 +2488,7 @@ mod tests {
 
     /// And the optimistic half (clause 1): before the Server has said anything there is nothing to
     /// obey, so the first report — which necessarily precedes any declaration — carries everything.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn package_statuses_ride_until_the_server_has_spoken() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2508,7 +2508,7 @@ mod tests {
     /// *without* declaring `OffersConnectionSettings` — this project's own does exactly that for a
     /// `[telemetry_offer]`-only or `[client_ca]`-only configuration. Withholding the acknowledgement
     /// would leave its hash gate open and have it re-offer for ever, so the offer arms the report.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn a_connection_settings_status_is_reported_to_a_server_that_offered_without_declaring_the_bit()
     {
@@ -2543,7 +2543,7 @@ mod tests {
     /// having arrived in this process. Sent to a Server that declares only the mandatory bit, that
     /// status exercises a capability the Server never claimed — so it is withheld until the Server
     /// either declares the bit or offers something.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn a_restored_connection_settings_status_is_withheld_from_a_server_that_never_offers() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2573,7 +2573,7 @@ mod tests {
     /// reversed by someone applying the MUST field by field. `OffersRemoteConfig` says the Server
     /// *can offer* configuration; what licenses this inbound status is `AcceptsStatus`, and gating
     /// it would silence the hash the Server's re-offer decision depends on.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn a_remote_config_status_rides_to_a_server_that_offers_no_remote_config() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2699,7 +2699,7 @@ mod tests {
         assert_eq!(statuses.server_provided_all_packages_hash, b"agg-2");
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn a_connection_offer_is_acknowledged_applying_and_handed_to_the_transport() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2757,7 +2757,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn a_failed_offer_still_reports_the_hash_so_the_server_stops_reoffering() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2847,7 +2847,7 @@ mod tests {
     /// The self-Agent's offer is acknowledged `APPLYING` and left pending for the Engine's
     /// Supervisor-set apply (ADR-0022); the verdict closes the lifecycle, and only then does the
     /// configuration echo as effective.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn an_offer_is_applied_and_acknowledged() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2955,7 +2955,7 @@ mod tests {
         assert!(!handled.send_report);
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0060
     #[test]
     fn effective_config_respects_the_servers_capability_set() {
         let dir = tempfile::tempdir().expect("tempdir");

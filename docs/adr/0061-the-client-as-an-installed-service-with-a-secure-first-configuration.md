@@ -1,18 +1,27 @@
-# ADR-0046: The Client installs itself as a native service named after a build-time product name, from a versioned layout it can rewrite, with a first configuration that authenticates and encrypts
+# ADR-0061: The Client installs itself as a native service named after a build-time product name, from a versioned layout it can rewrite, with a first configuration that authenticates and encrypts
 
-- **Status:** ⚪ superseded by [ADR-0061](0061-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
-- **Date:** 2026-10-03
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, and every path, name or account an installed Client uses
-- **Supersedes:** [ADR-0014](0014-the-client-as-an-installed-service.md)
+- **Supersedes:** [ADR-0046](0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
 
 ## Context
 
-Supersedes [ADR-0014](0014-the-client-as-an-installed-service.md) because the specification puts
-security before convenience (Strategy "Security before convenience", Q-1 "Secure by default"): the
-first configuration the installer writes must authenticate and must not send plaintext beyond the
-loopback. The decision sentence and clauses 17, 19 and 20 change; every other clause stands as it
-was, under its number.
+Supersedes [ADR-0046](0046-the-client-as-an-installed-service-with-a-secure-first-configuration.md)
+because the Agent plane admits a peer by its client certificate alone
+([ADR-0059](0059-admission-by-a-client-certificate-alone.md), superseding
+[ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md)), resting on the
+specification change drafted with it (Strategy "Security before convenience", Q-1, the Gateway Mode
+paragraph and G-15). There is no fleet credential any more, so the installer neither asks for one
+nor writes one, and a first configuration is complete with the endpoint, the CA where the Server's
+certificate needs one, and a client identity. Clauses 5, 8, 10, 16, 17, 18, 19, 20 and 21 and the
+fifth force below change; every other clause stands as it was, under its number.
+
+The specification puts security before convenience (Strategy "Security before convenience", Q-1
+"Secure by default"): the first configuration the installer writes must authenticate and must not
+send plaintext beyond the loopback. Since [ADR-0059](0059-admission-by-a-client-certificate-alone.md)
+the Client authenticates with one proof, the client certificate it presents in the TLS handshake.
 
 The specification commits the Client to install as a native operating-system service that updates
 itself in place, on Linux, macOS and Windows (Mission, Strategy, goals 10 and 11). A fleet client
@@ -43,11 +52,12 @@ Forces:
   without that file. It must at once be a systemd unit name, a launchd label, an SCM service name
   and a directory name on every platform.
 - **Nothing ships the configuration.** A release artifact is the bare binary
-  ([ADR-0023](0023-releases-installers-and-the-name-supervisor.md)), and the Client loads defaults
+  ([ADR-0062](0062-releases-installers-and-the-name-supervisor-secure-by-default.md)), and the Client loads defaults
   when its file is absent ([ADR-0011](0011-workspace-crates-and-configuration.md)) — so a service
   installed without one starts, dials the development default, and manages nothing, silently.
   `install` is also the command an Ansible play, an MDM profile or an MSI invokes: a prompt there
-  does not fail, it hangs. And a first configuration contains a credential.
+  does not fail, it hangs. And a first configuration names a client identity: a certificate and
+  its private key, files that must already be on the host.
 - **Least privilege** is an operator requirement: the Client, and every Managed Process its
   Supervisors spawn, may have to run under a dedicated account instead of root or `LocalSystem`.
 
@@ -100,7 +110,7 @@ that owns what it rewrites.
    | `supervisor` (`CLIENT_AGENT_TYPE`) | the **Agent type** | `service.name` on the wire, the package Set's key |
 
    The program's and the Agent type's names are
-   [ADR-0023](0023-releases-installers-and-the-name-supervisor.md)'s; they share a string and are
+   [ADR-0062](0062-releases-installers-and-the-name-supervisor-secure-by-default.md)'s; they share a string and are
    separate constants. Keeping the program's name off `PRODUCT_NAME` is what lets **one published
    package Set update every variant build**: the archive member a self-update extracts is the same
    in all of them.
@@ -110,7 +120,7 @@ that owns what it rewrites.
    `UpgradeCode`. The `UpgradeCode` is the one identity that cannot be derived: each variant mints
    one GUID once and records it, because Windows Installer treats a shared `UpgradeCode` as an
    instruction to remove the other installation. An installation is an isolation boundary —
-   separate Server, credentials, lifecycle and rollback. Scaling the number of *managed* Agents is
+   separate Server, client identity, lifecycle and rollback. Scaling the number of *managed* Agents is
    the multiplexing inside one installation
    ([ADR-0009](0009-client-modes-and-the-gateway.md)); two variants on one host are told apart by
    `service.instance.name` ([ADR-0024](0024-what-an-agent-reports-about-itself.md)).
@@ -152,7 +162,7 @@ that owns what it rewrites.
      account modify rights on a `TrustedInstaller`-owned tree it executes from is a
      privilege-escalation surface. The line is the one the Linux packages draw between the
      package-owned `/usr/libexec/<PRODUCT_NAME>/` payload and the program-owned `/opt` layout
-     ([ADR-0023](0023-releases-installers-and-the-name-supervisor.md)). The MSI passes no root flag,
+     ([ADR-0062](0062-releases-installers-and-the-name-supervisor-secure-by-default.md)). The MSI passes no root flag,
      so no directory property reaches a command line, and an MSI host and an archive host put the
      same things in the same places.
    - **Two flags.** `--root` names the layout root; given **alone** it collapses layout and data
@@ -161,7 +171,7 @@ that owns what it rewrites.
      neither and takes the platform defaults.
    - **What a package removal takes.** On **remove** the layout root and the `PATH` symlink — they
      hold nothing but staged binaries — and on **purge** additionally the data root, with the
-     identity and the credential in it. On Windows the MSI's uninstaller empties only
+     configuration and the identity in it. On Windows the MSI's uninstaller empties only
      `INSTALLFOLDER`, and the data under `%ProgramData%` survives: the same remove-versus-purge
      shape. An install rooted elsewhere with `--root` is manual, and no package touches it.
 
@@ -189,7 +199,7 @@ that owns what it rewrites.
 
 10. **An upgrade on an installed host is a re-registration, never a migration.** `--config` and
     `--state-dir` keep pointing into the data root; only the program path (`ExecStart`) changes;
-    the instance's identity, credential and state never move. A change that would move the data
+    the instance's configuration, identity and state never move. A change that would move the data
     root of an installed host must bring its own migration and carries the full weight of this
     rule.
 
@@ -254,7 +264,8 @@ that owns what it rewrites.
 
 16. **A configuration file that exists is never overwritten** — by `--interactive` or by any
     installer-supplied answer. The questionnaire is skipped, `install` proceeds with that file and
-    names it. A re-install can never eat the credential typed into the first.
+    names it. A re-install can never eat the answers typed into the first, or the edits made to
+    the file since.
 
 17. **The questionnaire asks only what has no useful default on a fresh host, and offers no
     answer the Client would refuse.**
@@ -264,15 +275,15 @@ that owns what it rewrites.
       again with a message saying that beyond the loopback the endpoint must be `wss://` or
       `https://`.
     - **The Agent `name`**, reported as `service.instance.name`.
-    - **The fleet credential**, required: the scheme, then the credential in a hidden prompt
-      ([ADR-0017](0017-admission-and-authentication.md)). There is no "no authentication"
-      answer, and an empty credential is asked for again.
     - **The CA file**, only for a `wss://` or `https://` endpoint, when the Server's certificate
       is signed by a private CA ([ADR-0012](0012-transports-tls-and-the-servers-two-planes.md)).
     - **The client identity**, as one of two answers, each a certificate file and its key file
       written as `[tls] cert_file` and `key_file`: a **bootstrap certificate** and its key, with
       which the Client enrols and waits until an operator approves its request, or a **client
-      certificate** and its key already issued by the Server's client CA.
+      certificate** and its key already issued by the Server's client CA. The identity is
+      required: there is no answer without one, and a path that names no readable file is asked
+      for again. It is the one proof the Server admits a peer by
+      ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)).
     - **The package verification key**, the Ed25519 public key written as
       `[packages] verification_key` ([ADR-0019](0019-package-delivery-on-the-agent.md)). An empty
       answer is accepted, and the install then says that the Client installs no package, its own
@@ -283,35 +294,48 @@ that owns what it rewrites.
     are [ADR-0021](0021-the-client-updates-itself.md)'s. Everything else is written as commented
     defaults, so the file stays a starting point for hand-editing. The non-interactive answers an
     installer can give — `--endpoint`
-    ([ADR-0023](0023-releases-installers-and-the-name-supervisor.md)), `--no-self-update` and
+    ([ADR-0062](0062-releases-installers-and-the-name-supervisor-secure-by-default.md)), `--no-self-update` and
     `--self-update-package` ([ADR-0021](0021-the-client-updates-itself.md)) — conflict with
     `--interactive`, go through the same renderer, the same endpoint rule and the same
-    never-overwrite write, and never include a credential. A file written from them alone
+    never-overwrite write, and never include a client identity. A file written from them alone
     therefore fails clause 19 and stays on disk for the operator to complete.
 
+    **No question asks for a credential, and no written file has an `[auth]` section.** The Agent
+    plane admits by the client certificate alone
+    ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)), so there is nothing to ask. A
+    Client whose `supervisor.toml` still has an `[auth]` section ignores it and sends nothing
+    from it, with one startup notice naming the section
+    ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)); `install` keeps such a file
+    (clause 16), and the section is never a reason to fail the install or to warn beyond that
+    notice.
+
 18. **The written file is treated as holding a secret:** mode `0600` on Unix; on Windows it
-    inherits the data root's ACL, administrator-owned at system scope.
+    inherits the data root's ACL, administrator-owned at system scope. It holds no credential. It
+    names where the client identity's private key lies, and it may hold `[packages] archive_key`,
+    the fleet's archive decryption secret, which an operator adds by editing the file the
+    installer created.
 
 19. **The configuration is validated before the service is registered, by the rules the Client
     applies at startup.** The order is write → load through `ClientConfig::load` → stage the
     layout → register, so a broken configuration fails at install and not at the service's first
     start. The load is the one the Client runs at startup: a `ws://` or `http://` endpoint off the
-    loopback fails the install, naming the setting. A missing fleet credential or client identity
-    is what the Client refuses at startup; the install names it in a warning and registers the
-    service all the same, because a packaged install has an endpoint and no terminal to ask for a
-    secret, and no installer starts the service it registers. The service then refuses to run
-    until the file is complete, so nothing ever runs unauthenticated. A file that already exists
-    (clause 16) is validated the same way. A written file that fails to load is left on disk and
+    loopback fails the install, naming the setting. A missing client identity is what the Client
+    refuses at startup; the install names it in a warning and registers the service all the same,
+    because a packaged install has an endpoint and no client identity to write, and no installer
+    starts the service it registers. The service then refuses to run until the file is complete,
+    so nothing ever runs unauthenticated. A file that already exists (clause 16) is validated the
+    same way. A written file that fails to load is left on disk and
     named in the error, so a typo is corrected by editing, and a re-run of `install` proceeds with
     the corrected file.
 
 20. **A non-interactive install with no configuration file warns.** Not an error — automation must
     not break — but a printed line naming the path registered and saying the Client refuses to
-    start until that file exists with a fleet credential and a client identity.
+    start until that file exists with a client identity.
 
-21. **Hidden input comes from `dialoguer`.** Platform terminal control behind a password prompt is
-    not worth hand-rolling for three operating systems; `dialoguer` is MIT-licensed and brings no
-    TLS or crypto backend. The terminal check itself is `std::io::IsTerminal`, no dependency.
+21. **The prompts come from `dialoguer`.** It validates an answer and asks again, offers a
+    default and a yes/no confirmation, the same way on three operating systems; `dialoguer` is
+    MIT-licensed and brings no TLS or crypto backend. The questionnaire asks for no secret, so no
+    prompt hides its input. The terminal check itself is `std::io::IsTerminal`, no dependency.
 
 22. **A Client running as a service writes its own log to a rotating file, on every platform.**
     `run --service` writes it; a foreground run writes stderr alone, because somebody is reading
@@ -337,14 +361,14 @@ that owns what it rewrites.
     runs without the file.
 
 **Out of scope:** the program's and the Agent type's names, the release artifacts and the native
-installers ([ADR-0023](0023-releases-installers-and-the-name-supervisor.md)); staging, verifying,
+installers ([ADR-0062](0062-releases-installers-and-the-name-supervisor-secure-by-default.md)); staging, verifying,
 rolling back and pruning versions in this layout, and the self-update consent
 ([ADR-0021](0021-the-client-updates-itself.md)); whether variant builds are ever published, and
 where their `UpgradeCode`s are recorded; how an operator discovers what is installed on a host;
 creating the `--run-as` account in the packages; a confined SELinux policy module; configuration
 reload on `SIGHUP`; `Type=notify` integration; the startup rules themselves and the Server's
-enrolment window and approval, which the installer only applies and names (a follow-up ADR on
-admission and enrolment); the properties a native installer passes to `install`.
+enrolment window and approval, which the installer only applies and names
+([ADR-0059](0059-admission-by-a-client-certificate-alone.md)); the properties a native installer passes to `install`.
 
 ## Alternatives considered
 
@@ -387,15 +411,24 @@ admission and enrolment); the properties a native installer passes to `install`.
   three platform APIs for what packaging does in one line.
 - **A separate `config init` command** — a second entry point and a second place resolving the
   path. **Interactive by default with `--non-interactive`** (Elastic Agent's shape) — would hang
-  every scripted install. **Overwrite with `--force`** — discards a credential typed once.
-  **`read_line` without a dependency** — echoes the credential into the scrollback. **`inquire`,
-  `cliclack`** — more than the questions need. **Ship an example configuration in the artifact** —
+  every scripted install. **Overwrite with `--force`** — discards answers typed once and the edits
+  made since. **`read_line` without a dependency** — re-implements validation, defaults and asking
+  again for every question. **`inquire`, `cliclack`** — more than the questions need. **Ship an example configuration in the artifact** —
   it still has to be edited before the service does anything.
 - **An installer that may write an unauthenticated or plaintext configuration** — the Client
   refuses that file at startup, so the installer would register a service that cannot start, and
-  a "no authentication" answer or a `ws://` default teaches the insecure setup as the normal one.
+  an answer without a client identity or a `ws://` default teaches the insecure setup as the
+  normal one.
   **Treat `localhost` as loopback** — a name resolves through whatever the host's resolver says,
   so only the IP literal guarantees the traffic stays on the host.
+- **Keep asking for the fleet credential, as optional, for a Server that still requires it** — the
+  Agent plane no longer reads one ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)),
+  and the upgrade order is the Server first, so a question kept for older Servers would teach a
+  setting nothing reads.
+- **Remove a leftover `[auth]` section at install, or refuse the file** — `install` never rewrites
+  a file that exists (clause 16), and refusing the section would stop a self-updated Client,
+  whose file still has it, from connecting on a host nobody watches; the Client ignores the
+  section and says so at startup.
 - **The Windows Event Log** — an event source registered at install time, a message resource, and a
   code path only one platform exercises. **A file only on Windows** — makes "where are the logs"
   platform-dependent and leaves containers without one. **Rely on the OTLP own-logs bridge**
@@ -480,9 +513,9 @@ admission and enrolment); the properties a native installer passes to `install`.
   enforcing, with no labelling step to keep alive.
 - Positive: the Client and every Managed Process it spawns can drop root and `LocalSystem`, with no
   password anywhere in the Windows story.
-- Positive: a fresh host goes from a binary to a working, registered service in one command, and a
-  credential is typed into a hidden prompt rather than a flag. A Windows service failure becomes
-  readable, and the logs cover failures own-telemetry structurally cannot.
+- Positive: a fresh host goes from a binary to a working, registered service in one command, and
+  no secret is typed into the installer at all. A Windows service failure becomes readable, and
+  the logs cover failures own-telemetry structurally cannot.
 - Positive: the first configuration a fresh host gets authenticates and encrypts beyond the
   loopback; an install never registers a service the Client would then refuse to start.
 - Negative / trade-offs: a Windows-only runtime path Unix never exercises; system scope needs root
@@ -503,11 +536,14 @@ admission and enrolment); the properties a native installer passes to `install`.
   is a second place following the configuration schema, for the keys it asks. The log duplicates the
   journal on Linux and macOS, is bounded by days and not bytes, and keeps a week of whatever the
   Client logs on disk, so nothing secret may be logged.
-- Negative / trade-offs: the questionnaire asks for more — a credential, a certificate and its
-  key, a verification key — and an operator must have them in hand before the first install. A
+- Negative / trade-offs: the questionnaire asks for a certificate and its key and a verification
+  key, and an operator must have them in hand before the first install. A
   scripted install that passes `--endpoint` alone no longer registers a service: it writes the
   file, fails validation, and is completed by editing that file and re-running `install`, or by
   provisioning a complete file first.
+- Negative / trade-offs: a host whose file was written with a credential keeps that `[auth]`
+  section, secret included, until an operator deletes it: neither `install` nor the Client rewrites
+  the file. The startup notice names the section on every start until then.
 - Follow-ups: the service smoke test excludes hosts with SELinux or AppArmor in the way, so nothing
   automated exercises clause 8's reason — the manual checklist covers it; `.deb`/`.rpm` account
   creation and `--run-as` wiring, and a virtual-account option in the MSI; whether `uninstall`
@@ -550,7 +586,17 @@ admission and enrolment); the properties a native installer passes to `install`.
   (clause 17); `a_complete_answer_writes_a_file_the_client_starts_with`, which renders an identity
   as `[tls] cert_file` and `key_file` and the verification key as answered, and passes
   `ClientConfig::check_admission` (clauses 17, 19);
-  `installer_answers_alone_fail_validation_and_stay_on_disk` (clauses 17, 19).
+  `installer_answers_alone_fail_validation_and_stay_on_disk` (clauses 17, 19);
+  `a_rendered_file_has_no_auth_section`, which renders complete answers and asserts
+  that the file holds no `[auth]` (clause 17).
+- `crates/fleet-agent/src/config_file.rs`: `admission_needs_a_client_identity_and_nothing_else`,
+  which asserts that `ClientConfig::check_admission` passes a file with a client identity and no
+  `[auth]` and refuses one without an identity, naming `[tls] cert_file` and `key_file` (clauses
+  19, 20). `crates/fleet-agent/src/config.rs`, shared with
+  [ADR-0059](0059-admission-by-a-client-certificate-alone.md):
+  `a_leftover_auth_section_is_ignored_with_a_notice`, which loads a file with an `[auth]`
+  section, asserts that it loads, that nothing is sent from it, and that the notice names `[auth]`
+  (clause 17).
 - Logging: `crates/fleet-agent/tests/logging.rs` (`a_service_run_writes_a_log_file`,
   `a_foreground_run_writes_no_log_file`); `crates/fleet-agent/src/config.rs`
   `the_log_file_is_on_by_default_and_its_retention_is_not_optional`; `crates/fleet-agent/src/logging.rs`
@@ -567,8 +613,9 @@ admission and enrolment); the properties a native installer passes to `install`.
 **Not mechanically decidable:** that the layout starts under an enforcing SELinux policy — no CI
 runner enforces it, so the manual checklist in [`README.md`](../../README.md) carries that step.
 The questionnaire's prompts (clause 17) read a terminal, which `cargo test` does not have: that no
-answer skips authentication, that an empty credential and a refused endpoint are asked for again,
-and that an empty verification key is named, are review questions on `ask` in `config_init.rs`.
+answer skips the client identity, that no question asks for a credential, that a certificate or key
+path naming no readable file and a refused endpoint are asked for again, and that an empty
+verification key is named, are review questions on `ask` in `config_init.rs`.
 `service install` (clauses 19, 20) validates only on the way to registering a service, so the
 warnings it prints and its load of an existing file are not run by any test; the rules it applies
 are `ClientConfig::load` and `ClientConfig::check_admission`, exercised above.

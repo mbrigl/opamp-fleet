@@ -1,4 +1,4 @@
-//! Renewal before expiry, end to end (ADR-0039 clauses 9 and 11): the real Server signs with a CA
+//! Renewal before expiry, end to end (ADR-0059 clauses 9 and 11): the real Server signs with a CA
 //! whose certificates live seconds, the real Client renews at two thirds of each life. The
 //! measure H6 of `docs/HARDENING.md` shortened the default life on the strength of this: a fleet
 //! renews before its certificates run out, without anyone's help.
@@ -67,8 +67,8 @@ fn issued(state_dir: &Path) -> Option<(Vec<u8>, time::OffsetDateTime, Option<Str
 
 /// Each certificate is replaced before it expires, over and over, and the Client stays with the
 /// Server throughout. The connection presents no certificate here, so the host that every
-/// generation carries on is the renewal proof's doing (ADR-0039 clause 27).
-/// Verifies: ADR-0039
+/// generation carries on is the renewal proof's doing (ADR-0059 clause 27).
+/// Verifies: ADR-0059
 #[tokio::test]
 async fn a_client_renews_each_certificate_before_it_expires() {
     const LIFE: u64 = 9;
@@ -96,7 +96,7 @@ async fn a_client_renews_each_certificate_before_it_expires() {
         state_dir.display().to_string()
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml + &common::credentials(dir.path())).expect("write");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path())).expect("write");
     let _client = ClientUnderTest(
         Command::new(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")

@@ -8,7 +8,7 @@
 //!
 //! Nothing here decides *who* may enrol. A CSR from an Agent holding a certificate of the client
 //! CA is a renewal and is signed at once; a CSR on an enrolment connection waits until an operator
-//! approves it ([`crate::enrolment`], ADR-0039).
+//! approves it ([`crate::enrolment`], ADR-0059).
 
 use rcgen::{
     CertificateSigningRequestParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -19,7 +19,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use crate::config::ClientCaConfig;
 use crate::revocation::{CertId, Facts, Signed};
 
-/// The SAN URI prefix naming the host a certificate was issued to (ADR-0039 clause 7).
+/// The SAN URI prefix naming the host a certificate was issued to (ADR-0059 clause 7).
 pub const HOST_URI_PREFIX: &str = "urn:opamp-fleet:host:";
 
 /// The issuing authority, loaded once at startup. Holding it parsed is what makes `AppState`'s
@@ -80,7 +80,7 @@ impl ClientCa {
         let mut request = CertificateSigningRequestParams::from_pem(csr_pem)
             .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
         // The life starts now, less a few minutes for clocks that disagree: a start in the past
-        // would put a fresh certificate into its renewal window at once (ADR-0039 clause 11), and
+        // would put a fresh certificate into its renewal window at once (ADR-0059 clause 11), and
         // would lengthen what a stolen one is good for.
         // A life shorter than the skew allowance keeps a tenth of itself as its allowance, or it
         // would start out in its renewal window.
@@ -101,7 +101,7 @@ impl ClientCa {
         request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         // None of the request's names — one could name another host. The one name this Server
-        // puts in is the host the certificate is issued to (ADR-0039 clause 7), which a renewal
+        // puts in is the host the certificate is issued to (ADR-0059 clause 7), which a renewal
         // carries on.
         request.params.subject_alt_names.clear();
         request.params.subject_alt_names.push(SanType::URI(
@@ -110,7 +110,7 @@ impl ClientCa {
                 .map_err(|e| format!("cannot name the host {host:?}: {e}"))?,
         ));
         // A serial of its own for every certificate, so two certificates from one key are two
-        // revocable things (ADR-0049 clause 1). rcgen would derive it from the key.
+        // revocable things (ADR-0065 clause 1). rcgen would derive it from the key.
         request.params.serial_number = Some(random_serial()?);
         let certificate = request
             .signed_by(&self.issuer)
@@ -122,14 +122,14 @@ impl ClientCa {
     }
 
     /// Issues certificates that live `validity` instead of `validity_days` — seconds, for a test
-    /// that watches renewal happen before expiry (ADR-0039 clause 9).
+    /// that watches renewal happen before expiry (ADR-0059 clause 9).
     #[must_use]
     pub fn with_validity(mut self, validity: time::Duration) -> Self {
         self.validity = Some(validity);
         self
     }
 
-    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0039 clause
+    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0059 clause
     /// 27): the proof's certificate must have been signed by this CA and be valid now, and its key
     /// must have signed the request's new key. `Ok(None)` for a request that carries no proof.
     ///
@@ -353,7 +353,7 @@ fn not_after(validity_days: u32) -> Result<time::OffsetDateTime, String> {
         .ok_or_else(|| format!("validity_days = {validity_days} is out of range"))
 }
 
-/// What an enrolment request says about itself (ADR-0039 clause 22): its subject and the SHA-256
+/// What an enrolment request says about itself (ADR-0059 clause 22): its subject and the SHA-256
 /// fingerprint of the public key it asks to be certified, by which the queue knows a re-sent
 /// request.
 ///
@@ -484,7 +484,7 @@ mod tests {
             .expect("csr pem")
     }
 
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn signs_a_request_into_a_certificate() {
         let issued = client_ca(90)
@@ -500,7 +500,7 @@ mod tests {
     /// to choose the certificate's powers (a CA cert chaining to the fleet CA could mint more). The
     /// issued certificate must be non-CA, carry only `clientAuth`, and none of the CSR's SANs — only
     /// its host.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn the_request_cannot_dictate_the_certificates_powers() {
         let issued = client_ca(90)
@@ -569,7 +569,7 @@ mod tests {
 
     /// The Baseline makes this a MUST on the Server: a request it cannot act on is answered with a
     /// `BadRequest` error response, which is what the caller does with this `Err`.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn refuses_a_request_that_does_not_parse() {
         let error = client_ca(90)
@@ -581,7 +581,7 @@ mod tests {
         assert!(error.contains("does not parse"), "{error}");
     }
 
-    /// Verifies: ADR-0056
+    /// Verifies: ADR-0065
     #[test]
     fn two_certificates_from_one_key_have_two_serials() {
         let ca = client_ca(90);
@@ -600,7 +600,7 @@ mod tests {
 
     /// The register knows a certificate's key by the fingerprint its request was listed and
     /// approved by, which is also the one the Client logs: one key, one fingerprint.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn a_certificate_carries_the_key_fingerprint_of_its_request() {
         let request = csr("edge-01");
@@ -729,7 +729,7 @@ mod tests {
     /// A renewal proof names the certificate it renews and its host; a proof signed with another
     /// key, or over a certificate of another CA, does not hold, and the issued certificate names
     /// its host and nothing the request asked for.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn a_renewal_proof_names_the_certificate_and_its_host() {
         let ca = client_ca(30);

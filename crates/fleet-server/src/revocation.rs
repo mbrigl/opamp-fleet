@@ -1,12 +1,11 @@
-//! What the Server signed, and what it no longer trusts (ADR-0049).
+//! What the Server signed, and what it no longer trusts (ADR-0065).
 //!
 //! The **register** holds every certificate the client CA signed, with the certificate it renewed
 //! as its predecessor, so a revocation reaches every renewal made after the certificate it names.
 //! An entry stays while it, or a certificate descended from it, is still valid. The **list** holds
-//! revoked certificates, by the CA that issued them and serial, and revoked credentials, by the
-//! SHA-256 of their `Authorization` value. Both persist through a [`LedgerStore`]; a change is
-//! written before it is answered, and every revocation is announced, so an open session can end
-//! the moment what admitted it is revoked.
+//! revoked certificates, by the CA that issued them and serial. Both persist through a
+//! [`LedgerStore`]; a change is written before it is answered, and every revocation is announced,
+//! so an open session can end the moment the certificate that admitted it is revoked.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -17,19 +16,19 @@ use tokio::sync::watch;
 
 use crate::fleet::Clock;
 
-/// The revocations one list holds at most (ADR-0049 clause 6).
+/// The revocations one list holds at most (ADR-0065 clause 6).
 pub const MAX_REVOCATIONS: usize = 100_000;
 
-/// The certificates the register holds at most (ADR-0049 clause 2).
+/// The certificates the register holds at most (ADR-0065 clause 2).
 pub const MAX_ISSUED: usize = 100_000;
 
 /// The certificates the register holds at most in one chain — below one root, the first
 /// certificate a chain renews from: enough for a Gateway's downstream Agents, few enough that one
-/// member cannot fill the register (ADR-0049 clause 2).
+/// member cannot fill the register (ADR-0065 clause 2).
 pub const MAX_DESCENDANTS_PER_ROOT: usize = 10_000;
 
 /// The room the register keeps for enrolments: a renewal is refused once fewer are left, so
-/// renewals alone cannot shut out a new host (ADR-0049 clause 2).
+/// renewals alone cannot shut out a new host (ADR-0065 clause 2).
 pub const ENROLMENT_RESERVE: usize = 1_000;
 
 /// A certificate by its issuer and serial: the issuer as the SHA-256 of its DER-encoded name, hex,
@@ -73,7 +72,7 @@ pub fn normalize_serial(serial: &str) -> String {
     }
 }
 
-/// A CA whose certificates can be revoked: the client CA or the bootstrap CA (ADR-0049 clause 3).
+/// A CA whose certificates can be revoked: the client CA or the bootstrap CA (ADR-0065 clause 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authority {
     /// `client` or `bootstrap` — what an operator names.
@@ -95,7 +94,7 @@ pub struct Facts {
     pub key_fingerprint: String,
     /// Milliseconds since the Unix epoch.
     pub not_after_ms: u64,
-    /// The host the certificate was issued to (ADR-0039 clause 7) — the stable identity a host
+    /// The host the certificate was issued to (ADR-0059 clause 7) — the stable identity a host
     /// keeps across renewals and re-keys; `None` for a certificate an operator provisioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
@@ -108,7 +107,7 @@ pub struct Presented {
     pub host: Option<String>,
 }
 
-/// A host this Server issued certificates to (ADR-0039 clause 7).
+/// A host this Server issued certificates to (ADR-0059 clause 7).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     /// A Gateway carries other hosts' Agents, so its certificate binds none of them.
@@ -119,7 +118,7 @@ pub struct Host {
     pub instance_uids: BTreeSet<String>,
 }
 
-/// The certificates one host may hold at once (ADR-0039 clause 7): the one in force, its renewal,
+/// The certificates one host may hold at once (ADR-0059 clause 7): the one in force, its renewal,
 /// and one more for a renewal whose answer was lost.
 pub const MAX_PER_HOST: usize = 3;
 
@@ -133,7 +132,7 @@ pub struct Signed {
     pub facts: Facts,
 }
 
-/// One certificate the Server signed (ADR-0049 clause 2).
+/// One certificate the Server signed (ADR-0065 clause 2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
     #[serde(flatten)]
@@ -157,8 +156,6 @@ pub enum Revoked {
         issuers: Vec<String>,
         serial: String,
     },
-    /// The SHA-256 of the exact `Authorization` value, hex — never the value itself.
-    Credential { sha256: String },
 }
 
 /// One entry of the list.
@@ -222,21 +219,10 @@ pub enum RevokeError {
     Store(String),
 }
 
-/// The SHA-256 of an `Authorization` value, hex.
-#[must_use]
-pub fn credential_hash(authorization: &str) -> String {
-    hex::encode(Sha256::digest(authorization.as_bytes()))
-}
-
-/// The check that tells whether `[auth]` accepts an `Authorization` value.
-pub type Accepts = Arc<dyn Fn(&str) -> bool + Send + Sync>;
-
 /// The register and the list, in memory and in their store.
 pub struct Revocations {
     store: Box<dyn LedgerStore>,
     clock: Arc<dyn Clock>,
-    /// Whether `[auth]` accepts an `Authorization` value: only such a credential can be revoked.
-    accepts: Accepts,
     authorities: Vec<Authority>,
     state: Mutex<State>,
     changes: watch::Sender<u64>,
@@ -262,17 +248,14 @@ impl State {
     fn revoked_certificates(&self) -> BTreeSet<CertId> {
         self.revocations
             .iter()
-            .flat_map(|entry| match &entry.revoked {
-                Revoked::Certificate {
+            .flat_map(|entry| {
+                let Revoked::Certificate {
                     issuers, serial, ..
-                } => issuers
-                    .iter()
-                    .map(|issuer| CertId {
-                        issuer: issuer.clone(),
-                        serial: serial.clone(),
-                    })
-                    .collect::<Vec<_>>(),
-                Revoked::Credential { .. } => Vec::new(),
+                } = &entry.revoked;
+                issuers.iter().map(|issuer| CertId {
+                    issuer: issuer.clone(),
+                    serial: serial.clone(),
+                })
             })
             .collect()
     }
@@ -359,12 +342,10 @@ impl Revocations {
     pub fn open(
         store: Box<dyn LedgerStore>,
         clock: Arc<dyn Clock>,
-        accepts: Accepts,
         authorities: Vec<Authority>,
     ) -> Result<Self, String> {
         let ledger = store.load()?;
         let revocations = Revocations {
-            accepts,
             authorities,
             state: Mutex::new({
                 let mut state = State {
@@ -484,7 +465,7 @@ impl Revocations {
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
-    /// (ADR-0039 clause 7). An `instance_uid` first heard from a host is bound to it; one bound to
+    /// (ADR-0059 clause 7). An `instance_uid` first heard from a host is bound to it; one bound to
     /// another host is refused. A Gateway's certificate binds nothing — it carries other hosts'
     /// Agents.
     ///
@@ -518,7 +499,7 @@ impl Revocations {
     }
 
     /// Moves a binding to the `instance_uid` the Server re-keyed an Agent to — a re-key never
-    /// orphans a host's certificate (ADR-0039 clause 7).
+    /// orphans a host's certificate (ADR-0059 clause 7).
     ///
     /// # Errors
     /// Returns an error when the binding cannot be written.
@@ -628,21 +609,6 @@ impl Revocations {
         })
     }
 
-    /// Revokes a credential `[auth]` accepts (clause 5).
-    ///
-    /// # Errors
-    /// Refuses a credential `[auth]` does not accept, a full list, and a failed write.
-    pub fn revoke_credential(&self, authorization: &str) -> Result<Revocation, RevokeError> {
-        if !(self.accepts)(authorization) {
-            return Err(RevokeError::Invalid(
-                "no credential of [auth] has this value".into(),
-            ));
-        }
-        self.add(Revoked::Credential {
-            sha256: credential_hash(authorization),
-        })
-    }
-
     fn add(&self, revoked: Revoked) -> Result<Revocation, RevokeError> {
         let mut state = self.state.lock().expect("revocation lock");
         if let Some(existing) = state.revocations.iter().find(|e| e.revoked == revoked) {
@@ -704,7 +670,7 @@ impl Revocations {
 
     /// Every certificate of the CAs of `role` that is revoked, itself or through a certificate it
     /// renewed, with its chain already resolved: what a Gateway refuses
-    /// (ADR-0056 clause 12). A certificate the register never held is on it as revoked.
+    /// (ADR-0065 clause 12). A certificate the register never held is on it as revoked.
     #[must_use]
     pub fn revoked_certificates(&self, role: &str) -> BTreeSet<CertId> {
         let issuers: BTreeSet<&str> = self
@@ -743,17 +709,6 @@ impl Revocations {
             .hosts
             .get(host)
             .is_some_and(|host| host.gateway)
-    }
-
-    /// Whether the `Authorization` value with this hash is revoked.
-    #[must_use]
-    pub fn is_credential_revoked(&self, sha256: &str) -> bool {
-        self.state
-            .lock()
-            .expect("revocation lock")
-            .revocations
-            .iter()
-            .any(|entry| matches!(&entry.revoked, Revoked::Credential { sha256: s } if s == sha256))
     }
 
     /// Announces every new revocation; an open session checks itself against the list on each.
@@ -810,13 +765,13 @@ impl Revocations {
             state.remove(id);
         }
         let before = state.revocations.len();
-        state.revocations.retain(|entry| match &entry.revoked {
-            Revoked::Certificate {
+        state.revocations.retain(|entry| {
+            let Revoked::Certificate {
                 issuers, serial, ..
-            } => !gone
+            } = &entry.revoked;
+            !gone
                 .iter()
-                .any(|id| &id.serial == serial && issuers.contains(&id.issuer)),
-            Revoked::Credential { .. } => true,
+                .any(|id| &id.serial == serial && issuers.contains(&id.issuer))
         });
         if state.revocations.len() != before {
             self.store.save_revocations(&state.revocations)?;
@@ -827,12 +782,10 @@ impl Revocations {
 
 /// A stable id: the same revocation twice is one entry.
 fn entry_id(revoked: &Revoked) -> String {
-    let text = match revoked {
-        Revoked::Certificate {
-            authority, serial, ..
-        } => format!("certificate\n{authority}\n{serial}"),
-        Revoked::Credential { sha256 } => format!("credential\n{sha256}"),
-    };
+    let Revoked::Certificate {
+        authority, serial, ..
+    } = revoked;
+    let text = format!("certificate\n{authority}\n{serial}");
     hex::encode(&Sha256::digest(text.as_bytes())[..8])
 }
 
@@ -882,14 +835,12 @@ mod tests {
 
     const NOW: u64 = 1_000_000_000;
     const CA: &[u8] = b"fleet client CA";
-    const TOKEN: &str = "Bearer fleet-token";
 
     fn open(store: &Memory) -> (Revocations, Arc<Manual>) {
         let clock = Arc::new(Manual(AtomicU64::new(NOW)));
         let revocations = Revocations::open(
             Box::new(store.clone()),
             clock.clone(),
-            Arc::new(|authorization: &str| authorization == TOKEN),
             vec![Authority {
                 role: "client".into(),
                 subject: name_hash(CA),
@@ -924,7 +875,7 @@ mod tests {
 
     /// A host holds a bounded number of valid certificates, an Agent is spoken for by the host
     /// that first reported it alone, a re-key keeps its host, and a Gateway speaks for any Agent.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn a_host_is_bounded_and_speaks_only_for_its_own_agents() {
         let store = Memory::default();
@@ -977,7 +928,7 @@ mod tests {
             .expect("still a Gateway");
     }
 
-    /// Verifies: ADR-0056
+    /// Verifies: ADR-0065
     #[test]
     fn a_revocation_follows_every_renewal() {
         let (revocations, _) = open(&Memory::default());
@@ -1012,7 +963,7 @@ mod tests {
 
     /// The revoked ancestor of a valid renewal outlives its own expiry, and so does every link
     /// between them.
-    /// Verifies: ADR-0056
+    /// Verifies: ADR-0065
     #[test]
     fn a_renewal_stays_revoked_after_its_revoked_ancestor_expires() {
         let (revocations, clock) = open(&Memory::default());
@@ -1039,27 +990,7 @@ mod tests {
         assert_eq!(revocations.list().len(), 1);
     }
 
-    /// Verifies: ADR-0056
-    #[test]
-    fn a_credential_is_kept_by_its_hash_alone() {
-        let store = Memory::default();
-        let (revocations, _) = open(&store);
-        assert!(matches!(
-            revocations.revoke_credential("Bearer typo"),
-            Err(RevokeError::Invalid(_))
-        ));
-        let entry = revocations.revoke_credential(TOKEN).expect("revoke");
-        assert!(revocations.is_credential_revoked(&credential_hash(TOKEN)));
-        let persisted = format!("{:?}", store.load().expect("load"));
-        assert!(!persisted.contains("fleet-token"), "{persisted}");
-        assert_eq!(
-            revocations.revoke_credential(TOKEN).expect("again").id,
-            entry.id,
-            "one value, one entry"
-        );
-    }
-
-    /// Verifies: ADR-0056
+    /// Verifies: ADR-0065
     #[test]
     fn the_list_survives_a_restart_and_can_be_lifted() {
         let store = Memory::default();
@@ -1082,7 +1013,7 @@ mod tests {
         assert!(reopened.list().is_empty());
     }
 
-    /// Verifies: ADR-0056
+    /// Verifies: ADR-0065
     #[test]
     fn the_list_and_the_register_are_bounded() {
         let store = Memory::default();
@@ -1091,8 +1022,10 @@ mod tests {
                 &(0..MAX_REVOCATIONS)
                     .map(|n| Revocation {
                         id: n.to_string(),
-                        revoked: Revoked::Credential {
-                            sha256: n.to_string(),
+                        revoked: Revoked::Certificate {
+                            authority: "client".into(),
+                            issuers: vec![name_hash(CA)],
+                            serial: format!("{n:x}"),
                         },
                         revoked_ms: NOW,
                     })
@@ -1129,7 +1062,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0056
+    /// Verifies: ADR-0065
     #[test]
     fn an_expired_register_entry_is_dropped_with_its_revocation() {
         let (revocations, clock) = open(&Memory::default());
@@ -1162,7 +1095,7 @@ mod tests {
     }
 
     /// A reload finds every chain's root from its links, whatever order the entries load in.
-    /// Verifies: ADR-0056
+    /// Verifies: ADR-0065
     #[test]
     fn a_reload_keeps_each_chain_under_its_root() {
         let store = Memory::default();

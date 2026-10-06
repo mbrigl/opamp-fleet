@@ -335,7 +335,7 @@ async fn a_duplicate_uid_on_a_second_connection_is_rekeyed() {
     panic!("the rekeyed clone never went down alone — or took the original with it");
 }
 
-/// Verifies: ADR-0055
+/// Verifies: ADR-0064
 #[tokio::test]
 async fn two_agents_share_one_connection() {
     // The multiplexing provision of ADR-0009: n Agents over one connection, told apart by

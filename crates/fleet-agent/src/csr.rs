@@ -28,7 +28,7 @@ const RENEW_AFTER: f64 = 2.0 / 3.0;
 /// right now.
 ///
 /// A request in flight is re-sent unchanged until it is answered: an enrolment waits for an
-/// operator, and the Server's queue knows a request by its public key (ADR-0039 clause 21).
+/// operator, and the Server's queue knows a request by its public key (ADR-0059 clause 21).
 /// Generating one **writes the private key** to the state directory before the request goes out,
 /// as a pending key beside the one in force, so an answer arriving after a restart is still usable
 /// and the certificate in force keeps its own key until the new one is proved.
@@ -133,12 +133,12 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     // Server to match on (ADR-0017): identity is `instance_uid`, and the Server may re-key it.
     let mut params = CertificateParams::new(vec![config.name.clone()])
         .map_err(|e| format!("cannot build a certificate request: {e}"))?;
-    // The subject an operator reads in the enrolment queue (ADR-0039 clause 22); rcgen's default
+    // The subject an operator reads in the enrolment queue (ADR-0059 clause 22); rcgen's default
     // names every host alike.
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, config.name.clone());
-    // A renewal says which certificate it renews, signed with that certificate's key (ADR-0039
+    // A renewal says which certificate it renews, signed with that certificate's key (ADR-0059
     // clause 27): the Server carries the host on from it even when a Gateway is in between.
     if let Some(proof) = renewal_proof(config, &key) {
         let uri = rcgen::string::Ia5String::try_from(proof)
@@ -164,7 +164,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     .map_err(|e| format!("cannot store the private key: {e}"))?;
     std::fs::write(config.state_dir.join(PENDING_CSR_FILE), csr.as_bytes())
         .map_err(|e| format!("cannot store the certificate request: {e}"))?;
-    // What the operator matches in the enrolment queue (ADR-0039 clause 22): the same SHA-256 the
+    // What the operator matches in the enrolment queue (ADR-0059 clause 22): the same SHA-256 the
     // Server lists as the request's key fingerprint.
     {
         use sha2::{Digest, Sha256};
@@ -212,7 +212,7 @@ mod tests {
 
     /// A fresh host asks, and the key is on disk before the request leaves — but the Client still
     /// presents nothing, because half an identity is not one.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn a_client_without_a_certificate_asks_and_keeps_its_key() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -231,7 +231,7 @@ mod tests {
     /// The private key is never on disk wider than its owner — set in the open call, so there is no
     /// window between a world-readable create and a later chmod for a local attacker to read it.
     #[cfg(unix)]
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn the_private_key_is_written_owner_only() {
         use std::os::unix::fs::PermissionsExt;
@@ -251,7 +251,7 @@ mod tests {
     }
 
     /// What comes back is stored beside the key and is what the Client presents from then on.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn an_issued_certificate_becomes_the_identity() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -280,7 +280,7 @@ mod tests {
 
     /// A certificate the Client never asked for has no key to go with it, and is refused rather
     /// than written where the connection code would then try to present it.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn a_certificate_without_a_pending_key_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -290,7 +290,7 @@ mod tests {
 
     /// The renewal window: a certificate two thirds through its life is asked for again, and the
     /// old one stays in force until the new one is verified.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0059
     #[test]
     fn a_certificate_in_its_renewal_window_is_requested_again() {
         let dir = tempfile::tempdir().expect("tempdir");

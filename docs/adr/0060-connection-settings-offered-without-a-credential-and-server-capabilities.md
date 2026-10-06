@@ -1,30 +1,32 @@
-# ADR-0041: The Server offers connection settings in the Baseline's classes under one hash, a credential read from a file and a plaintext endpoint only on the loopback, the Client proves over TLS 1.3 only what it can and acknowledges the whole offer, and a Server's capabilities bind what the Client reports
+# ADR-0060: The Server offers connection settings in the Baseline's classes under one hash, no credential and a plaintext endpoint only on the loopback, the Client proves over TLS 1.3 only what it can, applies no offered header and acknowledges the whole offer, and a Server's capabilities bind what the Client reports
 
-- **Status:** ⚪ superseded by [ADR-0060](0060-connection-settings-offered-without-a-credential-and-server-capabilities.md)
-- **Date:** 2026-10-04
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
 - **Applies to:** the `[connection_offer]` section of `server.toml`, the offer composition and capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb`, and every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs`
-- **Supersedes:** [ADR-0018](0018-connection-settings-and-server-capabilities.md)
+- **Supersedes:** [ADR-0041](0041-connection-settings-offered-securely-and-server-capabilities.md)
 
 ## Context
 
-Supersedes [ADR-0018](0018-connection-settings-and-server-capabilities.md) because the
-[specification](../SPECIFICATION.md) puts security before convenience (Strategy "Security before
-convenience", Q-1 "Secure by default"): an offered endpoint is a connection that leaves the host,
-so it is TLS 1.3 unless it stays on the loopback.
+Supersedes [ADR-0041](0041-connection-settings-offered-securely-and-server-capabilities.md)
+because the Agent plane admits by client certificate alone
+([ADR-0059](0059-admission-by-a-client-certificate-alone.md), which supersedes
+[ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md)), together with the
+change to the [specification](../SPECIFICATION.md) drafted with it. There is no fleet credential
+left for the Server to offer or for the Client to send: `[connection_offer]` loses its credential,
+and an offered header on the OpAMP connection has nothing on the Server that reads it. The rest of
+the decision stands as it was.
 
-The credential `[connection_offer]` hands the fleet sits verbatim in `server.toml`, beside the
-hashed credentials of
-[ADR-0039](0039-admission-requires-both-proofs-and-enrolment-is-approved.md) clause 26. Unlike those,
-the Server must send it, so it cannot be a hash: it moves out of `server.toml` into a file of its
-own that only the Server's account can read. And a Server could move the fleet to any host a public
-CA certified, since a Client without its own CA file trusts the public roots (measure H24 of
+The specification puts security before convenience (Strategy "Security before convenience", Q-1
+"Secure by default"): an offered endpoint is a connection that leaves the host, so it is TLS 1.3
+unless it stays on the loopback. And a Server could move the fleet to any host a public CA
+certified, since a Client without its own CA file trusts the public roots (measure H24 of
 [`HARDENING.md`](../HARDENING.md)).
 
-Static credentials ([ADR-0017](0017-admission-and-authentication.md)) would have to be rotated by
-editing every host's configuration file — the fleet-wide chore this project exists to remove. The
-Baseline's answer is connection settings management. `ConnectionSettingsOffers` carries an
-`OpAMPConnectionSettings` (endpoint, headers *"typically used to set access tokens"*, heartbeat
+An endpoint, a heartbeat interval or a client certificate that could only be changed by editing
+every host's configuration file would bring back the fleet-wide chore this project exists to
+remove. The Baseline's answer is connection settings management. `ConnectionSettingsOffers` carries
+an `OpAMPConnectionSettings` (endpoint, headers *"typically used to set access tokens"*, heartbeat
 interval, certificate, `tls`, `proxy`), the three own-telemetry destinations, and
 `other_connections`, under one `hash` described as *"Hash of all settings"*.
 `ConnectionSettingsStatus` reports the last hash with `APPLYING`/`APPLIED`/`FAILED`, and *"if the
@@ -63,23 +65,17 @@ persist what it applied and acknowledge the whole message once, and make the Cli
 capabilities a stated rule: optimistic until the Server speaks, outranked by what the Server
 actually sends, and pessimistic only where a message would be an error.
 
-1. **The Server's standing offer is `[connection_offer]`.** It names any of: a canonical client
-   credential — `bearer_token_file`, or `username` and `password_file`, exactly one scheme — an
-   optional
-   `heartbeat_interval_secs`, and an optional `endpoint` (e.g. for a Server move). The `endpoint`
-   is `wss://` or `https://`; `ws://` or `http://` only when its host is a loopback IP literal —
-   `127.0.0.1` or `::1`, never a host name, `localhost` included. An `endpoint` that breaks this
-   is refused at startup with a message naming `[connection_offer] endpoint`, never warned about,
-   so the Server never offers a fleet a plaintext path off the host. An empty section fails at
-   startup; a credential-less offer legitimately retunes only heartbeat or endpoint. Unless
-   `endpoint` points elsewhere, the offered credential must be in `[auth]`'s accepted set — a
-   rotation that would lock the fleet out fails at startup: its hash must be among `[auth]`'s
-   (ADR-0039 clause 26). The credential is read from the named file at startup, trailing
-   whitespace dropped, once — what is checked against `[auth]` is what is offered. It is opened
-   once and checked through that handle; a file that is missing, empty, readable by anyone but its
-   owner (mode wider than `0600` on Unix), or owned by another account than the Server's is
-   refused at startup naming the key. An inline `bearer_token` or
-   `password` is refused the same way. The credential never reaches the REST API.
+1. **The Server's standing offer is `[connection_offer]`, and it carries no credential.** It names
+   any of: an optional `heartbeat_interval_secs`, and an optional `endpoint` (e.g. for a Server
+   move). The `endpoint` is `wss://` or `https://`; `ws://` or `http://` only when its host is a
+   loopback IP literal — `127.0.0.1` or `::1`, never a host name, `localhost` included. An
+   `endpoint` that breaks this is refused at startup with a message naming
+   `[connection_offer] endpoint`, never warned about, so the Server never offers a fleet a
+   plaintext path off the host. An empty section fails at startup. A credential key —
+   `bearer_token_file`, `username`, `password_file`, or the inline `bearer_token` or `password` — is
+   refused at startup with a message naming the key: the Agent plane admits by client certificate
+   alone ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)), so an offered credential
+   would be one nothing reads. The OpAMP settings the Server offers carry no `headers`.
 
 2. **One message, one SHA-256 hash, offered on mismatch.** The Server composes the OpAMP settings
    and the own-telemetry destinations into one `ConnectionSettingsOffers`, hashes the whole message,
@@ -108,13 +104,14 @@ actually sends, and pessimistic only where a message would be an error.
    the reason. A candidate that moves to another `wss://` or `https://` endpoint is refused the
    same way unless `[tls] ca_file` is set, and is then verified against that CA alone: under the
    public roots, a Server could move the fleet to any host a public CA ever certified, and the
-   move would outlive the operator's file (clause 9). Otherwise it connects with the candidate — offered fields, falling back to those in
-   force, an offered certificate included — over TLS 1.3, presenting the client certificate in
-   force unless the offer carries one; only a candidate on the loopback connects in plaintext. A
-   WebSocket candidate must complete its handshake, a plain-HTTP candidate a real exchange. Only
-   then are the settings persisted, an issued certificate stored, and the connection dropped so
-   the runtime reconnects with them, possibly on the other transport. A refused or failed
-   verification keeps everything in force as it was and reports `FAILED` with the error.
+   move would outlive the operator's file (clause 9). Otherwise it connects with the candidate —
+   offered fields, falling back to those in force, an offered certificate included, offered
+   `headers` never (clause 8) — over TLS 1.3, presenting the client certificate in force unless the
+   offer carries one, and sending no `Authorization`; only a candidate on the loopback connects in
+   plaintext. A WebSocket candidate must complete its handshake, a plain-HTTP candidate a real
+   exchange. Only then are the settings persisted, an issued certificate stored, and the connection
+   dropped so the runtime reconnects with them, possibly on the other transport. A refused or
+   failed verification keeps everything in force as it was and reports `FAILED` with the error.
 
 6. **A telemetry destination is not verified by connecting, and does not restart the connection.**
    Reachability of an OTLP receiver is not this Client's to establish at offer time; a receiver
@@ -122,7 +119,10 @@ actually sends, and pessimistic only where a message would be an error.
    the Client can decide alone — the cleartext rule and the unhonoured fields of
    [ADR-0025](0025-own-telemetry.md) — and a refusal is reported, not swallowed. A telemetry-only
    offer is applied in place; its acknowledgement rides the reports already owed, and the transport
-   loop carries on.
+   loop carries on. The headers of a telemetry destination are an OTLP receiver's, not admission:
+   they stay as [ADR-0048](0048-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md) has them, still offered only on member
+   connections ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)), and clause 8 does not
+   reach them.
 
 7. **One offer, one acknowledgement.** A single `connection_settings_status` answers each offer,
    and its `error_message` names everything dropped or refused across both halves. If the OpAMP
@@ -130,13 +130,20 @@ actually sends, and pessimistic only where a message would be an error.
    included, and the offer is reported `FAILED`. Half-applying an offer whose other half was
    rejected would leave the Server unable to tell what is running.
 
-8. **`tls` and `proxy` are not honoured, and the acknowledgement says so.** An offer is applied for
-   every field the Client honours — endpoint, headers, heartbeat, certificate — and then reported
-   `FAILED` with an `error_message` naming the dropped fields. The hash is echoed either way, so the
-   Server does not re-offer in a loop. `TLSConnectionSettings` is refused on merit: a Server able to
-   command `insecure_skip_verify` could switch off the check that proves it is the Server, and trust
-   is an operator's file ([ADR-0012](0012-transports-tls-and-the-servers-two-planes.md) clause 5).
-   `ProxyConnectionSettings` has nothing on this Client to configure. Both are Development upstream.
+8. **`tls`, `proxy` and `headers` are not honoured, and the acknowledgement says so.** An offer is
+   applied for every field the Client honours — endpoint, heartbeat, certificate — and then
+   reported `FAILED` with an `error_message` naming the dropped fields, offered `headers` by their
+   keys and never their values. The hash is echoed either way, so the Server does not re-offer in
+   a loop. `TLSConnectionSettings` is refused on merit: a Server able to command
+   `insecure_skip_verify` could switch off the check that proves it is the Server, and trust is an
+   operator's file ([ADR-0012](0012-transports-tls-and-the-servers-two-planes.md) clause 5).
+   `ProxyConnectionSettings` has nothing on this Client to configure. Both are Development
+   upstream. Offered `headers` on the OpAMP connection are refused on merit too: the Agent plane
+   reads no `Authorization` and admits by client certificate alone
+   ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)), so an applied header would be a
+   value the Server plants on every connection of the fleet, persisted and sent upstream with no
+   reader on this Server, and carried to whatever endpoint a later offer moves the fleet to.
+   [`CONFORMANCE.md`](../CONFORMANCE.md) records the three refusals.
 
 9. **What is in force is persisted as `connection-settings.pb`, and it outranks `supervisor.toml`.**
    The file in `state_dir` is the Baseline's own `ConnectionSettingsOffers`: the merged settings in
@@ -144,9 +151,10 @@ actually sends, and pessimistic only where a message would be an error.
    that omits a field leaves the one in force — and the file carries an `opamp` block only when an
    offer or the state it folds into had one. How the telemetry destinations fold is
    [ADR-0025](0025-own-telemetry.md)'s. At startup the persisted settings override
-   `supervisor.toml`'s `endpoint`, `[auth]` credential and heartbeat and poll intervals, and the
-   persisted hash restores the status to report. `supervisor.toml` stays what the operator wrote;
-   deleting the file reverts to it.
+   `supervisor.toml`'s `endpoint` and heartbeat and poll intervals, and the persisted hash restores
+   the status to report. The persisted OpAMP settings carry no `headers`: an `Authorization` header
+   that a file holds from an earlier rotation is dropped on load and never sent. `supervisor.toml`
+   stays what the operator wrote; deleting the file reverts to it.
 
 10. **An offered heartbeat replaces the configured interval.** A non-zero
     `heartbeat_interval_seconds` becomes the heartbeat period on WebSocket and the polling interval
@@ -192,41 +200,45 @@ actually sends, and pessimistic only where a message would be an error.
     gated under clause 14 or 15; a decision not to gate one is recorded in `CONFORMANCE.md` with its
     reason, as clause 16 is.
 
-**Out of scope:** handing in or rotating credentials through the REST API; per-Agent credentials;
-`AcceptsOtherConnectionSettings`; what own telemetry is and how its destinations fold
-([ADR-0025](0025-own-telemetry.md)); `connection_settings_status` in the fleet view and the REST
-API; an audit of the Server's own use of Agent capabilities under the same rule.
+**Out of scope:** how the Agent plane admits and how it treats a Client of an older version that
+still sends `Authorization` ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)); the
+audit entries an offer leaves; `AcceptsOtherConnectionSettings`; what own telemetry is and how its
+destinations and their headers fold ([ADR-0025](0025-own-telemetry.md));
+`connection_settings_status` in the fleet view and the REST API; an audit of the Server's own use
+of Agent capabilities under the same rule.
 
 ## Alternatives considered
 
-- **The offered credential inline in `server.toml`** — the posture this ADR supersedes; the one
-  secret the Server must keep usable would be the one left in the file that travels.
-- **An environment variable** — visible in process listings, unit files and crash reports.
-
+- **Keeping an optional offered credential** — the Agent plane reads none
+  ([ADR-0059](0059-admission-by-a-client-certificate-alone.md)); an offered credential would be a
+  secret the Server keeps, sends and the fleet persists, for no check anywhere.
+- **Honouring offered `headers` other than `Authorization`** — no header has a reader on this
+  Server, and a generic pass-through would let a Server, or whoever can make one send an offer,
+  attach any value to every upstream connection of the fleet and keep it there across restarts.
+- **Dropping offered `headers` silently and reporting `APPLIED`** — a false report;
+  `CONFORMANCE.md` records gaps, not false reports, and a Server rotating a token through headers
+  would believe it in force.
+- **Refusing an offer wholesale when it carries `headers`** — an older Server that still offers a
+  credential would freeze the endpoint, heartbeat and certificate the same offer carries.
 - **Accepting any scheme the Server offers** — the Client would follow a Server, or whoever can
-  make one send an offer, onto a plaintext endpoint off the host and hand it the fleet credential
-  in the clear; Q-1 forbids that whatever the configuration, so both ends refuse it.
-- **Handing in rotation credentials through the REST API** — the "any UI drives the fleet" shape,
-  but it would push fleet credentials through the operator interface; infrastructure secrets stay in
-  `server.toml` beside the TLS key.
-- **Gating offers on the presented `Authorization` header instead of the status hash** — breaks on a
-  shared WebSocket connection (one header, n Agents) and replaces the Baseline's hash comparison
-  with invented semantics.
+  make one send an offer, onto a plaintext endpoint off the host and hand it the fleet's reports in
+  the clear; Q-1 forbids that whatever the configuration, so both ends refuse it.
 - **Offering blind, without `ReportsConnectionSettingsStatus`** — the Server could never stop
   re-offering, and rejection would be invisible.
-- **Hot reload instead of a Server restart to start a rotation** — a feature this Server does not
-  have; a restart is how `server.toml` changes take effect.
+- **Hot reload instead of a Server restart to change the standing offer** — a feature this Server
+  does not have; a restart is how `server.toml` changes take effect.
 - **Every offer always carries an `opamp` block** — the Server would synthesise a block it has
   nothing to put in, every telemetry change would verify-and-reconnect the whole fleet, and it
   contradicts the Baseline's three classes and its first-reply SHOULD.
 - **Requiring `[connection_offer]` beside `[telemetry_offer]` and documenting the gap** — an
-  operator would have to configure credential rotation to get metrics, a coupling with no reason.
+  operator would have to configure an endpoint or heartbeat offer to get metrics, a coupling with
+  no reason.
 - **A hash and an acknowledgement per class** — the Baseline defines one hash over all settings and
   one status field; splitting them would invent protocol semantics.
 - **Verifying a telemetry destination by connecting, for symmetry** — a momentarily down receiver
   would turn a correct offer `FAILED` and the Server would re-offer settings that were never wrong.
 - **Refusing an offer wholesale when it carries `tls` or `proxy`** — an unsupported extra would
-  freeze the endpoint and credential rotation the same offer carries.
+  freeze the endpoint move and certificate the same offer carries.
 - **Honouring `TLSConnectionSettings`** — most of what it can say weakens verification.
 - **Keeping `APPLIED` for a partly honoured offer and documenting it** — `CONFORMANCE.md` records
   gaps, not false reports; a declared capability is a promise a peer relies on.
@@ -242,7 +254,8 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
 - [OpAMP specification — Connection Settings Management](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md#connection-settings-management)
   (Baseline `v0.20.0`) — the three classes and per-class sequences, the verification MUST under
   `ConnectionSettingsOffers.opamp`, the own-telemetry sequence and its first-reply SHOULD, the hash
-  gate MUST, the heartbeat obligations; *Interoperability of Partial Implementations* for the
+  gate MUST, the heartbeat obligations, and `OpAMPConnectionSettings.headers` as the field
+  *"typically used to set access tokens"*; *Interoperability of Partial Implementations* for the
   symmetrical capability MUST; `ServerToAgent.capabilities` (*"MAY be omitted in subsequent
   ServerToAgent messages"*); and the `ServerCapabilities` comments distinguishing
   `OffersRemoteConfig` from `AcceptsStatus`.
@@ -258,11 +271,10 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
 
 ## Consequences
 
-- Positive: credentials rotate fleet-wide without touching a host — add the new token's hash to
-  `[auth].bearer_tokens`, write the token to the file `[connection_offer] bearer_token_file` names,
-  restart the Server, let the fleet
-  migrate connection by verified connection, then drop the old token. The Server can retune every
-  Agent's heartbeat and polling cadence and move the fleet to a new endpoint.
+- Positive: the Server can retune every Agent's heartbeat and polling cadence and move the fleet to
+  a new endpoint without touching a host, and an issued client certificate reaches its Agent the
+  same way. No secret sits in `[connection_offer]`, in a file beside it, or in a Client's state
+  directory.
 - Positive: a Server with only `[telemetry_offer]` reaches its Agents, and a telemetry endpoint
   move never disconnects the fleet.
 - Positive: a conforming but terse Server is safe to talk to; the next capability has a stated
@@ -272,43 +284,45 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
 - Negative / trade-offs: a refused telemetry destination fails an offer whose OpAMP half applied
   fine; the `error_message` says what was dropped, but a Server reading only the enum sees a
   failure. Accepted as the price of one hash.
-- Negative / trade-offs: the persisted settings are a state file an operator must know about; the
-  canonical credential is fleet-wide, so rotation is all-or-nothing; several surfaces are
-  Development maturity upstream.
+- Negative / trade-offs: a Server that offers a credential in `headers` — one of an older version,
+  or a third-party Server — receives `FAILED` for every such offer, though the endpoint, heartbeat
+  and certificate it carried are in force. The `error_message` names the headers, and the echoed
+  hash stops the re-offer.
+- Negative / trade-offs: the persisted settings are a state file an operator must know about;
+  several surfaces are Development maturity upstream.
 - Negative / trade-offs: clause 13 means a Server that sent one offer receives connection-settings
   status for that Agent's life; a withheld report is lost until the next full snapshot; clause 16
   is a documented departure from a literal field-by-field reading that every review has to be
   argued out of.
-- Follow-ups: `connection_settings_status` in the fleet view and the REST API, so a stalled rotation
-  is visible; rotation control in the REST API; the Server's use of Agent capabilities under the
-  same rule.
+- Follow-ups: `connection_settings_status` in the fleet view and the REST API, so a stalled endpoint
+  move is visible; the Server's use of Agent capabilities under the same rule.
 
 ## Enforcement
 
-- [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
-  `an_offered_credential_is_read_from_its_file`, `an_inline_offered_credential_is_refused`,
-  `an_offered_credential_file_readable_by_others_is_refused` (clause 1).
-- [`crates/fleet-agent/src/connection.rs`](../../crates/fleet-agent/src/connection.rs) —
-  `an_offered_move_needs_the_clients_own_ca` (clause 5).
-- The tests below verify the clauses that stand unchanged.
+The tests below verify the clauses that stand unchanged.
 
 - [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
-  `a_connection_offer_yields_the_expected_authorization`,
   `a_connection_offer_needs_at_least_one_field`, `a_connection_offer_rejects_a_bad_endpoint_scheme`,
-  `a_credential_offer_must_be_accepted_by_auth_unless_the_endpoint_moves` (clause 1).
+  `a_connection_offer_refuses_a_plaintext_endpoint_off_loopback_naming_the_setting`,
+  `a_connection_offer_accepts_a_plaintext_endpoint_on_a_loopback_ip_literal`,
+  `a_connection_offer_refuses_a_plaintext_endpoint_on_localhost` (clause 1).
 - [`crates/fleet-server/tests/connection_settings.rs`](../../crates/fleet-server/tests/connection_settings.rs)
-  — `the_offer_reaches_a_capable_agent_and_carries_the_rotated_credential`,
-  `no_offer_without_the_capability_or_without_a_configured_section`,
+  — `no_offer_without_the_capability_or_without_a_configured_section`,
   `the_reported_hash_gates_reoffering` (clause 2).
 - [`crates/fleet-server/tests/own_telemetry.rs`](../../crates/fleet-server/tests/own_telemetry.rs) —
   `a_telemetry_only_server_declares_that_it_offers_connection_settings` (clauses 2, 3).
 - [`crates/fleet-agent/src/connection.rs`](../../crates/fleet-agent/src/connection.rs) —
+  `verify_refuses_a_plaintext_endpoint_off_loopback_without_connecting`,
+  `verify_refuses_a_plaintext_endpoint_on_a_host_name`,
+  `verify_presents_the_client_certificate_in_force`, `an_offered_move_needs_the_clients_own_ca`
+  (clause 5); `offered_tls_and_proxy_are_neither_stored_nor_claimed` (clause 8);
   `merge_leaves_opamp_absent_when_neither_side_has_one`,
   `merge_of_a_telemetry_only_offer_carries_the_opamp_settings_in_force_forward`,
   `merge_keeps_unchanged_fields_from_the_previous_settings`, `load_store_round_trips`,
   `stored_settings_and_their_directory_are_owner_only`,
   `apply_overrides_client_toml_where_the_server_spoke`,
-  `apply_leaves_untouched_what_the_offer_omits` (clauses 9, 10).
+  `apply_leaves_untouched_what_the_offer_omits` (clauses 9, 10). The fold and apply tests carry
+  endpoint, heartbeat and certificate in their fixtures.
 - [`crates/fleet-agent/tests/connection_settings_e2e.rs`](../../crates/fleet-agent/tests/connection_settings_e2e.rs)
   — `an_offer_is_verified_persisted_and_reported_applied`;
   [`crates/fleet-agent/tests/gateway_and_supervisor_e2e.rs`](../../crates/fleet-agent/tests/gateway_and_supervisor_e2e.rs)
@@ -329,20 +343,21 @@ API; an audit of the Server's own use of Agent capabilities under the same rule.
   provoking.
 - [`crates/fleet-server/src/fleet.rs`](../../crates/fleet-server/src/fleet.rs) —
   `an_offered_heartbeat_interval_sets_the_budget` (clause 10).
+- TLS 1.3 is the provider's: `the_provider_offers_tls_1_3_suites_alone` in
+  [`crates/opamp/src/tls.rs`](../../crates/opamp/src/tls.rs) (clause 5).
 
-These tests carry `Verifies: ADR-0041`:
+These tests carry `Verifies: ADR-0060`:
 
 - [`crates/fleet-server/src/config.rs`](../../crates/fleet-server/src/config.rs) —
-  `a_connection_offer_refuses_a_plaintext_endpoint_off_loopback_naming_the_setting`,
-  `a_connection_offer_accepts_a_plaintext_endpoint_on_a_loopback_ip_literal`,
-  `a_connection_offer_refuses_a_plaintext_endpoint_on_localhost` (clause 1).
+  `a_connection_offer_refuses_a_credential_key_naming_it`, for each of `bearer_token_file`,
+  `username`, `password_file`, `bearer_token` and `password` (clause 1).
+- [`crates/fleet-server/tests/connection_settings.rs`](../../crates/fleet-server/tests/connection_settings.rs)
+  — `the_offer_reaches_a_capable_agent_and_carries_no_headers` (clauses 1, 2, 3).
 - [`crates/fleet-agent/src/connection.rs`](../../crates/fleet-agent/src/connection.rs) —
-  `verify_refuses_a_plaintext_endpoint_off_loopback_without_connecting`,
-  `verify_refuses_a_plaintext_endpoint_on_a_host_name`,
-  `verify_presents_the_client_certificate_in_force` (clause 5); the `FAILED` report of a refused
-  verification is `a_failed_offer_still_reports_the_hash_so_the_server_stops_reoffering` above, and
-  TLS 1.3 is the provider's, `the_provider_offers_tls_1_3_suites_alone` of
-  [ADR-0038](0038-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes.md).
+  `offered_headers_are_neither_stored_nor_claimed`, which also checks that the `error_message`
+  names the header keys and no value (clause 8);
+  `verify_sends_no_authorization_even_when_one_is_offered` (clauses 5, 8);
+  `a_persisted_authorization_header_is_dropped_on_load` (clause 9).
 
 **Not mechanically decidable:** clause 6's "no reconnect" for a telemetry-only offer is held by
 the `OfferOutcome::Applied` path in
