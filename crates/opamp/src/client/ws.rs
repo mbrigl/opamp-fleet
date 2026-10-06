@@ -1,5 +1,5 @@
 //! The WebSocket transport: one connection, reconnected with backoff, carrying every Agent of the
-//! session — the *n* over one of ADR-0009.
+//! session — the *n* over one of ADR-0034.
 
 use std::time::Duration;
 

@@ -1,4 +1,4 @@
-//! The `telegraf` plugin (ADR-0028): Telegraf, delivered as a package and run out of this
+//! The `telegraf` plugin (ADR-0015): Telegraf, delivered as a package and run out of this
 //! Supervisor's own directory.
 //!
 //! There is nothing to decide about how Telegraf is invoked. It is a single-file program, it takes
@@ -18,27 +18,27 @@ use crate::supervisor::ports::{
 use crate::supervisor::process::{sighup, Preflight, ProcessSpec, Runner, VersionProbe};
 
 /// InfluxData's archive holds one program of this name, and the installer finds the member by it
-/// (ADR-0028) — which is why the path *inside* the archive does not matter and there is no
+/// (ADR-0015) — which is why the path *inside* the archive does not matter and there is no
 /// `program_path` here.
 #[cfg(windows)]
 const PROGRAM: &str = "telegraf.exe";
 #[cfg(not(windows))]
 const PROGRAM: &str = "telegraf";
 
-/// The Agent type every Telegraf Configuration is aimed at (ADR-0024), and the name
+/// The Agent type every Telegraf Configuration is aimed at (ADR-0012), and the name
 /// `opamp-package-fetch` uploads its default Configuration under. The second is the first plus
 /// `-conf`, and both are properties of the packing side rather than of a host.
 const SERVICE_NAME: &str = "telegraf";
 const CONFIG_ENTRY: &str = "telegraf-conf";
 
 /// How Telegraf is asked for its version — and, run against a *staged* program before the running
-/// one is stopped, this kind's preflight (ADR-0029). The same arguments serve both, because what
+/// one is stopped, this kind's preflight (ADR-0016). The same arguments serve both, because what
 /// makes them a version probe is what makes them a safe check: cheap, and touching no state.
 const VERSION_ARGS: &[&str] = &["--version"];
 
-/// The keys this kind used to take as a `command` recipe and now supplies itself (ADR-0028), each
-/// with what answers it now — refused by name rather than met with serde's "unknown field", so an
-/// operator rewriting the old block is told where each value went.
+/// The keys a `command` recipe for Telegraf carries and this kind supplies itself (ADR-0015), each
+/// with what answers it — refused by name rather than met with serde's "unknown field", so an
+/// operator rewriting a `command` block is told where each value went.
 const RETIRED: &[(&str, &str)] = &[
     ("args", "the kind points Telegraf at its delivered configuration"),
     (
@@ -84,14 +84,14 @@ impl Plugin for TelegrafPlugin {
     }
 
     /// A single file, so there is no tree and no `program_path`: the installer finds the member
-    /// whose file name matches, and installs the archive as InfluxData published it (ADR-0028).
+    /// whose file name matches, and installs the archive as InfluxData published it (ADR-0015).
     fn defaults(&self) -> KindDefaults {
         KindDefaults {
             program: Some(PROGRAM),
             program_path: None,
             service_name: Some(SERVICE_NAME),
             // Wrapped, with nothing to correct: the fleet's `[supervisors]`/`[updates]` policy
-            // stands, and the block says nothing about it (ADR-0015).
+            // stands, and the block says nothing about it (ADR-0010).
             timing: Some(KindTiming::default()),
             // Telegraf speaks no OpAMP to us; its Endpoint is bound and nothing connects to it.
             endpoint_port: false,
@@ -99,7 +99,7 @@ impl Plugin for TelegrafPlugin {
     }
 
     fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
-        // Strictly empty: a kind that knows its agent has no escape hatch (ADR-0015), so anything
+        // Strictly empty: a kind that knows its agent has no escape hatch (ADR-0010), so anything
         // left here is a key nobody supplies.
         let _: TelegrafSettings = parse_settings(
             &ctx.name,
@@ -145,7 +145,7 @@ impl Plugin for TelegrafPlugin {
                     program: program.clone(),
                     args: args.clone(),
                     env: Vec::new(),
-                    // Its own program's directory (ADR-0015).
+                    // Its own program's directory (ADR-0010).
                     working_dir: None,
                     // One process, no worker of its own.
                     own_process_group: false,
@@ -164,7 +164,7 @@ impl Plugin for TelegrafPlugin {
 }
 
 /// This kind has no settings at all — the strict parse accepts an empty table and refuses every
-/// key (ADR-0028). Written as a type rather than a length check so the refusal reads the same as
+/// key (ADR-0015). Written as a type rather than a length check so the refusal reads the same as
 /// every other plugin's.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -187,9 +187,9 @@ mod tests {
         assert!(err.contains("interval"), "{err}");
     }
 
-    /// Each key the old `command` recipe carried is refused by name with what supplies it now —
-    /// including through `check`, so a Supervisor set the Server offers is refused before any
-    /// running process is touched (ADR-0022).
+    /// Each key a `command` recipe carries is refused by name with what supplies it — including
+    /// through `check`, so a Supervisor set the Server offers is refused before any running process
+    /// is touched (ADR-0032).
     #[test]
     fn the_recipes_keys_are_refused_by_name() {
         for (key, line) in [

@@ -1,4 +1,4 @@
-//! `supervisor.toml` on disk (ADR-0011): reading the file, the directories it names made absolute
+//! `supervisor.toml` on disk (ADR-0025): reading the file, the directories it names made absolute
 //! against the working directory, and the identity the state directory holds. What the file must
 //! say is [`config`](crate::config)'s; this is only where it comes from.
 
@@ -28,15 +28,15 @@ impl ClientConfig {
         config.source = Some(redact_secrets(&text));
         config.path = Some(path.to_path_buf());
         // **Every directory this Client derives is made absolute here**, and this is the one place
-        // it can be done once. Since ADR-0015 a Managed Process starts in its own directory, so a
-        // path the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}`
-        // it substitutes — is resolved by that process against a directory the Client has left.
-        // `state_dir` defaults to the relative `client-state`, so leaving these relative made the
-        // ordinary configuration the broken one: the program was looked for under itself, and a
-        // Collector that did start could not find the configuration written for it.
+        // it can be done once. A Managed Process starts in its own directory (ADR-0010), so a path
+        // the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}` it
+        // substitutes — is resolved by that process against a directory the Client has left.
+        // `state_dir` defaults to the relative `client-state`, so leaving these relative would make
+        // the ordinary configuration the broken one: the program would be looked for under itself,
+        // and a Collector that did start could not find the configuration written for it.
         config.state_dir = absolute(&config.state_dir);
         config.supervisor_dir = config.supervisor_dir.as_deref().map(absolute);
-        // Each allowed download source is held to ADR-0042's rules now, not at the first offer.
+        // Each allowed download source is held to ADR-0018's rules now, not at the first offer.
         if let Some(packages) = &config.packages {
             for entry in &packages.allowed_sources {
                 crate::packages::parse_source(entry)
@@ -46,7 +46,7 @@ impl ClientConfig {
         config.checked(path)
     }
 
-    /// What this Client must hold before it connects (ADR-0059, ADR-0061): a client certificate —
+    /// What this Client must hold before it connects (ADR-0026, ADR-0028): a client certificate —
     /// the one the Server issued, or the one `[tls]` names, a bootstrap certificate included. It is
     /// the one proof the Server admits a peer by, so without it the Client refuses to start, naming
     /// what is missing.
@@ -64,11 +64,11 @@ impl ClientConfig {
         Ok(())
     }
 
-    /// The client certificate and key this Client presents on both transports (ADR-0017), or
+    /// The client certificate and key this Client presents on both transports (ADR-0026), or
     /// `None` when it has no identity to present.
     ///
     /// A pair the Server issued outranks the configured one, the same precedence persisted
-    /// connection settings have over `supervisor.toml` (ADR-0018): the file stays what the operator
+    /// connection settings have over `supervisor.toml` (ADR-0027): the file stays what the operator
     /// wrote, and deleting the stored pair reverts to it. That is also what retires a bootstrap
     /// certificate — it keeps standing in `supervisor.toml`, unused, once a real one has been issued.
     pub fn client_identity(&self) -> Option<(PathBuf, PathBuf)> {
@@ -82,15 +82,14 @@ impl ClientConfig {
     }
 }
 
-/// Refuses to carry on when the configuration is only *missing* because it was renamed
-/// (ADR-0023): the file this Client looks for is absent and a `supervisor.toml` — what it was called
-/// until ADR-0023 — sits where it would be.
+/// Refuses to carry on when the file this Client looks for is absent and a `client.toml` sits
+/// beside where it would be (ADR-0029 clause 5).
 ///
 /// Everywhere else a missing configuration is not an error: a Client comes up on defaults, says so,
-/// and manages nothing until one exists (ADR-0014). That is exactly the wrong answer here, and the
+/// and manages nothing until one exists (ADR-0028). That is exactly the wrong answer here, and the
 /// dangerous one: an upgraded host would go on running, connect to the development endpoint, report
-/// none of the Agents it used to, and nothing about it would look like a failure. So this one case
-/// fails closed, naming both paths and the single command that fixes it.
+/// none of its Agents, and nothing about it would look like a failure. So this one case fails
+/// closed, naming both paths and the single command that fixes it.
 fn legacy_name_beside(path: &Path) -> Result<(), String> {
     let legacy = path.with_file_name(LEGACY_CONFIG_FILE_NAME);
     if path
@@ -102,7 +101,7 @@ fn legacy_name_beside(path: &Path) -> Result<(), String> {
     }
     Err(format!(
         "no configuration at {}, but {} is beside it: the file was renamed in this release \
-         (ADR-0023). Rename it — `mv {} {}` — and start the service again. Nothing else about it \
+         (ADR-0029). Rename it — `mv {} {}` — and start the service again. Nothing else about it \
          changed.",
         path.display(),
         legacy.display(),
@@ -115,7 +114,7 @@ fn legacy_name_beside(path: &Path) -> Result<(), String> {
 ///
 /// Lexical rather than `canonicalize`: that needs the file to exist, and these directories are
 /// named before they are created. It also follows symbolic links, which would be wrong here — the
-/// versioned install layout (ADR-0014) points at its current version *with* a link, and resolving
+/// versioned install layout (ADR-0028) points at its current version *with* a link, and resolving
 /// it would freeze a path that stops being true at the next update.
 pub(crate) fn absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -136,7 +135,7 @@ mod tests {
     /// The client identity is all a Client needs to start: a file naming one passes with no
     /// `[auth]`, and a file without one is refused, naming `[tls] cert_file` and `key_file` — the
     /// Server would refuse it in the handshake anyway.
-    /// Verifies: ADR-0059, ADR-0061, Q-1
+    /// Verifies: ADR-0026, ADR-0028, Q-1
     #[test]
     fn admission_needs_a_client_identity_and_nothing_else() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,4 +1,4 @@
-//! The register and revocation list on the filesystem (ADR-0065): the default adapter behind
+//! The register and revocation list on the filesystem (ADR-0031): the default adapter behind
 //! [`LedgerStore`](crate::revocation::LedgerStore).
 
 use std::path::PathBuf;
@@ -43,7 +43,7 @@ impl FsLedgerStore {
 
 impl FsLedgerStore {
     /// The list as persisted, without the credential entries a list may still hold: the Agent
-    /// plane admits by client certificate alone, so there is no credential to revoke (ADR-0065
+    /// plane admits by client certificate alone, so there is no credential to revoke (ADR-0031
     /// clause 5). They are dropped with one log line, and the list is written back without them.
     fn certificate_revocations(&self, bytes: &[u8]) -> Result<Vec<Revocation>, String> {
         let parse =
@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use crate::revocation::{Facts, Revoked};
 
-    /// Verifies: ADR-0065
+    /// Verifies: ADR-0031
     #[test]
     fn the_ledger_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -189,7 +189,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0065
+    /// Verifies: ADR-0031
     #[test]
     fn a_persisted_credential_entry_is_dropped_on_load() {
         let dir = tempfile::tempdir().expect("tempdir");

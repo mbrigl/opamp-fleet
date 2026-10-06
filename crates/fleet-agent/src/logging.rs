@@ -1,11 +1,11 @@
-//! The Client's own log on disk, while it runs as a service (ADR-0014).
+//! The Client's own log on disk, while it runs as a service (ADR-0028).
 //!
 //! The Windows SCM discards a service's stderr, so a Client installed there had no readable log at
 //! all; systemd and launchd do capture it, and the file is written on those platforms too so that
 //! "where are the logs" has one answer everywhere — including in a container, where neither is
 //! present. In the foreground nothing is written: somebody is reading stderr there.
 //!
-//! This is not the OTLP own-logs bridge (ADR-0025) under another name. That one needs a Server that
+//! This is not the OTLP own-logs bridge (ADR-0022) under another name. That one needs a Server that
 //! is already reachable, which is exactly what a bad `supervisor.toml`, an unusable certificate, or a
 //! refused endpoint is not.
 //!
@@ -80,7 +80,7 @@ pub fn open(dir: &Path, keep: usize) -> Result<PathBuf, String> {
 /// Where the log goes for a given state directory, unless `[logging] dir` names somewhere else.
 ///
 /// The state directory is the right home: it survives a self-update and `uninstall` deliberately
-/// does not delete it (ADR-0014), so a log explaining a failed install is still there afterwards.
+/// does not delete it (ADR-0028), so a log explaining a failed install is still there afterwards.
 pub fn default_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("logs")
 }
@@ -91,7 +91,7 @@ mod tests {
 
     /// Until a directory is named, the writer swallows everything rather than failing: it is
     /// consulted from the first line of `main`, before any instance exists.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0028
     #[test]
     fn the_writer_discards_until_a_file_is_opened() {
         // `FILE` is process-global and another test may have opened it, so this asserts the
@@ -103,7 +103,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0028
     #[test]
     fn the_log_directory_hangs_off_the_state_directory() {
         assert_eq!(

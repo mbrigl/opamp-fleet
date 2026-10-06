@@ -1,4 +1,4 @@
-//! The Agent-record store on the filesystem (ADR-0026): the default adapter behind
+//! The Agent-record store on the filesystem (ADR-0013): the default adapter behind
 //! [`AgentStore`](crate::agent_store::AgentStore).
 
 use std::collections::{BTreeMap, HashMap};
@@ -13,7 +13,7 @@ use crate::agent_store::{AgentStore, PersistedAgent};
 use crate::fleet::Transport;
 use crate::packages::PackageId;
 
-/// The default adapter (ADR-0026): one JSON file per Agent under `<config_dir>/agents/`,
+/// The default adapter (ADR-0013): one JSON file per Agent under `<config_dir>/agents/`,
 /// following the `LabelStore` pattern — temp file plus atomic rename, loud failure on a file
 /// that does not parse.
 pub struct FsAgentStore {
@@ -22,7 +22,7 @@ pub struct FsAgentStore {
 
 /// The on-disk envelope — **this adapter's format, not the port's**. Scalars and the
 /// effective-config text stay readable; the wire-typed fields are protobuf bytes base64-inline,
-/// the one encoding whose compatibility rules the Baseline already defines (ADR-0010, ADR-0026).
+/// the one encoding whose compatibility rules the Baseline already defines (ADR-0009, ADR-0013).
 #[derive(Serialize, Deserialize)]
 struct Envelope {
     /// The envelope shape, so a future change can migrate deliberately.
@@ -46,11 +46,11 @@ struct Envelope {
     package_statuses: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     available_components: Option<String>,
-    /// The config assignments (ADR-0027), name → revision hash. Absent in a pre-ADR file, which
-    /// is exactly the migration marker the fleet reads.
+    /// The config assignments (ADR-0014), name → revision hash. Absent in a file an older Server
+    /// wrote, which is exactly the migration marker the fleet reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     config_assignments: Option<BTreeMap<String, String>>,
-    /// What was rolled out to this Agent (ADR-0027, ADR-0030): the Deployment that released it
+    /// What was rolled out to this Agent (ADR-0014, ADR-0021): the Deployment that released it
     /// and the Package it pinned, as `<agent type>@<version>`. Absent means nothing was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     package_assignment: Option<PackageAssignmentMeta>,
@@ -63,7 +63,7 @@ struct PackageAssignmentMeta {
     package: String,
 }
 
-/// Bumped for ADR-0030's assignment shape, with **no reader for version 1**: there is no legacy
+/// Version 2 is ADR-0021's assignment shape, and there is **no reader for version 1**: no legacy
 /// store to support, so an envelope this Server did not write is named rather than guessed at.
 const ENVELOPE_VERSION: u32 = 2;
 
@@ -156,7 +156,7 @@ impl Envelope {
 
 impl FsAgentStore {
     /// Opens the store, creating its directory owner-only — reported effective configurations may
-    /// hold credentials (ADR-0026), the same reasoning that guards the package store's metadata.
+    /// hold credentials (ADR-0013), the same reasoning that guards the package store's metadata.
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         super::create_private_dir(&dir)?;
         Ok(FsAgentStore { dir })
@@ -232,10 +232,10 @@ mod tests {
         assert!(restored[&uid] == record(), "the record round-trips whole");
     }
 
-    /// ADR-0030 point 20: an envelope written before the ADR has no assignment fields, and they
+    /// ADR-0021 point 20: an envelope written before the ADR has no assignment fields, and they
     /// restore as `None` — the marker the fleet's migration reads. They are not invented as
     /// empty, which would silently un-roll the Agent.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0021
     #[test]
     fn a_pre_adr_0027_record_restores_with_no_assignments() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -256,7 +256,7 @@ mod tests {
         assert!(restored[&uid].package_assignment.is_none());
     }
 
-    /// Forgetting removes the file (ADR-0026 extended); removing the absent is not an error.
+    /// Forgetting removes the file (ADR-0013 extended); removing the absent is not an error.
     #[test]
     fn remove_deletes_and_tolerates_absence() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -280,7 +280,7 @@ mod tests {
         assert!(restored.contains_key(&new) && !restored.contains_key(&old));
     }
 
-    /// A file that does not parse fails startup loudly rather than being skipped (ADR-0011's
+    /// A file that does not parse fails startup loudly rather than being skipped (ADR-0025's
     /// principle, as every store here applies it).
     #[test]
     fn a_corrupt_record_fails_the_load_by_name() {

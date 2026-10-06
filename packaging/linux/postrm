@@ -1,8 +1,8 @@
 #!/bin/sh
-# Post-removal for the `.deb` and the `.rpm` alike (ADR-0023).
+# Post-removal for the `.deb` and the `.rpm` alike (ADR-0029).
 #
 # `service uninstall` (already run in the pre-removal) deliberately deletes nothing — that rule
-# (ADR-0014) protects the *manual* flows, where the layout is the operator's. A package removal is
+# (ADR-0028) protects the *manual* flows, where the layout is the operator's. A package removal is
 # different: the operator asked this host to stop being managed, and what the package flow created
 # it cleanly takes back —
 #
@@ -13,7 +13,7 @@
 #            configuration included. Purge is dpkg's word for "leave nothing"; rpm has no
 #            equivalent and stays at remove-level cleanup.
 #
-# That distinction is ADR-0023's, with the paths redrawn across the two roots by ADR-0014 clause 8.
+# That distinction is ADR-0029's, with the paths redrawn across the two roots by ADR-0028 clause 8.
 #
 # Only on a real removal. dpkg calls `postrm upgrade <new>` mid-upgrade, where the new version's
 # post-install re-lays the link; rpm's `%postun` gets the count of remaining instances, where `1`

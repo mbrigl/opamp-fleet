@@ -1,4 +1,4 @@
-//! How often an admitted peer may be heard on the Agent plane (ADR-0066).
+//! How often an admitted peer may be heard on the Agent plane (ADR-0023).
 //!
 //! Every message on `/v1/opamp` and every package download a member sends takes one token from a
 //! bucket. A bucket holds `burst` tokens and gains `messages_per_sec` of them a second, and a new
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use crate::fleet::Clock;
 use crate::revocation::CertId;
 
-/// The `[agent_rate_limit]` values (ADR-0066 clause 1).
+/// The `[agent_rate_limit]` values (ADR-0023 clause 19).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub messages_per_sec: u32,
@@ -36,7 +36,7 @@ impl Default for Limits {
     }
 }
 
-/// Who a message or a download is counted for (ADR-0066 clause 4).
+/// Who a message or a download is counted for (ADR-0023 clause 22).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Subject {
     /// The host a member's certificate names.
@@ -169,7 +169,7 @@ pub struct AgentRate {
 
 impl AgentRate {
     /// The limit as a Server keeps it: the subjects and aggregates as many as the certificate
-    /// register holds, the Agents behind Gateways as many as the fleet holds (ADR-0066 clause 8).
+    /// register holds, the Agents behind Gateways as many as the fleet holds (ADR-0023 clause 26).
     #[must_use]
     pub fn new(limits: Limits, max_agents: usize, clock: Arc<dyn Clock>) -> Self {
         AgentRate::with_capacities(limits, crate::revocation::MAX_ISSUED, max_agents, clock)
@@ -289,7 +289,7 @@ mod tests {
             .count()
     }
 
-    /// Verifies: ADR-0066
+    /// Verifies: ADR-0023
     #[test]
     fn a_bucket_starts_full_and_refills_at_the_configured_rate() {
         let (rate, clock) = rate(16, 16);
@@ -318,7 +318,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0066
+    /// Verifies: ADR-0023
     #[test]
     fn a_host_is_one_bucket_whatever_its_agents_report() {
         let (rate, _) = rate(16, 16);
@@ -333,7 +333,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0066
+    /// Verifies: ADR-0023
     #[test]
     fn a_member_certificate_without_a_host_is_counted_by_issuer_and_serial() {
         let (rate, _) = rate(16, 16);
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(passing(&rate, &two, false, None), 3, "another serial");
     }
 
-    /// Verifies: ADR-0066
+    /// Verifies: ADR-0023
     #[test]
     fn an_enrolment_connection_is_counted_by_its_peer_address() {
         let (rate, _) = rate(16, 16);
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(passing(&rate, &b, false, None), 3, "another address");
     }
 
-    /// Verifies: ADR-0066
+    /// Verifies: ADR-0023
     #[test]
     fn marking_a_gateway_takes_effect_at_the_next_message() {
         let (rate, _) = rate(16, 16);
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(rate.admit(&edge, false, Some(&uid(3))), Err(Bucket::Host));
     }
 
-    /// Verifies: ADR-0066
+    /// Verifies: ADR-0023
     #[test]
     fn behind_a_gateway_a_message_passes_its_agents_bucket_and_the_aggregate() {
         let (rate, _) = rate(16, 64);
@@ -398,7 +398,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0066
+    /// Verifies: ADR-0023
     #[test]
     fn a_message_naming_no_agent_behind_a_gateway_counts_in_the_aggregate_alone() {
         let (rate, _) = rate(16, 16);
@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(rate.tables.lock().expect("lock").agents.len(), 0);
     }
 
-    /// Verifies: ADR-0066
+    /// Verifies: ADR-0023
     #[test]
     fn a_full_table_evicts_the_bucket_used_least_recently() {
         let (rate, _) = rate(2, 16);
@@ -437,7 +437,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0066
+    /// Verifies: ADR-0023
     #[test]
     fn both_tables_are_bounded() {
         let (rate, clock) = rate(4, 8);

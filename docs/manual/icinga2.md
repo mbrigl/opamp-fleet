@@ -10,7 +10,7 @@ obtains its certificate from the Icinga master, distributes its configuration, a
 it back — with nothing installed on the host through `apt`, `dnf`, or an MSI.
 
 That is more than the [GLPI recipe](glpi-agent.md) does, and it needs a Supervisor kind of its own
-([ADR-0029](../adr/0029-icinga-2.md)), because Icinga 2 is not
+([ADR-0016](../adr/0016-icinga-2.md)), because Icinga 2 is not
 built to be relocated: it must be *told*, on every invocation, where its state, its template library
 and its account are — and it creates none of those directories itself.
 
@@ -29,7 +29,7 @@ and its account are — and it creates none of those directories itself.
 
 `type = "icinga2"` builds the daemon's whole command line — around ten `-D` constants and the
 directories behind them — out of the artifact it delivers, the platform, and the account it runs
-as ([ADR-0029](../adr/0029-icinga-2.md)). None of it is
+as ([ADR-0016](../adr/0016-icinga-2.md)). None of it is
 written on a host any more, and getting any of it wrong used to produce a daemon that starts and
 quietly uses the wrong files:
 
@@ -55,13 +55,13 @@ it: what follows is only what an operator decides.
 
 Icinga publishes distribution packages and an MSI, no portable tree — so the artifact is repacked
 from the vendor's own packages
-([ADR-0029](../adr/0029-icinga-2.md)).
+([ADR-0016](../adr/0016-icinga-2.md)).
 
 Build it **on** the distribution you are building for — the tree carries the libraries the build
 host resolves, so the build host is the decision, not a flag (see the two rules below). This
 project's Dev Container is that host: it is pinned to Debian 12 and carries Icinga's runtime
 libraries for exactly this reason
-([ADR-0029](../adr/0029-icinga-2.md)), so the
+([ADR-0016](../adr/0016-icinga-2.md)), so the
 Debian 12 artifact is built in it directly:
 
 ```console
@@ -90,7 +90,7 @@ Two things about that command line, each of which costs an attempt to discover:
 
 Add `--platform windows/amd64` to build the Windows artifact in the same run. It is repacked from
 the MSI and verified by Icinga's own Authenticode signature
-([ADR-0029](../adr/0029-icinga-2.md)) rather than by a
+([ADR-0016](../adr/0016-icinga-2.md)) rather than by a
 digest, so it needs no particular build host and no glibc floor applies to it.
 
 To build for a **different** reach — an older distribution than the Dev Container, for hosts it does
@@ -110,7 +110,7 @@ container also needs Icinga's runtime libraries installed once — see the refus
 The tree carries the daemon, the template library, **the check plugins**
 (`monitoring-plugins`, 47 of them, with the libraries they need), and the vendor copyright files.
 For Icinga 2 2.16.5 on Debian 12 that is 140 files and 75 MB unpacked — well inside the limits a
-package tree is held to ([ADR-0042](../adr/0042-signed-package-delivery-from-allowed-sources.md)).
+package tree is held to ([ADR-0018](../adr/0018-signed-package-delivery-from-allowed-sources.md)).
 
 The plugins come from the distribution rather than from Icinga, and one of them needs a word: Debian
 ships `check_http` through `update-alternatives`, so it exists only after a package is *installed* —
@@ -126,9 +126,9 @@ Two rules follow from what the tree carries:
   and not a flag.
 - **The glibc line it prints is the artifact's reach.** A tree built on Debian 13 does not run on
   Debian 12 or RHEL 9; one built on Debian 11 runs on all of them, across families, because glibc is
-  backward compatible (ADR-0029). Build on the oldest distribution you must serve — that is the one
+  backward compatible (ADR-0016). Build on the oldest distribution you must serve — that is the one
   decision this step really carries, and for this project it has been made once, as the Dev
-  Container's image pin (ADR-0029). Bumping that pin narrows every artifact built afterwards.
+  Container's image pin (ADR-0016). Bumping that pin narrows every artifact built afterwards.
 
 If the build host is missing a library any of the packages depend on, the tool stops rather than
 packing an incomplete tree — and prints the `apt-get install` line that fixes it, naming the
@@ -150,7 +150,7 @@ tool reads them out of that distribution's package index rather than this page l
 ## 2. The block
 
 Four keys, and each describes the Icinga installation this host is **joining** — nothing this
-Client can compute (ADR-0029). The block is the same on both platforms:
+Client can compute (ADR-0016). The block is the same on both platforms:
 
 ```toml
 [[supervisor]]
@@ -201,7 +201,7 @@ manager installed; nothing supervises it.
 ## 3. Enrolment: the ticket
 
 The Icinga master stays the certificate authority for Icinga — the fleet Server signs no Icinga
-certificate and never sees an Icinga private key ([ADR-0029](../adr/0029-icinga-2.md)).
+certificate and never sees an Icinga private key ([ADR-0016](../adr/0016-icinga-2.md)).
 What the fleet transports is the **ticket**, which the master computes for one node name. The
 calls below go to the Operator plane over TLS; `--cacert ca.pem` names the CA that signed the
 Server's certificate, and `-u` carries the [`[rest.auth]`](server.md#the-operator-plane-restauth)
@@ -311,7 +311,7 @@ rather than inside it.
   capabilities — `check_icmp` and its relatives — will not work. Local checks do.
 - **The build host decides the reach, and only glibc bounds it.** glibc cannot travel and is
   backward compatible, so **one** artifact serves every host whose glibc is at least the build
-  host's — across distribution families (ADR-0029). Build on the oldest system you serve: a Debian 11
+  host's — across distribution families (ADR-0016). Build on the oldest system you serve: a Debian 11
   build (`libc6 >= 2.30`) covers Debian, Ubuntu, and RHEL 9 and 10 alike.
 - **A tree built on Debian carries Debian's OpenSSL layout.** Icinga's cluster TLS is unaffected —
   its certificates are named by explicit paths — but a check that reaches for the *system* trust
@@ -328,7 +328,7 @@ rather than inside it.
   artifact, roll it out, and see whether the daemon finds `include_dir`, `plugin_dir` and its
   libraries from `${supervisor_dir}/program/tree` without the registry keys the MSI writes. Until
   someone has done that and this page says so, keep Windows hosts on their MSI installation and
-  outside the fleet. The RPM repack is not built and is optional under ADR-0029.
+  outside the fleet. The RPM repack is not built and is optional under ADR-0016.
 - **Removing the Supervisor removes its certificate with the directory.** The Icinga master still
   holds the signed certificate for that node — `icinga2 ca remove` there is the operator's, and the
   Supervisor says so when it is retired.

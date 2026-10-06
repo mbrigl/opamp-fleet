@@ -5,7 +5,7 @@ use std::path::Path;
 /// Writes a throwaway self-signed client certificate and key into `dir` and returns the `[tls]`
 /// table that names them, to be appended at the end of a `supervisor.toml`.
 ///
-/// The Client refuses to start without a client certificate (ADR-0059). The test Servers serve
+/// The Client refuses to start without a client certificate (ADR-0026). The test Servers serve
 /// plaintext with an open admission and do not check it, so the files only have to exist and
 /// parse.
 pub fn client_identity(dir: &Path) -> String {

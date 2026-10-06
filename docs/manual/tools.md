@@ -20,7 +20,7 @@ signing lives, which `opamp-package-fetch` deliberately does not do.
 ## Running them
 
 Both live in their own crate, `fleet-tools`, so neither is part of what runs on a managed host
-([ADR-0037](../adr/0037-five-crates-a-publishable-communication-layer-and-toml-configuration.md)). From a source
+([ADR-0025](../adr/0025-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md)). From a source
 checkout:
 
 ```console
@@ -60,8 +60,8 @@ checksum file goes with them:
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
 | `glpi-agent` | `glpi-project/glpi-agent` | Windows: the portable `.zip`, as published · Linux: a `.tar.gz` repacked from the AppImage |
 | `telegraf` | `dl.influxdata.com` (versions from `influxdata/telegraf`) | the `.tar.gz`, or the `.zip` on Windows, as published |
-| `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0044](../adr/0044-the-client-updates-itself-from-a-signed-package.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
-| `icinga2` | `packages.icinga.com` | Windows: a `.tar.gz` repacked from the MSI's payload, verified by its Authenticode signature (ADR-0029) since no digest is published. Linux: a `.tar.gz` repacked from the vendor's `icinga2-bin` and `icinga2-common` packages plus the check plugins, with the libraries they need bundled. Must run **on** the distribution it builds for, whose glibc becomes the artifact's reach; `--distro <codename>` states which one that is, and omitted it is this host's own — see [the Icinga 2 recipe](icinga2.md) |
+| `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0020](../adr/0020-the-client-updates-itself-from-a-signed-package.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
+| `icinga2` | `packages.icinga.com` | Windows: a `.tar.gz` repacked from the MSI's payload, verified by its Authenticode signature (ADR-0016) since no digest is published. Linux: a `.tar.gz` repacked from the vendor's `icinga2-bin` and `icinga2-common` packages plus the check plugins, with the libraries they need bundled. Must run **on** the distribution it builds for, whose glibc becomes the artifact's reach; `--distro <codename>` states which one that is, and omitted it is this host's own — see [the Icinga 2 recipe](icinga2.md) |
 
 Four things it does on every run:
 
@@ -69,7 +69,7 @@ Four things it does on every run:
   used for anything. A mismatch stops that platform and leaves the file for inspection.
 - **It leaves the artifact alone** wherever upstream's container is one a Client can open — so
   the hash the fleet verifies is the hash on the release page, and the line from the release to
-  the host is unbroken ([ADR-0042](../adr/0042-signed-package-delivery-from-allowed-sources.md)).
+  the host is unbroken ([ADR-0018](../adr/0018-signed-package-delivery-from-allowed-sources.md)).
 - **It uploads the agent's default configuration with the package** — but only the ones the
   Server does not already have, see [below](#the-default-configuration).
 - **It never distributes anything.** Uploading stores a Package and saves a Configuration; reaching a
@@ -110,7 +110,7 @@ question below shows what *that release* actually has. Two need a word:
   the distribution it is built for — the tree bundles the libraries found there — so the only
   artifact a run can produce is that host's, and its reach is that build's glibc floor. glibc is
   backward compatible, so the floor is the whole criterion and the family is none of it
-  ([ADR-0029](../adr/0029-icinga-2.md)). The
+  ([ADR-0016](../adr/0016-icinga-2.md)). The
   transcript above was taken in a `bookworm` container, whose vendor packages declare
   `libc6 >= 2.34`; run it in `bullseye` and the same line reads `Debian 11+/Ubuntu 20.04+/RHEL 9+`,
   in `trixie` `Debian 13+/Ubuntu 24.04+/RHEL 10+`. **Which container you start this in is therefore
@@ -174,7 +174,7 @@ Done. What a Supervisor needs to install these:
 
 For `--agent supervisor` there is no block to print — nothing supervises a Client — so the hint is
 the consent that lets it take the package over itself, which is also its default
-([ADR-0044](../adr/0044-the-client-updates-itself-from-a-signed-package.md)):
+([ADR-0020](../adr/0020-the-client-updates-itself-from-a-signed-package.md)):
 
 ```
 Done. What a Client needs to take these:
@@ -201,7 +201,7 @@ released binary:
 | `glpi-agent` | `glpi-agent-conf` | Agent type `glpi-agent` |
 | `telegraf` | `telegraf-conf` | Agent type `telegraf` |
 | `icinga2` | `icinga2-conf`, `icinga2-zones` | Agent type `icinga2` |
-| `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks ([ADR-0022](../adr/0022-a-supervisors-directory-program-and-set.md)) |
+| `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks ([ADR-0032](../adr/0032-a-host-can-keep-its-supervisor-set-from-the-server.md)) |
 
 Two rules keep this from surprising anyone:
 
@@ -209,7 +209,7 @@ Two rules keep this from surprising anyone:
   Server already holds is left exactly as you left it, edits and all. That is what makes a second
   upload of a newer version safe.
 - **Nothing is distributed.** Saving only saves
-  ([ADR-0027](../adr/0027-rollout-and-what-reaches-an-agent.md)), so the default reaches
+  ([ADR-0014](../adr/0014-rollout-and-what-reaches-an-agent.md)), so the default reaches
   no host until you roll it out. Read it first: these bodies carry example values — Icinga's
   parent is `master.example.com`.
 
@@ -235,7 +235,7 @@ The Server decides some uploads before it reads a byte of the artifact, and says
 
 | What it answers | What to do |
 |---|---|
-| `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed ([ADR-0027](../adr/0027-rollout-and-what-reaches-an-agent.md)). Fetch under a new version, or delete the Package first. |
+| `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed ([ADR-0014](../adr/0014-rollout-and-what-reaches-an-agent.md)). Fetch under a new version, or delete the Package first. |
 | `507 … max_total_package_bytes` | The package store is at its ceiling. Delete a Package no channel holds, or raise the limit ([the Server's configuration reference](server.md#top-level)). |
 | `404 … not configured` | The Server has no package store: `packages_dir` is unset in `server.toml` ([Packages](server.md#packages-and-deployments-distributing-software)). |
 | `413 …` | The artifact is past `max_package_size_bytes`. |
@@ -291,7 +291,7 @@ $ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --
 |---|---|---|
 | `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`; the private key goes in the file, ideally not on the Server host |
 | `pack <program> --out <file>` | the artifact's SHA-256 (hex) | building a one-file artifact; `--format tar.gz\|7z`, `--program-name <name>`, `--archive-key <key>` |
-| `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the Deployment's signature route, `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone (ADR-0042) |
+| `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the Deployment's signature route, `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone (ADR-0018) |
 | `public-key --key <file>` | the public key (hex) | recovering it from an existing private key |
 | `sha256 <artifact>` | the SHA-256 (hex) | the `sha256` of a *referenced* entry, for an artifact the Server never holds |
 
@@ -302,5 +302,5 @@ from packing to a running agent.
 **Signing is required, fleet-wide.** A Client takes a package only while `[packages]
 verification_key` is set, and only when the artifact's signature verifies against it. The Server
 offers no entry its Deployment has not signed, and refuses to roll out a Deployment with an
-unsigned entry ([ADR-0045](../adr/0045-packages-and-deployments-that-sign-every-package.md)). Give
+unsigned entry ([ADR-0021](../adr/0021-packages-and-deployments-that-sign-every-package.md)). Give
 every Client the same public key, and sign every entry of every Deployment.

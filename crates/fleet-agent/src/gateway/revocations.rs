@@ -1,9 +1,9 @@
 //! The one admission refusal a Gateway makes beyond its handshake: a downstream certificate its Server has
-//! revoked (ADR-0071 clause 14).
+//! revoked (ADR-0034 clause 14).
 //!
 //! The Server never sees a downstream certificate — the Gateway terminates that handshake and
 //! presents its own upstream — so the Server hands its Gateways the revoked certificates of the
-//! fleet's client CA instead, chains already resolved (ADR-0065 clause 12). The Gateway fetches the
+//! fleet's client CA instead, chains already resolved (ADR-0031 clause 12). The Gateway fetches the
 //! list over its own upstream origin, with its own certificate, keeps it in memory,
 //! and refuses what it names. While it holds no list young enough to trust, it admits nobody: a
 //! Gateway whose Server is away forwards nothing anyway, and a list kept for ever would admit a
@@ -190,7 +190,7 @@ async fn fetch(list: &RevocationList, config: &ClientConfig) -> Result<Option<us
         .apply(builder)?
         .build()
         .map_err(|e| format!("cannot build the client: {e}"))?;
-    // Admitted by this Gateway's certificate alone: no `Authorization` (ADR-0059 clause 3).
+    // Admitted by this Gateway's certificate alone: no `Authorization` (ADR-0026 clause 3).
     let mut request = client.get(&url);
     if let Some(etag) = list.etag() {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -238,7 +238,7 @@ mod tests {
 
     /// The Gateway fetches the list with its own identity and no `Authorization`, even when
     /// `supervisor.toml` still holds an `[auth]` section from an earlier version.
-    /// Verifies: ADR-0071, ADR-0059
+    /// Verifies: ADR-0034, ADR-0026
     #[tokio::test]
     async fn the_revocation_list_is_fetched_without_authorization() {
         opamp::tls::install_ring_provider();
@@ -287,7 +287,7 @@ mod tests {
 
     /// A Gateway with no list yet, or one past its age, admits nobody; with a fresh list it admits
     /// what the list does not name and refuses what it does.
-    /// Verifies: ADR-0071
+    /// Verifies: ADR-0034
     #[tokio::test(start_paused = true)]
     async fn the_verdict_follows_the_list_and_its_age() {
         let cert = certificate();

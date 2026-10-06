@@ -22,21 +22,20 @@ const CONFIG_PB_FILE: &str = "remote-config.pb";
 const CONFIG_DIR: &str = "config";
 const PACKAGE_FILE: &str = "installed-package.json";
 
-/// The role each delivered entry carries (ADR-0016) — `<name> <role>` per line, written into the
+/// The role each delivered entry carries (ADR-0011) — `<name> <role>` per line, written into the
 /// config directory beside the entries themselves.
 ///
 /// It lives in that directory because that is where a plugin looks, and it is written only when
 /// there is something to say — a fleet that never sets a role never sees this file. The leading
-/// dot is what keeps it from colliding with an entry: a Configuration name follows the ADR-0014
+/// dot is what keeps it from colliding with an entry: a Configuration name follows the ADR-0028
 /// grammar (lowercase letters, digits, `-`) and [`entry_file_name`] strips leading dots, so no
 /// entry file can ever be named this.
 ///
 /// **The value is here because the Baseline says it matters.** `AgentConfigFile.role` is defined as
 /// *"Optional role of the content in the body field. The values and their semantics are Agent
 /// type-specific"* — so a kind may define its own vocabulary, and to read it the value has to
-/// survive the write. This file used to hold names alone, which answered only *whether* an entry
-/// carried a role; a line without a second field still reads that way, which is exactly what an
-/// older Client left behind.
+/// survive the write. A line without a second field — what an older Client wrote — answers only
+/// *whether* an entry carries a role.
 pub const SUPPLEMENTARY_FILE: &str = ".supplementary";
 
 pub struct Storage {
@@ -50,14 +49,14 @@ impl Storage {
     }
 
     /// Where [`store_remote_config`](Self::store_remote_config) writes the plain entry files —
-    /// what a Managed Process is pointed at (ADR-0015).
+    /// what a Managed Process is pointed at (ADR-0010).
     #[must_use]
     pub fn config_dir(&self) -> PathBuf {
         self.dir.join(CONFIG_DIR)
     }
 
     /// Takes a stored remote configuration out of force for a Supervisor whose remote
-    /// configuration is switched off (ADR-0067 clause 5): each entry file, and `.supplementary`,
+    /// configuration is switched off (ADR-0032 clause 32): each entry file, and `.supplementary`,
     /// whose bytes are still the ones the stored map would write is deleted, every other file in
     /// `config/` stays, and `remote-config.pb` goes. A `.pb` that does not decode is deleted and
     /// `config/` is left alone. `None` when nothing was stored.
@@ -96,7 +95,7 @@ impl Storage {
 
 impl Storage {
     /// Takes the Client's own stored Supervisor set out of the way on a host that keeps its set
-    /// (ADR-0069 clause 24): `remote-config.pb` goes **first**, so nothing that fails after it can
+    /// (ADR-0032 clause 24): `remote-config.pb` goes **first**, so nothing that fails after it can
     /// leave a hash to report, and then each entry copy in `config/` whose bytes are still the
     /// stored ones goes as far as it can. Nothing runs on the copies, so one that cannot be read
     /// or deleted is named in the result, not an error. A `.pb` that does not decode is deleted
@@ -138,7 +137,7 @@ impl Storage {
     }
 }
 
-/// What [`Storage::drop_stored_set`] found and did (ADR-0069 clause 24).
+/// What [`Storage::drop_stored_set`] found and did (ADR-0032 clause 24).
 #[derive(Debug, PartialEq, Eq)]
 pub enum DroppedStoredSet {
     /// `remote-config.pb` is gone, and so is every entry copy still as stored; `kept` names the
@@ -153,7 +152,7 @@ pub enum DroppedStoredSet {
     Undecodable,
 }
 
-/// What [`Storage::drop_remote_config`] found and did (ADR-0067 clause 5).
+/// What [`Storage::drop_remote_config`] found and did (ADR-0032 clause 32).
 #[derive(Debug, PartialEq, Eq)]
 pub enum DroppedRemoteConfig {
     /// The stored configuration and the files it wrote are gone; `kept` names the files
@@ -222,10 +221,10 @@ impl AgentStorage for Storage {
 
     /// Stores a received remote configuration: the protobuf for lossless restart, and each
     /// config-map entry as a plain file under `config/`. Entry files from a previous offer are
-    /// removed first — the composed entry set changes over time (ADR-0016), and a stale file
+    /// removed first — the composed entry set changes over time (ADR-0011), and a stale file
     /// would otherwise still be handed to the Managed Process.
     ///
-    /// Every entry is written, whatever its role. An entry that carries one (ADR-0016) is content
+    /// Every entry is written, whatever its role. An entry that carries one (ADR-0011) is content
     /// the process reads *by path* rather than being configured with, so it lands in the same
     /// directory under the same name — that is what makes a `${file:...}` reference resolve — and
     /// its name is recorded in [`SUPPLEMENTARY_FILE`] for the plugin to leave out of what it
@@ -245,12 +244,12 @@ impl AgentStorage for Storage {
             write_private(&config_dir.join(file_name), &body)?;
         }
         // Last: a store cut short leaves the previous `.pb`, never a new one beside the previous
-        // offer's files, which `drop_remote_config` would keep as the operator's (ADR-0067
-        // clause 5).
+        // offer's files, which `drop_remote_config` would keep as the operator's (ADR-0032
+        // clause 32).
         write_private(&self.dir.join(CONFIG_PB_FILE), &config.encode_to_vec())
     }
 
-    /// The installed package (ADR-0019), if one survived a previous run.
+    /// The installed package (ADR-0018), if one survived a previous run.
     fn load_package(&self) -> Option<InstalledPackage> {
         let text = std::fs::read_to_string(self.dir.join(PACKAGE_FILE)).ok()?;
         match serde_json::from_str(&text) {
@@ -282,7 +281,7 @@ impl AgentStorage for Storage {
 /// order — the Collector's own merge semantics are order-dependent.
 ///
 /// Everything written by [`Storage::store_remote_config`] except the entries that carry a role
-/// (ADR-0016) and the bookkeeping that names them. Those files are deliberately still *there*:
+/// (ADR-0011) and the bookkeeping that names them. Those files are deliberately still *there*:
 /// supplementary content is read by path, so leaving it out of this list is the whole of what the
 /// role changes.
 ///
@@ -320,7 +319,7 @@ pub fn config_entries(config_dir: &std::path::Path) -> Vec<PathBuf> {
     files
 }
 
-/// What role each delivered entry carries, by entry file name (ADR-0016).
+/// What role each delivered entry carries, by entry file name (ADR-0011).
 ///
 /// A line an older Client wrote carries no role, only a name; it reads back as an empty value —
 /// "this entry carries *a* role", which is all that version ever recorded and all that the
@@ -344,10 +343,10 @@ pub fn entry_roles(config_dir: &std::path::Path) -> BTreeMap<String, String> {
 /// Create `dir` (and its parents) and, on Unix, narrow it to `0700`.
 ///
 /// The state directory holds the Agent's identity and the Server-pushed configuration, and a
-/// config-map entry read by path (`${file:...}`) can be a certificate or a key (ADR-0016). At the
+/// config-map entry read by path (`${file:...}`) can be a certificate or a key (ADR-0011). At the
 /// umask default the directory is world-listable, so on a multi-user host another local user could
 /// read that material; owner-only closes it. The Managed Process runs as this same user, so it still
-/// reads its own config. On Windows the `%ProgramData%` ACL is what protects it (ADR-0014).
+/// reads its own config. On Windows the `%ProgramData%` ACL is what protects it (ADR-0028).
 pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -441,7 +440,7 @@ mod tests {
     }
 
     /// The state directory holds the identity and the Server-pushed configuration — which can carry
-    /// secret material by path (ADR-0016) — so the directories are owner-only and the secret-bearing
+    /// secret material by path (ADR-0011) — so the directories are owner-only and the secret-bearing
     /// files are `0600`, whatever the process umask.
     #[cfg(unix)]
     #[test]
@@ -502,7 +501,7 @@ mod tests {
 
     #[test]
     fn a_new_offer_replaces_the_previous_entry_files() {
-        // The composed entry set changes over time (ADR-0016); an entry dropped upstream must
+        // The composed entry set changes over time (ADR-0011); an entry dropped upstream must
         // not survive on disk, where it would still be handed to the Managed Process.
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
@@ -582,10 +581,10 @@ mod tests {
         }
     }
 
-    /// ADR-0016: a roled entry is written like any other — it has to be on disk for a
+    /// ADR-0011: a roled entry is written like any other — it has to be on disk for a
     /// `${file:...}` reference to resolve — but it is not among the files the process is
     /// configured with.
-    // Verifies: ADR-0016
+    // Verifies: ADR-0011
     #[test]
     fn a_roled_entry_is_written_but_not_offered_as_configuration() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -606,7 +605,7 @@ mod tests {
         assert_eq!(entry_names(&config_dir), vec!["base"]);
     }
 
-    /// Any other value is handled like `supplementary` and never guessed at (ADR-0016).
+    /// Any other value is handled like `supplementary` and never guessed at (ADR-0011).
     #[test]
     fn an_unknown_role_is_treated_like_supplementary() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -696,8 +695,8 @@ mod tests {
         assert_eq!(entry_names(&config_dir), vec!["base"]);
     }
 
-    /// A Client that stored entries before ADR-0016 has no bookkeeping file; everything it wrote
-    /// is configuration, which is exactly what it was.
+    /// A state directory with no bookkeeping file holds configuration alone, so everything in it
+    /// reads as configuration (ADR-0011).
     #[test]
     fn entries_without_bookkeeping_are_all_configuration() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -730,10 +729,10 @@ mod tests {
 
     /// A store cut short leaves the previous `remote-config.pb`, never a new one beside the
     /// previous offer's files: the drop then still reads the previous map and deletes what it
-    /// wrote instead of keeping it as the operator's (ADR-0067 clause 5). The store is stopped
+    /// wrote instead of keeping it as the operator's (ADR-0032 clause 32). The store is stopped
     /// by a directory standing where the next offer's entry file goes — `create_private_dir`
     /// resets the mode of `config/`, so a failed removal cannot be staged from here.
-    /// Verifies: ADR-0067
+    /// Verifies: ADR-0032
     #[test]
     fn a_store_cut_short_leaves_no_previous_entry_file_beside_a_new_pb() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,4 +1,4 @@
-//! What the Server signed, and what it no longer trusts (ADR-0065).
+//! What the Server signed, and what it no longer trusts (ADR-0031).
 //!
 //! The **register** holds every certificate the client CA signed, with the certificate it renewed
 //! as its predecessor, so a revocation reaches every renewal made after the certificate it names.
@@ -16,19 +16,19 @@ use tokio::sync::watch;
 
 use crate::fleet::Clock;
 
-/// The revocations one list holds at most (ADR-0065 clause 6).
+/// The revocations one list holds at most (ADR-0031 clause 6).
 pub const MAX_REVOCATIONS: usize = 100_000;
 
-/// The certificates the register holds at most (ADR-0065 clause 2).
+/// The certificates the register holds at most (ADR-0031 clause 2).
 pub const MAX_ISSUED: usize = 100_000;
 
 /// The certificates the register holds at most in one chain — below one root, the first
 /// certificate a chain renews from: enough for a Gateway's downstream Agents, few enough that one
-/// member cannot fill the register (ADR-0065 clause 2).
+/// member cannot fill the register (ADR-0031 clause 2).
 pub const MAX_DESCENDANTS_PER_ROOT: usize = 10_000;
 
 /// The room the register keeps for enrolments: a renewal is refused once fewer are left, so
-/// renewals alone cannot shut out a new host (ADR-0065 clause 2).
+/// renewals alone cannot shut out a new host (ADR-0031 clause 2).
 pub const ENROLMENT_RESERVE: usize = 1_000;
 
 /// A certificate by its issuer and serial: the issuer as the SHA-256 of its DER-encoded name, hex,
@@ -72,7 +72,7 @@ pub fn normalize_serial(serial: &str) -> String {
     }
 }
 
-/// A CA whose certificates can be revoked: the client CA or the bootstrap CA (ADR-0065 clause 3).
+/// A CA whose certificates can be revoked: the client CA or the bootstrap CA (ADR-0031 clause 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authority {
     /// `client` or `bootstrap` — what an operator names.
@@ -94,7 +94,7 @@ pub struct Facts {
     pub key_fingerprint: String,
     /// Milliseconds since the Unix epoch.
     pub not_after_ms: u64,
-    /// The host the certificate was issued to (ADR-0059 clause 7) — the stable identity a host
+    /// The host the certificate was issued to (ADR-0026 clause 7) — the stable identity a host
     /// keeps across renewals and re-keys; `None` for a certificate an operator provisioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
@@ -107,7 +107,7 @@ pub struct Presented {
     pub host: Option<String>,
 }
 
-/// A host this Server issued certificates to (ADR-0059 clause 7).
+/// A host this Server issued certificates to (ADR-0026 clause 7).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     /// A Gateway carries other hosts' Agents, so its certificate binds none of them.
@@ -118,7 +118,7 @@ pub struct Host {
     pub instance_uids: BTreeSet<String>,
 }
 
-/// The Agents a host's certificate speaks for (ADR-0070 clause 3).
+/// The Agents a host's certificate speaks for (ADR-0033 clause 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpeaksFor {
     /// A host marked as a Gateway: it carries other hosts' Agents, and the Server keeps no record
@@ -128,7 +128,7 @@ pub enum SpeaksFor {
     Agents(BTreeSet<String>),
 }
 
-/// The certificates one host may hold at once (ADR-0059 clause 7): the one in force, its renewal,
+/// The certificates one host may hold at once (ADR-0026 clause 7): the one in force, its renewal,
 /// and one more for a renewal whose answer was lost.
 pub const MAX_PER_HOST: usize = 3;
 
@@ -142,7 +142,7 @@ pub struct Signed {
     pub facts: Facts,
 }
 
-/// One certificate the Server signed (ADR-0065 clause 2).
+/// One certificate the Server signed (ADR-0031 clause 2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
     #[serde(flatten)]
@@ -475,7 +475,7 @@ impl Revocations {
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
-    /// (ADR-0059 clause 7). An `instance_uid` first heard from a host is bound to it; one bound to
+    /// (ADR-0026 clause 7). An `instance_uid` first heard from a host is bound to it; one bound to
     /// another host is refused. A Gateway's certificate binds nothing — it carries other hosts'
     /// Agents.
     ///
@@ -508,7 +508,7 @@ impl Revocations {
         self.store.save_hosts(&state.hosts)
     }
 
-    /// The Agents a certificate naming `host` speaks for (ADR-0070 clause 3): the `instance_uid`s
+    /// The Agents a certificate naming `host` speaks for (ADR-0033 clause 3): the `instance_uid`s
     /// bound to it, or any Agent for a host marked as a Gateway. A host the register does not know
     /// speaks for none.
     #[must_use]
@@ -522,7 +522,7 @@ impl Revocations {
     }
 
     /// Moves a binding to the `instance_uid` the Server re-keyed an Agent to — a re-key never
-    /// orphans a host's certificate (ADR-0059 clause 7).
+    /// orphans a host's certificate (ADR-0026 clause 7).
     ///
     /// # Errors
     /// Returns an error when the binding cannot be written.
@@ -693,7 +693,7 @@ impl Revocations {
 
     /// Every certificate of the CAs of `role` that is revoked, itself or through a certificate it
     /// renewed, with its chain already resolved: what a Gateway refuses
-    /// (ADR-0065 clause 12). A certificate the register never held is on it as revoked.
+    /// (ADR-0031 clause 12). A certificate the register never held is on it as revoked.
     #[must_use]
     pub fn revoked_certificates(&self, role: &str) -> BTreeSet<CertId> {
         let issuers: BTreeSet<&str> = self
@@ -898,7 +898,7 @@ mod tests {
 
     /// A host holds a bounded number of valid certificates, an Agent is spoken for by the host
     /// that first reported it alone, a re-key keeps its host, and a Gateway speaks for any Agent.
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0026
     #[test]
     fn a_host_is_bounded_and_speaks_only_for_its_own_agents() {
         let store = Memory::default();
@@ -953,7 +953,7 @@ mod tests {
 
     /// A host speaks for the `instance_uid`s that reported with its certificate, a host the
     /// register does not know for none, and a Gateway for any Agent.
-    /// Verifies: ADR-0070
+    /// Verifies: ADR-0033
     #[test]
     fn a_host_speaks_for_the_agents_bound_to_it_and_a_gateway_for_any() {
         let (revocations, _) = open(&Memory::default());
@@ -990,7 +990,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0065
+    /// Verifies: ADR-0031
     #[test]
     fn a_revocation_follows_every_renewal() {
         let (revocations, _) = open(&Memory::default());
@@ -1025,7 +1025,7 @@ mod tests {
 
     /// The revoked ancestor of a valid renewal outlives its own expiry, and so does every link
     /// between them.
-    /// Verifies: ADR-0065
+    /// Verifies: ADR-0031
     #[test]
     fn a_renewal_stays_revoked_after_its_revoked_ancestor_expires() {
         let (revocations, clock) = open(&Memory::default());
@@ -1052,7 +1052,7 @@ mod tests {
         assert_eq!(revocations.list().len(), 1);
     }
 
-    /// Verifies: ADR-0065
+    /// Verifies: ADR-0031
     #[test]
     fn the_list_survives_a_restart_and_can_be_lifted() {
         let store = Memory::default();
@@ -1075,7 +1075,7 @@ mod tests {
         assert!(reopened.list().is_empty());
     }
 
-    /// Verifies: ADR-0065
+    /// Verifies: ADR-0031
     #[test]
     fn the_list_and_the_register_are_bounded() {
         let store = Memory::default();
@@ -1124,7 +1124,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0065
+    /// Verifies: ADR-0031
     #[test]
     fn an_expired_register_entry_is_dropped_with_its_revocation() {
         let (revocations, clock) = open(&Memory::default());
@@ -1157,7 +1157,7 @@ mod tests {
     }
 
     /// A reload finds every chain's root from its links, whatever order the entries load in.
-    /// Verifies: ADR-0065
+    /// Verifies: ADR-0031
     #[test]
     fn a_reload_keeps_each_chain_under_its_root() {
         let store = Memory::default();

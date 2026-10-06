@@ -1,20 +1,20 @@
 //! The MSI's custom-action command lines, parsed the way Windows will parse them
-//! (`packaging/windows/supervisor.wxs`, ADR-0023).
+//! (`packaging/windows/supervisor.wxs`, ADR-0029).
 //!
-//! Regression test, and since ADR-0014 clause 8 also a guard on how the hazard was retired.
+//! A guard on the hazard ADR-0028 clause 8 rules out.
 //!
 //! `[INSTALLFOLDER]` always resolves with a trailing backslash, and the C runtime that builds a
 //! process's argv treats a backslash before a quote as an escaped, literal quote — so
-//! `--root &quot;[INSTALLFOLDER]&quot;` did not end the argument at the closing quote. The root
-//! swallowed the rest of the command line, `service install` staged into an impossible path, and
-//! every MSI install died with error 1722 ("A program run as part of the setup did not finish as
-//! expected").
+//! `--root &quot;[INSTALLFOLDER]&quot;` would not end the argument at the closing quote. The root
+//! would swallow the rest of the command line, `service install` would stage into an impossible
+//! path, and every MSI install would die with error 1722 ("A program run as part of the setup did
+//! not finish as expected").
 //!
-//! The MSI no longer passes a root at all: `Program Files` holds the payload and the layout goes
-//! under `%ProgramData%`, so no directory property reaches a command line. That is the stronger
-//! fix — a doubled backslash is one edit away from being undoubled, while an argument that is not
-//! there cannot be mis-split. Both facts are asserted below, because the day someone reintroduces
-//! `--root` here, they reintroduce error 1722 with it.
+//! The MSI passes no root at all: `Program Files` holds the payload and the layout goes under
+//! `%ProgramData%`, so no directory property reaches a command line. That is the stronger fix — a
+//! doubled backslash is one edit away from being undoubled, while an argument that is not there
+//! cannot be mis-split. Both facts are asserted below, because the day someone adds `--root` here,
+//! they bring error 1722 with it.
 //!
 //! This test formats each ExeCommand the way msiexec does, splits it under the CRT's documented
 //! rules, and feeds the result to the real CLI parser — pure string handling, so the Windows
@@ -178,7 +178,7 @@ fn install_args(parsed: cli::Parsed) -> cli::InstallArgs {
     }
 }
 
-/// Verifies: ADR-0062
+/// Verifies: ADR-0029
 #[test]
 fn register_service_with_endpoint_survives_the_crt() {
     let args = install_args(parse(&exe_commands()["RegisterServiceWithEndpoint"]));
@@ -186,26 +186,26 @@ fn register_service_with_endpoint_survives_the_crt() {
     assert!(!args.interactive);
 }
 
-/// Verifies: ADR-0062
+/// Verifies: ADR-0029
 #[test]
 fn register_service_survives_the_crt() {
     let args = install_args(parse(&exe_commands()["RegisterService"]));
     assert_eq!(args.endpoint, None);
 }
 
-/// ADR-0014 clause 8: the MSI names neither root, so the install takes the platform defaults —
+/// ADR-0028 clause 8: the MSI names neither root, so the install takes the platform defaults —
 /// `%ProgramData%\opamp-fleet` for both halves — and `Program Files` holds only the payload.
 ///
-/// This is also what keeps error 1722 retired. A directory property resolves with a trailing
-/// backslash, and there is now no command line for one to reach.
-/// Verifies: ADR-0061, ADR-0062
+/// This is also what keeps error 1722 out. A directory property resolves with a trailing backslash,
+/// and there is no command line for one to reach.
+/// Verifies: ADR-0028, ADR-0029
 #[test]
 fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
     for (id, command) in exe_commands() {
         assert!(
             !command.contains("[INSTALLFOLDER]"),
             "{id} passes a directory property again — the trailing backslash that resolves into \
-             it is what produced error 1722 (ADR-0014 clause 8)"
+             it is what produced error 1722 (ADR-0028 clause 8)"
         );
         assert!(
             !command.contains("--root") && !command.contains("--data-root"),
@@ -218,12 +218,12 @@ fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
     assert_eq!(args.data_root, None);
 }
 
-/// The endpoint prefill (ADR-0062): the development Server over TLS on the loopback literal, held
+/// The endpoint prefill (ADR-0029): the development Server over TLS on the loopback literal, held
 /// to the loader's own endpoint rule so the dialog can never offer a value that `service install
 /// --endpoint` would then reject. And it must stay confined to the UI sequence: leaking it into a
 /// silent install would write the development default on every unattended host, the state
-/// ADR-0023 refuses to manufacture.
-/// Verifies: ADR-0062
+/// ADR-0029 refuses to manufacture.
+/// Verifies: ADR-0029
 #[test]
 fn endpoint_prefill_is_the_development_server_and_interactive_only() {
     let element = set_property("ENDPOINT");
@@ -239,12 +239,12 @@ fn endpoint_prefill_is_the_development_server_and_interactive_only() {
     assert_eq!(attribute(element, "Sequence").as_deref(), Some("ui"));
 }
 
-/// ADR-0021: the consent stands unless the install was told otherwise, and the MSI's answer travels
+/// ADR-0020: the consent stands unless the install was told otherwise, and the MSI's answer travels
 /// as a flag appended to the same command line. Two things have to hold, and the second is the one
 /// that would break silently: the withdrawing line must parse to `--no-self-update`, and the
 /// *consenting* line must be character for character what this package sent before the flag
 /// existed — an unset formatted property resolves to nothing, so no `--` argument may appear.
-/// Verifies: ADR-0044
+/// Verifies: ADR-0020
 #[test]
 fn the_self_update_answer_rides_both_register_actions() {
     let commands = exe_commands();
@@ -286,7 +286,7 @@ fn the_self_update_answer_rides_both_register_actions() {
 /// non-empty value, so the withdrawal has to test for the literal `"0"` an administrator types as
 /// well as for the empty property a cleared checkbox leaves. A condition of just `NOT SELFUPDATE`
 /// would honour the checkbox and silently ignore `SELFUPDATE=0`.
-/// Verifies: ADR-0044
+/// Verifies: ADR-0020
 #[test]
 fn the_withdrawal_condition_reads_both_spellings_of_off() {
     let condition = attribute(&set_property("SELFUPDATEFLAG"), "Condition")
@@ -302,7 +302,7 @@ fn the_withdrawal_condition_reads_both_spellings_of_off() {
 
     // Default-on for every install path — unlike the endpoint prefill, whose UI-only scope is the
     // point of `endpoint_prefill_is_the_development_server_and_interactive_only`. A silent install
-    // that names nothing must still get a fleet-updatable Client (ADR-0021). The default lives on
+    // that names nothing must still get a fleet-updatable Client (ADR-0020). The default lives on
     // the `Property` element, which both sequences see; the flag it feeds is computed in the
     // execute sequence alone, because `InstallInitialize` — the place a SetProperty feeding a
     // deferred action belongs before — exists only there.
@@ -321,7 +321,7 @@ fn the_withdrawal_condition_reads_both_spellings_of_off() {
     );
 }
 
-/// Verifies: ADR-0062
+/// Verifies: ADR-0029
 #[test]
 fn stop_and_unregister_survive_the_crt() {
     let commands = exe_commands();
@@ -343,7 +343,7 @@ fn stop_and_unregister_survive_the_crt() {
 /// certificate and its key, as `cert_file` and `key_file`, in the configuration under
 /// `%ProgramData%` — not in the installation folder, which holds only the payload. It mentions no
 /// credential, since the Client reads none.
-/// Verifies: ADR-0062
+/// Verifies: ADR-0029
 #[test]
 fn the_endpoint_dialog_names_the_identity_and_no_credential() {
     let path =

@@ -1,7 +1,7 @@
-//! Taking a version string apart (ADR-0013).
+//! Taking a version string apart (ADR-0017).
 //!
 //! A version this project produces looks like `1.2.3`, `1.2.3+a1b2c3d`, or `1.2.3-dev+a1b2c3d`
-//! (ADR-0013). Three different questions get asked of that one string, and they do not want the
+//! (ADR-0017). Three different questions get asked of that one string, and they do not want the
 //! same answer:
 //!
 //! - *Which release is this?* — the base and, when present, the pre-release. A `-dev` build is not
@@ -16,7 +16,7 @@
 //!
 //! This lives in `fleet-core` rather than in either end: the Client writes these strings and the
 //! Server displays them, so one implementation keeps the two from drifting. It is this project's
-//! grammar, not OpAMP's, which is why it is not in the `opamp` crate (ADR-0031).
+//! grammar, not OpAMP's, which is why it is not in the `opamp` crate (ADR-0024).
 //!
 //! [`current`] is the other half of that: the version *this build* reports. `build.rs` computes it
 //! and bakes it in, and every surface on either end reads it here rather than `CARGO_PKG_VERSION`,
@@ -24,11 +24,11 @@
 
 /// The version this build reports, e.g. `1.2.3+a1b2c3d` or `1.2.3-dev+b4e5f6a`.
 ///
-/// The one place either binary states its version (ADR-0013): the OpAMP `service.version`
-/// attribute, both CLIs' `--version` output, and the install layout of ADR-0014 all call this.
+/// The one place either binary states its version (ADR-0017): the OpAMP `service.version`
+/// attribute, both CLIs' `--version` output, and the install layout of ADR-0028 all call this.
 ///
 /// It is resolved at compile time by this crate's `build.rs` — the base from `Cargo.toml`
-/// (ADR-0013), the `-dev` marker and the commit short-hash from git — so a binary carries the
+/// (ADR-0017), the `-dev` marker and the commit short-hash from git — so a binary carries the
 /// answer rather than looking for a repository that is not there when it runs.
 #[must_use]
 pub fn current() -> &'static str {
@@ -67,7 +67,7 @@ impl<'a> Version<'a> {
 ///
 /// The pre-release and build metadata are held to the SemVer character set — dot-separated,
 /// non-empty identifiers of `[0-9A-Za-z-]`. That is not pedantry: this string becomes a directory
-/// name in the self-update layout (ADR-0014), so a value carrying `/`, `\`, or a bare `..` is both
+/// name in the self-update layout (ADR-0028), so a value carrying `/`, `\`, or a bare `..` is both
 /// not a version *and* a path-traversal waiting to happen. Refusing it here is the single gate the
 /// rest of the project trusts.
 #[must_use]
@@ -121,7 +121,7 @@ fn is_dot_identifiers(field: &str) -> bool {
 }
 
 /// The identifying part of a version string — everything except the build metadata — or `None`
-/// when the value is not a version (ADR-0013).
+/// when the value is not a version (ADR-0017).
 ///
 /// `1.2.3+a1b2c3d` yields `1.2.3`; `1.2.3-dev+a1b2c3d` yields `1.2.3-dev`.
 #[must_use]
@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(dev.identity(), "0.1.1-dev");
     }
 
-    /// The failure that prompted ADR-0013: a package uploaded as the release number against a
+    /// The failure that prompted ADR-0017: a package uploaded as the release number against a
     /// binary that reports the commit it was built from.
     #[test]
     fn a_release_matches_the_build_that_carries_it() {
@@ -284,8 +284,8 @@ mod tests {
         assert_eq!(precedence("", "1.0.0"), None);
     }
 
-    /// The distinction the pre-release exists for (ADR-0013), kept at the gate that can enforce it.
-    // Verifies: ADR-0035
+    /// The distinction the pre-release exists for (ADR-0017), kept at the gate that can enforce it.
+    // Verifies: ADR-0017
     #[test]
     fn a_development_build_is_not_the_release_it_heads_for() {
         assert!(!same_release("0.1.1", "0.1.1-dev+799e36a"));
@@ -325,7 +325,7 @@ mod tests {
         assert!(!same_release("latest", "latest"));
     }
 
-    /// The self-update turns this string into a directory name (ADR-0014), so a pre-release or
+    /// The self-update turns this string into a directory name (ADR-0028), so a pre-release or
     /// build metadata that smuggles a path separator or `..` is not a version. Parsing it away is
     /// the gate that stops a crafted Server offer from escaping `versions/`.
     #[test]
@@ -353,9 +353,9 @@ mod tests {
         assert!(parse("1.2.3-rc.1+build.7").is_some());
     }
 
-    /// The baked string has the shape ADR-0013 prescribes — and, now that both live here, it is
+    /// The baked string has the shape ADR-0017 prescribes — and, since both live here, it is
     /// checked with the parser the rest of the project judges it by rather than a second grammar.
-    // Verifies: ADR-0035
+    // Verifies: ADR-0017
     #[test]
     fn the_baked_version_has_the_adr_0013_shape() {
         let full = current();

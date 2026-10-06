@@ -1,4 +1,4 @@
-//! The package store on the filesystem (ADR-0020, ADR-0030): the default adapter behind
+//! The package store on the filesystem (ADR-0019, ADR-0021): the default adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one directory per Package under
 //! `packages_dir`, holding `package.json` and one `<os>-<arch>.bin` per uploaded entry.
 
@@ -19,7 +19,7 @@ pub struct FsPackageBackend {
 
 impl FsPackageBackend {
     /// Opens the directory, creating it owner-only: a referenced entry's metadata carries the
-    /// private source's headers — a bearer token (ADR-0019) — so the store must not be readable by
+    /// private source's headers — a bearer token (ADR-0018) — so the store must not be readable by
     /// other local users on the Server host. The metadata files are written `0600` as well.
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         super::create_private_dir(&dir)?;
@@ -46,11 +46,11 @@ impl PackageBackend for FsPackageBackend {
                 .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?
                 .path();
             if !path.is_dir() {
-                // A Package is a directory. A loose file at the top level is what the pre-ADR-0020
-                // store wrote (`<name>.json`, `<name>@<os>-<arch>.json`/`.bin`), and there is no
-                // reader for it any more — so it is named rather than skipped. Skipping would turn
-                // an old store into one that merely looks empty, which is the failure an operator
-                // cannot see (ADR-0011: loud, never silently ignored).
+                // A Package is a directory. A loose file at the top level (`<name>.json`,
+                // `<name>@<os>-<arch>.json`/`.bin`) is an older layout this Server has no reader
+                // for — so it is named rather than skipped. Skipping would turn such a store into
+                // one that merely looks empty, which is the failure an operator cannot see
+                // (ADR-0025: loud, never silently ignored).
                 return Err(format!(
                     "{} is not a Package directory — this Server reads no other package store \
                      layout. \
@@ -59,7 +59,7 @@ impl PackageBackend for FsPackageBackend {
                 ));
             }
             // The one directory here that is deliberately not a Package: the channel store the
-            // Deployments live in (ADR-0030), armed by this same `packages_dir`.
+            // Deployments live in (ADR-0021), armed by this same `packages_dir`.
             if path.file_name().and_then(|n| n.to_str()) == Some(DEPLOYMENTS_DIR) {
                 continue;
             }
@@ -68,7 +68,7 @@ impl PackageBackend for FsPackageBackend {
                 // Skipping is the dangerous half. A store written by an older layout —
                 // `<name>@<version>@<type>/set.json` — would open *successfully and empty*: no
                 // offer, no error, and a package list an operator reads as "nothing uploaded yet"
-                // (ADR-0030 point 5). So the directory is named instead.
+                // (ADR-0021 point 5). So the directory is named instead.
                 return Err(format!(
                     "{} holds no package.json — this Server reads no other package store layout. \
                      Move it aside or delete it; nothing here will be migrated.",
@@ -103,7 +103,7 @@ impl PackageBackend for FsPackageBackend {
                 });
                 // An uploaded artifact is re-hashed by streaming, so a corrupt one never ships. A
                 // referenced one has nothing here to check: its hash is the operator's word,
-                // verified by every Agent that downloads it (ADR-0019).
+                // verified by every Agent that downloads it (ADR-0018).
                 let size = match &source {
                     Some(_) => 0,
                     None => {
@@ -234,7 +234,7 @@ fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
 }
 
 /// A Package as persisted: `<agent_type>@<version>/package.json`, entries inline. One document per
-/// Package — what ADR-0020 kept secretly (other versions), this store keeps openly, as more
+/// Package — what ADR-0019 kept secretly (other versions), this store keeps openly, as more
 /// Packages.
 #[derive(Serialize, Deserialize)]
 struct PackageMeta {
@@ -251,7 +251,7 @@ struct EntryMeta {
     os: String,
     arch: String,
     content_hash_hex: String,
-    /// The source of a referenced entry (ADR-0019); absent for an uploaded one.
+    /// The source of a referenced entry (ADR-0018); absent for an uploaded one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_url: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

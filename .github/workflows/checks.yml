@@ -29,7 +29,7 @@ name: Checks
 #   git hooks under .githooks/, which refuse a commit on main and a push while the checks are
 #   red: a hook that is wrong guards nothing.
 # - Rust: the Cargo workspace built, tested and linted by scripts/check-rust.sh — the commands of
-#   README.md → "Build, Test & Run", on the stack of ADR-0058 — the same script
+#   README.md → "Build, Test & Run", on the stack of ADR-0025 — the same script
 #   scripts/check-all.sh runs, so the build and the tests gate a push as they gate a merge. The one
 #   job of this workflow that installs something: rustup reads rust-toolchain.toml on first use,
 #   and the cache keeps the build within its timeout. Check 9 recognises the job by its run line.

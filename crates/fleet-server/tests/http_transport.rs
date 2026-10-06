@@ -1,4 +1,4 @@
-//! The plain-HTTP transport end to end (ADR-0012): protobuf in, protobuf out, gzip accepted, the
+//! The plain-HTTP transport end to end (ADR-0023): protobuf in, protobuf out, gzip accepted, the
 //! config offer gated by the hash comparison.
 
 mod support;
@@ -60,7 +60,7 @@ async fn a_report_is_answered_and_the_agent_appears_in_the_fleet() {
     )
     .expect("json");
     assert_eq!(agents.as_array().expect("array").len(), 1);
-    // Type and name are two columns now (ADR-0024): `service_name` is what kind of Agent this is,
+    // Type and name are two columns now (ADR-0012): `service_name` is what kind of Agent this is,
     // `service_instance_name` is which one.
     assert_eq!(agents[0]["service_name"], support::AGENT_TYPE);
     assert_eq!(agents[0]["service_instance_name"], "itest");
@@ -342,7 +342,7 @@ async fn stateless_http_polling_never_triggers_the_duplicate_rekey() {
     );
 }
 
-/// Verifies: ADR-0054
+/// Verifies: ADR-0023
 #[tokio::test]
 async fn gzip_request_bodies_are_accepted() {
     let server = spawn().await;
@@ -371,7 +371,7 @@ async fn gzip_request_bodies_are_accepted() {
 
 /// The Baseline (message size limits): the Server MUST enforce a receive limit on the plain-HTTP
 /// transport and MUST answer an oversized request with `413 Content Too Large`.
-/// Verifies: ADR-0054
+/// Verifies: ADR-0023
 #[tokio::test]
 async fn an_oversized_request_body_is_refused_with_413() {
     let server = spawn_with_limit(1024).await;
@@ -389,7 +389,7 @@ async fn an_oversized_request_body_is_refused_with_413() {
 
 /// The same limit, applied *after* decompression: a small gzip body that inflates past the limit
 /// buys no more memory than an oversized plain one, and is answered the same way.
-/// Verifies: ADR-0054
+/// Verifies: ADR-0023
 #[tokio::test]
 async fn a_gzip_body_that_inflates_past_the_limit_is_refused_with_413() {
     let server = spawn_with_limit(1024).await;
@@ -413,7 +413,7 @@ async fn a_gzip_body_that_inflates_past_the_limit_is_refused_with_413() {
     assert_eq!(response.status(), 413);
 }
 
-/// Verifies: ADR-0054
+/// Verifies: ADR-0023
 #[tokio::test]
 async fn transport_detection_rejects_a_missing_protobuf_content_type() {
     let server = spawn().await;
@@ -497,7 +497,7 @@ async fn an_unknown_compressed_agent_is_asked_for_full_state_and_can_request_ide
 
 /// A poller past its burst is answered in the body: a `200` carrying the same `Unavailable` a
 /// WebSocket gets, never a `429` or a `503`.
-/// Verifies: ADR-0066
+/// Verifies: ADR-0023
 #[tokio::test]
 async fn a_poller_past_its_burst_is_answered_unavailable_in_the_body() {
     let (server, _clock) = support::spawn_with_agent_rate(fleet_server::agent_rate::Limits {

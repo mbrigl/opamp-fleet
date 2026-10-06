@@ -1,4 +1,4 @@
-//! End to end over **plain HTTP polling** (ADR-0012) — the same two things `e2e.rs` and
+//! End to end over **plain HTTP polling** (ADR-0023) — the same two things `e2e.rs` and
 //! `packages_e2e.rs` prove over a WebSocket: a Configuration rollout is applied, and a signed
 //! package is downloaded, verified, swapped and reported `Installed`.
 //!
@@ -25,10 +25,10 @@ use fleet_server::packages::{PackageStore, Platform};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
 /// Puts a Package into a ring aimed at the Agent type it is built for, and hands back the ring's
-/// name. Aim belongs to the Deployment now (ADR-0030): a Package reaches nobody by itself, so a
+/// name. Aim belongs to the Deployment now (ADR-0021): a Package reaches nobody by itself, so a
 /// test that wants one delivered has to say which ring the host is in — which is the model.
 /// The same, recording the artifact's signature on the ring — where a signature lives since
-/// ADR-0030. A Client with `[packages] verification_key` set refuses an unsigned artifact, so the
+/// ADR-0021. A Client with `[packages] verification_key` set refuses an unsigned artifact, so the
 /// ring is what has to carry it.
 fn ring_holding_signed(
     state: &fleet_server::fleet::AppState,
@@ -117,7 +117,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
 /// A Configuration rollout reaches a poller and is applied — `APPLIED`, in sync, and the managed
 /// process restarted on the written file. No Server push is involved: the offer rides the reply to
 /// the Client's own next poll, which is the whole of how this transport learns anything.
-/// Verifies: ADR-0054, G-1
+/// Verifies: ADR-0023, G-1
 #[tokio::test]
 async fn a_configuration_rollout_reaches_a_polling_client() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -280,8 +280,8 @@ async fn a_package_rollout_reaches_a_polling_client() {
     wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type since ADR-0030, and this block states none — so it is
-        // the program's file name, `managed-agent`, not the Supervisor's own name `myagent`.
+        // The wire name is the Agent type (ADR-0021 clause 2), and this block states none — so it
+        // is the program's file name, `managed-agent`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "Installed" && package.version == "2.0.0").then_some(())
     })

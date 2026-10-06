@@ -1,11 +1,11 @@
-//! The Baseline's attribute keys, and reading a string out of a set of them (ADR-0011).
+//! The Baseline's attribute keys, and reading a string out of a set of them (ADR-0025).
 //!
 //! An `AgentDescription` carries its identity as `KeyValue` pairs, and the keys are fixed strings
 //! the Baseline names. Both ends match on the same ones —
-//! [ADR-0024](../../../docs/adr/0024-what-an-agent-reports-about-itself.md)
+//! [ADR-0012](../../../docs/adr/0012-what-an-agent-reports-about-itself.md)
 //! gives `service.name` and `service.instance.name` their meaning, and
-//! [ADR-0020](../../../docs/adr/0020-the-package-store.md) and
-//! [ADR-0020](../../../docs/adr/0020-the-package-store.md) make them
+//! [ADR-0019](../../../docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md) and
+//! [ADR-0019](../../../docs/adr/0019-the-package-store-references-artifacts-only-over-tls-beyond-the-loopback.md) make them
 //! decide *which binary a host is offered*.
 //!
 //! Spelled as literals at each use, a typo in one of them is not a compile error: it is a Selector
@@ -15,27 +15,27 @@
 use crate::proto::{any_value, AnyValue, ArrayValue, KeyValue};
 
 /// The Agent *type* — a Collector distribution, this Client — never an operator's name for one
-/// (ADR-0024). A package is matched against it (ADR-0020).
+/// (ADR-0012). A package is matched against it (ADR-0019).
 pub const SERVICE_NAME: &str = "service.name";
-/// The operator's name for one Agent (ADR-0024).
+/// The operator's name for one Agent (ADR-0012).
 pub const SERVICE_INSTANCE_NAME: &str = "service.instance.name";
 /// The namespace an Agent runs in, reported only where the environment uses one.
 pub const SERVICE_NAMESPACE: &str = "service.namespace";
 /// The version the Agent reports for itself.
 pub const SERVICE_VERSION: &str = "service.version";
 /// The operating system in the semantic-convention spelling (`linux`, `darwin`, `windows`) — half
-/// of the platform a package artifact is chosen by (ADR-0020).
+/// of the platform a package artifact is chosen by (ADR-0019).
 pub const OS_TYPE: &str = "os.type";
 /// The human-readable operating system description, e.g. `Ubuntu 26.04 LTS`.
 pub const OS_DESCRIPTION: &str = "os.description";
 /// The architecture in the semantic-convention spelling (`amd64`, `arm64`) — the other half of the
-/// platform (ADR-0020).
+/// platform (ADR-0019).
 pub const HOST_ARCH: &str = "host.arch";
 
 /// The string value of `key`, or `None` when the attribute is absent, holds another type, or is
 /// empty.
 ///
-/// **An empty string is not a value.** That rule is load-bearing rather than tidy: ADR-0020 refuses
+/// **An empty string is not a value.** That rule is load-bearing rather than tidy: ADR-0019 refuses
 /// to offer a package to an Agent of another type, and an Agent reporting `service.name = ""` must
 /// therefore match no package at all rather than match every untyped one. Stating it here is the
 /// point of the module — one of the two copies this replaces enforced it and the other did not.
@@ -131,9 +131,9 @@ mod tests {
         assert_eq!(string_value(&attrs, SERVICE_INSTANCE_NAME), Some("edge-01"));
     }
 
-    /// The rule ADR-0020 leans on: an Agent that reports its type as an empty string reports no
+    /// The rule ADR-0019 leans on: an Agent that reports its type as an empty string reports no
     /// type, so it matches no package rather than every untyped one.
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0025
     #[test]
     fn an_empty_string_is_not_a_value() {
         assert_eq!(string_value(&attrs(), SERVICE_VERSION), None);

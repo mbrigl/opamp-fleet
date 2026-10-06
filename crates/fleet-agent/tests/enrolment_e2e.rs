@@ -1,4 +1,4 @@
-//! Enrolment and the renewals after it, end to end (ADR-0059 clauses 9, 11, 21 and 22): the real
+//! Enrolment and the renewals after it, end to end (ADR-0026 clauses 9, 11, 21 and 22): the real
 //! Client binary enrols with a bootstrap certificate over mutual TLS, an operator approves its
 //! request, and it renews what it was issued — each step costing the register exactly one
 //! certificate.
@@ -105,14 +105,14 @@ async fn past(state: &AppState, after: u64) {
 
 /// A host enrols with a bootstrap certificate and an operator's approval, and then renews, over the
 /// WebSocket transport: the approval issues one certificate and the renewal one more.
-/// Verifies: ADR-0059, ADR-0065
+/// Verifies: ADR-0026, ADR-0031
 #[tokio::test]
 async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_websocket() {
     enrol_and_renew("wss").await;
 }
 
 /// The same over plain HTTP polling.
-/// Verifies: ADR-0059, ADR-0065
+/// Verifies: ADR-0026, ADR-0031
 #[tokio::test]
 async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_http() {
     enrol_and_renew("https").await;
@@ -120,7 +120,7 @@ async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_http() {
 
 /// With heartbeats off, the request still reaches the queue at once: it never waits for a message
 /// that would carry it, and the certificate is pushed to the host on approval.
-/// Verifies: ADR-0059
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn an_enrolment_needs_no_heartbeat() {
     let served = Served::start(60).await;

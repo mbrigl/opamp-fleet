@@ -1,10 +1,10 @@
-//! Gateway Mode end to end (ADR-0071): the real Server, a real Gateway, and Agents reaching one
+//! Gateway Mode end to end (ADR-0034): the real Server, a real Gateway, and Agents reaching one
 //! through the other.
 //!
 //! What these prove is the part the design rests on — that the Server sees Agents rather than
 //! connections. Two downstream peers on two transports arrive as two Agents over **one** upstream
 //! connection, and each gets its own replies back. Every downstream peer reaches the Gateway over
-//! mutual TLS 1.3, the only way a Gateway admits one (ADR-0071).
+//! mutual TLS 1.3, the only way a Gateway admits one (ADR-0034).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-/// The downstream hop's PKI (ADR-0071): one CA that signs the Gateway's server certificate and the
+/// The downstream hop's PKI (ADR-0034): one CA that signs the Gateway's server certificate and the
 /// client certificate every downstream peer presents. The files live in a directory that outlives
 /// the Gateway reading them.
 struct Pki {
@@ -193,7 +193,7 @@ fn report(uid: &InstanceUid, sequence: u64) -> AgentToServer {
 
 /// Two Agents, two downstream transports, one upstream connection — and the Server tells them
 /// apart by `instance_uid` alone, which is the whole premise of Gateway Mode.
-/// Verifies: ADR-0071, G-14, G-15
+/// Verifies: ADR-0034, G-14, G-15
 #[tokio::test]
 async fn two_agents_reach_the_server_over_one_folded_connection() {
     let (server, state, _dir) = spawn_server().await;
@@ -246,8 +246,8 @@ async fn two_agents_reach_the_server_over_one_folded_connection() {
 }
 
 /// The pool grows lazily to its cap and no further: one Agent means one upstream connection, even
-/// with a cap of ten (ADR-0071 clause 8).
-/// Verifies: ADR-0071, G-15
+/// with a cap of ten (ADR-0034 clause 8).
+/// Verifies: ADR-0034, G-15
 #[tokio::test]
 async fn one_agent_opens_one_upstream_connection() {
     let (server, state, _dir) = spawn_server().await;
@@ -273,7 +273,7 @@ async fn one_agent_opens_one_upstream_connection() {
 /// report for a new Agent is dropped rather than growing the routing state, while the Agents already
 /// carried keep being served. This is what stops one hostile peer streaming endless fabricated
 /// `instance_uid`s from inflating the registry and pool maps without limit.
-/// Verifies: ADR-0071
+/// Verifies: ADR-0034
 #[tokio::test]
 async fn a_downstream_connection_carries_no_more_than_its_agent_cap() {
     let (server, state, _dir) = spawn_server().await;
@@ -362,7 +362,7 @@ async fn a_downstream_connection_carries_no_more_than_its_agent_cap() {
 
 /// A downstream peer that speaks the wrong content type is refused by the Gateway rather than
 /// forwarded — the Baseline's rule for the plain-HTTP transport, enforced per hop.
-/// Verifies: ADR-0071
+/// Verifies: ADR-0034
 #[tokio::test]
 async fn a_downstream_peer_without_the_protobuf_content_type_is_refused() {
     let (server, _state, _dir) = spawn_server().await;
@@ -384,12 +384,12 @@ async fn a_downstream_peer_without_the_protobuf_content_type_is_refused() {
 /// A gzipped report reaches the Server through the Gateway.
 ///
 /// The regression: accepting `Content-Encoding: gzip` is a Baseline MUST for anything serving this
-/// protocol, and a Gateway *is* an OpAMP server downstream (ADR-0071). It implemented the rule
+/// protocol, and a Gateway *is* an OpAMP server downstream (ADR-0034). It implemented the rule
 /// nowhere — the Server's endpoint had it, this one handed the compressed bytes straight to the
 /// protobuf decoder — so a Client that compressed reached the Server directly and was refused the
 /// moment a Gateway was put in front of it. One reading of the rule now serves both endpoints
-/// (ADR-0011).
-/// Verifies: ADR-0071
+/// (ADR-0025).
+/// Verifies: ADR-0034
 #[tokio::test]
 async fn a_downstream_peer_may_gzip_its_report() {
     let (server, state, _dir) = spawn_server().await;
@@ -422,7 +422,7 @@ async fn a_downstream_peer_may_gzip_its_report() {
 
 /// The other half of that MUST: the size limit applies *after* decompression, so a few kilobytes
 /// of gzip cannot buy the hop gigabytes of memory. Refused rather than expanded.
-/// Verifies: ADR-0071
+/// Verifies: ADR-0034
 #[tokio::test]
 async fn a_gzip_bomb_is_refused_by_the_gateway() {
     let (server, state, _dir) = spawn_server().await;
@@ -454,11 +454,11 @@ async fn a_gzip_bomb_is_refused_by_the_gateway() {
 
 /// An oversized message closes the downstream socket with 1009, the status the Baseline names.
 ///
-/// The regression: a Gateway is an OpAMP server to the Agents behind it (ADR-0071), and
+/// The regression: a Gateway is an OpAMP server to the Agents behind it (ADR-0034), and
 /// `docs/CONFORMANCE.md` claims the `1009 Message Too Big` close as implemented. The Server's
 /// endpoint did it; this one hung up with no status at all, so a downstream Client saw its
 /// connection drop and could not tell an oversized report from a Gateway that had died.
-/// Verifies: ADR-0071
+/// Verifies: ADR-0034
 #[tokio::test]
 async fn an_oversized_downstream_message_closes_with_1009() {
     let (server, _state, _dir) = spawn_server().await;

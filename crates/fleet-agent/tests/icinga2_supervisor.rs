@@ -1,4 +1,4 @@
-//! The `icinga2` kind as the core drives it (ADR-0029): the plugin's own adapter, its
+//! The `icinga2` kind as the core drives it (ADR-0016): the plugin's own adapter, its
 //! enrolment task, and the validation gate in front of the shared `Runner`.
 //!
 //! The unit tests in the module check the pieces; this drives the assembled thing through
@@ -119,8 +119,8 @@ async fn wait_for_file(path: &Path) {
     }
 }
 
-/// Delivers Icinga's root configuration the way the fleet does (ADR-0029): the entry, and the role
-/// that says it is the root. The block no longer names it — the marking is the fleet's.
+/// Delivers Icinga's root configuration the way the fleet does (ADR-0016): the entry, and the role
+/// that says it is the root. The block does not name it — the marking is the fleet's.
 fn write_config(harness: &Harness, body: &str) {
     std::fs::write(harness.config_dir().join("icinga2-conf"), body).expect("configuration");
     std::fs::write(
@@ -146,7 +146,7 @@ async fn apply_config(harness: &Harness) {
         .expect("send");
 }
 
-/// The Agent role's gate (ADR-0029): a parent that cannot be reached is a *wait* with a reason, and
+/// The Agent role's gate (ADR-0016): a parent that cannot be reached is a *wait* with a reason, and
 /// the daemon stays unstarted. Before this, a Supervisor would have spawned a process that could
 /// not do its job and hidden the cause in a restart loop.
 #[tokio::test]
@@ -175,7 +175,7 @@ async fn an_unreachable_parent_waits_with_a_reason_and_starts_nothing() {
 }
 
 /// The whole path in one go: enrolment succeeds, the gate opens, and the daemon runs — with the
-/// state where ADR-0029 puts it, beside the tree rather than inside it.
+/// state where ADR-0016 puts it, beside the tree rather than inside it.
 #[tokio::test]
 async fn enrolment_opens_the_gate_and_the_daemon_starts() {
     let mut harness = start(
@@ -204,7 +204,7 @@ async fn enrolment_opens_the_gate_and_the_daemon_starts() {
     harness.shutdown_tx.send(true).expect("shutdown");
 }
 
-/// ADR-0029's validation gate, through the assembled adapter: a configuration Icinga refuses is
+/// ADR-0016's validation gate, through the assembled adapter: a configuration Icinga refuses is
 /// answered `FAILED` and never reaches the running daemon — which is the only way the fleet can be
 /// told the truth about an apply Icinga aborts silently.
 /// Verifies: G-4, G-7

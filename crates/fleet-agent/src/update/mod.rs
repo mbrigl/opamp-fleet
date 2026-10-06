@@ -1,11 +1,11 @@
-//! The Client updating itself (ADR-0021): the decisions, apart from the host that carries them out.
+//! The Client updating itself (ADR-0020): the decisions, apart from the host that carries them out.
 //!
 //! The Client's own Agent accepts a package like any Supervisor's, but nothing outlives the
 //! process that installs it. So the install is split across a restart. Before it, the
 //! [`SelfUpdater`] stages, proves and points at the new version. After it, the next process either
 //! commits that version or rolls back. This module holds the port and the state the Engine keeps
 //! about it: whether self-update is armed, whether the Server has answered this process, and
-//! whether the run has to end. The adapter on the ADR-0014 version directories is
+//! whether the run has to end. The adapter on the ADR-0028 version directories is
 //! [`installer`].
 
 pub mod installer;
@@ -16,7 +16,7 @@ use std::path::Path;
 /// be some other program; this is what only this program answers.
 pub const SELF_CHECK_TOKEN: &str = "supervisor self-check ok version=";
 
-/// The exit code that asks the service manager for a restart (ADR-0021). Non-zero on purpose:
+/// The exit code that asks the service manager for a restart (ADR-0020). Non-zero on purpose:
 /// "restart on failure" is what all three managers offer, and there is no "restart on success".
 pub const EXIT_RESTART_FOR_UPDATE: i32 = 10;
 

@@ -92,7 +92,7 @@
           "type": "grafana-clickhouse-datasource",
           "uid": "clickhouse"
         },
-        "description": "The host an Agent runs on, as os.type/host.arch \u2014 the two halves ADR-0020 selects a package variant by.",
+        "description": "The host an Agent runs on, as os.type/host.arch \u2014 the two halves ADR-0019 selects a package variant by.",
         "query": {
           "refId": "tempvar",
           "editorType": "sql",

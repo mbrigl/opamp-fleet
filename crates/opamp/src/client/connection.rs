@@ -1,4 +1,4 @@
-//! One upstream connection, described once and built here (ADR-0036).
+//! One upstream connection, described once and built here (ADR-0024).
 //!
 //! The application says *what* to connect with: the endpoint, the credential, the trust anchors and
 //! the identity, the limit and the intervals. Everything else is built in this module: the rustls
@@ -35,7 +35,7 @@ pub struct ClientTls {
 impl ClientTls {
     /// The rustls configuration for `wss://`, always built here — never the transport's default,
     /// which would take whatever provider the process happens to have, TLS 1.2 included
-    /// (ADR-0036). Nothing configured means the web roots and no client certificate. Always
+    /// (ADR-0024). Nothing configured means the web roots and no client certificate. Always
     /// `Some`; the `Option` keeps the callers' shape.
     ///
     /// # Errors
@@ -326,7 +326,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0057
+    /// Verifies: ADR-0024
     #[test]
     fn the_scheme_picks_the_transport_and_anything_else_is_refused() {
         assert_eq!(Scheme::of("wss://h/v1/opamp"), Ok(Scheme::WebSocket));
@@ -337,7 +337,7 @@ mod tests {
         assert!(Scheme::of("h/v1/opamp").is_err());
     }
 
-    /// Verifies: ADR-0057, ADR-0054
+    /// Verifies: ADR-0024, ADR-0023
     #[test]
     fn plaintext_is_refused_off_the_loopback_literals() {
         let allowed = |endpoint| connection(endpoint, Some("Bearer t")).scheme();
@@ -366,7 +366,7 @@ mod tests {
             .is_err());
     }
 
-    /// Verifies: ADR-0057, ADR-0054
+    /// Verifies: ADR-0024, ADR-0023
     #[tokio::test]
     async fn plaintext_off_the_loopback_is_refused_before_connecting() {
         let refused = connection("ws://192.0.2.1:9/v1/opamp", None);
@@ -394,7 +394,7 @@ mod tests {
         assert!(!shown.contains("secret"), "{shown}");
     }
 
-    /// Verifies: ADR-0057
+    /// Verifies: ADR-0024
     #[test]
     fn no_tls_material_still_offers_tls_1_3_alone() {
         let config = ClientTls::default()

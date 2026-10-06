@@ -1,30 +1,30 @@
 #!/bin/sh
-# Post-install for the `.deb` and the `.rpm` alike (ADR-0062 clauses 12 and 13).
+# Post-install for the `.deb` and the `.rpm` alike (ADR-0029 clauses 12 and 13).
 #
 # The package delivered `/usr/libexec/opamp-fleet/supervisor` and nothing else. The install itself —
 # the versioned layout, the `current` pointer, the systemd unit — belongs to the Client's own
-# `service install` (ADR-0061), which is all this calls. No package ships a unit file: one that did
-# would know nothing of ADR-0014's service name or ADR-0021's restart policy, and there would be two
+# `service install` (ADR-0028), which is all this calls. No package ships a unit file: one that did
+# would know nothing of ADR-0028's service name or ADR-0020's restart policy, and there would be two
 # registrations disagreeing about which is the real one.
 #
-# What an operator invokes on PATH is a symlink through the layout's `current` pointer (ADR-0023),
+# What an operator invokes on PATH is a symlink through the layout's `current` pointer (ADR-0029),
 # laid here — so `opamp-fleet --version` answers for the binary the service runs, not for whatever
 # this package happened to deliver. The link carries the **product's** name and the file it resolves
-# to carries the program's (ADR-0014 clause 3): two variant builds must not collide on one
+# to carries the program's (ADR-0028 clause 3): two variant builds must not collide on one
 # `/usr/bin` entry, and they would if the link were named after the program they share.
 #
 # The paths name the default system roots (`default_layout_root` and `default_root` in
 # crates/fleet-agent/src/service/manager.rs), the only roots a packaged install ever uses: this script
 # calls plain `service install`. They are two roots on Linux — the executable layout under `/opt`,
 # because SELinux never lets systemd execute a binary labeled `var_lib_t`; the configuration and
-# state under `/var/lib`, where data belongs (ADR-0014 clause 8, carrying ADR-0014).
+# state under `/var/lib`, where data belongs (ADR-0028 clause 8).
 #
-# There is no migration branch here, and that is ADR-0014 clause 10: no host was ever installed
-# under the paths or names this release replaces, so there is nothing to carry across.
+# There is no migration branch here, and that is ADR-0028 clause 10: an upgrade is a
+# re-registration, so there is nothing to carry across.
 #
 # dpkg calls this as `postinst configure <old-version>`, rpm as `%post <count>`. The two argument
 # conventions have nothing in common, so nothing here reads "$1" except to bow out of dpkg's abort
-# paths — everything else is idempotent by ADR-0014 and safe on either.
+# paths — everything else is idempotent by ADR-0028 and safe on either.
 set -e
 
 case "${1-}" in
@@ -59,7 +59,7 @@ fi
 cat <<'EOF'
 
 The service is registered and stopped. Not starting it is deliberate: a Client without a client
-certificate refuses to start (ADR-0059, ADR-0062). Two steps remain:
+certificate refuses to start (ADR-0026, ADR-0029). Two steps remain:
 
   opamp-fleet service install --interactive
   systemctl start opamp-fleet
@@ -74,7 +74,7 @@ identity:
   cert_file = "<client or bootstrap certificate>"
   key_file = "<its key>"
 
-The configuration lets the Server update this Client itself (ADR-0044), from signed packages only
+The configuration lets the Server update this Client itself (ADR-0020), from signed packages only
 — the fleet then patches its own agent like any other program. Write `enabled = false` under
 [self_update] in supervisor.toml to keep that one update manual.
 EOF

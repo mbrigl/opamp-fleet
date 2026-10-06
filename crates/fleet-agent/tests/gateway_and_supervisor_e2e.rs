@@ -1,5 +1,5 @@
 //! The two Client Modes on one host, tested together: Supervisor Mode plus Gateway Mode in one
-//! process is a real test surface (ADR-0071), not just each mode in isolation.
+//! process is a real test surface (ADR-0034), not just each mode in isolation.
 //!
 //! They are orthogonal by design, and everything they share is where that could stop being true:
 //! one configuration file, one shutdown signal, one upstream endpoint, one TLS setup, and a gateway
@@ -21,7 +21,7 @@ use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-/// The downstream hop's PKI (ADR-0071): a Gateway admits Agents over mutual TLS only, so one CA
+/// The downstream hop's PKI (ADR-0034): a Gateway admits Agents over mutual TLS only, so one CA
 /// signs the Gateway's server certificate and the client certificate a downstream peer presents.
 struct Pki {
     ca_pem: String,
@@ -147,7 +147,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
     )
 }
 
-/// An Agent by the operator's name for it (`service.instance.name`, ADR-0024).
+/// An Agent by the operator's name for it (`service.instance.name`, ADR-0012).
 fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
@@ -160,7 +160,7 @@ fn free_port() -> u16 {
 
 /// One host supervising its own process *and* gatewaying for another Client: three Agents reach the
 /// Server, each its own, over the connections this one Client holds.
-/// Places the stub where a Managed Process must live since ADR-0022: inside the Supervisor's own
+/// Places the stub where a Managed Process must live (ADR-0032): inside the Supervisor's own
 /// `program/` directory, under a bare name the configuration can spell. Copied rather than
 /// symlinked so the file is one this Client owns in fact as well as by rule — which is what an
 /// installed package would leave behind.
@@ -186,7 +186,7 @@ fn install_stub(state_dir: &Path, supervisor: &str) -> String {
     name.to_string()
 }
 
-/// Verifies: ADR-0071
+/// Verifies: ADR-0034
 #[tokio::test]
 async fn a_host_supervises_and_gateways_at_the_same_time() {
     let (addr, state, dir) = spawn_server().await;
@@ -258,7 +258,7 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
         .expect("send through the gateway");
 
     // Three Agents, from one host running both modes — and the Server tells them apart by
-    // `instance_uid` alone, never by which connection carried them (ADR-0071).
+    // `instance_uid` alone, never by which connection carried them (ADR-0034).
     let agents = wait_until("the gatewayed agent too", || {
         let snapshot = state.snapshot();
         (snapshot.len() == 3).then_some(snapshot)
@@ -281,9 +281,9 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
 
 /// The interaction that only exists because both modes share a process: a verified connection
 /// settings offer ends the transport run, and the gateway task is restarted with the new
-/// configuration (ADR-0071) — because the pool dials the endpoint an offer can move. The
+/// configuration (ADR-0034) — because the pool dials the endpoint an offer can move. The
 /// Supervisors must live straight through it, and the Gateway must come back serving.
-/// Verifies: ADR-0071, ADR-0060
+/// Verifies: ADR-0034, ADR-0027
 #[tokio::test]
 async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_running() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -401,7 +401,7 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
 
 /// The Gateway binding a port must not take the Supervisors with it when it cannot: a Client whose
 /// gateway address is already taken fails loudly at startup rather than half-starting.
-/// Verifies: ADR-0071
+/// Verifies: ADR-0034
 #[tokio::test]
 async fn a_gateway_that_cannot_bind_is_loud() {
     let (addr, state, dir) = spawn_server().await;
@@ -429,7 +429,7 @@ async fn a_gateway_that_cannot_bind_is_loud() {
     let _client = spawn_client(&config_path);
 
     // The Client itself still reaches the Server: Gateway Mode failing to bind is loud in the log
-    // and fatal to the Gateway, not to the host's own management (ADR-0071 clause 1).
+    // and fatal to the Gateway, not to the host's own management (ADR-0034 clause 1).
     wait_until("the Client's own Agent despite the blocked gateway", || {
         state
             .snapshot()

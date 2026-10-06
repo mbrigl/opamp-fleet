@@ -1,14 +1,14 @@
 //! Which plane answers what: the OpAMP endpoint is the Agent plane's, and the REST API is the
-//! Operator plane's alone (ADR-0012).
+//! Operator plane's alone (ADR-0023).
 
 mod support;
 
 use support::spawn;
 
-/// The REST API answers on the Operator plane's own listener (ADR-0012), where authenticating it is
+/// The REST API answers on the Operator plane's own listener (ADR-0023), where authenticating it is
 /// a separate decision from the Agent plane's admission, and it is *not* served on the Agent plane
 /// at all, which is what the split is. The name is kept because accepted ADRs cite it.
-/// Verifies: ADR-0054
+/// Verifies: ADR-0023
 #[tokio::test]
 async fn the_rest_api_stays_open_on_its_own_listener_when_the_opamp_endpoint_is_guarded() {
     let server = spawn().await;

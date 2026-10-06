@@ -1,12 +1,12 @@
-//! Whether a Managed Process that failed is started again or held instead (ADR-0019): the
+//! Whether a Managed Process that failed is started again or held instead (ADR-0018): the
 //! crash-loop policy, apart from the process it is applied to. The runner reads the clock, waits
 //! out its backoff and starts the process; this decides.
 
 use std::time::{Duration, Instant};
 
 /// How many times in a row a Managed Process may fail to stay up before the Runner stops restarting
-/// it and holds until something changes — a new configuration, a new package, or a restart (ADR-0019).
-/// It is the self-update's give-up (three attempts, ADR-0021), so the two update paths behave alike.
+/// it and holds until something changes — a new configuration, a new package, or a restart (ADR-0018).
+/// It is the self-update's give-up (three attempts, ADR-0020), so the two update paths behave alike.
 /// A restart loop is a denial of service against the fleet's own Server; this bounds it.
 pub const MAX_CRASH_RESTARTS: usize = 3;
 
@@ -78,7 +78,7 @@ impl RestartPolicy {
 mod tests {
     use super::*;
 
-    /// ADR-0019: a process that keeps failing to start is held after a few tries rather than
+    /// ADR-0018: a process that keeps failing to start is held after a few tries rather than
     /// restarted forever.
     #[test]
     fn a_process_that_keeps_failing_is_held_after_three_tries() {
