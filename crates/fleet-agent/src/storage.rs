@@ -94,6 +94,65 @@ impl Storage {
     }
 }
 
+impl Storage {
+    /// Takes the Client's own stored Supervisor set out of the way on a host that keeps its set
+    /// (ADR-0069 clause 24): `remote-config.pb` goes **first**, so nothing that fails after it can
+    /// leave a hash to report, and then each entry copy in `config/` whose bytes are still the
+    /// stored ones goes as far as it can. Nothing runs on the copies, so one that cannot be read
+    /// or deleted is named in the result, not an error. A `.pb` that does not decode is deleted
+    /// and `config/` is left alone. `None` when nothing was stored.
+    ///
+    /// # Errors
+    /// Returns an error only when `remote-config.pb` itself cannot be read or deleted.
+    pub fn drop_stored_set(&self) -> io::Result<Option<DroppedStoredSet>> {
+        let pb = self.dir.join(CONFIG_PB_FILE);
+        let bytes = match std::fs::read(&pb) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        std::fs::remove_file(&pb)?;
+        let Ok(config) = AgentRemoteConfig::decode(bytes.as_slice()) else {
+            return Ok(Some(DroppedStoredSet::Undecodable));
+        };
+        let config_dir = self.config_dir();
+        let (mut kept, mut unremoved) = (Vec::new(), Vec::new());
+        for (file_name, body) in written_files(&config) {
+            let path = config_dir.join(&file_name);
+            match std::fs::read(&path) {
+                Ok(on_disk) if on_disk == body => {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        unremoved.push((file_name, e.to_string()));
+                    }
+                }
+                Ok(_) => kept.push(file_name),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => unremoved.push((file_name, e.to_string())),
+            }
+        }
+        Ok(Some(DroppedStoredSet::Removed {
+            hash: config.config_hash,
+            kept,
+            unremoved,
+        }))
+    }
+}
+
+/// What [`Storage::drop_stored_set`] found and did (ADR-0069 clause 24).
+#[derive(Debug, PartialEq, Eq)]
+pub enum DroppedStoredSet {
+    /// `remote-config.pb` is gone, and so is every entry copy still as stored; `kept` names the
+    /// copies whose content had changed, `unremoved` those that could not be read or deleted, each
+    /// with the error.
+    Removed {
+        hash: Vec<u8>,
+        kept: Vec<String>,
+        unremoved: Vec<(String, String)>,
+    },
+    /// The stored `remote-config.pb` did not decode and is gone; `config/` was left as it was.
+    Undecodable,
+}
+
 /// What [`Storage::drop_remote_config`] found and did (ADR-0067 clause 5).
 #[derive(Debug, PartialEq, Eq)]
 pub enum DroppedRemoteConfig {

@@ -882,7 +882,7 @@ async fn intercept(
 }
 
 /// `node_name` names the certificate and key files of this host, so it is one plain file-name
-/// component and nothing that could climb out of the certificate directory (ADR-0051 clause 19).
+/// component and nothing that could climb out of the certificate directory (ADR-0069 clause 19).
 fn check_node_name(name: &str, node_name: Option<&str>) -> Result<(), String> {
     let Some(node_name) = node_name else {
         return Ok(());
@@ -1029,7 +1029,7 @@ impl Plugin for Icinga2Plugin {
     }
 
     /// A delivered block reads its ticket and the parent's certificate only from its own
-    /// configuration directory, and pins the parent it names (ADR-0051 clause 19): otherwise the
+    /// configuration directory, and pins the parent it names (ADR-0069 clause 19): otherwise the
     /// Server could name any file on the host and a parent to send it to.
     fn check_delivered(
         &self,

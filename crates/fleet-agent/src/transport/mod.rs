@@ -227,6 +227,16 @@ pub async fn process_self_configuration<S: ReportSink>(
     let Some(offer) = engine.take_self_config() else {
         return false;
     };
+    // A second gate behind the capability the Agent does not declare: on a host that keeps its
+    // set no path reaches the apply (ADR-0069 clause 23).
+    if !config.server_manages_set() {
+        tracing::warn!(
+            hash = %hex::encode(&offer.config_hash),
+            "refusing to apply a supervisor set: this Client keeps its supervisor set \
+             ([supervisors] server_manages_set = false in supervisor.toml)"
+        );
+        return false;
+    }
     let goodbyes = crate::reconfigure::apply(engine, config, offer, shutdown).await;
     if !goodbyes.is_empty() {
         let _ = sink.send(goodbyes).await;
@@ -557,6 +567,39 @@ mod tests {
             self.0.extend(reports);
             Ok(())
         }
+    }
+
+    /// The Supervisor-set apply refuses to run on a host that keeps its set, whatever put a set in
+    /// front of it: nothing is written and nothing is sent (ADR-0069 clause 23).
+    /// Verifies: ADR-0069
+    #[tokio::test]
+    async fn the_supervisor_set_apply_refuses_to_run_on_a_host_that_keeps_its_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut engine, mut config, uid) = engine_with_state_dir(&dir);
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, "# the operator's\n").expect("write");
+        config.path = Some(path.clone());
+        config.supervisor_defaults.server_manages_set = false;
+        engine.handle(&ServerToAgent {
+            instance_uid: uid,
+            remote_config: Some(opamp::proto::AgentRemoteConfig {
+                config: None,
+                config_hash: b"set-1".to_vec(),
+            }),
+            ..Default::default()
+        });
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let mut sink = Recorder(Vec::new());
+
+        let ran = process_self_configuration(&mut engine, &mut config, &shutdown, &mut sink).await;
+
+        assert!(!ran, "the apply ran");
+        assert!(sink.0.is_empty());
+        assert!(engine.take_self_config().is_none());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "# the operator's\n"
+        );
     }
 
     /// The Baseline permits interim status reports while a package downloads, and this is what

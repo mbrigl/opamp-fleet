@@ -649,12 +649,12 @@ pub struct SupervisorsConfig {
     #[serde(default = "default_apply_grace_secs")]
     pub apply_grace_secs: u64,
     /// The environment variables a Server-delivered block may set, each name exact or ending in
-    /// `*` as a prefix (ADR-0051 clause 18). Empty — the default — lets a delivered block keep only
+    /// `*` as a prefix (ADR-0069 clause 18). Empty — the default — lets a delivered block keep only
     /// the environment its running block already has.
     #[serde(default)]
     pub delivered_env: Vec<String>,
     /// Whether a Server-delivered block may state `args` and `version_args` its running block does
-    /// not already have (ADR-0051 clause 18).
+    /// not already have (ADR-0069 clause 18).
     #[serde(default)]
     pub delivered_args: bool,
     /// The Supervisors whose Agents neither declare nor act on remote configuration (ADR-0067),
@@ -663,6 +663,16 @@ pub struct SupervisorsConfig {
     /// the Supervisor-set apply never writes this section.
     #[serde(default)]
     pub remote_config_disabled: Vec<String>,
+    /// Whether the Server manages the set of `[[supervisor]]` blocks through the Client's own
+    /// Agent (ADR-0069 clauses 7 and 21). `false` builds that Agent without remote configuration,
+    /// and the blocks in this file are the operator's alone. Read from this file only, like the
+    /// rest of the section.
+    #[serde(default = "default_server_manages_set")]
+    pub server_manages_set: bool,
+}
+
+fn default_server_manages_set() -> bool {
+    true
 }
 
 impl Default for SupervisorsConfig {
@@ -673,6 +683,7 @@ impl Default for SupervisorsConfig {
             delivered_env: Vec::new(),
             delivered_args: false,
             remote_config_disabled: Vec::new(),
+            server_manages_set: default_server_manages_set(),
         }
     }
 }
@@ -1055,6 +1066,12 @@ impl ClientConfig {
             .remote_config_disabled
             .iter()
             .any(|listed| listed == name)
+    }
+
+    /// Whether the Server manages this Client's Supervisor set (ADR-0069 clause 21).
+    #[must_use]
+    pub fn server_manages_set(&self) -> bool {
+        self.supervisor_defaults.server_manages_set
     }
 
     /// Supervisor names key state directories and Agent identities — a duplicate would silently
@@ -1480,7 +1497,7 @@ mod tests {
 
     /// One shape (ADR-0022): a bare name, which is what puts the program in a directory this
     /// Client owns and may therefore replace. Everything else is refused rather than guessed at.
-    // Verifies: ADR-0051
+    // Verifies: ADR-0069
     #[test]
     fn a_bare_name_resolves_and_everything_else_is_refused() {
         let dir = PathBuf::from("/srv/fleet/otelcol");
@@ -1857,6 +1874,34 @@ mod tests {
             assert!(err.contains("remote_config_disabled"), "{err}");
             assert!(err.contains(&format!("{bad:?}")), "{err}");
         }
+    }
+
+    /// The switch is a boolean in `[supervisors]`, `true` unless the operator writes `false`
+    /// (ADR-0069 clause 21).
+    /// Verifies: ADR-0069
+    #[test]
+    fn server_manages_set_defaults_to_true_and_reads_false() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, "").expect("write");
+        assert!(ClientConfig::load(&path)
+            .expect("load")
+            .server_manages_set());
+        std::fs::write(&path, "[supervisors]\nstop_timeout_secs = 5\n").expect("write");
+        assert!(ClientConfig::load(&path)
+            .expect("load")
+            .server_manages_set());
+
+        std::fs::write(&path, "[supervisors]\nserver_manages_set = false\n").expect("write");
+        assert!(!ClientConfig::load(&path)
+            .expect("load")
+            .server_manages_set());
+
+        std::fs::write(&path, "[supervisors]\nserver_manages_set = \"no\"\n").expect("write");
+        assert!(
+            ClientConfig::load(&path).is_err(),
+            "a non-boolean is refused"
+        );
     }
 
     #[test]

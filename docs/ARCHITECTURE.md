@@ -166,7 +166,7 @@ the Supervisor's `config/` directory and restarts its process; the Agent reports
 ([ADR-0016](adr/0016-configurations-and-the-rest-api.md)). A Configuration typed for the Client
 itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes into
 `supervisor.toml` before it starts or stops anything
-([ADR-0051](adr/0051-a-delivered-block-brings-nothing-past-the-signature.md)).
+([ADR-0069](adr/0069-a-host-can-keep-its-supervisor-set-from-the-server.md)).
 
 **A package reaches an Agent.** An operator uploads an artifact into `packages`, puts it into a
 Deployment with a Selector and the operator's signature, and releases it. The Agent is offered the

@@ -1,28 +1,34 @@
-# ADR-0051: Each Supervisor owns one directory and runs only a program installed there, the Server manages the set of Supervisors, and a delivered block brings nothing that reaches past the package signature
+# ADR-0069: Each Supervisor owns one directory and runs only a program installed there, the Server manages the set of Supervisors unless the host keeps it, and a delivered block brings nothing that reaches past the package signature
 
-- **Status:** ⚪ superseded by [ADR-0069](0069-a-host-can-keep-its-supervisor-set-from-the-server.md)
-- **Date:** 2026-10-04
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/config.rs (supervisor_dir, program resolution), crates/fleet-agent/src/supervisor/ (start, placeholders), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the `[[supervisor]]` blocks of supervisor.toml, the `delivered_env` and `delivered_args` keys of its `[supervisors]` section, and the delivered-block check every kind in crates/fleet-agent/src/supervisor/ states
-- **Supersedes:** [ADR-0022](0022-a-supervisors-directory-program-and-set.md)
+- **Applies to:** crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` key), crates/fleet-agent/src/supervisor/ (start, placeholders, the Client's own Agent in `build_engine`), crates/fleet-agent/src/supervisor/agent.rs (the capability set and the handling of a received or stored remote configuration of the Client's own Agent), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the `[[supervisor]]` blocks of supervisor.toml, the `delivered_env`, `delivered_args` and `server_manages_set` keys of its `[supervisors]` section, and the delivered-block check every kind in crates/fleet-agent/src/supervisor/ states
+- **Supersedes:** [ADR-0051](0051-a-delivered-block-brings-nothing-past-the-signature.md)
 
 ## Context
 
-Supersedes [ADR-0022](0022-a-supervisors-directory-program-and-set.md) because a delivered block
-can still run code no one signed. ADR-0022 keeps a delivered block to a program from its own
-directory — a program that arrived as a signed package — and names what it prevents: "fleet-wide
-code execution that bypasses signature verification entirely". But the block's `env` and `args`
-pass to that program unchecked, with placeholders expanded in both (clause 6). A Server that
-delivers a shared object as a configuration entry and then a block with `LD_PRELOAD` pointing at
-it has the loader run that object as the Client's account — root or LocalSystem by default — and
-any signed program that loads a plugin or a script named in its arguments reaches as far. The
-`icinga2` kind reads `ticket_file` from any path on the host and sends its content to the parent
-the block names; a delivered block naming `/etc/shadow` and a parent the attacker runs sends that
-file there. Both were found by measure H14 of [`HARDENING.md`](../HARDENING.md) and recorded as
-H21 and H22. The specification puts security before convenience; what a compromised Server can
-make a Supervisor block do on a host must stop at the signature. What an Agent's own configuration
-language allows its process to do stays the product's. The Decision sentence is extended and clauses 18 to 20 are
-new; the rest of the decision stands as it was.
+Supersedes [ADR-0051](0051-a-delivered-block-brings-nothing-past-the-signature.md) because a
+host must be able to keep its Supervisor set from the Server, and ADR-0051 clause 13 makes the
+Server's set authoritative for every Client once an offer has applied. Who manages a host's
+Supervisor set is one question, so the switch that answers it for one host belongs in the decision
+that answers it for the fleet. Every clause of ADR-0051 is restated below under its own number;
+clause 13 is qualified by the switch, and clauses 21 to 27 are the switch.
+
+Keeping a delivered block to a program from its own directory — a program that arrived as a signed
+package — prevents what [ADR-0022](0022-a-supervisors-directory-program-and-set.md) names
+"fleet-wide code execution that bypasses signature verification entirely". It is not enough on its
+own: a block's `env` and `args` would pass to that program unchecked, with placeholders expanded in
+both (clause 6). A Server that delivers a shared object as a configuration entry and then a block
+with `LD_PRELOAD` pointing at it has the loader run that object as the Client's account — root or
+LocalSystem by default — and any signed program that loads a plugin or a script named in its
+arguments reaches as far. The `icinga2` kind reads `ticket_file` from any path on the host and sends
+its content to the parent the block names; a delivered block naming `/etc/shadow` and a parent the
+attacker runs sends that file there. Both were found by measure H14 of
+[`HARDENING.md`](../HARDENING.md) and recorded as H21 and H22. The specification puts security
+before convenience; what a compromised Server can make a Supervisor block do on a host must stop at
+the signature. What an Agent's own configuration language allows its process to do stays the
+product's.
 
 A package update swaps files: the running program is renamed aside, the artifact is written beside
 it and renamed into place ([ADR-0019](0019-package-delivery-on-the-agent.md)). All of that needs
@@ -51,13 +57,54 @@ spawns is itself a trust anchor: a Server — or someone who has compromised it 
 package-signing key — that could name any program on the host would have fleet-wide code execution
 that bypasses signature verification entirely.
 
+[ADR-0067](0067-remote-configuration-switched-off-per-supervisor-on-the-host.md) lets the
+operator switch remote configuration off per Supervisor with `[supervisors]
+remote_config_disabled`, and leaves the Client's own Agent out of its scope: *"A host that wants
+the Server unable to change, remove or add Supervisors needs a decision of its own, and until
+then a Server can remove a listed Supervisor and deliver the same agent under another name,
+which is not listed."* Its consequences record this as the residual of the switch: it binds a
+name, not an agent, while the Server manages the set. Through the set the Server adds, changes,
+restarts and purges Supervisors on the host ([`HARDENING.md`](../HARDENING.md), *The channels
+that put code on the host*). The specification puts security before convenience (Q-1), and the
+Baseline allows remote configuration to be switched off: *"Remote configuration capability can be
+disabled if necessary"* (OpAMP specification, *Configuration*).
+
+The Client's own Agent is built by `AgentState::new` in
+`crates/fleet-agent/src/supervisor/agent.rs` and declares the constant `AGENT_CAPABILITIES`:
+`ReportsStatus`, `AcceptsRemoteConfig`, `ReportsEffectiveConfig`, `ReportsRemoteConfig`,
+`ReportsHealth`, `AcceptsOpAmpConnectionSettings`, `ReportsConnectionSettingsStatus` and
+`ReportsOwnMetrics`, `ReportsOwnTraces` and `ReportsOwnLogs`. `build_engine` in
+`crates/fleet-agent/src/supervisor/mod.rs` adds `ReportsHeartbeat` when heartbeats are enabled,
+and `AcceptsPackages` with `ReportsPackageStatuses` when `[self_update]` consents and a
+verification key is configured ([ADR-0044](0044-the-client-updates-itself-from-a-signed-package.md)).
+Its effective configuration is the redacted text of `supervisor.toml`. Only `AcceptsRemoteConfig`
+and `ReportsRemoteConfig` concern the set. ADR-0067 already built the mechanism for a Supervisor:
+`AgentState` can be restored without both bits, and then ignores an offer that arrives anyway and
+logs it once per hash in a bounded set (`ignored_configs`).
+
+The Client's own Agent stores an applied set too. `config_applied` writes it with
+`store_remote_config` once the Supervisor-set apply succeeded: `remote-config.pb` and one copy of
+each entry under `config/`, both in `state_dir`. Nothing runs on those files, since the set they
+carry is already in `supervisor.toml` (clause 11). Restoring them at start reports
+`RemoteConfigStatus` `APPLIED` with the stored hash, which tells the Server the Client runs that
+set, and the Server offers a set only while the reported hash differs
+([ADR-0016](0016-configurations-and-the-rest-api.md) clause 6).
+
+The Server offers a remote configuration only to an Agent declaring `AcceptsRemoteConfig`
+(ADR-0016 clause 6, `offer` in `crates/fleet-server/src/fleet.rs`), as the Baseline requires,
+and a Client's capabilities bind what it reports and acts on
+([ADR-0060](0060-connection-settings-offered-without-a-credential-and-server-capabilities.md)
+clauses 12 and 17). A Client whose own Agent does not declare the bit is therefore offered no
+set, with no change on the Server.
+
 ## Decision
 
 We will give every Supervisor one directory it owns under a root the operator can place, accept
 only programs this Client installs into that directory, point Foreign Agents at it by placeholder,
 and let the Server replace the set of `[[supervisor]]` blocks — and nothing else in the file —
-purging a removed Supervisor's directory with it, while a delivered block may bring no environment,
-arguments or host paths that reach past what its package's signature covers.
+purging a removed Supervisor's directory with it, unless the host sets `[supervisors]
+server_manages_set = false`, while a delivered block may bring no environment, arguments or host
+paths that reach past what its package's signature covers.
 
 1. **One directory per Supervisor, under a relocatable root.** The top-level key `supervisor_dir`
    defaults to `<state_dir>/supervisors` and is made absolute at load. Under it each Supervisor
@@ -168,9 +215,9 @@ arguments or host paths that reach past what its package's signature covers.
     that Supervisor's Agent, not a failed configuration.
 
 13. **No offer, no change.** A Client to which no Supervisor set is offered runs its locally written
-    blocks. The first applied offer replaces the local set, and from then on the Server's set is
-    authoritative for that Client's Supervisors; the offer is compared against the file, not
-    against the last offer.
+    blocks. The first applied offer replaces the local set, and from then on, while `[supervisors]
+    server_manages_set` is true, the Server's set is authoritative for that Client's Supervisors
+    (clauses 21 to 27); the offer is compared against the file, not against the last offer.
 
 14. **A removed Supervisor is purged.** Removal is keyed by name: only a name absent from the new
     set is removed, while a changed block keeps its directory, identity and installed package. The
@@ -227,11 +274,85 @@ arguments or host paths that reach past what its package's signature covers.
     and the offer is refused unless the rendered file reads back as exactly the set that passed
     clauses 8, 18 and 19.
 
+21. **The key.** `[supervisors] server_manages_set` is a boolean and defaults to `true`, the
+    behaviour clauses 7 to 20 describe. It is read when the configuration is loaded, like every key
+    of the file, and is never taken from the Server, since the Supervisor-set apply replaces only
+    the `[[supervisor]]` array (clauses 7 and 11). A change takes effect at the next start of the
+    Client.
+
+22. **The Client's own Agent declares neither remote-configuration capability.** With the key
+    `false` it is built without `AcceptsRemoteConfig` and without `ReportsRemoteConfig`. Every
+    other capability stays as the context lists it: `ReportsStatus`, `ReportsEffectiveConfig` with
+    `supervisor.toml` as its effective configuration, `ReportsHealth`, the connection-settings
+    bits, the own-telemetry bits, `ReportsHeartbeat` where enabled, and `AcceptsPackages` with
+    `ReportsPackageStatuses` where `[self_update]` consents and a verification key is configured.
+    Self-update is a separate consent (clause 5) and is not touched. The Server then offers the
+    Client no set ([ADR-0016](0016-configurations-and-the-rest-api.md) clause 6).
+
+23. **A set that arrives anyway is ignored.** It is not stored, not applied, and no
+    `RemoteConfigStatus` is reported: no Supervisor stops or starts and `supervisor.toml` is not
+    written. The Baseline's rule for a part of a message the Agent does not support is that it
+    *"SHOULD ignore it"*. The Client logs a warning naming the offered hash once per hash it has
+    seen since start, remembering at most as many hashes as it does for a Supervisor under
+    [ADR-0067](0067-remote-configuration-switched-off-per-supervisor-on-the-host.md) clause 4
+    before it starts over. The Supervisor-set apply itself refuses to run while the key is
+    `false` and logs the hash it was handed, so no path that hands it a set gets past the key.
+
+24. **A stored set from before is not restored, and is removed at start.** When the key is
+    `false` and `remote-config.pb` exists in `state_dir`, the Client, before it connects:
+    - does not restore it, so it reports no `RemoteConfigStatus` and no
+      `last_remote_config_hash`;
+    - deletes `remote-config.pb` first, so nothing that fails after it can leave the stored hash
+      behind;
+    - then deletes, as far as it can, each entry copy in `<state_dir>/config/` whose bytes are
+      still the ones the stored map holds, leaving every other file there, the comparison
+      ADR-0067 clause 5 makes for a Supervisor;
+    - deletes a `remote-config.pb` that does not decode and leaves `config/` as it is;
+    - logs once, naming the stored hash and every copy it kept or could not remove.
+
+    Nothing runs on these files, and the set they carry is already in `supervisor.toml`, so a
+    file that cannot be read or deleted is a warning naming the error, and startup continues.
+    Kept, `remote-config.pb` would be reported `APPLIED` again once the key returns to `true`,
+    and the Server would not offer its set while that hash is unchanged, though the file may by
+    then hold the operator's blocks; the warning for `remote-config.pb` itself says so.
+
+25. **The blocks in the file stay, and are the operator's.** Setting the key rewrites nothing:
+    every `[[supervisor]]` block stays as it is, including blocks an earlier applied set wrote,
+    and the Client runs them as written. From then on only the operator changes them. An operator
+    who switches the key off reviews the blocks first, since some of them may be the Server's. A
+    Supervisor's own remote configuration is not affected: each Supervisor's Agent keeps taking
+    its configuration unless it is named in `remote_config_disabled`. `delivered_args` and
+    `delivered_env` keep their meaning and have nothing to act on while no set is delivered.
+
+26. **Together with `remote_config_disabled` it closes the residual of ADR-0067.** With the key
+    `false` the Server can neither remove a listed Supervisor nor add the same agent under a name
+    that is not listed. The Server can still install a signed package into a Supervisor, restart a
+    Managed Process, offer connection settings, and configure every Supervisor not named in
+    `remote_config_disabled`.
+
+    What the key holds against the Server holds only while every Supervisor whose configuration
+    language can run commands as the Client's account — a Telegraf `inputs.exec`, an Icinga
+    `CheckCommand`, the configuration a `command` kind's program reads — is named in
+    `remote_config_disabled`. Otherwise the Server can configure such a Supervisor to rewrite
+    `supervisor.toml`, and the key flips at the next start. A signed Client build can also still
+    replace the Client's own program where `[self_update]` consents
+    ([ADR-0044](0044-the-client-updates-itself-from-a-signed-package.md)), and that program reads
+    the key.
+
+27. **Switching it back on hands the set to the Server again.** When the key returns to `true`,
+    the next start declares both capabilities, reports no hash — unless that earlier start warned
+    that it could not remove `remote-config.pb` itself — and is offered whatever set is
+    released to the Client's own Agent ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md)).
+    The first applied offer replaces the `[[supervisor]]` array, the operator's blocks included,
+    and purges each Supervisor it removes (clauses 13 and 14).
+
 **Out of scope:** reconciling a locally edited `[[supervisor]]` set against the last applied
 offer at startup; an opt-in reaping of orphaned directories; migrating a Supervisor tree when its
 root moves; a supervise-only mode for programs this Client does not install, which would need its
 own decision and capability model; how a multi-file tree is unpacked and swapped
-([ADR-0019](0019-package-delivery-on-the-agent.md)).
+([ADR-0019](0019-package-delivery-on-the-agent.md)); keeping some blocks from the Server while it
+manages the others; how the fleet view or the REST API shows that a host keeps its set, beyond the
+capability set the Server already lists; any change on the Server for the switch.
 
 ## Alternatives considered
 
@@ -286,6 +407,34 @@ own decision and capability model; how a multi-file tree is unpacked and swapped
   Supervisor, which a removed one is not; a renamed copy is a slower leak.
 - **Reaping orphaned directories at startup.** Startup cannot tell a leftover from a deliberate
   hand edit, and the destructive reading deletes an identity that was not meant to go.
+- **Default `false` for `server_manages_set`.** Every existing Client would stop following the
+  Server's set at upgrade, including hosts that took one, and G-1's loop would no longer close for
+  Supervisor sets until each host's file says so. The switch is an operator's narrowing of what
+  the Server may do on one host; the default keeps the behaviour clauses 7 to 20 describe.
+- **A reserved name in `remote_config_disabled`** (the Client's own `name`, or a fixed name such
+  as `supervisor`). The list holds Supervisor names under the instance-name grammar, so any
+  reserved literal is a name a block can carry, and the Client's own `name` is the operator's to
+  change. One key would mean two things: a Supervisor's configuration and the membership of the
+  set. ADR-0067 clause 2 already answers the Client's own name in the list with a notice that it
+  is not covered.
+- **A key per `[[supervisor]]` block** (`managed_by_server = false`). The Server replaces the
+  blocks (clause 7) and could drop the key by delivering the block without it. The decision is
+  also about the set: adding a block is the change to stop, and no existing block can say that.
+- **Keeping `AcceptsRemoteConfig` and answering every set `FAILED`.** The Server would keep
+  offering, the fleet view would show a refusal on every rollout, and the Agent would declare a
+  capability it does not exercise.
+- **Restoring the stored set, or leaving it on disk unrestored.** Restored, the Server sees a
+  set reported `APPLIED` that the host no longer follows. Left on disk, switching back on
+  restores its hash, and the Server does not offer an unchanged set to a file the operator may
+  have changed since.
+- **Failing startup when the stored set cannot be removed.** ADR-0067 fails closed because a
+  Supervisor runs on its files; nothing runs on these, and a refusal would take the host off the
+  fleet for an inert file.
+- **A top-level key outside `[supervisors]`.** `[supervisors]` already holds what the host
+  allows the Server for its Supervisors (`delivered_env`, `delivered_args`,
+  `remote_config_disabled`), and the Server never writes it.
+- **A separate ADR beside this one for the switch.** It would make clause 13 untrue for some hosts
+  without changing it; who manages a host's set is one decision.
 
 ## Sources / Prior art
 
@@ -304,11 +453,23 @@ own decision and capability model; how a multi-file tree is unpacked and swapped
 - [OpAMP specification v0.19.0](https://github.com/open-telemetry/opamp-spec/blob/v0.19.0/specification.md)
   and [v0.20.0](https://github.com/open-telemetry/opamp-spec/blob/v0.20.0/specification.md) —
   `EffectiveConfig` may merge local configuration; `RemoteConfigStatuses`; `agent_disconnect` as an
-  Agent's last word; `AcceptsPackages` as a per-Agent capability.
+  Agent's last word; `AcceptsPackages` as a per-Agent capability. For the switch, v0.20.0
+  *Configuration* (*"Remote configuration capability can be disabled if necessary"*; *"If the bit
+  is not set the Server MUST not offer a remote configuration to the Agent"*) and
+  *AgentToServer.capabilities* (an Agent that does not support a capability *"SHOULD ignore"* the
+  part of a message that belongs to it).
 - [`toml_edit`](https://docs.rs/toml_edit) — format- and comment-preserving TOML editing, what
   `cargo add` edits manifests with.
 - [Debian FAQ: remove vs purge](https://www.debian.org/doc/manuals/debian-faq/uptodate.en.html) —
   purge semantics, chosen because no operator is present after a Server-driven removal.
+- The code read for the switch: `AGENT_CAPABILITIES`, `AgentState::new`, `restore`, `handle`,
+  `apply` and `config_applied` in `crates/fleet-agent/src/supervisor/agent.rs`; `build_engine`,
+  `start_supervisor` and `remote_config_disabled_notices` in
+  `crates/fleet-agent/src/supervisor/mod.rs`; `SupervisorsConfig` in
+  `crates/fleet-agent/src/config.rs`; `store_remote_config` and `drop_remote_config` in
+  `crates/fleet-agent/src/storage.rs`; the self-Agent dispatch in
+  `crates/fleet-agent/src/engine.rs`; the `AcceptsRemoteConfig` gate in
+  `crates/fleet-server/src/fleet.rs`.
 
 ## Consequences
 
@@ -329,14 +490,35 @@ own decision and capability model; how a multi-file tree is unpacked and swapped
   twice (unpacked), so the rename saving lands on bare-binary artifacts.
 - Negative / trade-offs: an unknown placeholder passes through rather than failing, unlike an
   unknown key; an absolute path in an argument still works and can still drift.
-- Negative / trade-offs: after the first applied offer, a local edit to the blocks drifts silently
-  until the next publication overwrites it.
+- Negative / trade-offs: after the first applied offer, while the Server manages the set, a local
+  edit to the blocks drifts silently until the next publication overwrites it.
 - Negative / trade-offs: removal is destructive and final; a Supervisor removed by a mis-scoped
   rollout loses its identity and its program. A crash between write and purge leaves an orphan
   only a human removes.
+- Positive: an operator can stop the Server from adding, changing or purging Supervisors on a
+  host with one line the Server does not write (Q-1); with `remote_config_disabled`, a listed
+  agent can no longer reach the Server's configuration under another name, which closes the
+  residual ADR-0067 records on a host that sets both.
+- Negative / trade-offs: the line holds against the Server only while every Supervisor whose
+  configuration language can run commands as the Client's account is in
+  `remote_config_disabled`, and a signed Client build can still replace the program that reads it
+  where `[self_update]` consents (clause 26).
+- Positive: the switch needs no change on the Server, and the fleet view shows it through the
+  Client's capability set, which lacks `AcceptsRemoteConfig`.
+- Negative / trade-offs: a host that keeps its set is managed by hand. A Supervisor set released
+  to it reaches nothing, and G-1's loop does not close for the Client's own Agent there by
+  design.
+- Negative / trade-offs: the blocks an earlier set wrote stay in force without notice when the
+  switch goes off; the operator has to review them, and the manual says so. Switching back on
+  replaces the operator's blocks with the first applied set.
+- Negative / trade-offs: the Client's own capability set is no longer the same on every host.
+  [`CONFORMANCE.md`](../CONFORMANCE.md) rows for `AcceptsRemoteConfig` and `ReportsRemoteConfig`
+  must say it can be withdrawn (G-12).
 - Follow-ups (by topic): startup reconciliation of a locally edited set; a bundled-UI editor for
   Supervisor sets; an opt-in reap of orphaned directories; a purge option on `service uninstall`;
-  pruning stale `.rollback` files on a schedule; a supervise-only mode as its own decision.
+  pruning stale `.rollback` files on a schedule; a supervise-only mode as its own decision; keeping
+  chosen blocks from the Server while it manages the rest; showing in the fleet view that a host
+  keeps its set.
 
 ## Enforcement
 
@@ -350,8 +532,6 @@ own decision and capability model; how a multi-file tree is unpacked and swapped
   `delivered_tables_from_two_entries_keep_their_sub_tables` (clause 20),
   `a_delivered_icinga2_block_reads_files_only_from_its_config_dir`,
   `a_delivered_icinga2_block_must_pin_its_parent` (clause 19).
-- The tests below verify the clauses that stand unchanged.
-
 - Directory and program, in `crates/fleet-agent/src/config.rs`:
   `the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable`,
   `a_relative_state_dir_yields_absolute_directories`,
@@ -375,10 +555,26 @@ own decision and capability model; how a multi-file tree is unpacked and swapped
   `a_delivered_collector_binary_must_be_owned_too`,
   `the_write_replaces_blocks_and_keeps_the_operators_file`,
   `the_rewrite_keeps_the_files_restrictive_mode`, `a_freshly_created_file_is_owner_only`,
-  `removed_is_by_name_so_a_changed_block_is_not_removed`,
+  `the_plan_is_a_diff_by_name_and_unchanged_blocks_ride_through`,
   `the_purge_deletes_exactly_the_removed_supervisors_directory`,
   `the_purge_does_not_follow_a_symlink_out_of_the_supervisors_root`,
   `an_empty_offer_removes_every_block`; `retiring_uninstalls_the_removed_and_only_stops_the_changed`
   (`crates/fleet-agent/src/engine.rs`); and end to end
   `a_config_change_reaches_both_supervised_agents_over_one_connection` (`crates/fleet-agent/tests/e2e.rs`),
   which adds, keeps and removes a Supervisor through a delivered set and checks the purge.
+- The switch (clauses 21 to 27): `server_manages_set_defaults_to_true_and_reads_false`
+  (`crates/fleet-agent/src/config.rs`, clause 21);
+  `the_own_agent_of_a_host_that_keeps_its_set_declares_neither_remote_config_capability`,
+  `a_set_offered_anyway_to_a_host_that_keeps_it_is_neither_stored_nor_applied_nor_reported` and
+  `a_set_ignored_by_a_host_that_keeps_it_is_logged_once_per_hash`
+  (`crates/fleet-agent/src/supervisor/agent.rs`, clauses 22 and 23);
+  `the_supervisor_set_apply_refuses_to_run_on_a_host_that_keeps_its_set`
+  (`crates/fleet-agent/src/transport/mod.rs`, clause 23);
+  `a_host_that_keeps_its_set_drops_the_stored_set_and_reports_no_status`,
+  `a_stored_set_that_cannot_be_removed_does_not_stop_startup`,
+  `a_copy_that_cannot_be_removed_still_leaves_no_hash_to_report`,
+  `an_undecodable_stored_set_is_deleted_and_config_is_left_alone` and
+  `the_removed_stored_set_is_logged_naming_its_hash`
+  (`crates/fleet-agent/src/supervisor/mod.rs`, clauses 22, 24 and 27); and end to end
+  `a_server_offers_no_supervisor_set_to_a_host_that_keeps_it` (`crates/fleet-agent/tests/e2e.rs`,
+  clauses 22, 25 and 27).

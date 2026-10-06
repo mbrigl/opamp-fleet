@@ -99,7 +99,7 @@ has:
   written `0600` in `0700` directories; on Windows a system-scope install cuts the data root off
   from the read right every local user inherits under `%ProgramData%` and leaves it to LocalSystem,
   the Administrators and the service account.
-- **A delivered Supervisor block reaches no further than the package signature** (ADR-0051): no
+- **A delivered Supervisor block reaches no further than the package signature** (ADR-0069): no
   environment or arguments beyond what the running block has or the operator allowed, never a
   loader variable or `PATH`, and no file outside its own `config/` directory.
 - **No credential in `server.toml` authenticates on its own** (ADR-0059 clause 26): an operator's
@@ -177,16 +177,23 @@ Agent's host. They deserve at least as much attention as the transport, and argu
 through seven channels. It **can** write any files into a Supervisor's own `config/` directory and
 restart its process, except for a Supervisor the host lists in `[supervisors]
 remote_config_disabled`, whose Agent takes no remote configuration and whose delivered block must
-repeat the one it runs (ADR-0067); add, change, purge and restart Supervisors of the compiled-in kinds, each
-running a program from its own `program/` directory; install any package signed with the
-operator's key into a Supervisor, and a newer signed Client build into the Client itself; move the
+repeat the one it runs (ADR-0067); add, change, purge and restart Supervisors of the compiled-in
+kinds, each running a program from its own `program/` directory, except on a host that sets
+`[supervisors] server_manages_set = false`, whose own Agent takes no Supervisor set (ADR-0069);
+install any package signed with the operator's key into a Supervisor, and a newer signed Client build into the Client itself; move the
 fleet to another TLS endpoint its trust accepts, install a certificate for
 the key the Client generated, and set its telemetry destinations; restart a Managed Process; and
 re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a Telegraf
 `inputs.exec`, an Icinga `CheckCommand` — it allows as the process's account; that is the product.
 The switch of ADR-0067 binds a name: while the Server manages the set, it can remove a listed
 Supervisor and deliver the same agent under a name that is not listed, whose configuration is then
-the Server's again.
+the Server's again. A host that also sets `server_manages_set = false` closes that: the Server
+can neither remove the listed Supervisor nor add another (ADR-0069). Both keys hold against the
+Server only while every Supervisor whose configuration language can run commands as the Client's
+account — a Telegraf `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command`
+kind's program reads — is in `remote_config_disabled`; otherwise the Server can configure such a
+Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. A signed Client
+build can still replace the program that reads them where `[self_update]` consents (ADR-0044).
 
 It **cannot**: write outside a Supervisor's `config/` (entry names are sanitized); name a program
 outside a Supervisor's `program/`, by absolute, rooted or escaping path, or a wrapped kind's program

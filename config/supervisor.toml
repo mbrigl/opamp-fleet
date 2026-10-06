@@ -178,13 +178,17 @@ state_dir = "client-state"
 # apply_grace_secs = 3     # how long a restarted process must survive before a received
 #                          # configuration is acknowledged APPLIED (0 = acknowledge on start)
 # delivered_env = []       # environment names a Server-delivered block may set ("OTEL_*" for a
-#                          # prefix); never PATH, LD_* or DYLD_* (ADR-0051)
+#                          # prefix); never PATH, LD_* or DYLD_* (ADR-0069)
 # delivered_args = false   # whether a Server-delivered block may state its own arguments
 # remote_config_disabled = []   # Supervisor names whose Agents take no remote configuration and
 #                               # run only on the files placed in <supervisor_dir>/<name>/config/,
 #                               # e.g. ["telegraf"]; a delivered block must repeat their running
 #                               # block exactly
 #                               # (ADR-0067)
+# server_manages_set = true     # false: the Server offers this Client no Supervisor set, and the
+#                               # [[supervisor]] blocks below, including any a set wrote earlier,
+#                               # are the operator's alone; review them before switching it off
+#                               # (ADR-0069)
 #
 # How a block names its program — `binary` for a collector, `command` for a custom one — has one
 # shape: a **bare file name**. The program lives in <supervisor_dir>/<name>/program/, a directory

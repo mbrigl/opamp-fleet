@@ -41,6 +41,18 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   place the configuration it should run in its `config/` directory; before switching one back on,
   move anything there you want to keep, since the first delivered configuration replaces every
   file in it.
+- **A host can keep its Supervisor set from the Server**
+  ([ADR-0069](docs/adr/0069-a-host-can-keep-its-supervisor-set-from-the-server.md)).
+  `[supervisors] server_manages_set = false` in `supervisor.toml` builds the Client's own Agent
+  without `AcceptsRemoteConfig` and `ReportsRemoteConfig`, so the Server offers it no Supervisor
+  set; one that arrives anyway is ignored and logged once per hash. Every other capability stays,
+  self-update included. The `[[supervisor]]` blocks in the file are then the operator's alone. At
+  its next start the Client deletes the `remote-config.pb` in its `state_dir` and the unchanged
+  entry copies in `<state_dir>/config/`. Together with `remote_config_disabled`, the Server can no
+  longer bring a listed agent back under another name. **What to do:** nothing at the default
+  `true`. Before switching it off, review the `[[supervisor]]` blocks, since a set the Server
+  delivered earlier may have written some of them; switching it back on lets the first released
+  set replace every block.
 - **Every `Unavailable` names the Agent it answers**
   ([ADR-0066](docs/adr/0066-admitted-agents-are-rate-limited-per-host.md) clause 7): the
   Agent-record ceiling, a certificate request held back for its audit record, the full enrolment

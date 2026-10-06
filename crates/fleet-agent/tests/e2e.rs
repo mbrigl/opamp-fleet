@@ -114,7 +114,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: ADR-0051, ADR-0064, G-1, G-6, G-14
+// Verifies: ADR-0069, ADR-0064, G-1, G-6, G-14
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -154,7 +154,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "[attributes]\n",
             "env = \"prod\"\n\n",
             // The set the Server delivers below carries arguments; the operator consents to that
-            // here, where the Server cannot (ADR-0051 clause 18).
+            // here, where the Server cannot (ADR-0069 clause 18).
             "[supervisors]\n",
             "delivered_args = true\n\n",
             "{otelcol_block}\n",
@@ -553,7 +553,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 /// A delivered Supervisor set with one block the Client refuses is refused whole: the running
 /// Supervisor keeps its process, `supervisor.toml` keeps every byte, and the Client's own Agent
 /// reports the refusal.
-/// Verifies: ADR-0051
+/// Verifies: ADR-0069
 #[tokio::test]
 async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
     let (addr, state, dir) = spawn_server().await;
@@ -764,5 +764,122 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
     assert!(
         !operators_file.exists(),
         "the first stored offer replaces every file in config/"
+    );
+}
+
+/// ADR-0069 over one connection: a host that keeps its Supervisor set is offered none. A released
+/// set that would add a block reaches neither `supervisor.toml` nor the running Supervisors, and
+/// the Client's own Agent declares neither remote-configuration capability and reports no status.
+/// Switched back on, the next start is offered the released set, and it replaces the
+/// `[[supervisor]]` array, the operator's block included (clauses 22, 25 and 27).
+/// Verifies: ADR-0069
+#[tokio::test]
+async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {
+    let (addr, state, dir) = spawn_server().await;
+    let state_dir: PathBuf = dir.path().join("client-state");
+    let marker = dir.path().join("stub-marker");
+    let program = stub_program_name();
+    let config_path = dir.path().join("supervisor.toml");
+    let write_config = |server_manages_set: bool| {
+        let toml = format!(
+            concat!(
+                "endpoint = \"ws://{addr}/v1/opamp\"\n",
+                "state_dir = {state:?}\n",
+                "heartbeat_interval_secs = 1\n\n",
+                "[supervisors]\n",
+                "server_manages_set = {manages}\n\n",
+                "[[supervisor]]\n",
+                "type = \"command\"\n",
+                "name = \"stub\"\n",
+                "command = {program:?}\n",
+                "args = [\"--touch\", {marker:?}]\n",
+            ),
+            addr = addr,
+            state = state_dir.to_string_lossy(),
+            manages = server_manages_set,
+            program = program,
+            marker = marker.to_string_lossy(),
+        );
+        std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
+            .expect("write supervisor.toml");
+        std::fs::read(&config_path).expect("read")
+    };
+    let written = write_config(false);
+    stage_owned_program(&state_dir, "stub", &program);
+    let client = spawn_client(&config_path);
+
+    let pid = wait_until("the stub to run", || stub_pid(&marker)).await;
+    let capabilities = wait_until("the Client's own Agent", || {
+        view(&state.snapshot(), "Supervisor Agent")
+            .filter(|a| a.connected)
+            .map(|a| a.capabilities.clone())
+    })
+    .await;
+    for capability in ["AcceptsRemoteConfig", "ReportsRemoteConfig"] {
+        assert!(
+            !capabilities.iter().any(|c| c == capability),
+            "the Client's own Agent declares {capability}"
+        );
+    }
+    assert!(capabilities.iter().any(|c| c == "ReportsEffectiveConfig"));
+
+    state
+        .save_configuration(
+            "supervisor-set",
+            fleet_server::configs::Revision {
+                selector: Default::default(),
+                body: format!(
+                    "[[supervisor]]\ntype = \"command\"\nname = \"added\"\ncommand = {program:?}\n"
+                ),
+                role: String::new(),
+                service_name: "supervisor".to_string(),
+            },
+        )
+        .expect("save");
+    state
+        .rollout_configuration("supervisor-set")
+        .expect("roll out");
+
+    // A few exchanges later: nothing reached the host.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let snapshot = state.snapshot();
+    let own = view(&snapshot, "Supervisor Agent").expect("own view");
+    assert_eq!(own.remote_config_status, "UNSET", "a status from the host");
+    assert!(
+        view(&snapshot, "added").is_none(),
+        "the released block started"
+    );
+    assert_eq!(
+        std::fs::read(&config_path).expect("read"),
+        written,
+        "supervisor.toml changed"
+    );
+    assert_eq!(
+        stub_pid(&marker),
+        Some(pid),
+        "the running Supervisor was restarted"
+    );
+    assert!(!state_dir.join("remote-config.pb").exists());
+
+    // Switched back on: the next start takes the released set, which replaces the operator's.
+    drop(client);
+    write_config(true);
+    let _client = spawn_client(&config_path);
+    wait_until("the Client to apply the released set", || {
+        view(&state.snapshot(), "Supervisor Agent")
+            .filter(|a| {
+                a.connected
+                    && a.remote_config_status == "APPLIED"
+                    && a.capabilities.iter().any(|c| c == "AcceptsRemoteConfig")
+            })
+            .map(|_| ())
+    })
+    .await;
+    let rewritten = std::fs::read_to_string(&config_path).expect("read");
+    assert!(rewritten.contains("name = \"added\""), "{rewritten}");
+    assert!(!rewritten.contains("name = \"stub\""), "{rewritten}");
+    assert!(
+        rewritten.contains("server_manages_set = true"),
+        "{rewritten}"
     );
 }

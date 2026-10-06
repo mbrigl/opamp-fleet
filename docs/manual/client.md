@@ -1093,8 +1093,51 @@ carries `[[supervisor]]` blocks in its body, and a matching Client applies them 
   one more reason to state whom a Configuration is for.
 
 A Client whose Server never rolls such a Configuration out runs its locally written blocks
-exactly as before. Note that once one applied, the Server's set is authoritative: a later local
-edit to the blocks stands only until the next rollout act overwrites it.
+exactly as before. Note that once one applied, the Server's set is authoritative, unless
+`server_manages_set = false`
+([Keeping the Supervisor set on the host](#keeping-the-supervisor-set-on-the-host)): a later
+local edit to the blocks stands only until the next rollout act overwrites it.
+
+### Keeping the Supervisor set on the host
+
+A host whose Supervisors only its operator should add, change or remove takes no set from the
+Server:
+
+```toml
+[supervisors]
+server_manages_set = false   # default true
+```
+
+The key is read from this file only, and the Server never writes `[supervisors]`. A change takes
+effect when the Client next starts.
+
+- **What the Server sees.** The Client's own Agent declares neither `AcceptsRemoteConfig` nor
+  `ReportsRemoteConfig`, so the Server offers it no set, whatever a rollout is aimed at. Everything
+  else it declares stays, self-update included: it still reports its status, its health and this
+  file as its effective configuration, takes connection settings, and takes a signed Client
+  package where `[self_update]` consents. A set that arrives anyway is not stored, not applied and
+  not answered; the Client logs one warning per hash.
+- **The blocks stay yours.** Nothing in this file is rewritten when you set the key. Every
+  `[[supervisor]]` block runs as written, **including blocks a set the Server delivered earlier
+  wrote**, and from then on only you change them. Review the blocks before you switch the key off.
+- **What happens to a set delivered earlier.** At start the Client deletes the `remote-config.pb`
+  in its `state_dir` first, then the unchanged copies of that set's entries in
+  `<state_dir>/config/`, and logs the stored hash. Nothing runs on those files, so one that cannot
+  be deleted is a warning and the Client starts; it is not reported either way.
+- **Supervisors are not affected.** Each Supervisor's Agent keeps taking its own configuration
+  unless it is named in `remote_config_disabled`. With both set, the Server can no longer remove a
+  listed Supervisor and add the same agent under a name that is not listed.
+- **What the key holds, and what it does not.** It holds against the Server only while every
+  Supervisor whose configuration language can run commands as the Client's account — a Telegraf
+  `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command` Supervisor's program
+  reads — is named in `remote_config_disabled`. Otherwise the Server can configure such a
+  Supervisor to rewrite this file, and the key changes at the next start. A signed Client build
+  can still replace the Client itself where `[self_update]` consents, and that build reads the
+  key.
+- **Switching it back on.** Set the key to `true`, or remove it, and restart the Client. Its own
+  Agent declares both capabilities again, reports no hash — unless that earlier start warned that
+  it could not remove `remote-config.pb` itself — and is offered whatever set is released to it. The first set it applies replaces every `[[supervisor]]` block, yours included,
+  and purges each Supervisor it removes.
 
 ### Switching remote configuration off for one Supervisor
 
@@ -1112,8 +1155,9 @@ that removes a listed block and delivers it again under the same name gets a Sup
 still listed. Each value must be a valid Supervisor name, or the Client does not start. A listed
 name that no block carries yet is a startup notice, not an error, since the block may arrive later
 from the Server. The switch covers Supervisors only: a listed name equal to the Client's own
-`name` earns a notice that the Client's own Agent is not covered, and that Agent keeps taking its
-Supervisor set.
+`name` earns a notice that the Client's own Agent is not covered. That Agent takes its Supervisor
+set unless `server_manages_set = false`
+([Keeping the Supervisor set on the host](#keeping-the-supervisor-set-on-the-host)).
 
 - **What the Server sees.** A listed Supervisor's Agent declares neither `AcceptsRemoteConfig` nor
   `ReportsRemoteConfig`, so the Server offers it no configuration, whatever a rollout is aimed at.
@@ -1148,8 +1192,8 @@ Supervisor set.
   want to keep before switching back.
 
 The switch binds a name, not an agent: while the Server manages the set, it can remove a listed
-Supervisor and add the same agent under a name that is not listed. A change to the list takes
-effect when the Client next starts.
+Supervisor and add the same agent under a name that is not listed. Set `server_manages_set =
+false` as well to close that. A change to the list takes effect when the Client next starts.
 
 ### Keys every block accepts
 
