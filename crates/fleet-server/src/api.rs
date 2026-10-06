@@ -1671,6 +1671,7 @@ async fn download_package(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version)): Path<(String, String)>,
     Query(query): Query<PlatformQuery>,
+    request: Request,
 ) -> Response {
     let id = match PackageId::new(&agent_type, &version) {
         Ok(id) => id,
@@ -1680,17 +1681,46 @@ async fn download_package(
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
-    let Some(path) = state
-        .packages()
-        .and_then(|store| store.artifact_path(&id, &platform))
-    else {
-        return error(
+    // One answer for every artifact this requester may not fetch, whether or not the store holds
+    // it, so the store cannot be listed by probing (ADR-0068 clause 4).
+    let not_found = || {
+        error(
             StatusCode::NOT_FOUND,
             format!(
                 "no set {id} with an artifact for {}-{}",
                 platform.os, platform.arch
             ),
-        );
+        )
+    };
+    // A member certificate fetches only what is offered to an Agent its host speaks for (ADR-0068
+    // clause 3). The download guard admitted the certificate and hands over what it proves; a
+    // request without one exists only where no certificate is required, and is tested here no
+    // more than at admission.
+    if let Some(proofs) = request.extensions().get::<crate::transport::Proofs>() {
+        let host = proofs.host.as_deref();
+        if !host.is_some_and(|host| state.offers_artifact(host, &id, &platform)) {
+            state.audit_refusal(
+                crate::audit::Entry::new("download.refused", "refused")
+                    .peer(crate::transport::peer_ip(&request))
+                    .with("plane", "agent")
+                    .with("check", "not offered")
+                    .with("host", host.map(str::to_string))
+                    .with(
+                        "serial",
+                        proofs.certificate.as_ref().map(|(id, _)| id.serial.clone()),
+                    )
+                    .with("agent_type", id.agent_type.clone())
+                    .with("version", id.version.clone())
+                    .with("platform", platform.tag()),
+            );
+            return not_found();
+        }
+    }
+    let Some(path) = state
+        .packages()
+        .and_then(|store| store.artifact_path(&id, &platform))
+    else {
+        return not_found();
     };
     // Streamed from disk, never buffered: a fleet updating at once means many concurrent
     // downloads of the same artifact, and each one holding a copy of a program in memory is how a

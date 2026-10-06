@@ -79,7 +79,7 @@ line, `listen = "0.0.0.0:4320"`.
 | Path | What it is |
 |---|---|
 | `/v1/opamp` | The OpAMP endpoint. `GET` upgrades to WebSocket, `POST` is the plain-HTTP exchange — the same path serves both. |
-| `/api/v1/packages/{agent_type}/{version}/file` | An artifact's bytes: the one `/api/v1` route that belongs to the Agents, because the `download_url` in a package offer is a path the Client resolves against *its own* endpoint. It sits outside the Operator plane's `[rest.auth]` and behind the same TLS handshake as `/v1/opamp`, so a downloading Client presents its client certificate. A certificate from the client CA is required; a bootstrap certificate is answered `401`. |
+| `/api/v1/packages/{agent_type}/{version}/file` | An artifact's bytes: the one `/api/v1` route that belongs to the Agents, because the `download_url` in a package offer is a path the Client resolves against *its own* endpoint. It sits outside the Operator plane's `[rest.auth]` and behind the same TLS handshake as `/v1/opamp`, so a downloading Client presents its client certificate. A certificate from the client CA is required; a bootstrap certificate is answered `401`. A host is served only the artifact offered to one of its own Agents, and every other request is answered `404` ([A host fetches only what its Agents are offered](#a-host-fetches-only-what-its-agents-are-offered)). |
 
 The Agent plane asks every peer for a client certificate in the TLS handshake. A peer without one
 fails the handshake and reaches no route (see
@@ -197,6 +197,12 @@ key_file = "client-ca-key.pem"
 validity_days = 30
 ```
 
+Without it, every host holds a certificate an operator provisioned, and such a certificate is
+served an uploaded artifact only when it names its host as a URI SAN,
+`urn:opamp-fleet:host:<id>`. A certificate that names no host fetches nothing from the download
+route; referenced artifacts are unaffected. A Server started without `[client_ca]` says so once at
+startup.
+
 ### `[enrolment]`
 
 Optional. Present lets a new host enrol with a bootstrap certificate from this CA — see
@@ -218,6 +224,19 @@ Optional; absent means the defaults shown. See
 max_failures = 10
 window_secs = 60
 backoff_secs = 300
+```
+
+### `[agent_rate_limit]`
+
+Optional; absent means the defaults shown. See
+[How often a member may be heard](#how-often-a-member-may-be-heard).
+
+```toml
+[agent_rate_limit]
+messages_per_sec = 10
+burst = 300
+gateway_messages_per_sec = 500
+gateway_burst = 10000
 ```
 
 ### `[connection_offer]`
@@ -326,7 +345,8 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"gateway"
 ```
 
 A Gateway's certificate speaks for any Agent; behind it, fleet membership is all the Server
-proves. A third-party client that sends no renewal proof renews the certificate it presents.
+proves, and the Gateway's certificate may fetch the artifact offered to any Agent. A third-party
+client that sends no renewal proof renews the certificate it presents.
 
 **A certificate lives 30 days by default** and is renewed at two thirds of that; a host is ejected
 sooner by revoking its certificate ([Revocation](#revocation-withdrawing-a-certificate)).
@@ -467,7 +487,8 @@ host not marked — answers every downstream peer `503` and closes their session
 Every security decision leaves one line in `config_dir/audit/`: each admission and refusal on the
 Agent plane, each refused operator sign-in, each enrolment request, approval and rejection, each
 certificate issued, each revocation and the session it ended, each request for the Gateways'
-revocation list from a host not marked as a Gateway, each operator act with the operator's name, and each package an Agent reports installed or failed. A
+revocation list from a host not marked as a Gateway, each download a host may not fetch, each
+operator act with the operator's name, and each package an Agent reports installed or failed. A
 plain-HTTP Agent's admission is recorded once an hour per address and certificate, a WebSocket
 session every time. No line holds a secret in any form — an `Authorization` value is never
 written, not even as a hash, whether an operator presented it or an Agent sent it unasked — nor a
@@ -855,6 +876,35 @@ A Client without it takes no package at all, its own update included, and says s
 ([ADR-0042](../adr/0042-signed-package-delivery-from-allowed-sources.md)). Give every Client the
 key.
 
+### A host fetches only what its Agents are offered
+
+The download route serves an uploaded artifact only to a host whose certificate speaks for an
+Agent that is offered that artifact — its Agent type, version and Platform — by a rollout. A host
+speaks for the Agents that reported with its certificate, and a host marked as a Gateway for any
+Agent. An artifact stays offered until the Agent's assignment changes, so an Agent that echoed its
+offer and then failed to install can fetch it again. A version saved in a Deployment but not yet
+released by a rollout is offered to no one and cannot be fetched by anyone.
+
+Every other request for an artifact is answered `404` with the same status, body and headers as
+a request for an artifact the store does not hold: an artifact released to another host's Agents,
+one released to nobody yet, an entry that is only a reference, and any request over a certificate
+that names no host. A malformed type, version or Platform is still answered `400`, and a
+certificate that is not a member's still `401`. Each refused fetch leaves a `download.refused`
+entry in [the audit record](#the-audit-record) with `check` `not offered`, the host, the
+certificate's serial and the type, version and Platform asked for. The certificate is admitted
+before the route decides what it may fetch, so a refused fetch leaves both a `download.admitted`
+and a `download.refused` entry: a `download.admitted` says the certificate was let in, not that
+an artifact was served. Such a refusal is no failed admission, so it does not count toward
+[the throttle](#repeated-failures-are-throttled). Each download, served or refused, takes a token
+from the host's bucket ([How often a member may be heard](#how-often-a-member-may-be-heard)); for
+a Gateway, from its aggregate bucket.
+
+A `404` for an Agent that was offered an artifact therefore means one of three things: its host's
+certificate names no host (provision it with `urn:opamp-fleet:host:<id>`, see
+[`[client_ca]`](#client_ca)), the Agent now reports another Agent type than the Package was built
+for, or a later rollout changed what it is offered. A Client behind a Gateway receives only
+referenced artifacts: the Gateway does not relay the download route.
+
 ## The REST API
 
 The OpenAPI document at `/api/v1/openapi.json` is the contract; `/api/v1/docs` renders it. Every
@@ -882,7 +932,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/source` | Point that entry at an artifact hosted elsewhere. Body: `{"url": "…", "sha256": "…", "headers": {…}}`. |
 | `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Package is rolled out to an Agent. |
 | `DELETE /api/v1/packages/{agent_type}/{version}` | Remove the Package — and every per-Agent assignment that referenced it. Uninstalls nothing. |
-| `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. It requires a client certificate from the client CA in the handshake; a bootstrap certificate is answered `401`. |
+| `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. It requires a client certificate from the client CA in the handshake; a bootstrap certificate is answered `401`. It serves only an artifact offered to an Agent the host speaks for, and answers every other request `404`, as for an artifact that does not exist. |
 | `GET /api/v1/deployments` | Every Deployment, with its channel, its Packages, and the three reach counts. |
 | `PUT /api/v1/deployments/{name}` | Create one or re-aim it. Body: `{"selector": {…}}` — **never empty** (`400`). **Distributes nothing**. |
 | `GET` / `DELETE /api/v1/deployments/{name}` | One Deployment; `DELETE` is `409` while an Agent's assignment names it, and uninstalls nothing. |
@@ -1038,6 +1088,56 @@ guesser's count — so failures only age out of the window. On the Agent plane a
 handshake that succeeded, so the throttle bounds what a refused host that keeps retrying costs in
 handshakes, revocation lookups and audit entries. The Operator plane counts its own `401`s the same
 way, in a table of its own. `0` for any of the three keys is refused at startup.
+
+### How often a member may be heard
+
+A certificate admits a member; `[agent_rate_limit]` bounds how often it is heard after that
+([ADR-0066](../adr/0066-admitted-agents-are-rate-limited-per-host.md)):
+
+```toml
+[agent_rate_limit]
+messages_per_sec = 10            # tokens a host's or an Agent's bucket gains per second
+burst = 300                      # that bucket's capacity; a new bucket starts full
+gateway_messages_per_sec = 500   # tokens a marked Gateway's aggregate gains per second
+gateway_burst = 10000            # the aggregate's capacity
+```
+
+Each message on `/v1/opamp`, over either transport, takes one token before anything else is done
+with it, and so does each request on the package download route once the certificate is admitted.
+A message that cannot be decoded is counted too. The bucket is:
+
+- the host the certificate names;
+- the certificate's issuer and serial, for a certificate an operator provisioned that names no
+  host yet;
+- the peer address, an IPv6 one by its /64, on an enrolment connection: one bootstrap certificate
+  may serve the whole fleet;
+- for a host marked as a Gateway, two buckets, and a message takes a token from both: the bucket
+  of the Agent it names, sized by `messages_per_sec` and `burst`, and the Gateway's aggregate,
+  sized by the `gateway_` keys. A message naming no valid `instance_uid`, an undecodable one and
+  a download count in the aggregate alone. Marking or unmarking a Gateway takes effect at its next
+  message.
+
+A message past the limit is not processed: no record changes and no certificate is signed. It is
+answered with the message's own `instance_uid` and `error_response` `Unavailable` with
+`retry_info` of 30 seconds, on plain HTTP in the body of a `200`. The connection stays open. A
+Client waits the 30 seconds, and the next message the Server processes from that Agent is asked
+for a full report, so nothing is lost. A download past the limit is answered `429` with
+`Retry-After: 30`; it is no failure toward `[admission_throttle]`. Beyond this limit the Server
+honours the protocol's error and retry semantics as well, and answers malformed input with
+`BAD_REQUEST`.
+
+Every refusal is recorded as `agent_rate.throttled`, naming the host (or the serial and the CA's
+role), the `instance_uid`, the `bucket` that was empty (`agent`, `host` or `gateway`) and the
+`route` (`opamp` with its `transport`, or `download`). Past ten a second from one address they are
+counted in `agent_rate.throttled.aggregated`.
+
+The default `burst` lets one full report from each of the 256 Agents a host may speak for through
+after a reconnect. `messages_per_sec` times the offered `[connection_offer]
+heartbeat_interval_secs`, or 30 seconds without one, is how many Agents one host can report for at
+that interval; the Server logs a warning at startup naming both keys when that is below 256. The
+buckets live in memory: the subjects and aggregates up to the certificate register's 100 000, the
+Agents behind Gateways up to `max_agents`, and a full table forgets the bucket used least
+recently. `0` for any key is refused at startup; no value switches the limit off.
 
 ### The Operator plane: `[rest.auth]`
 
@@ -1205,9 +1305,9 @@ The standing offer carries no `tls` and no `proxy`: there is no configuration su
 - **It does not require a password on a loopback Operator plane.** `[rest.auth]` is optional
   there, because the address is the guard; it is required the moment the plane listens anywhere
   else.
-- **It throttles failed admission and nothing else.** A peer address past `[admission_throttle]`'s
-  failures is answered `429`; an admitted Agent is never told to slow down. It honours the
-  protocol's error and retry semantics and answers malformed input with `BAD_REQUEST`.
+- **It does not weigh a message by its cost.** Every message and download takes one token of
+  `[agent_rate_limit]`, whatever it carries. The Operator plane is not rate-limited; it is
+  guarded by `[rest.auth]` and `[admission_throttle]`.
 - **It does not download referenced package artifacts.** A referenced package is a URL plus a hash;
   the Agents fetch it.
 - **It does not install itself as a service.** Run it under whatever supervises services on the

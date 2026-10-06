@@ -13,7 +13,7 @@ use fleet_server::config::ServerConfig;
 use fleet_server::fleet::AppState;
 use fleet_server::listen;
 use opamp::server::listen::Handle;
-use tracing::info;
+use tracing::{info, warn};
 
 fn usage() -> ! {
     eprintln!(
@@ -272,6 +272,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
+        // ADR-0068 clause 3.
+        info!("{notice}");
+    }
     let telemetry_offer = config
         .telemetry_offer
         .as_ref()
@@ -334,9 +338,19 @@ async fn main() {
     if let Some(enrolment) = &enrolment {
         enrolment.set_audit(audit.clone());
     }
+    if let Some(warning) = config.rate_limit_warning() {
+        // ADR-0066 clause 2.
+        warn!("{warning}");
+    }
+    let agent_rate = Arc::new(fleet_server::agent_rate::AgentRate::new(
+        config.agent_rate_limit.limits(),
+        config.max_agents,
+        clock.clone(),
+    ));
     let state = match AppState::new(config.config_dir.clone()) {
         Ok(state) => Arc::new(
             state
+                .with_agent_rate(Some(agent_rate))
                 .with_connection_offer(connection_offer)
                 .with_client_ca(client_ca)
                 .with_enrolment(enrolment.clone())
@@ -435,6 +449,19 @@ async fn main() {
     state.flush_agents();
 }
 
+/// What a Server that signs no CSRs says once at startup (ADR-0068 clause 3): its hosts hold the
+/// certificates an operator provisioned, and only one that names its host is served an uploaded
+/// artifact.
+fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
+    (!signs_csrs).then(|| {
+        format!(
+            "without [client_ca], uploaded artifacts reach only hosts whose certificate names a \
+             host ({}<id>)",
+            fleet_server::ca::HOST_URI_PREFIX
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +477,16 @@ mod tests {
         assert!(!entry.contains("s3cret"));
         assert!(hasher(Some("--bearer")).is_none(), "--bearer is gone");
         assert!(hasher(None).is_none());
+    }
+
+    /// Without `[client_ca]` the Server says at startup that an uploaded artifact needs a
+    /// certificate naming a host, and how one is named; with it, it says nothing.
+    /// Verifies: ADR-0068
+    #[test]
+    fn a_server_without_client_ca_says_uploaded_artifacts_need_a_host() {
+        let notice = uploaded_artifacts_notice(false).expect("a notice");
+        assert!(notice.contains("uploaded artifacts"), "{notice}");
+        assert!(notice.contains("urn:opamp-fleet:host:<id>"), "{notice}");
+        assert!(uploaded_artifacts_notice(true).is_none());
     }
 }

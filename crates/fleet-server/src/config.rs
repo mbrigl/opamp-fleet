@@ -103,7 +103,74 @@ pub struct ServerConfig {
     /// How large the audit record grows and how much of it is kept (ADR-0063).
     #[serde(default)]
     pub audit: AuditConfig,
+    /// How often an admitted peer may be heard on the Agent plane (ADR-0066).
+    #[serde(default)]
+    pub agent_rate_limit: AgentRateLimitConfig,
 }
+
+/// The `[agent_rate_limit]` section (ADR-0066 clause 1). Every key has a default, and none is `0`:
+/// no value switches the limit off.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AgentRateLimitConfig {
+    /// Tokens a host's or an Agent's bucket gains per second.
+    pub messages_per_sec: u32,
+    /// That bucket's capacity; a new bucket starts full.
+    pub burst: u32,
+    /// Tokens the aggregate bucket of a host marked as a Gateway gains per second.
+    pub gateway_messages_per_sec: u32,
+    /// The aggregate bucket's capacity.
+    pub gateway_burst: u32,
+}
+
+impl Default for AgentRateLimitConfig {
+    fn default() -> Self {
+        let limits = crate::agent_rate::Limits::default();
+        AgentRateLimitConfig {
+            messages_per_sec: limits.messages_per_sec,
+            burst: limits.burst,
+            gateway_messages_per_sec: limits.gateway_messages_per_sec,
+            gateway_burst: limits.gateway_burst,
+        }
+    }
+}
+
+impl AgentRateLimitConfig {
+    /// The limits the buckets count by.
+    #[must_use]
+    pub fn limits(&self) -> crate::agent_rate::Limits {
+        crate::agent_rate::Limits {
+            messages_per_sec: self.messages_per_sec,
+            burst: self.burst,
+            gateway_messages_per_sec: self.gateway_messages_per_sec,
+            gateway_burst: self.gateway_burst,
+        }
+    }
+
+    fn check(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("messages_per_sec", self.messages_per_sec),
+            ("burst", self.burst),
+            ("gateway_messages_per_sec", self.gateway_messages_per_sec),
+            ("gateway_burst", self.gateway_burst),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "[agent_rate_limit] {key} must be greater than zero — the limit is never \
+                     switched off; raise it instead"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The Agents a host may speak for at most (ADR-0059 clause 7), which the limit has to carry at
+/// the fleet's heartbeat (ADR-0066 clause 2).
+const AGENTS_PER_HOST: u64 = 256;
+
+/// The heartbeat the Baseline uses when none is offered.
+const BASELINE_HEARTBEAT_SECS: u64 = 30;
 
 /// The `[audit]` section (ADR-0063 clause 4).
 #[derive(Debug, Deserialize)]
@@ -500,6 +567,7 @@ impl Default for ServerConfig {
             enrolment: None,
             admission_throttle: AdmissionThrottleConfig::default(),
             audit: AuditConfig::default(),
+            agent_rate_limit: AgentRateLimitConfig::default(),
         }
     }
 }
@@ -610,6 +678,10 @@ impl ServerConfig {
                 path.display()
             ));
         }
+        config
+            .agent_rate_limit
+            .check()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         if config.max_connections == 0 || config.rest.max_connections == 0 {
             return Err(format!(
                 "{}: max_connections and [rest] max_connections must be greater than zero — a \
@@ -621,6 +693,30 @@ impl ServerConfig {
             .check_secure()
             .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(config)
+    }
+
+    /// A warning when one host cannot report for all the Agents it may speak for at the fleet's
+    /// heartbeat (ADR-0066 clause 2): `messages_per_sec` times the offered heartbeat interval, or
+    /// the Baseline's 30 s, below 256. A limit set too low costs availability, not security, so
+    /// the Server starts.
+    #[must_use]
+    pub fn rate_limit_warning(&self) -> Option<String> {
+        let heartbeat = self
+            .connection_offer
+            .as_ref()
+            .and_then(|offer| offer.heartbeat_interval_secs)
+            .filter(|secs| *secs > 0)
+            .unwrap_or(BASELINE_HEARTBEAT_SECS);
+        let carried = u64::from(self.agent_rate_limit.messages_per_sec).saturating_mul(heartbeat);
+        (carried < AGENTS_PER_HOST).then(|| {
+            format!(
+                "[agent_rate_limit] messages_per_sec ({}) times [connection_offer] \
+                 heartbeat_interval_secs ({heartbeat}) carries {carried} Agents per host, below \
+                 the {AGENTS_PER_HOST} a host may speak for — a host with more Agents is \
+                 throttled at every heartbeat",
+                self.agent_rate_limit.messages_per_sec
+            )
+        })
     }
 
     /// The transport rules of the specification's Q-1 (ADR-0038): the Agent plane always serves
@@ -1112,6 +1208,74 @@ mod tests {
             let err = ServerConfig::load(&path).expect_err("zero must fail startup");
             assert!(err.contains("max_connections"), "{err}");
         }
+    }
+
+    /// Verifies: ADR-0066
+    #[test]
+    fn the_agent_rate_limit_defaults_and_refuses_zero() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(
+            cfg.agent_rate_limit.limits(),
+            crate::agent_rate::Limits {
+                messages_per_sec: 10,
+                burst: 300,
+                gateway_messages_per_sec: 500,
+                gateway_burst: 10_000,
+            }
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        for key in [
+            "messages_per_sec",
+            "burst",
+            "gateway_messages_per_sec",
+            "gateway_burst",
+        ] {
+            std::fs::write(&path, format!("{TLS}[agent_rate_limit]\n{key} = 0\n")).expect("write");
+            let err = ServerConfig::load(&path).expect_err("zero must fail startup");
+            assert!(err.contains(&format!("[agent_rate_limit] {key}")), "{err}");
+        }
+        std::fs::write(
+            &path,
+            format!("{TLS}[agent_rate_limit]\nmessages_per_second = 5\n"),
+        )
+        .expect("write");
+        let err = ServerConfig::load(&path).expect_err("an unknown key");
+        assert!(err.contains("messages_per_second"), "{err}");
+        std::fs::write(&path, format!("{TLS}[agent_rate_limit]\nburst = 50\n")).expect("write");
+        assert_eq!(
+            ServerConfig::load(&path)
+                .expect("loads")
+                .agent_rate_limit
+                .burst,
+            50
+        );
+    }
+
+    /// Verifies: ADR-0066
+    #[test]
+    fn a_limit_below_the_heartbeat_for_256_agents_warns_naming_both_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "{TLS}[agent_rate_limit]\nmessages_per_sec = 5\n\
+                 [connection_offer]\nheartbeat_interval_secs = 30\n"
+            ),
+        )
+        .expect("write");
+        let config = ServerConfig::load(&path).expect("a low limit still starts");
+        let warning = config.rate_limit_warning().expect("a warning");
+        assert!(
+            warning.contains("[agent_rate_limit] messages_per_sec")
+                && warning.contains("[connection_offer] heartbeat_interval_secs"),
+            "{warning}"
+        );
+
+        std::fs::write(&path, TLS).expect("write");
+        let config = ServerConfig::load(&path).expect("defaults");
+        assert_eq!(config.rate_limit_warning(), None, "10 times 30 carries 300");
     }
 
     /// Verifies: ADR-0054

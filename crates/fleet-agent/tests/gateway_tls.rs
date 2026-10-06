@@ -582,3 +582,63 @@ async fn a_downstream_connection_that_never_finishes_its_headers_is_hung_up_on()
     );
     assert!(elapsed < Duration::from_secs(8), "{elapsed:?}");
 }
+
+/// A Gateway serves `/v1/opamp` alone: the package download route is answered `404` by the
+/// Gateway itself and never relayed, although the Server behind it serves the artifact. A change
+/// that relays downloads has to revisit what a Gateway's certificate fetches (ADR-0068 clause 3).
+/// Verifies: ADR-0068
+#[tokio::test]
+async fn the_gateway_serves_no_download_route() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store =
+        fleet_server::packages::PackageStore::open(dir.path().join("packages")).expect("store");
+    let id = fleet_server::packages::PackageId::new("otelcol", "1.0.0").expect("id");
+    store.create(&id).expect("create");
+    store
+        .put_entry(
+            &id,
+            &fleet_server::packages::Platform::new("linux", "amd64").expect("platform"),
+            b"the-binary".to_vec(),
+        )
+        .expect("entry");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("state")
+            .with_packages(Some(
+                fleet_server::fleet::PackageOffering::new(store, String::new())
+                    .expect("deployments"),
+            )),
+    );
+    let app = fleet_server::agent_app(state, fleet_server::transport::Admission::open());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let server = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let path = "/api/v1/packages/otelcol/1.0.0/file?os=linux&arch=amd64";
+    let direct = reqwest::Client::new()
+        .get(format!("http://{server}{path}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        direct.status(),
+        reqwest::StatusCode::OK,
+        "the Server serves it"
+    );
+
+    let pki = Pki::new();
+    let (gateway, _stop, _dir) = spawn_tls_gateway(server, &pki).await;
+    let response = client(&pki, Some(pki.issue("edge-01")))
+        .get(format!("https://{gateway}{path}"))
+        .send()
+        .await
+        .expect("the TLS request reaches the gateway");
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_ne!(
+        response.bytes().await.expect("body").as_ref(),
+        b"the-binary"
+    );
+}

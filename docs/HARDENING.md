@@ -24,9 +24,11 @@ Process's `opampextension` ([`endpoint.rs`](../crates/fleet-agent/src/supervisor
 admits only the process its Supervisor started (ADR-0053).
 
 Out of scope, and deliberately so: **authorization and multi-tenancy**, which the specification
-names as non-goals. The boundary is worth stating precisely because the host binding (ADR-0059 clause 7)
-runs close to it — *which Agent is speaking* is authentication and belongs here; *what that Agent is
-allowed to do* is authorization and does not.
+names as non-goals, with one bound on the Agent plane: a host receives from the Server only the
+configurations and packages released to an Agent it speaks for (ADR-0068). The boundary is worth
+stating precisely because the host binding (ADR-0059 clause 7) runs close to it — *which Agent is
+speaking*, and so *what its host may receive from the Server*, is authentication and belongs here;
+*what that Agent is allowed to do* beyond that is authorization and does not.
 
 ## What already holds
 
@@ -134,7 +136,8 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1) · ✅ message size, in both directions ·
     ✅ gzip bounded *after* decompression · ✅ Admission by client certificate
   - ✅ connections capped (`max_connections`) · ✅ HTTP/2 streams and pings bounded
-  - ✅ failed admissions throttled per address
+  - ✅ failed admissions throttled per address · ✅ admitted members rate-limited per host, and
+    per Agent within a Gateway's aggregate (ADR-0066)
 - **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0054).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ Basic over the whole plane, required beyond the loopback (ADR-0059) ·
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes
@@ -172,13 +175,18 @@ Agent's host. They deserve at least as much attention as the transport, and argu
 
 **What a remote configuration can and cannot cause on a host.** The Server reaches a Client host
 through seven channels. It **can** write any files into a Supervisor's own `config/` directory and
-restart its process; add, change, purge and restart Supervisors of the compiled-in kinds, each
+restart its process, except for a Supervisor the host lists in `[supervisors]
+remote_config_disabled`, whose Agent takes no remote configuration and whose delivered block must
+repeat the one it runs (ADR-0067); add, change, purge and restart Supervisors of the compiled-in kinds, each
 running a program from its own `program/` directory; install any package signed with the
 operator's key into a Supervisor, and a newer signed Client build into the Client itself; move the
 fleet to another TLS endpoint its trust accepts, install a certificate for
 the key the Client generated, and set its telemetry destinations; restart a Managed Process; and
 re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a Telegraf
 `inputs.exec`, an Icinga `CheckCommand` — it allows as the process's account; that is the product.
+The switch of ADR-0067 binds a name: while the Server manages the set, it can remove a listed
+Supervisor and deliver the same agent under a name that is not listed, whose configuration is then
+the Server's again.
 
 It **cannot**: write outside a Supervisor's `config/` (entry names are sanitized); name a program
 outside a Supervisor's `program/`, by absolute, rooted or escaping path, or a wrapped kind's program
@@ -186,7 +194,8 @@ at all; start a kind that is not compiled in; change any key of `supervisor.toml
 `[[supervisor]]` array — not the endpoint, `state_dir`, `[tls]`, the verification key,
 `allowed_sources` or `[self_update]`; apply a set with one bad block; purge outside the Supervisors'
 root; install anything unsigned, from a source not allowed, or with an archive member that climbs
-out; downgrade the Client or install a program that is not the Client as the Client; switch to
+out; serve a host from its download route an artifact that is not offered to an Agent the host
+speaks for (ADR-0068); downgrade the Client or install a program that is not the Client as the Client; switch to
 plaintext beyond the loopback; weaken TLS verification, set a proxy or plant a header; hand the Client a private
 key. Each of these is enforced in the code, and most by a test.
 

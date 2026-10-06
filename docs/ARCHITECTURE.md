@@ -110,6 +110,10 @@ core module names an adapter or a technology, and when a module has no role.
   ([ADR-0059](adr/0059-admission-by-a-client-certificate-alone.md)). `revocation`
   holds the register of issued certificates, the revocation list and the hosts, behind the
   `LedgerStore` port ([ADR-0065](adr/0065-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)).
+  `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
+  marked Gateway, and the Gateway as a whole are heard; `transport` takes a token for each
+  message before the handler does anything else and for each download in the guard
+  ([ADR-0066](adr/0066-admitted-agents-are-rate-limited-per-host.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
   `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under
   `config_dir/audit/` ([ADR-0063](adr/0063-an-append-only-audit-record-chained-by-hash.md)).
@@ -167,7 +171,10 @@ itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes in
 **A package reaches an Agent.** An operator uploads an artifact into `packages`, puts it into a
 Deployment with a Selector and the operator's signature, and releases it. The Agent is offered the
 package; the Client downloads it from the Server's origin — presenting its certificate there and
-nowhere else — or from an allowed mirror, checks hash and signature in `packages`, and the
+nowhere else, and `api` serves it only when `fleet` finds it offered to an Agent the
+certificate's host speaks for, by the test `packages` shares with the offer
+([ADR-0068](adr/0068-a-host-fetches-only-the-packages-offered-to-its-own-agents.md)) — or from an
+allowed mirror, checks hash and signature in `packages`, and the
 Supervisor swaps the program, keeps the previous one for its grace period and rolls back if the
 new one does not stay up. The Client's own package goes through `update` instead: a version
 directory beside the running one, a self-check, the `current` pointer moved, and a restart on

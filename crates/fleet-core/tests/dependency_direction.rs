@@ -61,6 +61,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
         &[
             ("", Root),
             ("main", Root),
+            ("agent_rate", Core),
             ("agent_store", Core),
             ("audit", Core),
             ("configs", Core),

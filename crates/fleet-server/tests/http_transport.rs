@@ -494,3 +494,51 @@ async fn an_unknown_compressed_agent_is_asked_for_full_state_and_can_request_ide
     assert_ne!(assigned.new_instance_uid, temporary.as_bytes().to_vec());
     assert_eq!(reply.instance_uid, assigned.new_instance_uid);
 }
+
+/// A poller past its burst is answered in the body: a `200` carrying the same `Unavailable` a
+/// WebSocket gets, never a `429` or a `503`.
+/// Verifies: ADR-0066
+#[tokio::test]
+async fn a_poller_past_its_burst_is_answered_unavailable_in_the_body() {
+    let (server, _clock) = support::spawn_with_agent_rate(fleet_server::agent_rate::Limits {
+        messages_per_sec: 1,
+        burst: 2,
+        gateway_messages_per_sec: 1,
+        gateway_burst: 2,
+    })
+    .await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+    exchange(&client, &url, &full_report(&uid, "poller", 1)).await;
+    exchange(&client, &url, &compressed_report(&uid, 2)).await;
+
+    // `exchange` holds the status to 200 and the body to protobuf.
+    let reply = exchange(&client, &url, &compressed_report(&uid, 3)).await;
+    assert_eq!(reply.instance_uid, uid.as_bytes());
+    let error = reply.error_response.expect("an error response");
+    assert_eq!(error.r#type, ServerErrorResponseType::Unavailable as i32);
+    assert!(matches!(
+        error.details,
+        Some(opamp::proto::server_error_response::Details::RetryInfo(ref info))
+            if info.retry_after_nanoseconds == 30_000_000_000
+    ));
+    assert_eq!(server.state.snapshot()[0].sequence_num, 2, "not processed");
+
+    // A body that does not decode is counted too; it names no Agent, and neither does its reply.
+    let response = client
+        .post(&url)
+        .header("content-type", PROTOBUF)
+        .body(vec![0xff, 0xff, 0xff])
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 200);
+    let reply =
+        ServerToAgent::decode(response.bytes().await.expect("body").as_ref()).expect("decode");
+    assert!(reply.instance_uid.is_empty());
+    assert_eq!(
+        reply.error_response.expect("an error").r#type,
+        ServerErrorResponseType::Unavailable as i32
+    );
+}

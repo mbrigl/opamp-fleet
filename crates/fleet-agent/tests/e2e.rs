@@ -649,3 +649,120 @@ async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
         "the refused block started"
     );
 }
+
+/// ADR-0067 over one connection: a released Configuration reaches the unlisted Supervisor and not
+/// the listed one, whose Agent declares neither remote-configuration capability. Switched back on,
+/// the next start declares both, is offered what is released, and the stored offer replaces every
+/// file in `config/`, the operator's included (clauses 3 and 8).
+/// Verifies: ADR-0067
+#[tokio::test]
+async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
+    let (addr, state, dir) = spawn_server().await;
+    let state_dir: PathBuf = dir.path().join("client-state");
+    let program = stub_program_name();
+    let block = |name: &str| {
+        format!(
+            "[[supervisor]]\ntype = \"command\"\nname = {name:?}\ncommand = {program:?}\n\
+             args = [\"--touch\", {marker:?}]\n\n",
+            marker = dir.path().join(format!("{name}-marker")).to_string_lossy(),
+        )
+    };
+    let write_config = |listed: &str| {
+        let toml = format!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\nstate_dir = {state:?}\n\
+             heartbeat_interval_secs = 1\n\n[supervisors]\nremote_config_disabled = {listed}\n\n\
+             {open}{closed}",
+            state = state_dir.to_string_lossy(),
+            open = block("open"),
+            closed = block("closed"),
+        );
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, toml + &common::client_identity(dir.path()))
+            .expect("write supervisor.toml");
+        path
+    };
+    stage_owned_program(&state_dir, "open", &program);
+    stage_owned_program(&state_dir, "closed", &program);
+    let operators_file = state_dir.join("supervisors/closed/config/local.conf");
+    std::fs::create_dir_all(operators_file.parent().expect("config/")).expect("config/");
+    std::fs::write(&operators_file, "mine\n").expect("the operator's file");
+
+    let client = spawn_client(&write_config("[\"closed\"]"));
+    wait_until("every agent connected", || {
+        let snapshot = state.snapshot();
+        (snapshot.len() == AGENTS && snapshot.iter().all(|a| a.connected)).then_some(())
+    })
+    .await;
+    let declares = |name: &str, capability: &str| {
+        view(&state.snapshot(), name)
+            .is_some_and(|a| a.capabilities.iter().any(|c| c == capability))
+    };
+    assert!(declares("open", "AcceptsRemoteConfig"));
+    for capability in ["AcceptsRemoteConfig", "ReportsRemoteConfig"] {
+        assert!(
+            !declares("closed", capability),
+            "closed declares {capability}"
+        );
+    }
+    assert!(declares("closed", "ReportsEffectiveConfig"));
+
+    state
+        .save_configuration(
+            "fleet",
+            fleet_server::configs::Revision {
+                selector: Default::default(),
+                body: "receivers: {}\n".to_string(),
+                role: String::new(),
+                service_name: String::new(),
+            },
+        )
+        .expect("save the fleet configuration");
+    state
+        .rollout_configuration("fleet")
+        .expect("roll out the fleet configuration");
+    wait_until("the unlisted Supervisor in sync", || {
+        view(&state.snapshot(), "open")
+            .filter(|a| a.in_sync && a.remote_config_status == "APPLIED")
+            .map(|_| ())
+    })
+    .await;
+    // Over the same connection, a few exchanges later: still nothing for the listed one.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let snapshot = state.snapshot();
+    let closed = view(&snapshot, "closed").expect("closed view");
+    assert_eq!(
+        closed.remote_config_status, "UNSET",
+        "no status from the listed Supervisor"
+    );
+    assert!(!state_dir.join("supervisors/closed/config/fleet").exists());
+    assert!(!state_dir
+        .join("supervisors/closed/remote-config.pb")
+        .exists());
+    assert!(operators_file.is_file());
+
+    // Switched back on: the next start declares both and takes what is released.
+    drop(client);
+    let _client = spawn_client(&write_config("[]"));
+    wait_until(
+        "the formerly listed Supervisor to apply the release",
+        || {
+            view(&state.snapshot(), "closed")
+                .filter(|a| {
+                    a.connected
+                        && a.remote_config_status == "APPLIED"
+                        && a.capabilities.iter().any(|c| c == "AcceptsRemoteConfig")
+                })
+                .map(|_| ())
+        },
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(state_dir.join("supervisors/closed/config/fleet"))
+            .expect("the stored entry"),
+        "receivers: {}\n"
+    );
+    assert!(
+        !operators_file.exists(),
+        "the first stored offer replaces every file in config/"
+    );
+}

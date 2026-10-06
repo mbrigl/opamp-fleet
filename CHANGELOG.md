@@ -18,6 +18,34 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Added
 
+- **Admitted Agents are rate-limited per host**
+  ([ADR-0066](docs/adr/0066-admitted-agents-are-rate-limited-per-host.md)). Every OpAMP message
+  and every package download takes a token from the bucket of the host the certificate names — for
+  a host marked as a Gateway, from the bucket of the Agent the message names and from the
+  Gateway's aggregate. A message past the limit is answered `Unavailable` with `retry_info` of
+  30 seconds and is not processed; a download past it is answered `429` with `Retry-After: 30`.
+  Each refusal is recorded as `agent_rate.throttled`. `[agent_rate_limit]` sets
+  `messages_per_sec` (10), `burst` (300), `gateway_messages_per_sec` (500) and `gateway_burst`
+  (10 000); `0` is refused. **What to do:** nothing at the defaults. A fleet whose offered
+  `heartbeat_interval_secs` is short raises `messages_per_sec`; the Server warns at startup when
+  one host cannot report for 256 Agents at that interval.
+- **Remote configuration can be switched off per Supervisor**
+  ([ADR-0067](docs/adr/0067-remote-configuration-switched-off-per-supervisor-on-the-host.md)).
+  `[supervisors] remote_config_disabled` in `supervisor.toml` lists Supervisor names whose Agents
+  declare neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig` and run only on the files placed
+  in `<supervisor_dir>/<name>/config/`. A delivered block brings a listed Supervisor no `args`,
+  `version_args` or `env`, whatever `delivered_args` and `delivered_env` allow. At its next start a
+  listed Supervisor deletes its stored `remote-config.pb` and the unchanged files that
+  configuration wrote, and keeps every file edited or added on the host. A value outside the name
+  grammar fails startup. **What to do:** nothing unless you want it. Before listing a Supervisor,
+  place the configuration it should run in its `config/` directory; before switching one back on,
+  move anything there you want to keep, since the first delivered configuration replaces every
+  file in it.
+- **Every `Unavailable` names the Agent it answers**
+  ([ADR-0066](docs/adr/0066-admitted-agents-are-rate-limited-per-host.md) clause 7): the
+  Agent-record ceiling, a certificate request held back for its audit record, the full enrolment
+  queue and the closed enrolment window now carry the message's `instance_uid`, so the Client and
+  a Gateway route the reply to its Agent and the Agent waits as told.
 - **A refused request for the Gateways' revocation list is recorded**
   ([ADR-0063](docs/adr/0063-an-append-only-audit-record-chained-by-hash.md) clause 1): a member
   whose host is not marked as a Gateway leaves a `gateway_list.refused` line naming its host.
@@ -84,6 +112,18 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
 
 ### Changed
 
+- **Breaking: a host fetches from the download route only the artifact offered to its own
+  Agents** ([ADR-0068](docs/adr/0068-a-host-fetches-only-the-packages-offered-to-its-own-agents.md)).
+  An uploaded artifact is served only to a certificate whose host speaks for an Agent that a
+  rollout assigned it to — the Agents that reported with that certificate, or any Agent for a host
+  marked as a Gateway. Everything else is answered `404`, exactly as an artifact the store does
+  not hold, and recorded as `download.refused` with `check` `not offered`. A version saved in a
+  Deployment but not yet rolled out can no longer be fetched by anyone. An Agent that reports
+  another Agent type than its assigned Package's is no longer offered that Package. **What to do:**
+  nothing where the Server signs certificates (`[client_ca]`). Without `[client_ca]`, give every
+  hand-provisioned certificate the URI SAN `urn:opamp-fleet:host:<id>`; a certificate that names
+  no host gets `404` for uploaded artifacts, and the Server says so at startup. Referenced
+  artifacts are unaffected.
 - **Breaking: the Agent plane admits by a client certificate alone, and the fleet credential is
   gone** ([ADR-0059](docs/adr/0059-admission-by-a-client-certificate-alone.md),
   [ADR-0060](docs/adr/0060-connection-settings-offered-without-a-credential-and-server-capabilities.md),

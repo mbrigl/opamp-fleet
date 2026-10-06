@@ -118,6 +118,16 @@ pub struct Host {
     pub instance_uids: BTreeSet<String>,
 }
 
+/// The Agents a host's certificate speaks for (ADR-0068 clause 3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpeaksFor {
+    /// A host marked as a Gateway: it carries other hosts' Agents, and the Server keeps no record
+    /// of which.
+    Any,
+    /// The `instance_uid`s bound to the host, hex.
+    Agents(BTreeSet<String>),
+}
+
 /// The certificates one host may hold at once (ADR-0059 clause 7): the one in force, its renewal,
 /// and one more for a renewal whose answer was lost.
 pub const MAX_PER_HOST: usize = 3;
@@ -496,6 +506,19 @@ impl Revocations {
         entry.instance_uids.insert(uid.clone());
         state.owners.insert(uid, host.to_string());
         self.store.save_hosts(&state.hosts)
+    }
+
+    /// The Agents a certificate naming `host` speaks for (ADR-0068 clause 3): the `instance_uid`s
+    /// bound to it, or any Agent for a host marked as a Gateway. A host the register does not know
+    /// speaks for none.
+    #[must_use]
+    pub fn speaks_for(&self, host: &str) -> SpeaksFor {
+        let state = self.state.lock().expect("revocation lock");
+        match state.hosts.get(host) {
+            Some(entry) if entry.gateway => SpeaksFor::Any,
+            Some(entry) => SpeaksFor::Agents(entry.instance_uids.clone()),
+            None => SpeaksFor::Agents(BTreeSet::new()),
+        }
     }
 
     /// Moves a binding to the `instance_uid` the Server re-keyed an Agent to — a re-key never
@@ -926,6 +949,45 @@ mod tests {
         reopened
             .check_report("h2", &[9; 16])
             .expect("still a Gateway");
+    }
+
+    /// A host speaks for the `instance_uid`s that reported with its certificate, a host the
+    /// register does not know for none, and a Gateway for any Agent.
+    /// Verifies: ADR-0068
+    #[test]
+    fn a_host_speaks_for_the_agents_bound_to_it_and_a_gateway_for_any() {
+        let (revocations, _) = open(&Memory::default());
+        revocations
+            .record(on_host("a1", "h1"), &[1; 16], None)
+            .expect("record");
+        revocations
+            .record(on_host("b1", "h2"), &[2; 16], None)
+            .expect("record");
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents(BTreeSet::new()),
+            "nothing reported yet"
+        );
+        revocations.check_report("h1", &[1; 16]).expect("binds");
+        revocations.check_report("h1", &[3; 16]).expect("binds");
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([hex::encode([1; 16]), hex::encode([3; 16])].into())
+        );
+        assert_eq!(
+            revocations.speaks_for("unknown"),
+            SpeaksFor::Agents(BTreeSet::new())
+        );
+        assert!(revocations.set_gateway("h2", true).expect("mark"));
+        assert_eq!(revocations.speaks_for("h2"), SpeaksFor::Any);
+        revocations
+            .check_report("h2", &[1; 16])
+            .expect("a Gateway reports for h1's Agent");
+        assert_eq!(
+            revocations.speaks_for("h2"),
+            SpeaksFor::Any,
+            "a Gateway binds nothing"
+        );
     }
 
     /// Verifies: ADR-0065

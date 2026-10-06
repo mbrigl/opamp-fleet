@@ -1096,6 +1096,61 @@ A Client whose Server never rolls such a Configuration out runs its locally writ
 exactly as before. Note that once one applied, the Server's set is authoritative: a later local
 edit to the blocks stands only until the next rollout act overwrites it.
 
+### Switching remote configuration off for one Supervisor
+
+Some agents should not take their configuration from the fleet: one whose configuration language
+can run commands, such as Telegraf's `inputs.exec` or an Icinga `CheckCommand`, or one another
+system already configures. Name them in `[supervisors]`:
+
+```toml
+[supervisors]
+remote_config_disabled = ["icinga2", "telegraf"]   # Supervisor names, by their block's `name`
+```
+
+The key is read from this file only. The Server never writes `[supervisors]`, so a Supervisor set
+that removes a listed block and delivers it again under the same name gets a Supervisor that is
+still listed. Each value must be a valid Supervisor name, or the Client does not start. A listed
+name that no block carries yet is a startup notice, not an error, since the block may arrive later
+from the Server. The switch covers Supervisors only: a listed name equal to the Client's own
+`name` earns a notice that the Client's own Agent is not covered, and that Agent keeps taking its
+Supervisor set.
+
+- **What the Server sees.** A listed Supervisor's Agent declares neither `AcceptsRemoteConfig` nor
+  `ReportsRemoteConfig`, so the Server offers it no configuration, whatever a rollout is aimed at.
+  It still restarts on command and still takes signed packages. A configuration that arrives anyway
+  is not stored, not written, not applied and not answered; the Client logs one warning per hash.
+- **What it runs on.** The files you place in `<supervisor_dir>/<name>/config/`, under the names its
+  kind reads: any unroled file for `collector`, `telegraf-conf` for `telegraf`,
+  `glpi-agent-conf` for `glpi`, the `role = "main"` entry or `icinga2-conf` for `icinga2`, and
+  for `command` whatever its `args` name. Roles go into `.supplementary`, one `<file> <role>` per
+  line. Nothing else writes into that directory while the switch is on. Without such a file a
+  `collector` or `icinga2` waits and says so, and `telegraf` exits and is reported.
+- **The block stays yours.** A delivered block for a listed Supervisor must repeat its running
+  block exactly, every key included, whatever `delivered_args` and `delivered_env` allow. A
+  delivered block that adds a listed Supervisor carries only `type`, `name` and the key naming its
+  program where the kind does not name its own: `binary` for `collector`, `command` for `command`,
+  nothing more for `telegraf`, `glpi` and `icinga2`. Otherwise the whole set is refused before
+  anything stops. Any other key would be remote configuration by another route: a Collector reads
+  a whole configuration from `--config=yaml:…` or an environment variable, and an `icinga2` block
+  names the parent it enrols with and the certificate it pins.
+- **What happens to a configuration delivered earlier.** When a listed Supervisor starts, the
+  Client deletes the `remote-config.pb` in its directory, and from `config/` each file that stored
+  configuration wrote whose content is unchanged, `.supplementary` included. A file you edited
+  since, or added yourself, stays; the log names the kept files. A `remote-config.pb` that cannot
+  be read is deleted and `config/` is left as it is, with a warning that it may still hold files
+  the Server wrote. The Supervisor then reports no configuration status and no hash. When a file
+  that has to go cannot be read or deleted, the Supervisor does not start; at Client startup that
+  stops the whole Client with an error naming the Supervisor, so it fails closed rather than run
+  the Server's configuration under the switch.
+- **Switching it back on.** Remove the name and restart the Client. The Agent declares both
+  capabilities again, reports no hash, and is offered whatever is released to it. The first
+  configuration it stores replaces every file in `config/`, yours included, so move anything you
+  want to keep before switching back.
+
+The switch binds a name, not an agent: while the Server manages the set, it can remove a listed
+Supervisor and add the same agent under a name that is not listed. A change to the list takes
+effect when the Client next starts.
+
 ### Keys every block accepts
 
 | Key | Default | Meaning |

@@ -72,6 +72,20 @@ impl Pki {
         }
     }
 
+    /// A certificate and key signed by this CA naming `host` the way the Server's own signer does
+    /// (ADR-0059 clause 7): `urn:opamp-fleet:host:<host>`, and no other name.
+    fn issue_to_host(&self, host: &str) -> (String, String) {
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.subject_alt_names.push(rcgen::SanType::URI(
+            format!("{}{host}", fleet_server::ca::HOST_URI_PREFIX)
+                .try_into()
+                .expect("uri"),
+        ));
+        let cert = params.signed_by(&key, &self.issuer()).expect("signed");
+        (cert.pem(), key.serialize_pem())
+    }
+
     /// A certificate and key signed by this CA, for `name`.
     fn issue(&self, name: &str) -> (String, String) {
         let key = KeyPair::generate().expect("key");
@@ -119,6 +133,14 @@ struct Setup<'a> {
     revocations: bool,
     /// The audit record (ADR-0063).
     audit: Option<Arc<dyn fleet_server::audit::Audit>>,
+    /// `[agent_rate_limit]` (ADR-0066).
+    agent_rate: Option<fleet_server::agent_rate::Limits>,
+    /// `max_agents`.
+    max_agents: Option<usize>,
+    /// The clock the enrolment window and the rate limit run on; the system's by default.
+    clock: Option<Arc<dyn fleet_server::fleet::Clock>>,
+    /// Package delivery over an empty store (ADR-0043).
+    packages: bool,
 }
 
 /// The CAs a revocation can name, as `main` takes them from `[tls]` and `[enrolment]`.
@@ -144,6 +166,7 @@ struct Served {
     ca_pem: String,
     state: Arc<AppState>,
     revocations: Option<Arc<Revocations>>,
+    enrolment: Option<Arc<fleet_server::enrolment::Enrolment>>,
 }
 
 /// Serves both planes over TLS on ephemeral ports (ADR-0038), the Agent plane requiring a client
@@ -152,9 +175,10 @@ struct Served {
 async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
     let dir = tempfile::tempdir().expect("tempdir");
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
+    let test_clock = setup.clock.clone().unwrap_or_else(|| clock.clone());
     let enrolment = setup
         .bootstrap
-        .map(|_| Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone())));
+        .map(|_| Arc::new(fleet_server::enrolment::Enrolment::new(test_clock.clone())));
     let revocations = setup.revocations.then(|| {
         Arc::new(
             Revocations::open(
@@ -175,7 +199,27 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
             .with_connection_offer(setup.offer)
             .with_enrolment(enrolment.clone())
             .with_revocations(revocations.clone())
-            .with_audit(setup.audit.clone()),
+            .with_audit(setup.audit.clone())
+            .with_packages(setup.packages.then(|| {
+                fleet_server::fleet::PackageOffering::new(
+                    fleet_server::packages::PackageStore::open(dir.path().join("packages"))
+                        .expect("package store"),
+                    String::new(),
+                )
+                .expect("deployments")
+            }))
+            .with_max_agents(
+                setup
+                    .max_agents
+                    .unwrap_or(fleet_server::fleet::DEFAULT_MAX_AGENTS),
+            )
+            .with_agent_rate(setup.agent_rate.map(|limits| {
+                Arc::new(fleet_server::agent_rate::AgentRate::new(
+                    limits,
+                    100,
+                    test_clock.clone(),
+                ))
+            })),
     );
     let (server_cert, server_key) = pki.issue("localhost");
 
@@ -208,7 +252,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
         .expect("operator plane config");
 
     let mut admission = Admission::new(true)
-        .with_enrolment(planes.issuers, enrolment)
+        .with_enrolment(planes.issuers, enrolment.clone())
         .with_revocations(revocations.clone())
         .with_audit(setup.audit.clone());
     if let Some(limits) = setup.throttle {
@@ -241,6 +285,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
         ca_pem: pki.ca_pem.clone(),
         state,
         revocations,
+        enrolment,
     }
 }
 
@@ -2208,5 +2253,842 @@ async fn a_bootstrap_certificate_is_not_handed_the_list() {
     assert_eq!(
         fetch_list(&served, &enrolling, None).await.status(),
         reqwest::StatusCode::FORBIDDEN
+    );
+}
+
+// ---- The rate limit on the Agent plane (ADR-0066) ----
+
+/// A clock a test moves by hand, started at the real time so certificates and entries read true.
+struct Manual(std::sync::atomic::AtomicU64);
+
+impl fleet_server::fleet::Clock for Manual {
+    fn now_ms(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Manual {
+    fn now() -> Arc<Self> {
+        use fleet_server::fleet::Clock as _;
+        Arc::new(Manual(std::sync::atomic::AtomicU64::new(
+            fleet_server::clock::SystemClock.now_ms(),
+        )))
+    }
+
+    fn advance(&self, secs: u64) {
+        self.0
+            .fetch_add(secs * 1000, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A bucket of `burst` messages that refills one a second.
+fn burst(burst: u32) -> fleet_server::agent_rate::Limits {
+    fleet_server::agent_rate::Limits {
+        messages_per_sec: 1,
+        burst,
+        gateway_messages_per_sec: 1,
+        gateway_burst: burst,
+    }
+}
+
+/// Whether `reply` is the `Unavailable` of the rate limit or any other.
+fn is_unavailable(reply: &ServerToAgent) -> bool {
+    reply
+        .error_response
+        .as_ref()
+        .is_some_and(|error| error.r#type == ServerErrorResponseType::Unavailable as i32)
+}
+
+/// The host a certificate in PEM names.
+fn host_of(pem: &str) -> String {
+    let der = opamp::tls::certificates(pem.as_bytes()).expect("pem");
+    fleet_server::ca::facts(der[0].as_ref())
+        .expect("facts")
+        .host
+        .expect("a host")
+}
+
+/// One report from `client`, answered.
+async fn reported(served: &Served, client: &reqwest::Client) -> ServerToAgent {
+    decode(post(client, &served.endpoint, report(&InstanceUid::default())).await).await
+}
+
+/// Two certificates of one host draw on one bucket, whichever of them a message comes over; a
+/// certificate of another host has a bucket of its own.
+/// Verifies: ADR-0066
+#[tokio::test]
+async fn two_certificates_of_one_host_share_a_bucket_and_two_hosts_do_not() {
+    let pki = Pki::new();
+    let served = serve(
+        &pki,
+        Setup {
+            agent_rate: Some(burst(3)),
+            clock: Some(Manual::now()),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let (provisioned, provisioned_key) = pki.issue("edge-01");
+    let (first, first_key) = issued_through(
+        &served,
+        &client(&served.ca_pem, Some((&provisioned, &provisioned_key))),
+        "edge-01",
+    )
+    .await;
+    let first_client = client(&served.ca_pem, Some((&first, &first_key)));
+    // Its renewal names the same host, and takes the host's first token.
+    let (second, second_key) = issued_through(&served, &first_client, "edge-01").await;
+    assert_eq!(host_of(&first), host_of(&second));
+    let second_client = client(&served.ca_pem, Some((&second, &second_key)));
+
+    assert!(!is_unavailable(&reported(&served, &first_client).await));
+    assert!(!is_unavailable(&reported(&served, &second_client).await));
+    assert!(is_unavailable(&reported(&served, &first_client).await));
+    assert!(
+        is_unavailable(&reported(&served, &second_client).await),
+        "the second certificate drew on the same, empty bucket"
+    );
+
+    let (other, other_key) = pki.issue("edge-02");
+    let (third, third_key) = issued_through(
+        &served,
+        &client(&served.ca_pem, Some((&other, &other_key))),
+        "edge-02",
+    )
+    .await;
+    assert_ne!(host_of(&third), host_of(&first));
+    let third_client = client(&served.ca_pem, Some((&third, &third_key)));
+    assert!(!is_unavailable(&reported(&served, &third_client).await));
+}
+
+/// One bootstrap certificate presented from two addresses is two buckets: an enrolling host is
+/// counted by where it connects from, not by a certificate the whole fleet may share.
+/// Verifies: ADR-0066
+#[tokio::test]
+async fn a_bootstrap_certificate_shared_by_two_addresses_is_two_buckets() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            agent_rate: Some(burst(1)),
+            clock: Some(Manual::now()),
+            ..Setup::default()
+        },
+    )
+    .await;
+    served
+        .enrolment
+        .as_ref()
+        .expect("enrolment")
+        .open(600)
+        .expect("open the window");
+    let (cert, key) = bootstrap.issue("bootstrap");
+    let from = |address: &str| {
+        let mut pem = key.as_bytes().to_vec();
+        pem.extend_from_slice(cert.as_bytes());
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .tls_certs_only([reqwest::Certificate::from_pem(served.ca_pem.as_bytes()).expect("ca")])
+            .resolve(
+                "localhost",
+                "127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap(),
+            )
+            .local_address(Some(address.parse().expect("address")))
+            .identity(reqwest::Identity::from_pem(&pem).expect("identity"))
+            .build()
+            .expect("client")
+    };
+    let (one, two) = (from("127.0.0.1"), from("127.0.0.2"));
+    assert!(!is_unavailable(&reported(&served, &one).await));
+    assert!(is_unavailable(&reported(&served, &one).await));
+    assert!(
+        !is_unavailable(&reported(&served, &two).await),
+        "another address, another bucket"
+    );
+}
+
+/// The record's lines, in memory: no disk to wait on.
+#[derive(Clone, Default)]
+struct Lines(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl fleet_server::audit_log::AuditStore for Lines {
+    fn tail(&mut self) -> Result<Option<fleet_server::audit_log::Tail>, String> {
+        Ok(None)
+    }
+    fn append(&mut self, _: u64, line: &str) -> Result<(), String> {
+        self.0.lock().expect("lines").push(line.to_string());
+        Ok(())
+    }
+    fn current_bytes(&self) -> u64 {
+        0
+    }
+    fn rotate(&mut self, _: usize) -> Result<Vec<(String, String)>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// Every throttled message is passed to the record as a refusal naming the host; past ten a second
+/// from one address the rest are counted in `agent_rate.throttled.aggregated`. The record runs on
+/// the Server's frozen clock, so every refusal falls into one second: ten are written and the
+/// other fifteen are counted once the clock has moved past it.
+/// Verifies: ADR-0066, ADR-0063
+#[tokio::test]
+async fn a_throttled_message_leaves_an_aggregated_refusal_naming_the_host() {
+    const REFUSED: u64 = 25;
+    let pki = Pki::new();
+    let lines = Lines::default();
+    // Frozen, so the bucket stays empty and every refusal is recorded in the same second.
+    let clock = Manual::now();
+    let audit: Arc<dyn fleet_server::audit::Audit> = Arc::new(
+        fleet_server::audit_log::AuditLog::start(
+            Box::new(lines.clone()),
+            fleet_server::audit_log::Limits::default(),
+            clock.clone(),
+        )
+        .expect("audit"),
+    );
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit),
+            agent_rate: Some(burst(1)),
+            clock: Some(clock.clone()),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let (provisioned, provisioned_key) = pki.issue("edge-01");
+    let (cert, key) = issued_through(
+        &served,
+        &client(&served.ca_pem, Some((&provisioned, &provisioned_key))),
+        "edge-01",
+    )
+    .await;
+    let host = host_of(&cert);
+    let member = client(&served.ca_pem, Some((&cert, &key)));
+    assert!(!is_unavailable(&reported(&served, &member).await));
+    for _ in 0..REFUSED {
+        assert!(is_unavailable(&reported(&served, &member).await));
+    }
+    clock.advance(1);
+
+    // The writer counts a second's excess on its next tick after that second has passed.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (written, aggregated) = loop {
+        let all: Vec<serde_json::Value> = lines
+            .0
+            .lock()
+            .expect("lines")
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect();
+        let aggregated: Vec<_> = named(&all, "agent_rate.throttled.aggregated")
+            .into_iter()
+            .cloned()
+            .collect();
+        if !aggregated.is_empty() {
+            let written: Vec<_> = named(&all, "agent_rate.throttled")
+                .into_iter()
+                .cloned()
+                .collect();
+            break (written, aggregated);
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no aggregate was written: {all:#?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert_eq!(written.len(), 10, "ten a second are written");
+    assert_eq!(aggregated.len(), 1, "{aggregated:#?}");
+    assert_eq!(aggregated[0]["count"].as_u64(), Some(REFUSED - 10));
+    for entry in &written {
+        assert_eq!(entry["outcome"], "throttled");
+        assert_eq!(entry["host"], host.as_str());
+        assert_eq!(entry["bucket"], "host");
+        assert_eq!(entry["route"], "opamp");
+        assert_eq!(entry["transport"], "http");
+        assert_eq!(entry["peer"], "127.0.0.1");
+        assert_eq!(entry["instance_uid"].as_str().map(str::len), Some(32));
+    }
+    for entry in &aggregated {
+        assert_eq!(entry["peer"], "127.0.0.1");
+    }
+}
+
+/// Each `Unavailable` this Server sends carries the `instance_uid` of the message it answers — the
+/// field the Client and a Gateway route a reply by: the rate limit's, the Agent-record ceiling's, a
+/// CSR held back for its record, the full enrolment queue and the closed enrolment window.
+/// Verifies: ADR-0066, ADR-0059, ADR-0063
+#[tokio::test]
+async fn every_unavailable_reply_names_the_agent_it_answers() {
+    let names_its_agent = |reply: &ServerToAgent, uid: &InstanceUid, case: &str| {
+        assert!(is_unavailable(reply), "{case}: {reply:?}");
+        assert_eq!(reply.instance_uid, uid.as_bytes(), "{case}");
+    };
+    let pki = Pki::new();
+
+    // The rate limit.
+    let served = serve(
+        &pki,
+        Setup {
+            agent_rate: Some(burst(1)),
+            clock: Some(Manual::now()),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let (cert, key) = pki.issue("edge-01");
+    let member = client(&served.ca_pem, Some((&cert, &key)));
+    reported(&served, &member).await;
+    let uid = InstanceUid::default();
+    let reply = decode(post(&member, &served.endpoint, report(&uid)).await).await;
+    names_its_agent(&reply, &uid, "throttled");
+
+    // The Agent-record ceiling.
+    let served = serve(
+        &pki,
+        Setup {
+            max_agents: Some(1),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let member = client(&served.ca_pem, Some((&cert, &key)));
+    reported(&served, &member).await;
+    let uid = InstanceUid::default();
+    let reply = decode(post(&member, &served.endpoint, report(&uid)).await).await;
+    names_its_agent(&reply, &uid, "ceiling");
+
+    // A CSR held back for its audit record. A plain-HTTP member's admission is recorded once an
+    // hour, so the member is still admitted after the record fails; its CSR is not signed.
+    let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct Failing(Arc<std::sync::atomic::AtomicBool>);
+    impl fleet_server::audit_log::AuditStore for Failing {
+        fn tail(&mut self) -> Result<Option<fleet_server::audit_log::Tail>, String> {
+            Ok(None)
+        }
+        fn append(&mut self, _: u64, _: &str) -> Result<(), String> {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("disk full".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        fn current_bytes(&self) -> u64 {
+            0
+        }
+        fn rotate(&mut self, _: usize) -> Result<Vec<(String, String)>, String> {
+            Ok(Vec::new())
+        }
+    }
+    let audit: Arc<dyn fleet_server::audit::Audit> = Arc::new(
+        fleet_server::audit_log::AuditLog::start(
+            Box::new(Failing(failing.clone())),
+            fleet_server::audit_log::Limits::default(),
+            Arc::new(fleet_server::clock::SystemClock),
+        )
+        .expect("audit"),
+    );
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit.clone()),
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    let member = client(&served.ca_pem, Some((&cert, &key)));
+    reported(&served, &member).await;
+    failing.store(true, std::sync::atomic::Ordering::SeqCst);
+    // The record turns unavailable once its writer has failed to append; wait for that, not for
+    // a fixed time.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while audit
+        .record(fleet_server::audit::Entry::new("probe", "probe"))
+        .is_ok()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the record never turned unavailable"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let uid = InstanceUid::default();
+    let (csr, _) = csr_for("edge-01");
+    let reply = decode(post(&member, &served.endpoint, with_csr(&uid, csr)).await).await;
+    names_its_agent(&reply, &uid, "a CSR held back");
+
+    // The full enrolment queue, and the window that closed while a host was connected.
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let clock = Manual::now();
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            clock: Some(clock.clone()),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let enrolment = served.enrolment.clone().expect("enrolment");
+    enrolment.open(60).expect("open the window");
+    for n in 0..fleet_server::enrolment::MAX_PENDING {
+        let request = fleet_server::enrolment::Request {
+            csr_pem: String::new(),
+            subject: format!("CN=filler-{n}"),
+            key_fingerprint: format!("{n:064x}"),
+            instance_uid: vec![0; 16],
+        };
+        let requester = fleet_server::enrolment::Requester {
+            bootstrap_subject: String::new(),
+            bootstrap_fingerprint: String::new(),
+            peer: None,
+        };
+        enrolment.submit(request, requester);
+    }
+    let (bootstrap_cert, bootstrap_key) = bootstrap.issue("bootstrap");
+    let enrolling = client(&served.ca_pem, Some((&bootstrap_cert, &bootstrap_key)));
+    let uid = InstanceUid::default();
+    let (csr, _) = csr_for("edge-03");
+    let reply = decode(post(&enrolling, &served.endpoint, with_csr(&uid, csr)).await).await;
+    names_its_agent(&reply, &uid, "the full enrolment queue");
+
+    enrolment.close();
+    enrolment.open(60).expect("open the window");
+    let mut socket = websocket(&served, &bootstrap_cert, &bootstrap_key, None)
+        .await
+        .expect("admitted while the window is open");
+    clock.advance(61);
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let uid = InstanceUid::default();
+    let (csr, _) = csr_for("edge-04");
+    let framed = opamp::frame::encode_within(&with_csr(&uid, csr), usize::MAX).expect("frame");
+    socket.send(Ws::Binary(framed.into())).await.expect("send");
+    let reply = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .expect("a reply in time")
+        {
+            Some(Ok(Ws::Binary(bytes))) => {
+                break opamp::frame::decode::<ServerToAgent>(&bytes, usize::MAX).expect("decode")
+            }
+            Some(Ok(_)) => continue,
+            other => panic!("the session ended before its reply: {other:?}"),
+        }
+    };
+    names_its_agent(&reply, &uid, "the closed enrolment window");
+}
+
+// ---- A host fetches only what is offered to its own Agents (ADR-0068) ----
+
+/// The Agent type the delivery tests release.
+const OTELCOL: &str = "otelcol";
+
+/// A Server with package delivery, a host register and the client CA.
+fn delivery_setup(pki: &Pki) -> Setup<'static> {
+    Setup {
+        packages: true,
+        ..revocations_setup(pki)
+    }
+}
+
+/// A host's client: a certificate naming `host`.
+fn host_client(served: &Served, pki: &Pki, host: &str) -> reqwest::Client {
+    let (cert, key) = pki.issue_to_host(host);
+    client(&served.ca_pem, Some((&cert, &key)))
+}
+
+/// A report of an `otelcol` Agent on linux/amd64 that accepts packages.
+fn package_report(uid: &InstanceUid) -> AgentToServer {
+    let attr = opamp::attributes::string_attr;
+    AgentToServer {
+        agent_description: Some(opamp::proto::AgentDescription {
+            identifying_attributes: vec![attr("service.name", OTELCOL)],
+            non_identifying_attributes: vec![attr("os.type", "linux"), attr("host.arch", "amd64")],
+        }),
+        capabilities: AgentCapabilities::ReportsStatus as u64
+            | AgentCapabilities::AcceptsPackages as u64,
+        ..report(uid)
+    }
+}
+
+fn linux() -> fleet_server::packages::Platform {
+    fleet_server::packages::Platform::new("linux", "amd64").expect("platform")
+}
+
+/// Uploads `artifact` as `otelcol@<version>` for linux/amd64 and puts it, signed, into the
+/// `stable` channel that claims every `otelcol` — saved, released to nobody.
+fn save(served: &Served, version: &str, artifact: &[u8]) {
+    let id = fleet_server::packages::PackageId::new(OTELCOL, version).expect("id");
+    let store = served.state.packages().expect("package delivery");
+    store.create(&id).expect("create");
+    store
+        .put_entry(&id, &linux(), artifact.to_vec())
+        .expect("entry");
+    served
+        .state
+        .deployment_store()
+        .expect("deployments")
+        .put(
+            "stable",
+            [("service.name".to_string(), OTELCOL.to_string())].into(),
+        )
+        .expect("deployment");
+    served
+        .state
+        .put_deployment_package("stable", &id, true)
+        .expect("package");
+    served
+        .state
+        .put_deployment_signature("stable", &id, &linux(), vec![1; 64])
+        .expect("signature");
+}
+
+/// `GET` of the download route for `otelcol@<version>`, with a raw query.
+async fn fetch(served: &Served, client: &reqwest::Client, path: &str) -> reqwest::Response {
+    client
+        .get(served.endpoint.replace("/v1/opamp", path))
+        .send()
+        .await
+        .expect("send")
+}
+
+fn artifact_path(version: &str) -> String {
+    format!("/api/v1/packages/{OTELCOL}/{version}/file?os=linux&arch=amd64")
+}
+
+/// One host's Agent is reported, and `version` is saved and released to it by the press.
+async fn released_to(served: &Served, host: &reqwest::Client, version: &str, artifact: &[u8]) {
+    post(
+        host,
+        &served.endpoint,
+        package_report(&InstanceUid([1; 16])),
+    )
+    .await;
+    save(served, version, artifact);
+    assert_eq!(
+        served
+            .state
+            .rollout_deployment("stable")
+            .expect("the press"),
+        1
+    );
+}
+
+/// A host fetches the artifact released to the Agent that reported with its certificate.
+/// Verifies: ADR-0068
+#[tokio::test]
+async fn a_host_fetches_the_artifact_offered_to_its_own_agent() {
+    let pki = Pki::new();
+    let served = serve(&pki, delivery_setup(&pki)).await;
+    let host = host_client(&served, &pki, "h1");
+    released_to(&served, &host, "1.0.0", b"the-binary").await;
+    let response = fetch(&served, &host, &artifact_path("1.0.0")).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.bytes().await.expect("bytes").as_ref(),
+        b"the-binary"
+    );
+}
+
+/// Another member of the fleet is answered `404` for what was released to one host's Agent alone.
+/// Verifies: ADR-0068
+#[tokio::test]
+async fn a_host_is_answered_404_for_an_artifact_offered_only_to_another_host() {
+    let pki = Pki::new();
+    let served = serve(&pki, delivery_setup(&pki)).await;
+    released_to(
+        &served,
+        &host_client(&served, &pki, "h1"),
+        "1.0.0",
+        b"the-binary",
+    )
+    .await;
+    let other = host_client(&served, &pki, "h2");
+    post(&other, &served.endpoint, report(&InstanceUid([2; 16]))).await;
+    let response = fetch(&served, &other, &artifact_path("1.0.0")).await;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_ne!(
+        response.bytes().await.expect("bytes").as_ref(),
+        b"the-binary"
+    );
+}
+
+/// Status, headers and body of a response, the `Date` header aside: it tells the time of the
+/// answer, never what the store holds.
+async fn answer(response: reqwest::Response) -> (u16, Vec<(String, Vec<u8>)>, Vec<u8>) {
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .filter(|(name, _)| *name != reqwest::header::DATE)
+        .map(|(name, value)| (name.to_string(), value.as_bytes().to_vec()))
+        .collect();
+    (
+        status,
+        headers,
+        response.bytes().await.expect("body").to_vec(),
+    )
+}
+
+/// The same request is answered byte for byte alike whether the store holds nothing under it,
+/// holds only a referenced entry, holds an artifact released to nobody, or holds one released to
+/// another host's Agent.
+/// Verifies: ADR-0068
+#[tokio::test]
+async fn an_artifact_not_offered_and_one_not_held_are_answered_alike() {
+    let pki = Pki::new();
+    let served = serve(&pki, delivery_setup(&pki)).await;
+    let other = host_client(&served, &pki, "h2");
+    post(&other, &served.endpoint, report(&InstanceUid([2; 16]))).await;
+
+    let not_held = answer(fetch(&served, &other, &artifact_path("1.0.0")).await).await;
+    assert_eq!(not_held.0, 404);
+
+    let referenced = fleet_server::packages::PackageId::new(OTELCOL, "1.0.0").expect("id");
+    let store = served.state.packages().expect("package delivery");
+    store.create(&referenced).expect("create");
+    store
+        .set_entry_source(
+            &referenced,
+            &linux(),
+            vec![0; 32],
+            fleet_server::packages::Source {
+                url: "https://example.com/otelcol.tar.gz".to_string(),
+                headers: Default::default(),
+            },
+        )
+        .expect("source");
+    let only_referenced = answer(fetch(&served, &other, &artifact_path("1.0.0")).await).await;
+    assert_eq!(only_referenced, not_held, "a referenced entry");
+    store.delete_set(&referenced).expect("delete");
+
+    let host = host_client(&served, &pki, "h1");
+    post(
+        &host,
+        &served.endpoint,
+        package_report(&InstanceUid([1; 16])),
+    )
+    .await;
+    save(&served, "1.0.0", b"the-binary");
+    let released_to_nobody = answer(fetch(&served, &other, &artifact_path("1.0.0")).await).await;
+    assert_eq!(
+        released_to_nobody, not_held,
+        "an artifact released to nobody"
+    );
+
+    served
+        .state
+        .rollout_deployment("stable")
+        .expect("the press");
+    let released_to_another = answer(fetch(&served, &other, &artifact_path("1.0.0")).await).await;
+    assert_eq!(
+        released_to_another, not_held,
+        "an artifact of another host's Agent"
+    );
+    assert_eq!(
+        fetch(&served, &host, &artifact_path("1.0.0"))
+            .await
+            .status(),
+        reqwest::StatusCode::OK
+    );
+}
+
+/// A host marked as a Gateway speaks for any Agent, so it fetches what is offered to any; before
+/// it is marked, it fetches nothing of another host's.
+/// Verifies: ADR-0068
+#[tokio::test]
+async fn a_marked_gateway_fetches_what_is_offered_to_any_agent() {
+    let pki = Pki::new();
+    let served = serve(&pki, delivery_setup(&pki)).await;
+    released_to(
+        &served,
+        &host_client(&served, &pki, "h1"),
+        "1.0.0",
+        b"the-binary",
+    )
+    .await;
+    let gateway = host_client(&served, &pki, "gw");
+    post(&gateway, &served.endpoint, report(&InstanceUid([9; 16]))).await;
+    assert_eq!(
+        fetch(&served, &gateway, &artifact_path("1.0.0"))
+            .await
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert!(served
+        .revocations
+        .as_ref()
+        .expect("register")
+        .set_gateway("gw", true)
+        .expect("mark"));
+    let response = fetch(&served, &gateway, &artifact_path("1.0.0")).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.bytes().await.expect("bytes").as_ref(),
+        b"the-binary"
+    );
+}
+
+/// A certificate that names no host speaks for no Agent — not even the one it reported, to which
+/// the artifact was released.
+/// Verifies: ADR-0068
+#[tokio::test]
+async fn a_certificate_naming_no_host_fetches_nothing() {
+    let pki = Pki::new();
+    let served = serve(&pki, delivery_setup(&pki)).await;
+    let (cert, key) = pki.issue("edge-01");
+    let provisioned = client(&served.ca_pem, Some((&cert, &key)));
+    released_to(&served, &provisioned, "1.0.0", b"the-binary").await;
+    assert_eq!(
+        fetch(&served, &provisioned, &artifact_path("1.0.0"))
+            .await
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+}
+
+/// A fetch that is not offered leaves one `download.refused` entry naming the check, the host, the
+/// certificate's serial and the artifact asked for; it is no failure the admission throttle counts,
+/// which here backs off after one.
+/// Verifies: ADR-0068, ADR-0063
+#[tokio::test]
+async fn a_refused_fetch_leaves_one_download_refused_entry_naming_its_check() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit_in(dir.path())),
+            throttle: Some(fleet_server::throttle::Limits {
+                max_failures: 1,
+                window_secs: 60,
+                backoff_secs: 300,
+            }),
+            ..delivery_setup(&pki)
+        },
+    )
+    .await;
+    released_to(
+        &served,
+        &host_client(&served, &pki, "h1"),
+        "1.0.0",
+        b"the-binary",
+    )
+    .await;
+    let (cert, key) = pki.issue_to_host("h2");
+    let other = client(&served.ca_pem, Some((&cert, &key)));
+    assert_eq!(
+        fetch(&served, &other, &artifact_path("1.0.0"))
+            .await
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+
+    let all = entries(dir.path()).await;
+    let refused = named(&all, "download.refused");
+    assert_eq!(refused.len(), 1, "{all:#?}");
+    assert_eq!(refused[0]["outcome"], "refused");
+    assert_eq!(refused[0]["check"], "not offered");
+    assert_eq!(refused[0]["host"], "h2");
+    assert_eq!(refused[0]["serial"], cert_id(&cert).serial.as_str());
+    assert_eq!(refused[0]["agent_type"], OTELCOL);
+    assert_eq!(refused[0]["version"], "1.0.0");
+    assert_eq!(refused[0]["platform"], "linux-amd64");
+
+    // Past the throttle's one failure, the same address is still admitted.
+    assert_eq!(
+        fetch(&served, &other, &artifact_path("1.0.0"))
+            .await
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert!(
+        post(&other, &served.endpoint, report(&InstanceUid([2; 16])))
+            .await
+            .status()
+            .is_success()
+    );
+}
+
+/// A malformed identity or Platform token is a `400`, decided before any offer is tested: no
+/// `download.refused` entry follows it.
+/// Verifies: ADR-0068
+#[tokio::test]
+async fn a_malformed_token_is_answered_400_before_the_offer_is_tested() {
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            audit: Some(audit_in(dir.path())),
+            ..delivery_setup(&pki)
+        },
+    )
+    .await;
+    let other = host_client(&served, &pki, "h2");
+    for path in [
+        "/api/v1/packages/otel@col/1.0.0/file?os=linux&arch=amd64",
+        "/api/v1/packages/otelcol/1.0.0/file?os=lin%2Fux&arch=amd64",
+        "/api/v1/packages/otelcol/1.0.0/file?os=linux",
+    ] {
+        assert_eq!(
+            fetch(&served, &other, path).await.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "{path}"
+        );
+    }
+    let all = entries(dir.path()).await;
+    assert!(named(&all, "download.refused").is_empty(), "{all:#?}");
+}
+
+/// A download takes a token from the bucket of the host its certificate names — the bucket its
+/// Agent's messages draw on.
+/// Verifies: ADR-0068, ADR-0066
+#[tokio::test]
+async fn a_download_costs_a_token_of_the_hosts_bucket() {
+    let pki = Pki::new();
+    let served = serve(
+        &pki,
+        Setup {
+            agent_rate: Some(burst(2)),
+            clock: Some(Manual::now()),
+            ..delivery_setup(&pki)
+        },
+    )
+    .await;
+    let host = host_client(&served, &pki, "h1");
+    released_to(&served, &host, "1.0.0", b"the-binary").await;
+    assert_eq!(
+        fetch(&served, &host, &artifact_path("1.0.0"))
+            .await
+            .status(),
+        reqwest::StatusCode::OK
+    );
+    assert!(
+        is_unavailable(
+            &decode(
+                post(
+                    &host,
+                    &served.endpoint,
+                    package_report(&InstanceUid([1; 16]))
+                )
+                .await
+            )
+            .await
+        ),
+        "the download took the host's second token"
+    );
+    assert_eq!(
+        fetch(&served, &host, &artifact_path("1.0.0"))
+            .await
+            .status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
     );
 }

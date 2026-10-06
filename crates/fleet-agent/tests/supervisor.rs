@@ -269,6 +269,71 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
     let _ = client.wait();
 }
 
+/// ADR-0067 clause 6 end to end: a listed Collector runs on the files the operator placed in its
+/// `config/` directory, and the Server's last configuration stored there before the switch is not
+/// among what it is started with.
+/// Verifies: ADR-0067
+#[test]
+fn a_listed_collector_runs_on_the_entries_the_operator_placed() {
+    use fleet_agent::supervisor::ports::AgentStorage as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("marker");
+
+    let supervisor_dir = dir.path().join("state/supervisors/otelcol");
+    let storage =
+        fleet_agent::storage::Storage::new(supervisor_dir.clone()).expect("the supervisor's dir");
+    storage
+        .store_remote_config(&opamp::proto::AgentRemoteConfig {
+            config: Some(opamp::proto::AgentConfigMap {
+                config_map: std::collections::HashMap::from([(
+                    "fleet".to_string(),
+                    opamp::proto::AgentConfigObject {
+                        body: b"receivers: {}\n".to_vec(),
+                        ..Default::default()
+                    },
+                )]),
+            }),
+            config_hash: b"stored".to_vec(),
+        })
+        .expect("a configuration the Server delivered before the switch");
+    let config_dir = storage.config_dir();
+    std::fs::write(config_dir.join("local.yaml"), "receivers: {}\n").expect("operator's file");
+
+    let toml = format!(
+        "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\n\
+         [supervisors]\nremote_config_disabled = [\"otelcol\"]\n\n\
+         [[supervisor]]\ntype = \"collector\"\nname = \"otelcol\"\nbinary = {binary:?}\n\
+         args = [\"--touch\", {marker:?}]\n",
+        state = dir.path().join("state").to_string_lossy(),
+        binary = install_stub(&dir.path().join("state/supervisors"), "otelcol"),
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
+        .expect("write supervisor.toml");
+
+    let mut client = spawn_client(&config_path);
+    wait_for(
+        "the stub collector's marker",
+        Duration::from_secs(20),
+        || marker.exists(),
+    );
+    let content = std::fs::read_to_string(&marker).expect("read the marker");
+    assert!(
+        content.contains("local.yaml"),
+        "the operator's file is passed: {content}"
+    );
+    assert!(
+        !content.contains(&config_dir.join("fleet").display().to_string()),
+        "the Server's stored entry is not: {content}"
+    );
+    assert!(!config_dir.join("fleet").exists());
+    assert!(!supervisor_dir.join("remote-config.pb").exists());
+
+    client.kill().expect("kill the client");
+    let _ = client.wait();
+}
+
 #[cfg(unix)]
 #[test]
 fn sigterm_stops_the_managed_process_and_the_client_cleanly() {

@@ -344,6 +344,7 @@ Use these exact words in code, comments, documentation, and ADRs.
   basic operation; a production-grade user interface is external and out of scope for this project to
   build.
 - **Authorization and multi-tenancy.** The Server authenticates *that* a peer belongs to the fleet
-  (goal 17), but does not distinguish *which* Agent or operator may do *what*, nor separate one
-  operator's fleet from another's. Roles, permissions, and tenancy are real needs deferred rather than
-  half-built.
+  (goal 17), but does not distinguish *which* operator may do *what*, nor separate one operator's
+  fleet from another's. Roles, permissions, and tenancy are real needs deferred rather than
+  half-built. On the Agent plane one bound holds: a host receives from the Server only the
+  configurations and packages released to an Agent it speaks for.

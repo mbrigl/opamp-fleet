@@ -95,6 +95,16 @@ a peer behind one, can report under any `instance_uid`** and update that Agent's
 (health, effective config, remote-config status, and so the Configuration offered to it). This is
 *not* a cross-fleet or unauthenticated exposure: it is bounded by admission.
 
+**A host receives from the Server only what is released to an Agent it speaks for**
+([ADR-0068](docs/adr/0068-a-host-fetches-only-the-packages-offered-to-its-own-agents.md)). A
+composed configuration travels only to the Agent it was released to, and the package download
+serves an uploaded artifact only to a host one of whose Agents is offered it; every other request
+is answered `404`, as for an artifact the store does not hold, so a host can neither fetch another
+partition's builds nor list the store. A Gateway's certificate speaks for any Agent and may fetch
+what any Agent is offered. The bound is no stronger than the partition: a host that reports another
+partition's attributes under a fresh `instance_uid` is assigned by that partition's next rollout,
+and the fleet view shows such an Agent waiting before the press.
+
 **What this means for operators:** treat one fleet (one Server, one shared admission) as a single
 trust domain, mark only real Gateways as such (`PUT /api/v1/hosts/{host}/gateway`), and do not
 place mutually distrusting Agents behind one Gateway or in one fleet; isolate them by separate

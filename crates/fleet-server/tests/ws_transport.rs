@@ -395,3 +395,60 @@ async fn an_oversized_frame_closes_the_connection_with_1009() {
         }
     }
 }
+
+/// The limits the rate-limit tests serve with: three messages, then one a second.
+const SMALL: fleet_server::agent_rate::Limits = fleet_server::agent_rate::Limits {
+    messages_per_sec: 1,
+    burst: 3,
+    gateway_messages_per_sec: 1,
+    gateway_burst: 3,
+};
+
+/// A member past its burst is answered `Unavailable` with a `retry_info` of exactly 30 s, addressed
+/// to the Agent that sent the message; the session stays open, the Agent's record is untouched, and
+/// once the bucket refills the next message is processed and asked for a full report.
+/// Verifies: ADR-0066
+#[tokio::test]
+async fn a_session_past_its_burst_is_answered_unavailable_with_retry_info() {
+    use opamp::proto::server_error_response::Details;
+    use opamp::proto::{ServerErrorResponseType, ServerToAgentFlags};
+
+    let (server, clock) = support::spawn_with_agent_rate(SMALL).await;
+    let mut socket = connect(server.addr).await;
+    let uid = InstanceUid::default();
+    send(&mut socket, &full_report(&uid, "flooding", 1)).await;
+    recv(&mut socket).await;
+    for sequence in 2..=3 {
+        send(&mut socket, &compressed_report(&uid, sequence)).await;
+        assert!(recv(&mut socket).await.error_response.is_none());
+    }
+    let before = server.state.snapshot();
+
+    send(&mut socket, &compressed_report(&uid, 4)).await;
+    let reply = recv(&mut socket).await;
+    assert_eq!(reply.instance_uid, uid.as_bytes(), "it names the Agent");
+    assert_eq!(reply.capabilities, SERVER_CAPABILITIES);
+    let error = reply.error_response.expect("an error response");
+    assert_eq!(error.r#type, ServerErrorResponseType::Unavailable as i32);
+    match error.details {
+        Some(Details::RetryInfo(info)) => {
+            assert_eq!(info.retry_after_nanoseconds, 30_000_000_000);
+        }
+        other => panic!("no retry_info: {other:?}"),
+    }
+    let after = server.state.snapshot();
+    assert_eq!(
+        after[0].sequence_num, before[0].sequence_num,
+        "not processed"
+    );
+    assert_eq!(after[0].last_seen_ms, before[0].last_seen_ms, "not seen");
+
+    // Still open: once a token is back, the next message is processed, and the gap the throttled
+    // one left asks for a full report.
+    clock.advance(Duration::from_secs(1));
+    send(&mut socket, &compressed_report(&uid, 5)).await;
+    let reply = recv(&mut socket).await;
+    assert!(reply.error_response.is_none(), "{:?}", reply.error_response);
+    assert_ne!(reply.flags & ServerToAgentFlags::ReportFullState as u64, 0);
+    assert_eq!(server.state.snapshot()[0].sequence_num, 5);
+}

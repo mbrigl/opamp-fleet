@@ -747,6 +747,231 @@ mod tests {
             .expect("the running block's own arguments");
     }
 
+    const LISTED_GLOBALS: &str = "[supervisors]\nremote_config_disabled = [\"agent\"]\n\
+                                  delivered_args = true\ndelivered_env = [\"*\"]\n";
+
+    /// With every argument and variable allowed, a listed Supervisor's delivered block still
+    /// equals its running block whole: a changed `args`, `version_args`, `env` entry or core key,
+    /// an added key and a dropped one are each refused naming the block and the key, and the
+    /// running block delivered back passes (ADR-0067 clause 7).
+    /// Verifies: ADR-0067
+    #[test]
+    fn a_delivered_block_for_a_listed_supervisor_must_equal_the_running_block_whole() {
+        let body = "args = [\"-c\", \"/etc/agent.conf\"]\nversion_args = [\"-v\"]\n\
+                    env = { OTEL_X = \"1\" }\n";
+        let operators = format!("{AGENT}{body}");
+        let config = running(LISTED_GLOBALS, &operators);
+        crate::supervisor::check_delivered_block(&config, &delivered(&operators))
+            .expect("the operator's own block, delivered back");
+        for (key, changed) in [
+            (
+                "args",
+                body.replace("\"/etc/agent.conf\"", "\"--config=yaml:receivers: {}\""),
+            ),
+            ("version_args", body.replace("\"-v\"", "\"-V\"")),
+            ("env", body.replace("\"1\"", "\"2\"")),
+            (
+                "args",
+                body.replace("args = [\"-c\", \"/etc/agent.conf\"]\n", ""),
+            ),
+            ("args", body.replace("[\"-c\", \"/etc/agent.conf\"]", "[]")),
+            (
+                "service_name",
+                format!("{body}service_name = \"io.example.other\"\n"),
+            ),
+            (
+                "stop_timeout_secs",
+                format!("{body}stop_timeout_secs = 1\n"),
+            ),
+            (
+                "program_path",
+                format!("{body}program_path = \"bin/other\"\n"),
+            ),
+        ] {
+            let block = delivered(&format!("{AGENT}{changed}"));
+            let err = crate::supervisor::check_delivered_block(&config, &block).expect_err(key);
+            assert!(err.contains("\"agent\""), "{err}");
+            assert!(err.contains(key), "{err}");
+            assert!(err.contains("remote_config_disabled"), "{err}");
+        }
+        let other_program = delivered(&format!(
+            "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"other\"\n{body}"
+        ));
+        let err = crate::supervisor::check_delivered_block(&config, &other_program)
+            .expect_err("another program under the listed name");
+        assert!(err.contains("command"), "{err}");
+        let other_kind = delivered(
+            "[[supervisor]]\ntype = \"collector\"\nname = \"agent\"\nbinary = \"otelcol\"\n",
+        );
+        let err = crate::supervisor::check_delivered_block(&config, &other_kind)
+            .expect_err("another kind under the listed name");
+        assert!(err.contains("type"), "{err}");
+        // An unlisted Supervisor under the same consent takes them, as ADR-0051 lets it.
+        let unlisted = running(
+            "[supervisors]\ndelivered_args = true\ndelivered_env = [\"*\"]\n",
+            &operators,
+        );
+        crate::supervisor::check_delivered_block(
+            &unlisted,
+            &delivered(&format!(
+                "{AGENT}args = [\"--other\"]\nenv = {{ OTEL_X = \"2\" }}\n"
+            )),
+        )
+        .expect("consented");
+    }
+
+    /// A listed `icinga2` enrols only with the parent the operator wrote: a delivered block that
+    /// names another parent or node, or points the pin at a file in `${config_dir}` — which, with
+    /// remote configuration off, nothing writes, so enrolment would fall back to trust on first
+    /// use — is refused naming the key, although ADR-0051 alone would let it through
+    /// (ADR-0067 clause 7).
+    /// Verifies: ADR-0067
+    #[test]
+    fn a_listed_icinga2_keeps_the_parent_and_the_pin_the_operator_wrote() {
+        let globals = "[supervisors]\nremote_config_disabled = [\"icinga\"]\n";
+        // The operator placed the parent's certificate in `config/` by hand.
+        let operators = format!(
+            "{ICINGA}node_name = \"host-1\"\ntrusted_cert_file = \"${{config_dir}}/parent.crt\"\n"
+        );
+        let config = running(globals, &operators);
+        crate::supervisor::check_delivered_block(&config, &delivered(&operators))
+            .expect("the operator's own block, delivered back");
+        let pin_missing = "trusted_cert_file = \"${config_dir}/parent.crt\"\n";
+        for (key, block) in [
+            (
+                "parent_host",
+                operators.replace("master.example", "evil.example"),
+            ),
+            ("node_name", operators.replace("host-1", "host-2")),
+            (
+                "trusted_cert_file",
+                operators.replace("parent.crt", "absent.crt"),
+            ),
+        ] {
+            let block = delivered(&block);
+            crate::supervisor::check_delivered_block(&running("", &operators), &block)
+                .expect("what ADR-0051 alone lets through");
+            let err = crate::supervisor::check_delivered_block(&config, &block).expect_err(key);
+            assert!(err.contains(key) && err.contains("\"icinga\""), "{err}");
+        }
+        // Added under a listed name, the block cannot bring a parent either.
+        let err = crate::supervisor::check_delivered_block(
+            &running(globals, ""),
+            &delivered(&format!("{ICINGA}{pin_missing}")),
+        )
+        .expect_err("an added listed icinga2 with a parent");
+        assert!(err.contains("parent_host"), "{err}");
+    }
+
+    /// A listed Supervisor that does not run yet is added naming its program and nothing else:
+    /// `type`, `name` and the kind's program key where the kind does not name its own pass, and
+    /// any further key — an empty one included — fails the offer naming it (ADR-0067 clause 7).
+    /// Verifies: ADR-0067
+    #[test]
+    fn an_added_listed_supervisor_carries_only_what_names_its_program() {
+        let config = running(LISTED_GLOBALS, "");
+        for (key, line) in [
+            ("args", "args = [\"--config=env:CFG\"]\n"),
+            ("args", "args = []\n"),
+            ("version_args", "version_args = [\"--version\"]\n"),
+            ("env", "env = { CFG = \"receivers: {}\" }\n"),
+            ("env", "env = {}\n"),
+            ("service_name", "service_name = \"io.example.agent\"\n"),
+            ("apply_grace_secs", "apply_grace_secs = 0\n"),
+        ] {
+            let err = crate::supervisor::check_delivered_block(
+                &config,
+                &delivered(&format!("{AGENT}{line}")),
+            )
+            .expect_err(key);
+            assert!(err.contains(key) && err.contains("\"agent\""), "{err}");
+        }
+        crate::supervisor::check_delivered_block(&config, &delivered(AGENT)).expect("command");
+        crate::supervisor::check_delivered_block(
+            &config,
+            &delivered(
+                "[[supervisor]]\ntype = \"collector\"\nname = \"agent\"\nbinary = \"otelcol\"\n",
+            ),
+        )
+        .expect("collector");
+        crate::supervisor::check_delivered_block(
+            &config,
+            &delivered("[[supervisor]]\ntype = \"icinga2\"\nname = \"agent\"\n"),
+        )
+        .expect("icinga2, which names its own program");
+    }
+
+    /// The switch lives where the Server cannot write: a set that removes the listed block and
+    /// delivers it again starts an Agent still without `AcceptsRemoteConfig`, the written file
+    /// keeps `[supervisors]` byte for byte, and a block bringing arguments fails the whole offer
+    /// with the file untouched (ADR-0067 clauses 1 and 7).
+    /// Verifies: ADR-0067
+    #[tokio::test]
+    async fn a_delivered_set_cannot_switch_remote_config_back_on_for_a_listed_name() {
+        use opamp::proto::{AgentCapabilities, RemoteConfigStatuses};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let section = "[supervisors]\nremote_config_disabled = [\"agent\"]\n\
+                       delivered_args = true\n";
+        std::fs::write(
+            &path,
+            format!(
+                "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\n\
+                 {section}\n{AGENT}",
+                state = dir.path().join("state").to_string_lossy(),
+            ),
+        )
+        .expect("write");
+        let mut config = ClientConfig::load(&path).expect("load");
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let mut engine = crate::supervisor::build_engine(&config, &shutdown).expect("build");
+        let accepts = |report: &AgentToServer| {
+            report.capabilities & AgentCapabilities::AcceptsRemoteConfig as u64 != 0
+        };
+        assert!(!accepts(&engine.poll_reports()[1]));
+
+        let removing = offer_of(&[(
+            "fleet",
+            "[supervisors]\nremote_config_disabled = []\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"other\"\ncommand = \"agent\"\n",
+        )]);
+        apply(&mut engine, &mut config, removing, &shutdown).await;
+        let readding = offer_of(&[("fleet", AGENT)]);
+        apply(&mut engine, &mut config, readding, &shutdown).await;
+
+        let reports = engine.poll_reports();
+        assert_eq!(
+            reports[0].remote_config_status.as_ref().map(|s| s.status),
+            Some(RemoteConfigStatuses::Applied as i32),
+            "{:?}",
+            reports[0].remote_config_status
+        );
+        assert_eq!(
+            reports.len(),
+            2,
+            "the Client's own Agent and the re-added one"
+        );
+        assert!(
+            !accepts(&reports[1]),
+            "the re-added Agent took the capability back"
+        );
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains(section), "{text}");
+
+        let bringing = offer_of(&[(
+            "fleet",
+            &format!("{AGENT}args = [\"--config=yaml:receivers: {{}}\"]\n"),
+        )]);
+        apply(&mut engine, &mut config, bringing, &shutdown).await;
+        let status = engine.poll_reports()[0]
+            .remote_config_status
+            .clone()
+            .expect("a status");
+        assert_eq!(status.status, RemoteConfigStatuses::Failed as i32);
+        assert!(status.error_message.contains("args"), "{status:?}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
+    }
+
     const ICINGA: &str = "[[supervisor]]\ntype = \"icinga2\"\nname = \"icinga\"\n\
                           parent_host = \"master.example\"\n";
 

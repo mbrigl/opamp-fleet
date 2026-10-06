@@ -227,6 +227,60 @@ pub async fn distribute_with_role(
     assert_eq!(response.status(), 200, "the configuration is rolled out");
 }
 
+/// A clock a test moves by hand, so a rate limit refills when the test says (ADR-0066).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub struct ManualClock(pub std::sync::atomic::AtomicU64);
+
+impl fleet_server::fleet::Clock for ManualClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+impl ManualClock {
+    pub fn new() -> Arc<Self> {
+        Arc::new(ManualClock(std::sync::atomic::AtomicU64::new(1_000_000)))
+    }
+
+    pub fn advance(&self, by: std::time::Duration) {
+        self.0.fetch_add(
+            u64::try_from(by.as_millis()).expect("millis"),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
+/// The same real router with the Agent plane's rate limit armed (ADR-0066), its buckets on a clock
+/// the test moves.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn spawn_with_agent_rate(
+    limits: fleet_server::agent_rate::Limits,
+) -> (TestServer, Arc<ManualClock>) {
+    opamp::tls::install_ring_provider();
+    let clock = ManualClock::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("open the configuration store")
+            .with_agent_rate(Some(Arc::new(fleet_server::agent_rate::AgentRate::new(
+                limits,
+                100,
+                clock.clone(),
+            )))),
+    );
+    let (addr, rest_addr) = serve(state.clone(), fleet_server::transport::Admission::open()).await;
+    (
+        TestServer {
+            addr,
+            rest_addr,
+            state,
+            _dir: dir,
+        },
+        clock,
+    )
+}
+
 /// The same real router with own-telemetry destinations to offer (ADR-0025).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_telemetry(offer: fleet_server::fleet::TelemetryOffer) -> TestServer {

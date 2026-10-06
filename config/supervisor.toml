@@ -180,6 +180,11 @@ state_dir = "client-state"
 # delivered_env = []       # environment names a Server-delivered block may set ("OTEL_*" for a
 #                          # prefix); never PATH, LD_* or DYLD_* (ADR-0051)
 # delivered_args = false   # whether a Server-delivered block may state its own arguments
+# remote_config_disabled = []   # Supervisor names whose Agents take no remote configuration and
+#                               # run only on the files placed in <supervisor_dir>/<name>/config/,
+#                               # e.g. ["telegraf"]; a delivered block must repeat their running
+#                               # block exactly
+#                               # (ADR-0067)
 #
 # How a block names its program — `binary` for a collector, `command` for a custom one — has one
 # shape: a **bare file name**. The program lives in <supervisor_dir>/<name>/program/, a directory

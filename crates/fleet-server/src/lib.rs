@@ -3,6 +3,7 @@
 //!
 //! A library crate so integration tests can assemble the exact router the binary serves.
 
+pub mod agent_rate;
 pub mod agent_store;
 pub mod api;
 pub mod audit;
@@ -91,7 +92,9 @@ impl PackageOffering {
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
 /// `download_url` is resolved against the Agent's own endpoint.
 pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Router {
-    let guard = admission.download_guard();
+    let guard = admission
+        .download_guard()
+        .with_agent_rate(state.agent_rate().cloned());
     transport::router(state.clone(), admission).merge(transport::guard_download(
         api::download_router(state),
         guard,

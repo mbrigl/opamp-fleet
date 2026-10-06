@@ -30,7 +30,7 @@ use crate::deployments::{deployment_for, Deployment, DeploymentError, Deployment
 use crate::enrolment::{DecisionError, Enrolment};
 use crate::labels::{LabelError, LabelStore};
 use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, Source};
-use crate::revocation::{CertId, Facts, Presented, Revocations, Signed};
+use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
 /// binary is (see `server.toml`, `max_package_size_bytes`).
@@ -435,6 +435,8 @@ pub struct AppState {
     revocations: Option<Arc<Revocations>>,
     /// The audit record every security decision goes to (ADR-0063); `None` only in tests.
     audit: Option<Arc<dyn Audit>>,
+    /// How often an admitted peer may be heard (ADR-0066); `None` only in tests.
+    agent_rate: Option<Arc<crate::agent_rate::AgentRate>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
     /// Where Agents send their own telemetry (ADR-0025); empty offers no destination.
@@ -510,6 +512,7 @@ impl AppState {
             enrolment: None,
             revocations: None,
             audit: None,
+            agent_rate: None,
             clock,
             telemetry_offer: TelemetryOffer::default(),
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
@@ -679,6 +682,21 @@ impl AppState {
     /// The audit record.
     pub fn audit(&self) -> Option<&Arc<dyn Audit>> {
         self.audit.as_ref()
+    }
+
+    /// Arms the rate limit on the Agent plane (ADR-0066).
+    #[must_use]
+    pub fn with_agent_rate(
+        mut self,
+        agent_rate: Option<Arc<crate::agent_rate::AgentRate>>,
+    ) -> Self {
+        self.agent_rate = agent_rate;
+        self
+    }
+
+    /// The rate limit on the Agent plane.
+    pub fn agent_rate(&self) -> Option<&Arc<crate::agent_rate::AgentRate>> {
+        self.agent_rate.as_ref()
     }
 
     /// Records a decision this Server is about to act on; without a record it is not taken
@@ -1505,7 +1523,10 @@ impl AppState {
                 "refusing a new agent: the fleet is at its record ceiling"
             );
             return Processed {
-                reply: unavailable("the Server is at its Agent-record ceiling; retry later"),
+                reply: unavailable(
+                    &msg.instance_uid,
+                    "the Server is at its Agent-record ceiling; retry later",
+                ),
                 uid: None,
                 disconnected: false,
             };
@@ -1670,7 +1691,7 @@ impl AppState {
                         warn!(agent = %uid, error = %e, "held back a certificate: the audit record is unavailable");
                         self.persist_if_dirty(&uid, record);
                         return Processed {
-                            reply: unavailable(&e),
+                            reply: unavailable(&msg.instance_uid, &e),
                             uid: Some(uid),
                             disconnected: false,
                         };
@@ -1808,12 +1829,13 @@ impl AppState {
     /// never given.
     fn packages_offer(&self, record: &AgentRecord) -> Option<PackagesAvailable> {
         let offering = self.packages.as_ref()?;
-        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
+        if !accepts_packages(record) {
             return None;
         }
         let effective = record.effective_description();
         let description = effective.as_deref();
         let assigned = record.assigned_package();
+        let deployment = assigned_deployment(offering, record);
         let reported = record
             .package_statuses
             .as_ref()
@@ -1822,23 +1844,59 @@ impl AppState {
         if reported
             == offering
                 .store
-                .assigned_hash_for(assigned, description)
+                .assigned_hash_for(assigned, deployment.as_ref(), description)
                 .as_slice()
         {
             return None;
         }
-        // The channel the act named, not the one that claims the Agent today — see the note in
-        // `offer_for_assigned`.
-        let deployment = record
-            .package_assignment
-            .as_ref()
-            .and_then(|a| offering.deployments.get(&a.deployment));
         offering.store.offer_for_assigned(
             assigned,
             deployment.as_ref(),
             description,
             &offering.download_base,
         )
+    }
+
+    /// Whether a certificate naming `host` may fetch the uploaded artifact `(id, platform)` from
+    /// the download route (ADR-0068): it is offered to an Agent the host speaks for. The offer's
+    /// own test decides, for each such Agent — the `instance_uid`s bound to the host, or every Agent
+    /// for a host marked as a Gateway. Nothing is offered without package delivery or a host
+    /// register.
+    ///
+    /// The package store, the Deployments and the host register are read first and released
+    /// before the fleet is locked: no two of those locks are held together here.
+    pub fn offers_artifact(&self, host: &str, id: &PackageId, platform: &Platform) -> bool {
+        let (Some(offering), Some(revocations)) = (&self.packages, &self.revocations) else {
+            return false;
+        };
+        // What does not depend on the Agent is resolved once, before the fleet is locked.
+        let Some(artifact) = offering.store.uploaded(id, platform) else {
+            return false;
+        };
+        let signing = offering.deployments.signing(id, platform);
+        let speaks_for = revocations.speaks_for(host);
+        let fleet = self.fleet.lock().expect("fleet lock");
+        let offered = |record: &AgentRecord| {
+            // The cheap half of the test first: most Agents are assigned something else.
+            accepts_packages(record)
+                && record.assigned_package() == Some(id)
+                && artifact.offered_to(
+                    record.assigned_package(),
+                    record
+                        .package_assignment
+                        .as_ref()
+                        .is_some_and(|a| signing.contains(&a.deployment)),
+                    record.effective_description().as_deref(),
+                )
+        };
+        match speaks_for {
+            SpeaksFor::Any => fleet.values().any(offered),
+            SpeaksFor::Agents(uids) => uids
+                .iter()
+                .filter_map(|uid| <[u8; 16]>::try_from(hex::decode(uid).ok()?).ok())
+                .filter_map(|uid| fleet.get(&InstanceUid(uid)))
+                .any(offered),
+        }
     }
 
     /// Why this Agent is **proposed** nothing although it accepts packages: more than one
@@ -1855,7 +1913,7 @@ impl AppState {
         record: &AgentRecord,
         claim: &Result<Option<&Deployment>, String>,
     ) -> Option<String> {
-        if record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 == 0 {
+        if !accepts_packages(record) {
             return None;
         }
         claim.as_ref().err().cloned()
@@ -2309,6 +2367,21 @@ fn referenced_hashes(fleet: &HashMap<InstanceUid, AgentRecord>, name: &str) -> B
         .filter_map(|record| record.config_assignments.get(name))
         .cloned()
         .collect()
+}
+
+/// Whether this Agent declared that it accepts packages — the first condition of every offer
+/// (ADR-0068 clause 1).
+fn accepts_packages(record: &AgentRecord) -> bool {
+    record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 != 0
+}
+
+/// The Deployment this Agent's package assignment names: the channel the act released through,
+/// not the one that claims the Agent today, because an offer travels with what the act released.
+fn assigned_deployment(offering: &PackageOffering, record: &AgentRecord) -> Option<Deployment> {
+    record
+        .package_assignment
+        .as_ref()
+        .and_then(|a| offering.deployments.get(&a.deployment))
 }
 
 /// The remote-config offer for one Agent, or `None` when the hash comparison says it already has
@@ -2842,9 +2915,11 @@ pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
 /// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
-/// and with `retry_info` says when.
-pub fn unavailable(message: &str) -> ServerToAgent {
+/// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
+/// field a Client and a Gateway route a reply by (ADR-0066 clause 7).
+pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
     ServerToAgent {
+        instance_uid: instance_uid.to_vec(),
         capabilities: SERVER_CAPABILITIES,
         error_response: Some(ServerErrorResponse {
             r#type: ServerErrorResponseType::Unavailable as i32,
@@ -3131,10 +3206,11 @@ mod tests {
     /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
     /// be written — tells the Agent when to ask again, so it retries instead of giving up or
     /// hammering (ADR-0059 clause 21, ADR-0063 clause 6).
-    /// Verifies: ADR-0059, ADR-0063
+    /// Verifies: ADR-0059, ADR-0063, ADR-0066
     #[test]
     fn unavailable_tells_the_agent_when_to_retry() {
-        let reply = unavailable("busy");
+        let reply = unavailable(&[7; 16], "busy");
+        assert_eq!(reply.instance_uid, [7; 16], "it names the Agent it answers");
         let error = reply.error_response.expect("an error");
         assert_eq!(error.r#type, ServerErrorResponseType::Unavailable as i32);
         match error.details {
@@ -3552,5 +3628,174 @@ mod tests {
                 .any(|agent| agent.instance_uid == victim.to_string()),
             "the claimed Agent's record moved"
         );
+    }
+
+    // ---- Who may fetch an uploaded artifact (ADR-0068) ----
+
+    /// A fleet delivering `otelcol@1.0.0`, uploaded for linux/amd64 and signed on the `stable`
+    /// channel that claims every `otelcol`, with a host register.
+    fn delivering_fleet(dir: &std::path::Path) -> (AppState, Arc<Revocations>, PackageId) {
+        let store = PackageStore::open(dir.join("packages")).expect("store");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        store.create(&id).expect("create");
+        store
+            .put_entry(&id, &linux(), b"v1".to_vec())
+            .expect("entry");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir.join("revocation")).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.join("configs"))
+            .expect("state")
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("offering"),
+            ))
+            .with_revocations(Some(revocations.clone()));
+        state
+            .deployment_store()
+            .expect("deployments")
+            .put(
+                "stable",
+                BTreeMap::from([("service.name".to_string(), "otelcol".to_string())]),
+            )
+            .expect("deployment");
+        put_signed(&state, &id);
+        (state, revocations, id)
+    }
+
+    fn linux() -> Platform {
+        Platform::new("linux", "amd64").expect("platform")
+    }
+
+    /// Puts `id` into the `stable` channel, signed for linux/amd64 — saved, released to nobody.
+    fn put_signed(state: &AppState, id: &PackageId) {
+        state
+            .put_deployment_package("stable", id, true)
+            .expect("package");
+        state
+            .put_deployment_signature("stable", id, &linux(), vec![1; 64])
+            .expect("signature");
+    }
+
+    /// One report of an `otelcol` Agent on linux/amd64 that accepts packages, over a certificate
+    /// naming `host`, echoing `echoed` as the aggregate hash it holds.
+    fn report_from(state: &AppState, host: &str, uid: InstanceUid, echoed: &[u8]) -> Processed {
+        let attr = opamp::attributes::string_attr;
+        state.process_presented(
+            AgentToServer {
+                instance_uid: uid.as_bytes().to_vec(),
+                capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64
+                    | opamp::proto::AgentCapabilities::AcceptsPackages as u64
+                    | opamp::proto::AgentCapabilities::ReportsPackageStatuses as u64,
+                agent_description: Some(AgentDescription {
+                    identifying_attributes: vec![attr("service.name", "otelcol")],
+                    non_identifying_attributes: vec![
+                        attr("os.type", "linux"),
+                        attr("host.arch", "amd64"),
+                    ],
+                }),
+                package_statuses: (!echoed.is_empty()).then(|| PackageStatuses {
+                    server_provided_all_packages_hash: echoed.to_vec(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", host),
+                host: Some(host.to_string()),
+            }),
+        )
+    }
+
+    /// An artifact is fetched by a host only through an Agent it speaks for: the host whose Agent
+    /// it was released to, not another host, not a host the register does not know, and not for
+    /// another Platform or version — until that other host is marked as a Gateway.
+    /// Verifies: ADR-0068
+    #[test]
+    fn an_artifact_is_offered_to_a_host_only_through_an_agent_it_speaks_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, revocations, id) = delivering_fleet(dir.path());
+        report_from(&state, "h1", InstanceUid([1; 16]), &[]);
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        // h2 reports an Agent of its own, released nothing.
+        state.process_presented(
+            AgentToServer {
+                instance_uid: vec![2; 16],
+                capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64,
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", "h2"),
+                host: Some("h2".to_string()),
+            }),
+        );
+
+        assert!(state.offers_artifact("h1", &id, &linux()));
+        assert!(!state.offers_artifact("h2", &id, &linux()));
+        assert!(!state.offers_artifact("unknown", &id, &linux()));
+        let windows = Platform::new("windows", "amd64").expect("platform");
+        assert!(!state.offers_artifact("h1", &id, &windows));
+        let v2 = PackageId::new("otelcol", "2.0.0").expect("id");
+        assert!(!state.offers_artifact("h1", &v2, &linux()));
+
+        assert!(revocations.set_gateway("h2", true).expect("mark"));
+        assert!(
+            state.offers_artifact("h2", &id, &linux()),
+            "a Gateway speaks for any Agent"
+        );
+    }
+
+    /// An Agent that echoes the aggregate hash of its offer is not sent it again, and can still
+    /// fetch it — a retry after a failed install re-reads an offer no longer re-sent.
+    /// Verifies: ADR-0068
+    #[test]
+    fn an_offer_still_stands_after_its_hash_is_echoed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _, id) = delivering_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_from(&state, "h1", uid, &[]);
+        state.rollout_deployment("stable").expect("rollout");
+        let offer = report_from(&state, "h1", uid, &[])
+            .reply
+            .packages_available
+            .expect("an offer");
+        let echoed = report_from(&state, "h1", uid, &offer.all_packages_hash);
+        assert!(echoed.reply.packages_available.is_none(), "the hash gate");
+        assert!(state.offers_artifact("h1", &id, &linux()));
+    }
+
+    /// A version saved into the channel but not yet released by an operator's press is no one's
+    /// offer: not the Agent's host's, not a Gateway's — while the version released before stays.
+    /// Verifies: ADR-0068
+    #[test]
+    fn a_version_waiting_for_its_press_is_offered_to_no_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, revocations, v1) = delivering_fleet(dir.path());
+        report_from(&state, "h1", InstanceUid([1; 16]), &[]);
+        report_from(&state, "gw", InstanceUid([9; 16]), &[]);
+        assert!(revocations.set_gateway("gw", true).expect("mark"));
+        state.rollout_deployment("stable").expect("rollout");
+
+        let v2 = PackageId::new("otelcol", "2.0.0").expect("id");
+        let store = state.packages().expect("store");
+        store.create(&v2).expect("create");
+        store
+            .put_entry(&v2, &linux(), b"v2".to_vec())
+            .expect("entry");
+        put_signed(&state, &v2);
+        for host in ["h1", "gw"] {
+            assert!(!state.offers_artifact(host, &v2, &linux()), "{host}");
+            assert!(state.offers_artifact(host, &v1, &linux()), "{host}");
+        }
+        assert_eq!(state.rollout_deployment("stable").expect("the press"), 2);
+        assert!(state.offers_artifact("h1", &v2, &linux()));
     }
 }

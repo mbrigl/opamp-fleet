@@ -657,6 +657,12 @@ pub struct SupervisorsConfig {
     /// not already have (ADR-0051 clause 18).
     #[serde(default)]
     pub delivered_args: bool,
+    /// The Supervisors whose Agents neither declare nor act on remote configuration (ADR-0067),
+    /// by name: each runs only on what the operator placed in its `config/` directory, and a
+    /// delivered block brings it no `args`, `version_args` or `env`. Read from this file only —
+    /// the Supervisor-set apply never writes this section.
+    #[serde(default)]
+    pub remote_config_disabled: Vec<String>,
 }
 
 impl Default for SupervisorsConfig {
@@ -666,6 +672,7 @@ impl Default for SupervisorsConfig {
             apply_grace_secs: default_apply_grace_secs(),
             delivered_env: Vec::new(),
             delivered_args: false,
+            remote_config_disabled: Vec::new(),
         }
     }
 }
@@ -921,6 +928,16 @@ impl ClientConfig {
     pub fn checked(self, path: &Path) -> Result<Self, String> {
         let mut config = self;
         config.check_supervisor_names()?;
+        // A name no block can ever carry would switch nothing off, silently (ADR-0067 clause 2).
+        for name in &config.supervisor_defaults.remote_config_disabled {
+            parse_instance_name(name).map_err(|e| {
+                format!(
+                    "{}: [supervisors] remote_config_disabled: {name:?} is not a supervisor \
+                     name: {e}",
+                    path.display()
+                )
+            })?;
+        }
         // Plaintext is for the loopback alone, and refused rather than warned about (ADR-0038).
         config
             .transport()
@@ -1028,6 +1045,16 @@ impl ClientConfig {
             Some(name) => self.supervisor_dir(name).join(PACKAGES_DIR),
             None => self.state_dir.join(PACKAGES_DIR),
         }
+    }
+
+    /// Whether the operator switched remote configuration off for the Supervisor `name`
+    /// (ADR-0067).
+    #[must_use]
+    pub fn remote_config_disabled(&self, name: &str) -> bool {
+        self.supervisor_defaults
+            .remote_config_disabled
+            .iter()
+            .any(|listed| listed == name)
     }
 
     /// Supervisor names key state directories and Agent identities — a duplicate would silently
@@ -1783,6 +1810,52 @@ mod tests {
                 toml::from_str::<ClientConfig>(&toml).is_err(),
                 "{bad_name:?} should be rejected"
             );
+        }
+    }
+
+    /// The switch is a list of Supervisor names in `[supervisors]`, empty unless the operator
+    /// writes one (ADR-0067 clause 1).
+    /// Verifies: ADR-0067
+    #[test]
+    fn remote_config_disabled_defaults_to_empty_and_lists_supervisor_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, "").expect("write");
+        let absent = ClientConfig::load(&path).expect("load");
+        assert!(absent.supervisor_defaults.remote_config_disabled.is_empty());
+        assert!(!absent.remote_config_disabled("otelcol"));
+
+        std::fs::write(
+            &path,
+            "[supervisors]\nremote_config_disabled = [\"otelcol\", \"icinga2\"]\n",
+        )
+        .expect("write");
+        let listed = ClientConfig::load(&path).expect("load");
+        assert_eq!(
+            listed.supervisor_defaults.remote_config_disabled,
+            ["otelcol", "icinga2"]
+        );
+        assert!(listed.remote_config_disabled("otelcol"));
+        assert!(listed.remote_config_disabled("icinga2"));
+        assert!(!listed.remote_config_disabled("telegraf"));
+    }
+
+    /// A value no block can ever carry fails startup, naming the key and the value (ADR-0067
+    /// clause 2).
+    /// Verifies: ADR-0067
+    #[test]
+    fn a_remote_config_disabled_name_outside_the_instance_name_grammar_fails_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        for bad in ["OtelCol", "with space", "-lead", "", "con"] {
+            std::fs::write(
+                &path,
+                format!("[supervisors]\nremote_config_disabled = [\"ok\", {bad:?}]\n"),
+            )
+            .expect("write");
+            let err = ClientConfig::load(&path).expect_err(bad);
+            assert!(err.contains("remote_config_disabled"), "{err}");
+            assert!(err.contains(&format!("{bad:?}")), "{err}");
         }
     }
 

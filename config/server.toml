@@ -166,6 +166,18 @@ client_ca_file = "client-ca.pem"
 # window_secs = 60
 # backoff_secs = 300
 
+# How often an admitted peer is heard on the Agent plane (ADR-0066). Every OpAMP message and every
+# package download takes a token from the bucket of the host its certificate names — of the Agent
+# it names and of the aggregate, for a host marked as a Gateway. A message past the limit is
+# answered Unavailable with a 30 s retry_info, a download 429 with Retry-After: 30. 0 is refused;
+# the Server warns at startup when messages_per_sec times the heartbeat carries fewer than 256
+# Agents per host.
+# [agent_rate_limit]
+# messages_per_sec = 10
+# burst = 300
+# gateway_messages_per_sec = 500
+# gateway_burst = 10000
+
 # The audit record (ADR-0063): one JSON line per security decision — admissions and refusals,
 # enrolment, issuance, revocation, operator acts, package outcomes — in
 # <config_dir>/audit/, each line carrying the SHA-256 of the one before. Check it with
