@@ -1,25 +1,25 @@
 #!/bin/sh
-# Post-install for the `.deb` and the `.rpm` alike (ADR-0046 clauses 2 and 3).
+# Post-install for the `.deb` and the `.rpm` alike (ADR-0020 clauses 10 and 11).
 #
 # The package delivered `/usr/libexec/opamp-fleet/supervisor` and nothing else. The install itself —
 # the versioned layout, the `current` pointer, the systemd unit — belongs to the Client's own
 # `service install` (ADR-0010), which is all this calls. No package ships a unit file: one that did
-# would know nothing of ADR-0030's service name or ADR-0020's restart policy, and there would be two
+# would know nothing of ADR-0010 clause 11's service name or ADR-0017's restart policy, and there would be two
 # registrations disagreeing about which is the real one.
 #
-# What an operator invokes on PATH is a symlink through the layout's `current` pointer (ADR-0048),
+# What an operator invokes on PATH is a symlink through the layout's `current` pointer (ADR-0020),
 # laid here — so `opamp-fleet --version` answers for the binary the service runs, not for whatever
 # this package happened to deliver. The link carries the **product's** name and the file it resolves
-# to carries the program's (ADR-0084 clause 5): two variant builds must not collide on one
+# to carries the program's (ADR-0010 clause 11): two variant builds must not collide on one
 # `/usr/bin` entry, and they would if the link were named after the program they share.
 #
 # The paths name the default system roots (`default_layout_root` and `default_root` in
 # crates/client/src/service/manager.rs), the only roots a packaged install ever uses: this script
 # calls plain `service install`. They are two roots on Linux — the executable layout under `/opt`,
 # because SELinux never lets systemd execute a binary labeled `var_lib_t`; the configuration and
-# state under `/var/lib`, where data belongs (ADR-0084 clause 3, carrying ADR-0053).
+# state under `/var/lib`, where data belongs (ADR-0010 clause 9).
 #
-# There is no migration branch here, and that is ADR-0084 clause 8: no host was ever installed
+# There is no migration branch here, and that is ADR-0010 clause 14: no host was ever installed
 # under the paths or names this release replaces, so there is nothing to carry across.
 #
 # dpkg calls this as `postinst configure <old-version>`, rpm as `%post <count>`. The two argument
@@ -59,14 +59,14 @@ fi
 cat <<'EOF'
 
 The service is registered and stopped. Not starting it is deliberate: a Client with no
-configuration dials the development default and manages nothing (ADR-0027). Two steps remain:
+configuration dials the development default and manages nothing (ADR-0020). Two steps remain:
 
   opamp-fleet service install --endpoint wss://<server>/v1/opamp
   systemctl start opamp-fleet
 
 Run `opamp-fleet service install --interactive` instead to be asked for the credential too.
 
-The configuration that step writes lets the Server update this Client itself (ADR-0075) — the
+The configuration that step writes lets the Server update this Client itself (ADR-0017) — the
 fleet then patches its own agent like any other program. Append --no-self-update to keep that
 one update manual, or write `enabled = false` under [self_update] in supervisor.toml later.
 EOF

@@ -13,7 +13,7 @@
       "cwd": "${workspaceFolder}"
     },
     {
-      // The package is `supervisor`, the binary it produces is `supervisor` (ADR-0028):
+      // The package is `supervisor`, the binary it produces is `supervisor` (ADR-0022):
       // `--package` takes the first, `--bin` and the filter take the second.
       "type": "lldb",
       "request": "launch",

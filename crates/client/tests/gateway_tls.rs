@@ -1,4 +1,4 @@
-//! The downstream hop's TLS (ADR-0037, ADR-0035): a Gateway configured with `[gateway.tls]` serves
+//! The downstream hop's TLS (ADR-0024, ADR-0013): a Gateway configured with `[gateway.tls]` serves
 //! the downstream endpoint over TLS, and when a `client_ca_file` is set it *requires* a downstream
 //! Agent to present a certificate that chains to it.
 //!

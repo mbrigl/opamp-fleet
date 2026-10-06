@@ -1,4 +1,4 @@
-//! The product's name and display name, fixed at build time (ADR-0084).
+//! The product's name and display name, fixed at build time (ADR-0010).
 //!
 //! Three names sit side by side in this program, each naming a different thing, and conflating any
 //! two of them couples things that must be free to move apart:

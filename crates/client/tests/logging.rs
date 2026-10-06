@@ -1,4 +1,4 @@
-//! The Client's own log file, driven through the real binary (ADR-0041).
+//! The Client's own log file, driven through the real binary (ADR-0026).
 //!
 //! The unit tests cover the writer and the rotation; what they cannot show is the thing the
 //! decision exists for — that a process started the way a service manager starts it actually

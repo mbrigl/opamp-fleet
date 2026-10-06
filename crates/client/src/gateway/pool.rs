@@ -1,4 +1,4 @@
-//! The upstream Connection Pool (ADR-0037): *m* WebSocket connections carrying *n* Agents.
+//! The upstream Connection Pool (ADR-0024): *m* WebSocket connections carrying *n* Agents.
 //!
 //! Two rules do the work. The pool **grows lazily** to its configured cap — a Gateway in front of
 //! three Agents holds three connections, not ten — and an Agent is **stuck to its connection** by
@@ -79,7 +79,7 @@ impl Pool {
             .map_err(|e| format!("cannot forward a report of {uid}: {e}"))?;
 
         // Two attempts: the assigned connection may have died between the last send and this one,
-        // and re-homing is exactly what rule 6 of ADR-0037 asks for.
+        // and re-homing is exactly what rule 6 of ADR-0024 asks for.
         for attempt in 0..2 {
             let outbound = self.connection_for(uid, authorization).await?;
             match outbound.send(frame.clone()).await {
@@ -111,7 +111,7 @@ impl Pool {
                 }
             }
             // Grow only when every existing connection already carries something, and only to the
-            // cap: the pool costs what it uses (ADR-0037 rule 5).
+            // cap: the pool costs what it uses (ADR-0024 rule 5).
             let idle = inner
                 .connections
                 .iter()
@@ -157,7 +157,7 @@ impl Pool {
             .into_client_request()
             .map_err(|e| format!("invalid endpoint {endpoint}: {e}"))?;
         // The downstream peer's credential, forwarded untouched — a Gateway makes no
-        // authentication decisions (ADR-0003, ADR-0035).
+        // authentication decisions (ADR-0003, ADR-0013).
         if let Some(value) = authorization {
             request.headers_mut().insert(
                 AUTHORIZATION,
@@ -202,7 +202,7 @@ impl Pool {
                     Ok(_) => continue,
                 };
                 match opamp::frame::decode::<ServerToAgent>(&payload, limit) {
-                    // Routing is by `instance_uid` alone (ADR-0037 rule 10): a message for an Agent
+                    // Routing is by `instance_uid` alone (ADR-0024 rule 10): a message for an Agent
                     // this Gateway has never carried is dropped, never broadcast.
                     Ok(reply) => match InstanceUid::from_wire(&reply.instance_uid) {
                         Some(uid) => registry.deliver(uid, reply).await,
@@ -231,7 +231,7 @@ impl Pool {
         Ok(tx)
     }
 
-    /// Drops an Agent's assignment so the next report re-homes it (ADR-0037 rule 6). Nothing is
+    /// Drops an Agent's assignment so the next report re-homes it (ADR-0024 rule 6). Nothing is
     /// said upstream on its behalf: it never disconnected.
     fn forget_connection_of(&self, uid: InstanceUid) {
         let mut inner = self.inner.lock().expect("pool lock");

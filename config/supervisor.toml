@@ -120,7 +120,7 @@ state_dir = "client-state"
 #                          # wherever it is stored and is opened only on the host that runs it.
 
 # Consent for the Server to replace *this Client's own* binary. **Absent — as here — means the
-# consent stands**, under the name below (ADR-0075): a Client the fleet cannot update is the one
+# consent stands**, under the name below (ADR-0017): a Client the fleet cannot update is the one
 # program on the host that has to be patched by hand. Write `enabled = false` to withdraw it, and
 # the Client's Agent then declares no package capability at all — no offer can reach it.
 #

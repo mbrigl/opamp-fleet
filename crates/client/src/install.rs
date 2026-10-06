@@ -2,11 +2,11 @@
 //!
 //! The Client installs programs in two quite different ways: a Managed Process is replaced by a
 //! Supervisor that outlives it (ADR-0015), and the Client's own binary is staged beside the running
-//! version and reached by a restart (ADR-0020). Those two lifecycles are genuinely different and
+//! version and reached by a restart (ADR-0017). Those two lifecycles are genuinely different and
 //! stay where they are — `supervisor::process` owns the first, [`crate::selfupdate`] the second.
 //!
 //! What they share is the step in the middle, and they shared it by writing it twice: unpack the
-//! artifact — raw bytes or an archive holding the program (ADR-0018) — to a path, make the result
+//! artifact — raw bytes or an archive holding the program (ADR-0015) — to a path, make the result
 //! executable, and cope with the kernel refusing to exec a file that was written moments ago. That
 //! is what lives here, so each rule is stated once.
 
@@ -74,7 +74,7 @@ pub fn make_executable(path: &Path) -> Result<(), String> {
 
 /// Writes the program held by `artifact` to `dest` and makes it executable.
 ///
-/// The artifact is the program itself or an archive holding it under `member` (ADR-0018), decided
+/// The artifact is the program itself or an archive holding it under `member` (ADR-0015), decided
 /// by the leading bytes rather than by a file name. `dest` is overwritten if it exists; its parent
 /// directory must already be there.
 ///

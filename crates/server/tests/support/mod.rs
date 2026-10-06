@@ -12,9 +12,9 @@ use server::fleet::AppState;
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub struct TestServer {
-    /// The Agent plane (ADR-0066): `/v1/opamp` and the package download.
+    /// The Agent plane (ADR-0032): `/v1/opamp` and the package download.
     pub addr: SocketAddr,
-    /// The Operator plane (ADR-0066): the REST API, its docs, and the UI — a second listener, as
+    /// The Operator plane (ADR-0032): the REST API, its docs, and the UI — a second listener, as
     /// in a real deployment, so a test that calls the wrong one finds out.
     pub rest_addr: SocketAddr,
     pub state: Arc<AppState>,
@@ -41,7 +41,7 @@ pub async fn spawn_with_limit(limit: usize) -> TestServer {
     spawn_full(None, None, limit, DEFAULT_STALE_AFTER).await
 }
 
-/// The same real router with a tightened staleness budget (ADR-0038), for the tests that need an
+/// The same real router with a tightened staleness budget (ADR-0025), for the tests that need an
 /// Agent to fall silent without waiting out the real one.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_stale_after(stale_after: std::time::Duration) -> TestServer {
@@ -102,7 +102,7 @@ async fn spawn_full(
     }
 }
 
-/// Serves the two planes on ephemeral ports, exactly as the binary serves them (ADR-0066), and
+/// Serves the two planes on ephemeral ports, exactly as the binary serves them (ADR-0032), and
 /// answers with the address of each. The Operator plane is open, as it is without `[rest.auth]`.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve(
@@ -112,7 +112,7 @@ pub async fn serve(
     serve_guarded(state, admission, None).await
 }
 
-/// The same two planes, with the Operator plane's credential check active (ADR-0067).
+/// The same two planes, with the Operator plane's credential check active (ADR-0032).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve_guarded(
     state: Arc<AppState>,
@@ -126,7 +126,7 @@ pub async fn serve_guarded(
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
     let addr = agent_listener.local_addr().expect("local addr");
     let rest_addr = operator_listener.local_addr().expect("local addr");
-    // Through `listen::plane`, as the binary serves them (ADR-0073), so the whole suite runs
+    // Through `listen::plane`, as the binary serves them (ADR-0032), so the whole suite runs
     // against a Server whose connection setup is bounded the way a real one's is.
     let handle = axum_server::Handle::new();
     tokio::spawn(
@@ -140,9 +140,9 @@ pub async fn serve_guarded(
     (addr, rest_addr)
 }
 
-/// The Agent type every scaffolded Agent reports as `service.name` (ADR-0033). It is a constant
+/// The Agent type every scaffolded Agent reports as `service.name` (ADR-0022). It is a constant
 /// because a type describes a *kind* of Agent: the test fleet is one kind of thing on many hosts,
-/// which is also what makes one package able to reach several of them (ADR-0034).
+/// which is also what makes one package able to reach several of them (ADR-0016).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub const AGENT_TYPE: &str = "io.opentelemetry.collector";
 
@@ -166,7 +166,7 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
                 }),
             }],
             non_identifying_attributes: vec![
-                // The operator's name for this Agent (ADR-0033) — what distinguishes it from its
+                // The operator's name for this Agent (ADR-0022) — what distinguishes it from its
                 // neighbours, now that `service.name` says only what kind of thing it is.
                 KeyValue {
                     key: "service.instance.name".to_string(),
@@ -180,7 +180,7 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
                         value: Some(any_value::Value::StringValue("linux".to_string())),
                     }),
                 },
-                // The other half of the Platform a package is fitted against (ADR-0031). An Agent
+                // The other half of the Platform a package is fitted against (ADR-0021). An Agent
                 // reporting no `host.arch` fits no artifact at all, which is its own test.
                 KeyValue {
                     key: "host.arch".to_string(),
@@ -213,14 +213,14 @@ pub fn compressed_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer 
 }
 
 /// Stores **and rolls out** a Configuration through the REST API v1, the way an operator (or
-/// portal) does — two calls since ADR-0061, because saving alone distributes nothing and the
+/// portal) does — two calls since ADR-0030, because saving alone distributes nothing and the
 /// rollout act is what assigns it to every currently matching Agent.
 #[allow(dead_code)]
 pub async fn distribute(rest_addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
     distribute_with_role(rest_addr, name, selector, body, "").await;
 }
 
-/// [`distribute`] with the Baseline's `AgentConfigObject.role` set (ADR-0016); an empty role is the
+/// [`distribute`] with the Baseline's `AgentConfigObject.role` set (ADR-0012); an empty role is the
 /// ordinary top-level configuration and stays out of the request.
 pub async fn distribute_with_role(
     rest_addr: SocketAddr,
@@ -252,7 +252,7 @@ pub async fn distribute_with_role(
     assert_eq!(response.status(), 200, "the configuration is rolled out");
 }
 
-/// The same real router with own-telemetry destinations to offer (ADR-0036).
+/// The same real router with own-telemetry destinations to offer (ADR-0023).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_telemetry(offer: server::fleet::TelemetryOffer) -> TestServer {
     server::tls::install_ring_provider();

@@ -1,6 +1,6 @@
 # Development observability stack
 
-OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry (ADR-0036), stored
+OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry (ADR-0023), stored
 in one place, and up already whenever the Dev Container is. This is a **development tool**: nothing
 shipped depends on it, it holds no credentials worth having, and it retains 24 h of data on a local
 volume.
@@ -104,7 +104,7 @@ Two things this stack is shaped around:
   receiver routes on that path. An endpoint without it disappears into a 404.
 - **`http://` only inside the private address space.** The Client refuses a cleartext destination
   outside loopback and the private ranges — `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` — by
-  design ([ADR-0088](../docs/adr/0088-cleartext-own-telemetry-reaches-the-private-address-space.md)).
+  design ([ADR-0023](../docs/adr/0023-agents-report-their-own-telemetry.md)).
   That is why every port here is published to the host: an Agent on the same machine reaches
   `http://localhost:4318` and is satisfied. An Agent elsewhere on the LAN reaches the Collector's
   host by address — `http://192.168.10.5:4318/v1/metrics` — and is satisfied too. What is refused,
@@ -139,7 +139,7 @@ latter. Metric names are stored unmodified — `process.memory.usage`, `process.
 `process.uptime` — with no Prometheus-style normalisation to unpick.
 
 **The platform is on the Resource too.** `ResourceAttributes['os.type']` and `['host.arch']` — the
-two halves ADR-0031 selects a package variant by — plus `['os.description']` for the readable form.
+two halves ADR-0021 selects a package variant by — plus `['os.description']` for the readable form.
 They describe the *host*, not one Agent: this Client samples its own process and the Managed
 Processes it holds the pids of, so everything in one export runs on the machine the Resource names.
 Nothing else from the `AgentDescription`'s non-identifying attributes is sent — not the host's
@@ -173,7 +173,7 @@ Three dashboards are provisioned from `grafana/dashboards/` into the **OpAMP** f
 | **Fleet Agents — Traces** | Operation rate, error rate, p50/p95/p99 duration, which phase fails most, and a trace detail view. |
 
 **What fills the traces dashboard.** Five fleet operations, and nothing else
-([ADR-0090](../docs/adr/0090-own-traces-come-from-the-clients-own-tracing-spans.md)): `package.install`,
+([ADR-0023](../docs/adr/0023-agents-report-their-own-telemetry.md)): `package.install`,
 `config.apply` (twice over — a Managed Process's configuration, and the Supervisor set),
 `connection.settings.apply`, and `self.update`. Each is a root span whose children are its phases,
 and whose status is the outcome the Server is told — so *"which phase fails most"* has real rows in
@@ -209,7 +209,7 @@ reporting.
 The buckets alternate because each Client's `PeriodicReader` runs in its own phase (the samples of
 *one* Client share a timestamp, so its Managed Processes stay aligned), and because
 `$__timeInterval` resolves from the panel's width — around 5 s over an hour, well below the 10 s
-sampling interval ADR-0036 sets.
+sampling interval ADR-0023 sets.
 
 Hence:
 

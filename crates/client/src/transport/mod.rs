@@ -17,7 +17,7 @@ use crate::engine::Engine;
 /// The close the Baseline names for a message past the size limit: 1009, Message Too Big.
 ///
 /// Both sockets this Client owns send it — the upstream one it dials and the Supervisor Endpoint it
-/// serves — and they sent identical copies of it until ADR-0044. The sentence itself is the
+/// serves — and they sent identical copies of it until ADR-0005. The sentence itself is the
 /// Server's too, and lives in `opamp::frame`.
 pub(crate) fn too_big_close() -> CloseFrame {
     CloseFrame {
@@ -69,7 +69,7 @@ pub async fn process_package_downloads<S: ReportSink>(
         );
         let progress = crate::packages::Progress::default();
         let started = std::time::Instant::now();
-        // The install's trace (ADR-0090), opened here because this is where the operation begins:
+        // The install's trace (ADR-0023), opened here because this is where the operation begins:
         // the download and the verification are this task's, the staging and the swap are the
         // Supervisor's, and the span travels to it with the artifact so the two are one trace.
         let span = tracing::info_span!(
@@ -79,9 +79,9 @@ pub async fn process_package_downloads<S: ReportSink>(
             otel.status_code = tracing::field::Empty,
             otel.status_description = tracing::field::Empty,
         );
-        // Each Agent stages into its own directory (ADR-0021), so the Supervisor's install is a
+        // Each Agent stages into its own directory (ADR-0018), so the Supervisor's install is a
         // rename beside the download rather than a copy across filesystems. Keyed by the block
-        // name behind the Agent, never by index — the Agent set can change at runtime (ADR-0056).
+        // name behind the Agent, never by index — the Agent set can change at runtime (ADR-0029).
         let staging_dir = config.staging_dir_for(engine.block_name(index));
         let download =
             crate::packages::download_and_verify(&package, config, &staging_dir, &progress)
@@ -102,7 +102,7 @@ pub async fn process_package_downloads<S: ReportSink>(
             Ok(staged) => {
                 engine.apply_package(index, staged, version, hash, &span);
                 if engine.restart_for_update() {
-                    // A self-update moved the `current` pointer (ADR-0020). Whatever else was
+                    // A self-update moved the `current` pointer (ADR-0017). Whatever else was
                     // queued is moot: this process is about to be replaced, and the caller ends
                     // the run once the owed `Installing` has gone out.
                     break;
@@ -118,7 +118,7 @@ pub async fn process_package_downloads<S: ReportSink>(
     true
 }
 
-/// Applies the self-Agent's received configuration — its Supervisor set (ADR-0056) — if one is
+/// Applies the self-Agent's received configuration — its Supervisor set (ADR-0029) — if one is
 /// pending, and sends the retired Agents' goodbyes through `sink`. Returns whether an apply ran,
 /// so the caller flushes the owed status reports.
 pub async fn process_self_configuration<S: ReportSink>(
@@ -143,7 +143,7 @@ pub enum OfferOutcome {
     /// No offer was pending.
     None,
     /// The offer was applied — or refused — in place. The acknowledgement is owed, and the
-    /// connection stays up. A telemetry-only offer always lands here (ADR-0086 clause 4): no
+    /// connection stays up. A telemetry-only offer always lands here (ADR-0023 clause 15): no
     /// destination it names is reached over the OpAMP connection, so there is nothing to reconnect
     /// for.
     Applied,
@@ -155,7 +155,7 @@ pub enum OfferOutcome {
 /// Handles a pending connection-settings offer, whichever transport is carrying it.
 ///
 /// The two transports differ in how they end a connection, not in what an offer means — so the
-/// meaning lives here, once. Before ADR-0086 both carried a byte-identical copy of this, and both
+/// meaning lives here, once. Before ADR-0023 both carried a byte-identical copy of this, and both
 /// assumed every offer had to be proved by reconnecting.
 ///
 /// The order of the steps is load-bearing:
@@ -170,8 +170,8 @@ pub enum OfferOutcome {
 ///    certificate — would otherwise compare against `metrics: None, traces: None, logs: None` and
 ///    tear down exporters the Server never mentioned. `merge` is what puts those back. What it no
 ///    longer puts back is a signal left out of an offer that *does* name one: that is a stop, and
-///    ADR-0089 is where the difference is decided.
-/// 3. **One acknowledgement for the whole message** (ADR-0086 clause 3). The Baseline hashes all
+///    ADR-0023 is where the difference is decided.
+/// 3. **One acknowledgement for the whole message** (ADR-0023 clause 14). The Baseline hashes all
 ///    settings together, so the Agent answers the message, not its parts: a single status whose
 ///    `error_message` names everything dropped across both halves.
 ///
@@ -187,7 +187,7 @@ pub async fn process_connection_offer(
         return OfferOutcome::None;
     };
     // Opened here rather than on the function, which is called once per exchange and would
-    // otherwise trace every poll that had nothing to do (ADR-0090 clause 5). What follows is one
+    // otherwise trace every poll that had nothing to do (ADR-0023 clause 32). What follows is one
     // operation with an outcome the Server is told about, which is what a span is for here.
     //
     // `reconnect` is a field and not a phase: the reconnection itself happens after this returns,
@@ -214,7 +214,7 @@ pub async fn process_connection_offer(
             return OfferOutcome::Applied;
         }
         // The issued certificate is stored only now, after connecting with it proved it works — the
-        // old one stayed in force until here (ADR-0035).
+        // old one stayed in force until here (ADR-0013).
         if let Some(certificate) = &settings.certificate {
             if let Err(e) = crate::csr::accept(&config.state_dir, &certificate.cert) {
                 tracing::warn!(error = %e, "cannot store the issued certificate");
@@ -267,7 +267,7 @@ pub enum RunOutcome {
     /// effective configuration and reconnects — possibly on the other transport.
     Reconfigured,
     /// A self-update installed a new version of the Client and moved the `current` pointer
-    /// (ADR-0020). The run ends here and the process exits asking for a restart; what comes back
+    /// (ADR-0017). The run ends here and the process exits asking for a restart; what comes back
     /// up is the new version, which reports the outcome.
     RestartForUpdate,
 }
@@ -285,7 +285,7 @@ pub enum RunOutcome {
 /// nearly zero, which for a fleet reconnecting together is the very burst being avoided. This keeps
 /// a floor and still decorrelates.
 ///
-/// `pub(crate)` deliberately: nothing outside this crate has a use for it, and ADR-0024 widens
+/// `pub(crate)` deliberately: nothing outside this crate has a use for it, and ADR-0005 widens
 /// visibility by need rather than by default. Left `pub` it would be a public type whose `new`
 /// takes no arguments, which is a `Default` this crate would then have to keep meaning something.
 pub(crate) struct Backoff {
@@ -399,7 +399,7 @@ mod tests {
         }
     }
 
-    /// ADR-0086: an offer carrying only a telemetry destination is applied **in place** — no
+    /// ADR-0023: an offer carrying only a telemetry destination is applied **in place** — no
     /// verification by connecting, no reconnect — and acknowledged. Before it, the Client required
     /// `opamp` to be present and dropped this message whole: no `APPLYING`, no status, no
     /// exporters, and a Server whose hash gate therefore never closed and re-offered for ever.
@@ -408,7 +408,7 @@ mod tests {
         crate::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut engine, config, uid) = engine_with_state_dir(&dir);
-        // Loopback is the cleartext exception (ADR-0036) — nothing leaves the machine.
+        // Loopback is the cleartext exception (ADR-0023) — nothing leaves the machine.
         engine.handle(&telemetry_only_offer(
             uid,
             "http://127.0.0.1:4318/v1/metrics",
@@ -455,7 +455,7 @@ mod tests {
         crate::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut engine, config, uid) = engine_with_state_dir(&dir);
-        // Cleartext to a public host name: the Baseline's "MAY refuse", taken (ADR-0088).
+        // Cleartext to a public host name: the Baseline's "MAY refuse", taken (ADR-0023).
         engine.handle(&telemetry_only_offer(
             uid,
             "http://collector.example:4318/v1/metrics",

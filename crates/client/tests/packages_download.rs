@@ -42,7 +42,7 @@ async fn spawn() -> SocketAddr {
         .route("/redirect", get(|| async { Redirect::to("/artifact") }))
         .route("/artifact", get(|| async { vec![0u8; 4096] }))
         // A source that will not serve the artifact without the credential the operator configured
-        // for it (ADR-0018) — what a private mirror looks like.
+        // for it (ADR-0015) — what a private mirror looks like.
         .route(
             "/guarded",
             get(|headers: axum::http::HeaderMap| async move {
@@ -175,7 +175,7 @@ async fn a_body_within_the_ceiling_streams_through_to_verification() {
     );
 }
 
-/// An artifact URL may legitimately redirect — a mirror (ADR-0018) is often a CDN that bounces the
+/// An artifact URL may legitimately redirect — a mirror (ADR-0015) is often a CDN that bounces the
 /// download to signed storage — so the download follows it. Reaching the artifact (and then failing
 /// only on the deliberately wrong content hash) proves the redirect was followed, not refused.
 #[tokio::test]
@@ -198,7 +198,7 @@ async fn a_download_follows_a_redirect_to_the_mirror() {
 }
 
 /// The Baseline: *"The Agent SHOULD include the HTTP headers provided in the headers field for the
-/// GET request."* A referenced source (ADR-0018) may be a private mirror, and the Server fills those
+/// GET request."* A referenced source (ADR-0015) may be a private mirror, and the Server fills those
 /// headers from what the operator configured — so a download that drops them cannot fetch the
 /// artifact at all. Reaching the content-hash check (which then fails on the deliberately wrong
 /// hash) is what proves the credential travelled; before this was implemented the same call failed

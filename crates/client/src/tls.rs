@@ -1,4 +1,4 @@
-//! TLS for the Client's two transports (ADR-0007, ADR-0035): rustls everywhere, an optional CA
+//! TLS for the Client's two transports (ADR-0007, ADR-0013): rustls everywhere, an optional CA
 //! file that *replaces* the built-in roots for self-signed deployments, and the optional client
 //! certificate a Server demanding mutual TLS asks for.
 //!
@@ -26,7 +26,7 @@ pub fn install_ring_provider() {
 }
 
 /// The Server-issued client certificate, in the state directory beside the connection settings —
-/// it belongs to the Client's one upstream connection, not to any single Agent (ADR-0035).
+/// it belongs to the Client's one upstream connection, not to any single Agent (ADR-0013).
 pub const ISSUED_CERT_FILE: &str = "client-cert.pem";
 /// The private key of [`ISSUED_CERT_FILE`]. Generated on this host and never sent anywhere: what
 /// leaves is a CSR over its public half.
@@ -42,7 +42,7 @@ pub fn rustls_client_config(
 }
 
 /// The same, for a **candidate** identity: an offered certificate is proved by connecting with it
-/// before it is stored (ADR-0014's MUST, applied to the certificate in ADR-0035), so the
+/// before it is stored (ADR-0014's MUST, applied to the certificate in ADR-0013), so the
 /// certificate under test comes from the offer while its key is the pending one on disk.
 pub fn rustls_client_config_for(
     config: &ClientConfig,
@@ -158,7 +158,7 @@ pub fn trust(
 /// plain-HTTP transport talks to the Server with.
 ///
 /// Package downloads deliberately use [`trust`] alone: a `download_url` may point at a mirror this
-/// project knows nothing about (ADR-0018), and an identity is for the Server, not for whoever
+/// project knows nothing about (ADR-0015), and an identity is for the Server, not for whoever
 /// happens to host an artifact.
 pub fn trust_and_identity(
     builder: reqwest::ClientBuilder,
@@ -167,7 +167,7 @@ pub fn trust_and_identity(
     trust_and_identity_for(builder, config, None)
 }
 
-/// The same, with a candidate certificate under test (ADR-0035).
+/// The same, with a candidate certificate under test (ADR-0013).
 pub fn trust_and_identity_for(
     builder: reqwest::ClientBuilder,
     config: &ClientConfig,

@@ -17,9 +17,9 @@ pub struct ClientConfig {
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
     /// The operator's name for the Client's own Agent, reported as `service.instance.name`
-    /// (ADR-0033) — *which* Client this is. Its `service.name` is the type
+    /// (ADR-0022) — *which* Client this is. Its `service.name` is the type
     /// [`CLIENT_AGENT_TYPE`](crate::supervisor::agent::CLIENT_AGENT_TYPE) — `supervisor`, a
-    /// constant (ADR-0077) — so this key cannot state it: every Client in a fleet is the same kind
+    /// constant (ADR-0022) — so this key cannot state it: every Client in a fleet is the same kind
     /// of thing.
     #[serde(default = "default_name")]
     pub name: String,
@@ -41,7 +41,7 @@ pub struct ClientConfig {
     /// Where the Client persists its identity and the received remote configuration.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
-    /// Where the per-Supervisor directories live (ADR-0021); absent means
+    /// Where the per-Supervisor directories live (ADR-0018); absent means
     /// `<state_dir>/supervisors`, which is where they have always been. Set it to put the
     /// Managed Processes' programs somewhere `state_dir` cannot go — off a `noexec` mount, or
     /// onto a volume sized for a few hundred megabytes of agent rather than for state.
@@ -52,7 +52,7 @@ pub struct ClientConfig {
     /// code or the Managed Process reports win over configured ones.
     #[serde(default)]
     pub attributes: BTreeMap<String, String>,
-    /// Optional Gateway Mode (ADR-0037); absent means this Client gateways for nobody.
+    /// Optional Gateway Mode (ADR-0024); absent means this Client gateways for nobody.
     pub gateway: Option<GatewayConfig>,
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
@@ -66,20 +66,20 @@ pub struct ClientConfig {
     /// Package verification (ADR-0015); absent means unsigned packages are accepted on their
     /// content hash alone.
     pub packages: Option<PackagesConfig>,
-    /// Consent for the Server to replace this Client's own binary (ADR-0020). Absent means the
-    /// section's own defaults, which since ADR-0075 are **consent given** under the Client's own
+    /// Consent for the Server to replace this Client's own binary (ADR-0017). Absent means the
+    /// section's own defaults, which since ADR-0017 are **consent given** under the Client's own
     /// name — write `enabled = false` to withdraw it.
     #[serde(default)]
     pub self_update: SelfUpdateConfig,
-    /// Where this Client's own log goes when it runs as a service (ADR-0041). Absent takes the
+    /// Where this Client's own log goes when it runs as a service (ADR-0026). Absent takes the
     /// defaults: a rotating file in the state directory, seven days kept.
     #[serde(default)]
     pub logging: LoggingConfig,
-    /// The fleet's timing policy for every Managed Process (ADR-0091): the graceful-stop budget
+    /// The fleet's timing policy for every Managed Process (ADR-0037): the graceful-stop budget
     /// and the apply grace. Absent takes the defaults.
     #[serde(default, rename = "supervisors")]
     pub supervisor_defaults: SupervisorsConfig,
-    /// How Managed-Process package updates behave once applied (ADR-0058) — the retention of a
+    /// How Managed-Process package updates behave once applied (ADR-0015) — the retention of a
     /// superseded version. Absent takes the defaults: one day.
     #[serde(default)]
     pub updates: UpdatesConfig,
@@ -94,7 +94,7 @@ pub struct ClientConfig {
     #[serde(skip)]
     pub source: Option<String>,
     /// The path this configuration was loaded from — where an accepted Supervisor set is written
-    /// back to (ADR-0056). Kept even when the file does not exist yet: the first applied offer
+    /// back to (ADR-0029). Kept even when the file does not exist yet: the first applied offer
     /// creates it. `None` only for a configuration never loaded from a path (tests, defaults).
     #[serde(skip)]
     pub path: Option<PathBuf>,
@@ -131,17 +131,17 @@ pub struct SupervisorBlock {
     ///
     /// It is the operator's name for *this* Agent, never its type — that is
     /// [`service_name`](Self::service_name), which the grammar here could not spell anyway
-    /// (ADR-0033): a reverse FQDN has dots, and this value is a path component on three operating
+    /// (ADR-0022): a reverse FQDN has dots, and this value is a path component on three operating
     /// systems.
     pub name: String,
     /// The Agent *type* this Supervisor presents as `service.name` — the Baseline's "reverse FQDN
-    /// that uniquely identifies the Agent type" (ADR-0033). `None` falls back to the program's own
+    /// that uniquely identifies the Agent type" (ADR-0022). `None` falls back to the program's own
     /// file name, and a Managed Process that reports a type of its own overrides both: a
     /// Collector's `opampextension` states the `dist.name` it was built with, which is the truth
     /// this key can only approximate.
     ///
     /// Set it for a Managed Process that reports nothing — the core `otelcol` distribution, every
-    /// Foreign Agent — so a Selector can aim at what this Agent *is* (ADR-0017).
+    /// Foreign Agent — so a Selector can aim at what this Agent *is* (ADR-0016).
     pub service_name: Option<String>,
     /// The Supervisor Endpoint's loopback port; `0` (the default) binds an ephemeral port. Pin
     /// it when the distributed configuration carries the `opampextension` pointing at it.
@@ -150,7 +150,7 @@ pub struct SupervisorBlock {
     /// graceful stop may take before the Managed Process is killed. `None` — the default — takes
     /// the global value.
     ///
-    /// Only a kind that knows nothing about its agent may state it (ADR-0091): how long an agent
+    /// Only a kind that knows nothing about its agent may state it (ADR-0037): how long an agent
     /// needs to shut down is a property of that agent, so a wrapped kind holds the value and the
     /// key is refused in its block.
     pub stop_timeout_secs: Option<u64>,
@@ -160,30 +160,30 @@ pub struct SupervisorBlock {
     /// acknowledgement ADR-0011 names). `0` acknowledges on start. `None` takes the global value,
     /// and a wrapped kind refuses the key for the reason above.
     pub apply_grace_secs: Option<u64>,
-    /// Overrides the global `[updates] retain_previous_secs` for this Supervisor (ADR-0058): how
+    /// Overrides the global `[updates] retain_previous_secs` for this Supervisor (ADR-0015): how
     /// long the version a successful update supersedes is kept before deletion. `None` — the
     /// default — takes the global value.
     pub retain_previous_secs: Option<u64>,
-    /// Where the program sits *inside* a package that is a whole directory tree (ADR-0023), e.g.
+    /// Where the program sits *inside* a package that is a whole directory tree (ADR-0015), e.g.
     /// `bin/fluent-bit`. `None` — the default — is the single-file package of ADR-0015: one
     /// member, one file. Setting it is what asks for the tree to be unpacked whole.
     ///
     /// It never decides *whether* packages are taken; the written shape of `binary`/`command`
-    /// still does that alone (ADR-0021).
+    /// still does that alone (ADR-0018).
     pub program_path: Option<PathBuf>,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
 }
 
-/// The subdirectory of a Supervisor's own directory holding its Managed Process (ADR-0021).
+/// The subdirectory of a Supervisor's own directory holding its Managed Process (ADR-0018).
 ///
 /// Called `program` and not `bin` on purpose: it holds one file for a single-file package, and a
 /// Foreign Agent's whole tree — an executable with the shared objects it loads — is unpacked under
-/// the same root (ADR-0023, in [`TREE_DIR`]), so no path on disk moved when that arrived. A
+/// the same root (ADR-0015, in [`TREE_DIR`]), so no path on disk moved when that arrived. A
 /// directory name is cheap; a layout migration on every host is not.
 pub const PROGRAM_DIR: &str = "program";
 
-/// The subdirectory of `program/` holding an unpacked package tree (ADR-0023), with the tree it
+/// The subdirectory of `program/` holding an unpacked package tree (ADR-0015), with the tree it
 /// replaced kept beside it under the same name plus `.rollback`.
 ///
 /// Two fixed names rather than a version directory and a pointer: it is the mechanism the
@@ -196,12 +196,12 @@ pub const TREE_DIR: &str = "tree";
 const PACKAGES_DIR: &str = "packages";
 
 /// Where a Supervisor's Managed Process lives — and, as the same fact, whether this Client may
-/// replace it (ADR-0021).
+/// replace it (ADR-0018).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     /// What the process is spawned from, and what a package is installed over.
     ///
-    /// Always inside this Supervisor's own `program/` directory (ADR-0085): a Managed Process is
+    /// Always inside this Supervisor's own `program/` directory (ADR-0018): a Managed Process is
     /// always the fleet's. There is no `owned` flag beside this any more, because there is nothing
     /// left for it to distinguish — every block that parses names a program this Client installs,
     /// so `AcceptsPackages` is a constant of this Client rather than a function of its
@@ -209,13 +209,13 @@ pub struct Program {
     pub path: PathBuf,
 }
 
-/// Resolves the program path of a `[[supervisor]]` block (ADR-0021 clause 1, as amended by
-/// ADR-0085).
+/// Resolves the program path of a `[[supervisor]]` block (ADR-0018 clause 1, as amended by
+/// ADR-0018).
 ///
 /// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
-/// wrote. **One shape**, since ADR-0085 removed the second: a **bare file name**, resolving to
+/// wrote. **One shape**, since ADR-0018 removed the second: a **bare file name**, resolving to
 /// `<supervisor_dir>/program/<value>` — or `program/tree/<program_path>` for a multi-file package
-/// (ADR-0023) — a directory this Client creates and owns, so it may replace what is in it. A bare
+/// (ADR-0015) — a directory this Client creates and owns, so it may replace what is in it. A bare
 /// name cannot escape that directory, which is why nothing here has to sanitize a path.
 ///
 /// Everything else is refused, and an **absolute path** gets its own message: it is the shape this
@@ -231,7 +231,7 @@ pub fn resolve_program(
     supervisor_dir: &Path,
     name: &str,
 ) -> Result<Program, String> {
-    // The machine's program, which this Client no longer manages (ADR-0085). `has_root` rather
+    // The machine's program, which this Client no longer manages (ADR-0018). `has_root` rather
     // than `is_absolute` so the Windows drive-relative form — `\Program Files\otelcol\otelcol.exe`,
     // no drive letter — folds into the same message: it was only ever a near-miss of the absolute
     // form, and both now have the same answer.
@@ -250,7 +250,7 @@ pub fn resolve_program(
     let bare = matches!(components.next(), Some(std::path::Component::Normal(_)))
         && components.next().is_none();
     if bare {
-        // With a tree the program is one file *inside* the unpacked package (ADR-0023), and the
+        // With a tree the program is one file *inside* the unpacked package (ADR-0015), and the
         // bare name above is what it always was: the consent, readable in the file.
         let path = match program_path {
             Some(inside) => supervisor_dir.join(PROGRAM_DIR).join(TREE_DIR).join(inside),
@@ -261,7 +261,7 @@ pub fn resolve_program(
     Err(format!(
         "supervisor {name:?}: `{key} = {}` is not a bare file name — no path separator and no \
          `..`. The program lives in this Supervisor's own directory and is updated from \
-         Server-offered packages (ADR-0085); name the file, not a path to it",
+         Server-offered packages (ADR-0018); name the file, not a path to it",
         value.display()
     ))
 }
@@ -277,7 +277,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         crate::cli::parse_instance_name(&name)
             .map_err(|e| format!("invalid supervisor name {name:?}: {e}"))?;
         // Deliberately not run through `parse_instance_name`: a type may be a reverse FQDN
-        // (ADR-0033), which that grammar forbids. Only emptiness is refused — an empty
+        // (ADR-0022), which that grammar forbids. Only emptiness is refused — an empty
         // `service.name` would report "no type" as if it were one.
         let service_name = match take_string(&mut table, "service_name")
             .map_err(|e| format!("supervisor {name:?}: {e}"))?
@@ -313,13 +313,13 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                 format!("supervisor {name:?}: retain_previous_secs must not be negative")
             })?),
         };
-        // Retired by ADR-0091, and refused by name rather than left to the plugin's strict parse:
+        // Retired by ADR-0037, and refused by name rather than left to the plugin's strict parse:
         // a block carrying it was written against a Client that took it, and what replaces it is
         // not another key but a different place entirely.
         if table.contains_key("attributes") {
             return Err(format!(
                 "supervisor {name:?}: `[supervisor.attributes]` is no longer a supervisor key — a \
-                 Server label tags this Agent from the fleet (ADR-0042), keyed by its \
+                 Server label tags this Agent from the fleet (ADR-0027), keyed by its \
                  `instance_uid` and matched by the same Selectors; the Client-wide `[attributes]` \
                  still describe the host. Remove the table"
             ));
@@ -333,7 +333,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                     .map_err(|e| format!("supervisor {name:?}: `program_path = {raw:?}` {e}"))?,
             ),
         };
-        // `package = "name"` chose the artifact on the host; ADR-0017 moved that decision to the
+        // `package = "name"` chose the artifact on the host; ADR-0016 moved that decision to the
         // Server's Selector. Refuse it loudly rather than ignore a key an operator believes in.
         if table.contains_key("package") {
             return Err(format!(
@@ -344,7 +344,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         }
         // And `accepts_packages = true` said *whether*, while the program's path said *where* —
         // two keys for one truth, and nothing ever checked that the second permitted the first
-        // (ADR-0021). ADR-0085 left one shape, so every Supervisor accepts packages and the key
+        // (ADR-0018). ADR-0018 left one shape, so every Supervisor accepts packages and the key
         // would only be a way to disagree with a constant.
         if table.contains_key("accepts_packages") {
             return Err(format!(
@@ -368,7 +368,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
     }
 }
 
-/// Checks a `program_path` (ADR-0023): a relative path inside the package, and nothing that could
+/// Checks a `program_path` (ADR-0015): a relative path inside the package, and nothing that could
 /// reach outside it.
 ///
 /// The same three refusals the archive sanitizer makes, made here instead — at startup, where the
@@ -503,7 +503,7 @@ pub struct PackagesConfig {
     /// signature against it; when unset, an unsigned package is accepted on its content hash alone
     /// and a *signed* one is refused (there is nothing to check it with).
     pub verification_key: Option<String>,
-    /// The key that opens an encrypted `.7z` package artifact (ADR-0018). Unset means artifacts are
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0015). Unset means artifacts are
     /// expected unencrypted; an encrypted one then fails to install, naming this key.
     ///
     /// One secret for the fleet — a single archive serves every Agent — and never the OpAMP
@@ -512,31 +512,31 @@ pub struct PackagesConfig {
     pub archive_key: Option<String>,
 }
 
-/// The `[self_update]` block (ADR-0020): consent for the Server to replace *this Client's* binary.
+/// The `[self_update]` block (ADR-0017): consent for the Server to replace *this Client's* binary.
 ///
-/// **The section is absent on most hosts, and absent means consent** (ADR-0075, superseding
-/// ADR-0027 point 4): a Client the fleet cannot update is a Client that has to be updated by hand
+/// **The section is absent on most hosts, and absent means consent** (ADR-0017, superseding
+/// ADR-0020 point 4): a Client the fleet cannot update is a Client that has to be updated by hand
 /// on every host, which is the state fleet management exists to end. What used to be the default —
 /// no consent at all — is now written down, as `enabled = false`.
 ///
 /// The *name* is what the consent is narrowed to, and it does the work the absent section used to:
-/// a package with an empty Selector reaches every Agent that accepts packages (ADR-0017), so
+/// a package with an empty Selector reaches every Agent that accepts packages (ADR-0016), so
 /// without a name to match, the first fleet-wide Collector artifact an operator uploads would be
 /// installed over the Client and take the host out of reach. An offer under any other name is
 /// refused and reported, never applied. The default name is the Client's own Agent type —
-/// `supervisor` since ADR-0077 — which is what a Set carrying this Client is keyed by anyway
-/// (ADR-0034), so the default is not a wildcard: it is the one package that could legitimately be
+/// `supervisor` since ADR-0022 — which is what a Set carrying this Client is keyed by anyway
+/// (ADR-0016), so the default is not a wildcard: it is the one package that could legitimately be
 /// this Client.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfUpdateConfig {
     /// Whether the consent stands. `false` is the withdrawal — the Client's own Agent then declares
     /// no package capability at all and no offer can reach it, which is exactly what an absent
-    /// section meant before ADR-0075.
+    /// section meant before ADR-0017.
     #[serde(default = "default_self_update_enabled")]
     pub enabled: bool,
     /// The name of the package that carries this Client; defaults to the Client's own Agent type
-    /// (ADR-0077). An empty name with the consent standing is refused at load: the name is the
+    /// (ADR-0022). An empty name with the consent standing is refused at load: the name is the
     /// whole of the narrowing, and an empty one would widen it to every package the Server offers.
     #[serde(default = "default_self_update_package")]
     pub package: String,
@@ -551,16 +551,16 @@ impl Default for SelfUpdateConfig {
     }
 }
 
-/// What the configuration file was called until ADR-0080, and the one reason a missing file is an
+/// What the configuration file was called until ADR-0022, and the one reason a missing file is an
 /// error rather than the defaults.
 pub const LEGACY_CONFIG_FILE_NAME: &str = "client.toml";
 
 /// Refuses to carry on when the configuration is only *missing* because it was renamed
-/// (ADR-0080): the file this Client looks for is absent and a `supervisor.toml` — what it was called
-/// until ADR-0080 — sits where it would be.
+/// (ADR-0022): the file this Client looks for is absent and a `supervisor.toml` — what it was called
+/// until ADR-0022 — sits where it would be.
 ///
 /// Everywhere else a missing configuration is not an error: a Client comes up on defaults, says so,
-/// and manages nothing until one exists (ADR-0027). That is exactly the wrong answer here, and the
+/// and manages nothing until one exists (ADR-0020). That is exactly the wrong answer here, and the
 /// dangerous one: an upgraded host would go on running, connect to the development endpoint, report
 /// none of the Agents it used to, and nothing about it would look like a failure. So this one case
 /// fails closed, naming both paths and the single command that fixes it.
@@ -575,7 +575,7 @@ fn legacy_name_beside(path: &Path) -> Result<(), String> {
     }
     Err(format!(
         "no configuration at {}, but {} is beside it: the file was renamed in this release \
-         (ADR-0080). Rename it — `mv {} {}` — and start the service again. Nothing else about it \
+         (ADR-0022). Rename it — `mv {} {}` — and start the service again. Nothing else about it \
          changed.",
         path.display(),
         legacy.display(),
@@ -588,18 +588,18 @@ fn default_self_update_enabled() -> bool {
     true
 }
 
-/// The Client's own Agent type (ADR-0077): the Set that carries this Client is keyed by the type it
-/// is built for (ADR-0034), so the type is also what names it. Deliberately *not* the product's name
-/// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which since ADR-0077 is a different
+/// The Client's own Agent type (ADR-0022): the Set that carries this Client is keyed by the type it
+/// is built for (ADR-0016), so the type is also what names it. Deliberately *not* the product's name
+/// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which since ADR-0022 is a different
 /// string and names the binary, the service, and the version directories rather than the package.
 fn default_self_update_package() -> String {
     crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string()
 }
 
-/// The `[logging]` section (ADR-0041): this Client's own log, on disk, while it runs as a service.
+/// The `[logging]` section (ADR-0026): this Client's own log, on disk, while it runs as a service.
 ///
 /// It exists because the Windows SCM discards a service's stderr, so a Client installed there had
-/// no readable log at all — and because the OTLP own-logs bridge (ADR-0036) needs a Server that is
+/// no readable log at all — and because the OTLP own-logs bridge (ADR-0023) needs a Server that is
 /// already reachable, which is precisely what a startup failure is not. In the foreground nothing
 /// is written: somebody is reading stderr there.
 ///
@@ -641,7 +641,7 @@ impl Default for LoggingConfig {
     }
 }
 
-/// The `[supervisors]` section (ADR-0091): the fleet's timing policy for every Managed Process.
+/// The `[supervisors]` section (ADR-0037): the fleet's timing policy for every Managed Process.
 ///
 /// Global here, because these are decisions about *this deployment* — how long an operator is
 /// willing to wait for a stop, how long a restart must hold before it counts as applied — and not
@@ -669,13 +669,13 @@ impl Default for SupervisorsConfig {
     }
 }
 
-/// The `[updates]` section (ADR-0058): how a Managed Process's package updates behave once applied.
+/// The `[updates]` section (ADR-0015): how a Managed Process's package updates behave once applied.
 /// Global here, overridable per `[[supervisor]]` block, the shape `apply_grace_secs` already has.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdatesConfig {
     /// How long the version a successful update supersedes is kept before it is deleted, so an
-    /// operator has a fallback window (ADR-0058). `0` deletes it on success, the pre-ADR-0058
+    /// operator has a fallback window (ADR-0015). `0` deletes it on success, the pre-ADR-0015
     /// behaviour. A per-Supervisor `retain_previous_secs` overrides this for one block.
     #[serde(default = "default_retain_previous_secs")]
     pub retain_previous_secs: u64,
@@ -693,7 +693,7 @@ impl Default for UpdatesConfig {
     }
 }
 
-/// The `[gateway]` section (ADR-0037): the Client stands at a network boundary, accepts OpAMP from
+/// The `[gateway]` section (ADR-0024): the Client stands at a network boundary, accepts OpAMP from
 /// other Clients, and folds them onto a small pool of upstream connections. Present arms the mode;
 /// it composes with `[[supervisor]]` blocks on the same host, since the two modes are orthogonal
 /// (ADR-0003).
@@ -715,12 +715,12 @@ pub struct GatewayConfig {
     /// is refused at load.
     #[serde(default = "default_max_carried_agents")]
     pub max_carried_agents: usize,
-    /// TLS for the downstream hop. Mutual TLS is per hop (ADR-0035): what this verifies is the
+    /// TLS for the downstream hop. Mutual TLS is per hop (ADR-0013): what this verifies is the
     /// Agents connecting *here*, and the identity presented *upstream* is the Client's own.
     pub tls: Option<GatewayTlsConfig>,
 }
 
-/// The downstream hop's TLS material (ADR-0037). Separate from the top-level `[tls]`, which is
+/// The downstream hop's TLS material (ADR-0024). Separate from the top-level `[tls]`, which is
 /// about reaching the Server: this is about being reached.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -763,7 +763,7 @@ pub struct TlsConfig {
     /// PEM CA bundle that *replaces* the built-in webpki roots — the self-signed-deployment case.
     /// Optional, so a `[tls]` section can carry a client identity alone and keep the public roots.
     pub ca_file: Option<PathBuf>,
-    /// PEM client certificate chain this Client presents (ADR-0035), for a fleet whose Server
+    /// PEM client certificate chain this Client presents (ADR-0013), for a fleet whose Server
     /// demands mutual TLS. Together with [`key_file`](Self::key_file), and useless without it.
     ///
     /// This is the operator-provisioned identity, including the **bootstrap certificate** a host
@@ -800,12 +800,12 @@ fn default_endpoint() -> String {
 }
 
 fn default_name() -> String {
-    // A *display* name, and deliberately not the program's own (ADR-0080): this key is the one
+    // A *display* name, and deliberately not the program's own (ADR-0022): this key is the one
     // place an operator says which Client this is, and a default that reads exactly like the Agent
-    // type would put the same word in both columns of the fleet view — the collapse ADR-0033 ended.
+    // type would put the same word in both columns of the fleet view — the collapse ADR-0022 ended.
     // Spelled as a person would write it, spaces and capitals included: nothing resolves a path or
     // a service from it, the grammar of ADR-0010 governs the `--instance` and the `[[supervisor]]`
-    // block names instead, and the questionnaire asks for this one first (ADR-0027) so that a fleet
+    // block names instead, and the questionnaire asks for this one first (ADR-0020) so that a fleet
     // is told apart by names somebody chose.
     "Supervisor Agent".to_string()
 }
@@ -819,7 +819,7 @@ fn default_heartbeat_interval_secs() -> u64 {
     30
 }
 
-/// The pool cap when none is configured — the OpAMP Gateway Extension's default (ADR-0037). It is
+/// The pool cap when none is configured — the OpAMP Gateway Extension's default (ADR-0024). It is
 /// a ceiling, not a cost: connections are opened as Agents appear.
 fn default_upstream_connections() -> usize {
     10
@@ -905,7 +905,7 @@ impl ClientConfig {
     /// Loads the file, or the defaults when it does not exist. A file that exists but does not
     /// parse is an error — never silently ignored.
     /// The package this Client consents to be replaced by, or `None` when the consent is withdrawn
-    /// (ADR-0020, ADR-0075). The one place the two fields of `[self_update]` are read together, so
+    /// (ADR-0017). The one place the two fields of `[self_update]` are read together, so
     /// no caller can honour the name while ignoring the switch.
     #[must_use]
     pub fn self_update_package(&self) -> Option<&str> {
@@ -933,7 +933,7 @@ impl ClientConfig {
         config.source = Some(redact_secrets(&text));
         config.path = Some(path.to_path_buf());
         // **Every directory this Client derives is made absolute here**, and this is the one place
-        // it can be done once. Since ADR-0091 a Managed Process starts in its own directory, so a
+        // it can be done once. Since ADR-0037 a Managed Process starts in its own directory, so a
         // path the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}`
         // it substitutes — is resolved by that process against a directory the Client has left.
         // `state_dir` defaults to the relative `client-state`, so leaving these relative made the
@@ -952,7 +952,7 @@ impl ClientConfig {
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
         // An empty name with the consent standing must fail startup rather than widen the consent
-        // to whatever the Server offers next (ADR-0075). Withdrawn, the name is not read at all,
+        // to whatever the Server offers next (ADR-0017). Withdrawn, the name is not read at all,
         // so an empty one there is simply unused.
         if config.self_update.enabled && config.self_update.package.trim().is_empty() {
             return Err(format!(
@@ -999,7 +999,7 @@ impl ClientConfig {
                 path.display()
             ));
         }
-        // The retention bound is not optional (ADR-0041). Elsewhere a zero often means "no limit";
+        // The retention bound is not optional (ADR-0026). Elsewhere a zero often means "no limit";
         // here that is the one setting that fills a disk on a host nobody is watching, so it fails
         // startup instead of being reachable by typing a digit.
         if config.logging.enabled && config.logging.keep == 0 {
@@ -1017,7 +1017,7 @@ impl ClientConfig {
         self.package_key.as_deref()
     }
 
-    /// The client certificate and key this Client presents on both transports (ADR-0035), or
+    /// The client certificate and key this Client presents on both transports (ADR-0013), or
     /// `None` when it has no identity to present.
     ///
     /// A pair the Server issued outranks the configured one, the same precedence persisted
@@ -1039,7 +1039,7 @@ impl ClientConfig {
         self.tls.as_ref()?.ca_file.as_deref()
     }
 
-    /// The root the per-Supervisor directories sit under (ADR-0021) — `supervisor_dir` when the
+    /// The root the per-Supervisor directories sit under (ADR-0018) — `supervisor_dir` when the
     /// operator set one, and `<state_dir>/supervisors` when they did not.
     #[must_use]
     pub fn supervisors_root(&self) -> PathBuf {
@@ -1049,7 +1049,7 @@ impl ClientConfig {
     }
 
     /// One Supervisor's own directory: its state, its `program/`, and its package staging, under
-    /// a single root the operator can place (ADR-0021).
+    /// a single root the operator can place (ADR-0018).
     #[must_use]
     pub fn supervisor_dir(&self, name: &str) -> PathBuf {
         self.supervisors_root().join(name)
@@ -1058,9 +1058,9 @@ impl ClientConfig {
     /// Where the artifact offered to an Agent is staged, by the name of the Supervisor behind it —
     /// `None` for the Client's own Agent. Inside that Supervisor's own directory, so that the
     /// install which follows is a rename within one filesystem instead of a copy across two
-    /// (ADR-0021); the Client's own Agent stages under `state_dir`, beside the versions a
-    /// self-update writes (ADR-0020). Keyed by name rather than by Engine index because the Agent
-    /// set can change at runtime (ADR-0056), which is exactly when an index stops naming a block.
+    /// (ADR-0018); the Client's own Agent stages under `state_dir`, beside the versions a
+    /// self-update writes (ADR-0017). Keyed by name rather than by Engine index because the Agent
+    /// set can change at runtime (ADR-0029), which is exactly when an index stops naming a block.
     #[must_use]
     pub fn staging_dir_for(&self, supervisor: Option<&str>) -> PathBuf {
         match supervisor {
@@ -1084,7 +1084,7 @@ impl ClientConfig {
     /// The operator-defined attributes one Agent reports (ADR-0012): the machine-level table,
     /// with a Supervisor's own entries merged over it per key.
     pub fn agent_attributes(&self, block: Option<&SupervisorBlock>) -> BTreeMap<String, String> {
-        // The block half is gone (ADR-0091): tagging one Agent among several is a Server label's
+        // The block half is gone (ADR-0037): tagging one Agent among several is a Server label's
         // job, which does it from the fleet and takes effect at once. The parameter stays because
         // the two call sites still differ in nothing else, and a future per-block statement would
         // land here.
@@ -1140,7 +1140,7 @@ mod tests {
 
     /// Every directory this Client derives is absolute, however the operator wrote it.
     ///
-    /// Since ADR-0091 a Managed Process starts in its own directory, so a relative path handed to
+    /// Since ADR-0037 a Managed Process starts in its own directory, so a relative path handed to
     /// it is resolved against a directory the Client has left — and `state_dir` defaults to the
     /// relative `client-state`, which made the ordinary configuration the broken one. Two failures
     /// came out of it: the program was looked for beneath itself, and a Collector that did start
@@ -1232,7 +1232,7 @@ mod tests {
         );
     }
 
-    /// ADR-0041. The log is on by default with a bound that cannot be removed, and `[logging]` is
+    /// ADR-0026. The log is on by default with a bound that cannot be removed, and `[logging]` is
     /// the machine's — so a typo in it fails startup rather than quietly disabling the one thing
     /// that would have explained the next failure.
     #[test]
@@ -1275,7 +1275,7 @@ mod tests {
         assert!(ClientConfig::load(&path).is_ok());
     }
 
-    /// ADR-0080: the rename must not turn a managed host into a silent one. A missing
+    /// ADR-0022: the rename must not turn a managed host into a silent one. A missing
     /// configuration is ordinarily the defaults and a warning; a missing one with the *old* name
     /// beside it is an upgraded host that would otherwise come up on the development endpoint and
     /// manage nothing, which is the failure nobody sees.
@@ -1284,7 +1284,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let expected = dir.path().join(crate::config_init::FILE_NAME);
 
-        // Neither file: an ordinary fresh host, and the defaults are the answer (ADR-0027).
+        // Neither file: an ordinary fresh host, and the defaults are the answer (ADR-0020).
         assert!(ClientConfig::load(&expected).is_ok());
 
         std::fs::write(
@@ -1307,8 +1307,8 @@ mod tests {
         );
     }
 
-    /// ADR-0075: the consent stands unless the file withdraws it, and it is narrowed to a name
-    /// either way — the Client's own Agent type when the file names none, which since ADR-0077 is
+    /// ADR-0017: the consent stands unless the file withdraws it, and it is narrowed to a name
+    /// either way — the Client's own Agent type when the file names none, which since ADR-0022 is
     /// `supervisor`. A withdrawal is a written `enabled = false`, so a Client the fleet cannot
     /// update says so in its own configuration instead of saying nothing at all.
     #[test]
@@ -1328,7 +1328,7 @@ mod tests {
             Some(crate::supervisor::agent::CLIENT_AGENT_TYPE)
         );
 
-        // And that name is `supervisor` since ADR-0077 — pinned here because the default travels
+        // And that name is `supervisor` since ADR-0022 — pinned here because the default travels
         // into every written configuration and has to line up with the Set the Server publishes.
         assert_eq!(untouched.self_update_package(), Some("supervisor"));
 
@@ -1356,7 +1356,7 @@ mod tests {
         );
     }
 
-    /// The name is the whole of the narrowing (ADR-0075), so an empty one with the consent standing
+    /// The name is the whole of the narrowing (ADR-0017), so an empty one with the consent standing
     /// is refused at load rather than left to widen the consent to every package the Server offers.
     /// Withdrawn, the name is not read at all and an empty one is simply unused.
     #[test]
@@ -1438,8 +1438,8 @@ mod tests {
     }
 
     /// Both keys that once configured package delivery on the host are refused rather than
-    /// ignored: `package` named the artifact (ADR-0017 moved that to the Server's Selector), and
-    /// `accepts_packages` said whether to take one (ADR-0021 derives that from the program's
+    /// ignored: `package` named the artifact (ADR-0016 moved that to the Server's Selector), and
+    /// `accepts_packages` said whether to take one (ADR-0018 derives that from the program's
     /// path). An operator who still has either in a file believes it does something.
     #[test]
     fn the_retired_package_keys_are_refused() {
@@ -1475,7 +1475,7 @@ mod tests {
         );
     }
 
-    /// One shape (ADR-0085): a bare name, which is what puts the program in a directory this
+    /// One shape (ADR-0018): a bare name, which is what puts the program in a directory this
     /// Client owns and may therefore replace. Everything else is refused rather than guessed at.
     #[test]
     fn a_bare_name_resolves_and_everything_else_is_refused() {
@@ -1505,8 +1505,8 @@ mod tests {
         }
     }
 
-    /// With a tree (ADR-0023) the program is one file *inside* the package, so the spawn path is
-    /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0021
+    /// With a tree (ADR-0015) the program is one file *inside* the package, so the spawn path is
+    /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0018
     /// made it mean, which is consent and nothing else.
     #[test]
     fn a_tree_spawns_from_the_path_written_inside_the_package() {
@@ -1560,7 +1560,7 @@ mod tests {
             .contains("relative"));
     }
 
-    /// ADR-0085: the machine's program is refused, and the message is the only notice an operator
+    /// ADR-0018: the machine's program is refused, and the message is the only notice an operator
     /// carrying such a block will get — so it must name the way across, not a rule number.
     ///
     /// Whose *spelling* is platform-specific even though the rule is not: on Unix a leading `/`
@@ -1585,7 +1585,7 @@ mod tests {
 
     /// The case Windows adds and Unix has no equivalent of: `\Program Files\...` carries a root
     /// but no drive, so it resolves against whichever drive the process is on — it *looks*
-    /// absolute and is not. Since ADR-0085 it folds into the same refusal as the absolute form,
+    /// absolute and is not. Since ADR-0018 it folds into the same refusal as the absolute form,
     /// because it was only ever a near-miss of it and both now have one answer.
     #[cfg(windows)]
     #[test]
@@ -1603,7 +1603,7 @@ mod tests {
     }
 
     /// The per-Supervisor root is `<state_dir>/supervisors` unless the operator moved it, and
-    /// everything that Supervisor owns hangs off the same place (ADR-0021).
+    /// everything that Supervisor owns hangs off the same place (ADR-0018).
     #[test]
     fn the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable() {
         let default = ClientConfig {
@@ -1694,7 +1694,7 @@ mod tests {
         assert_eq!(collector.name, "otelcol");
         assert_eq!(collector.endpoint_port, 4321);
         // Neither is stated in this block, and unstated now stays unstated: what a Supervisor runs
-        // with is resolved against the fleet's `[supervisors]` policy and its kind (ADR-0091),
+        // with is resolved against the fleet's `[supervisors]` policy and its kind (ADR-0037),
         // rather than being filled in with a compiled-in number here.
         assert_eq!(collector.stop_timeout_secs, None);
         assert_eq!(collector.apply_grace_secs, None);
@@ -1709,7 +1709,7 @@ mod tests {
         assert!(command.settings.contains_key("args"));
     }
 
-    /// ADR-0058: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
+    /// ADR-0015: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
     /// block overrides it for itself — the shape `apply_grace_secs` has.
     #[test]
     fn retention_defaults_globally_and_is_overridable_per_supervisor() {
@@ -1797,7 +1797,7 @@ mod tests {
 
     /// The Agent type is a common key like `name`, and — unlike `name` — is not bound by the
     /// ADR-0010 instance grammar, because the Baseline asks for a reverse FQDN and that grammar
-    /// forbids the dots (ADR-0033).
+    /// forbids the dots (ADR-0022).
     #[test]
     fn a_block_may_state_its_agent_type_and_a_reverse_fqdn_is_accepted() {
         let cfg: ClientConfig = toml::from_str(
@@ -1849,7 +1849,7 @@ mod tests {
 
     /// The Client-wide table stays — it describes the *host*, and it is what a fresh Agent carries
     /// into its first message, before there is anything for a Server to label. The block's own
-    /// table is gone, and refused by name (ADR-0091).
+    /// table is gone, and refused by name (ADR-0037).
     #[test]
     fn attributes_describe_the_host_and_a_block_no_longer_tags_one_agent() {
         let cfg: ClientConfig = toml::from_str(
