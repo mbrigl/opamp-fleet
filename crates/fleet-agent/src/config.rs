@@ -734,7 +734,13 @@ pub struct GatewayConfig {
     /// is refused at load.
     #[serde(default = "default_max_carried_agents")]
     pub max_carried_agents: usize,
-    /// TLS for the downstream hop, required (ADR-0064). Mutual TLS is per hop: what this verifies
+    /// The most bytes of package artifacts this Gateway holds for the Agents behind it
+    /// (ADR-0070 clause 13), under `<state_dir>/gateway-packages`. An artifact larger than this, or
+    /// than `max_artifact_size_bytes`, is not cached and not delivered through the Gateway. `0` is
+    /// refused at load.
+    #[serde(default = "default_package_cache_bytes")]
+    pub package_cache_bytes: u64,
+    /// TLS for the downstream hop, required (ADR-0071). Mutual TLS is per hop: what this verifies
     /// is the Agents connecting *here*, and the identity presented *upstream* is the Client's own.
     /// An `Option` only so its absence can be named at load.
     pub tls: Option<GatewayTlsConfig>,
@@ -749,7 +755,7 @@ pub struct GatewayTlsConfig {
     pub cert_file: PathBuf,
     /// PEM private key for it.
     pub key_file: PathBuf,
-    /// PEM bundle a downstream Agent's client certificate must chain to, required (ADR-0064): a
+    /// PEM bundle a downstream Agent's client certificate must chain to, required (ADR-0071): a
     /// peer without one fails the handshake. An `Option` only so its absence can be named.
     pub client_ca_file: Option<PathBuf>,
 }
@@ -768,6 +774,13 @@ impl GatewayConfig {
                     .to_string(),
             );
         }
+        if self.package_cache_bytes == 0 {
+            return Err(
+                "[gateway] package_cache_bytes must be greater than zero — it bounds the package \
+                 cache, not a switch"
+                    .to_string(),
+            );
+        }
         if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
             return Err(format!(
                 "[gateway] needs a WebSocket endpoint upstream, and this Client's is {endpoint} — \
@@ -776,7 +789,7 @@ impl GatewayConfig {
             ));
         }
         // A Gateway admits Agents, so the downstream hop is mutual TLS 1.3 and nothing less — on the
-        // loopback too (ADR-0064).
+        // loopback too (ADR-0071).
         match &self.tls {
             None => Err(
                 "[gateway.tls] is required — a Gateway admits Agents over mutual TLS only; set \
@@ -866,6 +879,12 @@ fn default_upstream_connections() -> usize {
 /// hostile connection cannot grow the routing maps without bound.
 fn default_max_carried_agents() -> usize {
     10_000
+}
+
+/// Ten gibibytes: room for a handful of releases of a large Agent across a few Platforms, which is
+/// what one rollout behind a Gateway asks for (ADR-0070 clause 13).
+fn default_package_cache_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
 }
 
 fn default_state_dir() -> PathBuf {
@@ -1403,7 +1422,7 @@ mod tests {
     /// A single downstream connection's Agent cap bounds the routing state one peer can create; it
     /// has a generous default, and zero is a bound that could carry nothing rather than "unlimited",
     /// so it fails startup.
-    /// Verifies: ADR-0064
+    /// Verifies: ADR-0071
     #[test]
     fn the_gateway_agent_cap_defaults_and_rejects_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1431,9 +1450,41 @@ mod tests {
         assert!(err.contains("max_carried_agents"), "{err}");
     }
 
+    /// The Gateway's package cache holds ten gibibytes by default, and zero is a bound that could
+    /// hold nothing rather than "unlimited", so it fails startup.
+    /// Verifies: ADR-0070
+    #[test]
+    fn the_package_cache_defaults_to_ten_gib_and_rejects_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let tls = "[gateway.tls]\ncert_file = \"g.pem\"\nkey_file = \"g-key.pem\"\n\
+                   client_ca_file = \"ca.pem\"\n";
+        std::fs::write(
+            &path,
+            format!("endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n{tls}"),
+        )
+        .expect("write");
+        let config = ClientConfig::load(&path).expect("loads with the default bound");
+        assert_eq!(
+            config.gateway.expect("gateway").package_cache_bytes,
+            10_737_418_240
+        );
+
+        std::fs::write(
+            &path,
+            format!(
+                "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+                 package_cache_bytes = 0\n{tls}"
+            ),
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("package_cache_bytes"), "{err}");
+    }
+
     /// A Gateway admits Agents, so it never serves without TLS, nor without a client CA to verify
-    /// them against — on the loopback neither (ADR-0064).
-    /// Verifies: ADR-0064, Q-1
+    /// them against — on the loopback neither (ADR-0071).
+    /// Verifies: ADR-0071, Q-1
     #[test]
     fn a_gateway_without_mutual_tls_is_refused_at_load() {
         let dir = tempfile::tempdir().expect("tempdir");

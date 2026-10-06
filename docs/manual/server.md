@@ -902,8 +902,23 @@ a Gateway, from its aggregate bucket.
 A `404` for an Agent that was offered an artifact therefore means one of three things: its host's
 certificate names no host (provision it with `urn:opamp-fleet:host:<id>`, see
 [`[client_ca]`](#client_ca)), the Agent now reports another Agent type than the Package was built
-for, or a later rollout changed what it is offered. A Client behind a Gateway receives only
-referenced artifacts: the Gateway does not relay the download route.
+for, or a later rollout changed what it is offered.
+
+A Client behind a Gateway receives uploaded artifacts through the Gateway
+([ADR-0070](../adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)).
+Its offer names the path on this route, which it resolves against its own endpoint, the Gateway.
+The Gateway fetches each such artifact from this Server once, with its own certificate, as soon
+as it relays an offer of it, and serves it on the same path only to the hosts whose Agents it
+relayed that offer to. So the Gateway's host must be marked as a Gateway, and each artifact costs
+this Server one download, counted against the Gateway's aggregate bucket and recorded under the
+Gateway's host, however many Agents behind it install it. A Client that asks while the Gateway is
+still fetching is answered `503` with `Retry-After: 30` and asks again. **With `advertised_url` set, uploaded
+artifacts are not delivered to Clients behind a Gateway:** the offered URL is absolute and names
+this Server, which is not the Client's own origin, so the Client refuses it as a source not
+allowed, or presents no certificate to it and this Server's handshake refuses it. Leave
+`advertised_url` unset in a fleet with Gateways. Referenced artifacts are always fetched from
+their source directly. How the Gateway holds what it fetches is in
+[the Client's manual](client.md#the-package-cache).
 
 ## The REST API
 
@@ -1122,7 +1137,8 @@ answered with the message's own `instance_uid` and `error_response` `Unavailable
 `retry_info` of 30 seconds, on plain HTTP in the body of a `200`. The connection stays open. A
 Client waits the 30 seconds, and the next message the Server processes from that Agent is asked
 for a full report, so nothing is lost. A download past the limit is answered `429` with
-`Retry-After: 30`; it is no failure toward `[admission_throttle]`. Beyond this limit the Server
+`Retry-After: 30`; it is no failure toward `[admission_throttle]`, and the Client waits it out
+before it asks again, for up to 30 minutes per download. Beyond this limit the Server
 honours the protocol's error and retry semantics as well, and answers malformed input with
 `BAD_REQUEST`.
 

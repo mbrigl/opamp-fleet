@@ -118,7 +118,7 @@ pub struct Host {
     pub instance_uids: BTreeSet<String>,
 }
 
-/// The Agents a host's certificate speaks for (ADR-0068 clause 3).
+/// The Agents a host's certificate speaks for (ADR-0070 clause 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpeaksFor {
     /// A host marked as a Gateway: it carries other hosts' Agents, and the Server keeps no record
@@ -508,7 +508,7 @@ impl Revocations {
         self.store.save_hosts(&state.hosts)
     }
 
-    /// The Agents a certificate naming `host` speaks for (ADR-0068 clause 3): the `instance_uid`s
+    /// The Agents a certificate naming `host` speaks for (ADR-0070 clause 3): the `instance_uid`s
     /// bound to it, or any Agent for a host marked as a Gateway. A host the register does not know
     /// speaks for none.
     #[must_use]
@@ -953,7 +953,7 @@ mod tests {
 
     /// A host speaks for the `instance_uid`s that reported with its certificate, a host the
     /// register does not know for none, and a Gateway for any Agent.
-    /// Verifies: ADR-0068
+    /// Verifies: ADR-0070
     #[test]
     fn a_host_speaks_for_the_agents_bound_to_it_and_a_gateway_for_any() {
         let (revocations, _) = open(&Memory::default());

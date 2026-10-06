@@ -1,5 +1,5 @@
-//! The one refusal a Gateway makes beyond its handshake: a downstream certificate its Server has
-//! revoked (ADR-0064 clause 14).
+//! The one admission refusal a Gateway makes beyond its handshake: a downstream certificate its Server has
+//! revoked (ADR-0071 clause 14).
 //!
 //! The Server never sees a downstream certificate — the Gateway terminates that handshake and
 //! presents its own upstream — so the Server hands its Gateways the revoked certificates of the
@@ -238,7 +238,7 @@ mod tests {
 
     /// The Gateway fetches the list with its own identity and no `Authorization`, even when
     /// `supervisor.toml` still holds an `[auth]` section from an earlier version.
-    /// Verifies: ADR-0064, ADR-0059
+    /// Verifies: ADR-0071, ADR-0059
     #[tokio::test]
     async fn the_revocation_list_is_fetched_without_authorization() {
         opamp::tls::install_ring_provider();
@@ -287,7 +287,7 @@ mod tests {
 
     /// A Gateway with no list yet, or one past its age, admits nobody; with a fresh list it admits
     /// what the list does not name and refuses what it does.
-    /// Verifies: ADR-0064
+    /// Verifies: ADR-0071
     #[tokio::test(start_paused = true)]
     async fn the_verdict_follows_the_list_and_its_age() {
         let cert = certificate();

@@ -53,6 +53,24 @@ superseding [ADR-0013](docs/adr/0013-versions.md)). A section carries a date onc
   `true`. Before switching it off, review the `[[supervisor]]` blocks, since a set the Server
   delivered earlier may have written some of them; switching it back on lets the first released
   set replace every block.
+- **A Gateway delivers uploaded packages to the Clients behind it**
+  ([ADR-0070](docs/adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)). When it relays an offer of an
+  artifact the Server hosts, the Gateway fetches it once with its own certificate, checks its
+  SHA-256 against the offer, and serves it on its own listener at the path the offer names, only to
+  a host whose Agent it relayed that offer to; everything else is answered `404`. It holds the
+  artifacts in `<state_dir>/gateway-packages`, emptied at startup and bounded by `[gateway]
+  package_cache_bytes` (10 GiB; `0` is refused). An artifact larger than that is not delivered
+  through the Gateway. While the Gateway is still fetching, a request is answered `503` with
+  `Retry-After: 30`. Referenced artifacts are fetched from their host directly as before. With
+  the Server's `advertised_url` set, uploaded artifacts are not delivered behind a Gateway at all.
+  **What to do:** mark the Gateway's host as a Gateway on the Server if it is not yet, leave
+  `advertised_url` unset in a fleet with Gateways, and give the Gateway's `state_dir` room for the
+  cache.
+- **A download waits out `Retry-After` from the Server's own origin**
+  ([ADR-0070](docs/adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md) clause 15). A `429` or `503` with
+  `Retry-After` in seconds — the Server's rate limit, or a Gateway still fetching — is waited out,
+  each wait at most 60 seconds and all waits of one download at most 30 minutes, before the
+  download is reported failed. **What to do:** nothing.
 - **Every `Unavailable` names the Agent it answers**
   ([ADR-0066](docs/adr/0066-admitted-agents-are-rate-limited-per-host.md) clause 7): the
   Agent-record ceiling, a certificate request held back for its audit record, the full enrolment

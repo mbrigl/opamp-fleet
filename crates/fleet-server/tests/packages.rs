@@ -44,7 +44,7 @@ async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
 
 /// A host of the fleet on an Agent plane that requires a client certificate, as the binary serves
 /// it: its client presents a certificate naming the host (ADR-0059 clause 7), so a download is
-/// tested for an offer (ADR-0068).
+/// tested for an offer (ADR-0070).
 struct Member {
     client: reqwest::Client,
     /// `https://localhost:<port>` — the Agent plane.
@@ -458,7 +458,7 @@ async fn the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_pla
     );
 }
 
-/// Verifies: ADR-0043, ADR-0068
+/// Verifies: ADR-0043, ADR-0070
 #[tokio::test]
 async fn an_uploaded_set_is_offered_downloaded_and_gated() {
     let (server, member) = spawn_with_packages_for_a_host().await;
@@ -567,7 +567,7 @@ async fn an_entry_needs_its_set_first() {
 /// A package is a *program*: an `otelcol-contrib` binary weighs hundreds of megabytes, so the
 /// entry route must not be bounded by the framework's 2 MiB default, and the artifact must reach
 /// the Agent unchanged whatever its size.
-/// Verifies: ADR-0043, ADR-0068
+/// Verifies: ADR-0043, ADR-0070
 #[tokio::test]
 async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_intact() {
     let (server, member) = spawn_with_packages_for_a_host().await;
@@ -605,7 +605,7 @@ async fn an_artifact_larger_than_the_framework_default_uploads_and_downloads_int
 /// A version saved into the channel and signed, but not yet released by the operator's press, is
 /// no one's offer and cannot be fetched — while the version released before it still can. The
 /// press makes it fetchable.
-/// Verifies: ADR-0068
+/// Verifies: ADR-0070
 #[tokio::test]
 async fn a_version_waiting_for_its_rollout_cannot_be_fetched() {
     let (server, member) = spawn_with_packages_for_a_host().await;

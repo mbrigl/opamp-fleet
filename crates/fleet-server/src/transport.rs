@@ -317,7 +317,7 @@ async fn admit_download(
         return unauthorized("the package download requires a certificate of the fleet");
     }
     // What the certificate proves, read once: counted here, and handed to the route, which serves
-    // only what is offered to an Agent of the host it names (ADR-0068 clause 3).
+    // only what is offered to an Agent of the host it names (ADR-0070 clause 3).
     let proofs = certificate.map(|_| Proofs {
         host: facts.as_ref().and_then(|facts| facts.host.clone()),
         certificate: facts.map(|facts| (facts.id, facts.not_after_ms)),

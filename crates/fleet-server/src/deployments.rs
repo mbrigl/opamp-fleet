@@ -200,7 +200,7 @@ impl DeploymentStore {
     }
 
     /// The names of the Deployments that sign the artifact `(id, platform)` — what the download
-    /// route asks once per request rather than once per Agent (ADR-0068 clause 1).
+    /// route asks once per request rather than once per Agent (ADR-0070 clause 1).
     pub fn signing(&self, id: &PackageId, platform: &Platform) -> BTreeSet<String> {
         self.deployments
             .read()

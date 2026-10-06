@@ -945,6 +945,12 @@ needs no entry, and an empty list allows it alone.
   scheme, host and port stay the same.
 - **The client certificate goes only to the Server's own origin.** To a mirror, and on a hop that
   leaves the Server's origin, the Client presents none.
+- **A `429` or `503` with `Retry-After` from the Server's own origin is waited out**
+  ([ADR-0070](../adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md) clause 15). That origin answers so when its rate limit is reached, or —
+  for a Client behind a Gateway — while the Gateway is still fetching the artifact. Each wait is
+  the `Retry-After`, at least 1 and at most 60 seconds, and the asking stops 30 minutes after the
+  download's first request; the status stays `Downloading` meanwhile, and a shutdown ends it. Past that, or for such an answer from any
+  other host, the download fails and is reported `InstallFailed`.
 
 Every download is TLS 1.3, on this Client's trust: `[tls] ca_file` when it is set, the system's
 trust store otherwise.
@@ -983,12 +989,13 @@ A Client can stand at a network boundary and carry other Clients' Agents upstrea
 of connections — for a segmented network the Server cannot reach into, or simply for a
 fleet too large to give every Agent its own connection. The Gateway admits Agents, so it serves
 them over mutual TLS 1.3 only, and `[gateway.tls]` with its `client_ca_file` is required
-([ADR-0064](../adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)):
+([ADR-0071](../adr/0071-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)):
 
 ```toml
 [gateway]
 listen = "0.0.0.0:4320"
 upstream_connections = 10          # a cap, not a count
+package_cache_bytes = 10737418240  # the package cache's bound, 10 GiB
 [gateway.tls]
 cert_file = "gateway.pem"          # what this Gateway presents to its Agents
 key_file = "gateway-key.pem"
@@ -1013,13 +1020,72 @@ nothing the Gateway sends depends on which downstream peer an Agent came through
 This mode composes with `[[supervisor]]` blocks: one host may supervise its own processes *and*
 gateway for others.
 
+### The package cache
+
+A Gateway delivers the packages the Server hosts to the Agents behind it, so that one artifact
+crosses the Gateway's upstream link once instead of once per Agent
+([ADR-0070](../adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)):
+
+- **What it fetches.** When the Gateway relays a package offer whose `download_url` is a path on
+  the Server's download route — what the Server offers for an uploaded artifact while its
+  `advertised_url` is unset — it fetches that artifact once, before any Agent asks, with this
+  Client's own certificate. A request for it while that fetch runs is answered `503` with
+  `Retry-After: 30`, which the Client behind the Gateway waits out (see
+  [Where a download may come from](#where-a-download-may-come-from)). At most four fetches run at
+  a time, and a fetch that falls below 64 KiB/s on average after its first minute is cut. The
+  Server serves a Gateway's certificate only once the operator has marked its host as a Gateway;
+  until then the fetch is refused and the log says so. Each fetch costs one request of the
+  Gateway's rate at the Server; a `429` from it is waited out, and the fetch gives its slot back
+  while it waits. A fetch that fails — refused,
+  interrupted, or bytes that do not match — is not repeated by the Agents' requests, which are
+  answered `404`, nor by the same offer relayed again; the Gateway fetches it again when the
+  artifact newly appears in an Agent's offer.
+- **What it does not fetch.** An offer with an absolute URL is left alone. A referenced artifact
+  on an operator's own server is fetched by the Agent behind the Gateway directly, as it would
+  without one, under its own `[packages] allowed_sources`. **With the Server's `advertised_url`
+  set, an uploaded artifact is not delivered behind a Gateway at all:** the offer names the
+  Server, the Client's own origin is the Gateway, so the download is refused as a source not
+  allowed, or — when the Server's URL is listed in `allowed_sources` — by the Server's handshake,
+  because the Client presents its certificate only to its own origin. Leave `advertised_url` unset
+  in a fleet with Gateways.
+- **What it holds.** Only bytes whose SHA-256 is the one the offer names: a download is staged,
+  hashed as it arrives and renamed into place only when it matches. The Agent behind it still
+  checks the hash and the signature itself before it installs anything.
+- **Who receives it.** The Gateway serves the download route on its own `listen` address, behind
+  the same handshake and revocation list as its OpAMP endpoint. A downstream Client is served an
+  artifact only when the Gateway relayed an offer of it to an Agent carried over a connection whose
+  certificate names the same host (`urn:opamp-fleet:host:<id>`) as the requesting certificate. An
+  Agent's `instance_uid` belongs to the host of the first report for it since the Gateway
+  started; an offer relayed for it over another host's connection is not recorded, and the log
+  says so. If a host locks another host's Agent out this way, restart the Gateway: the real
+  host's next report then binds it. A host binds at most `max_carried_agents` `instance_uid`s;
+  at the Gateway's cap of 1 000 000 a new one replaces the least recently reported binding that
+  has neither a connection nor an offer. An offer relayed over a certificate that names no host serves nobody and is not
+  fetched. Everything else is answered `404`, the same answer whatever the reason, and logged with
+  the host, the certificate's serial and the path — the first five per host and minute one by one,
+  the rest counted into one line.
+- **Where, and how much.** `<state_dir>/gateway-packages`, owner-only, emptied when the Gateway
+  starts. `[gateway] package_cache_bytes` (default `10737418240`, 10 GiB; `0` fails startup) bounds
+  what it holds and what it is fetching: before a fetch writes a byte it reserves the artifact's
+  size. To make room it deletes artifacts no current offer names first, then the least recently
+  used. An offered artifact deleted this way is fetched again by the next request for it, once per
+  relayed offer. An artifact larger than `package_cache_bytes` or `max_artifact_size_bytes` is not
+  stored and not delivered through the Gateway: the log names it, and the Agent behind the Gateway
+  reports its download as failed. Raise `package_cache_bytes` before rolling out such an artifact
+  behind a Gateway.
+
+The offers the cache serves are kept in memory. After the Gateway restarts, an Agent whose install
+is still under way re-draws its offer when it reconnects. One that already reported a failed
+install and retries is answered `404` until the Server offers it another version; rolling out the
+same version again does not re-send the offer.
+
 ### What a Gateway does not do
 
 - **It makes no authentication decision of its own.** A downstream peer is admitted by its
   handshake against `client_ca_file`, which must be the fleet's client CA, never a bootstrap CA.
   The Gateway forwards no `Authorization` header: one a downstream peer sends is ignored, never
-  refused, and nothing is sent upstream in its place. The one refusal it makes beyond its
-  handshake is the Server's: it fetches the revoked certificates every 30 seconds and refuses a peer whose certificate is on that list with
+  refused, and nothing is sent upstream in its place. The one admission refusal it makes beyond
+  its handshake is the Server's: it fetches the revoked certificates every 30 seconds and refuses a peer whose certificate is on that list with
   `401`. Until it has a list younger than 300 seconds — at startup, while its Server is away, or
   while the operator has not marked its host as a Gateway — it answers every peer `503`.
 - **It never speaks for an Agent.** If a downstream Client disappears without sending

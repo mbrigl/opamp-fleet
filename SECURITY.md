@@ -87,7 +87,7 @@ in the TLS handshake, the one proof the Agent plane admits by. The certificate a
 `instance_uid` first reported with one host's certificate is not spoken for by another's: such a
 reporter is re-keyed to an identity of its own. A certificate is not bound to one `instance_uid`,
 which is self-asserted and which the Server may re-key, and a Gateway
-([ADR-0064](docs/adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)) forwards many
+([ADR-0071](docs/adr/0071-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)) forwards many
 Agents' reports under its own certificate.
 
 The consequence, which is a design property rather than a defect: **a host marked as a Gateway, or
@@ -96,14 +96,20 @@ a peer behind one, can report under any `instance_uid`** and update that Agent's
 *not* a cross-fleet or unauthenticated exposure: it is bounded by admission.
 
 **A host receives from the Server only what is released to an Agent it speaks for**
-([ADR-0068](docs/adr/0068-a-host-fetches-only-the-packages-offered-to-its-own-agents.md)). A
-composed configuration travels only to the Agent it was released to, and the package download
-serves an uploaded artifact only to a host one of whose Agents is offered it; every other request
-is answered `404`, as for an artifact the store does not hold, so a host can neither fetch another
-partition's builds nor list the store. A Gateway's certificate speaks for any Agent and may fetch
-what any Agent is offered. The bound is no stronger than the partition: a host that reports another
-partition's attributes under a fresh `instance_uid` is assigned by that partition's next rollout,
-and the fleet view shows such an Agent waiting before the press.
+([ADR-0070](docs/adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)). A composed configuration travels only to the Agent it was released to,
+and the package download serves an uploaded artifact only to a host one of whose Agents is
+offered it; every other request is answered `404`, as for an artifact the store does not hold, so
+a host can neither fetch another partition's builds nor list the store. A Gateway's certificate
+speaks for any Agent and may fetch what any Agent is offered; the Gateway passes an artifact on
+only to a downstream host whose Agent it relayed that offer to, and answers every other request
+`404` alike. Behind a Gateway an `instance_uid` belongs to the host of its first report since the
+Gateway started, so a host that reports another host's `instance_uid` first is served that
+Agent's offers until the Gateway restarts. A host binds at most `max_carried_agents`
+`instance_uid`s, and at the Gateway's cap of 1 000 000 a new binding replaces the least recently
+reported one that has neither a route nor an offer, so one host cannot keep another's Agents from
+being bound. The bound is no stronger than the partition: a host
+that reports another partition's attributes under a fresh `instance_uid` is assigned by that
+partition's next rollout, and the fleet view shows such an Agent waiting before the press.
 
 **What this means for operators:** treat one fleet (one Server, one shared admission) as a single
 trust domain, mark only real Gateways as such (`PUT /api/v1/hosts/{host}/gateway`), and do not

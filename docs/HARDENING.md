@@ -25,7 +25,8 @@ admits only the process its Supervisor started (ADR-0053).
 
 Out of scope, and deliberately so: **authorization and multi-tenancy**, which the specification
 names as non-goals, with one bound on the Agent plane: a host receives from the Server only the
-configurations and packages released to an Agent it speaks for (ADR-0068). The boundary is worth
+configurations and packages released to an Agent it speaks for (ADR-0070), on the Server and from
+a Gateway's package cache alike. The boundary is worth
 stating precisely because the host binding (ADR-0059 clause 7) runs close to it — *which Agent is
 speaking*, and so *what its host may receive from the Server*, is authentication and belongs here;
 *what that Agent is allowed to do* beyond that is authorization and does not.
@@ -56,7 +57,7 @@ has:
   provider carries the three TLS 1.3 suites and no other, every configuration pins TLS 1.3, and a
   peer offering only TLS 1.2 fails the handshake. Plaintext is accepted on `127.0.0.1` and `::1`
   alone and refused at startup anywhere else.
-- **A certificate in the handshake, and enrolment by approval** (ADR-0059, ADR-0064): every
+- **A certificate in the handshake, and enrolment by approval** (ADR-0059, ADR-0071): every
   Agent presents a client certificate the Agent plane and every Gateway ask for in the TLS
   handshake. A fresh host enrols with a bootstrap certificate from a CA of its own, only inside an
   operator-opened window, and only once an operator approves its request. Repeated admission
@@ -80,7 +81,7 @@ has:
   signed. Admission refuses them on both transports and on the
   download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, and every
   session ends when the certificate that admitted it expires.
-- **A Gateway refuses what the Server revoked** (ADR-0064, ADR-0065): a host marked as a Gateway
+- **A Gateway refuses what the Server revoked** (ADR-0071, ADR-0065): a host marked as a Gateway
   fetches the revoked certificates of the client CA every 30 s and refuses them downstream, closing
   the sessions they hold with `1008`; while it holds no list younger than 300 s it admits nobody.
   It forwards no `Authorization` upstream, and every upstream connection carries its own
@@ -150,7 +151,7 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1), from the listener every OpAMP endpoint
     is served on (ADR-0036) · ✅ message size, gzip after decompression, per-hop exchange timeout,
     `max_carried_agents` · ✅ no downstream `Authorization` forwarded; every upstream connection
-    carries the Gateway's own certificate alone (ADR-0064)
+    carries the Gateway's own certificate alone (ADR-0071)
   - ✅ a downstream peer that never finishes its headers after the handshake is hung up on
     ([`gateway_tls.rs`](../crates/fleet-agent/tests/gateway_tls.rs))
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
@@ -202,7 +203,9 @@ at all; start a kind that is not compiled in; change any key of `supervisor.toml
 `allowed_sources` or `[self_update]`; apply a set with one bad block; purge outside the Supervisors'
 root; install anything unsigned, from a source not allowed, or with an archive member that climbs
 out; serve a host from its download route an artifact that is not offered to an Agent the host
-speaks for (ADR-0068); downgrade the Client or install a program that is not the Client as the Client; switch to
+speaks for, or serve a host behind a Gateway an artifact the Gateway did not relay to one of
+that host's Agents — within the residual that the Gateway binds an `instance_uid` to the host of
+its first report since the Gateway started (ADR-0070); downgrade the Client or install a program that is not the Client as the Client; switch to
 plaintext beyond the loopback; weaken TLS verification, set a proxy or plant a header; hand the Client a private
 key. Each of these is enforced in the code, and most by a test.
 

@@ -40,7 +40,7 @@ than anywhere else, and none beats one that has stopped being true.
   ([ADR-0054](adr/0054-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
   ADR-0059). A Client in Gateway Mode carries other Clients' Agents over its own upstream
   connections and refuses what the Server revoked
-  ([ADR-0064](adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)).
+  ([ADR-0071](adr/0071-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
 - **Managed Processes** run on the Client's host under a Supervisor each; a Collector reports
   through its own `opampextension` to the Supervisor Endpoint, which admits only the process its
   Supervisor started ([ADR-0053](adr/0053-the-supervisor-endpoint-admits-only-its-own-process.md)).
@@ -142,9 +142,12 @@ core module names an adapter or a technology, and when a module has no role.
   and the Supervisor Endpoint use the same `opamp` building blocks
   ([ADR-0036](adr/0036-the-whole-opamp-communication-layer-in-the-opamp-crate.md)). The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
-  ([ADR-0064](adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)).
+  ([ADR-0071](adr/0071-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
+  The Gateway's `cache` sees every offer `registry` hands down, fetches each Server-hosted
+  artifact once into the state directory, and serves it on the downstream download route to the
+  hosts it was offered to ([ADR-0070](adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
-  ([ADR-0064](adr/0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)). The transports, the Gateway, telemetry
+  ([ADR-0071](adr/0071-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
 - **Client self-update** — `update` is the Client updating itself
   ([ADR-0044](adr/0044-the-client-updates-itself-from-a-signed-package.md)). It owns the port `SelfUpdater` and
@@ -173,7 +176,8 @@ Deployment with a Selector and the operator's signature, and releases it. The Ag
 package; the Client downloads it from the Server's origin — presenting its certificate there and
 nowhere else, and `api` serves it only when `fleet` finds it offered to an Agent the
 certificate's host speaks for, by the test `packages` shares with the offer
-([ADR-0068](adr/0068-a-host-fetches-only-the-packages-offered-to-its-own-agents.md)) — or from an
+([ADR-0070](adr/0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)); behind a Gateway the
+Client downloads it from the Gateway's cache, which `gateway` fetched once from the Server — or from an
 allowed mirror, checks hash and signature in `packages`, and the
 Supervisor swaps the program, keeps the previous one for its grace period and rolls back if the
 new one does not stay up. The Client's own package goes through `update` instead: a version

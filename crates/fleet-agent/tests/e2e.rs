@@ -114,7 +114,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: ADR-0069, ADR-0064, G-1, G-6, G-14
+// Verifies: ADR-0069, ADR-0071, G-1, G-6, G-14
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;

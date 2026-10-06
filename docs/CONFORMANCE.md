@@ -241,17 +241,18 @@ capability bit.
   remain the specification's non-goal, with one bound: a host receives from the Server only the
   configurations and packages released to an Agent it speaks for. The download route serves an
   uploaded artifact only to such a host and answers every other request `404`, as for an artifact
-  it does not hold (ADR-0068).
+  it does not hold (ADR-0070). A Gateway passes an uploaded artifact on from its package cache
+  only to a downstream host whose Agent it relayed the offer to.
 - **Mutual TLS is hop-by-hop.** Where a Gateway stands between an Agent and the Server there are
   two mutual-TLS connections, and the certificate the Server verifies is the Gateway's. The
   Gateway's own handshake against the fleet's client CA, with the Server's revocation list, admits
-  the downstream peer, and it forwards no `Authorization` (ADR-0064).
+  the downstream peer, and it forwards no `Authorization` (ADR-0071).
 - **Revocation is Server state, as the Baseline's *Revoking Access* describes.** The Server keeps
   a list of revoked certificates, by issuing CA and serial and extended along every renewal it signed; it
   refuses them at admission and closes every WebSocket session they admitted with `1008`
   (ADR-0065). There is no credential to revoke. There is no CRL and no OCSP. Behind a Gateway the
   Server sees the Gateway's certificate, so it hands its Gateways the revoked certificates on a
-  route of their own and the Gateway refuses them (ADR-0064) — no message of the protocol is
+  route of their own and the Gateway refuses them (ADR-0071) — no message of the protocol is
   involved.
 
 - **A CSR that names an `instance_uid` is checked against its sender.** The Baseline: *"When the

@@ -177,8 +177,10 @@ Use these exact words in code, comments, documentation, and ADRs.
   messages upstream over a **Connection Pool**, so a large number of agents reaches the Server over
   a small number of connections. A Gateway forwards messages unchanged and holds **no authentication
   policy of its own**: it admits a connecting Client by a client certificate from the fleet's client
-  CA in its handshake, as the Server would, and the one refusal it makes beyond that is the Server's
-  — a certificate the Server has revoked. Agents behind a Gateway remain distinct Agents.
+  CA in its handshake, as the Server would, and the one admission refusal it makes beyond that is
+  the Server's — a certificate the Server has revoked. It passes on a package it holds for the
+  Agents behind it only to the host whose Agent the Server offered it to through the Gateway.
+  Agents behind a Gateway remain distinct Agents.
 - **Supervisor Endpoint** — the OpAMP endpoint a Supervisor exposes on the loopback interface so that
   a Managed Process carrying an OpAMP client of its own can report to it. It exists because such a
   client — notably the OpenTelemetry Collector's `opampextension` — is a **client only** and therefore
@@ -309,7 +311,8 @@ Use these exact words in code, comments, documentation, and ADRs.
     through a Client in Gateway Mode appear as their own Agents, fully manageable, while sharing a
     small Connection Pool — and the Gateway makes no authentication decision of its own: it admits
     a Client by a certificate from the fleet's client CA, as the Server does, refuses what the
-    Server has revoked, and admits no one while it cannot learn what that is.
+    Server has revoked, admits no one while it cannot learn what that is, and passes on a package
+    the Server offered through it only to the host it was offered to.
 16. **G-16** — **A Collector reports through its own OpAMP client.** A Collector carrying the
     `opampextension` connects to its Supervisor's Supervisor Endpoint, which relays its description,
     health, and effective configuration upstream — so the Collector's own reporting, rather than
@@ -346,5 +349,5 @@ Use these exact words in code, comments, documentation, and ADRs.
 - **Authorization and multi-tenancy.** The Server authenticates *that* a peer belongs to the fleet
   (goal 17), but does not distinguish *which* operator may do *what*, nor separate one operator's
   fleet from another's. Roles, permissions, and tenancy are real needs deferred rather than
-  half-built. On the Agent plane one bound holds: a host receives from the Server only the
-  configurations and packages released to an Agent it speaks for.
+  half-built. On the Agent plane one bound holds: a host receives from the Server, directly or
+  through a Gateway, only the configurations and packages released to an Agent it speaks for.

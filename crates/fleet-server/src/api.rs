@@ -1682,7 +1682,7 @@ async fn download_package(
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
     // One answer for every artifact this requester may not fetch, whether or not the store holds
-    // it, so the store cannot be listed by probing (ADR-0068 clause 4).
+    // it, so the store cannot be listed by probing (ADR-0070 clause 4).
     let not_found = || {
         error(
             StatusCode::NOT_FOUND,
@@ -1692,7 +1692,7 @@ async fn download_package(
             ),
         )
     };
-    // A member certificate fetches only what is offered to an Agent its host speaks for (ADR-0068
+    // A member certificate fetches only what is offered to an Agent its host speaks for (ADR-0070
     // clause 3). The download guard admitted the certificate and hands over what it proves; a
     // request without one exists only where no certificate is required, and is tested here no
     // more than at admission.

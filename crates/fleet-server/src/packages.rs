@@ -735,7 +735,7 @@ impl PackageStore {
     }
 
     /// The uploaded artifact `(id, platform)`, when this Server holds it — the half of the download
-    /// route's test that needs no Agent (ADR-0068 clause 1). A referenced entry is fetched from its
+    /// route's test that needs no Agent (ADR-0070 clause 1). A referenced entry is fetched from its
     /// source, never from here, so it is `None` too.
     pub fn uploaded(&self, id: &PackageId, platform: &Platform) -> Option<Uploaded> {
         let sets = self.sets.read().expect("sets lock");
@@ -861,7 +861,7 @@ impl PackageStore {
 }
 
 /// The entry one Agent is offered, with the signature it travels with — the one test of "offered"
-/// that the offer and the download share (ADR-0068 clause 1). The Agent's assignment names the
+/// that the offer and the download share (ADR-0070 clause 1). The Agent's assignment names the
 /// Package; the Package must be built for the Agent type the Agent reports (ADR-0043 clause 9) and
 /// hold an entry for the Platform it reports; and the assigned Deployment must hold a signature
 /// for that entry, because the Server never offers a Package unsigned (ADR-0045). Whether the
@@ -895,7 +895,7 @@ fn fits(description: Option<&AgentDescription>, id: &PackageId, platform: &Platf
 }
 
 /// An uploaded artifact this Server holds, as [`PackageStore::uploaded`] found it: what the
-/// download route tests each Agent of a host against (ADR-0068 clause 1).
+/// download route tests each Agent of a host against (ADR-0070 clause 1).
 pub struct Uploaded {
     id: PackageId,
     platform: Platform,
@@ -1872,7 +1872,7 @@ mod tests {
         assert!(PackageId::new(&"x".repeat(65), "1.0.0").is_err());
     }
 
-    // ---- What is offered, for the offer and the download alike (ADR-0068) ----
+    // ---- What is offered, for the offer and the download alike (ADR-0070) ----
 
     /// The artifact an offer names, as `(type, version, platform)`, read off its `download_url`.
     fn named_by(offer: &PackagesAvailable) -> (String, String, Platform) {
@@ -1903,7 +1903,7 @@ mod tests {
     /// Every artifact `offer_for_assigned` names is one `offers` answers yes for, and nothing else
     /// is — across assignments, Agent types, Platforms, signed and unsigned Deployments, and
     /// artifacts the store does not hold.
-    /// Verifies: ADR-0068
+    /// Verifies: ADR-0070
     #[test]
     fn the_download_and_the_offer_test_one_predicate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1966,7 +1966,7 @@ mod tests {
 
     /// An Agent that reports another Agent type than its assigned Package's is offered nothing, and
     /// cannot fetch it (ADR-0043 clause 9).
-    /// Verifies: ADR-0068
+    /// Verifies: ADR-0070
     #[test]
     fn an_agent_reporting_another_type_is_offered_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1992,7 +1992,7 @@ mod tests {
 
     /// An entry the assigned Deployment holds no signature for is neither offered nor fetched,
     /// though another entry of the same Package is signed.
-    /// Verifies: ADR-0068
+    /// Verifies: ADR-0070
     #[test]
     fn an_entry_its_deployment_does_not_sign_is_not_offered() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2028,7 +2028,7 @@ mod tests {
 
     /// A referenced entry is offered from its source, and the download route never serves it: the
     /// Server holds no bytes for it.
-    /// Verifies: ADR-0068
+    /// Verifies: ADR-0070
     #[test]
     fn a_referenced_entry_is_never_offered_for_the_route() {
         let dir = tempfile::tempdir().expect("tempdir");

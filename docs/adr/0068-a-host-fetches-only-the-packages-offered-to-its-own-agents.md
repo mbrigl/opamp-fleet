@@ -1,6 +1,6 @@
 # ADR-0068: A host fetches from the download route only the artifact offered to an Agent it speaks for, and everything else is answered as if it did not exist
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0070](0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md)
 - **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
 - **Applies to:** the download route `GET /api/v1/packages/{agent_type}/{version}/file`, its handler `download_package` in `crates/fleet-server/src/api.rs`, the test of what is offered that `offer_for_assigned` and the download share in `crates/fleet-server/src/packages.rs`, what a host speaks for in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fleet.rs`, the `download.refused` audit entry, the startup notice of `crates/fleet-server/src/main.rs` when `[client_ca]` is absent, the Non-Goal "Authorization and multi-tenancy" in `docs/SPECIFICATION.md`

@@ -1858,7 +1858,7 @@ impl AppState {
     }
 
     /// Whether a certificate naming `host` may fetch the uploaded artifact `(id, platform)` from
-    /// the download route (ADR-0068): it is offered to an Agent the host speaks for. The offer's
+    /// the download route (ADR-0070): it is offered to an Agent the host speaks for. The offer's
     /// own test decides, for each such Agent — the `instance_uid`s bound to the host, or every Agent
     /// for a host marked as a Gateway. Nothing is offered without package delivery or a host
     /// register.
@@ -2370,7 +2370,7 @@ fn referenced_hashes(fleet: &HashMap<InstanceUid, AgentRecord>, name: &str) -> B
 }
 
 /// Whether this Agent declared that it accepts packages — the first condition of every offer
-/// (ADR-0068 clause 1).
+/// (ADR-0070 clause 1).
 fn accepts_packages(record: &AgentRecord) -> bool {
     record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 != 0
 }
@@ -3630,7 +3630,7 @@ mod tests {
         );
     }
 
-    // ---- Who may fetch an uploaded artifact (ADR-0068) ----
+    // ---- Who may fetch an uploaded artifact (ADR-0070) ----
 
     /// A fleet delivering `otelcol@1.0.0`, uploaded for linux/amd64 and signed on the `stable`
     /// channel that claims every `otelcol`, with a host register.
@@ -3716,7 +3716,7 @@ mod tests {
     /// An artifact is fetched by a host only through an Agent it speaks for: the host whose Agent
     /// it was released to, not another host, not a host the register does not know, and not for
     /// another Platform or version — until that other host is marked as a Gateway.
-    /// Verifies: ADR-0068
+    /// Verifies: ADR-0070
     #[test]
     fn an_artifact_is_offered_to_a_host_only_through_an_agent_it_speaks_for() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3755,7 +3755,7 @@ mod tests {
 
     /// An Agent that echoes the aggregate hash of its offer is not sent it again, and can still
     /// fetch it — a retry after a failed install re-reads an offer no longer re-sent.
-    /// Verifies: ADR-0068
+    /// Verifies: ADR-0070
     #[test]
     fn an_offer_still_stands_after_its_hash_is_echoed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3774,7 +3774,7 @@ mod tests {
 
     /// A version saved into the channel but not yet released by an operator's press is no one's
     /// offer: not the Agent's host's, not a Gateway's — while the version released before stays.
-    /// Verifies: ADR-0068
+    /// Verifies: ADR-0070
     #[test]
     fn a_version_waiting_for_its_press_is_offered_to_no_host() {
         let dir = tempfile::tempdir().expect("tempdir");

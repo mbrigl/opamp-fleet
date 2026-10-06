@@ -1,25 +1,23 @@
-# ADR-0064: One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits by client certificate over mutual TLS 1.3 and refuses what the Server revoked
+# ADR-0071: One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits by client certificate over mutual TLS 1.3, refuses what the Server revoked, and passes on a package only to the host it was offered to
 
-- **Status:** ⚪ superseded by [ADR-0071](0071-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/gateway/, crates/fleet-agent/src/supervisor/endpoint.rs, the [gateway] configuration section, and every place either end keeps per-Agent state
-- **Supersedes:** [ADR-0055](0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)
+- **Supersedes:** [ADR-0064](0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md)
 
 ## Context
 
-Supersedes [ADR-0055](0055-client-modes-and-a-gateway-that-refuses-what-the-server-revoked.md)
-because the Agent plane no longer has a fleet credential:
-[ADR-0059](0059-admission-by-a-client-certificate-alone.md), which supersedes ADR-0039, admits by
-a client certificate alone, and rests on the specification's Gateway Mode paragraph and goal 15 as
-amended alongside it. ADR-0055 forwarded each downstream peer's `Authorization` upstream untouched,
-so the Server checked a credential end to end, and the implementation partitioned the upstream pool
-by that credential.
-With no credential there is nothing to forward and nothing to partition by. That changes the
-substance of a downstream Agent's admission: the Gateway's downstream handshake against the fleet's
-client CA, together with the Server's revocation list, is now the whole of it, and the Server
-relies on a marked Gateway's handshake instead of judging a proof of its own. The rest of the
-decision stands as it was.
+Supersedes [ADR-0064](0064-client-modes-and-a-gateway-that-admits-by-certificate-and-refuses-what-the-server-revoked.md) because a Gateway now refuses one thing beyond admission, and
+ADR-0064 clause 11 excludes it. [ADR-0070](0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md) has a Gateway pass on the uploaded artifacts
+it holds for the Agents behind it only to a host whose Agent it relayed the Server's offer of that
+artifact to, and answer every other download request `404`. ADR-0064 clause 11 says that a revoked
+certificate is "the one refusal the Gateway makes beyond the handshake" and that the Gateway "holds
+no policy of its own". What a downstream peer is admitted to and what it may receive from the
+Gateway are one question about the downstream hop, so the bound belongs in the decision that
+answers it for admission. Every clause of ADR-0064 is restated below under its own number. Clause
+11 now names the download bound as the one refusal beyond admission and states that the bound is
+the Server's own, applied to what the Server sent through the Gateway.
 
 The [specification](../SPECIFICATION.md) asks the client side to cover three shapes: supervise
 local processes, serve a Collector that speaks OpAMP itself, and act as a gateway that carries many
@@ -66,9 +64,10 @@ We will ship one Client binary with exactly two independent Client Modes, Superv
 Gateway Mode, give every Supervisor a Supervisor Endpoint unconditionally, route by `instance_uid`
 alone on both ends, and implement Gateway Mode as a `[gateway]` section serving both transports
 downstream over mutual TLS 1.3, admitting each downstream Agent by its client certificate from the
-fleet's client CA, refusing every downstream certificate the Server has revoked, and a lazily grown,
-sticky upstream pool shared by every Agent it carries that forwards messages unchanged and
-synthesises none.
+fleet's client CA, refusing every downstream certificate the Server has revoked, passing on an
+uploaded artifact only to the host whose Agent the Server offered it to through the Gateway, and a
+lazily grown, sticky upstream pool shared by every Agent it carries that forwards messages
+unchanged and synthesises none.
 
 1. **Two modes, freely composable, neither implying the other.** Supervisor Mode (`[[supervisor]]`
    blocks) and Gateway Mode (`[gateway]`) run alone or together in one process. A mode is a
@@ -138,9 +137,17 @@ synthesises none.
     `client_ca_file` (`ClientAuth::Required` in `opamp`), so a peer without one never reaches OpAMP;
     `client_ca_file` must be the fleet's client CA, never a bootstrap CA. A peer that passed the
     handshake is admitted unless its certificate is on the list of clause 14; that is the one
-    refusal the Gateway makes beyond the handshake, and it is the Server's. The client CA and the
-    list are both the Server's, so the Gateway applies the Server's policy and holds none of its
-    own ([ADR-0059](0059-admission-by-a-client-certificate-alone.md) clauses 7, 13). Upstream the Gateway presents
+    admission refusal the Gateway makes beyond the handshake, and it is the Server's. Beyond
+    admission the Gateway refuses one thing: it passes on an uploaded artifact from its package
+    cache only to a host whose Agent it relayed the Server's offer of that artifact to, and answers
+    every other download request `404` ([ADR-0070](0070-a-host-fetches-only-what-its-agents-are-offered-and-a-gateway-caches-it-for-the-hosts-behind-it.md) clause 11). What a host may
+    receive is the Server's own bound (ADR-0070 clause 3), applied to what the Server sent through
+    this Gateway. Three parts of that refusal are the Gateway's own: it binds an `instance_uid` to
+    the host of the first report for it, it answers `404` for an artifact too large for its cache
+    or whose fetch failed, and it answers `503` while a fetch runs (ADR-0070 clauses 8, 11, 13).
+    The client CA and the list are the Server's, so the Gateway applies the Server's admission
+    policy and holds no admission policy of its own
+    ([ADR-0059](0059-admission-by-a-client-certificate-alone.md) clauses 7, 13). Upstream the Gateway presents
     the Client's own identity, so every downstream Agent arrives as a member, under the Gateway's
     certificate. The Gateway forwards no `Authorization`: one a downstream peer sends is ignored,
     never refused, and nothing is sent upstream in its place. The downstream hop speaks TLS 1.3
@@ -238,6 +245,11 @@ material is configured on a Client.
 - **Reusing the Server crate for the downstream endpoint.** The Client would depend on the Server,
   and the downstream side forwards rather than processes.
 
+- **Leave ADR-0064 standing and read the download `404` as outside clause 11.** Clause 11 calls
+  a revoked certificate the one refusal beyond the handshake. A reader who meets the download bound
+  in the code would take one of the two for a mistake. Saying in clause 11 what the bound is, and
+  that it is the Server's, keeps the Gateway's whole refusal set in one place.
+
 ## Sources / Prior art
 
 - [OpAMP specification, `ServerToAgent.instance_uid`](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md)
@@ -292,6 +304,11 @@ material is configured on a Client.
   behind it a certificate chaining to that CA, even on a single host or in a test.
 - Negative / trade-offs: the binary carries an HTTP routing layer it uses only in Gateway Mode, and
   Supervisor Mode plus Gateway Mode in one process is a real test surface.
+- Negative / trade-offs: the Gateway now refuses a download request beyond admission. What a host
+  may receive is the Server's bound applied to the offers the Server sent through the Gateway, and
+  the `404` reads as the Server's for an artifact it does not hold. The binding of an
+  `instance_uid` to the host of its first report, and the answers for an artifact too large, not
+  fetched or still being fetched, are the Gateway's own decisions (ADR-0070 clauses 8, 11, 13).
 - Follow-ups: re-balancing when the pool grows, if a real fleet is ever lopsided enough; consolidating
   TLS material on the Client if a fourth place appears.
 
@@ -319,7 +336,7 @@ material is configured on a Client.
 - `crates/fleet-agent/src/supervisor/endpoint.rs`: `extension_reports_are_folded_into_process_events` and
   `shutdown_stops_the_endpoint` (clause 2); `crates/fleet-agent/src/config.rs`:
   `the_gateway_agent_cap_defaults_and_rejects_zero` (clause 4).
-- Each marked `Verifies: ADR-0064`: `crates/fleet-agent/src/config.rs`
+- Each marked `Verifies: ADR-0071`: `crates/fleet-agent/src/config.rs`
   `a_gateway_without_mutual_tls_is_refused_at_load` — no `[gateway.tls]`, and a section without
   `client_ca_file` (clause 4);
   [`crates/fleet-agent/tests/gateway_tls.rs`](../../crates/fleet-agent/tests/gateway_tls.rs)
@@ -335,7 +352,7 @@ material is configured on a Client.
   `an_unmarked_gateway_admits_nobody` and `a_gateway_whose_list_goes_stale_admits_nobody`, run
   against a Server that reads no `Authorization`; `crates/fleet-agent/src/gateway/revocations.rs`
   `the_verdict_follows_the_list_and_its_age`.
-- Through the real Gateway and Server, each marked `Verifies: ADR-0064`:
+- Through the real Gateway and Server, each marked `Verifies: ADR-0071`:
   [`crates/fleet-agent/tests/gateway_tls.rs`](../../crates/fleet-agent/tests/gateway_tls.rs)
   `downstream_peers_with_different_certificates_share_one_upstream_connection` — two peers, an
   `upstream_connections` of `1`, both Agents reach the Server (clauses 7, 11);
@@ -344,6 +361,11 @@ material is configured on a Client.
   `crates/fleet-agent/src/gateway/revocations.rs`
   `the_revocation_list_is_fetched_without_authorization`, even with an `[auth]` section left in
   `supervisor.toml` (clause 14).
+
+- The download bound of clause 11, marked `Verifies: ADR-0071` beside ADR-0070:
+  [`crates/fleet-agent/tests/gateway_package_cache.rs`](../../crates/fleet-agent/tests/gateway_package_cache.rs)
+  `another_host_and_a_certificate_naming_no_host_are_answered_as_for_an_artifact_not_held` and
+  `a_revoked_certificate_is_refused_on_the_download_route`.
 
 **Not mechanically decidable:** that no message is synthesised on an Agent's behalf (clauses 9, 10)
 is an absence; review holds it.

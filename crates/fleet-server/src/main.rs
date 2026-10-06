@@ -273,7 +273,7 @@ async fn main() {
         }
     };
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
-        // ADR-0068 clause 3.
+        // ADR-0070 clause 3.
         info!("{notice}");
     }
     let telemetry_offer = config
@@ -449,7 +449,7 @@ async fn main() {
     state.flush_agents();
 }
 
-/// What a Server that signs no CSRs says once at startup (ADR-0068 clause 3): its hosts hold the
+/// What a Server that signs no CSRs says once at startup (ADR-0070 clause 3): its hosts hold the
 /// certificates an operator provisioned, and only one that names its host is served an uploaded
 /// artifact.
 fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
@@ -481,7 +481,7 @@ mod tests {
 
     /// Without `[client_ca]` the Server says at startup that an uploaded artifact needs a
     /// certificate naming a host, and how one is named; with it, it says nothing.
-    /// Verifies: ADR-0068
+    /// Verifies: ADR-0070
     #[test]
     fn a_server_without_client_ca_says_uploaded_artifacts_need_a_host() {
         let notice = uploaded_artifacts_notice(false).expect("a notice");
