@@ -1,4 +1,4 @@
-//! Enrolment: the client certificate this Client asks the Server to issue (ADR-0035).
+//! Enrolment: the client certificate this Client asks the Server to issue (ADR-0013).
 //!
 //! The Baseline's CSR flow keeps the private key on the host. This module generates that key and
 //! the request over its public half, and takes in the certificate that comes back through the
@@ -48,7 +48,7 @@ pub fn request(config: &ClientConfig) -> Option<Vec<u8>> {
 }
 
 /// Stores an issued certificate beside the key it was requested for, putting it in force on the
-/// next connection (ADR-0035).
+/// next connection (ADR-0013).
 ///
 /// # Errors
 /// Returns an error when the certificate cannot be written, or when no pending key is there to go
@@ -113,7 +113,7 @@ fn renewal_due(cert_file: &Path) -> Result<bool, String> {
 fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     let key = KeyPair::generate().map_err(|e| format!("cannot generate a key: {e}"))?;
     // The subject says which Client this is, for a human reading a certificate — never for the
-    // Server to match on (ADR-0035): identity is `instance_uid`, and the Server may re-key it.
+    // Server to match on (ADR-0013): identity is `instance_uid`, and the Server may re-key it.
     let params = CertificateParams::new(vec![config.name.clone()])
         .map_err(|e| format!("cannot build a certificate request: {e}"))?;
     let csr = params

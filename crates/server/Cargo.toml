@@ -15,7 +15,7 @@ futures-util.workspace = true
 tokio.workspace = true
 axum.workspace = true
 axum-server.workspace = true
-# ADR-0073: `TokioTimer`, without which hyper silently drops its own header-read timeout.
+# ADR-0032: `TokioTimer`, without which hyper silently drops its own header-read timeout.
 hyper-util.workspace = true
 prost.workspace = true
 serde.workspace = true
@@ -33,7 +33,7 @@ rcgen.workspace = true
 time.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
-# ADR-0018: probing the URL of a referenced package — one HEAD, to catch a typo. The Server never
+# ADR-0015: probing the URL of a referenced package — one HEAD, to catch a typo. The Server never
 # downloads an artifact, so this is the whole of its outbound HTTP.
 reqwest.workspace = true
 

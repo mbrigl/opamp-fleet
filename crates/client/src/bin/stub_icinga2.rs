@@ -1,4 +1,4 @@
-//! A stub `icinga2` for the tests of ADR-0068 and ADR-0069: pure Rust, so it behaves the same on
+//! A stub `icinga2` for the tests of ADR-0033: pure Rust, so it behaves the same on
 //! Linux, macOS, and Windows CI — the discipline `stub_agent` set.
 //!
 //! It answers the subcommands the Supervisor drives, and nothing else:

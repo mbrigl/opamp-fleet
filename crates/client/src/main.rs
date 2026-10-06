@@ -13,8 +13,8 @@ use client::service::{layout, manager, run_as, windows_rights, ServiceControl, S
 
 fn main() {
     // stderr as always, plus two empty slots the OTLP exporters are dropped into once the Server
-    // names a destination: the log bridge for events (ADR-0036) and the span layer for traces
-    // (ADR-0090). Both have to exist from the start: `tracing` takes one subscriber for the
+    // names a destination: the log bridge for events (ADR-0023) and the span layer for traces
+    // (ADR-0023). Both have to exist from the start: `tracing` takes one subscriber for the
     // process, and it is installed long before any destination is known.
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
@@ -38,7 +38,7 @@ fn main() {
             tracing_subscriber::fmt::layer()
                 .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())),
         )
-        // The log file (ADR-0041), which discards everything until a service run opens it — the
+        // The log file (ADR-0026), which discards everything until a service run opens it — the
         // state directory is not known until the command line is parsed, a few lines below. No
         // colour: this one is read with a pager, not a terminal.
         .with(
@@ -54,7 +54,7 @@ fn main() {
     let cli::Parsed { cli, config_named } = cli::parse();
     let result = match cli.command {
         // A bare invocation defaults to `run`, preserving the pre-subcommand contract.
-        // A bare invocation is a person at a terminal, so it writes no log file (ADR-0041).
+        // A bare invocation is a person at a terminal, so it writes no log file (ADR-0026).
         None => runtime::run_foreground(RunSpec {
             config_path: cli.config,
             state_dir: cli.state_dir,
@@ -70,7 +70,7 @@ fn main() {
         }
         Some(Command::Service { action }) => service_command(&cli.config, config_named, &action),
         // Answer for this executable so a self-update can prove it before pointing at it
-        // (ADR-0020). Deliberately does nothing else: it must work on a binary that has no
+        // (ADR-0017). Deliberately does nothing else: it must work on a binary that has no
         // configuration, no state directory, and no Server.
         Some(Command::SelfCheck) => {
             println!(
@@ -132,7 +132,7 @@ fn service_command(
     }
 }
 
-/// `service install`: write the configuration if asked to (ADR-0027), validate it, lay out the
+/// `service install`: write the configuration if asked to (ADR-0020), validate it, lay out the
 /// versioned install at the chosen root, and register the service against the `current` pointer
 /// (ADR-0010).
 fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result<(), String> {
@@ -148,7 +148,7 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     // and swung `current` at it and only then failed (ADR-0010: fail with a clear message).
     windows_rights::ensure_can_register(level)?;
 
-    // Resolve the `--run-as` account with the same before-anything-is-written rule (ADR-0062): a
+    // Resolve the `--run-as` account with the same before-anything-is-written rule (ADR-0010 clause 18): a
     // name that does not exist, or a Windows form that would need a password, fails here.
     let run_as = args
         .run_as
@@ -156,9 +156,9 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         .map(|account| run_as::RunAs::resolve(account, manager::service_name()))
         .transpose()?;
 
-    // Two roots and two flags (ADR-0084 clause 3). The executable layout and the data default to
+    // Two roots and two flags (ADR-0010 clause 9). The executable layout and the data default to
     // different places on Linux at system scope — and only there — because systemd may not execute
-    // from `/var/lib` under SELinux. `--root` alone keeps ADR-0053's meaning and collapses both
+    // from `/var/lib` under SELinux. `--root` alone keeps ADR-0010 clause 9's meaning and collapses both
     // halves into the one directory the operator named, whose labeling and permissions are then
     // the operator's business; `--data-root` names the other half when they must stay apart.
     let (layout_root, data_root) = match (&args.root, &args.data_root) {
@@ -177,7 +177,7 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     // Everything baked into the unit is absolute: a service's working directory is `/` or
     // `System32`, so a relative path would silently point nowhere. An operator who named no path
     // gets one inside the install root rather than one resolved against this shell's working
-    // directory, which the service manager will not share (ADR-0027).
+    // directory, which the service manager will not share (ADR-0020).
     let config_path = if config_named {
         absolute(config_path)?
     } else {
@@ -187,9 +187,9 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     if args.interactive {
         config_init::run(&config_path)?;
     } else if let Some(endpoint) = &args.endpoint {
-        // The same file, from an answer given rather than asked for (ADR-0046): this is the branch
+        // The same file, from an answer given rather than asked for (ADR-0020): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with
-        // it — standing unless this install was told to withdraw it (ADR-0075).
+        // it — standing unless this install was told to withdraw it (ADR-0017).
         let self_update = if args.no_self_update {
             None
         } else {
@@ -231,9 +231,9 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         run_as: run_as.as_ref().map(|r| r.account().to_string()),
     })?;
 
-    // The handover (ADR-0084 clause 12, carrying ADR-0062): both roots belong to the account —
-    // config and state because the service reads and rewrites them (ADR-0056), the executable
-    // layout because the self-update that stages into it *is* the service (ADR-0020). The state
+    // The handover (ADR-0010 clause 18): both roots belong to the account —
+    // config and state because the service reads and rewrites them (ADR-0029), the executable
+    // layout because the self-update that stages into it *is* the service (ADR-0017). The state
     // directory is created first: the daemon must not need rights on its parent to begin.
     if let Some(run_as) = &run_as {
         std::fs::create_dir_all(&state_dir)

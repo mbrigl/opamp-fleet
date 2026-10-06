@@ -12,7 +12,7 @@
 # Settings
 # =============================================================================================
 
-# TWO LISTENERS, SPLIT BY AUDIENCE (ADR-0066, superseding ADR-0005 on this point).
+# TWO LISTENERS, SPLIT BY AUDIENCE (ADR-0032, superseding ADR-0005 on this point).
 #
 # The AGENT PLANE: the OpAMP endpoint (/v1/opamp) and the package download the offers point at.
 # Port 4320 is the protocol's default, and it is open to the network because that is where the
@@ -22,8 +22,8 @@ listen = "0.0.0.0:4320"
 
 # Where Configurations (ADR-0012) are persisted across Server restarts — one JSON file each,
 # holding the draft revision an operator edits and, once released, the published revision the
-# fleet is offered. SAVING NEVER DISTRIBUTES (ADR-0055): a Configuration reaches the Agents of
-# its type (ADR-0054) that its Selector matches only after
+# fleet is offered. SAVING NEVER DISTRIBUTES (ADR-0030): a Configuration reaches the Agents of
+# its type (ADR-0012) that its Selector matches only after
 # PUT /api/v1/configurations/{name}/publication — body {"published": true}.
 config_dir = "fleet-configs"
 
@@ -34,13 +34,13 @@ config_dir = "fleet-configs"
 max_message_size_bytes = 67108864
 
 # How long an Agent that declares ReportsHeartbeat may be silent before the fleet view calls it
-# stale (ADR-0038). It is an observation, never a state change: nothing is torn down, and the next
+# stale (ADR-0025). It is an observation, never a state change: nothing is torn down, and the next
 # report clears it. Ignored when [connection_offer] names a heartbeat interval — the period this
 # Server actually asked for is a better answer than a default. Three times the protocol's own
 # default heartbeat of 30 s, because one missed beat is a lost packet.
 stale_after_secs = 90
 
-# Where software packages are persisted (ADR-0015, reorganised by ADR-0095 and ADR-0096). Two
+# Where software packages are persisted (ADR-0015, reorganised by ADR-0039 and ADR-0040). Two
 # objects share this directory, and the split is the whole of the model:
 #
 #   <packages_dir>/<agent type>@<version>/   a PACKAGE: what an Agent type runs at a version.
@@ -53,13 +53,13 @@ stale_after_secs = 90
 #                                            artifact's Ed25519 signature. The only thing rolled
 #                                            out.
 #
-# The Agent type is compared raw against the `service.name` the Agents report (ADR-0034), so spell
+# The Agent type is compared raw against the `service.name` the Agents report (ADR-0016), so spell
 # it exactly — a Client updating itself is typed `supervisor`.
 #
 # Create a Package with PUT /api/v1/packages/{agent_type}/{version} — the body has no writable
 # field, so {} is all of it. Then store one entry per platform: upload an artifact with
 # PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch} (artifact as the body), or point
-# the entry at an artifact hosted elsewhere with PUT .../entries/{os}/{arch}/source (ADR-0018:
+# the entry at an artifact hosted elsewhere with PUT .../entries/{os}/{arch}/source (ADR-0015:
 # url + sha256, optional headers for a private source); the Server stores only that reference and
 # never downloads it. No two entries share a platform — writing one again replaces it.
 #
@@ -99,7 +99,7 @@ max_package_size_bytes = 1073741824
 
 # The absolute base URL advertised for downloads. Leave unset in the ordinary case: the offered
 # download_url is then a path, which the Client resolves against its own OpAMP endpoint — the
-# Agent plane, which is exactly where the download is served (ADR-0066). Set it only when
+# Agent plane, which is exactly where the download is served (ADR-0032). Set it only when
 # downloads must go through a different host, such as a mirror.
 # advertised_url = "https://fleet.example:4320"
 
@@ -108,7 +108,7 @@ max_package_size_bytes = 1073741824
 # =============================================================================================
 
 # Optional TLS (ADR-0007): with a certificate and key BOTH listeners serve HTTPS/WSS instead.
-# client_ca_file turns on mutual TLS (ADR-0035) and belongs to the Agent plane alone: every request
+# client_ca_file turns on mutual TLS (ADR-0013) and belongs to the Agent plane alone: every request
 # to /v1/opamp must then arrive over a connection carrying a client certificate that bundle
 # verifies. Client authentication stays optional at the TLS layer, because the same listener serves
 # the package download, which a Client fetches presenting no certificate — so only the OpAMP route
@@ -124,7 +124,7 @@ max_package_size_bytes = 1073741824
 # key_file = "key.pem"
 # client_ca_file = "client-ca.pem"
 
-# Optional certificate authority for the CSR flow (ADR-0035). Present is what arms it: the Server
+# Optional certificate authority for the CSR flow (ADR-0013). Present is what arms it: the Server
 # declares AcceptsConnectionSettingsRequest, and an Agent that has no certificate — or holds one two
 # thirds through its life — generates a key (which never leaves its host), sends a signing request,
 # and receives the certificate as an ordinary connection-settings offer.
@@ -145,7 +145,7 @@ max_package_size_bytes = 1073741824
 # OpAMP request — plain-HTTP POST or WebSocket upgrade — needs an Authorization header matching
 # any listed credential; anything else is answered 401. Both schemes may be configured at once;
 # several valid credentials allow overlapping rotation. Without [auth] the endpoint stays open.
-# REST API and UI are not guarded by this — that is [rest.auth] at the end of this file (ADR-0067).
+# REST API and UI are not guarded by this — that is [rest.auth] at the end of this file (ADR-0032).
 # [auth]
 # bearer_tokens = ["a-long-random-token"]
 # [auth.basic_users]
@@ -162,7 +162,7 @@ max_package_size_bytes = 1073741824
 # heartbeat_interval_secs = 30             # heartbeat on WebSocket, polling interval on HTTP
 # endpoint = "wss://fleet.example:4320/v1/opamp"   # move the fleet to a new endpoint
 
-# WHERE THE FLEET SENDS ITS OWN TELEMETRY (ADR-0036). Each signal is independent, and each is
+# WHERE THE FLEET SENDS ITS OWN TELEMETRY (ADR-0023). Each signal is independent, and each is
 # offered only to Agents that declare they can report it. The endpoints are full OTLP/HTTP URLs
 # WITH PATH — this Server appends no /v1/metrics for you, because guessing a receiver's routing is
 # how telemetry disappears into a 404 nobody looks at.
@@ -178,7 +178,7 @@ max_package_size_bytes = 1073741824
 # Five things worth knowing before you fill this in:
 #
 #  - The destinations are FLEET-WIDE. There is no Selector here as there is on Configurations
-#    (ADR-0012) and packages (ADR-0017): every Agent is offered the same three addresses. The only
+#    (ADR-0012) and packages (ADR-0016): every Agent is offered the same three addresses. The only
 #    per-Agent variation is which of the three signals it gets, and that follows the capabilities
 #    the Agent itself declares.
 #  - A change here needs a SERVER RESTART. The offer is compiled once at startup; there is no
@@ -191,7 +191,7 @@ max_package_size_bytes = 1073741824
 #    of them — each carrying process metrics for the Agent and for every process it supervises.
 #  - Offer only what you can receive. A signal you leave unset is simply not offered, and the Agent
 #    reports nothing for it — which costs less than a destination that answers 404 forever.
-#  - What this section says, it says about ALL THREE signals (ADR-0089). An Agent already reporting
+#  - What this section says, it says about ALL THREE signals (ADR-0023). An Agent already reporting
 #    traces STOPS when you remove traces_endpoint from here: the offer is the whole truth about own
 #    telemetry, not a list of changes. Which is what makes a destination removable at all.
 #
@@ -226,7 +226,7 @@ max_package_size_bytes = 1073741824
 #     FAILED naming the reason. Terminate TLS in front of the receiver and offer the https:// URL.
 #
 #     A Collector one hop away on the LAN needs no certificate for this: an address in 10/8,
-#     172.16/12, 192.168/16 or fc00::/7 is accepted in cleartext (ADR-0088), e.g.
+#     172.16/12, 192.168/16 or fc00::/7 is accepted in cleartext (ADR-0023), e.g.
 #     http://192.168.10.5:4318/v1/metrics. The judgement is on the ADDRESS — a name that resolves
 #     there is still refused, because a name can be re-pointed after the offer was admitted.
 # [telemetry_offer]
@@ -240,7 +240,7 @@ max_package_size_bytes = 1073741824
 # [telemetry_offer]
 # metrics_endpoint = "https://collector.example:4318/v1/metrics"
 
-# THE OPERATOR PLANE (ADR-0066): the REST API, the API docs, and the bundled UI, on their own
+# THE OPERATOR PLANE (ADR-0032): the REST API, the API docs, and the bundled UI, on their own
 # listener. This port carries the authority to reconfigure and re-package the entire fleet, and
 # without [rest.auth] below it is open to whoever reaches it — hence loopback by default. Reach it
 # through an SSH tunnel, or publish it deliberately with listen = "0.0.0.0:4321".
@@ -250,7 +250,7 @@ max_package_size_bytes = 1073741824
 [rest]
 listen = "127.0.0.1:4321"
 
-# Optional Basic authentication over the WHOLE Operator plane (ADR-0067): the REST API, the
+# Optional Basic authentication over the WHOLE Operator plane (ADR-0032): the REST API, the
 # OpenAPI document, the API docs, and the UI. Absent means open, as it has been. Every request
 # then needs `Authorization: Basic <base64(user:password)>`; anything else is answered 401 with a
 # challenge, which is what makes a browser ask for the password instead of showing a bare error —

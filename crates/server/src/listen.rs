@@ -1,4 +1,4 @@
-//! How a plane is served, and what bounds a connection before it is a request (ADR-0073).
+//! How a plane is served, and what bounds a connection before it is a request (ADR-0032).
 //!
 //! Everything else the Server enforces — the message size limits, Admission, `max_agents` — starts
 //! at a request. A peer that completes the TCP connection, sends `GET /v1/opamp HTTP/1.1` and then
@@ -40,7 +40,7 @@ pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Bounded on purpose: an Agent's WebSocket is idle most of the time and would otherwise decide
 /// how long a restart takes. Whatever has not ended by then is cut, and the record flush that
-/// follows shutdown (ADR-0051) still runs.
+/// follows shutdown (ADR-0025) still runs.
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
 
 /// A plane's server on an already-bound listener, with its connection setup bounded.

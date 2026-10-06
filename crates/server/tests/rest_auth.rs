@@ -1,4 +1,4 @@
-//! Basic authentication on the Operator plane (ADR-0067): the REST API, the API docs, and the UI
+//! Basic authentication on the Operator plane (ADR-0032): the REST API, the API docs, and the UI
 //! behind one credential set — and the Agent plane deliberately untouched by it.
 
 mod support;
@@ -139,7 +139,7 @@ async fn a_credential_in_the_server_url_authenticates() {
 }
 
 /// The guard covers the *plane*, not `/api/v1`: the UI and the API docs are as much of it as the
-/// API is, and Basic is what lets a browser answer for them without a login page (ADR-0067).
+/// API is, and Basic is what lets a browser answer for them without a login page (ADR-0032).
 #[tokio::test]
 async fn the_ui_and_the_api_docs_are_guarded_too() {
     let server = spawn_guarded().await;
@@ -161,7 +161,7 @@ async fn the_ui_and_the_api_docs_are_guarded_too() {
 
 /// The half that must NOT change: guarding the operator's plane locks nothing out of the fleet's.
 /// An Agent carries no operator credential, and a Client downloading a package carries none either
-/// (ADR-0066, ADR-0067) — so a rollout keeps working exactly as it did.
+/// (ADR-0032) — so a rollout keeps working exactly as it did.
 #[tokio::test]
 async fn the_agent_plane_is_untouched_by_the_operator_credential() {
     let server = spawn_guarded().await;

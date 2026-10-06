@@ -1,9 +1,9 @@
-//! The listener's TLS, and the mutual half of it (ADR-0007, ADR-0035).
+//! The listener's TLS, and the mutual half of it (ADR-0007, ADR-0013).
 //!
 //! Two things live here. [`server_config`] builds the rustls configuration both listeners serve
 //! with — the certificate and key of ADR-0007, plus the optional client verifier that turns mutual
 //! TLS on. [`PeerCertAcceptor`] is what makes that verifier usable: client authentication stays
-//! optional at the TLS layer and is required on the OpAMP *route* instead. Since ADR-0066 the
+//! optional at the TLS layer and is required on the OpAMP *route* instead. Since ADR-0032 the
 //! browser is no longer the reason — the UI has its own listener — but the Agent plane still
 //! carries one route that must stay reachable without a certificate: the package download, which a
 //! Client fetches presenting none (ADR-0015). Requiring the certificate in the handshake is a
@@ -49,8 +49,8 @@ pub struct PeerCertificate(pub Option<CertificateDer<'static>>);
 impl PeerCertificate {
     /// The peer's certificate subject, for the record the fleet row shows. Deliberately *not* an
     /// identity check: a certificate proves fleet membership, never which Agent is speaking
-    /// (ADR-0035), all the more so behind a Gateway, where it belongs to the Gateway. Admission is a
-    /// fleet-wide trust boundary, and `instance_uid` is self-asserted within it (ADR-0047).
+    /// (ADR-0013), all the more so behind a Gateway, where it belongs to the Gateway. Admission is a
+    /// fleet-wide trust boundary, and `instance_uid` is self-asserted within it (ADR-0013).
     pub fn present(&self) -> bool {
         self.0.is_some()
     }
@@ -95,7 +95,7 @@ pub fn server_config(tls: &TlsConfig) -> Result<Arc<ServerConfig>, String> {
 fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
     let pem = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     opamp::pem::certificates(&pem).map_err(|e| {
-        // What the file *means* is known here and nowhere else, so the wording stays (ADR-0044).
+        // What the file *means* is known here and nowhere else, so the wording stays (ADR-0005).
         if e == "no certificates" {
             format!("{} contains no certificates", path.display())
         } else {
@@ -129,7 +129,7 @@ impl PeerCertAcceptor {
 }
 
 /// The acceptor both planes hand their TLS connections to, with the handshake deadline stated
-/// rather than inherited (ADR-0073). It is `axum_server`'s own default value; naming it here is
+/// rather than inherited (ADR-0032). It is `axum_server`'s own default value; naming it here is
 /// what makes it a decision, and what keeps the Operator plane — which needs no peer certificate
 /// and therefore no wrapper — bounded by the same one.
 pub fn rustls_acceptor(config: Arc<ServerConfig>) -> RustlsAcceptor {

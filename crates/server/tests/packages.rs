@@ -1,4 +1,4 @@
-//! Package delivery (ADR-0015, reorganised into Sets by ADR-0052): the REST Set + entry routes,
+//! Package delivery (ADR-0015, reorganised into Sets by ADR-0016): the REST Set + entry routes,
 //! and the hash-gated `PackagesAvailable` offer toward capable Agents.
 
 mod support;
@@ -55,10 +55,10 @@ async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> Ser
 }
 
 /// The platform the test fleet reports (see `support::full_report`), and therefore the only one
-/// an entry may be stored under for these Agents to be offered it (ADR-0031).
+/// an entry may be stored under for these Agents to be offered it (ADR-0021).
 const HOST: &str = "linux/amd64";
 
-/// The base of one Package's routes: `/api/v1/packages/<agent type>/<version>` (ADR-0095) — the
+/// The base of one Package's routes: `/api/v1/packages/<agent type>/<version>` (ADR-0039) — the
 /// identity **is** the path, stated at creation and never edited. There is no name beside the two.
 fn set_url(server: &TestServer, agent_type: &str, version: &str) -> String {
     format!(
@@ -67,7 +67,7 @@ fn set_url(server: &TestServer, agent_type: &str, version: &str) -> String {
     )
 }
 
-/// The artifact download of one Set — on the **Agent plane** (ADR-0066), which is where the
+/// The artifact download of one Set — on the **Agent plane** (ADR-0032), which is where the
 /// `download_url` in an offer points and the one `/api/v1` route the Operator plane does not serve.
 fn download_url(server: &TestServer, agent_type: &str, version: &str) -> String {
     format!(
@@ -106,9 +106,9 @@ async fn upload_entry(
         .expect("put entry")
 }
 
-/// `POST /api/v1/deployments/<channel>/rollout` — the one act that distributes (ADR-0061): the channel's
+/// `POST /api/v1/deployments/<channel>/rollout` — the one act that distributes (ADR-0030): the channel's
 /// Package is assigned to every Agent it claims. Returns the outcome body.
-/// One channel as the API answers with it — where the reach counts live since ADR-0096.
+/// One channel as the API answers with it — where the reach counts live since ADR-0040.
 async fn ring_view(server: &TestServer, channel: &str) -> serde_json::Value {
     reqwest::Client::new()
         .get(deployment_url(server, channel))
@@ -130,7 +130,7 @@ async fn rollout_ring(server: &TestServer, channel: &str) -> serde_json::Value {
     response.json().await.expect("json")
 }
 
-/// A channel aiming at `pairs`, holding this Package. Aim lives on the Deployment (ADR-0096), so a
+/// A channel aiming at `pairs`, holding this Package. Aim lives on the Deployment (ADR-0040), so a
 /// test that wants something delivered says which hosts are in the channel — and `replace` because a
 /// channel holds one Package per Agent type, so pointing it at another version is a swap.
 async fn ring_holding(
@@ -166,7 +166,7 @@ async fn everyone(server: &TestServer, version: &str) -> String {
 }
 
 /// Create + upload in one go: the Set is complete — and still reaches nobody until a rollout act
-/// names it (ADR-0061).
+/// names it (ADR-0030).
 async fn upload(server: &TestServer, agent_type: &str, version: &str, artifact: &[u8]) {
     create_set(server, agent_type, version).await;
     let response = upload_entry(server, agent_type, version, HOST, artifact).await;
@@ -178,10 +178,10 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
     Sha256::digest(bytes).to_vec()
 }
 
-/// ADR-0052's versions under ADR-0061: versions are first-class Sets, and the act names the one
+/// ADR-0016's versions under ADR-0030: versions are first-class Sets, and the act names the one
 /// the operator releases — no one produces an old artifact again, and no publication state is
 /// juggled. An Agent that has reported nothing installed takes either of them; what happens once
-/// it *has* reported is ADR-0076's, tested below.
+/// it *has* reported is ADR-0035's, tested below.
 #[tokio::test]
 async fn the_act_names_the_version_it_releases() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -209,7 +209,7 @@ async fn the_act_names_the_version_it_releases() {
     );
 
     // The same act, pointed at the older version. This Agent reports no package statuses, so it
-    // has nothing installed to be held against (ADR-0076) and the older Set still reaches it —
+    // has nothing installed to be held against (ADR-0035) and the older Set still reaches it —
     // and its artifact is still here.
     assert_eq!(
         rollout_ring(&server, &everyone(&server, "0.156.0").await).await["assigned_agents"],
@@ -231,7 +231,7 @@ async fn the_act_names_the_version_it_releases() {
     assert_eq!(served.as_ref(), b"old-binary");
 }
 
-/// ADR-0066: the offered `download_url` is a path the Client resolves against **its own OpAMP
+/// ADR-0032: the offered `download_url` is a path the Client resolves against **its own OpAMP
 /// endpoint**, so the artifact has to be served by the listener the Agents already talk to — not by
 /// the Operator plane, which is where authentication is going and where no Agent will ever look.
 #[tokio::test]
@@ -362,7 +362,7 @@ async fn no_offer_without_the_capability() {
 }
 
 /// An entry belongs to a Set: uploading toward an identity nobody created is a 404, not a package
-/// conjured out of a URL (ADR-0052 — the identity is stated at creation).
+/// conjured out of a URL (ADR-0016 — the identity is stated at creation).
 #[tokio::test]
 async fn an_entry_needs_its_set_first() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -440,7 +440,7 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
     assert_eq!(response.status(), 413);
 }
 
-/// The point of ADR-0096: the channel decides whom the rollout act assigns, so a binary rollout can
+/// The point of ADR-0040: the channel decides whom the rollout act assigns, so a binary rollout can
 /// be tried on part of the fleet first — and nobody outside it is touched by the act.
 #[tokio::test]
 async fn a_selector_aims_a_rollout_at_part_of_the_fleet() {
@@ -508,13 +508,13 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
         | AgentCapabilities::ReportsPackageStatuses as u64;
     exchange(&server, &report).await;
 
-    // Two Packages of one Agent type differ by version (ADR-0095) — there is no name to tell them
+    // Two Packages of one Agent type differ by version (ADR-0039) — there is no name to tell them
     // apart any more, which is the point: what distinguishes two artifacts is what they are and
     // which release they belong to.
     upload(&server, support::AGENT_TYPE, "2.0.0", b"for-linux").await;
     upload(&server, support::AGENT_TYPE, "2.1.0", b"for-windows").await;
     // Two channels, disjoint by platform — which is what a partition looks like when the attribute
-    // that separates the hosts is one they all report (ADR-0096 point 4).
+    // that separates the hosts is one they all report (ADR-0040 point 4).
     let linux = ring_holding(&server, "linux-channel", &[("os.type", "linux")], "2.0.0").await;
     let windows = ring_holding(
         &server,
@@ -570,9 +570,9 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     );
 }
 
-/// The canary shape an operator actually wants, under ADR-0096: **two channels, disjoint by a label**
+/// The canary shape an operator actually wants, under ADR-0040: **two channels, disjoint by a label**
 /// — because a Selector is equality and cannot say "not", so the fleet-wide-plus-narrower-override
-/// shape ADR-0017 allowed is gone. Each channel holds its own version; the rollout finishes by moving
+/// shape ADR-0016 allowed is gone. Each channel holds its own version; the rollout finishes by moving
 /// the canary host's label back and rolling the stable channel out again. Nobody moves without an act.
 #[tokio::test]
 async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
@@ -653,7 +653,7 @@ async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
     );
 }
 
-/// The one case with no defensible answer, restated for ADR-0096. It is no longer about versions
+/// The one case with no defensible answer, restated for ADR-0040. It is no longer about versions
 /// or specificity — **any** two channels claiming one Agent is a conflict, however narrow or wide
 /// either is. The Server offers nothing and the fleet view names both.
 #[tokio::test]
@@ -661,7 +661,7 @@ async fn an_agent_two_rings_claim_is_offered_nothing_and_the_view_says_why() {
     let (server, _scratch) = spawn_with_packages().await;
     upload(&server, support::AGENT_TYPE, "2.0.0", b"one").await;
     upload(&server, support::AGENT_TYPE, "3.0.0", b"two").await;
-    // Two channels that overlap on the Agent below. Under ADR-0017 the second would have won by
+    // Two channels that overlap on the Agent below. Under ADR-0016 the second would have won by
     // being no less specific, or lost by being no more; now neither happens.
     ring_holding(&server, "by-platform", &[("os.type", "linux")], "2.0.0").await;
     ring_holding(
@@ -692,7 +692,7 @@ async fn an_agent_two_rings_claim_is_offered_nothing_and_the_view_says_why() {
     );
 }
 
-/// ADR-0018: an entry may live somewhere else. The Server stores the reference, offers that
+/// ADR-0015: an entry may live somewhere else. The Server stores the reference, offers that
 /// address verbatim with the operator's checksum and headers, and has nothing of its own to serve.
 #[tokio::test]
 async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
@@ -829,7 +829,7 @@ async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_n
     assert_eq!(unreachable.status(), 200);
 }
 
-/// ADR-0052 in place of ADR-0034's late typing: the Agent type is identity, stated at creation —
+/// ADR-0016 in place of ADR-0016's late typing: the Agent type is identity, stated at creation —
 /// there is no untyped state — and a Set built for another type fits nobody here: its rollout
 /// act assigns no one, whatever its Selector says.
 #[tokio::test]
@@ -863,7 +863,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
     assert_eq!(response.status(), 200);
     // A channel that claims this Agent, holding only a Package built for another type. The channel is
     // right, the Agent is in it, and it still gets nothing — because fit is by type, before any
-    // channel is consulted (ADR-0034).
+    // channel is consulted (ADR-0016).
     assert_eq!(
         put_deployment(&server, "stable", &[("service.name", support::AGENT_TYPE)])
             .await
@@ -910,7 +910,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
     assert!(offer.packages.contains_key(support::AGENT_TYPE));
 }
 
-/// ADR-0076 end to end: a Set reaches an Agent only as an **upgrade**. What the Agent reports
+/// ADR-0035 end to end: a Set reaches an Agent only as an **upgrade**. What the Agent reports
 /// installed is the fourth matching test, so the count, the per-Agent act and the bulk act all
 /// refuse to move a host backwards — or to move it nowhere at all. The assignment path is
 /// deliberately exempt: an installed package stays in the Agent's offer, or the Agent would be
@@ -944,7 +944,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
         report
     }
 
-    /// The two counts the Set view carries (ADR-0076 point 8): whom it aims at, and whom it
+    /// The two counts the Set view carries (ADR-0035 point 12): whom it aims at, and whom it
     /// would actually reach.
     async fn counts(server: &TestServer, version: &str) -> (i64, i64) {
         let list: serde_json::Value = reqwest::Client::new()
@@ -1001,7 +1001,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
     );
 
     // A greater version in the same channel reaches it. The channel is the constant; what it holds is
-    // what an operator changes (ADR-0096) — two channels claiming this Agent would be a conflict.
+    // what an operator changes (ADR-0040) — two channels claiming this Agent would be a conflict.
     upload(&server, support::AGENT_TYPE, "2.0.0", b"the-next-one").await;
     let channel = everyone(&server, "2.0.0").await;
     assert_eq!(counts(&server, "2.0.0").await, (1, 1));
@@ -1013,7 +1013,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
     assert_eq!(offer.packages[support::AGENT_TYPE].version, "2.0.0");
 
     // And once the Agent reports it installed, the assignment keeps composing the offer — the
-    // Set the Agent runs must not vanish from its desired state (ADR-0076 point 5).
+    // Set the Agent runs must not vanish from its desired state (ADR-0035 point 9).
     let offer = exchange(&server, &running(&uid, 3, "2.0.0"))
         .await
         .packages_available
@@ -1023,12 +1023,12 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
     // But it is no longer waiting for anything: the channel still claims it and proposes nothing.
     assert_eq!(counts(&server, "2.0.0").await, (1, 0));
     // And pointing the channel back at the older version proposes nothing either — a Package that
-    // would move this Agent backwards is no candidate, whichever channel holds it (ADR-0083).
+    // would move this Agent backwards is no candidate, whichever channel holds it (ADR-0035).
     everyone(&server, "1.0.0").await;
     assert_eq!(counts(&server, "1.0.0").await, (1, 0));
 }
 
-/// The silent no-op ADR-0034 named: a Set can target nobody through a mistyped Agent type, a
+/// The silent no-op ADR-0016 named: a Set can target nobody through a mistyped Agent type, a
 /// platform the fleet does not run, or a Selector that matches no one — and none of the three is
 /// a rejected upload, so without a count nothing says it.
 #[tokio::test]
@@ -1101,7 +1101,7 @@ async fn a_set_says_how_many_agents_it_reaches() {
     assert_eq!(reach(&server, "2.0.0").await, 0);
 }
 
-/// ADR-0042 reaches packages, not just Configurations — which is the case it exists for. A binary
+/// ADR-0027 reaches packages, not just Configurations — which is the case it exists for. A binary
 /// rollout starts on the hosts an operator moved into the canary channel, and moving one in needs no
 /// access to that host.
 #[tokio::test]
@@ -1146,7 +1146,7 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
         "exactly the channel, and nothing else"
     );
 
-    // The label only aims (ADR-0061); the act distributes — to the channel, and nobody else.
+    // The label only aims (ADR-0030); the act distributes — to the channel, and nobody else.
     assert_eq!(rollout_ring(&server, "stable").await["assigned_agents"], 1);
     let mut report = full_report(&canary, "canary-host", 2);
     report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
@@ -1167,7 +1167,7 @@ async fn a_label_aims_a_set_at_part_of_the_fleet() {
     );
 }
 
-/// ADR-0061 through the API, from the operator's side: a saved Set waits, rolling out an empty
+/// ADR-0030 through the API, from the operator's side: a saved Set waits, rolling out an empty
 /// one is refused, the act is its own request — and an assigned Set's entries are immutable
 /// while its Selector stays editable.
 #[tokio::test]
@@ -1237,12 +1237,12 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
     let staged = view(&server, "2.0.0").await;
     assert!(
         staged.get("published").is_none(),
-        "ADR-0061: there is no publication state to show: {staged}"
+        "ADR-0030: there is no publication state to show: {staged}"
     );
     assert_eq!(
         staged["deployments"],
         serde_json::json!(["stable"]),
-        "the Package says which channels hold it — it aims at nobody by itself (ADR-0095)"
+        "the Package says which channels hold it — it aims at nobody by itself (ADR-0039)"
     );
     assert_eq!(
         ring_view(&server, "stable").await["targeted_agents"],
@@ -1289,7 +1289,7 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
     ring_holding(&server, "stable", &[("os.type", "linux")], "2.0.0").await;
 
     // Deleting the Set removes its assignments with it: the offer is withdrawn, and nothing is
-    // uninstalled — an Agent that already took it keeps running it (ADR-0017).
+    // uninstalled — an Agent that already took it keeps running it (ADR-0016).
     let deleted = reqwest::Client::new()
         .delete(set_url(&server, support::AGENT_TYPE, "2.0.0"))
         .send()
@@ -1394,7 +1394,7 @@ async fn the_package_store_has_a_total_size_ceiling() {
 
     // A second Package would take the store past the ceiling — refused, and nothing is left staged
     // for it. It has to be a second *version*: two artifacts of one Agent type are told apart by
-    // version now (ADR-0095), and writing 1.0.0 again would replace the entry above rather than
+    // version now (ADR-0039), and writing 1.0.0 again would replace the entry above rather than
     // add to it — which would have this test pass without the store ever growing.
     create_set(&server, support::AGENT_TYPE, "2.0.0").await;
     let second = upload_entry(
@@ -1413,7 +1413,7 @@ async fn the_package_store_has_a_total_size_ceiling() {
 }
 
 // -------------------------------------------------------------------------------------------
-// Deployments (ADR-0096)
+// Deployments (ADR-0040)
 // -------------------------------------------------------------------------------------------
 
 fn deployment_url(server: &TestServer, name: &str) -> String {
@@ -1436,7 +1436,7 @@ async fn put_deployment(
 
 /// A Deployment must name the channel it aims at. There is no fleet-wide default, and the refusal
 /// says what to write instead — an empty Selector is what a forgotten field looks like, and it
-/// would collide with every other channel (ADR-0096 point 3).
+/// would collide with every other channel (ADR-0040 point 3).
 #[tokio::test]
 async fn a_deployment_without_a_selector_is_refused() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1543,7 +1543,7 @@ async fn a_deployment_holds_one_uploaded_package_per_agent_type() {
     );
 }
 
-/// The signature belongs to the Deployment, not the artifact (ADR-0096 point 7) — and the view
+/// The signature belongs to the Deployment, not the artifact (ADR-0040 point 7) — and the view
 /// reports which platforms are covered, because an unsigned artifact is a legitimate policy the
 /// Server cannot refuse, only surface.
 #[tokio::test]
@@ -1663,7 +1663,7 @@ async fn a_deployments_aim_is_editable_and_deleting_it_is_its_own_act() {
     assert_eq!(again.status(), 404);
 }
 
-/// The signature an Agent is offered comes from **its** Deployment (ADR-0096 point 7), not from
+/// The signature an Agent is offered comes from **its** Deployment (ADR-0040 point 7), not from
 /// the artifact record — so the same Package in two channels travels with each channel's own signature.
 #[tokio::test]
 async fn the_signature_an_agent_is_offered_comes_from_its_deployment() {
@@ -1748,7 +1748,7 @@ async fn a_signature_on_the_artifact_upload_is_refused_by_name() {
 
 /// **The rule the whole conflict model turns on.** A conflict takes the *candidate* away and never
 /// a standing assignment: an Agent already rolled out to keeps its offer, because nothing
-/// distributes — or un-distributes — by itself (ADR-0061). Creating an overlapping channel must not
+/// distributes — or un-distributes — by itself (ADR-0030). Creating an overlapping channel must not
 /// withdraw software from a running host, and that is one `if` away from being wrong.
 #[tokio::test]
 async fn a_conflict_takes_the_candidate_away_and_leaves_the_assignment_standing() {
@@ -1802,7 +1802,7 @@ async fn a_conflict_takes_the_candidate_away_and_leaves_the_assignment_standing(
     assert_eq!(after.all_packages_hash, before.all_packages_hash);
 }
 
-/// The per-Agent act refuses to pick a side (ADR-0096 point 9): naming a channel while a second one
+/// The per-Agent act refuses to pick a side (ADR-0040 point 9): naming a channel while a second one
 /// also claims the Agent is `409`, even though the operator has said which they mean. Honouring it
 /// would sidestep the conflict for good and make this path the way into a state the channel-wide act
 /// forbids.
@@ -1855,7 +1855,7 @@ async fn the_per_agent_act_refuses_to_pick_a_side() {
     }
 }
 
-/// What a **standing offer travels with** is frozen (ADR-0096 point 10): the signature of a
+/// What a **standing offer travels with** is frozen (ADR-0040 point 10): the signature of a
 /// Package this channel released, and the channel's hold on that Package. What gates re-offering is the
 /// package hash, which does not cover the signature — so a signature changed under a standing
 /// offer would never reach the Agent installing against the old one, and one removed would turn a
@@ -1958,7 +1958,7 @@ async fn a_ring_freezes_what_it_has_released() {
     );
 }
 
-/// ADR-0095 point 3: the hash an Agent verifies against is readable off the package, so "did this
+/// ADR-0039 point 3: the hash an Agent verifies against is readable off the package, so "did this
 /// host take my bytes" is answerable without trusting a status field.
 #[tokio::test]
 async fn a_packages_entry_shows_the_hash_an_agent_verifies_against() {
@@ -2001,7 +2001,7 @@ async fn a_packages_entry_shows_the_hash_an_agent_verifies_against() {
     );
 }
 
-/// ADR-0096 point 4: the fleet view tells apart the states that would otherwise be one empty row,
+/// ADR-0040 point 4: the fleet view tells apart the states that would otherwise be one empty row,
 /// because the operator's next move differs in each. An Agent in **no channel** has to be labelled;
 /// one in a channel that holds nothing for it needs a package uploaded; one with something waiting
 /// needs a press.

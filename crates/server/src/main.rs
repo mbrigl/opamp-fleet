@@ -1,8 +1,8 @@
 //! Entry point: load `server.toml`, bind the two listeners (plain or TLS) — the Agent plane and
-//! the Operator plane (ADR-0066) — and serve both until interrupted.
+//! the Operator plane (ADR-0032) — and serve both until interrupted.
 //!
 //! Both planes are served the same way whether or not TLS is configured, so that what bounds a
-//! connection before it becomes a request holds on all four surfaces (ADR-0073). Only the acceptor
+//! connection before it becomes a request holds on all four surfaces (ADR-0032). Only the acceptor
 //! differs.
 
 use std::net::SocketAddr;
@@ -118,7 +118,7 @@ async fn main() {
     {
         Ok(ca) => {
             if let Some(ca) = &ca {
-                // ADR-0035.
+                // ADR-0013.
                 info!(
                     validity_days = ca.validity_days(),
                     "signing client certificates for Agents that ask"
@@ -137,7 +137,7 @@ async fn main() {
         .map(server::fleet::TelemetryOffer::from_config)
         .unwrap_or_default();
     if config.telemetry_offer.is_some() {
-        // ADR-0036.
+        // ADR-0023.
         info!("offering the fleet somewhere to send its own telemetry");
     }
     let packages = match server::packages::PackageStore::open(config.packages_dir.clone()) {
@@ -189,7 +189,7 @@ async fn main() {
         info!("the OpAMP endpoint requires authentication");
     }
     // Mutual TLS is on when the listener has a CA to verify client certificates against; the
-    // OpAMP endpoint then requires one *in addition to* whatever `[auth]` requires (ADR-0035).
+    // OpAMP endpoint then requires one *in addition to* whatever `[auth]` requires (ADR-0013).
     let mutual_tls = config
         .tls
         .as_ref()
@@ -197,7 +197,7 @@ async fn main() {
     if mutual_tls {
         info!("the OpAMP endpoint requires a client certificate");
     }
-    // Two planes, two listeners (ADR-0066): Agents reach the OpAMP endpoint and the package
+    // Two planes, two listeners (ADR-0032): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
     let agents = server::agent_app(
         state.clone(),
@@ -209,7 +209,7 @@ async fn main() {
         .as_ref()
         .map(server::api::OperatorAuth::from_config);
     if operator_auth.is_some() {
-        // ADR-0067.
+        // ADR-0032.
         info!("the REST API and the UI require authentication");
         // Basic puts a reusable password on the wire on every request. On loopback that stays on
         // the host; published in cleartext it does not, and the operator should hear so once.
@@ -217,7 +217,7 @@ async fn main() {
             tracing::warn!(
                 listen = %config.rest.listen,
                 "[rest.auth] sends its password in the clear on a listener that is not loopback — \
-                 add [tls], or put a TLS-terminating proxy in front (ADR-0067)"
+                 add [tls], or put a TLS-terminating proxy in front (ADR-0032)"
             );
         }
     }
@@ -226,7 +226,7 @@ async fn main() {
     let agent_listener = bind(config.listen, "the Agent plane");
     let operator_listener = bind(config.rest.listen, "the Operator plane");
     // One signal, both planes: the interrupt is watched once, and the handle both servers hold
-    // drains them together within a bounded window (ADR-0073).
+    // drains them together within a bounded window (ADR-0032).
     let handle = Handle::new();
     tokio::spawn({
         let handle = handle.clone();
@@ -282,7 +282,7 @@ async fn main() {
             operators.expect("serve the Operator plane");
         }
     }
-    // The graceful-shutdown flush (ADR-0051): every record's current timestamp and sequence
+    // The graceful-shutdown flush (ADR-0025): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
 }

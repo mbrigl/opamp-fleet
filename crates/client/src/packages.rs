@@ -27,7 +27,7 @@ pub struct PackageDownload {
     /// The Ed25519 signature over the artifact; empty means unsigned.
     pub signature: Vec<u8>,
     /// The headers the offer says this download needs — a referenced source's credential
-    /// (ADR-0018), which the Server fills from the operator's configuration. The Baseline: *"The
+    /// (ADR-0015), which the Server fills from the operator's configuration. The Baseline: *"The
     /// Agent SHOULD include the HTTP headers provided in the headers field for the GET request."*
     ///
     /// Raw pairs rather than the wire type, like every other field here: what the download needs is
@@ -38,7 +38,7 @@ pub struct PackageDownload {
 /// Written by hand rather than derived, because a header value is a credential.
 ///
 /// This struct travels inside `Handled`, which derives `Debug`; a single `debug!(?handled)` added
-/// later would otherwise put a fleet credential in the log file that ADR-0041 writes to disk in
+/// later would otherwise put a fleet credential in the log file that ADR-0026 writes to disk in
 /// service mode. Keys are printed — they are what a diagnosis needs — and values never are.
 impl std::fmt::Debug for PackageDownload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,7 +117,7 @@ fn ensure_safe_package_name(name: &str) -> Result<(), String> {
 /// The artifact is a program — tens or hundreds of megabytes — so it is streamed to `staging_dir`
 /// and hashed as it arrives, never assembled in memory. Only a signature check reads it back,
 /// because Ed25519 verifies over the whole message. `staging_dir` is the receiving Agent's own
-/// (ADR-0021), so the install that follows is a rename inside one filesystem.
+/// (ADR-0018), so the install that follows is a rename inside one filesystem.
 pub async fn download_and_verify(
     package: &PackageDownload,
     config: &ClientConfig,
@@ -131,7 +131,7 @@ pub async fn download_and_verify(
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         // Unlike the OpAMP endpoint, an artifact URL may legitimately redirect — a mirror
-        // (ADR-0018) is often a CDN that bounces the download to signed storage — so redirects are
+        // (ADR-0015) is often a CDN that bounces the download to signed storage — so redirects are
         // allowed but bounded to a small chain. Integrity does not rest on where the bytes come
         // from: the content hash (always) and the signature (when a key is configured) are checked
         // after the download, so a redirect cannot substitute a malicious artifact.
@@ -149,14 +149,14 @@ pub async fn download_and_verify(
         .connect_timeout(std::time::Duration::from_secs(30))
         .read_timeout(std::time::Duration::from_secs(60));
     // Trust only, never this Client's certificate: a `download_url` may point at a mirror
-    // (ADR-0018), and an identity belongs to the Server rather than to whoever hosts an artifact.
+    // (ADR-0015), and an identity belongs to the Server rather than to whoever hosts an artifact.
     builder = crate::tls::trust(builder, config)?;
     let client = builder
         .build()
         .map_err(|e| format!("cannot build the download client: {e}"))?;
     // A count, never a key and never a value — and the source without whatever authorises reaching
     // it. This line goes to the log file, and through the bridge to the destination the Server named
-    // (ADR-0036), which is the same reason the span below carries the redacted form: a pre-signed
+    // (ADR-0023), which is the same reason the span below carries the redacted form: a pre-signed
     // URL puts its signature in the query, and a log line is a poor place to keep one.
     let source = source_of(&url);
     info!(package = %package.name, url = %source, headers = package.headers.len(), "downloading package");
@@ -203,7 +203,7 @@ pub async fn download_and_verify(
         }
     };
     // The bytes are in; what remains is deciding whether they are the right ones. Its own phase of
-    // the trace (ADR-0090), because the hash and the signature are what a package's security rests
+    // the trace (ADR-0023), because the hash and the signature are what a package's security rests
     // on and "it failed to install" must be able to say which of the two.
     drop(download);
     let verify = tracing::info_span!("verify", bytes = staged.len).entered();
@@ -291,7 +291,7 @@ fn with_headers(
 
 /// Where an artifact is being fetched from, without whatever authorises the fetch.
 ///
-/// The span this labels leaves the host for a destination the *Server* named (ADR-0090 clause 9), and
+/// The span this labels leaves the host for a destination the *Server* named (ADR-0023 clause 36), and
 /// a download URL is one of the few strings here that can carry a credential in plain sight: a
 /// pre-signed URL puts its signature in the query. The scheme, host and path answer the question a
 /// trace is read for — *which mirror served this* — and the query answers none of it.
@@ -480,7 +480,7 @@ mod tests {
     use ring::signature::KeyPair;
 
     /// What labels the download span must not carry what authorises the download: the span goes to
-    /// a destination the Server named (ADR-0090 clause 9), and a pre-signed URL is a credential.
+    /// a destination the Server named (ADR-0023 clause 36), and a pre-signed URL is a credential.
     #[test]
     fn the_download_source_drops_whatever_authorises_it() {
         assert_eq!(

@@ -1,4 +1,4 @@
-//! The Agent-record storage port and its filesystem adapter (ADR-0051).
+//! The Agent-record storage port and its filesystem adapter (ADR-0025).
 //!
 //! The fleet is loaded whole at startup and held in memory; at runtime the store only ever
 //! receives writes and deletions for single Agents. That narrow access pattern is what the port
@@ -44,13 +44,13 @@ pub struct PersistedAgent {
     /// The transport the last report arrived on — informational, never a routing key (ADR-0003).
     pub transport: Transport,
     pub last_seen_ms: u64,
-    /// A queued restart is operator intent and survives like any other (ADR-0051).
+    /// A queued restart is operator intent and survives like any other (ADR-0025).
     pub restart_pending: bool,
-    /// The Configurations the operator rolled out to this Agent (ADR-0061): name → the pinned
+    /// The Configurations the operator rolled out to this Agent (ADR-0030): name → the pinned
     /// revision's hash. `None` marks a record persisted before the ADR, whose assignments the
     /// fleet seeds at startup from what was published then (point 9).
     pub config_assignments: Option<BTreeMap<String, String>>,
-    /// The package Sets the operator rolled out to this Agent (ADR-0061), keyed by package name.
+    /// The package Sets the operator rolled out to this Agent (ADR-0030), keyed by package name.
     /// `None` marks a record whose seed has not run — it runs when package delivery is armed.
     pub package_assignment: Option<crate::fleet::PackageAssignment>,
 }
@@ -58,7 +58,7 @@ pub struct PersistedAgent {
 impl PersistedAgent {
     /// A digest over the *durable* content — everything except `last_seen_ms` and `sequence_num`,
     /// which move on every report. This is what the caller's dirty check compares, so the common
-    /// heartbeat, which changes nothing else, reaches no adapter at all (ADR-0051).
+    /// heartbeat, which changes nothing else, reaches no adapter at all (ADR-0025).
     pub fn durable_digest(&self) -> [u8; 32] {
         let mut settled = self.clone();
         settled.last_seen_ms = 0;
@@ -69,7 +69,7 @@ impl PersistedAgent {
     }
 }
 
-/// The storage port (ADR-0051): the only thing the fleet logic knows about persistence. A
+/// The storage port (ADR-0025): the only thing the fleet logic knows about persistence. A
 /// database or an external store is a new implementation of these four operations plus one wiring
 /// line — the rest of the Server is, by construction, unaffected.
 pub trait AgentStore: Send + Sync {
@@ -80,7 +80,7 @@ pub trait AgentStore: Send + Sync {
     /// Creates or replaces one record.
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String>;
 
-    /// Forgets one record (ADR-0039); removing what is already absent is not an error.
+    /// Forgets one record (ADR-0025); removing what is already absent is not an error.
     fn remove(&self, uid: &InstanceUid) -> Result<(), String>;
 
     /// The identity reassignment (`RequestInstanceUid`): one operation, so an adapter with atomic
@@ -96,7 +96,7 @@ pub trait AgentStore: Send + Sync {
     }
 }
 
-/// The default adapter (ADR-0051): one JSON file per Agent under `<config_dir>/agents/`,
+/// The default adapter (ADR-0025): one JSON file per Agent under `<config_dir>/agents/`,
 /// following the `LabelStore` pattern — temp file plus atomic rename, loud failure on a file
 /// that does not parse.
 pub struct FsAgentStore {
@@ -105,7 +105,7 @@ pub struct FsAgentStore {
 
 /// The on-disk envelope — **this adapter's format, not the port's**. Scalars and the
 /// effective-config text stay readable; the wire-typed fields are protobuf bytes base64-inline,
-/// the one encoding whose compatibility rules the Baseline already defines (ADR-0006, ADR-0051).
+/// the one encoding whose compatibility rules the Baseline already defines (ADR-0006, ADR-0025).
 #[derive(Serialize, Deserialize)]
 struct Envelope {
     /// The envelope shape, so a future change can migrate deliberately.
@@ -129,11 +129,11 @@ struct Envelope {
     package_statuses: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     available_components: Option<String>,
-    /// The config assignments (ADR-0061), name → revision hash. Absent in a pre-ADR file, which
+    /// The config assignments (ADR-0030), name → revision hash. Absent in a pre-ADR file, which
     /// is exactly the migration marker the fleet reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     config_assignments: Option<BTreeMap<String, String>>,
-    /// What was rolled out to this Agent (ADR-0061, ADR-0096): the Deployment that released it
+    /// What was rolled out to this Agent (ADR-0030, ADR-0040): the Deployment that released it
     /// and the Package it pinned, as `<agent type>@<version>`. Absent means nothing was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     package_assignment: Option<PackageAssignmentMeta>,
@@ -146,7 +146,7 @@ struct PackageAssignmentMeta {
     package: String,
 }
 
-/// Bumped for ADR-0096's assignment shape, with **no reader for version 1**: there is no legacy
+/// Bumped for ADR-0040's assignment shape, with **no reader for version 1**: there is no legacy
 /// store to support, so an envelope this Server did not write is named rather than guessed at.
 const ENVELOPE_VERSION: u32 = 2;
 
@@ -245,7 +245,7 @@ impl Envelope {
 
 impl FsAgentStore {
     /// Opens the store, creating its directory owner-only — reported effective configurations may
-    /// hold credentials (ADR-0051), the same reasoning that guards the package store's metadata.
+    /// hold credentials (ADR-0025), the same reasoning that guards the package store's metadata.
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -367,7 +367,7 @@ mod tests {
         assert!(restored[&uid] == record(), "the record round-trips whole");
     }
 
-    /// ADR-0061 point 9: an envelope written before the ADR has no assignment fields, and they
+    /// ADR-0030 point 9: an envelope written before the ADR has no assignment fields, and they
     /// restore as `None` — the marker the fleet's migration reads. They are not invented as
     /// empty, which would silently un-roll the Agent.
     #[test]
@@ -408,7 +408,7 @@ mod tests {
         assert_ne!(settled.durable_digest(), changed.durable_digest());
     }
 
-    /// Forgetting removes the file (ADR-0039 extended); removing the absent is not an error.
+    /// Forgetting removes the file (ADR-0025 extended); removing the absent is not an error.
     #[test]
     fn remove_deletes_and_tolerates_absence() {
         let dir = tempfile::tempdir().expect("tempdir");

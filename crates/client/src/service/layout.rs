@@ -7,7 +7,7 @@
 //!
 //! The default state directory is [`STATE_DIR_NAME`] under the *data* root — the same directory
 //! as this layout's root everywhere except Linux system installs, where the layout executes from
-//! `/opt` while data stays in `/var/lib` (ADR-0084 clause 3, carrying ADR-0053).
+//! `/opt` while data stays in `/var/lib` (ADR-0010 clause 9).
 //!
 //! The directory name is Elastic Agent's `<component>-<version>-<hash>` scheme: always the bare
 //! version base and the commit short-hash, never the pre-release — whether a directory holds a
@@ -20,11 +20,11 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-/// The platform's binary filename inside a version directory (ADR-0028).
+/// The platform's binary filename inside a version directory (ADR-0022).
 ///
 /// It is two contracts at once: the program a service unit is registered against, and the archive
 /// member a self-update extracts from an offered package. Changing it after a release is therefore
-/// not a rename but a migration — see ADR-0028.
+/// not a rename but a migration — see ADR-0022.
 pub const BINARY_FILENAME: &str = if cfg!(windows) {
     "supervisor.exe"
 } else {
@@ -35,7 +35,7 @@ pub const BINARY_FILENAME: &str = if cfg!(windows) {
 /// [`BINARY_FILENAME`] carries without its Windows extension. One definition, so the directory and
 /// the file it holds cannot drift.
 ///
-/// Not the product's, and not the service's. ADR-0084 clause 5 registers the service under
+/// Not the product's, and not the service's. ADR-0010 clause 11 registers the service under
 /// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME), and clause 9 keeps this constant off it on
 /// purpose: the version directory and the archive member a self-update extracts are identical in
 /// every variant build, which is what lets one published package Set serve them all.
@@ -44,7 +44,7 @@ pub const COMPONENT: &str = "supervisor";
 /// The manifest inside each version directory: the full version string and the content hash.
 const MANIFEST_FILENAME: &str = "manifest.toml";
 
-/// The state directory's name under its root (ADR-0010) — the *data* root, which ADR-0084
+/// The state directory's name under its root (ADR-0010) — the *data* root, which ADR-0010
 /// clause 3 places beside the configuration rather than inside the executable layout on Linux
 /// system installs.
 pub const STATE_DIR_NAME: &str = "state";
@@ -165,7 +165,7 @@ impl Layout {
 }
 
 /// The version-directory name for a full ADR-0009 version string:
-/// `supervisor-<MAJOR.MINOR.PATCH>-<hash>` — never the pre-release (ADR-0010, ADR-0028).
+/// `supervisor-<MAJOR.MINOR.PATCH>-<hash>` — never the pre-release (ADR-0010, ADR-0022).
 #[must_use]
 pub fn version_dir_name(full_version: &str) -> String {
     let (base, metadata) = full_version.split_once('+').unwrap_or((full_version, ""));
@@ -186,7 +186,7 @@ pub fn version_dir_name(full_version: &str) -> String {
 /// returns the link. The service is registered against `<root>/current/client` — the whole point of
 /// the pointer — so on the platforms that return the link, the path is `<root>/current/client`,
 /// whose grandparent is not `versions`, and [`Layout::enclosing`] finds no layout at all. What
-/// depends on that: the self-update (ADR-0020) and the torn-pointer repair, neither of which would
+/// depends on that: the self-update (ADR-0017) and the torn-pointer repair, neither of which would
 /// ever run.
 ///
 /// The resolution is what makes the two platforms agree. On Windows the pointer is a junction and
@@ -250,7 +250,7 @@ fn plain(path: PathBuf) -> PathBuf {
 /// (`<root>/current/client`). Staging an already-present version replaces its contents — an
 /// idempotent re-install, never a silent mix of two builds — except when the staged binary
 /// already holds these exact bytes, which is skipped rather than rewritten: `service install`
-/// can arrive through the `PATH` symlink (ADR-0048) and then *runs from* the staged file, and
+/// can arrive through the `PATH` symlink (ADR-0020) and then *runs from* the staged file, and
 /// Linux refuses to write over a running executable (`ETXTBSY`).
 ///
 /// # Errors
@@ -403,7 +403,7 @@ mod tests {
     }
 
     /// `service install` reached through the `PATH` symlink runs *from* the staged file
-    /// (ADR-0048); rewriting it would be refused (`ETXTBSY`), so identical bytes must be left
+    /// (ADR-0020); rewriting it would be refused (`ETXTBSY`), so identical bytes must be left
     /// alone. Observed via the modification time: pinned to the epoch, it only stays there when
     /// no write happened.
     #[cfg(unix)]

@@ -1,6 +1,6 @@
 //! What `service-manager` leaves undone on Windows: the recovery actions that make ADR-0010's
-//! "restart on failure" true there as well, the display name of ADR-0030, and the logon account
-//! of ADR-0062.
+//! "restart on failure" true there as well, the display name of ADR-0010 clause 11, and the logon account
+//! of ADR-0010 clause 18.
 //!
 //! On systemd and launchd the restart policy handed to `service-manager` is written straight into
 //! the unit (`Restart=on-failure`) or the plist (`KeepAlive{SuccessfulExit:false}`). Its Windows
@@ -40,7 +40,7 @@
 //! Everything here is a no-op on Unix.
 
 /// Configure what the Windows backend does not: failure recovery, the display name, the
-/// description — and, when `--run-as` named one, the logon account (ADR-0062).
+/// description — and, when `--run-as` named one, the logon account (ADR-0010 clause 18).
 ///
 /// # Errors
 /// Returns an error if the service cannot be opened or reconfigured. On Unix this never fails —
@@ -103,7 +103,7 @@ pub fn configure(
             format!("cannot enable recovery on reported failures for {service_name}: {e}")
         })?;
 
-    // The name the services list shows (ADR-0030). `sc.exe` wants `displayname=` with the space
+    // The name the services list shows (ADR-0010 clause 11). `sc.exe` wants `displayname=` with the space
     // **after** the equals sign: the token is the option and the *next* argument is its value, so
     // `displayname=x` as one word is parsed as an option nobody knows and silently changes nothing.
     sc(
@@ -121,7 +121,7 @@ pub fn configure(
         &format!("description of {service_name}"),
     )?;
 
-    // The logon account (ADR-0062). `service-manager`'s `sc.exe` backend ignores the ctx's
+    // The logon account (ADR-0010 clause 18). `service-manager`'s `sc.exe` backend ignores the ctx's
     // `username`, so the account is set here — and set *without* a `password=`, which every form
     // `run_as` admits (the service's virtual account, a gMSA, the built-ins) is defined not to
     // need. No *Log on as a service* grant follows: the default security policy grants it to

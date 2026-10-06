@@ -30,98 +30,42 @@ in the repository root). ADRs derive from the specification in [`docs/SPECIFICAT
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-agent-governance-model.md) | Specification + ADRs governed through a single `AGENTS.md` | 🟢 accepted |
-| [0002](0002-dev-container-runtime.md) | Debian Dev Container without host Docker access | 🟢 accepted |
+| [0002](0002-dev-container-runtime.md) | Debian Dev Container without host Docker access, pinned to the distribution it builds for | 🟢 accepted |
 | [0003](0003-client-modes-and-connection-multiplexing.md) | One Client binary with two composable modes, multiplexing Agents over a connection pool | 🟢 accepted |
-| [0004](0004-protocol-baseline-and-conformance-tracking.md) | Pin the protocol to a Baseline version and track conformance in a dedicated document | 🟢 accepted |
-| [0005](0005-workspace-and-server-runtime.md) | Three-crate Cargo workspace; tokio runtime; axum serves OpAMP, REST API, and the bundled UI on one port | 🟢 accepted |
+| [0004](0004-protocol-baseline-and-conformance.md) | Pin the protocol to a Baseline version, track conformance in a dedicated document, and prove it against `opamp-go` | 🟢 accepted |
+| [0005](0005-workspace-and-crates.md) | Four-crate Cargo workspace on tokio and axum — the Client is a library under a thin binary, the shared crate holds what both ends implement identically, the package tools live in their own crate | 🟢 accepted |
 | [0006](0006-proto-vendoring-and-codegen.md) | Vendor the Baseline's protobuf schema and compile it with prost via protox (no system protoc) | 🟢 accepted |
 | [0007](0007-dual-transport-and-tls.md) | Both OpAMP transports on both ends — plain HTTP(S) polling and WebSocket on one endpoint, TLS via rustls | 🟢 accepted |
 | [0008](0008-toml-configuration.md) | TOML configuration files for the Server and the Client | 🟢 accepted |
-| [0009](0009-version-derivation-and-baking.md) | Version computed from git in `build.rs` — strict SemVer from `version/*` tags, `-dev` pre-release for non-release builds, commit-hash build metadata | 🟢 accepted |
-| [0010](0010-client-os-service-and-cli.md) | Client as a multi-instance OS service — clap subcommand CLI, per-instance identity, versioned install layout | 🟢 accepted |
-| [0011](0011-supervisor-mode-hexagonal-core-and-plugins.md) | Supervisor Mode — hexagonal supervision core, compiled-in plugins, n Agents over one connection | 🟢 accepted |
-| [0012](0012-selector-targeted-configurations-and-openapi-rest-api.md) | Selector-targeted Configurations and the OpenAPI-described REST API | 🟢 accepted |
-| [0013](0013-opamp-endpoint-authentication.md) | Static Basic and Bearer authentication on the OpAMP endpoint, optional by default | 🟢 accepted |
+| [0009](0009-version-from-cargo-toml-and-git.md) | The version is baked at build time from `Cargo.toml` and git, read through one helper in `crates/opamp`, and compared and shown without its build metadata | 🟢 accepted |
+| [0010](0010-client-os-service-and-installation-layout.md) | The Client is an OS service the product names — clap subcommand CLI, one build-time name, a versioned install layout, one account | 🟢 accepted |
+| [0011](0011-supervisor-mode-and-lifecycle-port.md) | Supervisor Mode — a hexagonal supervision core, compiled-in plugins, n Agents over one connection, and one lifecycle vocabulary every plugin executes | 🟢 accepted |
+| [0012](0012-selector-targeted-configurations-and-rest-api.md) | Selector-targeted Configurations with a content role and an optional Agent type, behind the OpenAPI-described REST API | 🟢 accepted |
+| [0013](0013-opamp-endpoint-admission.md) | Admission on the OpAMP endpoint — optional Basic and Bearer credentials, mutual TLS with a Server-issued client certificate, and no authorization between admitted Agents | 🟢 accepted |
 | [0014](0014-server-driven-connection-settings.md) | Server-driven OpAMP connection settings — credential rotation, offered heartbeat, movable endpoint | 🟢 accepted |
-| [0015](0015-package-delivery-for-managed-processes.md) | Package delivery for Managed Processes — verified download, Supervisor-applied, health-gated, rolled back | 🟢 accepted |
-| [0016](0016-configuration-content-role.md) | Carry the Baseline's `AgentConfigFile.role` through the Configuration model | 🟢 accepted |
-| [0017](0017-selector-targeted-packages.md) | Selector-targeted packages, chosen by the Server rather than named on each host | 🟢 accepted |
-| [0018](0018-packages-imported-from-a-url.md) | A package is an uploaded archive or a URL the Agents fetch — unpacked by the Agent, `.tar.gz` or encrypted `.7z` | 🟢 accepted |
-| [0019](0019-one-step-back.md) | One step back — the package store remembers the version it replaced | ⚪ superseded by [0052](0052-a-package-is-a-versioned-set.md) |
-| [0020](0020-client-self-update.md) | The Client updates itself — its own Agent, a staged version, and a restart it does not issue | 🟢 accepted |
-| [0021](0021-supervisor-directory-and-path-implied-package-consent.md) | One directory per Supervisor — a bare program name means the Client owns it and updates it, an absolute path means it does not | 🟢 accepted |
-| [0022](0022-supervisor-path-placeholders-in-process-arguments.md) | A Foreign Agent is pointed at its own directory by placeholder, never by a path an operator has to keep in sync | 🟢 accepted |
-| [0023](0023-multi-file-packages.md) | A package may be a directory tree, unpacked whole beside the one it replaces | 🟢 accepted |
-| [0024](0024-client-library-target.md) | The Client is a library with a thin binary on top, so a test can reach what it tests | 🟢 accepted |
-| [0025](0025-release-pipeline-and-artifacts.md) | A release is a `version/*` tag built for five targets and published as `.7z` artifacts the Client can install | 🟢 accepted |
-| [0026](0026-version-from-cargo-toml.md) | The release version is the one in `Cargo.toml`, and the pipeline creates the tag from it | 🟢 accepted |
-| [0027](0027-interactive-install-writes-the-first-configuration.md) | The first configuration is written by an interactive install — asked once, never overwritten, validated before the service is registered | 🟢 accepted |
-| [0028](0028-the-client-is-named-opamp-fleet-client.md) | The Client ships as `opamp-fleet-client` — the artifact, the installed binary, and the version directory | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
-| [0029](0029-a-version-is-compared-and-shown-without-its-build-metadata.md) | A version is compared and shown without its build metadata — the commit is provenance, not identity | 🟢 accepted |
-| [0030](0030-one-service-name-on-every-platform.md) | One service name on every platform — `opamp-fleet-client`, with the instance as a suffix | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
-| [0031](0031-per-platform-package-variants.md) | One platform vocabulary from the release file name to the offer — a package is one name with one artifact per platform | 🟢 accepted |
-| [0032](0032-release-artifacts-separate-their-fields-with-underscores.md) | A release artifact separates its four fields with `_` — `name_version_os_arch.7z` | 🟢 accepted |
-| [0033](0033-an-agents-type-and-its-instance-name-are-two-attributes.md) | An Agent's type and its instance name are two attributes — `service.name` carries the type, `service.instance.name` the operator's name | 🟢 accepted |
-| [0034](0034-a-package-states-the-agent-type-it-is-built-for.md) | A package states the Agent type it is built for, and reaches no Agent of another | 🟢 accepted |
-| [0035](0035-mutual-tls-and-the-server-issued-client-certificate.md) | Mutual TLS with a Server-issued client certificate — the credential bootstraps it, the CSR flow renews it | 🟢 accepted |
-| [0036](0036-agents-report-their-own-telemetry.md) | An Agent reports its own telemetry over OTLP/HTTP, through the OpenTelemetry SDK | 🟢 accepted |
-| [0037](0037-gateway-mode.md) | Gateway Mode — a lazily grown pool, sticky by `instance_uid`, and a hop that invents nothing | 🟢 accepted |
-| [0038](0038-an-agent-that-stops-reporting-goes-stale.md) | An Agent that stops reporting goes stale — liveness beside connectedness, never instead of it | 🟢 accepted |
-| [0039](0039-forgetting-an-agent.md) | Forgetting an Agent — the fleet view drops a record, and reaches no host | 🟢 accepted |
-| [0040](0040-interoperability-against-opamp-go.md) | Conformance proved against `opamp-go` — a second reading of the specification | 🟢 accepted |
-| [0041](0041-the-client-logs-to-a-file-in-service-mode.md) | A Client running as a service logs to a file, on every platform | 🟢 accepted |
-| [0042](0042-server-set-labels.md) | The Server labels an Agent — rollout rings that are not a file on the host | 🟢 accepted |
-| [0043](0043-a-package-is-published-before-it-is-offered.md) | A package is published before it is offered — uploading stages it, releasing it is its own act | ⚪ superseded by [0061](0061-a-rollout-is-an-explicit-act.md) |
-| [0044](0044-what-the-shared-crate-holds.md) | The shared crate holds what both ends implement *identically* — measured, not by category | 🟢 accepted |
-| [0045](0045-the-version-helper-lives-in-the-shared-crate.md) | The single version helper lives in `crates/opamp`, so both ends report one number | 🟢 accepted |
-| [0046](0046-a-release-ships-native-installers.md) | A release also ships native installers — `.deb`, `.rpm`, and an `.msi` that asks for the install root and the endpoint | 🟢 accepted |
-| [0047](0047-admission-is-a-fleet-wide-trust-boundary.md) | Admission is a fleet-wide trust boundary — `instance_uid` is self-asserted, and there is no authorization between Agents | 🟢 accepted |
-| [0048](0048-the-packaged-cli-is-a-symlink-through-current.md) | The packaged CLI on `PATH` is a symlink through `current`, and a package removal takes every staged version with it | 🟢 accepted |
-| [0049](0049-the-msi-prefills-the-development-endpoint.md) | The MSI's endpoint dialog is prefilled with the development default — interactively only | 🟢 accepted |
-| [0050](0050-agents-report-host-network-addresses.md) | Agents report the host's network addresses, CPU model, and OS build | 🟢 accepted |
-| [0051](0051-agent-records-persist-across-a-server-restart.md) | Agent records persist behind a storage port — filesystem by default, connectedness runtime-only | 🟢 accepted |
-| [0052](0052-a-package-is-a-versioned-set.md) | A package is a versioned Set — identified by name, Agent type, and version; one entry per platform; saved is not offered | 🟢 accepted |
-| [0053](0053-the-linux-service-executes-from-opt.md) | The Linux service executes from `/opt` — a binary under `/var/lib` is one SELinux never lets systemd start | ⚪ superseded by [0084](0084-the-product-names-the-installation.md) |
-| [0054](0054-a-configuration-may-state-the-agent-type-it-is-for.md) | A Configuration may state the Agent type it is for — and then reaches no Agent of another | 🟢 accepted |
-| [0055](0055-a-configuration-is-published-before-it-is-offered.md) | A Configuration is published before it is offered — saving stages a draft, releasing it is its own act | ⚪ superseded by [0061](0061-a-rollout-is-an-explicit-act.md) |
-| [0056](0056-the-client-accepts-its-supervisor-set-from-the-server.md) | The Client accepts its Supervisor set from the Server — the rest of `client.toml` stays the operator's | 🟢 accepted |
-| [0057](0057-server-pushed-supervisor-blocks-name-only-client-owned-programs.md) | A Server-pushed `[[supervisor]]` block may name only a Client-owned program — no absolute paths, no machine binaries | 🟢 accepted |
-| [0058](0058-package-rollback-retention-and-no-restart-loop.md) | A failed package apply rolls back only to a predecessor, never loops, and a superseded version is kept for a grace period before deletion | 🟢 accepted |
-| [0059](0059-a-removed-supervisor-is-purged.md) | A removed Supervisor is purged — its Managed Process stops and its directory goes with it | 🟢 accepted |
-| [0060](0060-unified-supervisor-lifecycle-port.md) | One lifecycle vocabulary for every Supervisor — install, uninstall, start, stop, update, reload, and configuration handled by the specific plugin | 🟢 accepted |
-| [0061](0061-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟢 accepted |
-| [0062](0062-the-service-runs-under-an-operator-named-account.md) | The system service may run under an operator-named account — and the instance's files belong to that account | ⚪ superseded by [0084](0084-the-product-names-the-installation.md) |
-| [0063](0063-the-glpi-agent-is-supervised-by-the-command-kind.md) | The GLPI Agent is supervised by the `command` kind — one documented recipe per platform, no new plugin | 🟢 accepted |
-| [0064](0064-self-contained-glpi-agent-packages-for-both-platforms.md) | Self-contained GLPI Agent packages — the Windows zip as published, the Linux AppImage repacked as a tree | 🟢 accepted |
-| [0065](0065-the-operator-package-tools-live-in-their-own-crate.md) | The operator package tools live in their own crate, depending on the Client rather than shipping inside it | 🟢 accepted |
-| [0066](0066-the-agent-plane-and-the-operator-plane-get-their-own-listeners.md) | The Agent plane and the Operator plane get their own listeners — OpAMP and package downloads on `4320`, REST API and UI on loopback `4321` | 🟢 accepted |
-| [0067](0067-basic-authentication-on-the-operator-plane.md) | Basic authentication on the Operator plane — one credential set for the REST API and the UI, optional by default | 🟢 accepted |
-| [0068](0068-icinga-2-is-supervised-by-a-kind-of-its-own.md) | Icinga 2 is supervised by a kind of its own — the relocation arguments, the directories, and the validation are the Supervisor's | 🟢 accepted |
-| [0069](0069-the-icinga-master-signs-the-ticket-travels-as-a-configuration.md) | The Icinga master stays the CA — the ticket travels as a Configuration, and the Supervisor enrols once | 🟢 accepted |
-| [0070](0070-repacked-vendor-packages-as-relocatable-icinga-2-trees.md) | Repacked vendor packages as relocatable Icinga 2 trees — everything but glibc rides along | 🟢 accepted |
-| [0071](0071-one-icinga-2-artifact-built-on-the-oldest-glibc-it-must-serve.md) | One Icinga 2 artifact, built on the oldest glibc it must serve — the distribution family is not the criterion | 🟢 accepted |
-| [0072](0072-the-windows-artifact-is-verified-by-its-publisher.md) | The Windows artifact is verified by its publisher — the Authenticode signature, pinned to Icinga GmbH | 🟢 accepted |
-| [0073](0073-both-listeners-bound-connection-setup.md) | Both listeners bound connection setup — an HTTP/1 header-read timeout, set where hyper can honour it | 🟢 accepted |
-| [0074](0074-the-dev-container-is-pinned-to-the-distribution-it-builds-for.md) | The Dev Container is pinned to the distribution it builds for — its glibc is the artifact's reach | 🟢 accepted |
-| [0075](0075-the-self-update-consent-stands-unless-it-is-withdrawn.md) | The self-update consent stands unless it is withdrawn — and the installers can ask | 🟢 accepted |
-| [0076](0076-a-set-reaches-an-agent-only-as-an-upgrade.md) | A Set reaches an Agent only as an upgrade — the reported installed version is the fourth matching test | ⚪ superseded by [0083](0083-what-reaches-an-agent.md) |
-| [0077](0077-the-clients-own-agent-type-is-supervisor.md) | The Client's own Agent type is `supervisor` — and so is the package that carries it | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
-| [0078](0078-a-release-is-named-after-the-set-it-becomes.md) | A release is named after the Set it becomes, and packed as `.tar.gz` like every other package | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
-| [0079](0079-the-version-an-agent-runs-stands-in-for-an-unreported-package-version.md) | The version an Agent reports running stands in for a package version it does not report | ⚪ superseded by [0083](0083-what-reaches-an-agent.md) |
-| [0080](0080-the-program-and-its-configuration-are-named-supervisor.md) | The program is `supervisor`, and so is its service and its configuration file | ⚪ superseded by [0082](0082-the-fleets-own-agent-is-called-supervisor.md) |
-| [0081](0081-what-an-agent-runs-is-what-it-has.md) | What an Agent runs is what it has — a Set is held against the lower of the two versions it reports | ⚪ superseded by [0083](0083-what-reaches-an-agent.md) |
-| [0082](0082-the-fleets-own-agent-is-called-supervisor.md) | The fleet's own agent is called `supervisor` — the type, the package, the release and the program | 🟢 accepted |
-| [0083](0083-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟢 accepted |
-| [0084](0084-the-product-names-the-installation.md) | The product names the installation — one build-time name, one layout, one account | 🟢 accepted |
-| [0085](0085-the-client-manages-only-programs-it-installs.md) | The Client manages only programs it installs — a Managed Process is always the fleet's | 🟢 accepted |
-| [0086](0086-a-telemetry-destination-is-an-offer-of-its-own-class.md) | A telemetry destination is an offer of its own class — applied without a connection to prove it | 🟢 accepted |
-| [0087](0087-a-servers-capabilities-bind-what-the-client-reports.md) | A Server's capabilities bind what the Client reports — optimistic until it speaks, and an offer outranks its bitmask | 🟢 accepted |
-| [0088](0088-cleartext-own-telemetry-reaches-the-private-address-space.md) | Cleartext own telemetry reaches the private address space — by address, never by name | 🟢 accepted |
-| [0089](0089-an-own-telemetry-offer-states-all-three-destinations.md) | An own-telemetry offer states all three destinations — and an empty endpoint withdraws one | 🟢 accepted |
-| [0090](0090-own-traces-come-from-the-clients-own-tracing-spans.md) | Own traces come from the Client's own `tracing` spans, and a span is a fleet operation | 🟢 accepted |
-| [0091](0091-a-kind-knows-its-own-agent.md) | A kind knows its own agent — a block names a decision, never a layout | 🟢 accepted |
-| [0092](0092-icinga-2s-block-keeps-only-what-enrolment-needs.md) | Icinga 2's block keeps only what enrolment needs | 🟢 accepted |
-| [0093](0093-the-glpi-agent-gets-a-kind-of-its-own.md) | The GLPI Agent gets a kind of its own | 🟢 accepted |
-| [0094](0094-telegraf-gets-a-kind-of-its-own.md) | Telegraf gets a kind of its own | 🟢 accepted |
-| [0095](0095-a-package-is-what-an-agent-type-runs-at-a-version.md) | A Package is what an Agent type runs at a version — the name and the aim leave it | 🟡 proposed |
-| [0096](0096-a-deployment-aims-packages-at-a-channel.md) | A Deployment aims Packages at a channel, signs them, and is the only thing rolled out — and an Agent belongs to at most one | 🟡 proposed |
+| [0015](0015-package-delivery-for-managed-processes.md) | Package delivery for Managed Processes — verified, unpacked by the Agent, Supervisor-applied as a file or a tree, health-gated, rolled back only to a kept predecessor | 🟢 accepted |
+| [0016](0016-a-package-is-a-versioned-set.md) | A package is a versioned Set for one Agent type, aimed by a Selector and chosen by the Server — identified by name, Agent type, and version, with one entry per platform | 🟢 accepted |
+| [0017](0017-client-self-update-and-its-consent.md) | The Client updates itself — its own Agent, a staged version, a restart it does not issue, and a consent that stands unless it is withdrawn | 🟢 accepted |
+| [0018](0018-supervisor-directory-and-client-installed-programs.md) | One directory per Supervisor — the Client manages only programs it installs, and a Foreign Agent finds its own directories by placeholder | 🟢 accepted |
+| [0019](0019-release-pipeline-and-artifact-names.md) | A release is a `version/*` tag built for five targets, published as artifacts the Client can install, and named by four fields separated by `_` | 🟢 accepted |
+| [0020](0020-installing-the-client-and-native-installers.md) | The Client is installed by `service install` — the first configuration is asked once and never overwritten, and native `.deb`, `.rpm` and `.msi` packages deliver the binary and call it | 🟢 accepted |
+| [0021](0021-one-platform-vocabulary.md) | One platform vocabulary from the release file name to the offer — a package is one name with one artifact per platform | 🟢 accepted |
+| [0022](0022-agent-type-instance-name-and-the-supervisor-name.md) | An Agent's type and its instance name are two attributes, and the fleet's own agent is called `supervisor` — the type, the package, the release, the program and its configuration file | 🟢 accepted |
+| [0023](0023-agents-report-their-own-telemetry.md) | An Agent reports its own telemetry over OTLP/HTTP, through the OpenTelemetry SDK, to destinations the Server offers as a class of their own | 🟢 accepted |
+| [0024](0024-gateway-mode.md) | Gateway Mode — a lazily grown pool, sticky by `instance_uid`, and a hop that invents nothing | 🟢 accepted |
+| [0025](0025-agent-records-staleness-and-forgetting.md) | Agent records persist behind a storage port — a silent Agent goes stale, and one that is not reporting can be forgotten | 🟢 accepted |
+| [0026](0026-the-client-logs-to-a-file-in-service-mode.md) | A Client running as a service logs to a file, on every platform | 🟢 accepted |
+| [0027](0027-server-set-labels.md) | The Server labels an Agent — rollout rings that are not a file on the host | 🟢 accepted |
+| [0028](0028-agents-report-host-network-addresses.md) | Agents report the host's network addresses, CPU model, and OS build | 🟢 accepted |
+| [0029](0029-supervisor-set-from-the-server.md) | The Client accepts its Supervisor set from the Server — a delivered block names only a Client-owned program, the rest of `supervisor.toml` stays the operator's, and a removed Supervisor is purged | 🟢 accepted |
+| [0030](0030-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟢 accepted |
+| [0031](0031-the-glpi-agent.md) | The GLPI Agent gets a kind of its own, delivered as self-contained packages — the Windows zip as published, the Linux AppImage repacked as a tree | 🟢 accepted |
+| [0032](0032-agent-and-operator-planes-on-their-own-listeners.md) | The Agent plane and the Operator plane get their own listeners — OpAMP and package downloads on `4320`, the REST API and UI on loopback `4321` behind optional Basic authentication, and both bound connection setup | 🟢 accepted |
+| [0033](0033-icinga-2-supervision-and-enrolment.md) | Icinga 2 is supervised by a kind of its own — the Icinga master stays the CA, the ticket travels as a Configuration, and the block keeps only what enrolment needs | 🟢 accepted |
+| [0034](0034-repacked-icinga-2-artifacts.md) | Repacked vendor packages as relocatable Icinga 2 trees — one artifact built on the oldest glibc it must serve, and the Windows artifact verified by its publisher | 🟢 accepted |
+| [0035](0035-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟢 accepted |
+| [0036](0036-a-servers-capabilities-bind-what-the-client-reports.md) | A Server's capabilities bind what the Client reports — optimistic until it speaks, and an offer outranks its bitmask | 🟢 accepted |
+| [0037](0037-a-kind-knows-its-own-agent.md) | A kind knows its own agent — a block names a decision, never a layout | 🟢 accepted |
+| [0038](0038-telegraf-gets-a-kind-of-its-own.md) | Telegraf gets a kind of its own | 🟢 accepted |
+| [0039](0039-a-package-is-what-an-agent-type-runs-at-a-version.md) | A Package is what an Agent type runs at a version — the name and the aim leave it | 🟡 proposed |
+| [0040](0040-a-deployment-aims-packages-at-a-channel.md) | A Deployment aims Packages at a channel, signs them, and is the only thing rolled out — and an Agent belongs to at most one | 🟡 proposed |

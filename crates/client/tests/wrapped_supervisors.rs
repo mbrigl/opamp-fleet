@@ -1,6 +1,6 @@
-//! The two kinds whose whole block is `type` and `name` (ADR-0091), driven through
-//! `Plugin::start` the way the core drives them: [`glpi`](ADR-0093) and
-//! [`telegraf`](ADR-0094).
+//! The two kinds whose whole block is `type` and `name` (ADR-0037), driven through
+//! `Plugin::start` the way the core drives them: [`glpi`](ADR-0031) and
+//! [`telegraf`](ADR-0038).
 //!
 //! The unit tests in each module check what the kind *builds* — the program's name per platform,
 //! the arguments, the refusals. What no unit test can show is that a two-line block is actually
@@ -55,7 +55,7 @@ fn start(plugin: &dyn Plugin, name: &str, program_path: Option<&str>) -> Harness
     std::fs::create_dir_all(dir.path().join("config")).expect("config dir");
     let program_dir = dir.path().join("program");
     let (program, install) = match program_path {
-        // A tree package: the program sits inside the unpacked tree (ADR-0023).
+        // A tree package: the program sits inside the unpacked tree (ADR-0015).
         Some(path) => (
             program_dir.join("tree").join(path),
             InstallTarget::Tree {
@@ -63,7 +63,7 @@ fn start(plugin: &dyn Plugin, name: &str, program_path: Option<&str>) -> Harness
                 program_path: PathBuf::from(path),
             },
         ),
-        // A single file, in this Supervisor's own program/ directory (ADR-0021).
+        // A single file, in this Supervisor's own program/ directory (ADR-0018).
         None => {
             let program = program_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
             (program.clone(), InstallTarget::Binary(program))

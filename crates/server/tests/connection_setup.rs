@@ -1,4 +1,4 @@
-//! What bounds a connection before it is a request (ADR-0073).
+//! What bounds a connection before it is a request (ADR-0032).
 //!
 //! Every other limit this Server enforces starts at a request. These tests drive the two rules that
 //! apply earlier: a peer that never finishes its headers is hung up on, and a peer that finishes
@@ -45,7 +45,7 @@ async fn spawn() -> (std::net::SocketAddr, tempfile::TempDir) {
 }
 
 /// The measure itself: a connection that sends a request line and then falls silent is closed by
-/// the Server. Before ADR-0073 it was held open indefinitely — hyper's own default timeout resolves
+/// the Server. Before ADR-0032 it was held open indefinitely — hyper's own default timeout resolves
 /// to nothing while no timer is installed, and neither `axum::serve` nor `axum_server` installs one.
 #[tokio::test]
 async fn a_connection_that_never_finishes_its_headers_is_hung_up_on() {
