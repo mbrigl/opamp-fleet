@@ -3,6 +3,8 @@
 //! connecting, persists it, reconnects, and reports `APPLIED`; the Server, seeing the reported
 //! hash match, stops offering. A restarted Client is not re-offered what it already runs.
 
+mod common;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -31,8 +33,8 @@ async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     panic!("timed out waiting for {what}");
 }
 
-/// A Server armed with a heartbeat-only offer: it rotates a setting without changing the
-/// credential or endpoint, so the offer verifies against the very same listener.
+/// A Server armed with a heartbeat-only offer: it changes a setting without moving the endpoint,
+/// so the offer verifies against the very same listener.
 async fn spawn_armed_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let offer_config: ConnectionOfferConfig =
@@ -40,9 +42,7 @@ async fn spawn_armed_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile:
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("open the configuration store")
-            .with_connection_offer(Some(
-                ConnectionOffer::from_config(&offer_config).expect("offer"),
-            )),
+            .with_connection_offer(Some(ConnectionOffer::from_config(&offer_config))),
     );
     let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -67,6 +67,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
     )
 }
 
+/// Verifies: ADR-0013
 #[tokio::test]
 async fn an_offer_is_verified_persisted_and_reported_applied() {
     let (addr, state, dir) = spawn_armed_server().await;
@@ -77,7 +78,8 @@ async fn an_offer_is_verified_persisted_and_reported_applied() {
         state_dir = state_dir.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
+        .expect("write supervisor.toml");
 
     let client = spawn_client(&config_path);
 

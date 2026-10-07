@@ -36,6 +36,9 @@ fn main() {
 
     if let Some(path) = flag("--touch") {
         let mut marker = format!("pid={}\n", std::process::id());
+        if let Ok(token) = std::env::var("OPAMP_SUPERVISOR_TOKEN") {
+            marker.push_str(&format!("token={token}\n"));
+        }
         for arg in &args {
             marker.push_str(arg);
             marker.push('\n');

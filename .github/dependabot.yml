@@ -2,7 +2,7 @@
 #
 # This is the continuous, automatic half of dependency hygiene: Dependabot opens PRs to bump
 # dependencies on a schedule and — once "Dependabot security updates" is enabled in the repo's
-# Settings → Advanced Security — raises fix PRs for advisories between the weekly cargo-audit runs.
+# Settings → Advanced Security — raises fix PRs for advisories between the weekly cargo-deny runs.
 # It complements .github/workflows/audit.yml, which is the hard gate that fails a build on a
 # vulnerability.
 version: 2
@@ -17,6 +17,17 @@ updates:
       # One PR per week for the routine patch/minor bumps, so the noise stays low; a major bump
       # still gets its own PR to be reviewed on its own.
       cargo-patch-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The fuzz targets' own lockfile (fuzz/), kept as current as the workspace's.
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+    groups:
+      fuzz-patch-minor:
         update-types:
           - "minor"
           - "patch"

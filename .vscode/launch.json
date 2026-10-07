@@ -10,7 +10,8 @@
         "args": ["build", "--bin", "server", "--package", "fleet-server"],
         "filter": { "name": "server", "kind": "bin" }
       },
-      "args": ["--config", "config/server.toml"],
+      "args": ["--config", ".dev-pki/server.toml"],
+      "preLaunchTask": "dev pki",
       "cwd": "${workspaceFolder}"
     },
     {
@@ -23,7 +24,8 @@
         "args": ["build", "--bin", "supervisor", "--package", "fleet-agent"],
         "filter": { "name": "supervisor", "kind": "bin" }
       },
-      "args": ["--config", "config/supervisor.toml"],
+      "args": ["--config", ".dev-pki/supervisor.toml"],
+      "preLaunchTask": "dev pki",
       "cwd": "${workspaceFolder}"
     }
   ],
