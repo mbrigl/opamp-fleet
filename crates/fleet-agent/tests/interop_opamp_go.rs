@@ -661,8 +661,8 @@ fn our_client_against_opamp_go_server_over_plain_http() {
     our_client_against_go_server("http");
 }
 
-/// A PKI of the test's own, written to files: a CA, certificates it issues, and the files for one
-/// party at a time. Nothing in it reaches the network.
+/// A PKI of the test's own, written to files: a CA and the certificates it issues. Nothing in it
+/// reaches the network.
 struct TestPki {
     dir: tempfile::TempDir,
     ca_pem: String,
@@ -675,6 +675,10 @@ struct Party {
     cert: PathBuf,
     key: PathBuf,
 }
+
+/// The name our TLS endpoints are reached by: an IP address in the certificate, so nothing depends
+/// on how a host resolves `localhost`.
+const LOOPBACK: &str = "127.0.0.1";
 
 impl TestPki {
     fn new(name: &str) -> TestPki {
@@ -694,7 +698,11 @@ impl TestPki {
         }
     }
 
-    /// A certificate for `name`, issued directly by this CA, with `name` as its DNS name.
+    fn ca_file(&self) -> PathBuf {
+        self.dir.path().join("ca.pem")
+    }
+
+    /// A certificate for `name` — a DNS name, or an IP address — issued directly by this CA.
     fn issue(&self, name: &str) -> Party {
         let ca_key = rcgen::KeyPair::from_pem(&self.ca_key_pem).expect("CA key");
         let issuer = rcgen::Issuer::from_ca_cert_pem(&self.ca_pem, ca_key).expect("issuer");
@@ -708,7 +716,7 @@ impl TestPki {
         std::fs::write(&cert_file, cert.pem()).expect("write the certificate");
         std::fs::write(&key_file, key.serialize_pem()).expect("write the key");
         Party {
-            ca: self.dir.path().join("ca.pem"),
+            ca: self.ca_file(),
             cert: cert_file,
             key: key_file,
         }
@@ -716,8 +724,15 @@ impl TestPki {
 }
 
 impl Party {
-    /// The harness's `--tls` value: CA, certificate, key for a Client; certificate, key, client CA
-    /// for a Server.
+    /// The same party, trusting `ca` instead: a stranger who knows whom to trust.
+    fn trusting(self, ca: &Path) -> Party {
+        Party {
+            ca: ca.to_path_buf(),
+            ..self
+        }
+    }
+
+    /// The harness Client's `--tls` value: the CA it trusts, its certificate and key.
     fn as_client(&self) -> String {
         format!(
             "{},{},{}",
@@ -727,12 +742,14 @@ impl Party {
         )
     }
 
-    fn as_server(&self, client_ca: &Path) -> String {
+    /// The harness Server's `--tls` value: its certificate and key, and the CA it requires client
+    /// certificates from — the one it trusts.
+    fn as_server(&self) -> String {
         format!(
             "{},{},{}",
             self.cert.display(),
             self.key.display(),
-            client_ca.display()
+            self.ca.display()
         )
     }
 
@@ -747,15 +764,16 @@ impl Party {
     }
 }
 
-/// Our Server as it ships: TLS 1.3 alone, a server certificate for `localhost`, and admission by a
-/// client certificate the client CA issued, required in the handshake.
+/// Our Server's TLS and admission as the binary sets them up (`main.rs`): TLS 1.3 alone and
+/// admission by a client certificate its client CA issued, required in the handshake. What does
+/// not act at the handshake — revocation, the audit record, rate limits — is left out.
 async fn our_tls_server(pki: &TestPki) -> (SocketAddr, Arc<AppState>, tempfile::TempDir) {
     opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs")).expect("open the configuration store"),
     );
-    let server = pki.issue("localhost");
+    let server = pki.issue(LOOPBACK);
     let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
         "cert_file = {:?}\nkey_file = {:?}\nclient_ca_file = {:?}\n",
         server.cert.display().to_string(),
@@ -767,7 +785,7 @@ async fn our_tls_server(pki: &TestPki) -> (SocketAddr, Arc<AppState>, tempfile::
     let agent_tls = planes.agent.rustls_config().expect("the Agent plane's TLS");
     let admission =
         fleet_server::transport::Admission::new(true).with_enrolment(planes.issuers, None);
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Agent plane");
+    let listener = std::net::TcpListener::bind((LOOPBACK, 0)).expect("bind the Agent plane");
     let addr = listener.local_addr().expect("local addr");
     let app = fleet_server::agent_app(state.clone(), admission);
     let handle = opamp::server::listen::Handle::new();
@@ -775,12 +793,31 @@ async fn our_tls_server(pki: &TestPki) -> (SocketAddr, Arc<AppState>, tempfile::
     (addr, state, dir)
 }
 
-/// `opamp-go`'s Client against our Server as it ships: a member's certificate is admitted, reports
-/// and takes a configuration; a certificate another CA issued is refused in the handshake.
+/// A harness Client that our Server must refuse: it starts, fails to connect, and never appears.
+fn refused_go_client(state: &AppState, args: &[&str]) {
+    let go = Harness::spawn(args);
+    let uid = go.wait_for("the refused Client to start", "started", |_| true)["instance_uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    go.wait_for("its connection to fail", "connect_failed", |_| true);
+    assert!(go.events("connected").is_empty(), "it was let in");
+    assert!(
+        state
+            .snapshot()
+            .iter()
+            .all(|a| uid_hex(&a.instance_uid) != uid_hex(&uid)),
+        "it reached the fleet"
+    );
+}
+
+/// `opamp-go`'s Client against our Server's TLS and admission: a member's certificate, offered the
+/// way a real `opamp-go` agent offers one, is admitted, reports and takes a configuration; a
+/// certificate another CA issued is refused, and so is a peer that offers none.
 async fn go_client_against_our_tls_server(scheme: &str) {
     let pki = TestPki::new("interop-fleet-ca");
     let (addr, state, _dir) = our_tls_server(&pki).await;
-    let url = format!("{scheme}://localhost:{}/v1/opamp", addr.port());
+    let url = format!("{scheme}://{addr}/v1/opamp");
     let agent = |uid: &str| {
         state
             .snapshot()
@@ -819,51 +856,35 @@ async fn go_client_against_our_tls_server(scheme: &str) {
     drop(go);
 
     let elsewhere = TestPki::new("someone-elses-ca");
-    let stranger = elsewhere.issue("go-agent");
-    let refused = Harness::spawn(&[
-        "client",
-        "--tls",
-        // Trusts our Server, presents a certificate our client CA never issued.
-        &format!(
-            "{},{},{}",
-            member.ca.display(),
-            stranger.cert.display(),
-            stranger.key.display()
-        ),
-        &url,
-    ]);
-    let stranger_uid = refused.wait_for("the stranger to start", "started", |_| true)
-        ["instance_uid"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    refused.wait_for(
-        "the stranger's connection to fail",
-        "connect_failed",
-        |_| true,
+    let stranger = elsewhere.issue("go-agent").trusting(&pki.ca_file());
+    refused_go_client(
+        &state,
+        &[
+            "client",
+            "--tls",
+            &stranger.as_client(),
+            "--force-cert",
+            &url,
+        ],
     );
-    assert!(
-        agent(&stranger_uid).is_none(),
-        "a certificate another CA issued was admitted"
-    );
+    let nobody = format!("{},,", pki.ca_file().display());
+    refused_go_client(&state, &["client", "--tls", &nobody, &url]);
 }
 
-/// Our Client against `opamp-go`'s Server requiring a client certificate: with the certificate
-/// the Server's client CA issued it reports and applies a configuration; with one another CA
-/// issued it is refused in the handshake.
+/// Our Client against an `opamp-go` Server requiring a client certificate: with the certificate the
+/// Server's client CA issued it reports and applies a configuration; with one another CA issued it
+/// tries, and is refused in the handshake.
 fn our_client_against_go_tls_server(scheme: &str) {
     let pki = TestPki::new("interop-go-ca");
-    let server = pki.issue("localhost");
-    let client_ca = pki.dir.path().join("ca.pem");
-    let mut go = Harness::spawn(&["server", "--tls", &server.as_server(&client_ca)]);
+    let mut go = Harness::spawn(&["server", "--tls", &pki.issue(LOOPBACK).as_server()]);
     let port = go.wait_for("the Go Server to listen", "listening", |_| true)["port"]
         .as_u64()
         .unwrap();
-    let endpoint = format!("{scheme}://localhost:{port}/v1/opamp");
+    let endpoint = format!("{scheme}://{LOOPBACK}:{port}/v1/opamp");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let member = pki.issue("our-agent");
-    let (_client, _) = our_client_with(dir.path(), &endpoint, &member.tls_table());
+    let (client, _) = our_client_with(dir.path(), &endpoint, &member.tls_table());
     let first = go.wait_for("our Client's first report over TLS", "agent_message", |e| {
         e["has_description"] == true
     });
@@ -881,26 +902,27 @@ fn our_client_against_go_tls_server(scheme: &str) {
             && e["remote_config_hash"] == hash.as_str()
             && e["remote_config_status"] == "RemoteConfigStatuses_APPLIED"
     });
-    drop(_client);
+    drop(client);
 
     let other = tempfile::tempdir().expect("tempdir");
     let elsewhere = TestPki::new("someone-elses-ca");
-    let stranger = elsewhere.issue("our-agent");
-    let tls = format!(
-        "\n[tls]\nca_file = {:?}\ncert_file = {:?}\nkey_file = {:?}\n",
-        member.ca.display().to_string(),
-        stranger.cert.display().to_string(),
-        stranger.key.display().to_string(),
+    let stranger = elsewhere.issue("our-agent").trusting(&pki.ca_file());
+    let (hellos, reported) = (
+        go.events("client_hello").len(),
+        go.events("agent_message").len(),
     );
-    let reported = go.events("agent_message").len();
-    let (mut refused, _) = our_client_with(other.path(), &endpoint, &tls);
-    // A handshake the Server refuses never gets as far as a message; give it time to try, and make
-    // sure it was trying — a Client that did not start at all would pass this vacuously.
-    std::thread::sleep(Duration::from_secs(5));
+    let (mut refused, _) = our_client_with(other.path(), &endpoint, &stranger.tls_table());
+    // It tries: handshakes arrive while the Client keeps running.
+    let deadline = Instant::now() + TIMEOUT;
+    while go.events("client_hello").len() < hellos + 2 {
+        assert!(Instant::now() < deadline, "the stranger never tried");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(
         refused.0.try_wait().expect("poll the Client").is_none(),
-        "the Client with the stranger's certificate did not stay up to try"
+        "the Client with the stranger's certificate gave up instead of retrying"
     );
+    // And none of those attempts became a message.
     let after = go.events("agent_message");
     assert!(
         after[reported..]
@@ -911,15 +933,15 @@ fn our_client_against_go_tls_server(scheme: &str) {
     );
 }
 
-// Verifies: ADR-0009
+// Verifies: ADR-0035, ADR-0023, ADR-0026
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
-async fn opamp_go_client_against_our_server_as_it_ships() {
+async fn opamp_go_client_against_our_tls_and_admission() {
     go_client_against_our_tls_server("wss").await;
     go_client_against_our_tls_server("https").await;
 }
 
-// Verifies: ADR-0009
+// Verifies: ADR-0035, ADR-0023, ADR-0026
 #[test]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 fn our_client_against_opamp_go_server_requiring_a_client_certificate() {

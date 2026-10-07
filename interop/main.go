@@ -5,9 +5,10 @@
 // The harness reports what opamp-go sees as one JSON object per line on stdout, and takes
 // commands as one JSON object per line on stdin.
 //
-//	opamp-go-harness client [--request-uid] [--tls ca,cert,key] <url>
-//	    opamp-go's Client, connected to <url>; with --tls it trusts the CA file and presents the
-//	    certificate, over TLS 1.3 alone
+//	opamp-go-harness client [--request-uid] [--tls ca,cert,key [--force-cert]] <url>
+//	    opamp-go's Client, connected to <url>; with --tls it trusts the CA file and offers the
+//	    certificate (none when cert and key are empty), over TLS 1.3 alone. Go offers a certificate
+//	    only when the Server names its CA as acceptable; --force-cert offers it regardless
 //	opamp-go-harness server [--tls cert,key,client-ca]
 //	    opamp-go's Server, on 127.0.0.1, any port; with --tls it serves TLS 1.3 alone and requires
 //	    a client certificate the client CA issued
@@ -91,12 +92,13 @@ func main() {
 		flags := flag.NewFlagSet("client", flag.ExitOnError)
 		requestUid := flags.Bool("request-uid", false, "ask the Server for an instance_uid")
 		files := flags.String("tls", "", "ca,cert,key")
+		force := flags.Bool("force-cert", false, "offer the certificate whatever the Server accepts")
 		_ = flags.Parse(os.Args[2:])
 		if flags.NArg() != 1 {
 			usage()
 		}
 		var config *tls.Config
-		if config, err = clientTLS(*files); err == nil {
+		if config, err = clientTLS(*files, *force); err == nil {
 			err = runClient(flags.Arg(0), *requestUid, config)
 		}
 	case "server":
@@ -117,7 +119,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: opamp-go-harness client [--request-uid] [--tls ca,cert,key] <url>")
+	fmt.Fprintln(os.Stderr, "usage: opamp-go-harness client [--request-uid] [--tls ca,cert,key [--force-cert]] <url>")
 	fmt.Fprintln(os.Stderr, "       opamp-go-harness server [--tls cert,key,client-ca]")
 	os.Exit(2)
 }
@@ -147,9 +149,9 @@ func pool(file string) (*x509.CertPool, error) {
 	return certs, nil
 }
 
-// clientTLS trusts the CA and presents the certificate, on TLS 1.3 alone, as this project's own
-// endpoint requires of every peer.
-func clientTLS(list string) (*tls.Config, error) {
+// clientTLS trusts the CA and offers the certificate, on TLS 1.3 alone, as this project's own
+// endpoint requires of every peer. Without a certificate it offers none.
+func clientTLS(list string, force bool) (*tls.Config, error) {
 	files, err := tlsFiles(list)
 	if files == nil {
 		return nil, err
@@ -158,20 +160,25 @@ func clientTLS(list string) (*tls.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	config := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}
+	if files[1] == "" && files[2] == "" {
+		return config, nil
+	}
 	identity, err := tls.LoadX509KeyPair(files[1], files[2])
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{
-		RootCAs: roots,
-		// Presented whatever the Server names as acceptable: Go would otherwise send nothing for a
-		// certificate another CA issued, and the Server's refusal of a foreign certificate would
-		// go untested.
-		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	if force {
+		// Offered whatever the Server names as acceptable: without this Go sends nothing for a
+		// certificate another CA issued, and the refusal of a foreign certificate goes untested.
+		config.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			return &identity, nil
-		},
-		MinVersion: tls.VersionTLS13,
-	}, nil
+		}
+	} else {
+		// What a real opamp-go agent configures: Go picks it only if the Server accepts its CA.
+		config.Certificates = []tls.Certificate{identity}
+	}
+	return config, nil
 }
 
 // serverTLS serves the certificate and requires one the client CA issued, on TLS 1.3 alone.
@@ -193,6 +200,12 @@ func serverTLS(list string) (*tls.Config, error) {
 		ClientCAs:    clients,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		MinVersion:   tls.VersionTLS13,
+		// Every handshake attempt is reported, so a test can tell a refused peer from one that
+		// never tried.
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			emit("client_hello", nil)
+			return nil, nil
+		},
 	}, nil
 }
 
