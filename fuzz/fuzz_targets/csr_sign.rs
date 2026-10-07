@@ -35,7 +35,13 @@ fuzz_target!(|data: &[u8]| {
     let Ok(csr) = std::str::from_utf8(data) else {
         return;
     };
-    if let Ok(issued) = ca().sign(csr) {
-        assert!(!issued.contains("CA:TRUE"), "a request was signed as a CA");
+    if let Ok(issued) = ca().sign(csr, "fuzz-host") {
+        let (_, pem) = x509_parser::pem::parse_x509_pem(issued.pem.as_bytes()).expect("issued PEM");
+        let certificate = pem.parse_x509().expect("issued certificate");
+        let is_ca = certificate
+            .basic_constraints()
+            .expect("at most one basicConstraints")
+            .is_some_and(|constraints| constraints.value.ca);
+        assert!(!is_ca, "a request was signed as a CA");
     }
 });
