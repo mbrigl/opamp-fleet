@@ -12,8 +12,9 @@ use rustls::ServerConfig;
 /// How long connections are given to finish once shutdown has been asked for.
 ///
 /// Bounded on purpose: an Agent's WebSocket is idle most of the time and would otherwise decide
-/// how long a restart takes. Whatever has not ended by then is cut, and the record flush that
-/// follows shutdown (ADR-0013) still runs.
+/// how long a restart takes. Its session is told to close at once, with the close code for a server
+/// going away; whatever has not ended by the deadline is cut, and only then does the record flush
+/// that follows shutdown (ADR-0013) run.
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
 
 /// A plane on an already-bound listener, over TLS when `tls` is given, holding at most
