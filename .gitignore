@@ -33,3 +33,6 @@ Thumbs.db
 
 # Session artifacts — plans, handoff notes, scratch files (AGENTS.md, section 4)
 .scratch/
+
+# Development certificates from scripts/dev-pki.sh — throwaway keys, never committed.
+.dev-pki/

@@ -245,3 +245,44 @@ async fn a_run_carries_the_session_over_the_transport_the_scheme_names() {
         );
     }
 }
+
+/// A server that speaks TLS 1.2 alone never completes the handshake with this client, on either
+/// transport: the client offers TLS 1.3 and nothing older. The server is built from the full ring
+/// provider, so the refusal is the client's.
+/// Verifies: ADR-0012, Q-3
+#[tokio::test]
+async fn a_tls12_only_server_fails_the_handshake() {
+    opamp::tls::install_ring_provider();
+    let pki = Pki::new();
+    let identity = pki.issue("localhost");
+    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS12])
+    .expect("tls 1.2")
+    .with_no_client_auth()
+    .with_single_cert(
+        opamp::tls::certificates(&identity.cert_pem).expect("cert"),
+        opamp::tls::private_key(&identity.key_pem).expect("key"),
+    )
+    .expect("server config");
+    let router = opamp::server::router(Arc::new(Gate), Settings::new(4096));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(
+        Listener::new(listener, Handle::new())
+            .with_tls(Arc::new(tls))
+            .serve(router),
+    );
+    for scheme in ["wss", "https"] {
+        let described = connection(
+            format!("{scheme}://localhost:{port}/v1/opamp"),
+            &pki,
+            Some(pki.issue("agent")),
+        );
+        let error = opamp::client::connection::probe(&described, report)
+            .await
+            .expect_err("a TLS 1.2 server was reached");
+        assert!(error.starts_with("cannot reach"), "{scheme}: {error}");
+    }
+}

@@ -1,4 +1,4 @@
-// The version this build reports (ADR-0011, as amended by ADR-0011), baked in as
+// The version this build reports (ADR-0011), baked in as
 // `OPAMP_BUILD_VERSION` and read back through `fleet_core::version::current`.
 //
 // It lives in the crate both binaries already depend on because ADR-0011 asks for a *single* helper
