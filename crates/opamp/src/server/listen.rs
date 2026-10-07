@@ -61,6 +61,32 @@ pub const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// stated so that every listener visibly has one.
 pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a listener's WebSocket sessions get to close once it has stopped serving HTTP.
+///
+/// A session told to close sends its peer a close frame and ends at once, so this bound is only
+/// reached by a session stuck in its handler. Whatever is still open then is cut when the process
+/// exits.
+pub const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The WebSocket sessions a listener has upgraded to, which outlive the HTTP connection they began
+/// on and so are not counted by the [`Handle`]'s drain.
+///
+/// Every session holds a clone for as long as it runs. The listener asks them to close when it has
+/// stopped serving HTTP, and waits until every clone is gone, so what follows its `serve` — the
+/// Server's record flush — sees no session still at work (ADR-0023 clause 13).
+#[derive(Clone)]
+pub(crate) struct Sessions {
+    closing: tokio::sync::watch::Receiver<bool>,
+    _alive: tokio::sync::mpsc::Sender<()>,
+}
+
+impl Sessions {
+    /// Resolves once the listener asks its sessions to close.
+    pub(crate) async fn closing(&mut self) {
+        let _ = self.closing.wait_for(|closing| *closing).await;
+    }
+}
+
 /// Whether a peer has to present a client certificate, and the CA it is verified against.
 #[derive(Clone, Debug)]
 pub enum ClientAuth {
@@ -213,8 +239,15 @@ impl Listener {
         }
         let server = axum_server::from_tcp(self.listener).handle(self.handle);
         let slots = Slots::new(self.max_connections, self.pace);
-        let router = router.layer(axum::middleware::from_fn(pace::bodies));
-        match self.tls {
+        let (close, closing) = tokio::sync::watch::channel(false);
+        let (alive, mut ended) = tokio::sync::mpsc::channel(1);
+        let router = router
+            .layer(axum::middleware::from_fn(pace::bodies))
+            .layer(Extension(Sessions {
+                closing,
+                _alive: alive,
+            }));
+        let served = match self.tls {
             None => {
                 bounded(server.acceptor(Plain(slots)), self.header_read_timeout)
                     .serve(router.into_make_service())
@@ -230,7 +263,13 @@ impl Listener {
                 .serve(router.into_make_service())
                 .await
             }
-        }
+        };
+        // HTTP has drained; the WebSocket sessions are told to close and given their bound. The
+        // channel ends when the last session drops its clone, the router's own having gone with
+        // the server.
+        let _ = close.send(true);
+        let _ = tokio::time::timeout(SESSION_CLOSE_TIMEOUT, ended.recv()).await;
+        served
     }
 }
 

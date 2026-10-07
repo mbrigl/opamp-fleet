@@ -171,7 +171,7 @@ separately because conformance depends on them just as much.
 
 | Area | Requirement | Status | Note |
 |---|---|---|---|
-| WebSocket transport | Servers SHOULD accept it; Clients MAY choose either | implemented | Varint header followed by the Protobuf message (`opamp::frame`); both ends (ADR-0023). The Client uses it by default; the Server pushes config changes over it. |
+| WebSocket transport | Servers SHOULD accept it; Clients MAY choose either | implemented | Varint header followed by the Protobuf message (`opamp::frame`); both ends (ADR-0023). The Client uses it by default; the Server pushes config changes over it, and on shutdown closes every session with the code `1001` (going away) before it saves the fleet. |
 | Plain HTTP transport | Servers SHOULD accept it; Clients MAY choose either | implemented | *"Server implementations SHOULD accept both plain HTTP connections and WebSocket connections. OpAMP Client implementations may choose to support either."* Both ends (ADR-0023). The Client polls, by default every 30 s, with an immediate follow-up after a config outcome. |
 | Default endpoint | Port 4320, path `/v1/opamp` | implemented | Both defaults in place; address/endpoint configurable on both ends (ADR-0025). |
 | Message size limits | Both ends MUST enforce a receive limit and MUST NOT send past it; `413` on HTTP, close `1009` on WebSocket | implemented | New in `v0.19.0` — see [Message size limits](#message-size-limits). Default 64 MiB, the upstream recommendation; `max_message_size_bytes` in `server.toml` and `supervisor.toml` tightens it (ADR-0025). |
