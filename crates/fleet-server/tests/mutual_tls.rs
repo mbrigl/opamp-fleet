@@ -173,6 +173,9 @@ struct Served {
 /// certificate in the handshake (ADR-0026) and the Operator plane asking for none, exactly as the
 /// binary builds them.
 async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
+    // Before anything a test builds: a reqwest or rustls client made without a process provider
+    // panics, and which test reaches that first depends on the order the tests run in.
+    opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
     let test_clock = setup.clock.clone().unwrap_or_else(|| clock.clone());

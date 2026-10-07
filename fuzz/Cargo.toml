@@ -20,6 +20,8 @@ fleet-server = { path = "../crates/fleet-server" }
 prost = "0.14"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 tempfile = "3"
+# Reads the issued certificate back, so the assertion is on what was signed, not on its text.
+x509-parser = "0.18"
 
 # Its own workspace, so the repository's stable build never compiles libFuzzer.
 [workspace]

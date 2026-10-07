@@ -43,10 +43,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: client-linux, os: ubuntu-latest, package: client, binary: target/release/supervisor }
-          - { name: client-windows, os: windows-latest, package: client, binary: target/release/supervisor.exe }
-          - { name: client-macos, os: macos-latest, package: client, binary: target/release/supervisor }
-          - { name: server-linux, os: ubuntu-latest, package: server, binary: target/release/server }
+          - { name: client-linux, os: ubuntu-latest, package: fleet-agent, binary: target/release/supervisor }
+          - { name: client-windows, os: windows-latest, package: fleet-agent, binary: target/release/supervisor.exe }
+          - { name: client-macos, os: macos-latest, package: fleet-agent, binary: target/release/supervisor }
+          - { name: server-linux, os: ubuntu-latest, package: fleet-server, binary: target/release/server }
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
