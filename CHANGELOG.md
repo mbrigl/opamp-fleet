@@ -271,6 +271,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Fixed
 
+- **A Server that shuts down closes its WebSocket sessions before it saves the fleet**
+  ([ADR-0023](docs/adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
+  clause 13, [ADR-0013](docs/adr/0013-the-fleet-record.md) clause 5). The shutdown drain counted
+  HTTP connections only, so an Agent's WebSocket session kept being served after the drain and
+  after the Agent records were flushed, and ended without a close frame when the process exited.
+  Each session is now sent the close code `1001` (going away) once HTTP has drained, given five
+  seconds to end, and only then are the records saved. **What to do:** nothing; Agents reconnect
+  as before.
+
 - **A named parent certificate that is missing is waited for, never trusted on sight**
   ([ADR-0016](docs/adr/0016-icinga-2.md) clause 12). An `icinga2` Supervisor whose
   `trusted_cert_file` names a file that is not there — not yet delivered, or a mistyped path —
