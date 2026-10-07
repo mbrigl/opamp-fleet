@@ -131,15 +131,7 @@ func runClient(url string, requestUid bool) error {
 		httpClient = &http.Client{Transport: replyReader{next: http.DefaultTransport}}
 	}
 
-	if err := opamp.SetAgentDescription(&protobufs.AgentDescription{
-		IdentifyingAttributes: []*protobufs.KeyValue{
-			stringAttr("service.name", "opamp-go-harness"),
-			stringAttr("service.version", "0.25.0"),
-		},
-		NonIdentifyingAttributes: []*protobufs.KeyValue{
-			stringAttr("os.type", "linux"),
-		},
-	}); err != nil {
+	if err := opamp.SetAgentDescription(description("")); err != nil {
 		return err
 	}
 	capabilities := agentCapabilities
@@ -150,8 +142,6 @@ func runClient(url string, requestUid bool) error {
 		opamp.SetFlags(protobufs.AgentToServerFlags_AgentToServerFlags_RequestInstanceUid)
 	}
 
-	var current sync.Mutex
-	currentUid := uid
 	heartbeat := time.Second
 	ctx := context.Background()
 	settings := clienttypes.StartSettings{
@@ -189,7 +179,6 @@ func runClient(url string, requestUid bool) error {
 					})
 				}
 				if msg.AgentIdentification != nil {
-					copy(currentUid[:], msg.AgentIdentification.NewInstanceUid)
 					fields["new_instance_uid"] = hex.EncodeToString(msg.AgentIdentification.NewInstanceUid)
 				}
 				emit("message", fields)
@@ -208,15 +197,19 @@ func runClient(url string, requestUid bool) error {
 			stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			err := opamp.Stop(stopCtx)
 			cancel()
-			current.Lock()
-			final := hex.EncodeToString(currentUid[:])
-			current.Unlock()
 			if err != nil {
-				emit("stopped", map[string]any{"error": err.Error(), "instance_uid": final})
+				emit("stopped", map[string]any{"error": err.Error()})
 			} else {
-				emit("stopped", map[string]any{"instance_uid": final})
+				emit("stopped", nil)
 			}
 			return nil
+		case "describe":
+			// A changed description, sent once and then omitted: what a Server that missed it can
+			// only learn through ReportFullState.
+			if err := opamp.SetAgentDescription(description(c.Body)); err != nil {
+				return err
+			}
+			emit("described", map[string]any{"mark": c.Body})
 		default:
 			emit("error", map[string]any{"message": "unknown client command " + c.Cmd})
 		}
@@ -242,12 +235,24 @@ func (r replyReader) RoundTrip(req *http.Request) (*http.Response, error) {
 	var reply protobufs.ServerToAgent
 	if resp.Header.Get("Content-Encoding") == "" && proto.Unmarshal(body, &reply) == nil {
 		emit("server_reply", map[string]any{
-			"capabilities":  reply.Capabilities,
-			"flags":         reply.Flags,
-			"remote_config": reply.RemoteConfig != nil,
+			"capabilities": reply.Capabilities,
+			"flags":        reply.Flags,
 		})
 	}
 	return resp, nil
+}
+
+// description is the harness Client's AgentDescription; a non-empty mark rides along as the
+// non-identifying attribute interop.mark.
+func description(mark string) *protobufs.AgentDescription {
+	nonIdentifying := []*protobufs.KeyValue{stringAttr("os.type", "linux")}
+	if mark != "" {
+		nonIdentifying = append(nonIdentifying, stringAttr("interop.mark", mark))
+	}
+	return &protobufs.AgentDescription{
+		IdentifyingAttributes:    []*protobufs.KeyValue{stringAttr("service.name", "opamp-go-harness")},
+		NonIdentifyingAttributes: nonIdentifying,
+	}
 }
 
 func stringAttr(key, value string) *protobufs.KeyValue {
@@ -257,7 +262,8 @@ func stringAttr(key, value string) *protobufs.KeyValue {
 	}
 }
 
-// serverCapabilities is what the harness's Server declares on every reply.
+// serverCapabilities is what the harness's Server declares on every reply until a "capabilities"
+// command changes it.
 const serverCapabilities = protobufs.ServerCapabilities_ServerCapabilities_AcceptsStatus |
 	protobufs.ServerCapabilities_ServerCapabilities_OffersRemoteConfig |
 	protobufs.ServerCapabilities_ServerCapabilities_AcceptsEffectiveConfig
@@ -268,10 +274,11 @@ type pending struct {
 	remoteConfig    *protobufs.AgentRemoteConfig
 	reportFullState bool
 	newUid          []byte
+	capabilities    uint64
 }
 
 func runServer() error {
-	var next pending
+	next := pending{capabilities: uint64(serverCapabilities)}
 	srv := server.New(nil)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -290,9 +297,6 @@ func runServer() error {
 								ctx context.Context, conn servertypes.Connection, msg *protobufs.AgentToServer,
 							) *protobufs.ServerToAgent {
 								return onAgentMessage(&next, msg)
-							},
-							OnConnectionClose: func(conn servertypes.Connection) {
-								emit("connection_closed", nil)
 							},
 						},
 					}
@@ -322,6 +326,14 @@ func runServer() error {
 				ConfigHash: hash,
 			}
 			emit("queued", map[string]any{"cmd": c.Cmd, "hash": hex.EncodeToString(hash)})
+		case "capabilities":
+			var value uint64
+			if _, err := fmt.Sscan(c.Body, &value); err != nil {
+				next.Unlock()
+				return err
+			}
+			next.capabilities = value
+			emit("queued", map[string]any{"cmd": c.Cmd})
 		case "report_full_state":
 			next.reportFullState = true
 			emit("queued", map[string]any{"cmd": c.Cmd})
@@ -352,12 +364,13 @@ func runServer() error {
 // queued for it.
 func onAgentMessage(next *pending, msg *protobufs.AgentToServer) *protobufs.ServerToAgent {
 	fields := map[string]any{
-		"instance_uid":     hex.EncodeToString(msg.InstanceUid),
-		"sequence_num":     msg.SequenceNum,
-		"capabilities":     msg.Capabilities,
-		"flags":            msg.Flags,
-		"has_description":  msg.AgentDescription != nil,
-		"agent_disconnect": msg.AgentDisconnect != nil,
+		"instance_uid":         hex.EncodeToString(msg.InstanceUid),
+		"sequence_num":         msg.SequenceNum,
+		"capabilities":         msg.Capabilities,
+		"flags":                msg.Flags,
+		"has_description":      msg.AgentDescription != nil,
+		"agent_disconnect":     msg.AgentDisconnect != nil,
+		"has_effective_config": msg.EffectiveConfig != nil,
 	}
 	if d := msg.AgentDescription; d != nil {
 		for _, kv := range d.IdentifyingAttributes {
@@ -369,16 +382,15 @@ func onAgentMessage(next *pending, msg *protobufs.AgentToServer) *protobufs.Serv
 	if s := msg.RemoteConfigStatus; s != nil {
 		fields["remote_config_status"] = s.Status.String()
 		fields["remote_config_hash"] = hex.EncodeToString(s.LastRemoteConfigHash)
-		fields["remote_config_error"] = s.ErrorMessage
 	}
 	emit("agent_message", fields)
 
-	reply := &protobufs.ServerToAgent{
-		InstanceUid:  msg.InstanceUid,
-		Capabilities: uint64(serverCapabilities),
-	}
 	next.Lock()
 	defer next.Unlock()
+	reply := &protobufs.ServerToAgent{
+		InstanceUid:  msg.InstanceUid,
+		Capabilities: next.capabilities,
+	}
 	if next.remoteConfig != nil {
 		reply.RemoteConfig = next.remoteConfig
 		next.remoteConfig = nil

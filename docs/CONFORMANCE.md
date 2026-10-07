@@ -280,12 +280,12 @@ beyond its reach. What the job reaches is narrower than the matrix:
 | Row | Reached by the oracle | Note |
 |---|---|---|
 | WebSocket transport, Plain HTTP transport | both directions | Every scenario runs on both. |
-| `sequence_num` | both directions | Our Client's numbers are checked for gaps by `opamp-go`'s Server; our Server's view advances one per report. |
-| `ReportFullState` | both directions | Our Server asks for it after a restart that cost it the Agent; `opamp-go`'s Server asks our Client for it. |
+| `sequence_num` | both directions | The test checks the numbers our Client sends for gaps; our Server asks for no full state while nothing was lost, and notices the gap when the Agent returns to it after reporting elsewhere. |
+| `ReportFullState` | both directions | Our Server asks for it from an Agent it has never seen and after a gap, and learns a description that changed in between; `opamp-go`'s Server asks our Client for it. |
 | `AcceptsRemoteConfig`, `ReportsRemoteConfig`, `OffersRemoteConfig` | both directions | Offer, `APPLIED` with the offered hash, and no repeated offer once applied. |
-| Capability negotiation | both directions, partly | Each side records what the other declared. `opamp-go`'s Client exposes no Server capabilities, so ours are read off the wire on plain HTTP only. |
+| Capability negotiation | both directions, partly | Each side records what the other declared, and our Client stops reporting its effective configuration once `opamp-go`'s Server stops declaring `AcceptsEffectiveConfig`. `opamp-go`'s Client exposes no Server capabilities, so ours are read off the wire on plain HTTP only. |
 | `AgentIdentification`, `RequestInstanceUid` | both directions | Our Server mints the identity `opamp-go`'s Client requests; our Client adopts and persists one `opamp-go`'s Server assigns. |
-| `agent_disconnect` | both directions | Our Client says goodbye on a graceful stop on both transports; our Server records `opamp-go`'s over WebSocket. |
+| `agent_disconnect` | our Client only | Our Client says goodbye on a graceful stop on both transports. Our Server's side is not decided: `opamp-go`'s plain-HTTP Client sends no `agent_disconnect`, and over WebSocket the goodbye and the closing socket mark the Agent disconnected alike. |
 | Transport security, Mutual TLS, Authentication | no | The job runs plaintext on the loopback with an open admission, as the rest of the suite does. |
 | Packages, connection settings, own telemetry, Gateway Mode | no | Not in the scenario list of ADR-0009. |
 

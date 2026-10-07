@@ -284,16 +284,13 @@ async fn go_client_against_our_server(scheme: &str) {
         if scheme == "ws" { "websocket" } else { "http" }
     );
 
-    // sequence_num advances one by one under heartbeats.
+    // sequence_num advances under heartbeats; that it advances without a gap is what the
+    // ReportFullState steps below decide, through a gap our Server must notice.
     let first = view.sequence_num;
-    let later = wait_until("three more reports", || {
-        server
-            .agent(&uid)
-            .map(|a| a.sequence_num)
-            .filter(|n| *n >= first + 3)
+    wait_until("three more reports", || {
+        server.agent(&uid).filter(|a| a.sequence_num >= first + 3)
     })
     .await;
-    assert!(later >= first + 3);
 
     // The Server's capabilities reach the Go Client (read off the wire on plain HTTP, where the
     // harness can see the reply before opamp-go does).
@@ -351,11 +348,22 @@ async fn go_client_against_our_server(scheme: &str) {
         .count();
     assert_eq!(offers, 1, "the hash gate let an applied offer repeat");
 
-    // ReportFullState: a Server that lost its state asks for it, and gets the description back.
-    let server = OurServer::start().await;
-    relay.switch_to(server.addr);
-    wait_until("the restarted Server to recover the full state", || {
-        server
+    // Until now nothing was lost, so our Server never asked for the full state.
+    if scheme == "http" {
+        let asked = go
+            .events("server_reply")
+            .iter()
+            .filter(|e| e["flags"].as_u64().unwrap_or(0) & bits::REPORT_FULL_STATE != 0)
+            .count();
+        assert_eq!(asked, 0, "ReportFullState without a gap");
+    }
+
+    // ReportFullState for an unknown Agent: a second Server that has never seen it asks, and
+    // gets the description back.
+    let other = OurServer::start().await;
+    relay.switch_to(other.addr);
+    wait_until("the second Server to recover the full state", || {
+        other
             .agent(&uid)
             .filter(|a| a.service_name == GO_AGENT_TYPE)
     })
@@ -368,22 +376,33 @@ async fn go_client_against_our_server(scheme: &str) {
         );
     }
 
-    // agent_disconnect: a clean stop says goodbye, and the Server records it.
-    if scheme == "ws" {
-        wait_until("the restarted Server to see the connection", || {
-            server.agent(&uid).filter(|a| a.connected)
-        })
-        .await;
-    }
+    // ReportFullState for a gap: the description changes while the first Server is not
+    // listening, so when the Agent comes back to it, the first Server sees `sequence_num` jump
+    // and can learn the change only by asking for the full state.
+    go.send(json!({"cmd": "describe", "body": "after-the-gap"}));
+    let marked = |a: &AgentView| {
+        a.non_identifying_attributes
+            .get("interop.mark")
+            .map(String::as_str)
+            == Some("after-the-gap")
+    };
+    wait_until("the second Server to see the changed description", || {
+        other.agent(&uid).filter(|a| marked(a))
+    })
+    .await;
+    relay.switch_to(server.addr);
+    wait_until(
+        "the first Server to recover the change after the gap",
+        || server.agent(&uid).filter(|a| marked(a)),
+    )
+    .await;
+
+    // A graceful stop. Whether our Server is told goodbye is not decided here: `opamp-go`'s
+    // plain-HTTP Client sends no `agent_disconnect`, and over WebSocket the goodbye and the
+    // closing socket mark the Agent disconnected alike (interop/README.md).
     go.send(json!({"cmd": "stop"}));
     let stopped = go.wait_for("the Go Client to stop", "stopped", |_| true);
     assert!(stopped.get("error").is_none(), "stop failed: {stopped}");
-    if scheme == "ws" {
-        wait_until("the Server to record the disconnect", || {
-            server.agent(&uid).filter(|a| !a.connected)
-        })
-        .await;
-    }
 }
 
 /// A Server-assigned identity: the Go Client asks for one, our Server mints it, and the Agent
@@ -536,6 +555,22 @@ fn our_client_against_go_server(scheme: &str) {
         "sequence_num skipped: {run:?}"
     );
 
+    // Capability negotiation, the Server's half: while the Server declares
+    // AcceptsEffectiveConfig our Client reports its effective configuration...
+    let full = |e: &Value| e["instance_uid"] == uid.as_str() && e["has_description"] == true;
+    assert!(
+        go.events("agent_message")
+            .iter()
+            .any(|e| full(e) && e["has_effective_config"] == true),
+        "no effective configuration reported to a Server that accepts one"
+    );
+    // ...and once the Server stops declaring it, a full report leaves it out.
+    let without_effective_config = bits::SERVER_ACCEPTS_STATUS | bits::SERVER_OFFERS_REMOTE_CONFIG;
+    go.send(json!({"cmd": "capabilities", "body": without_effective_config.to_string()}));
+    go.wait_for("the new capabilities to be queued", "queued", |e| {
+        e["cmd"] == "capabilities"
+    });
+
     // ReportFullState: asked for it, the next report carries the full description again.
     go.send(json!({"cmd": "report_full_state"}));
     go.wait_for("ReportFullState to go out", "sent", |e| {
@@ -555,11 +590,13 @@ fn our_client_against_go_server(scheme: &str) {
             .and_then(|e| e["sequence_num"].as_u64())
             .expect("a report the flag answered")
     };
-    go.wait_for("a full report after the flag", "agent_message", |e| {
-        e["instance_uid"] == uid.as_str()
-            && e["sequence_num"].as_u64().unwrap() > asked_at
-            && e["has_description"] == true
+    let refreshed = go.wait_for("a full report after the flag", "agent_message", |e| {
+        full(e) && e["sequence_num"].as_u64().unwrap() > asked_at
     });
+    assert_eq!(
+        refreshed["has_effective_config"], false,
+        "effective configuration reported to a Server that no longer accepts it"
+    );
 
     // Remote config: an empty Supervisor set offered to the Client's own Agent is applied and
     // acknowledged with the offered hash.

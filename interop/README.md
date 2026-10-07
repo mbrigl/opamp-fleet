@@ -30,15 +30,20 @@ Each runs in both directions (`opamp-go`'s Client against our Server, our Client
 `opamp-go`'s Server) and on both transports:
 
 - connect and report: the description and the declared capabilities arrive;
-- `sequence_num` continuity, and the `ReportFullState` recovery: our Server, restarted behind a
-  relay with no memory of the Agent, asks for it; `opamp-go`'s Server asks our Client for it;
+- `sequence_num` continuity, and the `ReportFullState` recovery: our Server asks for the full state
+  from an Agent a relay hands it without its history, and from one that comes back to it after a
+  gap with a changed description; `opamp-go`'s Server asks our Client for it;
 - the remote-config offer, its `APPLIED` acknowledgement with the offered hash, and the hash gate
   that stops our Server repeating an applied offer;
-- capability negotiation: each side records what the other declared. `opamp-go`'s Client hands its
-  callbacks no Server capabilities, so on that side they are read off the wire, on plain HTTP only;
+- capability negotiation: each side records what the other declared, and our Client drops its
+  effective configuration from its reports once `opamp-go`'s Server stops accepting it.
+  `opamp-go`'s Client hands its callbacks no Server capabilities, so on that side they are read off
+  the wire, on plain HTTP only;
 - identity: a Server-assigned `AgentIdentification` is adopted, our Client persists it, and our
   Server keeps no record under the requested identity;
-- `agent_disconnect` on a graceful stop.
+- `agent_disconnect` on a graceful stop of our Client. The other direction is not decided:
+  `opamp-go`'s plain-HTTP Client sends no `agent_disconnect` (an oracle gap), and over WebSocket
+  the goodbye and the closing socket mark the Agent disconnected alike.
 
 ## When it is red
 

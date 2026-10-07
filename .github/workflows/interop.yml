@@ -29,6 +29,12 @@ jobs:
         with:
           go-version-file: interop/go.mod
           cache-dependency-path: interop/go.sum
+      # The harness is code too: formatted and vetted before anything runs it.
+      - name: Lint the Go harness
+        working-directory: interop
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
       - uses: Swatinem/rust-cache@v2
       # Built as its own step so a compile failure is not reported as an interop failure.
       - name: Build
