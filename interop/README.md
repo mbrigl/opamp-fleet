@@ -27,7 +27,8 @@ The test builds this program itself with `go build`.
 ## Scenarios
 
 Each runs in both directions (`opamp-go`'s Client against our Server, our Client against
-`opamp-go`'s Server) and on both transports:
+`opamp-go`'s Server) and on both transports; all but the last-but-one run in plaintext on the
+loopback with an open admission:
 
 - connect and report: the description and the declared capabilities arrive;
 - `sequence_num` continuity, and the `ReportFullState` recovery: our Server asks for the full state
@@ -41,6 +42,9 @@ Each runs in both directions (`opamp-go`'s Client against our Server, our Client
   the wire, on plain HTTP only;
 - identity: a Server-assigned `AgentIdentification` is adopted, our Client persists it, and our
   Server keeps no record under the requested identity;
+- the endpoint as it ships: both directions over `wss://` and `https://` with TLS 1.3 alone and a
+  required client certificate from a PKI the test generates, carrying connect and report and a
+  configuration round trip; a certificate another CA issued is refused by both ends;
 - `agent_disconnect` on a graceful stop of our Client. The other direction is not decided:
   `opamp-go`'s plain-HTTP Client sends no `agent_disconnect` (an oracle gap), and over WebSocket
   the goodbye and the closing socket mark the Agent disconnected alike.

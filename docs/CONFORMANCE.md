@@ -286,7 +286,7 @@ beyond its reach. What the job reaches is narrower than the matrix:
 | Capability negotiation | both directions, partly | Each side records what the other declared, and our Client stops reporting its effective configuration once `opamp-go`'s Server stops declaring `AcceptsEffectiveConfig`. `opamp-go`'s Client exposes no Server capabilities, so ours are read off the wire on plain HTTP only. |
 | `AgentIdentification`, `RequestInstanceUid` | both directions | Our Server mints the identity `opamp-go`'s Client requests; our Client adopts and persists one `opamp-go`'s Server assigns. |
 | `agent_disconnect` | our Client only | Our Client says goodbye on a graceful stop on both transports. Our Server's side is not decided: `opamp-go`'s plain-HTTP Client sends no `agent_disconnect`, and over WebSocket the goodbye and the closing socket mark the Agent disconnected alike. |
-| Transport security, Mutual TLS, Authentication | no | The job runs plaintext on the loopback with an open admission, as the rest of the suite does. |
+| Transport security, Mutual TLS, Authentication | both directions | Connect, report and a configuration round trip also run over `wss://` and `https://` on TLS 1.3 alone, against our Server admitting by a client certificate its client CA issued, and with our Client presenting one to an `opamp-go` Server that requires it. A certificate another CA issued is refused by both. The certificates come from a PKI the test generates. |
 | Packages, connection settings, own telemetry, Gateway Mode | no | Not in the scenario list of ADR-0009. |
 
 ## Deviations
