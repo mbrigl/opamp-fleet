@@ -1,0 +1,53 @@
+# Interop against opamp-go
+
+This directory holds the Go side of the conformance check of
+[ADR-0009](../docs/adr/0009-protocol-baseline-and-conformance.md): a small program that puts
+[`opamp-go`](https://github.com/open-telemetry/opamp-go), the OpAMP reference implementation, at the
+far end of a connection with this project's Server or Client. It decides nothing. It reports what
+`opamp-go` sees as one JSON object per line on stdout and takes commands on stdin. The scenarios and
+every assertion live in
+[`crates/fleet-agent/tests/interop_opamp_go.rs`](../crates/fleet-agent/tests/interop_opamp_go.rs),
+where both ends' state can be read.
+
+`go.mod` pins the oracle. Moving the pin is a deliberate change, like a Baseline move: read what the
+new release brought and update the oracle row in [`CONFORMANCE.md`](../docs/CONFORMANCE.md).
+
+## Running it
+
+The job runs weekly and on demand ([`interop.yml`](../.github/workflows/interop.yml)). Locally, with
+a Go toolchain on `PATH` (nothing else in the repository needs one, and the Dev Container ships
+none):
+
+```console
+cargo test -p fleet-agent --test interop_opamp_go -- --ignored --nocapture --test-threads=1
+```
+
+The test builds this program itself with `go build`.
+
+## Scenarios
+
+Each runs in both directions (`opamp-go`'s Client against our Server, our Client against
+`opamp-go`'s Server) and on both transports:
+
+- connect and report: the description and the declared capabilities arrive;
+- `sequence_num` continuity, and the `ReportFullState` recovery: our Server, restarted behind a
+  relay with no memory of the Agent, asks for it; `opamp-go`'s Server asks our Client for it;
+- the remote-config offer, its `APPLIED` acknowledgement with the offered hash, and the hash gate
+  that stops our Server repeating an applied offer;
+- capability negotiation: each side records what the other declared. `opamp-go`'s Client hands its
+  callbacks no Server capabilities, so on that side they are read off the wire, on plain HTTP only;
+- identity: a Server-assigned `AgentIdentification` is adopted, our Client persists it, and our
+  Server keeps no record under the requested identity;
+- `agent_disconnect` on a graceful stop.
+
+## When it is red
+
+Triage a failure before calling it a defect. It is one of three things:
+
+1. **Our bug.** The point of the exercise. Fix it, with a regression test in the ordinary suite
+   where one can be written.
+2. **The oracle lagging the Baseline.** `opamp-go` may implement an older `opamp-spec` than the
+   Baseline. Record it as a known upstream gap in `CONFORMANCE.md`, and pin the scenario to the
+   older behaviour or skip it by name, with the row it concerns.
+3. **A genuine ambiguity in the specification.** Open an issue upstream in `opamp-spec`, and link
+   it from the `CONFORMANCE.md` row it concerns.

@@ -201,6 +201,12 @@ it (AGENTS.md links here).
   (needs `cargo install cargo-fuzz` and a nightly toolchain); the targets are listed in
   [`fuzz/Cargo.toml`](fuzz/Cargo.toml), and every parser that reads bytes from the network or a
   downloaded artifact has one (specification Q-2)
+- **Check interop against `opamp-go`:**
+  `cargo test -p fleet-agent --test interop_opamp_go -- --ignored --nocapture --test-threads=1`
+  (needs a Go toolchain on `PATH`, which nothing else here needs and the Dev Container does not
+  ship); the scheduled `Interop` workflow runs it weekly, and
+  [`interop/README.md`](interop/README.md) says what it covers and how a red run is triaged
+  (ADR-0009)
 - **Make development certificates:** `scripts/dev-pki.sh` — both binaries refuse to run without
   TLS (ADR-0023); it writes a CA, a Server certificate for `127.0.0.1`, an Agent certificate, and a
   `server.toml` and `supervisor.toml` that use them to `.dev-pki/`. The VS Code launch

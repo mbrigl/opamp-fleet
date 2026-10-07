@@ -20,6 +20,7 @@ against. It is the single authoritative statement of "which OpAMP" this code spe
 | **Upstream specification** | <https://github.com/open-telemetry/opamp-spec> |
 | **Upstream status** | Beta — the protocol itself is not yet stable |
 | **Last reconciled with upstream** | 2026-10-01 |
+| **Interop oracle** | [`opamp-go`](https://github.com/open-telemetry/opamp-go) `v0.25.0` (2026-09-29), which implements `opamp-spec` `v0.20.0`; pinned in [`interop/go.mod`](../interop/go.mod) — see [Interoperability](#interoperability) |
 
 Moving the Baseline to a newer upstream version is a deliberate change — see
 [Upgrading the Baseline](#upgrading-the-baseline) for what it obliges.
@@ -263,6 +264,30 @@ capability bit.
   queued (ADR-0026). This is a different question from the bullet above: the *issued* certificate
   is still not bound to an `instance_uid`. This project's own Client claims nothing, so its
   requests are signed as before.
+
+## Interoperability
+
+Both ends are checked against `opamp-go`, the reference implementation, in a scheduled job
+([ADR-0009](adr/0009-protocol-baseline-and-conformance.md),
+[`interop.yml`](../.github/workflows/interop.yml)): `opamp-go`'s Client against our Server, and our
+Client against `opamp-go`'s Server, on the WebSocket and the plain HTTP transport. The scenarios are
+[`crates/fleet-agent/tests/interop_opamp_go.rs`](../crates/fleet-agent/tests/interop_opamp_go.rs);
+how a red run is triaged is in [`interop/README.md`](../interop/README.md).
+
+The oracle implements the Baseline's own `opamp-spec` version, so no row of this document lies
+beyond its reach. What the job reaches is narrower than the matrix:
+
+| Row | Reached by the oracle | Note |
+|---|---|---|
+| WebSocket transport, Plain HTTP transport | both directions | Every scenario runs on both. |
+| `sequence_num` | both directions | Our Client's numbers are checked for gaps by `opamp-go`'s Server; our Server's view advances one per report. |
+| `ReportFullState` | both directions | Our Server asks for it after a restart that cost it the Agent; `opamp-go`'s Server asks our Client for it. |
+| `AcceptsRemoteConfig`, `ReportsRemoteConfig`, `OffersRemoteConfig` | both directions | Offer, `APPLIED` with the offered hash, and no repeated offer once applied. |
+| Capability negotiation | both directions, partly | Each side records what the other declared. `opamp-go`'s Client exposes no Server capabilities, so ours are read off the wire on plain HTTP only. |
+| `AgentIdentification`, `RequestInstanceUid` | both directions | Our Server mints the identity `opamp-go`'s Client requests; our Client adopts and persists one `opamp-go`'s Server assigns. |
+| `agent_disconnect` | both directions | Our Client says goodbye on a graceful stop on both transports; our Server records `opamp-go`'s over WebSocket. |
+| Transport security, Mutual TLS, Authentication | no | The job runs plaintext on the loopback with an open admission, as the rest of the suite does. |
+| Packages, connection settings, own telemetry, Gateway Mode | no | Not in the scenario list of ADR-0009. |
 
 ## Deviations
 
