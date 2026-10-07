@@ -1,7 +1,7 @@
 # ADR-0009: The protocol is pinned to a released Baseline, compiled from a vendored schema, and checked against opamp-go
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-08-09
+- **Status:** ⚪ superseded by [ADR-0035](0035-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)
+- **Date:** 2026-10-07
 - **Deciders:** Markus Brigl
 - **Applies to:** docs/CONFORMANCE.md, crates/opamp/build.rs, crates/opamp/proto/, the Protocol Baseline check in scripts/check-docs.sh, and every change that adds or alters protocol behaviour
 

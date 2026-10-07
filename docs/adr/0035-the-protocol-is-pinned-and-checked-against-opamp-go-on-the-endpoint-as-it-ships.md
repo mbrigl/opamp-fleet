@@ -1,12 +1,10 @@
 # ADR-0035: The protocol is pinned to a released Baseline, compiled from a vendored schema, and checked against opamp-go on the endpoint as it ships
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-07
 - **Deciders:** Markus Brigl
 - **Applies to:** docs/CONFORMANCE.md, crates/opamp/build.rs, crates/opamp/proto/, the Protocol Baseline check in scripts/check-docs.sh, interop/, crates/fleet-agent/tests/interop_opamp_go.rs, .github/workflows/interop.yml, and every change that adds or alters protocol behaviour
-
-Supersedes [ADR-0009](0009-protocol-baseline-and-conformance.md) whole, on acceptance: the
-`Supersedes` field and ADR-0009's status line change together, with the flip to accepted.
+- **Supersedes:** [ADR-0009](0009-protocol-baseline-and-conformance.md)
 
 ## Context
 
@@ -40,13 +38,13 @@ The oracle as it stands meets three further facts:
   `v0.20.0`, the Baseline itself, and `v0.25.0` is its newest release. An oracle reading an older
   specification than the Baseline is therefore not today's case, but it returns whenever either
   side moves, so the duty to write it down stays.
-- **The oracle checks the endpoint as a test builds it, not as it ships.** The job runs plaintext
-  on the loopback with an open admission, as the rest of the suite does. The shipped Server refuses
+- **Plaintext runs alone check the endpoint as a test builds it, not as it ships.** They run on
+  the loopback with an open admission, as the rest of the suite does. The shipped Server refuses
   plaintext beyond the loopback and admits by a client certificate in a TLS 1.3 handshake alone
   ([ADR-0023](0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
   [ADR-0026](0026-admission-by-a-client-certificate-alone.md)), and the Client presents one on both
-  transports. Whether `opamp-go` can speak to that endpoint at all, and ours to an `opamp-go`
-  Server that requires the same, is untested — and it is the path every deployment takes.
+  transports. Whether `opamp-go` can speak to that endpoint, and ours to an `opamp-go` Server that
+  requires the same, is what every deployment depends on.
 - **Not everything the scenario list names is observable on both ends.** `opamp-go`'s plain-HTTP
   Client sends no `agent_disconnect`, and over WebSocket its goodbye reaches our Server together
   with the closing socket, which marks the Agent disconnected on its own. A test that waits for
@@ -238,9 +236,7 @@ well as in plaintext on the loopback.
 - Negative / trade-offs: a second toolchain enters the project's life, the TLS runs need a test PKI
   in the harness, and a scheduled job nobody reads is decoration; clause 17 is what makes it worth
   having.
-- Follow-ups: the TLS and client-certificate runs of clause 14, which the job does not have yet;
-  the references to ADR-0009 in code comments and in other ADRs' text, which point here once this
-  decision is accepted; a non-blocking job against `opamp-go`'s `main` if its releases stay
+- Follow-ups: a non-blocking job against `opamp-go`'s `main` if its releases stay
   frozen; the Collector as a second oracle; generating the matrix from the code.
 
 ## Enforcement

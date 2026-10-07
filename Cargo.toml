@@ -21,7 +21,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 axum = "0.8"
 prost = "0.14"
 prost-build = "0.14"
-# Pure-Rust protobuf compilation — no system protoc anywhere in the build chain (ADR-0009).
+# Pure-Rust protobuf compilation — no system protoc anywhere in the build chain (ADR-0035).
 protox = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -48,7 +48,7 @@ uuid = { version = "1", features = ["v7"] }
 flate2 = "1"
 # Opening a `.7z` package artifact, encrypted or not (ADR-0018). Pure Rust; default features are
 # off because they pull `bzip2`, which links a *system* library — `aes256` is the RustCrypto AES
-# this needs, and LZMA/LZMA2 decoding is in the base. That keeps what ADR-0009 and ADR-0023
+# this needs, and LZMA/LZMA2 decoding is in the base. That keeps what ADR-0035 and ADR-0023
 # actually secured: no system dependency, no cmake, no `protoc`. This build is not free of C —
 # `ring` compiles C and assembly in its build script, so a C compiler is required either way
 # (ADR-0026).
@@ -60,11 +60,11 @@ sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256
 # Reading a `.zip` package artifact (ADR-0015) — the container the GLPI Agent's portable Windows
 # build is published in. Default features pull C-binding codecs (bzip2, xz, zstd), so only
 # `deflate` is taken, which decompresses on the `flate2`/`miniz_oxide` chain already present;
-# reading stays pure Rust (ADR-0009, ADR-0023). Read-only and unencrypted: the Client never
+# reading stays pure Rust (ADR-0035, ADR-0023). Read-only and unencrypted: the Client never
 # writes a zip, and a confidential artifact is a `.7z` (ADR-0018).
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # Reading the tar inside a `.tar.gz` package artifact (ADR-0018). Pure Rust and no system library,
-# which is what ADR-0009 and ADR-0023 keep this build free of; the Client extracts one member and
+# which is what ADR-0035 and ADR-0023 keep this build free of; the Client extracts one member and
 # never writes a path the archive chose.
 tar = "0.4"
 # Encoding Basic credentials into their Authorization header value (ADR-0026).

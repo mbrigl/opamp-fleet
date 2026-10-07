@@ -895,7 +895,7 @@ check_template_release() {
 }
 
 # The Protocol Baseline — the pinned upstream opamp-spec version all protocol code is written
-# against (ADR-0009) — must stay a deliberate choice. This compares the pin against the latest
+# against (ADR-0035) — must stay a deliberate choice. This compares the pin against the latest
 # upstream release and warns on divergence, so falling behind is noticed rather than discovered.
 # Deliberately not an error: upstream tagging a release says nothing about this repository being
 # wrong, and a check that reddens CI for that would simply be disabled.

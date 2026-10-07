@@ -1,4 +1,4 @@
-//! The OpAMP communication layer (ADR-0009, ADR-0024). Without features it is the wire layer: the
+//! The OpAMP communication layer (ADR-0035, ADR-0024). Without features it is the wire layer: the
 //! protobuf types generated from the specification, the WebSocket framing, the endpoint's body
 //! rules, `InstanceUid`, and the attribute keys an `AgentDescription` is read by.
 //!
