@@ -602,3 +602,95 @@ async fn a_websocket_that_only_pings_stays_open() {
         }
     }
 }
+
+/// An OpAMP handler whose every message never finishes: a session stuck in its handler.
+struct Stuck(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+/// Sets its flag when dropped — when the task holding it is cut.
+struct CutFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CutFlag {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl opamp::server::Handler for Stuck {
+    type Connection = ();
+    type Outbound = Never;
+
+    fn on_connecting(
+        &self,
+        _request: &opamp::server::RequestInfo<'_>,
+    ) -> Result<((), Option<Never>), opamp::server::Rejection> {
+        Ok(((), None))
+    }
+
+    async fn on_message(
+        &self,
+        _connection: &mut (),
+        _message: opamp::proto::AgentToServer,
+    ) -> opamp::server::Reply {
+        let _flag = CutFlag(self.0.clone());
+        std::future::pending().await
+    }
+
+    fn on_outbound(&self, _connection: &mut (), _item: ()) -> Vec<opamp::proto::ServerToAgent> {
+        Vec::new()
+    }
+}
+
+/// A WebSocket session outlives the HTTP connection it was upgraded from, so the drain must reach
+/// it separately: one stuck in its handler is cut at the drain's deadline, and `serve` returns only
+/// once it is — whatever follows a listener's shutdown sees no session still at work.
+///
+/// Verifies: ADR-0023, ADR-0024
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_cuts_a_stuck_websocket_session_at_its_deadline() {
+    use futures_util::SinkExt;
+
+    let cut = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (listener, port) = bind();
+    let router = opamp::server::router(
+        std::sync::Arc::new(Stuck(cut.clone())),
+        opamp::server::Settings::new(1 << 20),
+    );
+    let handle = Handle::new();
+    let serving = tokio::spawn(Listener::new(listener, handle.clone()).serve(router));
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/opamp"))
+            .await
+            .expect("connect");
+    let report = opamp::frame::encode_within(
+        &opamp::proto::AgentToServer {
+            instance_uid: vec![7; 16],
+            ..Default::default()
+        },
+        1 << 20,
+    )
+    .expect("encode");
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Binary(
+            report.into(),
+        ))
+        .await
+        .expect("send");
+    // The session is now inside its handler, and will never come out on its own.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!cut.load(std::sync::atomic::Ordering::SeqCst));
+
+    let drain = Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    handle.graceful_shutdown(Some(drain));
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("serve returns soon after the deadline")
+        .expect("the serve task")
+        .expect("serve");
+    assert!(
+        cut.load(std::sync::atomic::Ordering::SeqCst),
+        "the stuck session outlived serve"
+    );
+    assert!(started.elapsed() >= drain, "cut before its deadline");
+}

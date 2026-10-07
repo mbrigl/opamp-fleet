@@ -22,6 +22,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use axum::extract::ConnectInfo;
 use axum::{Extension, Router};
 use axum_server::accept::Accept;
@@ -33,8 +35,6 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-
-pub use axum_server::Handle;
 
 use super::pace::{self, Pace, MIN_PACE_BYTES, PACE_WINDOW};
 use crate::endpoint::is_loopback_literal;
@@ -61,29 +61,82 @@ pub const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// stated so that every listener visibly has one.
 pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a listener's WebSocket sessions get to close once it has stopped serving HTTP.
+/// Shuts listeners down. One handle may drain several; how long a drain may take is the caller's
+/// to state (ADR-0024 clause 6).
 ///
-/// A session told to close sends its peer a close frame and ends at once, so this bound is only
-/// reached by a session stuck in its handler. Whatever is still open then is cut when the process
-/// exits.
-pub const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// It is `axum_server`'s handle plus what that one cannot reach: the WebSocket sessions, which
+/// outlive the HTTP connection they were upgraded from and so are not counted by its drain. A
+/// shutdown tells them at once, and the same deadline bounds them (ADR-0023 clause 13).
+#[derive(Clone, Debug)]
+pub struct Handle {
+    server: axum_server::Handle,
+    /// `None` while serving; once shutting down, the deadline — `None` for a drain without one.
+    shutdown: Arc<tokio::sync::watch::Sender<Option<Option<Instant>>>>,
+}
 
-/// The WebSocket sessions a listener has upgraded to, which outlive the HTTP connection they began
-/// on and so are not counted by the [`Handle`]'s drain.
-///
-/// Every session holds a clone for as long as it runs. The listener asks them to close when it has
-/// stopped serving HTTP, and waits until every clone is gone, so what follows its `serve` — the
-/// Server's record flush — sees no session still at work (ADR-0023 clause 13).
+impl Default for Handle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Handle {
+    /// A handle for listeners that have not started yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Handle {
+            server: axum_server::Handle::new(),
+            shutdown: Arc::new(tokio::sync::watch::channel(None).0),
+        }
+    }
+
+    /// Stops accepting, and gives what is open `duration` to end — every connection still serving a
+    /// request, and every WebSocket session, which is told to close now. `None` waits for as long
+    /// as they take. Whatever is open at the deadline is cut before `serve` returns.
+    pub fn graceful_shutdown(&self, duration: Option<Duration>) {
+        self.shutdown
+            .send_replace(Some(duration.map(|d| Instant::now() + d)));
+        self.server.graceful_shutdown(duration);
+    }
+
+    /// Stops accepting and cuts everything open at once.
+    pub fn shutdown(&self) {
+        self.shutdown.send_replace(Some(Some(Instant::now())));
+        self.server.shutdown();
+    }
+
+    /// The HTTP connections currently open; upgraded WebSocket sessions are not among them.
+    #[must_use]
+    pub fn connection_count(&self) -> usize {
+        self.server.connection_count()
+    }
+
+    /// The address the listener is bound to, once it serves; `None` if it ended first.
+    pub async fn listening(&self) -> Option<SocketAddr> {
+        self.server.listening().await
+    }
+}
+
+/// The WebSocket sessions one listener has upgraded to: the signal that tells them to close, and
+/// their tasks, so a shutdown can wait for them and cut what outlives its deadline.
 #[derive(Clone)]
 pub(crate) struct Sessions {
-    closing: tokio::sync::watch::Receiver<bool>,
-    _alive: tokio::sync::mpsc::Sender<()>,
+    shutdown: tokio::sync::watch::Receiver<Option<Option<Instant>>>,
+    tasks: Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
 }
 
 impl Sessions {
-    /// Resolves once the listener asks its sessions to close.
+    /// Runs one session as a task of this listener's.
+    pub(crate) fn spawn(&self, session: impl Future<Output = ()> + Send + 'static) {
+        let mut tasks = self.tasks.lock().expect("sessions lock");
+        // Ended sessions are reaped here, so a long-lived listener holds no record of them.
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(session);
+    }
+
+    /// Resolves once the listener is shutting down.
     pub(crate) async fn closing(&mut self) {
-        let _ = self.closing.wait_for(|closing| *closing).await;
+        let _ = self.shutdown.wait_for(Option::is_some).await;
     }
 }
 
@@ -237,16 +290,15 @@ impl Listener {
                 ));
             }
         }
-        let server = axum_server::from_tcp(self.listener).handle(self.handle);
+        let server = axum_server::from_tcp(self.listener).handle(self.handle.server.clone());
         let slots = Slots::new(self.max_connections, self.pace);
-        let (close, closing) = tokio::sync::watch::channel(false);
-        let (alive, mut ended) = tokio::sync::mpsc::channel(1);
+        let sessions = Sessions {
+            shutdown: self.handle.shutdown.subscribe(),
+            tasks: Arc::default(),
+        };
         let router = router
             .layer(axum::middleware::from_fn(pace::bodies))
-            .layer(Extension(Sessions {
-                closing,
-                _alive: alive,
-            }));
+            .layer(Extension(sessions.clone()));
         let served = match self.tls {
             None => {
                 bounded(server.acceptor(Plain(slots)), self.header_read_timeout)
@@ -264,11 +316,21 @@ impl Listener {
                 .await
             }
         };
-        // HTTP has drained; the WebSocket sessions are told to close and given their bound. The
-        // channel ends when the last session drops its clone, the router's own having gone with
-        // the server.
-        let _ = close.send(true);
-        let _ = tokio::time::timeout(SESSION_CLOSE_TIMEOUT, ended.recv()).await;
+        // HTTP has drained. The sessions were told when the shutdown began; what is still open at
+        // its deadline is cut here, so nothing a session does outlives `serve`. A listener that
+        // stopped for another reason cuts its own sessions at once, and leaves the handle — which
+        // other listeners may share — alone.
+        let deadline = (*self.handle.shutdown.borrow()).unwrap_or(Some(Instant::now()));
+        let mut tasks = std::mem::take(&mut *sessions.tasks.lock().expect("sessions lock"));
+        let ended = async { while tasks.join_next().await.is_some() {} };
+        match deadline {
+            Some(deadline) => {
+                let _ = tokio::time::timeout_at(deadline, ended).await;
+            }
+            None => ended.await,
+        }
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
         served
     }
 }
