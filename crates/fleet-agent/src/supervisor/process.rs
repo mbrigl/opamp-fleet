@@ -1309,8 +1309,9 @@ mod tests {
     /// A program held open for writing cannot be exec'd for that moment (`ETXTBSY`); the probe
     /// waits it out instead of reporting a program that cannot run — the race a staged package
     /// meets when another thread forks while it is being written.
+    /// Linux alone refuses to exec a file held open for writing, so the race exists only there.
     /// Verifies: ADR-0016
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_program_busy_for_a_moment_is_run_once_it_is_free() {
         use std::os::unix::fs::PermissionsExt;
