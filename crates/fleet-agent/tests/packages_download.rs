@@ -23,8 +23,15 @@ use futures_util::stream;
 async fn spawn() -> SocketAddr {
     // What main() does at startup: without a process provider, reqwest refuses to build a client.
     opamp::tls::install_ring_provider();
-    let listener = tokio::net::TcpListener::bind("[::]:0").await.expect("bind");
+    // Both loopbacks on one port, as two listeners: a `[::]` socket takes IPv4 too on Linux but
+    // not on Windows, where IPV6_V6ONLY is the default.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let port = listener.local_addr().expect("addr").port();
+    let listener_v6 = tokio::net::TcpListener::bind(("::1", port))
+        .await
+        .expect("bind the IPv6 loopback on the same port");
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let elsewhere = format!("http://[::1]:{port}/refuses-credentials");
     let app = Router::new()
@@ -73,8 +80,12 @@ async fn spawn() -> SocketAddr {
                 }
             }),
         );
+    let app_v6 = app.clone();
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");
+    });
+    tokio::spawn(async move {
+        axum::serve(listener_v6, app_v6).await.expect("serve");
     });
     addr
 }
