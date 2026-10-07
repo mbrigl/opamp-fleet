@@ -268,7 +268,7 @@ capability bit.
 ## Interoperability
 
 Both ends are checked against `opamp-go`, the reference implementation, in a scheduled job
-([ADR-0009](adr/0009-protocol-baseline-and-conformance.md),
+([ADR-0035](adr/0035-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md),
 [`interop.yml`](../.github/workflows/interop.yml)): `opamp-go`'s Client against our Server, and our
 Client against `opamp-go`'s Server, on the WebSocket and the plain HTTP transport. The scenarios are
 [`crates/fleet-agent/tests/interop_opamp_go.rs`](../crates/fleet-agent/tests/interop_opamp_go.rs);
@@ -286,8 +286,9 @@ beyond its reach. What the job reaches is narrower than the matrix:
 | Capability negotiation | both directions, partly | Each side records what the other declared, and our Client stops reporting its effective configuration once `opamp-go`'s Server stops declaring `AcceptsEffectiveConfig`. `opamp-go`'s Client exposes no Server capabilities, so ours are read off the wire on plain HTTP only. |
 | `AgentIdentification`, `RequestInstanceUid` | both directions | Our Server mints the identity `opamp-go`'s Client requests; our Client adopts and persists one `opamp-go`'s Server assigns. |
 | `agent_disconnect` | our Client only | Our Client says goodbye on a graceful stop on both transports. Our Server's side is not decided: `opamp-go`'s plain-HTTP Client sends no `agent_disconnect`, and over WebSocket the goodbye and the closing socket mark the Agent disconnected alike. |
-| Transport security, Mutual TLS, Authentication | no | The job runs plaintext on the loopback with an open admission, as the rest of the suite does. |
-| Packages, connection settings, own telemetry, Gateway Mode | no | Not in the scenario list of ADR-0009. |
+| Transport security, Mutual TLS | both directions | Connect, report and a configuration round trip also run over `wss://` and `https://` on TLS 1.3 alone, against our Server's TLS and admission as the binary sets them up, and with our Client presenting its certificate to an `opamp-go` Server that requires one. A certificate another CA issued is refused by both, and our Server refuses a peer that offers none. The certificates come from a PKI the test generates. |
+| Authentication | partly | Only the refusal in the handshake is reached; the `401` for a revoked certificate is not, since the test Server keeps no revocation list. |
+| Packages, connection settings, own telemetry, Gateway Mode | no | Not in the scenario list of ADR-0035. |
 
 ## Deviations
 

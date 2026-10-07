@@ -107,6 +107,14 @@ fn ring_holding_signed(
 /// reads an embedded `/` as the start of a switch.
 const PREVIOUS_VERSION_DIR: &str = "supervisor-0.0.0-previous";
 
+/// The tests of this file, one at a time. Two of them build a newer Client — a whole workspace,
+/// minutes of every core — and the others wait on a running Client with a deadline; side by side
+/// on a small runner the build starved them past it.
+async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    SERIAL.lock().await
+}
+
 async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
@@ -473,6 +481,7 @@ fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> S
 /// Verifies: ADR-0020, G-10, G-11
 #[tokio::test]
 async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
+    let _serial = one_at_a_time().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
     // The artifact is a Client built as a greater version — the only thing that will pass the
@@ -582,6 +591,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
+    let _serial = one_at_a_time().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
 
@@ -705,6 +715,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 /// Verifies: ADR-0020
 #[tokio::test]
 async fn a_set_at_the_running_version_reaches_nobody() {
+    let _serial = one_at_a_time().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
     let full = version_of(&client);
@@ -808,6 +819,7 @@ async fn a_set_at_the_running_version_reaches_nobody() {
 /// Verifies: ADR-0020
 #[tokio::test]
 async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() {
+    let _serial = one_at_a_time().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
     let version = version_of(&client);
@@ -907,6 +919,7 @@ async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() 
 /// Verifies: ADR-0020
 #[tokio::test]
 async fn a_self_update_whose_signature_does_not_verify_is_refused_and_the_client_keeps_running() {
+    let _serial = one_at_a_time().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
 

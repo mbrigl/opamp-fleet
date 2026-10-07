@@ -1,12 +1,17 @@
 // Command opamp-go-harness puts opamp-go, the OpAMP reference implementation, at the far end of a
-// connection with this project's Server or Client (ADR-0009). It decides nothing: the Rust test
+// connection with this project's Server or Client (ADR-0035). It decides nothing: the Rust test
 // in crates/fleet-agent/tests/interop_opamp_go.rs drives the scenarios and asserts on both ends.
 //
 // The harness reports what opamp-go sees as one JSON object per line on stdout, and takes
 // commands as one JSON object per line on stdin.
 //
-//	opamp-go-harness client <url> [--request-uid]   opamp-go's Client, connected to <url>
-//	opamp-go-harness server                         opamp-go's Server, on 127.0.0.1, any port
+//	opamp-go-harness client [--request-uid] [--tls ca,cert,key [--force-cert]] <url>
+//	    opamp-go's Client, connected to <url>; with --tls it trusts the CA file and offers the
+//	    certificate (none when cert and key are empty), over TLS 1.3 alone. Go offers a certificate
+//	    only when the Server names its CA as acceptable; --force-cert offers it regardless
+//	opamp-go-harness server [--tls cert,key,client-ca]
+//	    opamp-go's Server, on 127.0.0.1, any port; with --tls it serves TLS 1.3 alone and requires
+//	    a client certificate the client CA issued
 package main
 
 import (
@@ -14,8 +19,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -76,19 +84,31 @@ func commands() <-chan command {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: opamp-go-harness client <url> [--request-uid] | server")
-		os.Exit(2)
+		usage()
 	}
 	var err error
 	switch os.Args[1] {
 	case "client":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: opamp-go-harness client <url> [--request-uid]")
-			os.Exit(2)
+		flags := flag.NewFlagSet("client", flag.ExitOnError)
+		requestUid := flags.Bool("request-uid", false, "ask the Server for an instance_uid")
+		files := flags.String("tls", "", "ca,cert,key")
+		force := flags.Bool("force-cert", false, "offer the certificate whatever the Server accepts")
+		_ = flags.Parse(os.Args[2:])
+		if flags.NArg() != 1 {
+			usage()
 		}
-		err = runClient(os.Args[2], len(os.Args) > 3 && os.Args[3] == "--request-uid")
+		var config *tls.Config
+		if config, err = clientTLS(*files, *force); err == nil {
+			err = runClient(flags.Arg(0), *requestUid, config)
+		}
 	case "server":
-		err = runServer()
+		flags := flag.NewFlagSet("server", flag.ExitOnError)
+		files := flags.String("tls", "", "cert,key,client-ca")
+		_ = flags.Parse(os.Args[2:])
+		var config *tls.Config
+		if config, err = serverTLS(*files); err == nil {
+			err = runServer(config)
+		}
 	default:
 		err = fmt.Errorf("unknown mode %q", os.Args[1])
 	}
@@ -96,6 +116,97 @@ func main() {
 		emit("error", map[string]any{"message": err.Error()})
 		os.Exit(1)
 	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: opamp-go-harness client [--request-uid] [--tls ca,cert,key [--force-cert]] <url>")
+	fmt.Fprintln(os.Stderr, "       opamp-go-harness server [--tls cert,key,client-ca]")
+	os.Exit(2)
+}
+
+// tlsFiles splits a comma-separated list of exactly three paths; empty means no TLS.
+func tlsFiles(list string) ([]string, error) {
+	if list == "" {
+		return nil, nil
+	}
+	files := strings.Split(list, ",")
+	if len(files) != 3 {
+		return nil, fmt.Errorf("--tls takes three comma-separated files, got %q", list)
+	}
+	return files, nil
+}
+
+// pool reads a CA certificate file into a pool.
+func pool(file string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	certs := x509.NewCertPool()
+	if !certs.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no certificate in %s", file)
+	}
+	return certs, nil
+}
+
+// clientTLS trusts the CA and offers the certificate, on TLS 1.3 alone, as this project's own
+// endpoint requires of every peer. Without a certificate it offers none.
+func clientTLS(list string, force bool) (*tls.Config, error) {
+	files, err := tlsFiles(list)
+	if files == nil {
+		return nil, err
+	}
+	roots, err := pool(files[0])
+	if err != nil {
+		return nil, err
+	}
+	config := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}
+	if files[1] == "" && files[2] == "" {
+		return config, nil
+	}
+	identity, err := tls.LoadX509KeyPair(files[1], files[2])
+	if err != nil {
+		return nil, err
+	}
+	if force {
+		// Offered whatever the Server names as acceptable: without this Go sends nothing for a
+		// certificate another CA issued, and the refusal of a foreign certificate goes untested.
+		config.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return &identity, nil
+		}
+	} else {
+		// What a real opamp-go agent configures: Go picks it only if the Server accepts its CA.
+		config.Certificates = []tls.Certificate{identity}
+	}
+	return config, nil
+}
+
+// serverTLS serves the certificate and requires one the client CA issued, on TLS 1.3 alone.
+func serverTLS(list string) (*tls.Config, error) {
+	files, err := tlsFiles(list)
+	if files == nil {
+		return nil, err
+	}
+	identity, err := tls.LoadX509KeyPair(files[0], files[1])
+	if err != nil {
+		return nil, err
+	}
+	clients, err := pool(files[2])
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{identity},
+		ClientCAs:    clients,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		MinVersion:   tls.VersionTLS13,
+		// Every handshake attempt is reported, so a test can tell a refused peer from one that
+		// never tried.
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			emit("client_hello", nil)
+			return nil, nil
+		},
+	}, nil
 }
 
 // constantBackoff reconnects quickly, so a test that restarts the far end waits seconds, not
@@ -112,7 +223,7 @@ const agentCapabilities = protobufs.AgentCapabilities_AgentCapabilities_ReportsS
 	protobufs.AgentCapabilities_AgentCapabilities_ReportsEffectiveConfig |
 	protobufs.AgentCapabilities_AgentCapabilities_ReportsHeartbeat
 
-func runClient(url string, requestUid bool) error {
+func runClient(url string, requestUid bool, tlsConfig *tls.Config) error {
 	var uid clienttypes.InstanceUid
 	if _, err := rand.Read(uid[:]); err != nil {
 		return err
@@ -128,7 +239,11 @@ func runClient(url string, requestUid bool) error {
 		opamp = client.NewHTTP(stderrLogger{})
 		// opamp-go hands the callbacks no Server capabilities and no flags, so on the plain HTTP
 		// transport the harness reads each reply itself before opamp-go does.
-		httpClient = &http.Client{Transport: replyReader{next: http.DefaultTransport}}
+		// opamp-go puts its TLS configuration on a transport it clones, which this wrapper is not;
+		// the wrapped transport carries it instead.
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = tlsConfig
+		httpClient = &http.Client{Transport: replyReader{next: transport}}
 	}
 
 	if err := opamp.SetAgentDescription(description("")); err != nil {
@@ -147,6 +262,7 @@ func runClient(url string, requestUid bool) error {
 	settings := clienttypes.StartSettings{
 		OpAMPServerURL:    url,
 		Client:            httpClient,
+		TLSConfig:         websocketTLS(httpClient, tlsConfig),
 		InstanceUid:       uid,
 		HeartbeatInterval: &heartbeat,
 		BackoffPolicy:     func() clienttypes.BackoffPolicy { return constantBackoff{} },
@@ -217,6 +333,15 @@ func runClient(url string, requestUid bool) error {
 	return nil
 }
 
+// websocketTLS is the TLS configuration opamp-go applies itself: on the WebSocket transport alone,
+// since on plain HTTP the harness's own transport carries it.
+func websocketTLS(httpClient *http.Client, config *tls.Config) *tls.Config {
+	if httpClient != nil {
+		return nil
+	}
+	return config
+}
+
 // replyReader reports the capabilities and flags of every ServerToAgent a plain HTTP exchange
 // returns, then hands opamp-go the body unchanged.
 type replyReader struct{ next http.RoundTripper }
@@ -277,7 +402,7 @@ type pending struct {
 	capabilities    uint64
 }
 
-func runServer() error {
+func runServer(tlsConfig *tls.Config) error {
 	next := pending{capabilities: uint64(serverCapabilities)}
 	srv := server.New(nil)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -287,6 +412,7 @@ func runServer() error {
 	settings := server.StartSettings{
 		Listener:   listener,
 		ListenPath: "/v1/opamp",
+		TLSConfig:  tlsConfig,
 		Settings: server.Settings{
 			Callbacks: servertypes.Callbacks{
 				OnConnecting: func(r *http.Request) servertypes.ConnectionResponse {
