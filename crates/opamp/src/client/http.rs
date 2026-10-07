@@ -188,7 +188,7 @@ async fn exchange(
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err(Exchange::failed(
-            "the server rejected the credentials (HTTP 401)",
+            "admission failed: the server refused this client (HTTP 401)",
         ));
     }
     // Throttling (the Baseline, *Throttling*, plain HTTP): the Server may answer 503 or 429 and

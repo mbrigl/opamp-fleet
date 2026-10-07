@@ -12,8 +12,9 @@
 # Every check runs even after an earlier one fails, so a single run reports everything that is
 # wrong instead of the first thing. The exit code is what a pre-push decision is made on.
 #
-# Pure bash + coreutils/git. The individual checks state their own dependencies — the shell lint needs
-# ShellCheck and skips itself with a notice where it is missing.
+# Pure bash + coreutils/git, and the Rust toolchain for scripts/check-rust.sh. The individual checks
+# state their own dependencies — the shell lint needs ShellCheck and skips itself with a notice
+# where it is missing.
 #
 # Usage:
 #     scripts/check-all.sh        (or: bash scripts/check-all.sh)
@@ -50,6 +51,7 @@ run "Revision-due sensor self-test" scripts/test-sensor-revision-due.sh
 run "Revision-due sensor" scripts/sensor-revision-due.sh
 run "Git hooks self-test" scripts/test-git-hooks.sh
 run "Shell lint" scripts/check-shell.sh
+run "Build, test and lint" scripts/check-rust.sh
 
 printf '\n'
 if ((${#failed[@]})); then

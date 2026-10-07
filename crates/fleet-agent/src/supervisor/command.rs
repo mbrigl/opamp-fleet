@@ -38,10 +38,10 @@ struct CommandSettings {
     version_args: Option<Vec<String>>,
 }
 
-/// The keys this kind used to take and no longer does (ADR-0017), each with what answers it now.
-/// Refused by name rather than met with serde's "unknown field", for the reason `icinga2` refuses
-/// its own: a block carrying one was written against a Client that needed it, and the operator
-/// deleting the line deserves to be told where the value went.
+/// The keys this kind does not take (ADR-0017), each with what answers it. Refused by name rather
+/// than met with serde's "unknown field", for the reason `icinga2` refuses its own: a block
+/// carrying one expects a Client that needs it, and the operator deleting the line deserves to be
+/// told where the value went.
 const RETIRED: &[(&str, &str)] = &[
     (
         "working_dir",
@@ -131,6 +131,7 @@ impl Plugin for CommandPlugin {
             "foreign agent invocation"
         );
         let runner = Runner {
+            endpoint_token: ctx.endpoint_token.clone(),
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
