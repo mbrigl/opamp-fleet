@@ -66,7 +66,7 @@ Debian 12 artifact is built in it directly:
 
 ```console
 $ cargo run --bin opamp-package-fetch -- --agent icinga2 --version 2.16.5 --distro bookworm \
-      --platform linux/amd64 --server http://127.0.0.1:4321
+      --platform linux/amd64 --server https://127.0.0.1:4321
   reading https://packages.icinga.com/debian/dists/icinga-bookworm/main/binary-amd64/Packages.gz …
   reading https://deb.debian.org/debian/dists/bookworm/main/binary-amd64/Packages.gz …
   this build needs glibc >= 2.34 on every host it is rolled out to
@@ -200,19 +200,22 @@ manager installed; nothing supervises it.
 
 ## 3. Enrolment: the ticket
 
-The Icinga master stays the certificate authority — the fleet Server signs nothing and never sees a
-private key ([ADR-0019](../adr/0019-icinga-2.md)).
-What the fleet transports is the **ticket**, which the master computes for one node name:
+The Icinga master stays the certificate authority for Icinga — the fleet Server signs no Icinga
+certificate and never sees an Icinga private key ([ADR-0019](../adr/0019-icinga-2.md)).
+What the fleet transports is the **ticket**, which the master computes for one node name. The
+calls below go to the Operator plane over TLS; `--cacert ca.pem` names the CA that signed the
+Server's certificate, and `-u` carries the [`[rest.auth]`](server.md#the-operator-plane-restauth)
+credential:
 
 ```console
 $ icinga2 pki ticket --cn edge-01.example.com          # on the Icinga master
 d9c8…
 
-$ curl -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "icinga2", "role": "supplementary",
             "selector": {"service.instance.name": "edge-01"},
             "body": "d9c8…"}' \
-       http://127.0.0.1:4321/api/v1/configurations/icinga2-ticket
+       https://127.0.0.1:4321/api/v1/configurations/icinga2-ticket
 ```
 
 `role = "supplementary"` writes it as a file the Supervisor reads and nothing else consumes, and the
@@ -225,8 +228,12 @@ Two variations:
   Configuration and name it in `trusted_cert_file`. It is the parent's **own** certificate —
   `DataDir/certs/<master-cn>.crt` on the master — **not** the CA that signed it: Icinga compares
   what the parent presents against this file, so a CA certificate here fails every enrolment with
-  *"Peer certificate does not match trusted certificate"*. Without a pinned certificate the
-  Supervisor trusts what the parent presents on first contact, and logs that it did.
+  *"Peer certificate does not match trusted certificate"*. Once `trusted_cert_file` names a file,
+  enrolment waits until that file is there — the Agent stays unhealthy and says which path it
+  waits for — and never falls back to trusting the parent on sight. Only a block that names no
+  `trusted_cert_file` at all trusts what the parent presents on first contact, and logs that it did.
+  Unlike the ticket, the parent certificate stays needed after enrolment: a renewal pins the parent
+  again, so keep its Configuration released for as long as the block names it.
 - **No ticket at all.** The request lands in the master's signing queue; the Agent stays unhealthy
   until someone runs `icinga2 ca sign <hash>` there. That is correct behaviour, not a fault.
 
@@ -237,8 +244,8 @@ against the including file, so the delivered entries can reference each other by
 knowing any absolute path:
 
 ```console
-$ curl -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
-       -d @icinga2-conf.json http://127.0.0.1:4321/api/v1/configurations/icinga2-conf
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+       -d @icinga2-conf.json https://127.0.0.1:4321/api/v1/configurations/icinga2-conf
 ```
 
 with a body along the lines of [`config/examples/icinga2-conf.conf`](../../config/examples/icinga2-conf.conf):
@@ -258,12 +265,26 @@ the cluster protocol, into `DataDir/api/zones`.
 
 ## 5. Roll it out
 
+The Package reaches hosts through a Deployment that holds it and signs every entry
+([step 5 of the walkthrough](rollout.md#5-put-it-in-a-deployment-and-sign-it-there)):
+
 ```console
-$ curl -u fleet-admin:secret -X POST \
-       http://127.0.0.1:4321/api/v1/packages/icinga2/icinga2/2.16.4/rollout
-$ curl -u fleet-admin:secret -X POST \
-       http://127.0.0.1:4321/api/v1/configurations/icinga2-conf/rollout
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+       -d '{"selector": {"channel": "stable"}}' https://127.0.0.1:4321/api/v1/deployments/stable
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT \
+       https://127.0.0.1:4321/api/v1/deployments/stable/packages/icinga2/2.16.5
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+       -d "{\"signature\": \"$sig\"}" \
+       https://127.0.0.1:4321/api/v1/deployments/stable/signatures/icinga2/2.16.5/linux/amd64
+$ curl --cacert ca.pem -u fleet-admin:secret -X POST \
+       https://127.0.0.1:4321/api/v1/deployments/stable/rollout
+$ curl --cacert ca.pem -u fleet-admin:secret -X POST \
+       https://127.0.0.1:4321/api/v1/configurations/icinga2-conf/rollout
 ```
+
+`$sig` is the artifact's signature from `opamp-package-sign sign --agent-type icinga2 --version …`,
+which holds for that type and version alone. A Client takes the package only
+with `[packages] verification_key` set.
 
 ## What to expect in the fleet view
 
@@ -316,7 +337,7 @@ rather than inside it.
 
 | Symptom | Cause |
 |---|---|
-| `awaiting the certificate for <node>` | Enrolment has not succeeded. The health's error names why: an unreachable parent, an invalid ticket, or a signature nobody granted yet. It retries with backoff; the daemon deliberately does not start meanwhile. |
+| `awaiting the certificate for <node>` | Enrolment has not succeeded. The health's error names why: an unreachable parent, an invalid ticket, a signature nobody granted yet, or a parent certificate named in `trusted_cert_file` that has not arrived (the error names the path). It retries with backoff; the daemon deliberately does not start meanwhile. |
 | `awaiting the configuration …` | No root Configuration has arrived yet: nothing delivered carries `role = "main"`, and no entry is named `icinga2-conf` either. |
 | `two configurations claim to be the root` | Two delivered entries carry `role = "main"`. The message names both; take the role off the one that is not Icinga's root file. |
 | `remote_config_status = FAILED` with a syntax error | Icinga refused the configuration. The running daemon kept the previous one — fix the Configuration and roll out again. |

@@ -16,11 +16,17 @@ use rustls::ServerConfig;
 /// follows shutdown (ADR-0026) still runs.
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
 
-/// A plane on an already-bound listener, over TLS when `tls` is given. `handle` is shared by both
-/// planes, so one signal drains both.
+/// A plane on an already-bound listener, over TLS when `tls` is given, holding at most
+/// `max_connections` at once (ADR-0012). `handle` is shared by both planes, so one signal drains
+/// both.
 #[must_use]
-pub fn plane(listener: TcpListener, tls: Option<Arc<ServerConfig>>, handle: Handle) -> Listener {
-    let plane = Listener::new(listener, handle);
+pub fn plane(
+    listener: TcpListener,
+    tls: Option<Arc<ServerConfig>>,
+    max_connections: usize,
+    handle: Handle,
+) -> Listener {
+    let plane = Listener::new(listener, handle).with_max_connections(max_connections);
     match tls {
         Some(config) => plane.with_tls(config),
         None => plane,

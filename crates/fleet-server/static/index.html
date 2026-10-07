@@ -698,7 +698,7 @@
       }
       // Everything about an agent that is a set rather than a value: reported attributes, the
       // operator's labels (ADR-0026), the per-row actions, and its package pills. Not named
-      // `labels` — since ADR-0026 that word means the 🏷 chips alone, and a row headed with it
+      // `labels` — that word means the 🏷 chips alone (ADR-0026), and a row headed with it
       // reads as if a package status were one.
       function details(a) {
         const chips = [];
@@ -1194,11 +1194,10 @@
       // matching nobody — none of which is a rejected upload, so nothing else would say it.
       // Checking the aim before the act is what the count exists for (ADR-0027) — so the count
       // rides on the act it aims, and is a button only where it is a count the act can reach.
-      // Zero has two meanings since ADR-0027, and only one of them is a mistake: a set that aims
+      // Zero has two meanings (ADR-0027), and only one of them is a mistake: a set that aims
       // at nobody is the amber warning, a set everyone already runs is a plain statement.
-      // A package aims at nobody by itself since ADR-0028: what answers "whom would this reach"
-      // is the channels that hold it, and an empty list is the state that used to be a selector
-      // matching no one — stored, and unreachable.
+      // A package aims at nobody by itself (ADR-0028): what answers "whom would this reach" is
+      // the channels that hold it, and an empty list means stored, and unreachable.
       function ringsCell(p) {
         const channels = p.deployments || [];
         if (!channels.length) {

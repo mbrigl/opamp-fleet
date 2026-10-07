@@ -11,8 +11,7 @@
 //!
 //! The two stubs are the vocabulary: [`stub_agent`] stays up until it is killed, [`stub_crasher`]
 //! exits at once. Which one's *bytes* an artifact carries is what decides whether an install
-//! survives its grace — the same thing the shell scripts used to say, in a form all three platforms
-//! can execute.
+//! survives its grace, said in a form all three platforms can execute.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -108,6 +107,7 @@ fn runner_full(
     let (commands, command_rx) = mpsc::channel(16);
     let (shutdown_tx, shutdown) = shutdown_channel();
     let runner = Runner {
+        endpoint_token: String::new(),
         name: "test".to_string(),
         stop_timeout: Duration::from_secs(5),
         apply_grace,
@@ -266,22 +266,22 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
     harness.task.await.expect("join");
 }
 
-/// A program named by a **relative** path still starts — which it did not, once ADR-0017 had the
-/// process begin in its own directory.
+/// A program named by a **relative** path starts, though the process begins in its own directory
+/// (ADR-0017).
 ///
 /// `Command` does `chdir` *before* `exec` on Unix, so a relative program is resolved against the
 /// directory it was just moved into: `<dir>/<dir>/<program>`, which is nothing. The Client's own
 /// default makes this the ordinary case rather than a corner — `state_dir = "client-state"` is
-/// relative, so every Managed Process under a default configuration failed to spawn, with a bare
-/// `No such file or directory` naming a file that was plainly there.
+/// relative, so every Managed Process under a default configuration would fail to spawn, with a
+/// bare `No such file or directory` naming a file that is plainly there.
 #[tokio::test]
 async fn a_program_named_by_a_relative_path_still_starts_in_its_own_directory() {
     // **Under** this test's working directory, so the relative path is a plain descent with no
     // `..` in it — which is what a Client's own `state_dir = "client-state"` looks like, and what
     // makes the fixture mean the same thing on every platform. Counting `..` to the root does not:
-    // it is drive-relative on Windows, and the first version of this test accidentally used
-    // exactly as many as the new working directory was deep, so the path climbed back out to the
-    // same file and passed against the unfixed code.
+    // it is drive-relative on Windows, and exactly as many as the new working directory is deep
+    // climb back out to the same file, so the test would pass whether or not the path is made
+    // absolute.
     let here = std::env::current_dir().expect("cwd");
     let dir = tempfile::tempdir_in(&here).expect("tempdir under the working directory");
     let program_dir = dir.path().join("a/b/c/d/program");
@@ -488,6 +488,52 @@ async fn wait_until_started(marker: &Path) {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// The Managed Process finds the Supervisor Endpoint's token in its environment, and no block's
+/// `env` can put another one in its place.
+/// Verifies: ADR-0014
+#[tokio::test]
+async fn the_managed_process_is_handed_the_endpoint_token() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("running");
+    let program = stub_agent();
+    let marker_arg = marker.display().to_string();
+    let (event_tx, _events) = mpsc::channel(64);
+    let (_commands, command_rx) = mpsc::channel(16);
+    let (_shutdown_tx, shutdown) = shutdown_channel();
+    let runner = Runner {
+        endpoint_token: "the-token".to_string(),
+        name: "test".to_string(),
+        stop_timeout: Duration::from_secs(5),
+        apply_grace: Duration::ZERO,
+        retain_previous: Duration::ZERO,
+        install: None,
+        archive_key: None,
+        version_probe: None,
+        preflight: None,
+        reload_signal: None,
+        events: EventSender::new(0, event_tx),
+        commands: command_rx,
+        build: Box::new(move || {
+            Some(ProcessSpec {
+                program: program.clone(),
+                args: vec!["--touch".to_string(), marker_arg.clone()],
+                env: vec![(
+                    "OPAMP_SUPERVISOR_TOKEN".to_string(),
+                    "a-block-tried".to_string(),
+                )],
+                working_dir: None,
+                own_process_group: false,
+                ensure_dirs: Vec::new(),
+            })
+        }),
+    };
+    let task = tokio::spawn(runner.run(shutdown));
+    wait_until_started(&marker).await;
+    let text = std::fs::read_to_string(&marker).expect("marker");
+    assert!(text.contains("token=the-token\n"), "{text}");
+    task.abort();
 }
 
 /// A kind that declared a reload applies a configuration in place (ADR-0017): the process is
@@ -846,6 +892,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() 
     let _ = harness.task.await;
 }
 
+/// Verifies: ADR-0028
 #[tokio::test]
 async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -879,6 +926,7 @@ async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
 
 /// The case ADR-0028 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
 /// Supervisor takes the member named after its own binary and installs that.
+/// Verifies: ADR-0028
 #[tokio::test]
 async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -923,6 +971,7 @@ async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
 /// not installed yet, and the Server delivers it. A plugin with nothing to run — a Collector
 /// awaiting its configuration — must not turn that into a failed install, which would delete the
 /// binary that was just put in place.
+/// Verifies: ADR-0028
 #[tokio::test]
 async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -957,7 +1006,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let _ = harness.task.await;
 }
 
-// Verifies: ADR-0028
+// Verifies: ADR-0028, G-10
 #[tokio::test]
 async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -987,8 +1036,9 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
 }
 
 /// ADR-0028: a *first* install that will not start has nothing to roll back to, so it is **kept**
-/// rather than discarded — the verified binary stays in `program/`. Discarding it is what used to
-/// empty the directory and set the Server re-offering the same artifact in a loop.
+/// rather than discarded — the verified binary stays in `program/`. Discarding it would empty the
+/// directory and set the Server re-offering the same artifact in a loop.
+/// Verifies: ADR-0028
 #[tokio::test]
 async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1051,6 +1101,7 @@ async fn a_program_that_keeps_crashing_is_held_not_looped() {
 
 /// ADR-0028: a successful update does not delete the version it superseded — it is retained for the
 /// window, with a marker recording the deadline, so an operator has a fallback.
+/// Verifies: ADR-0028
 #[tokio::test]
 async fn a_successful_update_keeps_the_previous_version_for_the_window() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1146,6 +1197,7 @@ fn tree_harness(root: &Path) -> Harness {
 
 /// The case ADR-0028 exists for: an agent that is a program *plus* what it loads, arriving with
 /// nothing on the host first — and then being replaced the same way.
+/// Verifies: ADR-0028
 #[tokio::test]
 async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1200,6 +1252,7 @@ async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
 
 /// The health gate, one level up: a tree whose program will not stay up puts the *whole* previous
 /// tree back — libraries included, since half of each would run nothing.
+/// Verifies: ADR-0028
 #[tokio::test]
 async fn a_tree_that_will_not_stay_up_is_rolled_back_whole() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1245,6 +1298,7 @@ async fn a_tree_that_will_not_stay_up_is_rolled_back_whole() {
 
 /// The archive names a member the configuration does not — refused, with the old tree left exactly
 /// where it was.
+/// Verifies: ADR-0028
 #[tokio::test]
 async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1354,6 +1408,7 @@ fn descendants_of(recorded: &Recorded, root: &tracing::span::Id) -> Vec<String> 
 /// of its own and "which phase failed" — the question the dashboard is built around — would have no
 /// span to answer with. Asserted against the real Runner swapping a real program, because the hand
 /// -over is the thing under test and a mock of it would test the mock.
+/// Verifies: ADR-0016
 #[tokio::test]
 async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
     let recorded = recorder();

@@ -95,7 +95,15 @@ async fn apply_inner(
     candidate.supervisors = blocks.clone();
     for block in &blocks {
         validate_offered_block(&candidate, block).map_err(Refused)?;
+        // Against what runs now: the operator's `[supervisors]` and the running block of the
+        // same name decide what a delivered block may bring (ADR-0017 clauses 38, 39).
+        crate::supervisor::check_delivered_block(config, block).map_err(Refused)?;
     }
+    // What will be written is rendered now, before anything stops, and must read back as exactly
+    // the set just checked: what is checked is what is written (ADR-0017 clause 28).
+    let rendered = render_supervisors(&path, tables)
+        .and_then(|text| reads_back_as(&text, &blocks).map(|()| text))
+        .map_err(Refused)?;
     drop(validate);
 
     let Plan {
@@ -118,7 +126,7 @@ async fn apply_inner(
     // Stopped, so the write comes next: a crash between the two restarts into the old file, one
     // after it into the new one — both build exactly what the file says, so both converge.
     let write = tracing::info_span!("write", path = %path.display()).entered();
-    let source = match write_supervisors(&path, tables) {
+    let source = match replace_file(&path, rendered) {
         Ok(source) => source,
         Err(e) => {
             // The old file still stands, so the old set is what this Client must run: bring the
@@ -378,8 +386,8 @@ fn offered_blocks(
 /// (ADR-0017). Letting the Server spawn a program on the machine would be arbitrary code execution
 /// that never passes through package signing.
 ///
-/// Since ADR-0017 that rule **cannot fire**: no block naming a program on the machine parses at
-/// all, from any principal, so every block reaching here already satisfies it. The check stays as
+/// That rule **cannot fire** (ADR-0017): no block naming a program on the machine parses at all,
+/// from any principal, so every block reaching here already satisfies it. The check stays as
 /// defence in depth against a future shape nobody has thought of yet — deleting a guard because it
 /// currently cannot trigger is how it comes back — and `resolve_block_program` below is what
 /// enforces it in fact.
@@ -409,7 +417,18 @@ fn supervisor_tables(item: &toml_edit::Item) -> Option<Vec<toml_edit::Table>> {
 /// other line of the file exactly as the operator wrote it — comments, ordering, formatting
 /// (ADR-0017). A file that does not exist yet is created; the write goes through a sibling
 /// temporary file so a crash never leaves a half-written configuration. Returns the new text.
+#[cfg(test)]
 fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<String, String> {
+    replace_file(path, render_supervisors(path, tables)?)
+}
+
+/// The file with its `[[supervisor]]` array replaced by `tables`, everything else as it was.
+///
+/// Every delivered table keeps the position it had in its own entry, and `toml_edit` writes tables
+/// in position order across the whole document — so tables from two entries would interleave, and
+/// a sub-table such as `[supervisor.env]` would land under another block's header. Each table and
+/// its sub-tables are therefore renumbered in array order, after everything the file already has.
+fn render_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<String, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -420,14 +439,66 @@ fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<Strin
         .map_err(|e| format!("the current file is not TOML: {e}"))?;
     doc.remove("supervisor");
     if !tables.is_empty() {
+        let mut next = last_position(doc.as_table()) + 1;
         let mut array = toml_edit::ArrayOfTables::new();
-        for table in tables {
+        for mut table in tables {
+            renumber(&mut table, &mut next);
             array.push(table);
         }
         doc.insert("supervisor", toml_edit::Item::ArrayOfTables(array));
     }
-    let new_text = doc.to_string();
+    Ok(doc.to_string())
+}
 
+/// The highest position any table of `table` holds, itself included.
+fn last_position(table: &toml_edit::Table) -> isize {
+    let mut last = table.position().unwrap_or(0);
+    for (_, item) in table.iter() {
+        match item {
+            toml_edit::Item::Table(inner) => last = last.max(last_position(inner)),
+            toml_edit::Item::ArrayOfTables(array) => {
+                for inner in array.iter() {
+                    last = last.max(last_position(inner));
+                }
+            }
+            _ => {}
+        }
+    }
+    last
+}
+
+/// Gives `table` and every table below it the next positions, in order.
+fn renumber(table: &mut toml_edit::Table, next: &mut isize) {
+    table.set_position(Some(*next));
+    *next += 1;
+    for (_, item) in table.iter_mut() {
+        match item {
+            toml_edit::Item::Table(inner) => renumber(inner, next),
+            toml_edit::Item::ArrayOfTables(array) => {
+                for inner in array.iter_mut() {
+                    renumber(inner, next);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether the rendered file reads back as exactly the checked set.
+fn reads_back_as(text: &str, blocks: &[SupervisorBlock]) -> Result<(), String> {
+    let parsed: ClientConfig =
+        toml::from_str(text).map_err(|e| format!("the rewritten file would not parse: {e}"))?;
+    if parsed.supervisors != blocks {
+        return Err(
+            "the rewritten file would not read back as the offered set — nothing was changed"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Replaces `path` with `new_text` in one step.
+fn replace_file(path: &Path, new_text: String) -> Result<String, String> {
     let tmp = path.with_extension("toml.tmp");
     write_replacement(&tmp, path, &new_text)?;
     // `rename` replaces an existing file on every platform — on Windows it is `MoveFileExW` with
@@ -439,10 +510,10 @@ fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<Strin
 /// Writes the new configuration to the temporary file the caller then renames over `supervisor.toml`.
 ///
 /// On Unix the temp file inherits the mode of the file it will replace — created with it, never
-/// widened after — so the rename cannot loosen permissions. `supervisor.toml` holds the OpAMP
-/// credential in cleartext and is created `0600` (`config_init::write_new`); writing the temp file
-/// at the default umask (`0644`) and renaming it over the original, as this did before, left that
-/// credential world-readable after every Server-driven reconfigure (ADR-0017). A file that does not
+/// widened after — so the rename cannot loosen permissions. `supervisor.toml` may hold
+/// `[packages] archive_key` in cleartext and is created `0600` (`config_init::write_new`); writing
+/// the temp file at the default umask (`0644`) and renaming it over the original, as this did
+/// before, left that secret world-readable after every Server-driven reconfigure (ADR-0017). A file that does not
 /// exist yet falls back to `0600`, the same floor `write_new` uses. The operator's own mode, if
 /// they widened or narrowed it deliberately, is preserved.
 fn write_replacement(tmp: &Path, target: &Path, contents: &str) -> Result<(), String> {
@@ -542,6 +613,426 @@ mod tests {
         assert!(err.contains("needs a `name`"), "{err}");
     }
 
+    /// The running configuration a delivered block is checked against: `globals` for the
+    /// operator's `[supervisors]`, then the running blocks.
+    fn running(globals: &str, blocks: &str) -> ClientConfig {
+        let mut config: ClientConfig = toml::from_str(globals).expect("config");
+        if !blocks.is_empty() {
+            let (running, _) = offered_blocks(&offer_of(&[("running", blocks)])).expect("parse");
+            config.supervisors = running;
+        }
+        config
+    }
+
+    fn delivered(block: &str) -> SupervisorBlock {
+        let (blocks, _) = offered_blocks(&offer_of(&[("fleet", block)])).expect("parse");
+        blocks.into_iter().next().expect("one block")
+    }
+
+    const AGENT: &str =
+        "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"agent\"\n";
+
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_block_may_not_add_environment_the_operator_did_not_allow() {
+        let block = delivered(&format!("{AGENT}env = {{ OTEL_RESOURCE = \"a\" }}\n"));
+        let err = crate::supervisor::check_delivered_block(&running("", AGENT), &block)
+            .expect_err("not allowed");
+        assert!(
+            err.contains("\"agent\"") && err.contains("OTEL_RESOURCE"),
+            "{err}"
+        );
+        assert!(
+            err.contains("delivered_env"),
+            "names the way to allow it: {err}"
+        );
+        let allowing = running("[supervisors]\ndelivered_env = [\"OTEL_*\"]\n", AGENT);
+        crate::supervisor::check_delivered_block(&allowing, &block).expect("allowed by prefix");
+    }
+
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_loader_variable_is_refused_whatever_the_operator_allowed() {
+        let allowing = running("[supervisors]\ndelivered_env = [\"*\"]\n", AGENT);
+        for name in [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "PATH",
+            "Path",
+            "GLIBC_TUNABLES",
+            "JAVA_TOOL_OPTIONS",
+            "COR_PROFILER_PATH",
+        ] {
+            let block = delivered(&format!(
+                "{AGENT}env = {{ {name} = \"${{config_dir}}/x.so\" }}\n"
+            ));
+            let err = crate::supervisor::check_delivered_block(&allowing, &block)
+                .expect_err("a loader variable");
+            assert!(err.contains(name), "{err}");
+        }
+    }
+
+    /// An allowed name still may not point at a file the Server delivered into the Supervisor's
+    /// own directories — the OpenTelemetry Java agent would load a jar from there.
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_value_may_not_point_into_its_own_directories() {
+        let allowing = running("[supervisors]\ndelivered_env = [\"OTEL_*\"]\n", AGENT);
+        for value in ["${config_dir}/x.jar", "${supervisor_dir}/program/x"] {
+            let block = delivered(&format!(
+                "{AGENT}env = {{ OTEL_JAVAAGENT_EXTENSIONS = \"{value}\" }}\n"
+            ));
+            let err = crate::supervisor::check_delivered_block(&allowing, &block).expect_err(value);
+            assert!(err.contains("own directories"), "{err}");
+        }
+    }
+
+    /// Tables from two entries keep their sub-tables: what is written reads back as the set that
+    /// was checked, and a `[supervisor.env]` never moves under another block's header.
+    /// Verifies: ADR-0017
+    #[test]
+    fn delivered_tables_from_two_entries_keep_their_sub_tables() {
+        let offer = offer_of(&[
+            (
+                "a",
+                "[[supervisor]]\ntype = \"command\"\nname = \"a\"\ncommand = \"agent\"\n\n\
+                 [supervisor.env]\nOTEL_X = \"1\"\n",
+            ),
+            (
+                "b",
+                "[[supervisor]]\ntype = \"command\"\nname = \"b\"\ncommand = \"agent\"\n",
+            ),
+        ]);
+        let (blocks, tables) = offered_blocks(&offer).expect("parse");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, "endpoint = \"wss://fleet.example/v1/opamp\"\n").expect("write");
+        let text = render_supervisors(&path, tables).expect("render");
+        reads_back_as(&text, &blocks).expect("the checked set, block for block");
+        let parsed: ClientConfig = toml::from_str(&text).expect("parse");
+        assert!(parsed.supervisors[0].settings.contains_key("env"), "{text}");
+        assert!(
+            !parsed.supervisors[1].settings.contains_key("env"),
+            "{text}"
+        );
+    }
+
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_block_keeps_the_environment_it_already_runs_with() {
+        let operators = format!("{AGENT}env = {{ LD_LIBRARY_PATH = \"/opt/vendor/lib\" }}\n");
+        let config = running("", &operators);
+        crate::supervisor::check_delivered_block(&config, &delivered(&operators))
+            .expect("what the operator wrote, delivered back unchanged");
+        let changed = delivered(&format!("{AGENT}env = {{ LD_LIBRARY_PATH = \"/tmp\" }}\n"));
+        assert!(crate::supervisor::check_delivered_block(&config, &changed).is_err());
+    }
+
+    /// Verifies: ADR-0017
+    #[test]
+    fn delivered_arguments_need_the_operators_consent() {
+        let with_args = delivered(&format!(
+            "{AGENT}args = [\"-c\", \"${{config_dir}}/conf\"]\n"
+        ));
+        let err = crate::supervisor::check_delivered_block(&running("", AGENT), &with_args)
+            .expect_err("arguments without consent");
+        assert!(err.contains("delivered_args"), "{err}");
+        let version = delivered(&format!("{AGENT}version_args = [\"--version\"]\n"));
+        assert!(crate::supervisor::check_delivered_block(&running("", AGENT), &version).is_err());
+        let consenting = running("[supervisors]\ndelivered_args = true\n", AGENT);
+        crate::supervisor::check_delivered_block(&consenting, &with_args).expect("consented");
+        let same = format!("{AGENT}args = [\"-v\"]\n");
+        crate::supervisor::check_delivered_block(&running("", &same), &delivered(&same))
+            .expect("the running block's own arguments");
+    }
+
+    const LISTED_GLOBALS: &str = "[supervisors]\nremote_config_disabled = [\"agent\"]\n\
+                                  delivered_args = true\ndelivered_env = [\"*\"]\n";
+
+    /// With every argument and variable allowed, a listed Supervisor's delivered block still
+    /// equals its running block whole: a changed `args`, `version_args`, `env` entry or core key,
+    /// an added key and a dropped one are each refused naming the block and the key, and the
+    /// running block delivered back passes (ADR-0017 clause 54).
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_block_for_a_listed_supervisor_must_equal_the_running_block_whole() {
+        let body = "args = [\"-c\", \"/etc/agent.conf\"]\nversion_args = [\"-v\"]\n\
+                    env = { OTEL_X = \"1\" }\n";
+        let operators = format!("{AGENT}{body}");
+        let config = running(LISTED_GLOBALS, &operators);
+        crate::supervisor::check_delivered_block(&config, &delivered(&operators))
+            .expect("the operator's own block, delivered back");
+        for (key, changed) in [
+            (
+                "args",
+                body.replace("\"/etc/agent.conf\"", "\"--config=yaml:receivers: {}\""),
+            ),
+            ("version_args", body.replace("\"-v\"", "\"-V\"")),
+            ("env", body.replace("\"1\"", "\"2\"")),
+            (
+                "args",
+                body.replace("args = [\"-c\", \"/etc/agent.conf\"]\n", ""),
+            ),
+            ("args", body.replace("[\"-c\", \"/etc/agent.conf\"]", "[]")),
+            (
+                "service_name",
+                format!("{body}service_name = \"io.example.other\"\n"),
+            ),
+            (
+                "stop_timeout_secs",
+                format!("{body}stop_timeout_secs = 1\n"),
+            ),
+            (
+                "program_path",
+                format!("{body}program_path = \"bin/other\"\n"),
+            ),
+        ] {
+            let block = delivered(&format!("{AGENT}{changed}"));
+            let err = crate::supervisor::check_delivered_block(&config, &block).expect_err(key);
+            assert!(err.contains("\"agent\""), "{err}");
+            assert!(err.contains(key), "{err}");
+            assert!(err.contains("remote_config_disabled"), "{err}");
+        }
+        let other_program = delivered(&format!(
+            "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"other\"\n{body}"
+        ));
+        let err = crate::supervisor::check_delivered_block(&config, &other_program)
+            .expect_err("another program under the listed name");
+        assert!(err.contains("command"), "{err}");
+        let other_kind = delivered(
+            "[[supervisor]]\ntype = \"collector\"\nname = \"agent\"\nbinary = \"otelcol\"\n",
+        );
+        let err = crate::supervisor::check_delivered_block(&config, &other_kind)
+            .expect_err("another kind under the listed name");
+        assert!(err.contains("type"), "{err}");
+        // An unlisted Supervisor under the same consent takes them, as ADR-0017 lets it.
+        let unlisted = running(
+            "[supervisors]\ndelivered_args = true\ndelivered_env = [\"*\"]\n",
+            &operators,
+        );
+        crate::supervisor::check_delivered_block(
+            &unlisted,
+            &delivered(&format!(
+                "{AGENT}args = [\"--other\"]\nenv = {{ OTEL_X = \"2\" }}\n"
+            )),
+        )
+        .expect("consented");
+    }
+
+    /// A listed `icinga2` enrols only with the parent the operator wrote: a delivered block that
+    /// names another parent or node, or points the pin at a file in `${config_dir}` — which, with
+    /// remote configuration off, nothing writes, so enrolment would fall back to trust on first
+    /// use — is refused naming the key, although ADR-0017 alone would let it through
+    /// (ADR-0017 clause 54).
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_listed_icinga2_keeps_the_parent_and_the_pin_the_operator_wrote() {
+        let globals = "[supervisors]\nremote_config_disabled = [\"icinga\"]\n";
+        // The operator placed the parent's certificate in `config/` by hand.
+        let operators = format!(
+            "{ICINGA}node_name = \"host-1\"\ntrusted_cert_file = \"${{config_dir}}/parent.crt\"\n"
+        );
+        let config = running(globals, &operators);
+        crate::supervisor::check_delivered_block(&config, &delivered(&operators))
+            .expect("the operator's own block, delivered back");
+        let pin_missing = "trusted_cert_file = \"${config_dir}/parent.crt\"\n";
+        for (key, block) in [
+            (
+                "parent_host",
+                operators.replace("master.example", "evil.example"),
+            ),
+            ("node_name", operators.replace("host-1", "host-2")),
+            (
+                "trusted_cert_file",
+                operators.replace("parent.crt", "absent.crt"),
+            ),
+        ] {
+            let block = delivered(&block);
+            crate::supervisor::check_delivered_block(&running("", &operators), &block)
+                .expect("what ADR-0017 alone lets through");
+            let err = crate::supervisor::check_delivered_block(&config, &block).expect_err(key);
+            assert!(err.contains(key) && err.contains("\"icinga\""), "{err}");
+        }
+        // Added under a listed name, the block cannot bring a parent either.
+        let err = crate::supervisor::check_delivered_block(
+            &running(globals, ""),
+            &delivered(&format!("{ICINGA}{pin_missing}")),
+        )
+        .expect_err("an added listed icinga2 with a parent");
+        assert!(err.contains("parent_host"), "{err}");
+    }
+
+    /// A listed Supervisor that does not run yet is added naming its program and nothing else:
+    /// `type`, `name` and the kind's program key where the kind does not name its own pass, and
+    /// any further key — an empty one included — fails the offer naming it (ADR-0017 clause 54).
+    /// Verifies: ADR-0017
+    #[test]
+    fn an_added_listed_supervisor_carries_only_what_names_its_program() {
+        let config = running(LISTED_GLOBALS, "");
+        for (key, line) in [
+            ("args", "args = [\"--config=env:CFG\"]\n"),
+            ("args", "args = []\n"),
+            ("version_args", "version_args = [\"--version\"]\n"),
+            ("env", "env = { CFG = \"receivers: {}\" }\n"),
+            ("env", "env = {}\n"),
+            ("service_name", "service_name = \"io.example.agent\"\n"),
+            ("apply_grace_secs", "apply_grace_secs = 0\n"),
+        ] {
+            let err = crate::supervisor::check_delivered_block(
+                &config,
+                &delivered(&format!("{AGENT}{line}")),
+            )
+            .expect_err(key);
+            assert!(err.contains(key) && err.contains("\"agent\""), "{err}");
+        }
+        crate::supervisor::check_delivered_block(&config, &delivered(AGENT)).expect("command");
+        crate::supervisor::check_delivered_block(
+            &config,
+            &delivered(
+                "[[supervisor]]\ntype = \"collector\"\nname = \"agent\"\nbinary = \"otelcol\"\n",
+            ),
+        )
+        .expect("collector");
+        crate::supervisor::check_delivered_block(
+            &config,
+            &delivered("[[supervisor]]\ntype = \"icinga2\"\nname = \"agent\"\n"),
+        )
+        .expect("icinga2, which names its own program");
+    }
+
+    /// The switch lives where the Server cannot write: a set that removes the listed block and
+    /// delivers it again starts an Agent still without `AcceptsRemoteConfig`, the written file
+    /// keeps `[supervisors]` byte for byte, and a block bringing arguments fails the whole offer
+    /// with the file untouched (ADR-0017 clauses 48 and 54).
+    /// Verifies: ADR-0017
+    #[tokio::test]
+    async fn a_delivered_set_cannot_switch_remote_config_back_on_for_a_listed_name() {
+        use opamp::proto::{AgentCapabilities, RemoteConfigStatuses};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let section = "[supervisors]\nremote_config_disabled = [\"agent\"]\n\
+                       delivered_args = true\n";
+        std::fs::write(
+            &path,
+            format!(
+                "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\n\
+                 {section}\n{AGENT}",
+                state = dir.path().join("state").to_string_lossy(),
+            ),
+        )
+        .expect("write");
+        let mut config = ClientConfig::load(&path).expect("load");
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let mut engine = crate::supervisor::build_engine(&config, &shutdown).expect("build");
+        let accepts = |report: &AgentToServer| {
+            report.capabilities & AgentCapabilities::AcceptsRemoteConfig as u64 != 0
+        };
+        assert!(!accepts(&engine.poll_reports()[1]));
+
+        let removing = offer_of(&[(
+            "fleet",
+            "[supervisors]\nremote_config_disabled = []\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"other\"\ncommand = \"agent\"\n",
+        )]);
+        apply(&mut engine, &mut config, removing, &shutdown).await;
+        let readding = offer_of(&[("fleet", AGENT)]);
+        apply(&mut engine, &mut config, readding, &shutdown).await;
+
+        let reports = engine.poll_reports();
+        assert_eq!(
+            reports[0].remote_config_status.as_ref().map(|s| s.status),
+            Some(RemoteConfigStatuses::Applied as i32),
+            "{:?}",
+            reports[0].remote_config_status
+        );
+        assert_eq!(
+            reports.len(),
+            2,
+            "the Client's own Agent and the re-added one"
+        );
+        assert!(
+            !accepts(&reports[1]),
+            "the re-added Agent took the capability back"
+        );
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains(section), "{text}");
+
+        let bringing = offer_of(&[(
+            "fleet",
+            &format!("{AGENT}args = [\"--config=yaml:receivers: {{}}\"]\n"),
+        )]);
+        apply(&mut engine, &mut config, bringing, &shutdown).await;
+        let status = engine.poll_reports()[0]
+            .remote_config_status
+            .clone()
+            .expect("a status");
+        assert_eq!(status.status, RemoteConfigStatuses::Failed as i32);
+        assert!(status.error_message.contains("args"), "{status:?}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
+    }
+
+    const ICINGA: &str = "[[supervisor]]\ntype = \"icinga2\"\nname = \"icinga\"\n\
+                          parent_host = \"master.example\"\n";
+
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_icinga2_block_reads_files_only_from_its_config_dir() {
+        let pin = "trusted_cert_file = \"${config_dir}/parent.crt\"\n";
+        for ticket in [
+            "/etc/shadow",
+            "${config_dir}/../../client-key.pem",
+            "${supervisor_dir}/ticket",
+            "${config_dir}/",
+        ] {
+            let block = delivered(&format!("{ICINGA}{pin}ticket_file = \"{ticket}\"\n"));
+            let err = crate::supervisor::check_delivered_block(&running("", ""), &block)
+                .expect_err(ticket);
+            assert!(err.contains("ticket_file"), "{err}");
+        }
+        let inside = delivered(&format!(
+            "{ICINGA}{pin}ticket_file = \"${{config_dir}}/ticket\"\n"
+        ));
+        crate::supervisor::check_delivered_block(&running("", ""), &inside).expect("inside");
+    }
+
+    /// The operator's ticket goes only to the operator's parent: a delivered block that keeps the
+    /// ticket file but names another parent is refused, and a node name is one plain name.
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_icinga2_block_cannot_send_the_operators_ticket_elsewhere() {
+        let operators = format!("{ICINGA}ticket_file = \"/etc/icinga2/ticket\"\n");
+        let elsewhere = delivered(
+            "[[supervisor]]\ntype = \"icinga2\"\nname = \"icinga\"\n\
+             parent_host = \"evil.example\"\nticket_file = \"/etc/icinga2/ticket\"\n\
+             trusted_cert_file = \"${config_dir}/evil.crt\"\n",
+        );
+        let err = crate::supervisor::check_delivered_block(&running("", &operators), &elsewhere)
+            .expect_err("the ticket to another parent");
+        assert!(err.contains("ticket_file"), "{err}");
+
+        for node_name in ["/etc/fleet/client", "../../etc/ssl/certs/x", "a\\b", ".."] {
+            let block = delivered(&format!(
+                "{ICINGA}trusted_cert_file = \"${{config_dir}}/p.crt\"\nnode_name = {node_name:?}\n"
+            ));
+            let err = validate_offered_block(&running("", ""), &block).expect_err(node_name);
+            assert!(err.contains("node_name"), "{err}");
+        }
+        let standalone = delivered("[[supervisor]]\ntype = \"icinga2\"\nname = \"icinga\"\n");
+        crate::supervisor::check_delivered_block(&running("", ""), &standalone)
+            .expect("no parent, nothing to pin");
+    }
+
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_icinga2_block_must_pin_its_parent() {
+        let err = crate::supervisor::check_delivered_block(&running("", ""), &delivered(ICINGA))
+            .expect_err("no pin");
+        assert!(err.contains("trusted_cert_file"), "{err}");
+        crate::supervisor::check_delivered_block(&running("", ICINGA), &delivered(ICINGA))
+            .expect("the operator's own block, unchanged, keeps its trust on first use");
+    }
+
     /// ADR-0017: a Server-delivered block that names an **absolute** program path is refused as a
     /// whole — that is the machine's own process, and letting the Server spawn one would run
     /// arbitrary code that never passed through package signing. The refusal names the block and the
@@ -557,10 +1048,10 @@ mod tests {
         }
     }
 
-    /// The attack this guard was written against: a Server that delivers a block spawning a
-    /// program on the machine with arguments of its choosing. Since ADR-0017 it is refused a step
-    /// earlier and for a broader reason — no block naming a program on the machine parses, from
-    /// any principal — but the delivery path must still refuse it, which is what this asserts.
+    /// The attack this guard stands against: a Server that delivers a block spawning a program on
+    /// the machine with arguments of its choosing. It is refused a step earlier and for a broader
+    /// reason (ADR-0017) — no block naming a program on the machine parses, from any principal —
+    /// but the delivery path must still refuse it, which is what this asserts.
     #[test]
     fn a_server_delivered_block_may_not_name_an_absolute_program() {
         let program = machine_program();
@@ -581,8 +1072,8 @@ mod tests {
         assert!(err.contains(program), "names the path: {err}");
     }
 
-    /// The counterpart: a bare file name is a program this Client owns (ADR-0017), so a
-    /// delivered block that names one is accepted — since ADR-0017 the only shape there is.
+    /// The counterpart: a bare file name is a program this Client owns (ADR-0017), so a delivered
+    /// block that names one is accepted — the only shape there is.
     #[test]
     fn a_server_delivered_block_naming_a_bare_program_is_accepted() {
         let offer = offer_of(&[(
@@ -669,9 +1160,130 @@ mod tests {
         assert_eq!(parsed.supervisors[0].name, "new");
     }
 
-    /// `supervisor.toml` holds the OpAMP credential in cleartext and is created `0600`; the rewrite must
+    /// A delivered set reaches no key of `supervisor.toml` but the `[[supervisor]]` array: whatever
+    /// else it names — an `[auth]` section, trust, the verification key, the allowed sources, the
+    /// operator's consent in `[supervisors]`, self-update, Gateway Mode — the file keeps the
+    /// operator's values and gains none of the offered ones.
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_set_writes_nothing_beyond_the_supervisor_blocks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let operator = "endpoint = \"wss://fleet.example:4320/v1/opamp\"\n\n\
+                        [packages]\nverification_key = \"aa\"\n\
+                        archive_key = \"operator-secret\"\n";
+        std::fs::write(&path, operator).expect("write");
+
+        let offer = offer_of(&[(
+            "fleet",
+            r#"
+            [auth]
+            bearer_token = "server-token"
+
+            [tls]
+            ca_file = "/tmp/server-ca.pem"
+
+            [packages]
+            verification_key = "bb"
+            allowed_sources = ["https://evil.example/"]
+
+            [supervisors]
+            delivered_args = true
+            delivered_env = ["LD_PRELOAD"]
+
+            [self_update]
+            package = "evil"
+
+            [gateway]
+            listen = "0.0.0.0:4320"
+
+            [[supervisor]]
+            type = "command"
+            name = "agent"
+            command = "agent"
+            "#,
+        )]);
+        let (blocks, tables) = offered_blocks(&offer).expect("parse");
+        assert_eq!(blocks.len(), 1);
+        let text = render_supervisors(&path, tables).expect("render");
+        for offered in [
+            "server-token",
+            "server-ca.pem",
+            "\"bb\"",
+            "evil.example",
+            "delivered_args",
+            "LD_PRELOAD",
+            "self_update",
+            "[gateway]",
+        ] {
+            assert!(
+                !text.contains(offered),
+                "{offered} reached the file:\n{text}"
+            );
+        }
+        let parsed: ClientConfig = toml::from_str(&text).expect("the file parses");
+        assert_eq!(parsed.endpoint, "wss://fleet.example:4320/v1/opamp");
+        assert!(text.contains("operator-secret"));
+        assert!(text.contains("verification_key = \"aa\""));
+        assert_eq!(parsed.supervisors.len(), 1);
+    }
+
+    /// A delivered block of a kind this Client was not built with is refused, naming the kind —
+    /// a Server cannot conjure a Supervisor type.
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_block_of_an_unknown_type_is_refused() {
+        let offer = offer_of(&[(
+            "fleet",
+            "[[supervisor]]\ntype = \"shell\"\nname = \"agent\"\ncommand = \"agent\"\n",
+        )]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        let (blocks, _) = offered_blocks(&offer).expect("parse");
+        let err = validate_offered_block(&config, &blocks[0]).expect_err("an unknown type");
+        assert!(err.contains("shell"), "{err}");
+    }
+
+    /// Neither a delivered Supervisor name nor a delivered program name can leave the directories
+    /// this Client owns: a name is one path component of a fixed grammar, and a program a bare
+    /// file name inside `program/`.
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_name_or_program_that_traverses_is_refused() {
+        for name in ["..", "../etc", "a/b", "a\\b", "Agent"] {
+            let offer = offer_of(&[(
+                "fleet",
+                &format!(
+                    "[[supervisor]]\ntype = \"command\"\nname = {name:?}\ncommand = \"agent\"\n"
+                ),
+            )]);
+            assert!(
+                offered_blocks(&offer).is_err(),
+                "the Supervisor name {name:?} was accepted"
+            );
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = ClientConfig {
+            state_dir: dir.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        for program in ["../../bin/sh", "sub/../../sh", "..", "sub/agent"] {
+            let block = delivered(&format!(
+                "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = {program:?}\n"
+            ));
+            assert!(
+                validate_offered_block(&config, &block).is_err(),
+                "the program {program:?} was accepted"
+            );
+        }
+    }
+
+    /// `supervisor.toml` may hold the archive key in cleartext and is created `0600`; the rewrite must
     /// not widen it. Before the fix, writing the temp file at the default umask and renaming it over
-    /// the original left the file (and the credential) world-readable after a Server reconfigure.
+    /// the original left the file (and the secret) world-readable after a Server reconfigure.
     #[cfg(unix)]
     #[test]
     fn the_rewrite_keeps_the_files_restrictive_mode() {
@@ -682,7 +1294,7 @@ mod tests {
         std::fs::write(
             &path,
             "endpoint = \"wss://fleet.example:4320/v1/opamp\"\n\n\
-             [auth]\nbearer_token = \"a-long-secret\"\n\n\
+             [packages]\narchive_key = \"a-long-secret\"\n\n\
              [[supervisor]]\ntype = \"command\"\nname = \"old\"\ncommand = \"old\"\n",
         )
         .expect("write");
@@ -731,6 +1343,7 @@ mod tests {
     /// ADR-0017: the apply is a diff by name. An unchanged block rides through — neither stopped
     /// nor started — a changed one is stopped and started but keeps its directory, a vanished one
     /// is stopped and removed, and a new one is only started (point 14: removal is keyed by name).
+    /// Verifies: ADR-0017
     #[test]
     fn the_plan_is_a_diff_by_name_and_unchanged_blocks_ride_through() {
         let parse = |text: &str| -> Vec<SupervisorBlock> {

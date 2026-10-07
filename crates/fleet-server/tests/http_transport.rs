@@ -82,6 +82,7 @@ async fn a_report_is_answered_and_the_agent_appears_in_the_fleet() {
     assert!(capabilities.contains(&serde_json::json!("AcceptsRemoteConfig")));
 }
 
+/// Verifies: G-3
 #[tokio::test]
 async fn the_offer_is_gated_by_the_config_hash() {
     let server = spawn().await;
@@ -128,6 +129,41 @@ async fn the_offer_is_gated_by_the_config_hash() {
     assert!(
         reply.remote_config.is_none(),
         "no redundant reconfiguration"
+    );
+}
+
+/// A Configuration aimed by a Selector reaches the Agents it matches, and an Agent outside it is
+/// offered nothing and keeps what it runs.
+/// Verifies: G-9
+#[tokio::test]
+async fn a_selector_aims_a_configuration_at_part_of_the_fleet() {
+    let server = spawn().await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let (inside, outside) = (InstanceUid::default(), InstanceUid::default());
+    exchange(&client, &url, &full_report(&inside, "canary-01", 1)).await;
+    exchange(&client, &url, &full_report(&outside, "edge-01", 1)).await;
+
+    distribute(
+        server.rest_addr,
+        "canary",
+        &[("service.instance.name", "canary-01")],
+        "receivers: {}\n",
+    )
+    .await;
+
+    let offered = exchange(&client, &url, &compressed_report(&inside, 2)).await;
+    assert!(
+        offered
+            .remote_config
+            .and_then(|offer| offer.config)
+            .is_some_and(|map| map.config_map.contains_key("canary")),
+        "the matching Agent is offered the Configuration"
+    );
+    let untouched = exchange(&client, &url, &compressed_report(&outside, 2)).await;
+    assert!(
+        untouched.remote_config.is_none(),
+        "an Agent outside the Selector is offered nothing"
     );
 }
 
@@ -306,6 +342,7 @@ async fn stateless_http_polling_never_triggers_the_duplicate_rekey() {
     );
 }
 
+/// Verifies: ADR-0012
 #[tokio::test]
 async fn gzip_request_bodies_are_accepted() {
     let server = spawn().await;
@@ -334,6 +371,7 @@ async fn gzip_request_bodies_are_accepted() {
 
 /// The Baseline (message size limits): the Server MUST enforce a receive limit on the plain-HTTP
 /// transport and MUST answer an oversized request with `413 Content Too Large`.
+/// Verifies: ADR-0012
 #[tokio::test]
 async fn an_oversized_request_body_is_refused_with_413() {
     let server = spawn_with_limit(1024).await;
@@ -351,6 +389,7 @@ async fn an_oversized_request_body_is_refused_with_413() {
 
 /// The same limit, applied *after* decompression: a small gzip body that inflates past the limit
 /// buys no more memory than an oversized plain one, and is answered the same way.
+/// Verifies: ADR-0012
 #[tokio::test]
 async fn a_gzip_body_that_inflates_past_the_limit_is_refused_with_413() {
     let server = spawn_with_limit(1024).await;
@@ -374,6 +413,7 @@ async fn a_gzip_body_that_inflates_past_the_limit_is_refused_with_413() {
     assert_eq!(response.status(), 413);
 }
 
+/// Verifies: ADR-0012
 #[tokio::test]
 async fn transport_detection_rejects_a_missing_protobuf_content_type() {
     let server = spawn().await;
@@ -453,4 +493,52 @@ async fn an_unknown_compressed_agent_is_asked_for_full_state_and_can_request_ide
     assert_eq!(assigned.new_instance_uid.len(), 16);
     assert_ne!(assigned.new_instance_uid, temporary.as_bytes().to_vec());
     assert_eq!(reply.instance_uid, assigned.new_instance_uid);
+}
+
+/// A poller past its burst is answered in the body: a `200` carrying the same `Unavailable` a
+/// WebSocket gets, never a `429` or a `503`.
+/// Verifies: ADR-0012
+#[tokio::test]
+async fn a_poller_past_its_burst_is_answered_unavailable_in_the_body() {
+    let (server, _clock) = support::spawn_with_agent_rate(fleet_server::agent_rate::Limits {
+        messages_per_sec: 1,
+        burst: 2,
+        gateway_messages_per_sec: 1,
+        gateway_burst: 2,
+    })
+    .await;
+    let url = format!("http://{}/v1/opamp", server.addr);
+    let client = reqwest::Client::new();
+    let uid = InstanceUid::default();
+    exchange(&client, &url, &full_report(&uid, "poller", 1)).await;
+    exchange(&client, &url, &compressed_report(&uid, 2)).await;
+
+    // `exchange` holds the status to 200 and the body to protobuf.
+    let reply = exchange(&client, &url, &compressed_report(&uid, 3)).await;
+    assert_eq!(reply.instance_uid, uid.as_bytes());
+    let error = reply.error_response.expect("an error response");
+    assert_eq!(error.r#type, ServerErrorResponseType::Unavailable as i32);
+    assert!(matches!(
+        error.details,
+        Some(opamp::proto::server_error_response::Details::RetryInfo(ref info))
+            if info.retry_after_nanoseconds == 30_000_000_000
+    ));
+    assert_eq!(server.state.snapshot()[0].sequence_num, 2, "not processed");
+
+    // A body that does not decode is counted too; it names no Agent, and neither does its reply.
+    let response = client
+        .post(&url)
+        .header("content-type", PROTOBUF)
+        .body(vec![0xff, 0xff, 0xff])
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), 200);
+    let reply =
+        ServerToAgent::decode(response.bytes().await.expect("body").as_ref()).expect("decode");
+    assert!(reply.instance_uid.is_empty());
+    assert_eq!(
+        reply.error_response.expect("an error").r#type,
+        ServerErrorResponseType::Unavailable as i32
+    );
 }

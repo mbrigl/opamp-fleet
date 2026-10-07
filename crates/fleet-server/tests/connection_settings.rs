@@ -17,13 +17,10 @@ const PROTOBUF: &str = "application/x-protobuf";
 
 fn offer() -> ConnectionOffer {
     let config: ConnectionOfferConfig = toml::from_str(
-        r#"
-        bearer_token = "rotated-token"
-        heartbeat_interval_secs = 7
-        "#,
+        "heartbeat_interval_secs = 7\nendpoint = \"wss://fleet.example:4320/v1/opamp\"\n",
     )
     .expect("parse");
-    ConnectionOffer::from_config(&config).expect("offer")
+    ConnectionOffer::from_config(&config)
 }
 
 async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> ServerToAgent {
@@ -38,9 +35,12 @@ async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> Ser
     ServerToAgent::decode(response.bytes().await.expect("body").as_ref()).expect("decode")
 }
 
+/// The standing offer reaches a capable Agent with what it names — and no `headers`: nothing on
+/// the Agent plane reads one (ADR-0013 clause 1).
+/// Verifies: ADR-0013
 #[tokio::test]
-async fn the_offer_reaches_a_capable_agent_and_carries_the_rotated_credential() {
-    let server = spawn_with(None, Some(offer())).await;
+async fn the_offer_reaches_a_capable_agent_and_carries_no_headers() {
+    let server = spawn_with(Some(offer())).await;
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "capable", 1);
     report.capabilities |= AgentCapabilities::AcceptsOpAmpConnectionSettings as u64;
@@ -55,14 +55,17 @@ async fn the_offer_reaches_a_capable_agent_and_carries_the_rotated_credential() 
     assert!(!offers.hash.is_empty());
     let settings = offers.opamp.expect("opamp settings");
     assert_eq!(settings.heartbeat_interval_seconds, 7);
-    let header = &settings.headers.expect("headers").headers[0];
-    assert_eq!(header.key, "Authorization");
-    assert_eq!(header.value, "Bearer rotated-token");
+    assert_eq!(
+        settings.destination_endpoint,
+        "wss://fleet.example:4320/v1/opamp"
+    );
+    assert!(settings.headers.is_none(), "an offer carries no headers");
 }
 
+/// Verifies: ADR-0013
 #[tokio::test]
 async fn no_offer_without_the_capability_or_without_a_configured_section() {
-    let armed = spawn_with(None, Some(offer())).await;
+    let armed = spawn_with(Some(offer())).await;
     let uid = InstanceUid::default();
     // full_report declares no AcceptsOpAMPConnectionSettings.
     let reply = exchange(&armed, &full_report(&uid, "incapable", 1)).await;
@@ -71,7 +74,7 @@ async fn no_offer_without_the_capability_or_without_a_configured_section() {
         "capability negotiation is binding"
     );
 
-    let unarmed = spawn_with(None, None).await;
+    let unarmed = spawn_with(None).await;
     let mut report = full_report(&uid, "capable", 1);
     report.capabilities |= AgentCapabilities::AcceptsOpAmpConnectionSettings as u64;
     let reply = exchange(&unarmed, &report).await;
@@ -83,9 +86,10 @@ async fn no_offer_without_the_capability_or_without_a_configured_section() {
     );
 }
 
+/// Verifies: ADR-0013
 #[tokio::test]
 async fn the_reported_hash_gates_reoffering() {
-    let server = spawn_with(None, Some(offer())).await;
+    let server = spawn_with(Some(offer())).await;
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "gated", 1);
     report.capabilities |= AgentCapabilities::AcceptsOpAmpConnectionSettings as u64;

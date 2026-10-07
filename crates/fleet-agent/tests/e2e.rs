@@ -7,6 +7,8 @@
 //! says goodbye, and its directory is purged (ADR-0017) — and `supervisor.toml` is rewritten around
 //! the operator's globals each time.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -112,7 +114,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: ADR-0017
+// Verifies: ADR-0017, ADR-0014, G-1, G-6, G-14
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -151,6 +153,10 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "heartbeat_interval_secs = 1\n\n",
             "[attributes]\n",
             "env = \"prod\"\n\n",
+            // The set the Server delivers below carries arguments; the operator consents to that
+            // here, where the Server cannot (ADR-0017 clause 38).
+            "[supervisors]\n",
+            "delivered_args = true\n\n",
             "{otelcol_block}\n",
             "{stub_block}",
         ),
@@ -160,7 +166,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         stub_block = stub_block,
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
+        .expect("write supervisor.toml");
 
     // Both owned Supervisors have their program staged before the Client starts, so they run at
     // once rather than waiting for a package (ADR-0017 makes the delivery path owned-only).
@@ -169,9 +176,9 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     let _client = spawn_client(&config_path);
 
-    // Both Supervisors appear as their own connected Agents — over the one WebSocket
-    // connection this Client maintains (ADR-0014: routed by instance_uid alone) — and so does the
-    // Client itself, which since ADR-0020 is an Agent whether or not it supervises anything.
+    // Both Supervisors appear as their own connected Agents — over the one WebSocket connection
+    // this Client maintains (ADR-0014: routed by instance_uid alone) — and so does the Client
+    // itself, which is an Agent (ADR-0020) whether or not it supervises anything.
     let agents = wait_until("every agent connected", || {
         let snapshot = state.snapshot();
         (snapshot.len() == AGENTS && snapshot.iter().all(|a| a.connected)).then_some(snapshot)
@@ -330,8 +337,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         .labels
         .is_empty());
 
-    // …and a Selector aimed at it reaches that Agent and no other — which is the whole claim the
-    // retired block table used to carry.
+    // …and a Selector aimed at it reaches that Agent and no other.
 
     state
         .save_configuration(
@@ -400,11 +406,11 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // ——— The Server manages the Client's own Supervisor set (ADR-0017) ———
 
-    // The untyped fleet Configuration keeps poisoning the Client's composed map (its body is
-    // YAML). Since ADR-0027 a narrower aim no longer withdraws what was already rolled out —
-    // the Client keeps its pinned assignment however the type changes — so the recovery is to
-    // delete the Configuration, which removes it from every assigned Agent, and roll it out
-    // again stated for the type both Supervisors report (ADR-0025).
+    // The untyped fleet Configuration keeps poisoning the Client's composed map (its body is YAML).
+    // A narrower aim does not withdraw what was already rolled out (ADR-0027) — the Client keeps
+    // its pinned assignment however the type changes — so the recovery is to delete the
+    // Configuration, which removes it from every assigned Agent, and roll it out again stated for
+    // the type both Supervisors report (ADR-0025).
     let snapshot = state.snapshot();
     let supervised_type = view(&snapshot, "otelcol")
         .expect("otelcol view")
@@ -540,5 +546,339 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(
         state_dir.join("supervisors/stub/instance-uid").is_file(),
         "a supervisor that stays keeps its directory and identity"
+    );
+}
+
+/// A delivered Supervisor set with one block the Client refuses is refused whole: the running
+/// Supervisor keeps its process, `supervisor.toml` keeps every byte, and the Client's own Agent
+/// reports the refusal.
+/// Verifies: ADR-0017
+#[tokio::test]
+async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
+    let (addr, state, dir) = spawn_server().await;
+    let state_dir: PathBuf = dir.path().join("client-state");
+    let marker = dir.path().join("stub-marker");
+    let program = stub_program_name();
+    let toml = format!(
+        concat!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\n",
+            "state_dir = {state:?}\n",
+            "heartbeat_interval_secs = 1\n\n",
+            // Consent to delivered arguments, so the one refusal is the unknown kind.
+            "[supervisors]\n",
+            "delivered_args = true\n\n",
+            "[[supervisor]]\n",
+            "type = \"command\"\n",
+            "name = \"stub\"\n",
+            "command = {program:?}\n",
+            "args = [\"--touch\", {marker:?}]\n",
+        ),
+        addr = addr,
+        state = state_dir.to_string_lossy(),
+        program = program,
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path())).expect("write");
+    let written = std::fs::read(&config_path).expect("read");
+    stage_owned_program(&state_dir, "stub", &program);
+    let _client = spawn_client(&config_path);
+
+    let pid = wait_until("the stub to run", || stub_pid(&marker)).await;
+    wait_until("the Client's own Agent", || {
+        view(&state.snapshot(), "Supervisor Agent").map(|_| ())
+    })
+    .await;
+
+    // The stub with other arguments — applied, it would restart — beside a kind no Client has.
+    let offered = format!(
+        concat!(
+            "[[supervisor]]\n",
+            "type = \"command\"\n",
+            "name = \"stub\"\n",
+            "command = {program:?}\n",
+            "args = [\"--touch\", {marker:?}, \"--changed\"]\n\n",
+            "[[supervisor]]\n",
+            "type = \"shell\"\n",
+            "name = \"intruder\"\n",
+            "command = \"sh\"\n",
+        ),
+        program = program,
+        marker = marker.to_string_lossy(),
+    );
+    state
+        .save_configuration(
+            "supervisor-set",
+            fleet_server::configs::Revision {
+                selector: Default::default(),
+                body: offered,
+                role: String::new(),
+                service_name: "supervisor".to_string(),
+            },
+        )
+        .expect("save");
+    state
+        .rollout_configuration("supervisor-set")
+        .expect("roll out");
+
+    let refusal = wait_until("the Client to refuse the set", || {
+        view(&state.snapshot(), "Supervisor Agent")
+            .filter(|agent| agent.remote_config_status == "FAILED")
+            .map(|agent| agent.remote_config_error.clone())
+    })
+    .await;
+    assert!(
+        refusal.contains("shell"),
+        "the refusal names the kind: {refusal}"
+    );
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        stub_pid(&marker),
+        Some(pid),
+        "the running Supervisor was restarted"
+    );
+    assert_eq!(
+        std::fs::read(&config_path).expect("read"),
+        written,
+        "supervisor.toml changed"
+    );
+    assert!(
+        view(&state.snapshot(), "intruder").is_none(),
+        "the refused block started"
+    );
+}
+
+/// ADR-0017 over one connection: a released Configuration reaches the unlisted Supervisor and not
+/// the listed one, whose Agent declares neither remote-configuration capability. Switched back on,
+/// the next start declares both, is offered what is released, and the stored offer replaces every
+/// file in `config/`, the operator's included (clauses 3 and 8).
+/// Verifies: ADR-0017
+#[tokio::test]
+async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
+    let (addr, state, dir) = spawn_server().await;
+    let state_dir: PathBuf = dir.path().join("client-state");
+    let program = stub_program_name();
+    let block = |name: &str| {
+        format!(
+            "[[supervisor]]\ntype = \"command\"\nname = {name:?}\ncommand = {program:?}\n\
+             args = [\"--touch\", {marker:?}]\n\n",
+            marker = dir.path().join(format!("{name}-marker")).to_string_lossy(),
+        )
+    };
+    let write_config = |listed: &str| {
+        let toml = format!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\nstate_dir = {state:?}\n\
+             heartbeat_interval_secs = 1\n\n[supervisors]\nremote_config_disabled = {listed}\n\n\
+             {open}{closed}",
+            state = state_dir.to_string_lossy(),
+            open = block("open"),
+            closed = block("closed"),
+        );
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, toml + &common::client_identity(dir.path()))
+            .expect("write supervisor.toml");
+        path
+    };
+    stage_owned_program(&state_dir, "open", &program);
+    stage_owned_program(&state_dir, "closed", &program);
+    let operators_file = state_dir.join("supervisors/closed/config/local.conf");
+    std::fs::create_dir_all(operators_file.parent().expect("config/")).expect("config/");
+    std::fs::write(&operators_file, "mine\n").expect("the operator's file");
+
+    let client = spawn_client(&write_config("[\"closed\"]"));
+    wait_until("every agent connected", || {
+        let snapshot = state.snapshot();
+        (snapshot.len() == AGENTS && snapshot.iter().all(|a| a.connected)).then_some(())
+    })
+    .await;
+    let declares = |name: &str, capability: &str| {
+        view(&state.snapshot(), name)
+            .is_some_and(|a| a.capabilities.iter().any(|c| c == capability))
+    };
+    assert!(declares("open", "AcceptsRemoteConfig"));
+    for capability in ["AcceptsRemoteConfig", "ReportsRemoteConfig"] {
+        assert!(
+            !declares("closed", capability),
+            "closed declares {capability}"
+        );
+    }
+    assert!(declares("closed", "ReportsEffectiveConfig"));
+
+    state
+        .save_configuration(
+            "fleet",
+            fleet_server::configs::Revision {
+                selector: Default::default(),
+                body: "receivers: {}\n".to_string(),
+                role: String::new(),
+                service_name: String::new(),
+            },
+        )
+        .expect("save the fleet configuration");
+    state
+        .rollout_configuration("fleet")
+        .expect("roll out the fleet configuration");
+    wait_until("the unlisted Supervisor in sync", || {
+        view(&state.snapshot(), "open")
+            .filter(|a| a.in_sync && a.remote_config_status == "APPLIED")
+            .map(|_| ())
+    })
+    .await;
+    // Over the same connection, a few exchanges later: still nothing for the listed one.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let snapshot = state.snapshot();
+    let closed = view(&snapshot, "closed").expect("closed view");
+    assert_eq!(
+        closed.remote_config_status, "UNSET",
+        "no status from the listed Supervisor"
+    );
+    assert!(!state_dir.join("supervisors/closed/config/fleet").exists());
+    assert!(!state_dir
+        .join("supervisors/closed/remote-config.pb")
+        .exists());
+    assert!(operators_file.is_file());
+
+    // Switched back on: the next start declares both and takes what is released.
+    drop(client);
+    let _client = spawn_client(&write_config("[]"));
+    wait_until(
+        "the formerly listed Supervisor to apply the release",
+        || {
+            view(&state.snapshot(), "closed")
+                .filter(|a| {
+                    a.connected
+                        && a.remote_config_status == "APPLIED"
+                        && a.capabilities.iter().any(|c| c == "AcceptsRemoteConfig")
+                })
+                .map(|_| ())
+        },
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(state_dir.join("supervisors/closed/config/fleet"))
+            .expect("the stored entry"),
+        "receivers: {}\n"
+    );
+    assert!(
+        !operators_file.exists(),
+        "the first stored offer replaces every file in config/"
+    );
+}
+
+/// ADR-0017 over one connection: a host that keeps its Supervisor set is offered none. A released
+/// set that would add a block reaches neither `supervisor.toml` nor the running Supervisors, and
+/// the Client's own Agent declares neither remote-configuration capability and reports no status.
+/// Switched back on, the next start is offered the released set, and it replaces the
+/// `[[supervisor]]` array, the operator's block included (clauses 22, 25 and 27).
+/// Verifies: ADR-0017
+#[tokio::test]
+async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {
+    let (addr, state, dir) = spawn_server().await;
+    let state_dir: PathBuf = dir.path().join("client-state");
+    let marker = dir.path().join("stub-marker");
+    let program = stub_program_name();
+    let config_path = dir.path().join("supervisor.toml");
+    let write_config = |server_manages_set: bool| {
+        let toml = format!(
+            concat!(
+                "endpoint = \"ws://{addr}/v1/opamp\"\n",
+                "state_dir = {state:?}\n",
+                "heartbeat_interval_secs = 1\n\n",
+                "[supervisors]\n",
+                "server_manages_set = {manages}\n\n",
+                "[[supervisor]]\n",
+                "type = \"command\"\n",
+                "name = \"stub\"\n",
+                "command = {program:?}\n",
+                "args = [\"--touch\", {marker:?}]\n",
+            ),
+            addr = addr,
+            state = state_dir.to_string_lossy(),
+            manages = server_manages_set,
+            program = program,
+            marker = marker.to_string_lossy(),
+        );
+        std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
+            .expect("write supervisor.toml");
+        std::fs::read(&config_path).expect("read")
+    };
+    let written = write_config(false);
+    stage_owned_program(&state_dir, "stub", &program);
+    let client = spawn_client(&config_path);
+
+    let pid = wait_until("the stub to run", || stub_pid(&marker)).await;
+    let capabilities = wait_until("the Client's own Agent", || {
+        view(&state.snapshot(), "Supervisor Agent")
+            .filter(|a| a.connected)
+            .map(|a| a.capabilities.clone())
+    })
+    .await;
+    for capability in ["AcceptsRemoteConfig", "ReportsRemoteConfig"] {
+        assert!(
+            !capabilities.iter().any(|c| c == capability),
+            "the Client's own Agent declares {capability}"
+        );
+    }
+    assert!(capabilities.iter().any(|c| c == "ReportsEffectiveConfig"));
+
+    state
+        .save_configuration(
+            "supervisor-set",
+            fleet_server::configs::Revision {
+                selector: Default::default(),
+                body: format!(
+                    "[[supervisor]]\ntype = \"command\"\nname = \"added\"\ncommand = {program:?}\n"
+                ),
+                role: String::new(),
+                service_name: "supervisor".to_string(),
+            },
+        )
+        .expect("save");
+    state
+        .rollout_configuration("supervisor-set")
+        .expect("roll out");
+
+    // A few exchanges later: nothing reached the host.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let snapshot = state.snapshot();
+    let own = view(&snapshot, "Supervisor Agent").expect("own view");
+    assert_eq!(own.remote_config_status, "UNSET", "a status from the host");
+    assert!(
+        view(&snapshot, "added").is_none(),
+        "the released block started"
+    );
+    assert_eq!(
+        std::fs::read(&config_path).expect("read"),
+        written,
+        "supervisor.toml changed"
+    );
+    assert_eq!(
+        stub_pid(&marker),
+        Some(pid),
+        "the running Supervisor was restarted"
+    );
+    assert!(!state_dir.join("remote-config.pb").exists());
+
+    // Switched back on: the next start takes the released set, which replaces the operator's.
+    drop(client);
+    write_config(true);
+    let _client = spawn_client(&config_path);
+    wait_until("the Client to apply the released set", || {
+        view(&state.snapshot(), "Supervisor Agent")
+            .filter(|a| {
+                a.connected
+                    && a.remote_config_status == "APPLIED"
+                    && a.capabilities.iter().any(|c| c == "AcceptsRemoteConfig")
+            })
+            .map(|_| ())
+    })
+    .await;
+    let rewritten = std::fs::read_to_string(&config_path).expect("read");
+    assert!(rewritten.contains("name = \"added\""), "{rewritten}");
+    assert!(!rewritten.contains("name = \"stub\""), "{rewritten}");
+    assert!(
+        rewritten.contains("server_manages_set = true"),
+        "{rewritten}"
     );
 }

@@ -8,6 +8,10 @@
 //!
 //! The pool is WebSocket-only, and the configuration refuses anything else at startup: a polling
 //! upstream could not carry the Server's pushes to the Agents behind the Gateway.
+//!
+//! Any live connection carries any downstream Agent: every one is opened with this Gateway's own
+//! identity and nothing else, so nothing on it depends on the peer an Agent came through
+//! (ADR-0014 clause 7).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,26 +68,20 @@ impl Pool {
 
     /// Forwards one report upstream on its Agent's connection, opening or re-homing as needed.
     ///
-    /// The message is forwarded **unchanged** (ADR-0014): this encodes exactly what arrived, and
-    /// the `Authorization` the downstream peer presented rides the upstream handshake.
-    pub async fn forward(
-        &self,
-        uid: InstanceUid,
-        report: &AgentToServer,
-        authorization: Option<&str>,
-    ) -> Result<(), String> {
+    /// The message is forwarded **unchanged** (ADR-0014): this encodes exactly what arrived.
+    pub async fn forward(&self, uid: InstanceUid, report: &AgentToServer) -> Result<(), String> {
         let frame = opamp::frame::encode_within(report, self.limit)
             .map_err(|e| format!("cannot forward a report of {uid}: {e}"))?;
 
         // Two attempts: the assigned connection may have died between the last send and this one,
-        // and re-homing is exactly what rule 6 of ADR-0014 asks for.
-        let outbound = self.connection_for(uid, authorization).await?;
+        // and re-homing is exactly what clause 9 of ADR-0014 asks for.
+        let outbound = self.connection_for(uid).await?;
         if outbound.send(frame.clone()).await.is_ok() {
             return Ok(());
         }
         debug!(agent = %uid, "the upstream connection is gone; re-homing");
         self.forget_connection_of(uid);
-        let outbound = self.connection_for(uid, authorization).await?;
+        let outbound = self.connection_for(uid).await?;
         outbound
             .send(frame)
             .await
@@ -92,22 +90,29 @@ impl Pool {
 
     /// The Agent's connection: the one it is stuck to while that lives, else the least-loaded one,
     /// else a new one while the cap allows.
-    async fn connection_for(
-        &self,
-        uid: InstanceUid,
-        authorization: Option<&str>,
-    ) -> Result<mpsc::Sender<Vec<u8>>, String> {
+    async fn connection_for(&self, uid: InstanceUid) -> Result<mpsc::Sender<Vec<u8>>, String> {
         {
-            let inner = self.inner.lock().expect("pool lock");
+            let mut inner = self.inner.lock().expect("pool lock");
             if let Some(&index) = inner.assigned.get(&uid) {
                 if let Some(upstream) = inner.connections.get(index) {
                     if upstream.alive.load(Ordering::Relaxed) {
                         return Ok(upstream.outbound.clone());
                     }
                 }
+                // Gone: re-home.
+                inner.assigned.remove(&uid);
+                if let Some(upstream) = inner.connections.get_mut(index) {
+                    upstream.carries.retain(|carried| *carried != uid);
+                }
             }
             // Grow only when every existing connection already carries something, and only to the
-            // cap: the pool costs what it uses (ADR-0014 rule 8).
+            // cap: the pool costs what it uses (ADR-0014 clause 8).
+            let live = inner
+                .connections
+                .iter()
+                .filter(|c| c.alive.load(Ordering::Relaxed))
+                .count();
+            let at_cap = live >= self.limit_connections();
             let idle = inner
                 .connections
                 .iter()
@@ -115,22 +120,16 @@ impl Pool {
                 .filter(|(_, c)| c.alive.load(Ordering::Relaxed))
                 .min_by_key(|(_, c)| c.carries.len());
             let reuse = match idle {
-                Some((index, connection))
-                    if connection.carries.is_empty()
-                        || inner.connections.len() >= self.limit_connections() =>
-                {
-                    Some(index)
-                }
+                Some((index, connection)) if connection.carries.is_empty() || at_cap => Some(index),
                 _ => None,
             };
             if let Some(index) = reuse {
-                let mut inner = inner;
                 inner.assigned.insert(uid, index);
                 inner.connections[index].carries.push(uid);
                 return Ok(inner.connections[index].outbound.clone());
             }
         }
-        self.open(uid, authorization).await
+        self.open(uid).await
     }
 
     fn limit_connections(&self) -> usize {
@@ -142,19 +141,11 @@ impl Pool {
     }
 
     /// Opens one upstream connection and starts its reader and writer tasks.
-    async fn open(
-        &self,
-        uid: InstanceUid,
-        authorization: Option<&str>,
-    ) -> Result<mpsc::Sender<Vec<u8>>, String> {
+    async fn open(&self, uid: InstanceUid) -> Result<mpsc::Sender<Vec<u8>>, String> {
+        // This Gateway's own identity, and no `Authorization`: a downstream peer's is never
+        // forwarded, and nothing is sent in its place (ADR-0014 clause 11, ADR-0022).
         let mut upstream = crate::transport::connection(&self.config)?;
-        // The downstream peer's credential, forwarded untouched — a Gateway makes no
-        // authentication decisions (ADR-0014, ADR-0022).
-        upstream.authorization = authorization.map(str::to_string);
         upstream.max_message_size = self.limit;
-        upstream
-            .headers()
-            .map_err(|e| format!("a forwarded credential is not valid: {e}"))?;
         let socket = upstream.connect_websocket().await?;
 
         let (mut sink, mut stream) = socket.split();
@@ -181,7 +172,7 @@ impl Pool {
                     Ok(_) => continue,
                 };
                 match opamp::frame::decode::<ServerToAgent>(&payload, limit) {
-                    // Routing is by `instance_uid` alone (ADR-0014 rule 13): a message for an Agent
+                    // Routing is by `instance_uid` alone (ADR-0014 clause 13): a message for an Agent
                     // this Gateway has never carried is dropped, never broadcast.
                     Ok(reply) => match InstanceUid::from_wire(&reply.instance_uid) {
                         Some(uid) => registry.deliver(uid, reply).await,
@@ -195,12 +186,32 @@ impl Pool {
         });
 
         let mut inner = self.inner.lock().expect("pool lock");
-        inner.connections.push(Upstream {
+        let upstream = Upstream {
             outbound: tx.clone(),
             carries: vec![uid],
             alive,
-        });
-        let index = inner.connections.len() - 1;
+        };
+        // A closed connection's place is taken rather than the list growing; what it still
+        // carried re-homes on its next report.
+        let index = match inner
+            .connections
+            .iter()
+            .position(|c| !c.alive.load(Ordering::Relaxed))
+        {
+            Some(index) => {
+                let stale = std::mem::replace(&mut inner.connections[index], upstream);
+                for carried in stale.carries {
+                    if inner.assigned.get(&carried) == Some(&index) {
+                        inner.assigned.remove(&carried);
+                    }
+                }
+                index
+            }
+            None => {
+                inner.connections.push(upstream);
+                inner.connections.len() - 1
+            }
+        };
         inner.assigned.insert(uid, index);
         info!(
             connections = inner.connections.len(),
@@ -210,7 +221,7 @@ impl Pool {
         Ok(tx)
     }
 
-    /// Drops an Agent's assignment so the next report re-homes it (ADR-0014 rule 9). Nothing is
+    /// Drops an Agent's assignment so the next report re-homes it (ADR-0014 clause 9). Nothing is
     /// said upstream on its behalf: it never disconnected.
     fn forget_connection_of(&self, uid: InstanceUid) {
         let mut inner = self.inner.lock().expect("pool lock");

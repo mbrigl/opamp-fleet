@@ -1,9 +1,9 @@
 //! Server-set labels on an Agent (ADR-0026).
 //!
-//! The attribute a staged rollout wants — `rollout = "canary"` — is one an operator invents, and
-//! until now it could only be invented in `supervisor.toml` on the machine. Moving a host between channels
-//! was therefore a file edit plus a restart *on that host*: the per-host wiring ADR-0028 set out to
-//! remove, surviving in the one place it mattered most.
+//! The attribute a staged rollout wants — `rollout = "canary"` — is one an operator invents, and a
+//! label lets the operator invent it on the Server. Invented in `supervisor.toml` on the machine,
+//! moving a host between channels would be a file edit plus a restart *on that host*: the per-host
+//! wiring ADR-0028 removes, surviving in the one place it matters most.
 //!
 //! A label joins the attribute set a Selector matches against — for Configurations (ADR-0025) and
 //! for packages (ADR-0028) alike, since both resolve against the same `AgentDescription`. It never
@@ -108,7 +108,7 @@ pub fn effective_description(
 /// The labels this Agent has that its own reports shadow — set, and matching nothing.
 ///
 /// Surfaced on the fleet row rather than dropped in silence: doing what can be done and saying what
-/// was not is the correction ADR-0013 already made for connection settings.
+/// was not is what ADR-0013 does for connection settings.
 pub fn shadowed(
     description: Option<&AgentDescription>,
     labels: &BTreeMap<String, String>,
@@ -162,6 +162,7 @@ mod tests {
 
     /// The crux (ADR-0026 point 18): reported wins. A label that could rewrite `os.type` would let a
     /// slip in the UI offer this Agent an artifact built for another machine.
+    /// Verifies: ADR-0028
     #[test]
     fn a_label_never_overrides_what_the_agent_reports() {
         let described = described(&[("os.type", "linux")]);

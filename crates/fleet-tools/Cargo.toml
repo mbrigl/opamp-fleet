@@ -20,6 +20,7 @@ opamp = { workspace = true, features = ["client"] }
 # code that will install it is the property worth asserting, and it is why these tools live in the
 # same workspace as the Client rather than beside it.
 fleet-agent = { path = "../fleet-agent" }
+fleet-core.workspace = true
 # ADR-0028: `pack` writes the containers a Client can open, so it needs the *writers* — `compress`
 # for 7z, and the gzip/tar pair for `.tar.gz` and for the tree `opamp-package-fetch` repacks.
 sevenz-rust2 = { workspace = true, features = ["compress"] }

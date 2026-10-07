@@ -194,10 +194,19 @@ it (AGENTS.md links here).
   Container carries the `llvm-lib` it requires). Worth running whenever a change touches
   platform-gated code or the tests around it: CI builds the Client on Windows and macOS, and a
   `#[cfg(unix)]` mistake compiles perfectly well on Linux.
-- **Audit dependencies:** `cargo audit` (needs `cargo install cargo-audit`; reviewed, non-actionable
-  advisories are recorded in [`.cargo/audit.toml`](.cargo/audit.toml))
-- **Run the Server:** `cargo run -p fleet-server -- --config config/server.toml`
-- **Run the Client:** `cargo run -p fleet-agent -- --config config/supervisor.toml`
+- **Check the supply chain:** `cargo deny check` (needs `cargo install cargo-deny`): advisories,
+  licences, sources and banned crates, as [`deny.toml`](deny.toml) sets them; reviewed advisories
+  are recorded there with a reason
+- **Fuzz a parser:** `cargo +nightly fuzz run <target> fuzz/corpus/<target> fuzz/seeds/<target>`
+  (needs `cargo install cargo-fuzz` and a nightly toolchain); the targets are listed in
+  [`fuzz/Cargo.toml`](fuzz/Cargo.toml), and every parser that reads bytes from the network or a
+  downloaded artifact has one (specification Q-2)
+- **Make development certificates:** `scripts/dev-pki.sh` — both binaries refuse to run without
+  TLS (ADR-0012); it writes a CA, a Server certificate for `127.0.0.1`, an Agent certificate, and a
+  `server.toml` and `supervisor.toml` that use them to `.dev-pki/`. The VS Code launch
+  configurations run it when `.dev-pki/` has no configuration yet
+- **Run the Server:** `cargo run -p fleet-server -- --config .dev-pki/server.toml`
+- **Run the Client:** `cargo run -p fleet-agent -- --config .dev-pki/supervisor.toml`
 - **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release
   and hand it to the Server) or `cargo run --bin opamp-package-sign -- --help` (build, hash, and
   sign an artifact out of any program) — both documented in
@@ -205,9 +214,11 @@ it (AGENTS.md links here).
 
 Both binaries read a TOML configuration file ([ADR-0009](docs/adr/0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md));
 every setting has a default, so they also start with no file at all. The annotated examples live in
-[`config/`](config/). CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs exactly these
-build/test/lint commands and additionally release-builds the Client for Linux, Windows, and macOS
-and the Server for Linux.
+[`config/`](config/). [`scripts/check-rust.sh`](scripts/check-rust.sh) runs exactly these
+build/test/lint commands, locally through `scripts/check-all.sh` and in CI as the `rust` job of
+[`.github/workflows/checks.yml`](.github/workflows/checks.yml);
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) additionally checks the Client on Windows and
+macOS and release-builds the Client for Linux, Windows, and macOS and the Server for Linux.
 
 **Releases** ([ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md),
 [ADR-0011](docs/adr/0011-versions-resolved-in-the-internal-crate.md)): the version is
@@ -217,9 +228,8 @@ nobody types a tag. Running it publishes one archive per platform,
 `supervisor_<version>_<os>_<arch>.tar.gz` for Linux, macOS and Windows on the architectures each
 ships on, plus a `SHA256SUMS` file. The files are named after the **Set** an operator uploads them
 to, not after the product inside them
-([ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md)) — and since
-[ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md) the program inside them and
-its configuration file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
+([ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md)) — and the program inside them and its configuration
+file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
 the **product's** name, `opamp-fleet`
 ([ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md)): that is the name that
 identifies an *installation*, and a second one is a second build rather than a flag. The fields are separated by `_` because a name and a version both
@@ -475,7 +485,7 @@ configured once by a maintainer and worth re-checking after a repository move or
 
 - a **ruleset on `main`** that requires pull requests, requires the
   <!-- required-checks begin — compared with the workflow's jobs by scripts/check-docs.sh -->
-  `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, and `shell`
+  `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, `shell`, and `rust`
   <!-- required-checks end -->
   jobs of the **Checks** workflow as required status checks (rulesets list checks by their job
   name), and blocks force pushes and branch deletion;

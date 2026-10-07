@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
 use serde::Deserialize;
 
 /// `supervisor.toml`. Every setting has a default; unknown keys are rejected so a typo fails loudly at
@@ -56,19 +55,18 @@ pub struct ClientConfig {
     pub gateway: Option<GatewayConfig>,
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
-    /// Optional authentication toward the Server (ADR-0022); absent means no `Authorization`
-    /// header, as before.
-    pub auth: Option<AuthConfig>,
-    /// A Server-rotated `Authorization` value (ADR-0013), applied from the persisted connection
-    /// settings at startup — never from the file, and it wins over `[auth]`.
-    #[serde(skip)]
-    pub authorization_override: Option<String>,
+    /// An `[auth]` section a file written for an earlier version still holds. The Client sends
+    /// no credential (ADR-0022 clause 3): the section is read only so that it does not fail the
+    /// load — whatever keys it has — and nothing in it is kept. Its presence is what
+    /// [`leftover_auth_notice`](Self::leftover_auth_notice) reports, once, at startup.
+    #[serde(default, rename = "auth")]
+    pub leftover_auth: Option<serde::de::IgnoredAny>,
     /// Package verification (ADR-0028); absent means unsigned packages are accepted on their
     /// content hash alone.
     pub packages: Option<PackagesConfig>,
     /// Consent for the Server to replace this Client's own binary (ADR-0020). Absent means the
-    /// section's own defaults, which since ADR-0020 are **consent given** under the Client's own
-    /// name — write `enabled = false` to withdraw it.
+    /// section's own defaults, which are **consent given** under the Client's own name — write
+    /// `enabled = false` to withdraw it.
     #[serde(default)]
     pub self_update: SelfUpdateConfig,
     /// Where this Client's own log goes when it runs as a service (ADR-0021). Absent takes the
@@ -202,10 +200,9 @@ pub struct Program {
     /// What the process is spawned from, and what a package is installed over.
     ///
     /// Always inside this Supervisor's own `program/` directory (ADR-0017): a Managed Process is
-    /// always the fleet's. There is no `owned` flag beside this any more, because there is nothing
-    /// left for it to distinguish — every block that parses names a program this Client installs,
-    /// so `AcceptsPackages` is a constant of this Client rather than a function of its
-    /// configuration.
+    /// always the fleet's. There is no `owned` flag beside this, because there is nothing for it to
+    /// distinguish — every block that parses names a program this Client installs, so
+    /// `AcceptsPackages` is a constant of this Client rather than a function of its configuration.
     pub path: PathBuf,
 }
 
@@ -213,14 +210,14 @@ pub struct Program {
 /// ADR-0017).
 ///
 /// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
-/// wrote. **One shape**, since ADR-0017 removed the second: a **bare file name**, resolving to
+/// wrote. **One shape** (ADR-0017): a **bare file name**, resolving to
 /// `<supervisor_dir>/program/<value>` — or `program/tree/<program_path>` for a multi-file package
 /// (ADR-0028) — a directory this Client creates and owns, so it may replace what is in it. A bare
 /// name cannot escape that directory, which is why nothing here has to sanitize a path.
 ///
-/// Everything else is refused, and an **absolute path** gets its own message: it is the shape this
-/// Client used to accept, so its refusal is the only notice an operator carrying such a block will
-/// get and it carries the whole explanation rather than a rule number.
+/// Everything else is refused, and an **absolute path** gets its own message: it names a program on
+/// the machine, so its refusal is the only notice an operator writing such a block will get and it
+/// carries the whole explanation rather than a rule number.
 ///
 /// # Errors
 /// Returns an error for anything that is not a bare file name, naming the rule and the way across.
@@ -231,10 +228,10 @@ pub fn resolve_program(
     supervisor_dir: &Path,
     name: &str,
 ) -> Result<Program, String> {
-    // The machine's program, which this Client no longer manages (ADR-0017). `has_root` rather
-    // than `is_absolute` so the Windows drive-relative form — `\Program Files\otelcol\otelcol.exe`,
-    // no drive letter — folds into the same message: it was only ever a near-miss of the absolute
-    // form, and both now have the same answer.
+    // The machine's program, which this Client does not manage (ADR-0017). `has_root` rather than
+    // `is_absolute` so the Windows drive-relative form — `\Program Files\otelcol\otelcol.exe`, no
+    // drive letter — folds into the same message: it is a near-miss of the absolute form, and both
+    // have the same answer.
     if value.is_absolute() || value.has_root() {
         return Err(format!(
             "supervisor {name:?}: `{key} = {}` names a program on the machine, and this Client \
@@ -269,10 +266,10 @@ pub fn resolve_program(
 /// A name validated against the intersection of the systemd-unit, launchd-label, Windows
 /// service-name, and directory-name grammars (ADR-0021).
 ///
-/// Since ADR-0021 removed `--instance`, this no longer names an instance: it governs
+/// It names no instance, since there is no instance flag (ADR-0021 clause 6): it governs
 /// `[[supervisor]]` block names, and `build.rs` holds a second copy of the same rules for
-/// `PRODUCT_NAME` — which cannot borrow this one, because a build script cannot depend on the
-/// crate it builds.
+/// `PRODUCT_NAME` — which cannot borrow this one, because a build script cannot depend on the crate
+/// it builds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceName(String);
 
@@ -353,9 +350,9 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         let stop_timeout_secs = take_secs(&mut table, &name, "stop_timeout_secs")?;
         let apply_grace_secs = take_secs(&mut table, &name, "apply_grace_secs")?;
         let retain_previous_secs = take_secs(&mut table, &name, "retain_previous_secs")?;
-        // Retired by ADR-0017, and refused by name rather than left to the plugin's strict parse:
-        // a block carrying it was written against a Client that took it, and what replaces it is
-        // not another key but a different place entirely.
+        // Not a supervisor key (ADR-0017 clause 13), and refused by name rather than left to the
+        // plugin's strict parse: a block carrying it expects a Client that takes it, and what
+        // answers it is not another key but a different place entirely.
         if table.contains_key("attributes") {
             return Err(format!(
                 "supervisor {name:?}: `[supervisor.attributes]` is no longer a supervisor key — a \
@@ -373,8 +370,8 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                     .map_err(|e| format!("supervisor {name:?}: `program_path = {raw:?}` {e}"))?,
             ),
         };
-        // `package = "name"` chose the artifact on the host; ADR-0028 moved that decision to the
-        // Server's Selector. Refuse it loudly rather than ignore a key an operator believes in.
+        // `package = "name"` would choose the artifact on the host, a decision that is the Server's
+        // Selector's (ADR-0028). Refuse it loudly rather than ignore a key an operator believes in.
         if table.contains_key("package") {
             return Err(format!(
                 "supervisor {name:?}: `package` is no longer a supervisor key — the Server \
@@ -382,10 +379,9 @@ impl TryFrom<toml::Table> for SupervisorBlock {
                  (PUT /api/v1/packages/<name>/selector)"
             ));
         }
-        // And `accepts_packages = true` said *whether*, while the program's path said *where* —
-        // two keys for one truth, and nothing ever checked that the second permitted the first
-        // (ADR-0017). ADR-0017 left one shape, so every Supervisor accepts packages and the key
-        // would only be a way to disagree with a constant.
+        // And `accepts_packages = true` would say *whether*, while the program's path says *where*
+        // — two keys for one truth. ADR-0017 leaves one shape, so every Supervisor accepts packages
+        // and the key would only be a way to disagree with a constant.
         if table.contains_key("accepts_packages") {
             return Err(format!(
                 "supervisor {name:?}: `accepts_packages` is no longer a supervisor key — a \
@@ -470,38 +466,11 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
     }
 }
 
-/// The `[auth]` block (ADR-0022): exactly one scheme — `bearer_token`, or `username` and
-/// `password` together. Mixing or halving them fails loudly at startup (ADR-0009).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthConfig {
-    pub bearer_token: Option<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
-}
-
-impl AuthConfig {
-    /// The `Authorization` header value this block yields, sent on every plain-HTTP request and
-    /// on the WebSocket upgrade.
-    pub fn authorization(&self) -> Result<String, String> {
-        match (&self.bearer_token, &self.username, &self.password) {
-            (Some(token), None, None) => Ok(format!("Bearer {token}")),
-            (None, Some(user), Some(password)) => {
-                let encoded =
-                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
-                Ok(format!("Basic {encoded}"))
-            }
-            (Some(_), _, _) => Err(
-                "[auth] must set either bearer_token or username/password, not both".to_string(),
-            ),
-            _ => Err("[auth] needs bearer_token, or username and password together".to_string()),
-        }
-    }
-}
-
-/// Keys whose values are credentials: `[auth]`'s `bearer_token` and `password`, and
-/// `[packages]`'s `archive_key`. Paths and public keys are not on the list — a path locates a
-/// secret, it is not one, and the `verification_key` is the *public* half of the signing pair.
+/// Keys whose values are secrets: `[packages]`'s `archive_key`, and the `bearer_token` and
+/// `password` a leftover `[auth]` section may still hold — the Client ignores the section
+/// (ADR-0022 clause 3), but the file's text is reported as it stands, so its values stay masked.
+/// Paths and public keys are not on the list — a path locates a secret, it is not one, and the
+/// `verification_key` is the *public* half of the signing pair.
 const SECRET_KEYS: &[&str] = &["bearer_token", "password", "archive_key"];
 
 /// The file's text with every secret value replaced by `***`, for reporting it off the host —
@@ -541,44 +510,43 @@ pub fn redact_secrets(text: &str) -> String {
     out
 }
 
-/// The `[packages]` block (ADR-0028): how downloaded package artifacts are verified.
-#[derive(Debug, Clone, Deserialize)]
+/// The `[packages]` block (ADR-0028): how downloaded package artifacts are verified, and where they may come from.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackagesConfig {
-    /// Hex-encoded Ed25519 public key. When set, every offered package MUST carry a valid
-    /// signature against it; when unset, an unsigned package is accepted on its content hash alone
-    /// and a *signed* one is refused (there is nothing to check it with).
+    /// Hex-encoded Ed25519 public key. Every offered package MUST carry a valid signature against
+    /// it; without it this Client takes no packages at all, its own self-update included
+    /// (ADR-0028, ADR-0020).
     pub verification_key: Option<String>,
+    /// The `https://` URL prefixes a download may come from besides the Server's own origin
+    /// (ADR-0028). Every redirect hop is checked against them; empty allows the Server alone.
+    #[serde(default)]
+    pub allowed_sources: Vec<String>,
     /// The key that opens an encrypted `.7z` package artifact (ADR-0028). Unset means artifacts are
     /// expected unencrypted; an encrypted one then fails to install, naming this key.
     ///
-    /// One secret for the fleet — a single archive serves every Agent — and never the OpAMP
-    /// credential from `[auth]`, which the Server rotates on its own (ADR-0013): a rotation would
-    /// leave every packed archive unopenable.
+    /// One secret for the fleet — a single archive serves every Agent.
     pub archive_key: Option<String>,
 }
 
 /// The `[self_update]` block (ADR-0020): consent for the Server to replace *this Client's* binary.
 ///
-/// **The section is absent on most hosts, and absent means consent** (ADR-0020, superseding
-/// ADR-0021 point 17): a Client the fleet cannot update is a Client that has to be updated by hand
-/// on every host, which is the state fleet management exists to end. What used to be the default —
-/// no consent at all — is now written down, as `enabled = false`.
+/// **The section is absent on most hosts, and absent means consent** (ADR-0020): a Client the
+/// fleet cannot update is a Client that has to be updated by hand on every host, which is the state
+/// fleet management exists to end. No consent at all is written down, as `enabled = false`.
 ///
-/// The *name* is what the consent is narrowed to, and it does the work the absent section used to:
-/// a package with an empty Selector reaches every Agent that accepts packages (ADR-0028), so
-/// without a name to match, the first fleet-wide Collector artifact an operator uploads would be
-/// installed over the Client and take the host out of reach. An offer under any other name is
-/// refused and reported, never applied. The default name is the Client's own Agent type —
-/// `supervisor` since ADR-0021 — which is what a Set carrying this Client is keyed by anyway
-/// (ADR-0028), so the default is not a wildcard: it is the one package that could legitimately be
-/// this Client.
+/// The *name* is what the consent is narrowed to, and it is what keeps that consent safe: a package
+/// with an empty Selector reaches every Agent that accepts packages (ADR-0028), so without a name
+/// to match, the first fleet-wide Collector artifact an operator uploads would be installed over
+/// the Client and take the host out of reach. An offer under any other name is refused and
+/// reported, never applied. The default name is the Client's own Agent type — `supervisor`
+/// (ADR-0021) — which is what a Set carrying this Client is keyed by anyway (ADR-0028), so the
+/// default is not a wildcard: it is the one package that could legitimately be this Client.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfUpdateConfig {
     /// Whether the consent stands. `false` is the withdrawal — the Client's own Agent then declares
-    /// no package capability at all and no offer can reach it, which is exactly what an absent
-    /// section meant before ADR-0020.
+    /// no package capability at all and no offer can reach it.
     #[serde(default = "default_self_update_enabled")]
     pub enabled: bool,
     /// The name of the package that carries this Client; defaults to the Client's own Agent type
@@ -597,8 +565,8 @@ impl Default for SelfUpdateConfig {
     }
 }
 
-/// What the configuration file was called until ADR-0021, and the one reason a missing file is an
-/// error rather than the defaults.
+/// The file name ADR-0021 clause 29 looks for beside a missing `supervisor.toml`, and the one reason
+/// a missing file is an error rather than the defaults.
 pub const LEGACY_CONFIG_FILE_NAME: &str = "client.toml";
 
 fn default_self_update_enabled() -> bool {
@@ -606,9 +574,9 @@ fn default_self_update_enabled() -> bool {
 }
 
 /// The Client's own Agent type (ADR-0021): the Set that carries this Client is keyed by the type it
-/// is built for (ADR-0028), so the type is also what names it. Deliberately *not* the product's name
-/// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which since ADR-0021 is a different
-/// string and names the binary, the service, and the version directories rather than the package.
+/// is built for (ADR-0028), so the type is also what names it. Deliberately *not* the product's
+/// name [`layout::COMPONENT`](crate::service::layout::COMPONENT), which is a different string and
+/// names the binary, the service, and the version directories rather than the package.
 fn default_self_update_package() -> String {
     crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string()
 }
@@ -675,6 +643,31 @@ pub struct SupervisorsConfig {
     /// configuration is acknowledged `APPLIED`; `0` acknowledges on start.
     #[serde(default = "default_apply_grace_secs")]
     pub apply_grace_secs: u64,
+    /// The environment variables a Server-delivered block may set, each name exact or ending in
+    /// `*` as a prefix (ADR-0017 clause 38). Empty — the default — lets a delivered block keep only
+    /// the environment its running block already has.
+    #[serde(default)]
+    pub delivered_env: Vec<String>,
+    /// Whether a Server-delivered block may state `args` and `version_args` its running block does
+    /// not already have (ADR-0017 clause 38).
+    #[serde(default)]
+    pub delivered_args: bool,
+    /// The Supervisors whose Agents neither declare nor act on remote configuration (ADR-0017),
+    /// by name: each runs only on what the operator placed in its `config/` directory, and a
+    /// delivered block brings it no `args`, `version_args` or `env`. Read from this file only —
+    /// the Supervisor-set apply never writes this section.
+    #[serde(default)]
+    pub remote_config_disabled: Vec<String>,
+    /// Whether the Server manages the set of `[[supervisor]]` blocks through the Client's own
+    /// Agent (ADR-0017 clauses 27 and 41). `false` builds that Agent without remote configuration,
+    /// and the blocks in this file are the operator's alone. Read from this file only, like the
+    /// rest of the section.
+    #[serde(default = "default_server_manages_set")]
+    pub server_manages_set: bool,
+}
+
+fn default_server_manages_set() -> bool {
+    true
 }
 
 impl Default for SupervisorsConfig {
@@ -682,6 +675,10 @@ impl Default for SupervisorsConfig {
         SupervisorsConfig {
             stop_timeout_secs: default_stop_timeout_secs(),
             apply_grace_secs: default_apply_grace_secs(),
+            delivered_env: Vec::new(),
+            delivered_args: false,
+            remote_config_disabled: Vec::new(),
+            server_manages_set: default_server_manages_set(),
         }
     }
 }
@@ -692,8 +689,8 @@ impl Default for SupervisorsConfig {
 #[serde(deny_unknown_fields)]
 pub struct UpdatesConfig {
     /// How long the version a successful update supersedes is kept before it is deleted, so an
-    /// operator has a fallback window (ADR-0028). `0` deletes it on success, the pre-ADR-0028
-    /// behaviour. A per-Supervisor `retain_previous_secs` overrides this for one block.
+    /// operator has a fallback window (ADR-0028). `0` deletes it on success, with no
+    /// fallback window. A per-Supervisor `retain_previous_secs` overrides this for one block.
     #[serde(default = "default_retain_previous_secs")]
     pub retain_previous_secs: u64,
 }
@@ -732,8 +729,15 @@ pub struct GatewayConfig {
     /// is refused at load.
     #[serde(default = "default_max_carried_agents")]
     pub max_carried_agents: usize,
-    /// TLS for the downstream hop. Mutual TLS is per hop (ADR-0022): what this verifies is the
-    /// Agents connecting *here*, and the identity presented *upstream* is the Client's own.
+    /// The most bytes of package artifacts this Gateway holds for the Agents behind it
+    /// (ADR-0028 clause 47), under `<state_dir>/gateway-packages`. An artifact larger than this, or
+    /// than `max_artifact_size_bytes`, is not cached and not delivered through the Gateway. `0` is
+    /// refused at load.
+    #[serde(default = "default_package_cache_bytes")]
+    pub package_cache_bytes: u64,
+    /// TLS for the downstream hop, required (ADR-0014). Mutual TLS is per hop: what this verifies
+    /// is the Agents connecting *here*, and the identity presented *upstream* is the Client's own.
+    /// An `Option` only so its absence can be named at load.
     pub tls: Option<GatewayTlsConfig>,
 }
 
@@ -746,8 +750,8 @@ pub struct GatewayTlsConfig {
     pub cert_file: PathBuf,
     /// PEM private key for it.
     pub key_file: PathBuf,
-    /// Optional PEM bundle a downstream Agent's client certificate must chain to. Absent accepts
-    /// any peer at the TLS layer, which is what a fleet still bootstrapping wants.
+    /// PEM bundle a downstream Agent's client certificate must chain to, required (ADR-0014): a
+    /// peer without one fails the handshake. An `Option` only so its absence can be named.
     pub client_ca_file: Option<PathBuf>,
 }
 
@@ -765,6 +769,13 @@ impl GatewayConfig {
                     .to_string(),
             );
         }
+        if self.package_cache_bytes == 0 {
+            return Err(
+                "[gateway] package_cache_bytes must be greater than zero — it bounds the package \
+                 cache, not a switch"
+                    .to_string(),
+            );
+        }
         if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
             return Err(format!(
                 "[gateway] needs a WebSocket endpoint upstream, and this Client's is {endpoint} — \
@@ -772,7 +783,21 @@ impl GatewayConfig {
                  Gateway"
             ));
         }
-        Ok(())
+        // A Gateway admits Agents, so the downstream hop is mutual TLS 1.3 and nothing less — on the
+        // loopback too (ADR-0014).
+        match &self.tls {
+            None => Err(
+                "[gateway.tls] is required — a Gateway admits Agents over mutual TLS only; set \
+                 cert_file, key_file and client_ca_file"
+                    .to_string(),
+            ),
+            Some(tls) if tls.client_ca_file.is_none() => Err(
+                "[gateway.tls] client_ca_file is required — every downstream Agent presents a \
+                 certificate that chains to it"
+                    .to_string(),
+            ),
+            Some(_) => Ok(()),
+        }
     }
 }
 
@@ -814,8 +839,9 @@ pub enum TransportKind {
 }
 
 fn default_endpoint() -> String {
-    // The Baseline's default port and path.
-    "ws://127.0.0.1:4320/v1/opamp".to_string()
+    // The Baseline's default port and path, over TLS: the Agent plane serves nothing else
+    // (ADR-0012).
+    "wss://127.0.0.1:4320/v1/opamp".to_string()
 }
 
 fn default_name() -> String {
@@ -848,6 +874,12 @@ fn default_upstream_connections() -> usize {
 /// hostile connection cannot grow the routing maps without bound.
 fn default_max_carried_agents() -> usize {
     10_000
+}
+
+/// Ten gibibytes: room for a handful of releases of a large Agent across a few Platforms, which is
+/// what one rollout behind a Gateway asks for (ADR-0028 clause 47).
+fn default_package_cache_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
 }
 
 fn default_state_dir() -> PathBuf {
@@ -888,8 +920,7 @@ impl Default for ClientConfig {
             attributes: BTreeMap::new(),
             gateway: None,
             tls: None,
-            auth: None,
-            authorization_override: None,
+            leftover_auth: None,
             packages: None,
             self_update: SelfUpdateConfig::default(),
             package_key: None,
@@ -922,11 +953,20 @@ impl ClientConfig {
     pub fn checked(self, path: &Path) -> Result<Self, String> {
         let mut config = self;
         config.check_supervisor_names()?;
-        if let Some(auth) = &config.auth {
-            // A half-configured block must fail now, not at the first exchange.
-            auth.authorization()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+        // A name no block can ever carry would switch nothing off, silently (ADR-0017 clause 49).
+        for name in &config.supervisor_defaults.remote_config_disabled {
+            parse_instance_name(name).map_err(|e| {
+                format!(
+                    "{}: [supervisors] remote_config_disabled: {name:?} is not a supervisor \
+                     name: {e}",
+                    path.display()
+                )
+            })?;
         }
+        // Plaintext is for the loopback alone, and refused rather than warned about (ADR-0012).
+        config
+            .transport()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         if let Some(tls) = &config.tls {
             tls.check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1032,6 +1072,22 @@ impl ClientConfig {
         }
     }
 
+    /// Whether the operator switched remote configuration off for the Supervisor `name`
+    /// (ADR-0017).
+    #[must_use]
+    pub fn remote_config_disabled(&self, name: &str) -> bool {
+        self.supervisor_defaults
+            .remote_config_disabled
+            .iter()
+            .any(|listed| listed == name)
+    }
+
+    /// Whether the Server manages this Client's Supervisor set (ADR-0017 clause 41).
+    #[must_use]
+    pub fn server_manages_set(&self) -> bool {
+        self.supervisor_defaults.server_manages_set
+    }
+
     /// Supervisor names key state directories and Agent identities — a duplicate would silently
     /// merge two Supervisors into one.
     fn check_supervisor_names(&self) -> Result<(), String> {
@@ -1055,23 +1111,24 @@ impl ClientConfig {
         self.attributes.clone()
     }
 
-    /// The `Authorization` value this Client sends, if any: a Server-rotated credential
-    /// (ADR-0013) wins over the `[auth]` block (ADR-0022).
-    pub fn authorization_value(&self) -> Result<Option<String>, String> {
-        if let Some(rotated) = &self.authorization_override {
-            return Ok(Some(rotated.clone()));
-        }
-        self.auth.as_ref().map(|a| a.authorization()).transpose()
+    /// The one startup notice a leftover `[auth]` section earns (ADR-0022 clause 3), or `None`
+    /// when the file has none. The section is ignored and nothing from it is sent; it is not a
+    /// reason to refuse the file, since a Client the Server updated must keep connecting.
+    #[must_use]
+    pub fn leftover_auth_notice(&self) -> Option<&'static str> {
+        self.leftover_auth.is_some().then_some(
+            "[auth] is ignored: the Server admits this Client by its client certificate alone, \
+             and nothing from the section is sent — it can be deleted from the file",
+        )
     }
 
+    /// The transport the endpoint names, held to the specification's rule: `wss://` or `https://`,
+    /// and `ws://` or `http://` only to `127.0.0.1` or `::1` (ADR-0012).
     pub fn transport(&self) -> Result<TransportKind, String> {
+        opamp::endpoint::check_url(&self.endpoint).map_err(|e| format!("endpoint {e}"))?;
         match self.endpoint.split("://").next() {
             Some("ws") | Some("wss") => Ok(TransportKind::WebSocket),
-            Some("http") | Some("https") => Ok(TransportKind::Http),
-            _ => Err(format!(
-                "endpoint {} must start with ws://, wss://, http:// or https://",
-                self.endpoint
-            )),
+            _ => Ok(TransportKind::Http),
         }
     }
 }
@@ -1081,11 +1138,11 @@ mod tests {
 
     /// Every directory this Client derives is absolute, however the operator wrote it.
     ///
-    /// Since ADR-0017 a Managed Process starts in its own directory, so a relative path handed to
-    /// it is resolved against a directory the Client has left — and `state_dir` defaults to the
-    /// relative `client-state`, which made the ordinary configuration the broken one. Two failures
-    /// came out of it: the program was looked for beneath itself, and a Collector that did start
-    /// could not open the configuration written for it.
+    /// A Managed Process starts in its own directory (ADR-0017), so a relative path handed to it is
+    /// resolved against a directory the Client has left — and `state_dir` defaults to the relative
+    /// `client-state`, which would make the ordinary configuration the broken one: the program
+    /// would be looked for beneath itself, and a Collector that did start could not open the
+    /// configuration written for it.
     #[test]
     fn a_relative_state_dir_yields_absolute_directories() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1160,7 +1217,7 @@ mod tests {
     fn the_service_namespace_is_a_top_level_key_and_absent_by_default() {
         assert!(ClientConfig::default().service_namespace.is_none());
         let untouched: ClientConfig =
-            toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
+            toml::from_str("endpoint = \"wss://h/v1/opamp\"").expect("parse");
         assert!(untouched.service_namespace.is_none());
 
         let configured: ClientConfig =
@@ -1176,6 +1233,7 @@ mod tests {
     /// ADR-0021. The log is on by default with a bound that cannot be removed, and `[logging]` is
     /// the machine's — so a typo in it fails startup rather than quietly disabling the one thing
     /// that would have explained the next failure.
+    /// Verifies: ADR-0021
     #[test]
     fn the_log_file_is_on_by_default_and_its_retention_is_not_optional() {
         let defaults = ClientConfig::default().logging;
@@ -1220,6 +1278,7 @@ mod tests {
     /// configuration is ordinarily the defaults and a warning; a missing one with the *old* name
     /// beside it is an upgraded host that would otherwise come up on the development endpoint and
     /// manage nothing, which is the failure nobody sees.
+    /// Verifies: ADR-0021
     #[test]
     fn the_configurations_old_name_beside_the_new_one_is_refused_rather_than_defaulted() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1230,7 +1289,7 @@ mod tests {
 
         std::fs::write(
             dir.path().join(LEGACY_CONFIG_FILE_NAME),
-            "endpoint = \"ws://h/v1/opamp\"\n",
+            "endpoint = \"wss://h/v1/opamp\"\n",
         )
         .expect("write the file this host was configured with");
         let error = ClientConfig::load(&expected).expect_err("an upgraded host must not go quiet");
@@ -1244,14 +1303,15 @@ mod tests {
         std::fs::rename(dir.path().join(LEGACY_CONFIG_FILE_NAME), &expected).expect("rename");
         assert_eq!(
             ClientConfig::load(&expected).expect("loads").endpoint,
-            "ws://h/v1/opamp"
+            "wss://h/v1/opamp"
         );
     }
 
     /// ADR-0020: the consent stands unless the file withdraws it, and it is narrowed to a name
-    /// either way — the Client's own Agent type when the file names none, which since ADR-0021 is
-    /// `supervisor`. A withdrawal is a written `enabled = false`, so a Client the fleet cannot
-    /// update says so in its own configuration instead of saying nothing at all.
+    /// either way — the Client's own Agent type when the file names none, which is `supervisor`
+    /// (ADR-0021). A withdrawal is a written `enabled = false`, so a Client the fleet cannot update
+    /// says so in its own configuration instead of saying nothing at all.
+    /// Verifies: ADR-0020
     #[test]
     fn self_update_consent_stands_by_default_and_is_narrowed_to_a_package_name() {
         let default = ClientConfig::default();
@@ -1263,14 +1323,14 @@ mod tests {
 
         // A file that never mentions the section is the common case, and it is consent.
         let untouched: ClientConfig =
-            toml::from_str("endpoint = \"ws://h/v1/opamp\"").expect("parse");
+            toml::from_str("endpoint = \"wss://h/v1/opamp\"").expect("parse");
         assert_eq!(
             untouched.self_update_package(),
             Some(crate::supervisor::agent::CLIENT_AGENT_TYPE)
         );
 
-        // And that name is `supervisor` since ADR-0021 — pinned here because the default travels
-        // into every written configuration and has to line up with the Set the Server publishes.
+        // And that name is `supervisor` (ADR-0021) — pinned here because the default travels into
+        // every written configuration and has to line up with the Set the Server publishes.
         assert_eq!(untouched.self_update_package(), Some("supervisor"));
 
         // A name of its own is honoured, and it is the *only* name an offer may carry.
@@ -1278,7 +1338,7 @@ mod tests {
             toml::from_str("[self_update]\npackage = \"opamp-client\"\n").expect("parse");
         assert_eq!(named.self_update_package(), Some("opamp-client"));
 
-        // The withdrawal, which is what an absent section used to mean.
+        // The withdrawal, written rather than implied by an absent section.
         let withdrawn: ClientConfig =
             toml::from_str("[self_update]\nenabled = false\n").expect("parse");
         assert_eq!(withdrawn.self_update_package(), None);
@@ -1300,6 +1360,7 @@ mod tests {
     /// The name is the whole of the narrowing (ADR-0020), so an empty one with the consent standing
     /// is refused at load rather than left to widen the consent to every package the Server offers.
     /// Withdrawn, the name is not read at all and an empty one is simply unused.
+    /// Verifies: ADR-0020
     #[test]
     fn an_empty_self_update_package_is_refused_while_the_consent_stands() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1338,6 +1399,7 @@ mod tests {
     /// The artifact download has a ceiling so a Server cannot fill the staging disk before the hash
     /// is checked; it defaults to the Server's own per-package limit, is configurable, and zero is
     /// a bound that could carry nothing rather than "unlimited", so it fails startup.
+    /// Verifies: ADR-0028
     #[test]
     fn the_artifact_size_limit_defaults_is_configurable_and_rejects_zero() {
         assert_eq!(ClientConfig::default().max_artifact_size_bytes, 1 << 30);
@@ -1355,14 +1417,17 @@ mod tests {
     /// A single downstream connection's Agent cap bounds the routing state one peer can create; it
     /// has a generous default, and zero is a bound that could carry nothing rather than "unlimited",
     /// so it fails startup.
+    /// Verifies: ADR-0014
     #[test]
     fn the_gateway_agent_cap_defaults_and_rejects_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("supervisor.toml");
 
+        let tls = "[gateway.tls]\ncert_file = \"g.pem\"\nkey_file = \"g-key.pem\"\n\
+                   client_ca_file = \"ca.pem\"\n";
         std::fs::write(
             &path,
-            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n",
+            format!("endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n{tls}"),
         )
         .expect("write");
         let config = ClientConfig::load(&path).expect("loads with the default cap");
@@ -1370,18 +1435,78 @@ mod tests {
 
         std::fs::write(
             &path,
-            "endpoint = \"ws://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
-             max_carried_agents = 0\n",
+            format!(
+                "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+                 max_carried_agents = 0\n{tls}"
+            ),
         )
         .expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_carried_agents"), "{err}");
     }
 
-    /// Both keys that once configured package delivery on the host are refused rather than
-    /// ignored: `package` named the artifact (ADR-0028 moved that to the Server's Selector), and
-    /// `accepts_packages` said whether to take one (ADR-0017 derives that from the program's
-    /// path). An operator who still has either in a file believes it does something.
+    /// The Gateway's package cache holds ten gibibytes by default, and zero is a bound that could
+    /// hold nothing rather than "unlimited", so it fails startup.
+    /// Verifies: ADR-0028
+    #[test]
+    fn the_package_cache_defaults_to_ten_gib_and_rejects_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let tls = "[gateway.tls]\ncert_file = \"g.pem\"\nkey_file = \"g-key.pem\"\n\
+                   client_ca_file = \"ca.pem\"\n";
+        std::fs::write(
+            &path,
+            format!("endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n{tls}"),
+        )
+        .expect("write");
+        let config = ClientConfig::load(&path).expect("loads with the default bound");
+        assert_eq!(
+            config.gateway.expect("gateway").package_cache_bytes,
+            10_737_418_240
+        );
+
+        std::fs::write(
+            &path,
+            format!(
+                "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+                 package_cache_bytes = 0\n{tls}"
+            ),
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+        assert!(err.contains("package_cache_bytes"), "{err}");
+    }
+
+    /// A Gateway admits Agents, so it never serves without TLS, nor without a client CA to verify
+    /// them against — on the loopback neither (ADR-0014).
+    /// Verifies: ADR-0014, Q-1
+    #[test]
+    fn a_gateway_without_mutual_tls_is_refused_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(
+            &path,
+            "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n",
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("no TLS");
+        assert!(err.contains("[gateway.tls] is required"), "{err}");
+
+        std::fs::write(
+            &path,
+            "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+             [gateway.tls]\ncert_file = \"g.pem\"\nkey_file = \"g-key.pem\"\n",
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("no client CA");
+        assert!(err.contains("client_ca_file is required"), "{err}");
+    }
+
+    /// Both keys that would configure package delivery on the host are refused rather than ignored:
+    /// `package` would name the artifact (the Server's Selector does, ADR-0028), and
+    /// `accepts_packages` would say whether to take one (ADR-0017 derives that from the program's
+    /// path). An operator who has either in a file believes it does something.
+    /// Verifies: ADR-0028
     #[test]
     fn the_retired_package_keys_are_refused() {
         let block = |extra: &str| {
@@ -1450,6 +1575,7 @@ mod tests {
     /// With a tree (ADR-0028) the program is one file *inside* the package, so the spawn path is
     /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0017
     /// made it mean, which is consent and nothing else.
+    /// Verifies: ADR-0028
     #[test]
     fn a_tree_spawns_from_the_path_written_inside_the_package() {
         let dir = PathBuf::from("/srv/fleet/fluent-bit");
@@ -1473,6 +1599,7 @@ mod tests {
 
     /// Refused at startup, where the operator is still looking at the file — not at rollout time
     /// on every matched host, which is where the archive sanitizer would catch the same thing.
+    /// Verifies: ADR-0028
     #[test]
     fn a_program_path_must_stay_inside_the_package() {
         assert_eq!(
@@ -1525,10 +1652,10 @@ mod tests {
         assert!(err.contains(foreign), "it quotes what was written: {err}");
     }
 
-    /// The case Windows adds and Unix has no equivalent of: `\Program Files\...` carries a root
-    /// but no drive, so it resolves against whichever drive the process is on — it *looks*
-    /// absolute and is not. Since ADR-0017 it folds into the same refusal as the absolute form,
-    /// because it was only ever a near-miss of it and both now have one answer.
+    /// The case Windows adds and Unix has no equivalent of: `\Program Files\...` carries a root but
+    /// no drive, so it resolves against whichever drive the process is on — it *looks* absolute and
+    /// is not. It folds into the same refusal as the absolute form (ADR-0017), because it is a
+    /// near-miss of it and both have one answer.
     #[cfg(windows)]
     #[test]
     fn a_drive_relative_windows_path_folds_into_the_same_refusal() {
@@ -1585,12 +1712,13 @@ mod tests {
         );
     }
 
+    /// Verifies: ADR-0012
     #[test]
     fn scheme_selects_the_transport() {
         for (endpoint, kind) in [
-            ("ws://x/v1/opamp", TransportKind::WebSocket),
+            ("ws://127.0.0.1/v1/opamp", TransportKind::WebSocket),
             ("wss://x/v1/opamp", TransportKind::WebSocket),
-            ("http://x/v1/opamp", TransportKind::Http),
+            ("http://[::1]/v1/opamp", TransportKind::Http),
             ("https://x/v1/opamp", TransportKind::Http),
         ] {
             let cfg = ClientConfig {
@@ -1601,6 +1729,33 @@ mod tests {
         }
     }
 
+    /// Verifies: ADR-0012
+    #[test]
+    fn the_default_endpoint_is_wss_on_the_loopback() {
+        assert_eq!(
+            ClientConfig::default().endpoint,
+            "wss://127.0.0.1:4320/v1/opamp"
+        );
+    }
+
+    /// Verifies: ADR-0012, Q-1
+    #[test]
+    fn a_plaintext_endpoint_off_the_loopback_is_refused_at_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        for endpoint in [
+            "ws://fleet.example/v1/opamp",
+            "http://localhost:4320/v1/opamp",
+        ] {
+            std::fs::write(&path, format!("endpoint = \"{endpoint}\"\n")).expect("write");
+            let err = ClientConfig::load(&path).expect_err(endpoint);
+            assert!(err.contains("plaintext"), "{err}");
+        }
+        std::fs::write(&path, "endpoint = \"ws://127.0.0.1:4320/v1/opamp\"\n").expect("write");
+        ClientConfig::load(&path).expect("plaintext on a loopback literal loads");
+    }
+
+    /// Verifies: ADR-0012, ADR-0009
     #[test]
     fn rejects_an_unknown_scheme_and_unknown_keys() {
         let cfg = ClientConfig {
@@ -1653,6 +1808,7 @@ mod tests {
 
     /// ADR-0028: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
     /// block overrides it for itself — the shape `apply_grace_secs` has.
+    /// Verifies: ADR-0028
     #[test]
     fn retention_defaults_globally_and_is_overridable_per_supervisor() {
         let default: ClientConfig = toml::from_str("").expect("parse");
@@ -1718,6 +1874,80 @@ mod tests {
                 "{bad_name:?} should be rejected"
             );
         }
+    }
+
+    /// The switch is a list of Supervisor names in `[supervisors]`, empty unless the operator
+    /// writes one (ADR-0017 clause 48).
+    /// Verifies: ADR-0017
+    #[test]
+    fn remote_config_disabled_defaults_to_empty_and_lists_supervisor_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, "").expect("write");
+        let absent = ClientConfig::load(&path).expect("load");
+        assert!(absent.supervisor_defaults.remote_config_disabled.is_empty());
+        assert!(!absent.remote_config_disabled("otelcol"));
+
+        std::fs::write(
+            &path,
+            "[supervisors]\nremote_config_disabled = [\"otelcol\", \"icinga2\"]\n",
+        )
+        .expect("write");
+        let listed = ClientConfig::load(&path).expect("load");
+        assert_eq!(
+            listed.supervisor_defaults.remote_config_disabled,
+            ["otelcol", "icinga2"]
+        );
+        assert!(listed.remote_config_disabled("otelcol"));
+        assert!(listed.remote_config_disabled("icinga2"));
+        assert!(!listed.remote_config_disabled("telegraf"));
+    }
+
+    /// A value no block can ever carry fails startup, naming the key and the value (ADR-0017
+    /// clause 29).
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_remote_config_disabled_name_outside_the_instance_name_grammar_fails_startup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        for bad in ["OtelCol", "with space", "-lead", "", "con"] {
+            std::fs::write(
+                &path,
+                format!("[supervisors]\nremote_config_disabled = [\"ok\", {bad:?}]\n"),
+            )
+            .expect("write");
+            let err = ClientConfig::load(&path).expect_err(bad);
+            assert!(err.contains("remote_config_disabled"), "{err}");
+            assert!(err.contains(&format!("{bad:?}")), "{err}");
+        }
+    }
+
+    /// The switch is a boolean in `[supervisors]`, `true` unless the operator writes `false`
+    /// (ADR-0017 clause 41).
+    /// Verifies: ADR-0017
+    #[test]
+    fn server_manages_set_defaults_to_true_and_reads_false() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(&path, "").expect("write");
+        assert!(ClientConfig::load(&path)
+            .expect("load")
+            .server_manages_set());
+        std::fs::write(&path, "[supervisors]\nstop_timeout_secs = 5\n").expect("write");
+        assert!(ClientConfig::load(&path)
+            .expect("load")
+            .server_manages_set());
+
+        std::fs::write(&path, "[supervisors]\nserver_manages_set = false\n").expect("write");
+        assert!(!ClientConfig::load(&path)
+            .expect("load")
+            .server_manages_set());
+
+        std::fs::write(&path, "[supervisors]\nserver_manages_set = \"no\"\n").expect("write");
+        assert!(
+            ClientConfig::load(&path).is_err(),
+            "a non-boolean is refused"
+        );
     }
 
     #[test]
@@ -1824,36 +2054,40 @@ mod tests {
         assert!(toml::from_str::<ClientConfig>("[attributes]\nport = 80\n").is_err());
     }
 
+    /// A file written for an earlier version may still hold `[auth]`, with any of the keys it
+    /// took then. It loads — a Client the Server updated must keep connecting — the notice names
+    /// the section, and nothing from it reaches the connection: no `Authorization` value, and the
+    /// effective configuration reported upstream carries none of its secrets.
+    /// Verifies: ADR-0022, ADR-0021
     #[test]
-    fn auth_yields_exactly_one_authorization_scheme() {
-        let bearer: ClientConfig = toml::from_str("[auth]\nbearer_token = \"tok\"").expect("parse");
-        assert_eq!(
-            bearer.auth.expect("auth").authorization().expect("value"),
-            "Bearer tok"
-        );
-
-        let basic: ClientConfig =
-            toml::from_str("[auth]\nusername = \"fleet\"\npassword = \"secret\"").expect("parse");
-        assert_eq!(
-            basic.auth.expect("auth").authorization().expect("value"),
-            // base64("fleet:secret")
-            "Basic ZmxlZXQ6c2VjcmV0"
-        );
-
-        // Mixing the schemes, halving Basic, or an empty block all fail loudly.
-        for bad in [
-            "[auth]\nbearer_token = \"tok\"\nusername = \"fleet\"\npassword = \"s\"",
-            "[auth]\nusername = \"fleet\"",
-            "[auth]\npassword = \"secret\"",
-            "[auth]",
+    fn a_leftover_auth_section_is_ignored_with_a_notice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(crate::config_init::FILE_NAME);
+        for section in [
+            "[auth]\nbearer_token = \"s3cret\"\n",
+            "[auth]\nusername = \"fleet\"\npassword = \"s3cret\"\n",
+            "[auth]\nbearer_token = \"s3cret\"\nusername = \"fleet\"\n",
+            "[auth]\n",
         ] {
-            let cfg: ClientConfig = toml::from_str(bad).expect("parses; the mix is semantic");
-            assert!(
-                cfg.auth.expect("auth").authorization().is_err(),
-                "{bad:?} should be rejected"
-            );
+            std::fs::write(
+                &path,
+                format!("endpoint = \"wss://fleet:4320/v1/opamp\"\n{section}"),
+            )
+            .expect("write");
+            let config = ClientConfig::load(&path).expect("a leftover [auth] still loads");
+
+            let notice = config.leftover_auth_notice().expect("a notice");
+            assert!(notice.contains("[auth]"), "{notice}");
+
+            let connection = crate::transport::connection(&config).expect("connection");
+            assert_eq!(connection.authorization, None, "{section:?} was sent");
+            let source = config.source.expect("source");
+            assert!(!source.contains("s3cret"), "{source}");
         }
-        assert!(toml::from_str::<ClientConfig>("[auth]\ntoken = \"x\"").is_err());
+
+        std::fs::write(&path, "endpoint = \"wss://fleet:4320/v1/opamp\"\n").expect("write");
+        let clean = ClientConfig::load(&path).expect("loads");
+        assert_eq!(clean.leftover_auth_notice(), None, "no section, no notice");
     }
 
     #[test]
@@ -1912,13 +2146,13 @@ mod tests {
         let path = dir.path().join(crate::config_init::FILE_NAME);
         std::fs::write(
             &path,
-            "endpoint = \"ws://fleet:4320/v1/opamp\"\n[auth]\nbearer_token = \"s3cret\"\n",
+            "endpoint = \"wss://fleet:4320/v1/opamp\"\n[auth]\nbearer_token = \"s3cret\"\n",
         )
         .expect("write");
         let cfg = ClientConfig::load(&path).expect("loads");
         let source = cfg.source.expect("the file's text is kept");
         assert!(!source.contains("s3cret"), "{source}");
-        assert!(source.contains("endpoint = \"ws://fleet:4320/v1/opamp\""));
+        assert!(source.contains("endpoint = \"wss://fleet:4320/v1/opamp\""));
 
         // No file, no text: the defaults run and there is nothing truthful to report.
         assert!(ClientConfig::load(&dir.path().join("absent.toml"))

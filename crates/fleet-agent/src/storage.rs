@@ -34,9 +34,8 @@ const PACKAGE_FILE: &str = "installed-package.json";
 /// **The value is here because the Baseline says it matters.** `AgentConfigFile.role` is defined as
 /// *"Optional role of the content in the body field. The values and their semantics are Agent
 /// type-specific"* — so a kind may define its own vocabulary, and to read it the value has to
-/// survive the write. This file used to hold names alone, which answered only *whether* an entry
-/// carried a role; a line without a second field still reads that way, which is exactly what an
-/// older Client left behind.
+/// survive the write. A line without a second field — what an older Client wrote — answers only
+/// *whether* an entry carries a role.
 pub const SUPPLEMENTARY_FILE: &str = ".supplementary";
 
 pub struct Storage {
@@ -55,6 +54,136 @@ impl Storage {
     pub fn config_dir(&self) -> PathBuf {
         self.dir.join(CONFIG_DIR)
     }
+
+    /// Takes a stored remote configuration out of force for a Supervisor whose remote
+    /// configuration is switched off (ADR-0017 clause 52): each entry file, and `.supplementary`,
+    /// whose bytes are still the ones the stored map would write is deleted, every other file in
+    /// `config/` stays, and `remote-config.pb` goes. A `.pb` that does not decode is deleted and
+    /// `config/` is left alone. `None` when nothing was stored.
+    ///
+    /// # Errors
+    /// Returns an error when a file that has to go cannot be read or deleted.
+    pub fn drop_remote_config(&self) -> io::Result<Option<DroppedRemoteConfig>> {
+        let pb = self.dir.join(CONFIG_PB_FILE);
+        let bytes = match std::fs::read(&pb) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let Ok(config) = AgentRemoteConfig::decode(bytes.as_slice()) else {
+            std::fs::remove_file(&pb)?;
+            return Ok(Some(DroppedRemoteConfig::Undecodable));
+        };
+        let config_dir = self.config_dir();
+        let mut kept = Vec::new();
+        for (file_name, body) in written_files(&config) {
+            let path = config_dir.join(&file_name);
+            match std::fs::read(&path) {
+                Ok(on_disk) if on_disk == body => std::fs::remove_file(&path)?,
+                Ok(_) => kept.push(file_name),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        std::fs::remove_file(&pb)?;
+        Ok(Some(DroppedRemoteConfig::Removed {
+            hash: config.config_hash,
+            kept,
+        }))
+    }
+}
+
+impl Storage {
+    /// Takes the Client's own stored Supervisor set out of the way on a host that keeps its set
+    /// (ADR-0017 clause 44): `remote-config.pb` goes **first**, so nothing that fails after it can
+    /// leave a hash to report, and then each entry copy in `config/` whose bytes are still the
+    /// stored ones goes as far as it can. Nothing runs on the copies, so one that cannot be read
+    /// or deleted is named in the result, not an error. A `.pb` that does not decode is deleted
+    /// and `config/` is left alone. `None` when nothing was stored.
+    ///
+    /// # Errors
+    /// Returns an error only when `remote-config.pb` itself cannot be read or deleted.
+    pub fn drop_stored_set(&self) -> io::Result<Option<DroppedStoredSet>> {
+        let pb = self.dir.join(CONFIG_PB_FILE);
+        let bytes = match std::fs::read(&pb) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        std::fs::remove_file(&pb)?;
+        let Ok(config) = AgentRemoteConfig::decode(bytes.as_slice()) else {
+            return Ok(Some(DroppedStoredSet::Undecodable));
+        };
+        let config_dir = self.config_dir();
+        let (mut kept, mut unremoved) = (Vec::new(), Vec::new());
+        for (file_name, body) in written_files(&config) {
+            let path = config_dir.join(&file_name);
+            match std::fs::read(&path) {
+                Ok(on_disk) if on_disk == body => {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        unremoved.push((file_name, e.to_string()));
+                    }
+                }
+                Ok(_) => kept.push(file_name),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => unremoved.push((file_name, e.to_string())),
+            }
+        }
+        Ok(Some(DroppedStoredSet::Removed {
+            hash: config.config_hash,
+            kept,
+            unremoved,
+        }))
+    }
+}
+
+/// What [`Storage::drop_stored_set`] found and did (ADR-0017 clause 44).
+#[derive(Debug, PartialEq, Eq)]
+pub enum DroppedStoredSet {
+    /// `remote-config.pb` is gone, and so is every entry copy still as stored; `kept` names the
+    /// copies whose content had changed, `unremoved` those that could not be read or deleted, each
+    /// with the error.
+    Removed {
+        hash: Vec<u8>,
+        kept: Vec<String>,
+        unremoved: Vec<(String, String)>,
+    },
+    /// The stored `remote-config.pb` did not decode and is gone; `config/` was left as it was.
+    Undecodable,
+}
+
+/// What [`Storage::drop_remote_config`] found and did (ADR-0017 clause 52).
+#[derive(Debug, PartialEq, Eq)]
+pub enum DroppedRemoteConfig {
+    /// The stored configuration and the files it wrote are gone; `kept` names the files
+    /// left in place because their content had changed since.
+    Removed { hash: Vec<u8>, kept: Vec<String> },
+    /// The stored `remote-config.pb` did not decode and is gone; `config/` was left as it was.
+    Undecodable,
+}
+
+/// The files [`Storage::store_remote_config`] writes into `config/` for `config`, by file name:
+/// each entry, then [`SUPPLEMENTARY_FILE`] when any entry carries a role.
+fn written_files(config: &AgentRemoteConfig) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut supplementary: Vec<String> = Vec::new();
+    if let Some(map) = &config.config {
+        for (name, file) in &map.config_map {
+            let file_name = entry_file_name(name);
+            if !file.role.is_empty() {
+                supplementary.push(format!("{file_name} {}", file.role));
+            }
+            files.push((file_name, file.body.clone()));
+        }
+    }
+    if !supplementary.is_empty() {
+        supplementary.sort();
+        files.push((
+            SUPPLEMENTARY_FILE.to_string(),
+            (supplementary.join("\n") + "\n").into_bytes(),
+        ));
+    }
+    files
 }
 
 impl AgentStorage for Storage {
@@ -103,7 +232,6 @@ impl AgentStorage for Storage {
     fn store_remote_config(&self, config: &AgentRemoteConfig) -> io::Result<()> {
         // The protobuf and the entry files can carry secret material (a roled `${file:...}` entry
         // that is a certificate or key), so both the config directory and the files are owner-only.
-        write_private(&self.dir.join(CONFIG_PB_FILE), &config.encode_to_vec())?;
         let config_dir = self.dir.join(CONFIG_DIR);
         create_private_dir(&config_dir)?;
         for entry in std::fs::read_dir(&config_dir)? {
@@ -112,24 +240,13 @@ impl AgentStorage for Storage {
                 std::fs::remove_file(path)?;
             }
         }
-        let mut supplementary: Vec<String> = Vec::new();
-        if let Some(map) = &config.config {
-            for (name, file) in &map.config_map {
-                let file_name = entry_file_name(name);
-                write_private(&config_dir.join(&file_name), &file.body)?;
-                if !file.role.is_empty() {
-                    supplementary.push(format!("{file_name} {}", file.role));
-                }
-            }
+        for (file_name, body) in written_files(config) {
+            write_private(&config_dir.join(file_name), &body)?;
         }
-        if !supplementary.is_empty() {
-            supplementary.sort();
-            write_private(
-                &config_dir.join(SUPPLEMENTARY_FILE),
-                (supplementary.join("\n") + "\n").as_bytes(),
-            )?;
-        }
-        Ok(())
+        // Last: a store cut short leaves the previous `.pb`, never a new one beside the previous
+        // offer's files, which `drop_remote_config` would keep as the operator's (ADR-0017
+        // clause 32).
+        write_private(&self.dir.join(CONFIG_PB_FILE), &config.encode_to_vec())
     }
 
     /// The installed package (ADR-0028), if one survived a previous run.
@@ -578,8 +695,8 @@ mod tests {
         assert_eq!(entry_names(&config_dir), vec!["base"]);
     }
 
-    /// A Client that stored entries before ADR-0025 has no bookkeeping file; everything it wrote
-    /// is configuration, which is exactly what it was.
+    /// A state directory with no bookkeeping file holds configuration alone, so everything in it
+    /// reads as configuration (ADR-0025).
     #[test]
     fn entries_without_bookkeeping_are_all_configuration() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -608,5 +725,49 @@ mod tests {
             .expect("store");
         let plain = std::fs::read(dir.path().join("config").join("config")).expect("plain file");
         assert_eq!(plain, b"a\n");
+    }
+
+    /// A store cut short leaves the previous `remote-config.pb`, never a new one beside the
+    /// previous offer's files: the drop then still reads the previous map and deletes what it
+    /// wrote instead of keeping it as the operator's (ADR-0017 clause 52). The store is stopped
+    /// by a directory standing where the next offer's entry file goes — `create_private_dir`
+    /// resets the mode of `config/`, so a failed removal cannot be staged from here.
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_store_cut_short_leaves_no_previous_entry_file_beside_a_new_pb() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let mut previous = roled_offer(&[("a", b"1\n", "")]);
+        previous.config_hash = vec![1];
+        storage.store_remote_config(&previous).expect("store");
+        let config_dir = storage.config_dir();
+        std::fs::create_dir(config_dir.join("b")).expect("in the way");
+
+        let mut next = roled_offer(&[("b", b"x\n", "")]);
+        next.config_hash = vec![2];
+        storage
+            .store_remote_config(&next)
+            .expect_err("the entry file cannot be written");
+
+        assert_eq!(
+            storage
+                .load_remote_config()
+                .map(|stored| stored.config_hash),
+            Some(vec![1]),
+            "the stored map still describes what is on disk"
+        );
+        std::fs::remove_dir(config_dir.join("b")).expect("clear the way");
+        assert_eq!(
+            storage.drop_remote_config().expect("drop"),
+            Some(DroppedRemoteConfig::Removed {
+                hash: vec![1],
+                kept: Vec::new()
+            })
+        );
+        assert!(
+            entry_names(&config_dir).is_empty(),
+            "{:?}",
+            entry_names(&config_dir)
+        );
     }
 }

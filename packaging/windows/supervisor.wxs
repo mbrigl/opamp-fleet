@@ -114,7 +114,7 @@
                  Before="InstallInitialize"
                  Condition="NOT SELFUPDATE OR SELFUPDATE=&quot;0&quot;" />
     <SetProperty Id="ENDPOINT"
-                 Value="http://localhost:4320/v1/opamp"
+                 Value="wss://127.0.0.1:4320/v1/opamp"
                  Sequence="ui"
                  After="LaunchConditions"
                  Condition="NOT ENDPOINT AND NOT Installed" />
@@ -168,18 +168,16 @@
 
       The self-update answer needs no third and fourth action, because unlike the endpoint it *has*
       a no-op spelling: `[SELFUPDATEFLAG]` is empty when the consent stands, and a formatted field
-      of an unset property resolves to nothing — so the consenting command line is character for
-      character the one this package sent before ADR-0020.
+      of an unset property resolves to nothing — so the consenting command line carries no
+      self-update flag at all.
 
-      **No root flag here, and that is ADR-0021 clause 8.** These lines used to pass one, naming
-      `[INSTALLFOLDER]` with a doubled backslash that was load-bearing: a directory property always
-      resolves with a trailing backslash, and the C runtime that builds the client's argv reads a
-      backslash before a quote as an escaped, literal quote rather than the end of the argument —
-      so the root swallowed the rest of the line and the install died with error 1722. With
-      INSTALLFOLDER no longer being the install root, no directory property reaches a command line
-      at all and the hazard has no way back in. `tests/msi_exe_command.rs` parses these lines
-      exactly as the CRT will and asserts both: that they still survive the split, and that they
-      name no root.
+      **No root flag here, and that is ADR-0021 clause 8.** A root would name `[INSTALLFOLDER]`, and
+      a directory property always resolves with a trailing backslash, which the C runtime that
+      builds the client's argv reads before a quote as an escaped, literal quote rather than the
+      end of the argument — so the root would swallow the rest of the line and the install would
+      die with error 1722. INSTALLFOLDER is not the install root, so no directory property reaches
+      a command line at all. `tests/msi_exe_command.rs` parses these lines exactly as the CRT will
+      and asserts both: that they survive the split, and that they name no root.
 
       (Spelled without the flag's own name on purpose: an XML comment may not contain a double
       hyphen, so writing it out here is a build error, not a typo somebody can fix later.)
@@ -204,8 +202,8 @@
       type 18 action needs its executable to still be on disk.
 
       `service uninstall` leaves both roots behind, as it does everywhere (ADR-0021) — deleting a
-      supervisor.toml holding a credential the operator typed would be the overwrite ADR-0021
-      refused, one step later. What this package's uninstaller then empties is INSTALLFOLDER, which
+      supervisor.toml the operator answered or edited would be the overwrite ADR-0021 refuses, one
+      step later. What this package's uninstaller then empties is INSTALLFOLDER, which
       holds only the payload it delivered: exactly right, and the reason ADR-0021 clause 8 moved
       the data out of `Program Files`. The configuration and the state survive under
       `%ProgramData%\opamp-fleet`, the same remove-versus-purge shape the `.deb` has.
@@ -230,10 +228,10 @@
         so it has to exist first.
 
         The service is registered and left stopped, exactly as the `.deb` and `.rpm` post-install
-        does and for the same reason (ADR-0021 clause 37, ADR-0021): a Client with no configuration
+        does and for the same reason (ADR-0021 clause 37): a Client with no configuration
         dials the development default and manages nothing, and an installer must not manufacture
         that state on every host it touches. An install that was given an ENDPOINT still does not
-        start — the credential, if the Server needs one, is not in yet.
+        start — the client identity is not in yet (ADR-0021).
       -->
       <Custom Action="RegisterServiceWithEndpoint" After="InstallFiles"
               Condition="NOT REMOVE AND ENDPOINT&lt;&gt;&quot;&quot;" />

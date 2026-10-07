@@ -257,18 +257,24 @@ pub struct Preflight {
 pub struct VersionProbe {
     pub program: PathBuf,
     pub args: Vec<String>,
-    /// How to read a version out of what the program printed. `None` is [`find_semver`], the
-    /// strict Semantic Versioning read every Managed Process was held to until ADR-0019: a program
-    /// whose version banner is not SemVer — Icinga 2 prints `r2.14.6-1` — reported none at all,
-    /// and a kind that knows its program's convention can now say so instead.
+    /// How to read a version out of what the program printed. `None` is [`find_semver`], the strict
+    /// Semantic Versioning read. A program whose version banner is not SemVer — Icinga 2 prints
+    /// `r2.14.6-1` — would report none at all, so a kind that knows its program's convention says
+    /// so here (ADR-0019).
     pub parse: Option<fn(&str) -> Option<String>>,
 }
 
 /// The adapter task driving one Managed Process. The plugin supplies `build`: the current
 /// [`ProcessSpec`], or `None` while the process should not run (a Collector before any
 /// configuration arrived).
+/// The environment variable a Managed Process finds the Supervisor Endpoint's token in
+/// (ADR-0014): an `opampextension` presents it as `Authorization: Bearer ${env:OPAMP_SUPERVISOR_TOKEN}`.
+pub const ENDPOINT_TOKEN_ENV: &str = "OPAMP_SUPERVISOR_TOKEN";
+
 pub struct Runner {
     pub name: String,
+    /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0014).
+    pub endpoint_token: String,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// (ADR-0017's health-gated acknowledgement); zero acknowledges on start.
@@ -277,14 +283,14 @@ pub struct Runner {
     /// `None` for a plugin with nothing swappable, which then reports a package `InstallFailed`.
     pub install: Option<InstallTarget>,
     /// How long the version a successful update supersedes is kept before deletion (ADR-0028), so
-    /// an operator has a fallback window. Zero deletes it on success, the pre-ADR-0028 behaviour.
+    /// an operator has a fallback window. Zero deletes it on success.
     pub retain_previous: Duration,
     /// Opens an encrypted `.7z` artifact (ADR-0028); `None` when no key is configured.
     pub archive_key: Option<String>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
-    /// How to prove a staged package runs before it replaces what does (ADR-0019). `None` keeps
-    /// the pre-ADR-0019 behaviour: the swap is the first thing that finds out.
+    /// How to prove a staged package runs before it replaces what does (ADR-0019). `None` proves
+    /// nothing in advance: the swap is the first thing that finds out.
     pub preflight: Option<Preflight>,
     /// The signal that makes the running process re-read its configuration in place (ADR-0017);
     /// `None` — the generic behaviour — applies a configuration by restarting. A reload that
@@ -610,7 +616,7 @@ impl Runner {
             // No predecessor: a first install with nothing behind it. It is *not* rolled back
             // (ADR-0028) — the verified program stays in place, reported InstallFailed, so a first
             // package that will not start does not empty `program/` and set the Server re-offering
-            // it in a loop. Discarding it here is what used to make that loop turn.
+            // it in a loop. Discarding it here would make that loop turn.
             (GraceOutcome::Failed(_), false) => {
                 warn!(supervisor = %self.name, "the first install would not start; kept in place, not rolled back (nothing to roll back to)");
             }
@@ -623,8 +629,8 @@ impl Runner {
     }
 
     /// Keeps the version a successful update superseded, or drops it now (ADR-0028). With retention
-    /// off it is the old immediate delete; otherwise the backup stays and a marker records the
-    /// deadline `now + retain_previous`, swept once it passes.
+    /// off it is deleted at once; otherwise the backup stays and a marker records the deadline
+    /// `now + retain_previous`, swept once it passes.
     fn retain_backup(&self, target: &InstallTarget) {
         if self.retain_previous.is_zero() {
             target.drop_backup();
@@ -861,6 +867,10 @@ impl Runner {
         };
         let mut command = Command::new(&program);
         command.args(&spec.args).envs(spec.env.iter().cloned());
+        // Last, so no block's `env` can replace it (ADR-0014).
+        if !self.endpoint_token.is_empty() {
+            command.env(ENDPOINT_TOKEN_ENV, &self.endpoint_token);
+        }
         if let Some(dir) = working_dir {
             command.current_dir(dir);
         }
@@ -933,13 +943,13 @@ pub async fn probe_version(
 ) {
     let mut command = Command::new(&program);
     command.args(&args).kill_on_drop(true);
-    let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
+    let output = match bounded_output(&mut command).await {
+        Some(Ok(output)) => output,
+        Some(Err(e)) => {
             warn!(program = %program.display(), error = %e, "version probe cannot run");
             return;
         }
-        Err(_) => {
+        None => {
             warn!(program = %program.display(), "version probe timed out");
             return;
         }
@@ -1018,6 +1028,25 @@ async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
     info!(supervisor = %name, "process stopped");
 }
 
+/// Runs `command` to completion within [`PROBE_TIMEOUT`]; `None` when it does not finish in time.
+///
+/// A program written moments ago may fail to exec with `ETXTBSY` while another thread's fork still
+/// holds it open for writing ([`install::is_text_file_busy`] states why); that is retried briefly,
+/// as a spawn is, rather than taken for a program that cannot run.
+async fn bounded_output(command: &mut Command) -> Option<std::io::Result<std::process::Output>> {
+    let mut attempt = 0;
+    loop {
+        match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
+            Err(_) => return None,
+            Ok(Err(e)) if install::is_text_file_busy(&e) && attempt < install::BUSY_RETRIES => {
+                attempt += 1;
+                tokio::time::sleep(install::BUSY_DELAY).await;
+            }
+            Ok(result) => return Some(result),
+        }
+    }
+}
+
 /// Runs a plugin's preflight against a staged package (ADR-0019).
 ///
 /// Bounded like the version probe, because this is the same shape of question asked of a program
@@ -1034,10 +1063,10 @@ async fn run_preflight(staged: &Staged, preflight: &Preflight) -> Result<(), Str
             value.replace("${staged}", &staged.root.to_string_lossy()),
         );
     }
-    let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => return Err(format!("the packaged program cannot be run: {e}")),
-        Err(_) => return Err("the packaged program did not answer in time".to_string()),
+    let output = match bounded_output(&mut command).await {
+        Some(Ok(output)) => output,
+        Some(Err(e)) => return Err(format!("the packaged program cannot be run: {e}")),
+        None => return Err("the packaged program did not answer in time".to_string()),
     };
     if output.status.success() {
         return Ok(());
@@ -1064,7 +1093,7 @@ async fn run_preflight(staged: &Staged, preflight: &Preflight) -> Result<(), Str
 /// Leading a group is what a plugin asks for with [`ProcessSpec::own_process_group`], so the test
 /// is the fact rather than a flag threaded through the Runner: a child whose process group id is
 /// its own pid is a group the Supervisor created for it, and everything in it descends from the
-/// process it started. Anything else is signalled alone, exactly as before (ADR-0019).
+/// process it started. Anything else is signalled alone (ADR-0019).
 #[cfg(unix)]
 fn signal_child(pid: u32, signal: i32) {
     let pid = pid as libc::pid_t;
@@ -1138,8 +1167,8 @@ enum GraceOutcome {
 /// over `path` — the final rename being what makes the swap atomic, so a crash mid-install never
 /// leaves a half-written program where one is about to be started.
 ///
-/// A raw artifact is **moved** rather than copied when it can be: since ADR-0017 the download is
-/// staged in the same Supervisor directory the program lives in, so the two are normally on one
+/// A raw artifact is **moved** rather than copied when it can be: the download is staged in the
+/// same Supervisor directory the program lives in (ADR-0017), so the two are normally on one
 /// filesystem and the install costs a metadata update instead of a second full write of several
 /// hundred megabytes. The move consumes the artifact — the caller's cleanup of it is best-effort
 /// for exactly this reason. A rename across filesystems fails, and so does one out of a staging
@@ -1277,10 +1306,43 @@ fn now_unix() -> u64 {
 mod tests {
     use super::*;
 
+    /// A program held open for writing cannot be exec'd for that moment (`ETXTBSY`); the probe
+    /// waits it out instead of reporting a program that cannot run — the race a staged package
+    /// meets when another thread forks while it is being written.
+    /// Linux alone refuses to exec a file held open for writing, so the race exists only there.
+    /// Verifies: ADR-0019
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_program_busy_for_a_moment_is_run_once_it_is_free() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let program = dir.path().join("true");
+        std::fs::copy("/bin/true", &program).expect("copy a program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&program)
+            .expect("hold it open for writing");
+        let busy = Command::new(&program).output().await;
+        assert!(
+            busy.as_ref().is_err_and(install::is_text_file_busy),
+            "the condition this guards against: {busy:?}"
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            drop(writer);
+        });
+        let output = bounded_output(&mut Command::new(&program))
+            .await
+            .expect("in time")
+            .expect("run once the writer let go");
+        assert!(output.status.success());
+    }
+
     // What remains here are the cases that reach *into* this module — a private helper and the
-    // install function — and need no program to spawn. Everything that supervises a running
-    // process moved to `tests/supervisor_process.rs` when ADR-0009 made a real stub reachable;
-    // those cases were gated to Unix for want of one, and now run on all three platforms.
+    // install function — and need no program to spawn. Everything that supervises a running process
+    // lives in `tests/supervisor_process.rs`, where a real stub is reachable (ADR-0009) and the
+    // cases run on all three platforms.
 
     #[test]
     fn find_semver_extracts_the_first_strict_version_from_free_text() {
@@ -1395,6 +1457,7 @@ mod tests {
 
     /// ADR-0028: a retained predecessor is swept only once its deadline passes, never before, and
     /// the marker goes with it.
+    /// Verifies: ADR-0028
     #[test]
     fn a_retained_backup_is_swept_only_after_its_deadline() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1417,8 +1480,9 @@ mod tests {
         assert!(!target.backup_marker().exists(), "and so is its marker");
     }
 
-    /// A backup with no marker is not something this Runner retained (the pre-ADR-0028 immediate
-    /// drop, or a half-finished install), so a sweep leaves it alone.
+    /// A backup with no marker is not something this Runner retained (a half-finished install
+    /// leaves one), so a sweep leaves it alone.
+    /// Verifies: ADR-0028
     #[test]
     fn a_sweep_leaves_an_unmarked_backup_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1430,6 +1494,7 @@ mod tests {
 
     /// Dropping a backup takes its marker too, so a superseding update does not leave a dangling
     /// deadline behind.
+    /// Verifies: ADR-0028
     #[test]
     fn dropping_a_backup_clears_its_marker() {
         let dir = tempfile::tempdir().expect("tempdir");

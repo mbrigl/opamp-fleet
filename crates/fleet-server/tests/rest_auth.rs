@@ -28,17 +28,15 @@ async fn spawn_guarded() -> TestServer {
                 PackageOffering::new(store, String::new()).expect("deployments"),
             )),
     );
-    let auth: RestAuthConfig = toml::from_str(
-        r#"
-        [basic_users]
-        fleet-admin = "secret"
-        "#,
-    )
+    let auth: RestAuthConfig = toml::from_str(&format!(
+        "[basic_users]\nfleet-admin = {:?}\n",
+        fleet_server::credentials::hash_basic("secret").expect("hash"),
+    ))
     .expect("parse");
     let (addr, rest_addr) = support::serve_guarded(
         state.clone(),
         fleet_server::transport::Admission::open(),
-        Some(OperatorAuth::from_config(&auth)),
+        Some(OperatorAuth::from_config(&auth).expect("auth")),
     )
     .await;
     TestServer {
@@ -62,6 +60,7 @@ async fn get(server: &TestServer, path: &str, authorization: Option<&str>) -> re
     request.send().await.expect("get")
 }
 
+/// Verifies: ADR-0022
 #[tokio::test]
 async fn a_request_without_credentials_is_answered_401_with_a_basic_challenge() {
     let server = spawn_guarded().await;
@@ -97,6 +96,7 @@ async fn a_request_without_credentials_is_answered_401_with_a_basic_challenge() 
     );
 }
 
+/// Verifies: ADR-0022
 #[tokio::test]
 async fn the_configured_operator_reaches_the_api() {
     let server = spawn_guarded().await;
@@ -140,6 +140,7 @@ async fn a_credential_in_the_server_url_authenticates() {
 
 /// The guard covers the *plane*, not `/api/v1`: the UI and the API docs are as much of it as the
 /// API is, and Basic is what lets a browser answer for them without a login page (ADR-0022).
+/// Verifies: ADR-0022
 #[tokio::test]
 async fn the_ui_and_the_api_docs_are_guarded_too() {
     let server = spawn_guarded().await;
@@ -161,7 +162,8 @@ async fn the_ui_and_the_api_docs_are_guarded_too() {
 
 /// The half that must NOT change: guarding the operator's plane locks nothing out of the fleet's.
 /// An Agent carries no operator credential, and a Client downloading a package carries none either
-/// (ADR-0012, ADR-0022) — so a rollout keeps working exactly as it did.
+/// (ADR-0012, ADR-0022) — so a rollout keeps working.
+/// Verifies: ADR-0022
 #[tokio::test]
 async fn the_agent_plane_is_untouched_by_the_operator_credential() {
     let server = spawn_guarded().await;

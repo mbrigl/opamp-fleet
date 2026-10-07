@@ -353,11 +353,11 @@ mod tests {
         assert!(parse("1.2.3-rc.1+build.7").is_some());
     }
 
-    /// The baked string has the shape ADR-0011 prescribes — and, now that both live here, it is
+    /// The baked string has the shape ADR-0011 prescribes — and, since both live here, it is
     /// checked with the parser the rest of the project judges it by rather than a second grammar.
     // Verifies: ADR-0011
     #[test]
-    fn the_baked_version_has_the_adr_0013_shape() {
+    fn the_baked_version_has_the_prescribed_shape() {
         let full = current();
         let parsed = parse(full).unwrap_or_else(|| panic!("{full:?} is not a version"));
         assert!(

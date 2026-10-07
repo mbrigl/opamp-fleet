@@ -124,6 +124,7 @@ impl Plugin for CollectorPlugin {
         let install = ctx.install;
         let (commands, command_rx) = mpsc::channel(16);
         let runner = Runner {
+            endpoint_token: ctx.endpoint_token.clone(),
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
@@ -141,12 +142,12 @@ impl Plugin for CollectorPlugin {
                 program: binary.clone(),
                 args: vec!["--version".to_string()],
             }),
-            // The same `--version`, asked of the *staged* program before the running one is
-            // stopped (ADR-0019). It is the same question the probe above asks and the same cost,
-            // so the only thing that was ever missing here was asking it early: until now the swap
-            // itself was the first thing to try a new binary, and a build the host cannot run —
-            // one linked against a libc newer than this host's — paid for that with a stop, a
-            // swap, a failed start and a rollback instead of a refusal that touches nothing.
+            // The same `--version`, asked of the *staged* program before the running one is stopped
+            // (ADR-0019). It is the same question the probe above asks and the same cost, so asking
+            // it early costs nothing: otherwise the swap itself would be the first thing to try a
+            // new binary, and a build the host cannot run — one linked against a libc newer than
+            // this host's — would pay for that with a stop, a swap, a failed start and a rollback
+            // instead of a refusal that touches nothing.
             //
             // No environment: the probe already invokes the live program bare, so a Collector that
             // needs one to answer `--version` would report no version today either.
@@ -199,9 +200,8 @@ mod tests {
         );
     }
 
-    /// The regression for the bug this fixes: the built spec must carry the environment, not the
-    /// empty vector the collector plugin used to hardcode. A configuration entry has to exist first,
-    /// since the Collector does not run on nothing.
+    /// The built spec must carry the environment, not an empty vector. A configuration entry has to
+    /// exist first, since the Collector does not run on nothing.
     #[test]
     fn the_spec_carries_the_environment() {
         let dir = tempfile::tempdir().expect("tempdir");

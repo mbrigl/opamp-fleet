@@ -56,15 +56,16 @@ struct Icinga2Settings {
     /// signing request waits for `icinga2 ca sign` on the parent.
     ticket_file: Option<String>,
     /// The parent's certificate — **its own**, not the CA that signed it: `pki request` compares
-    /// what the parent presents against this file. Pinned rather than trusted on sight; absent
-    /// falls back to `pki save-cert`, which is trust on first use and is logged as such.
+    /// what the parent presents against this file. Pinned rather than trusted on sight. Not named
+    /// at all falls back to `pki save-cert`, which is trust on first use and is logged as such; a
+    /// file named here that is not there is an error the enrolment retries, never that fallback.
     trusted_cert_file: Option<String>,
 }
 
-/// The keys this kind used to take and now supplies itself (ADR-0019), each with what answers it
-/// now. Refused by name rather than met with serde's "unknown field": a block that carries one was
-/// written against a Client that needed it, and the operator deleting the line deserves to be told
-/// where the value went — the pattern `package` and `accepts_packages` already run.
+/// The keys this kind supplies itself (ADR-0019), each with what answers it. Refused by name rather
+/// than met with serde's "unknown field": a block that carries one expects a Client that needs it,
+/// and the operator deleting the line deserves to be told where the value went — the pattern
+/// `package` and `accepts_packages` already run.
 const RETIRED: &[(&str, &str)] = &[
     ("binary", "the kind installs and names its own program"),
     (
@@ -481,6 +482,18 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
         }
     }
 
+    // The parent is pinned before it is talked to, and before a key is made for it. A named file
+    // that is missing — not yet arrived, or a path mistyped — is an error the enrolment retries:
+    // ADR-0019 clause 12 trusts on first use only when none was delivered. That holds for a renewal
+    // too: the pin kept from an earlier run may itself have come from trust on first use.
+    if let Some(delivered) = layout.trusted_cert_file.as_ref().filter(|f| !f.is_file()) {
+        return Err(format!(
+            "the parent certificate named in trusted_cert_file is not a file at {}: enrolment \
+             waits for it rather than trusting the parent on first use",
+            delivered.display()
+        ));
+    }
+
     tracing::info!(node = %layout.node_name, parent = %host, renewing, "requesting an Icinga certificate");
     if !renewing {
         // A renewal must not do this: it would overwrite the very key and certificate that
@@ -501,13 +514,15 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
         .await?;
     }
 
-    // The parent is pinned from what the fleet delivered; `save-cert` is the fallback, and it is
-    // trust on first use — logged, so an operator can see that it happened and against what.
-    match layout.trusted_cert_file.as_ref().filter(|f| f.is_file()) {
+    // The parent is pinned from what the fleet delivered. Only when no certificate was named at all
+    // is `save-cert` the fallback, and it is trust on first use — logged, so an operator can see
+    // that it happened and against what.
+    match layout.trusted_cert_file.as_ref() {
         Some(delivered) => {
             std::fs::copy(delivered, &layout.pinned_parent).map_err(|e| {
                 format!(
-                    "cannot keep the parent certificate at {}: {e}",
+                    "cannot copy the parent certificate {} to {}: {e}",
+                    delivered.display(),
                     layout.pinned_parent.display()
                 )
             })?;
@@ -637,7 +652,7 @@ impl Icinga2Plugin {
             run_dir: path("${supervisor_dir}/run"),
             // The operator's, else this host's fully qualified name, else the Supervisor's own —
             // which the instance-name grammar cannot spell as an FQDN, so it is the last resort
-            // rather than the default it used to be (ADR-0019).
+            // rather than the default (ADR-0019).
             node_name: settings
                 .node_name
                 .clone()
@@ -743,9 +758,9 @@ fn read_fqdn() -> Option<String> {
 const ROOT_ROLE: &str = "main";
 const CONVENTIONAL_ROOT: &str = "icinga2-conf";
 
-/// The console severity the daemon is started with (`-x`). Icinga's own default, and no longer a
-/// block key: where verbosity is worth raising, `object FileLogger` in Icinga's own configuration
-/// is the place, which the fleet rolls out (ADR-0019).
+/// The console severity the daemon is started with (`-x`). Icinga's own default, and not a block
+/// key: where verbosity is worth raising, `object FileLogger` in Icinga's own configuration is the
+/// place, which the fleet rolls out (ADR-0019).
 const DEFAULT_LOG_LEVEL: &str = "information";
 
 /// Splits a parent into host and port, the port defaulting to Icinga's 5665 (ADR-0019).
@@ -866,6 +881,27 @@ async fn intercept(
     }
 }
 
+/// `node_name` names the certificate and key files of this host, so it is one plain file-name
+/// component and nothing that could climb out of the certificate directory (ADR-0017 clause 39).
+fn check_node_name(name: &str, node_name: Option<&str>) -> Result<(), String> {
+    let Some(node_name) = node_name else {
+        return Ok(());
+    };
+    let plain = !node_name.is_empty()
+        && !node_name.contains(['/', '\\', ':'])
+        && node_name != "."
+        && node_name != ".."
+        && node_name.trim() == node_name;
+    if plain {
+        Ok(())
+    } else {
+        Err(format!(
+            "supervisor {name:?}: node_name {node_name:?} must be a plain name — it names this \
+             host's certificate and key files"
+        ))
+    }
+}
+
 impl Plugin for Icinga2Plugin {
     fn kind(&self) -> &'static str {
         "icinga2"
@@ -905,6 +941,7 @@ impl Plugin for Icinga2Plugin {
             RETIRED,
             std::mem::take(&mut ctx.settings),
         )?;
+        check_node_name(&ctx.name, settings.node_name.as_deref())?;
         let layout = Self::layout(&ctx, &settings);
         // What the delivered tree needs to run at all, and nothing else (ADR-0019): its own
         // libraries have to win over whatever the machine has, which is the whole point of a
@@ -920,6 +957,7 @@ impl Plugin for Icinga2Plugin {
         let events = ctx.events.clone();
         let gate = layout.clone();
         let runner = Runner {
+            endpoint_token: ctx.endpoint_token.clone(),
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
@@ -983,10 +1021,61 @@ impl Plugin for Icinga2Plugin {
     }
 
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
-        // Retired keys are refused before the strict parse, so a block written against an older
-        // Client is told where its value went instead of meeting serde's "unknown field"
-        // (ADR-0019).
-        parse_settings::<Icinga2Settings>(name, self.kind(), RETIRED, settings).map(|_| ())
+        // Retired keys are refused before the strict parse, so a block carrying one is told where
+        // its value went instead of meeting serde's "unknown field" (ADR-0019).
+        let settings = parse_settings::<Icinga2Settings>(name, self.kind(), RETIRED, settings)?;
+        check_node_name(name, settings.node_name.as_deref())
+    }
+
+    /// A delivered block reads its ticket and the parent's certificate only from its own
+    /// configuration directory, and pins the parent it names (ADR-0017 clause 39): otherwise the
+    /// Server could name any file on the host and a parent to send it to.
+    fn check_delivered(
+        &self,
+        settings: &toml::Table,
+        running: Option<&toml::Table>,
+    ) -> Result<(), String> {
+        // The block the operator wrote, delivered back unchanged, brings nothing new.
+        if running == Some(settings) {
+            return Ok(());
+        }
+        // A file the operator named is kept only while it goes to the parent the operator named,
+        // under the node name the operator chose.
+        let same_parent = ["parent_host", "node_name"]
+            .iter()
+            .all(|key| running.map(|running| running.get(*key)) == Some(settings.get(*key)));
+        for key in ["ticket_file", "trusted_cert_file"] {
+            let Some(value) = settings.get(key) else {
+                continue;
+            };
+            if same_parent && running.and_then(|running| running.get(key)) == Some(value) {
+                continue;
+            }
+            let inside = value
+                .as_str()
+                .and_then(|path| path.strip_prefix("${config_dir}/"))
+                .is_some_and(|rest| {
+                    let rest = std::path::Path::new(rest);
+                    rest.components().count() > 0
+                        && rest
+                            .components()
+                            .all(|c| matches!(c, std::path::Component::Normal(_)))
+                });
+            if !inside {
+                return Err(format!(
+                    "a delivered block's {key} must be ${{config_dir}}/<file>, inside its own \
+                     configuration directory"
+                ));
+            }
+        }
+        if settings.contains_key("parent_host") && !settings.contains_key("trusted_cert_file") {
+            return Err(
+                "a delivered block must name trusted_cert_file: a parent the Server names is not \
+                 trusted on first use"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1002,9 +1091,9 @@ mod tests {
             .expect("settings")
     }
 
-    /// The paths this kind used to be told are now the tree's own (ADR-0019), and the state
-    /// directories sit beside it. Asserted against a context rather than against the settings,
-    /// because after this change the settings have nothing to say about any of them.
+    /// The paths are the tree's own (ADR-0019), and the state directories sit beside it. Asserted
+    /// against a context rather than against the settings, because the settings have nothing to say
+    /// about any of them.
     #[test]
     fn the_layout_follows_the_delivered_tree_and_needs_no_settings() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1012,6 +1101,7 @@ mod tests {
         let (_tx, shutdown) = crate::shutdown::shutdown_channel();
         let (events, _rx) = tokio::sync::mpsc::channel(1);
         let ctx = SupervisorContext {
+            endpoint_token: String::new(),
             name: "icinga2".to_string(),
             supervisor_dir: root.clone(),
             config_dir: root.join("config"),
@@ -1074,8 +1164,8 @@ mod tests {
         assert_eq!(parent_address("[::1]:5665"), ("::1".to_string(), 5665));
     }
 
-    /// A block written against an older Client is told where its value went, rather than meeting
-    /// serde's "unknown field" — the pattern `package` and `accepts_packages` already run.
+    /// A block carrying a key this kind supplies itself is told where its value went, rather than
+    /// meeting serde's "unknown field" — the pattern `package` and `accepts_packages` already run.
     #[test]
     fn a_retired_key_is_refused_by_name_and_says_what_supplies_it_now() {
         for (key, expected) in [
@@ -1269,6 +1359,7 @@ mod tests {
         let (_tx, shutdown) = crate::shutdown::shutdown_channel();
         let (events, _rx) = tokio::sync::mpsc::channel(1);
         let ctx = SupervisorContext {
+            endpoint_token: String::new(),
             name: "icinga2".to_string(),
             supervisor_dir: root.clone(),
             config_dir: root.join("config"),
@@ -1422,6 +1513,47 @@ mod tests {
         );
     }
 
+    /// A `trusted_cert_file` that is named but not there — not yet delivered, or mistyped — never
+    /// falls back to trust on first use: enrolment fails, nothing is saved from the parent, and it
+    /// pins the file once it arrives.
+    /// Verifies: ADR-0019
+    #[tokio::test]
+    async fn a_named_parent_certificate_that_is_missing_is_waited_for_not_trusted_on_sight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut layout = enrolling(dir.path());
+        let named = dir.path().join("config/parent.crt");
+        layout.trusted_cert_file = Some(named.clone());
+
+        let err = ensure_enrolled(&layout)
+            .await
+            .expect_err("a missing pin is not trusted on sight");
+        assert!(err.contains("trusted_cert_file"), "{err}");
+        assert!(
+            err.contains(&named.display().to_string()),
+            "names the path: {err}"
+        );
+        assert!(
+            !layout.certificate().is_file(),
+            "no key or certificate is made for a parent that cannot be pinned yet"
+        );
+        assert!(
+            !layout.pinned_parent.is_file(),
+            "nothing the parent presented was saved as trusted"
+        );
+        assert!(!layout.marker.is_file(), "nothing is recorded as enrolled");
+
+        std::fs::write(&named, "the-parents-own-cert").expect("deliver it");
+        assert!(
+            ensure_enrolled(&layout).await.expect("enrol"),
+            "enrols once it is there"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&layout.pinned_parent).expect("pinned"),
+            "the-parents-own-cert",
+            "the delivered certificate is what is pinned"
+        );
+    }
+
     /// A parent that cannot be reached is a wait: the error names the reason, and nothing is
     /// recorded as enrolled.
     #[tokio::test]
@@ -1505,6 +1637,37 @@ mod tests {
         // And once renewed, nothing runs again.
         assert!(!ensure_enrolled(&layout).await.expect("settled"));
         assert_eq!(requests(), "2");
+    }
+
+    /// A renewal whose named parent certificate is gone waits for it too: the pin kept from the
+    /// first enrolment is not reused and the parent is not trusted on sight, while the held
+    /// certificate is kept untouched.
+    /// Verifies: ADR-0019
+    #[tokio::test]
+    async fn a_renewal_whose_named_parent_certificate_is_gone_waits_for_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut layout = enrolling(dir.path());
+        let named = dir.path().join("config/parent.crt");
+        std::fs::write(&named, "the-parents-own-cert").expect("deliver it");
+        layout.trusted_cert_file = Some(named.clone());
+        ensure_enrolled(&layout).await.expect("enrol");
+
+        std::fs::write(layout.certificate(), "expiring").expect("write");
+        std::fs::remove_file(&named).expect("no longer delivered");
+        let err = ensure_enrolled(&layout)
+            .await
+            .expect_err("a renewal without its pin waits");
+        assert!(err.contains(&named.display().to_string()), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(layout.certificate()).expect("cert"),
+            "expiring",
+            "the held certificate is kept while the renewal waits"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&layout.pinned_parent).expect("pinned"),
+            "the-parents-own-cert",
+            "nothing the parent presented replaced the pin"
+        );
     }
 
     /// The measured case behind ADR-0019's validation gate: Icinga aborts a reload it cannot

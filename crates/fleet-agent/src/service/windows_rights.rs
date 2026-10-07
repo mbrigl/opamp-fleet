@@ -61,6 +61,65 @@ pub fn ensure_can_register(level: ServiceLevel) -> Result<(), String> {
     }
 }
 
+/// Who keeps full control of a system-scope data root once its inherited rights are cut: LocalSystem
+/// and the Administrators group, by SID so a localised group name cannot miss. The service account
+/// is granted its own rights afterwards, by the handover.
+#[cfg(any(windows, test))]
+const KEEPERS: [&str; 2] = ["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"];
+
+/// The `icacls.exe` arguments that cut `path` off from the rights it inherits and leave it to
+/// [`KEEPERS`]. Without the inheritance flags propagated, what is already inside — the configuration
+/// written moments ago — loses the inherited read right with its parent.
+#[cfg(any(windows, test))]
+fn restrict_args(path: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut args = vec![path.as_os_str().to_owned(), "/inheritance:r".into()];
+    for keeper in KEEPERS {
+        args.push("/grant:r".into());
+        args.push(keeper.into());
+    }
+    args
+}
+
+/// Cuts a system-scope data root off from what `%ProgramData%` lets every local user do.
+///
+/// Every folder created under `%ProgramData%` inherits `BUILTIN\Users:(OI)(CI)(RX)`: any local
+/// user could read the configuration and the archive key it may hold, the private key and the
+/// stored connection settings. On Unix the Client writes those `0600` in a `0700` directory itself;
+/// here the install removes the inherited rights and leaves the directory to LocalSystem and the
+/// Administrators, before the handover grants the service account its own. A user-scope install
+/// lives in the user's profile, which is private already.
+///
+/// # Errors
+/// Returns an error when `icacls.exe` cannot be run or refuses the change.
+#[cfg(windows)]
+pub fn restrict_data_root(level: ServiceLevel, path: &std::path::Path) -> Result<(), String> {
+    if level != ServiceLevel::System {
+        return Ok(());
+    }
+    let output = std::process::Command::new("icacls.exe")
+        .args(restrict_args(path))
+        .output()
+        .map_err(|e| format!("cannot run icacls.exe: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "cannot restrict {} to LocalSystem and the Administrators: icacls.exe exited with {} ({})",
+        path.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim()
+    ))
+}
+
+/// A no-op on Unix, where the Client writes its secrets owner-only itself.
+///
+/// # Errors
+/// Never.
+#[cfg(not(windows))]
+pub fn restrict_data_root(_level: ServiceLevel, _path: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
 /// `ERROR_ACCESS_DENIED` — the one refusal that means "elevate", matched on the number because the
 /// message is localised (the report this check came from read *"OpenSCManager FEHLER 5"*).
 #[cfg(any(windows, test))]
@@ -76,7 +135,29 @@ const NEEDS_ADMINISTRATOR: &str = "the Windows service control manager denied ac
 
 #[cfg(test)]
 mod tests {
-    use super::{ACCESS_DENIED, NEEDS_ADMINISTRATOR};
+    use super::{restrict_args, ACCESS_DENIED, KEEPERS, NEEDS_ADMINISTRATOR};
+
+    /// The data root keeps no inherited right — `BUILTIN\Users` read among them — and full control
+    /// only for LocalSystem and the Administrators, each granted by SID.
+    /// Verifies: ADR-0021
+    #[test]
+    fn the_data_root_is_cut_off_from_what_every_local_user_inherits() {
+        let args: Vec<String> = restrict_args(std::path::Path::new(r"C:\ProgramData\opamp-fleet"))
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], r"C:\ProgramData\opamp-fleet");
+        assert_eq!(
+            args[1], "/inheritance:r",
+            "inherited rights are removed, not kept"
+        );
+        assert_eq!(&args[2..], ["/grant:r", KEEPERS[0], "/grant:r", KEEPERS[1]]);
+        assert!(KEEPERS[0].starts_with("*S-1-5-18:") && KEEPERS[1].starts_with("*S-1-5-32-544:"));
+        assert!(
+            !args.iter().any(|arg| arg.contains("S-1-5-32-545")),
+            "no grant to Users"
+        );
+    }
 
     /// The message *is* the feature: this check exists only so that a refusal says what was
     /// refused and what to do about it (ADR-0021). It must not offer `--user` as the way out —

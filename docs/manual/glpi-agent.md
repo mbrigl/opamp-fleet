@@ -98,7 +98,7 @@ the checksum upstream published, repacks what has to be repacked, and uploads if
 
 ```console
 $ opamp-package-fetch --agent glpi-agent --version 1.19 \
-      --platform windows/amd64 --platform linux/amd64 --server http://127.0.0.1:4320
+      --platform windows/amd64 --platform linux/amd64 --server https://127.0.0.1:4321
 ```
 
 What that does differs per platform, and the difference is worth knowing:
@@ -187,13 +187,14 @@ into every host's file — in two variants, as it had to be until now.
 
 The configuration the fleet delivers is an ordinary Configuration — typed `glpi-agent` so it
 reaches no other kind of Agent, named `glpi-agent-conf` because that is the file name the
-`--conf-file` argument expects, written in the GLPI Agent's own `key = value` format:
+`--conf-file` argument expects, written in the GLPI Agent's own `key = value` format.
+`--cacert ca.pem` names the CA that signed the Server's certificate:
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "glpi-agent", "selector": {}, "body": "server = https://glpi.example.com/front/inventory.php\n"}' \
-       http://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf
-$ curl -X POST http://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf/rollout
+       https://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf/rollout
 ```
 
 A minimal body to start from is `config/examples/glpi-agent-conf.cfg` in this repository;
@@ -222,7 +223,7 @@ rolled-out Configuration then lands in `config/` with nothing reading it.
 | Field | What it shows for this Agent |
 |---|---|
 | `service_name` | `glpi-agent` — aim Configurations (and Selectors) at this. |
-| `capabilities` | `AcceptsPackages` and `AcceptsRestartCommand`: the fleet updates this program and the fleet-view restart works. |
+| `capabilities` | `AcceptsPackages` and `AcceptsRestartCommand`: the fleet updates this program and the fleet-view restart works. `AcceptsPackages` needs `[packages] verification_key` on the Client. |
 | `packages` | `Installed` with the Package's version once the tree is in place, or `InstallFailed` with the reason the artifact would not run here. |
 | `service_version` | Usually absent — see the note on `service.version` in [step 3](#3-the-block). The Package's version above says which release is installed. |
 | `healthy`, `health_status` | The crash-loop hold before the first Configuration; healthy once the daemon runs. |

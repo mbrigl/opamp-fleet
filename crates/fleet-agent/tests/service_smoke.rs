@@ -21,6 +21,8 @@
 //! What it does **not** cover: starting at boot (a runner never reboots), long-running behaviour,
 //! and hosts with SELinux or AppArmor in the way. The manual checklist in `README.md` keeps those.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -35,9 +37,9 @@ use fleet_server::fleet::{AgentView, AppState};
 /// Deliberately not `service.name`: that carries the Agent *type*, which for this Client is always
 /// `supervisor` (ADR-0021).
 ///
-/// Since ADR-0021 there is no `--instance` to isolate this run under, and the service it registers
-/// carries the product's name like any other install. This test therefore takes over the host's
-/// one service for its duration, which is what `Registered` exists to undo.
+/// There is no `--instance` to isolate this run under (ADR-0021 clause 6), and the service it
+/// registers carries the product's name like any other install. This test therefore takes over the
+/// host's one service for its duration, which is what `Registered` exists to undo.
 const AGENT_NAME: &str = "service-smoke-client";
 
 fn service() -> NativeService {
@@ -99,7 +101,7 @@ fn agent(state: &AppState) -> Option<AgentView> {
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running
 /// under that name — which is itself an answer the assertions below use.
 fn service_pid() -> Option<u32> {
-    // One name on every platform since ADR-0021, so this is what systemd, launchd, and the SCM
+    // One name on every platform (ADR-0021 clause 3), so this is what systemd, launchd, and the SCM
     // are each asked about.
     let qualified = service_name();
     #[cfg(windows)]
@@ -194,6 +196,7 @@ fn spawn_server() -> (
 /// The kill is the assertion the stand-in service manager cannot make, and the reason this test
 /// exists: `RestartPolicy::OnFailure` is what a self-update relies on to come back at all, and on
 /// Windows it is a set of recovery actions this Client registers itself.
+/// Verifies: ADR-0020, ADR-0021, G-11
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_stop() {
@@ -211,7 +214,8 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     std::fs::write(
         &config,
         format!(
-            "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n"
+            "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n{}",
+            common::client_identity(dir.path())
         ),
     )
     .expect("write supervisor.toml");

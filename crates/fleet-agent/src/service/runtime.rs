@@ -117,10 +117,10 @@ fn start_log_file(config: &crate::config::ClientConfig) {
 /// What this process is and what it will use, in one line each, before it uses any of it.
 ///
 /// **The version is the point of the first line.** It rides in every report to the Server and names
-/// the directory this binary runs from (ADR-0021), and until now it appeared in no log line at all
-/// — so the file a self-update left behind (ADR-0020, ADR-0021) could not be attributed to the
-/// version that wrote it, which is the situation that file exists for. The rest of the line is what
-/// an operator otherwise has to reconstruct from the command line of a service they did not start.
+/// the directory this binary runs from (ADR-0021), and logged here it lets the file a self-update
+/// leaves behind (ADR-0020, ADR-0021) be attributed to the version that wrote it, which is the
+/// situation that file exists for. The rest of the line is what an operator otherwise has to
+/// reconstruct from the command line of a service they did not start.
 ///
 /// **The second line is the trust and the identity in force**, resolved through the same two
 /// accessors the transports build their TLS from (ADR-0012, ADR-0022) rather than read off the
@@ -226,18 +226,28 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     heal_torn_pointer();
     let mut config = match load_effective_config(&spec) {
         Ok(config) => config,
-        // A version that cannot read this host's file is a failed update like any other, and until
-        // now it was the one failure the probation of ADR-0020 could not see: the load happens
-        // before `on_start`, so the process left before the attempt was counted, the manager
-        // restarted it, and the host stayed on a version that never reached the Server to say so.
+        // A version that cannot read this host's file is a failed update like any other, and one
+        // the probation of ADR-0020 would not see on its own: the load happens before `on_start`,
+        // so the process would leave before the attempt was counted, the manager would restart it,
+        // and the host would stay on a version that never reaches the Server to say so.
         Err(error) => return unreadable_config(&spec, error),
     };
+    // Without a client certificate the Server refuses this Client; it says so and stops rather
+    // than retrying for ever (ADR-0022).
+    config
+        .check_admission()
+        .map_err(|e| format!("{}: {e}", spec.config_path.display()))?;
     if spec.service {
         start_log_file(&config);
     }
     // After the log file, so the line that says which version is running is the first line *in the
     // file* — a log whose opening line is already about work in progress starts one step too late.
     announce(&config, &spec.config_path);
+    // Once per start, not per reconnect: a leftover [auth] is ignored and nothing from it is sent
+    // (ADR-0022 clause 3).
+    if let Some(notice) = config.leftover_auth_notice() {
+        tracing::warn!(config = %spec.config_path.display(), "{notice}");
+    }
 
     // Resolve any self-update in flight before anything else runs (ADR-0020): this process may be
     // a freshly installed version on probation, or the previous one brought back after a rollback.
@@ -259,16 +269,14 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             probation,
         ));
     }
-    // Signing is opt-in (ADR-0028): with no `[packages] verification_key`, an offered artifact — a
-    // managed process's package or this Client's own self-update — is accepted on the Server-supplied
-    // content hash alone, with no signature binding those bytes to a key the operator holds. That is
-    // a deliberate posture, not a bug, but it is one an operator should choose knowingly, so say so
-    // loudly at startup rather than only in the code path that acts on it.
-    if config.package_key().is_none() && engine.installs_packages() {
+    // There is no unsigned posture (ADR-0028, ADR-0020): without `[packages] verification_key` no
+    // Agent of this Client takes packages, its own self-update included. Said once at startup, since
+    // the Server only sees an Agent that declares no package capability.
+    if config.package_key().is_none() {
         tracing::warn!(
-            "accepting packages without a signature check: no [packages] verification_key is set, so \
-             an offered package or self-update is trusted on the Server's content hash alone \
-             (ADR-0028). Set verification_key to require an Ed25519 signature."
+            "taking no packages and no self-update: [packages] verification_key is not set, and \
+             nothing is installed without a signature (ADR-0028). Set it to the hex Ed25519 key \
+             your packages are signed with."
         );
     }
     if let Some(outcome) = &owed_outcome {
@@ -347,7 +355,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
                 return Ok(Exit::RestartForUpdate);
             }
             // Verified connection settings took effect (ADR-0013): re-resolve the effective
-            // configuration — endpoint, credential, intervals, possibly the other transport —
+            // configuration — endpoint, certificate, intervals, possibly the other transport —
             // and reconnect. The Engine (and its Managed Processes) carries on.
             RunOutcome::Reconfigured => {
                 config = load_effective_config(&spec)?;
@@ -502,7 +510,8 @@ mod tests {
     ///
     /// The test binary does not run from an install layout, so the resolution takes the "the new
     /// version did not take over" path: the marker is cleared and an outcome recorded. What is
-    /// asserted is that the marker was *seen at all*, which before this change it was not.
+    /// asserted is that the marker was *seen at all*.
+    /// Verifies: ADR-0020
     #[test]
     fn an_unreadable_configuration_resolves_the_update_in_flight() {
         let dir = tempfile::tempdir().expect("tempdir");

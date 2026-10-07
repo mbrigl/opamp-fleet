@@ -133,6 +133,7 @@ mod tests {
 
     /// The rule ADR-0028 leans on: an Agent that reports its type as an empty string reports no
     /// type, so it matches no package rather than every untyped one.
+    /// Verifies: ADR-0009
     #[test]
     fn an_empty_string_is_not_a_value() {
         assert_eq!(string_value(&attrs(), SERVICE_VERSION), None);

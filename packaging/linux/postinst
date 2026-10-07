@@ -17,10 +17,10 @@
 # crates/fleet-agent/src/service/manager.rs), the only roots a packaged install ever uses: this script
 # calls plain `service install`. They are two roots on Linux — the executable layout under `/opt`,
 # because SELinux never lets systemd execute a binary labeled `var_lib_t`; the configuration and
-# state under `/var/lib`, where data belongs (ADR-0021 clause 8, carrying ADR-0021).
+# state under `/var/lib`, where data belongs (ADR-0021 clause 8).
 #
-# There is no migration branch here, and that is ADR-0021 clause 10: no host was ever installed
-# under the paths or names this release replaces, so there is nothing to carry across.
+# There is no migration branch here, and that is ADR-0021 clause 10: an upgrade is a
+# re-registration, so there is nothing to carry across.
 #
 # dpkg calls this as `postinst configure <old-version>`, rpm as `%post <count>`. The two argument
 # conventions have nothing in common, so nothing here reads "$1" except to bow out of dpkg's abort
@@ -58,15 +58,23 @@ fi
 
 cat <<'EOF'
 
-The service is registered and stopped. Not starting it is deliberate: a Client with no
-configuration dials the development default and manages nothing (ADR-0021). Two steps remain:
+The service is registered and stopped. Not starting it is deliberate: a Client without a client
+certificate refuses to start (ADR-0022, ADR-0021). Two steps remain:
 
-  opamp-fleet service install --endpoint wss://<server>/v1/opamp
+  opamp-fleet service install --interactive
   systemctl start opamp-fleet
 
-Run `opamp-fleet service install --interactive` instead to be asked for the credential too.
+The first asks for the endpoint, the client certificate — a bootstrap certificate to enrol with,
+or one already issued — and its key, and the package verification key, and writes
+supervisor.toml. To write it yourself instead, give it at least the endpoint and the client
+identity:
 
-The configuration that step writes lets the Server update this Client itself (ADR-0020) — the
-fleet then patches its own agent like any other program. Append --no-self-update to keep that
-one update manual, or write `enabled = false` under [self_update] in supervisor.toml later.
+  endpoint = "wss://<server>/v1/opamp"
+  [tls]
+  cert_file = "<client or bootstrap certificate>"
+  key_file = "<its key>"
+
+The configuration lets the Server update this Client itself (ADR-0020), from signed packages only
+— the fleet then patches its own agent like any other program. Write `enabled = false` under
+[self_update] in supervisor.toml to keep that one update manual.
 EOF

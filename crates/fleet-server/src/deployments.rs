@@ -15,10 +15,10 @@
 //!
 //! **A Selector is never empty.** An empty one is the channel that collides with every other, and a
 //! forgotten field would quietly become the base for the whole fleet — the class of accident
-//! ADR-0027 was built to prevent. Channels are therefore a *partition*: a Selector cannot express
+//! ADR-0027 exists to prevent. Channels are therefore a *partition*: a Selector cannot express
 //! "not", so disjoint channels come from membership, which is what ADR-0026's labels already are.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
 
 use opamp::proto::AgentDescription;
@@ -33,7 +33,7 @@ pub struct Deployment {
     /// it keeps the ADR-0021 grammar a Package gave up (ADR-0028).
     pub name: String,
     /// Equality pairs that must all match an attribute the Agent reported, labels included
-    /// (ADR-0025 semantics, unchanged). **Never empty** — see the module note.
+    /// (ADR-0025 semantics). **Never empty** — see the module note.
     pub selector: BTreeMap<String, String>,
     /// At most one Package per Agent type, keyed by that type. Two of one type would collide on
     /// the wire map key *and* fit the same Agent, so the second is refused at the moment it is
@@ -197,6 +197,18 @@ impl DeploymentStore {
             .expect("deployments lock")
             .get(name)
             .cloned()
+    }
+
+    /// The names of the Deployments that sign the artifact `(id, platform)` — what the download
+    /// route asks once per request rather than once per Agent (ADR-0028 clause 35).
+    pub fn signing(&self, id: &PackageId, platform: &Platform) -> BTreeSet<String> {
+        self.deployments
+            .read()
+            .expect("deployments lock")
+            .values()
+            .filter(|deployment| deployment.signature(id, platform).is_some())
+            .map(|deployment| deployment.name.clone())
+            .collect()
     }
 
     /// A snapshot of the whole store, for one resolution pass.
@@ -422,6 +434,7 @@ pub(crate) mod tests {
     /// An Agent belongs to at most one Deployment. Two claiming it is the conflict, and the
     /// message names **both** — a rollout that silently never starts is worse than one that says
     /// why (ADR-0028 point 26).
+    /// Verifies: ADR-0028
     #[test]
     fn two_deployments_matching_one_agent_are_a_conflict_that_names_them() {
         let memory = Memory::default();
@@ -446,8 +459,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// Specificity does not break the tie, and that is the decision — not an oversight. The wider
-    /// Selector used to win by being narrower; now neither does.
+    /// Specificity does not break the tie, and that is the decision — not an oversight: neither
+    /// Selector wins by being narrower (ADR-0028 clause 26).
+    /// Verifies: ADR-0028
     #[test]
     fn a_narrower_selector_does_not_win_over_a_wider_one() {
         let memory = Memory::default();
@@ -468,6 +482,7 @@ pub(crate) mod tests {
 
     /// An Agent no channel claims waits, and that is not an error: after a fresh enrolment it is the
     /// ordinary state (ADR-0028 point 25).
+    /// Verifies: ADR-0028
     #[test]
     fn an_agent_no_ring_claims_is_not_a_conflict() {
         let memory = Memory::default();
@@ -486,6 +501,7 @@ pub(crate) mod tests {
 
     /// An empty Selector is refused, and the message says what to write instead. It is the channel
     /// that collides with every other, and it is what a forgotten field looks like.
+    /// Verifies: ADR-0028
     #[test]
     fn a_deployment_must_name_the_ring_it_aims_at() {
         let memory = Memory::default();
@@ -511,6 +527,7 @@ pub(crate) mod tests {
 
     /// One Package per Agent type, refused at the write rather than puzzled over at resolution —
     /// and the refusal names what is already held.
+    /// Verifies: ADR-0028
     #[test]
     fn a_deployment_holds_one_package_per_agent_type() {
         let memory = Memory::default();
@@ -547,6 +564,7 @@ pub(crate) mod tests {
 
     /// A signature belongs to an artifact this Deployment actually offers, and it goes when the
     /// Package does — a signature over something no longer offered has nothing left to say.
+    /// Verifies: ADR-0028
     #[test]
     fn a_signature_needs_its_package_and_leaves_with_it() {
         let memory = Memory::default();
@@ -579,6 +597,7 @@ pub(crate) mod tests {
 
     /// Editing the Selector is not editing the bytes: a Deployment's aim stays writable, and
     /// changing it keeps everything the channel holds.
+    /// Verifies: ADR-0028
     #[test]
     fn the_selector_stays_editable_and_keeps_what_the_ring_holds() {
         let memory = Memory::default();

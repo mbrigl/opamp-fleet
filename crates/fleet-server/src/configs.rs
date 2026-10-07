@@ -1,9 +1,9 @@
-//! Named Configurations with Selectors (ADR-0025): the persistent store, the type fit
-//! (ADR-0025) and Selector matching, and the composition of each Agent's Remote configuration.
-//! Since ADR-0027 saving is the only content state — **a saved Configuration reaches nobody by
-//! itself**. What an Agent is offered is composed from the per-Agent assignments the operator's
-//! explicit rollout acts wrote; the store's part is to keep the saved revision, and to retain
-//! every pinned revision an assignment still references.
+//! Named Configurations with Selectors (ADR-0025): the persistent store, the type fit (ADR-0025)
+//! and Selector matching, and the composition of each Agent's Remote configuration. Saving is the
+//! only content state (ADR-0027) — **a saved Configuration reaches nobody by itself**. What an
+//! Agent is offered is composed from the per-Agent assignments the operator's explicit rollout acts
+//! wrote; the store's part is to keep the saved revision, and to retain every pinned revision an
+//! assignment still references.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
@@ -24,12 +24,12 @@ pub struct Revision {
     pub selector: BTreeMap<String, String>,
     /// The configuration text handed to the Managed Process.
     pub body: String,
-    /// The Baseline's `AgentConfigObject.role` (ADR-0025), travelling unchanged to the Agent.
-    /// Empty — the default, and absent from the JSON — means top-level configuration, handled as
-    /// it always was. `supplementary` means content the Managed Process reads *by path* rather
+    /// The Baseline's `AgentConfigObject.role` (ADR-0025), travelling unchanged to the Agent. Empty
+    /// — the default, and absent from the JSON — means top-level configuration, handled as any
+    /// configuration is. `supplementary` means content the Managed Process reads *by path* rather
     /// than being configured with: a fragment, a certificate, a rule file. Any other value is
-    /// carried verbatim and treated like `supplementary`; the protocol leaves the vocabulary to
-    /// the Agent type, so nothing here guesses at one it does not know.
+    /// carried verbatim and treated like `supplementary`; the protocol leaves the vocabulary to the
+    /// Agent type, so nothing here guesses at one it does not know.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
     /// The Agent type this Configuration is for (ADR-0025), compared raw for equality against
@@ -763,11 +763,11 @@ pub(crate) mod tests {
         assert_ne!(store.compose(&assignments).expect("desired").hash, without);
     }
 
-    /// A Configuration written before ADR-0025 has no role, and its hash must not move when the
-    /// Server is upgraded — a moved hash restarts every Managed Process in the fleet to deliver a
-    /// configuration identical to the one it already runs. The same pin guards ADR-0025, ADR-0027
-    /// and ADR-0027: neither the type, nor a revision split, nor the assignment model may enter
-    /// the hash.
+    /// A Configuration with an empty role keeps the hash it had without one, so the hash does not
+    /// move when the Server is upgraded — a moved hash restarts every Managed Process in the fleet
+    /// to deliver a configuration identical to the one it already runs. The same pin guards
+    /// ADR-0025 and ADR-0027: neither the type, nor a revision split, nor the assignment model may
+    /// enter the hash.
     // Verifies: ADR-0025
     #[test]
     fn an_empty_role_leaves_the_hash_where_it_was() {

@@ -4,6 +4,8 @@
 //! offered artifact, verifies its content hash and Ed25519 signature, swaps it over the managed
 //! binary, health-gates the restart, and reports `Installed` — visible in the fleet view.
 
+mod common;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -13,19 +15,10 @@ use fleet_server::fleet::{AgentView, AppState, PackageOffering};
 use fleet_server::packages::{PackageStore, Platform};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
-/// Puts a Package into a ring aimed at the Agent type it is built for, and hands back the ring's
-/// name. Aim belongs to the Deployment now (ADR-0028): a Package reaches nobody by itself, so a
-/// test that wants one delivered has to say which ring the host is in — which is the model.
-fn ring_holding(
-    state: &fleet_server::fleet::AppState,
-    id: &fleet_server::packages::PackageId,
-) -> String {
-    ring_holding_signed(state, id, None)
-}
-
-/// The same, recording the artifact's signature on the ring — where a signature lives since
-/// ADR-0028. A Client with `[packages] verification_key` set refuses an unsigned artifact, so the
-/// ring is what has to carry it.
+/// Puts a Package into a ring aimed at the Agent type it is built for, with the artifact's signature
+/// on the ring — where a signature lives (ADR-0028) — and hands back the ring's name. A Package
+/// reaches nobody by itself, so a test that wants one delivered has to say which ring the host is
+/// in, and a Client installs nothing unsigned (ADR-0028).
 fn ring_holding_signed(
     state: &fleet_server::fleet::AppState,
     id: &fleet_server::packages::PackageId,
@@ -117,7 +110,7 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
 
-// Verifies: ADR-0028
+/// Verifies: ADR-0028, G-10
 #[tokio::test]
 async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed() {
     // The artifact is the stub binary itself — a real executable that stays up when swapped in.
@@ -126,7 +119,14 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
     let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
     let public_key_hex = hex::encode(keypair.public_key().as_ref());
-    let signature = keypair.sign(&artifact).as_ref().to_vec();
+    let signature = keypair
+        .sign(&fleet_core::package::statement(
+            "managed-agent",
+            "2.0.0",
+            &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+        ))
+        .as_ref()
+        .to_vec();
 
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
@@ -175,7 +175,8 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
+        .expect("write supervisor.toml");
 
     let _client = spawn_client(&config_path);
 
@@ -200,7 +201,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type since ADR-0028 — the program's file name here, since
+        // The wire name is the Agent type (ADR-0028 clause 16) — the program's file name here, since
         // the block states no `service_name`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "Installed" && package.version == "2.0.0").then_some(())
@@ -235,6 +236,20 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 #[tokio::test]
 async fn a_package_that_fails_the_configured_version_check_is_refused() {
     let artifact = std::fs::read(env!("CARGO_BIN_EXE_stub_agent")).expect("read stub");
+    // Signed, as everything a Client installs is (ADR-0028): the refusal under test is the version
+    // check's, not the signature policy's.
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+    let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
+    let public_key_hex = hex::encode(keypair.public_key().as_ref());
+    let signature = keypair
+        .sign(&fleet_core::package::statement(
+            "managed-agent",
+            "2.0.0",
+            &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+        ))
+        .as_ref()
+        .to_vec();
 
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
@@ -265,6 +280,8 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
             "state_dir = {state:?}\n",
             "heartbeat_interval_secs = 1\n\n",
+            "[packages]\n",
+            "verification_key = \"{key}\"\n\n",
             "[[supervisor]]\n",
             "type = \"command\"\n",
             "name = \"myagent\"\n",
@@ -275,16 +292,22 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
+        key = public_key_hex,
         marker = marker.to_string_lossy(),
     );
     let config_path = dir.path().join("supervisor.toml");
-    std::fs::write(&config_path, toml).expect("write supervisor.toml");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
+        .expect("write supervisor.toml");
 
     let _client = spawn_client(&config_path);
 
     wait_until("the rollout act to reach the agent", || {
         state
-            .rollout_deployment(&ring_holding(&state, &set))
+            .rollout_deployment(&ring_holding_signed(
+                &state,
+                &set,
+                Some((&this_host(), signature.clone())),
+            ))
             .ok()
             .filter(|assigned| *assigned >= 1)
             .map(|_| ())
@@ -294,7 +317,7 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
     let error = wait_until("the package to be reported InstallFailed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type since ADR-0028 — the program's file name here, since
+        // The wire name is the Agent type (ADR-0028 clause 16) — the program's file name here, since
         // the block states no `service_name`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "InstallFailed").then(|| package.error.clone())

@@ -46,8 +46,8 @@ struct Envelope {
     package_statuses: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     available_components: Option<String>,
-    /// The config assignments (ADR-0027), name → revision hash. Absent in a pre-ADR file, which
-    /// is exactly the migration marker the fleet reads.
+    /// The config assignments (ADR-0027), name → revision hash. Absent in a file an older Server
+    /// wrote, which is exactly the migration marker the fleet reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     config_assignments: Option<BTreeMap<String, String>>,
     /// What was rolled out to this Agent (ADR-0027, ADR-0028): the Deployment that released it
@@ -63,7 +63,7 @@ struct PackageAssignmentMeta {
     package: String,
 }
 
-/// Bumped for ADR-0028's assignment shape, with **no reader for version 1**: there is no legacy
+/// Version 2 is ADR-0028's assignment shape, and there is **no reader for version 1**: no legacy
 /// store to support, so an envelope this Server did not write is named rather than guessed at.
 const ENVELOPE_VERSION: u32 = 2;
 
@@ -235,8 +235,9 @@ mod tests {
     /// ADR-0028 point 34: an envelope written before the ADR has no assignment fields, and they
     /// restore as `None` — the marker the fleet's migration reads. They are not invented as
     /// empty, which would silently un-roll the Agent.
+    /// Verifies: ADR-0028
     #[test]
-    fn a_pre_adr_0027_record_restores_with_no_assignments() {
+    fn a_record_without_assignments_restores_with_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
         let uid = InstanceUid::default();

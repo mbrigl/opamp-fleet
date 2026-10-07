@@ -42,35 +42,50 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("client::ws", Adapter),
             ("server", Adapter),
             ("server::listen", Adapter),
+            ("server::pace", Adapter),
             ("tls", Adapter),
         ],
     ),
     (
         "fleet-core",
-        &[("", Root), ("platform", Core), ("version", Core)],
+        &[
+            ("", Root),
+            ("package", Core),
+            ("platform", Core),
+            ("renewal", Core),
+            ("version", Core),
+        ],
     ),
     (
         "fleet-server",
         &[
             ("", Root),
             ("main", Root),
+            ("agent_rate", Core),
             ("agent_store", Core),
+            ("audit", Core),
             ("configs", Core),
             ("deployments", Core),
+            ("enrolment", Core),
             ("fleet", Core),
             ("labels", Core),
             ("packages", Core),
+            ("revocation", Core),
+            ("throttle", Core),
             ("api", Adapter),
+            ("audit_log", Adapter),
             ("ca", Adapter),
             ("clock", Adapter),
             ("config", Adapter),
             ("credentials", Adapter),
             ("fs", Adapter),
             ("fs::agents", Adapter),
+            ("fs::audit", Adapter),
             ("fs::configs", Adapter),
             ("fs::deployments", Adapter),
             ("fs::labels", Adapter),
             ("fs::packages", Adapter),
+            ("fs::revocation", Adapter),
             ("listen", Adapter),
             ("tls", Adapter),
             ("transport", Adapter),
@@ -103,8 +118,10 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("connection", Adapter),
             ("csr", Adapter),
             ("gateway", Adapter),
+            ("gateway::cache", Adapter),
             ("gateway::pool", Adapter),
             ("gateway::registry", Adapter),
+            ("gateway::revocations", Adapter),
             ("host", Adapter),
             ("install", Adapter),
             ("logging", Adapter),
@@ -700,7 +717,7 @@ fn reexports() -> Reexports {
     found
 }
 
-/// Verifies: ADR-0006
+/// Verifies: ADR-0006, G-8
 #[test]
 fn the_core_depends_on_no_adapter_and_no_technology() {
     let locked = locked_crates();

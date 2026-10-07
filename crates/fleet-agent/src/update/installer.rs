@@ -380,6 +380,15 @@ fn probe(binary: &Path, expected_version: &str) -> Result<(), String> {
 /// Returns an error only when a rollback is needed and the pointer cannot be moved, which leaves
 /// the host running a version its own marker says is failing.
 pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
+    on_start_as(
+        state_dir,
+        &layout::running_exe()?,
+        fleet_core::version::current(),
+    )
+}
+
+/// [`on_start`] for the process running `exe` at `running_version`.
+fn on_start_as(state_dir: &Path, exe: &Path, running_version: &str) -> Result<Startup, String> {
     let Some(mut marker) = load_marker(state_dir) else {
         // Nothing in flight — but an outcome may still be owed from the run that finished one.
         return Ok(
@@ -388,13 +397,8 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
     };
     marker.attempts += 1;
 
-    let exe = layout::running_exe()?;
-    let running_dir = Layout::enclosing(&exe).map(|(_, dir)| dir);
-    let is_new_version = took_over(
-        fleet_core::version::current(),
-        running_dir.as_deref(),
-        &marker,
-    );
+    let running_dir = Layout::enclosing(exe).map(|(_, dir)| dir);
+    let is_new_version = took_over(running_version, running_dir.as_deref(), &marker);
 
     if !is_new_version {
         // We are the *old* version and the marker is still here: the switch never took effect, or
@@ -402,7 +406,7 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
         let reason = format!(
             "the new version {} did not take over; running {} from {} instead",
             marker.version,
-            fleet_core::version::current(),
+            running_version,
             running_dir
                 .as_deref()
                 .unwrap_or(Path::new("an unknown directory"))
@@ -445,7 +449,7 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
             ),
         );
         let _rolling = span.enter();
-        let (layout, _) = Layout::enclosing(&exe).expect("checked above");
+        let (layout, _) = Layout::enclosing(exe).expect("checked above");
         layout.set_current(&marker.previous_dir)?;
         crate::telemetry::failed(&span, &reason);
         finish(state_dir, &marker, Some(reason));
@@ -464,14 +468,13 @@ pub fn on_start(state_dir: &Path) -> Result<Startup, String> {
 /// Whether the process that came up is the update the marker describes — asked of the directory it
 /// runs from **and** of the version it reports for itself.
 ///
-/// The directory alone answered this until ADR-0027, and it answers a slightly different question:
-/// which version was *pointed at*. On a platform where the running path is the `current` pointer
-/// rather than the version behind it, canonicalising it says where the pointer now leads, not which
-/// binary the service manager actually started. A commit that trusted that would tell the Server a
-/// version this host does not run — and the fleet then holds the package back over a claim the
-/// program itself denies, which is the state ADR-0027 is about. What a binary says about itself is
-/// the one thing no stale pointer can fake, so both must agree; the build metadata does not take
-/// part (ADR-0011).
+/// The directory alone answers a slightly different question: which version was *pointed at*. On a
+/// platform where the running path is the `current` pointer rather than the version behind it,
+/// canonicalising it says where the pointer now leads, not which binary the service manager
+/// actually started. A commit that trusted that would tell the Server a version this host does not
+/// run — and the fleet then holds the package back over a claim the program itself denies, which is
+/// the state ADR-0027 is about. What a binary says about itself is the one thing no stale pointer
+/// can fake, so both must agree; the build metadata does not take part (ADR-0011).
 fn took_over(running_version: &str, running_dir: Option<&Path>, marker: &UpdateMarker) -> bool {
     fleet_core::version::same_release(running_version, &marker.version)
         && running_dir.is_some_and(|dir| {
@@ -569,6 +572,7 @@ mod tests {
     /// exactly when this file is read by a *different* build than the one that wrote it, and a
     /// marker that failed to parse there would put a Client on probation forever over a field that
     /// only decorates a trace.
+    /// Verifies: ADR-0016
     #[test]
     fn a_marker_carries_its_trace_and_one_written_without_it_still_parses() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -580,7 +584,7 @@ mod tests {
         store_marker(dir.path(), &written).expect("store");
         assert_eq!(load_marker(dir.path()), Some(written));
 
-        // What a Client from before ADR-0016 left behind: every field but this one.
+        // A marker an older Client wrote: every field but this one.
         let older = serde_json::json!({
             "previous_dir": dir.path().join("previous"),
             "new_dir": dir.path().join("new"),
@@ -598,6 +602,7 @@ mod tests {
     /// before it is ever turned into a directory name — otherwise the staged binary lands outside
     /// `versions/` and `current` is pointed at it. The refusal happens ahead of the layout check,
     /// so it holds even where this test binary does not run from an install layout.
+    /// Verifies: ADR-0020
     #[test]
     fn install_refuses_a_version_that_would_escape_the_layout() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -624,6 +629,7 @@ mod tests {
     /// even though it may be validly signed — the refusal happens ahead of the layout check, so it
     /// holds regardless of where this test binary runs from. `0.0.1` is below any release this
     /// project builds.
+    /// Verifies: ADR-0020
     #[test]
     fn install_refuses_a_downgrade() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -644,6 +650,7 @@ mod tests {
         assert_eq!(on_start(dir.path()).expect("start"), Startup::Ordinary);
     }
 
+    /// Verifies: ADR-0020
     #[test]
     fn committing_replaces_the_marker_with_an_installed_outcome() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -669,6 +676,7 @@ mod tests {
     /// binary says which one came up. A commit that trusted the pointer would report a version this
     /// host does not run, and the fleet would then hold the package back over a claim the program
     /// denies — the state ADR-0027 is about, created by the very mechanism meant to end it.
+    /// Verifies: ADR-0020
     #[test]
     fn taking_over_needs_the_binary_to_be_the_version_the_marker_names() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -699,6 +707,7 @@ mod tests {
 
     /// The old version finding the marker means the switch never took hold — reported as a
     /// failure rather than silently forgotten, since the Server was told `Installing`.
+    /// Verifies: ADR-0020
     #[test]
     fn the_old_version_finding_a_marker_reports_the_update_as_failed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -721,9 +730,65 @@ mod tests {
         assert!(!marker_path(dir.path()).exists());
     }
 
+    /// A new version that does not stay up is rolled back: after its last attempt `current` points
+    /// at the previous version again, and the Server is owed `InstallFailed` with the reason. The
+    /// attempts before it run on probation.
+    /// Verifies: ADR-0020, G-10, G-11
+    #[test]
+    fn a_new_version_that_does_not_stay_up_is_rolled_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("install");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).expect("state");
+        let marker = marker(&root, 0);
+        for version_dir in [&marker.previous_dir, &marker.new_dir] {
+            std::fs::create_dir_all(version_dir).expect("version dir");
+            std::fs::write(version_dir.join(BINARY_FILENAME), b"client").expect("binary");
+        }
+        let layout = Layout::new(&root);
+        layout
+            .set_current(&marker.new_dir)
+            .expect("point at the new version");
+        store_marker(&state, &marker).expect("store");
+        let exe = marker.new_dir.join(BINARY_FILENAME);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let startup = on_start_as(&state, &exe, "2.0.0").expect("start");
+            assert!(
+                matches!(&startup, Startup::OnProbation(m) if m.attempts == attempt),
+                "attempt {attempt}: {startup:?}"
+            );
+        }
+        let startup = on_start_as(&state, &exe, "2.0.0").expect("start");
+        assert!(matches!(startup, Startup::RolledBack(_)), "{startup:?}");
+        assert_eq!(
+            std::fs::canonicalize(layout.current()).expect("current resolves"),
+            std::fs::canonicalize(&marker.previous_dir).expect("previous resolves"),
+            "current points back at the previous version"
+        );
+        assert!(!marker_path(&state).exists());
+        let owed = load_outcome(&state).expect("an outcome is owed");
+        assert_eq!(owed.version, "2.0.0");
+        assert!(
+            owed.error
+                .as_deref()
+                .is_some_and(|e| e.contains("did not stay up")),
+            "{owed:?}"
+        );
+
+        // The previous version comes up next and reports the failure.
+        let previous = marker.previous_dir.join(BINARY_FILENAME);
+        let startup = on_start_as(&state, &previous, "1.0.0").expect("start");
+        assert!(
+            matches!(&startup, Startup::Outcome(o) if o.error.is_some()),
+            "{startup:?}"
+        );
+    }
+
     /// A binary that cannot run at all is the failure class no post-restart mechanism can catch,
     /// because it never gets far enough to count an attempt. Refusing it is the whole reason the
     /// probe happens before the pointer moves.
+    /// Verifies: ADR-0020
     #[test]
     fn the_probe_refuses_a_binary_that_cannot_run() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -734,6 +799,7 @@ mod tests {
     /// A program that runs happily and answers something else: offered under the configured
     /// package name, and still not this Client. Unix-only because the impostor is a shell script;
     /// what it proves is platform-independent.
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[test]
     fn the_probe_refuses_a_binary_that_is_not_this_client() {
@@ -748,6 +814,7 @@ mod tests {
         assert!(err.contains("not an OpAMP Fleet Client"), "got {err}");
     }
 
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[test]
     fn the_probe_refuses_a_client_of_the_wrong_version() {
@@ -770,7 +837,7 @@ mod tests {
 
     /// ADR-0011, and the failure that prompted it: a package is uploaded under the release number,
     /// while the binary in it reports the commit it was built from. Those are the same release.
-    // Verifies: ADR-0011
+    /// Verifies: ADR-0011, ADR-0020
     #[cfg(unix)]
     #[test]
     fn the_probe_ignores_the_commit_a_build_came_from() {
@@ -786,6 +853,7 @@ mod tests {
 
     /// What is deliberately *not* dropped: a development build is not the release it heads for
     /// (ADR-0011), and this is the last gate that can refuse one before a fleet installs it.
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[test]
     fn the_probe_refuses_a_development_build_offered_as_a_release() {
@@ -799,6 +867,7 @@ mod tests {
 
     /// A package version is free-form by the API's own contract, so the offer may not be a version
     /// at all — including the `0.1.1 799e36a` a query string makes of an unencoded `+`.
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[test]
     fn the_probe_refuses_an_offer_that_is_not_a_version() {

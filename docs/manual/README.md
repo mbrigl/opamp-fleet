@@ -6,7 +6,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 
 | Part | Read it to |
 |---|---|
-| **[Server](server.md)** | run the control plane: the listener, Configurations and Selectors, packages and deployments, the REST API, authentication, TLS |
+| **[Server](server.md)** | run the control plane: the two listeners, Configurations and Selectors, packages and deployments, the REST API, authentication, enrolment, TLS |
 | **[Client](client.md)** | run a managed host, end to end: how it is built, the OS service, the on-disk layout, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
 | **[GLPI Agent recipe](glpi-agent.md)** | deliver a third party's release and supervise it: the GLPI inventory agent as a foreground daemon, on Windows and Linux, configured from the Server |
@@ -15,8 +15,9 @@ is one machine, the Clients are all the others — so each half can be read on i
 | **[Artifact documents](../artifacts/)** | for maintainers: what each wrapped agent's artifact *is* — source, assets, integrity, repack, the delivered tree, and what the Client derives from it. One per wrapped agent: [Icinga 2](../artifacts/icinga2.md), [GLPI Agent](../artifacts/glpi-agent.md), [Telegraf](../artifacts/telegraf.md) |
 
 The two halves interlock in three places, and each is described on both sides: **authentication**
-(the Client presents a credential the Server accepts), **connection settings** (the Server can move
-the fleet to a new endpoint or credential), and **packages** (the Server decides *which* artifact an
+(the Client presents a client certificate the Server accepts, and a new host is
+enrolled on an operator's approval), **connection settings** (the Server can move
+the fleet to a new endpoint and renews each certificate), and **packages** (the Server decides *which* artifact an
 Agent gets, the Client decides *whether* it takes one at all).
 
 ## What this manual is not
@@ -40,45 +41,62 @@ $ cargo run -p fleet-server -- --config config/server.toml
 $ cargo run -p fleet-agent -- --config config/supervisor.toml
 ```
 
-An installed deployment runs the same two programs under the names `server` and `client`; the
+An installed deployment runs the same two programs under the names `server` and `supervisor`; the
 `cargo run -p … --` prefix is only how you invoke them from a source checkout.
 
 ## Quick start: a closed loop on one machine
 
-This is the smallest complete deployment — one Server, one Client, one Configuration — and it needs
-no configuration file at all, because every setting has a default.
+This is the smallest complete deployment — one Server, one Client, one Configuration. Neither end
+starts without TLS material and a client certificate, so the first step makes a
+development set of them.
 
-1. **Start the Server.** It serves two planes on two ports: the **Agent plane** on `4320` (the
-   OpAMP endpoint at `/v1/opamp` and the package downloads), and the **Operator plane** on
-   `127.0.0.1:4321` (the REST API under `/api/v1/`, the API docs at `/api/v1/docs`, and the bundled
-   UI at `/`). The operator half is on loopback because nothing authenticates it yet.
-
-   ```console
-   $ cargo run -p fleet-server -- --config config/server.toml
-   ```
-
-2. **Start a Client.** With no `[[supervisor]]` block it presents exactly one Agent: itself.
+1. **Create the development certificates.** [`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) needs
+   the `openssl` command-line tool. It writes a development CA, a Server certificate for `127.0.0.1`
+   and `::1`, a client certificate, and a bootstrap CA with a bootstrap certificate to try
+   enrolment with. Everything lands in `.dev-pki/`, which git ignores. The keys are unencrypted and
+   the CAs are throwaway, so use the set on a development machine only. The script refuses to
+   overwrite a directory that already holds a CA.
 
    ```console
-   $ cargo run -p fleet-agent -- --config config/supervisor.toml
+   $ scripts/dev-pki.sh
    ```
 
-3. **Open the UI** at <http://127.0.0.1:4321/>. The Agent is listed as *Connected*, with the
-   attributes it reported.
+   It also writes `.dev-pki/server.toml` and `.dev-pki/supervisor.toml`, which name the set by
+   absolute path. Every other key keeps its default.
 
-4. **Create and roll out a Configuration.** In the UI, press **Configurations**, give it a name,
+2. **Start the Server.** It serves two planes on two ports, both over TLS 1.3: the **Agent plane**
+   on `127.0.0.1:4320` (the OpAMP endpoint at `/v1/opamp` and the package downloads), and the
+   **Operator plane** on `127.0.0.1:4321` (the REST API under `/api/v1/`, the API docs at
+   `/api/v1/docs`, and the bundled UI at `/`). Both are on the loopback by default.
+
+   ```console
+   $ cargo run -p fleet-server -- --config .dev-pki/server.toml
+   ```
+
+3. **Start a Client.** With no `[[supervisor]]` block it presents exactly one Agent: itself. It
+   presents the development client certificate, and it trusts the development CA.
+
+   ```console
+   $ cargo run -p fleet-agent -- --config .dev-pki/supervisor.toml
+   ```
+
+4. **Open the UI** at <https://127.0.0.1:4321/>. Your browser does not know the development CA, so
+   import `.dev-pki/ca.pem` into its trust store first. The Agent is listed as *Connected*, with
+   the attributes it reported.
+
+5. **Create and roll out a Configuration.** In the UI, press **Configurations**, give it a name,
    leave the Selector empty (which targets every Agent), enter the configuration text, save — and
    then press **Roll out to all matching**, because saving only stores; the rollout act is what
-   reaches the fleet. The same two steps over the API:
+   reaches the fleet. The same two steps over the API, with `--cacert` naming the development CA:
 
    ```console
-   $ curl -X PUT -H 'Content-Type: application/json' \
+   $ curl --cacert .dev-pki/ca.pem -X PUT -H 'Content-Type: application/json' \
           -d '{"selector": {}, "body": "receivers: {}"}' \
-          http://127.0.0.1:4321/api/v1/configurations/base
-   $ curl -X POST http://127.0.0.1:4321/api/v1/configurations/base/rollout
+          https://127.0.0.1:4321/api/v1/configurations/base
+   $ curl --cacert .dev-pki/ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/base/rollout
    ```
 
-5. **Watch the loop close.** A WebSocket Client receives it within a second, an HTTP Client on its
+6. **Watch the loop close.** A WebSocket Client receives it within a second, an HTTP Client on its
    next poll. It stores the configuration, reports it **Applied** with the matching hash, and its
    effective configuration appears in the fleet table. Rolling the same Configuration out again
    sends nothing — every push is gated on a content hash. An Agent that connects *later* is not
@@ -128,18 +146,27 @@ per Agent type, and each artifact's signature. It is the only thing that is roll
 Agent belongs to **at most one** — two claiming the same Agent is a conflict the Server reports
 rather than resolves. A Selector is equality and cannot say "not", so channels are a partition over an
 attribute every Agent carries; there is no fleet-wide default. The Server decides which artifact an
-Agent is offered; the Client decides whether it accepts packages at all. Artifacts are verified by
-content hash always, and by Ed25519 signature when a verification key is configured.
+Agent is offered; the Client decides whether it accepts packages at all. Every artifact is verified
+by its content hash and by its Ed25519 signature. A Client without a verification key takes no
+package, and the Server offers no entry its Deployment has not signed.
 
-**Transports.** The URL scheme in the Client's `endpoint` selects the transport:
-`ws://`/`wss://` for WebSocket, where the Server pushes changes within seconds, and
-`http://`/`https://` for plain-HTTP polling. The Server accepts both on the same path, at the same
-time.
+**Transports.** The URL scheme in the Client's `endpoint` selects the transport: `wss://` for
+WebSocket, where the Server pushes changes within seconds, and `https://` for plain-HTTP polling.
+The Server accepts both on the same path, at the same time. `ws://` and `http://` are accepted
+only to the IP literals `127.0.0.1` and `::1`.
+
+**Security before convenience.** Both ends refuse an insecure configuration at startup, and the
+refusal names the setting to fix; neither warns and carries on. Every connection that leaves a host
+is TLS 1.3, and plaintext is accepted on the loopback alone — the IP literals `127.0.0.1` and
+`::1`, never the name `localhost`. An Agent proves fleet membership with one thing: a client
+certificate in the TLS handshake. It holds no credential. A new host gets its certificate
+only through an enrolment an operator opens and approves. Software is installed only when it is
+signed with the operator's key and fetched from a source the operator allowed.
 
 **Configuration files.** Both ends read one hand-edited TOML file, named with `--config`.
-Every key is optional, an unknown key is refused at startup rather than ignored, and there are no
-environment-variable fallbacks. The annotated examples in [`config/`](../../config/) are the
-reference copies: [`config/server.toml`](../../config/server.toml) and
+Most keys are optional; the TLS material is not. An unknown key is
+refused at startup rather than ignored, and there are no environment-variable fallbacks. The
+annotated examples in [`config/`](../../config/) are the reference copies: [`config/server.toml`](../../config/server.toml) and
 [`config/supervisor.toml`](../../config/supervisor.toml).
 
 ## Not built yet
@@ -149,7 +176,7 @@ not go looking for a setting that does not exist. [`docs/CONFORMANCE.md`](../CON
 authority on all of it.
 
 - **`tls` and `proxy` in connection settings** — a Server offering either is told, in
-  its status report, that the Client dropped them. Mutual TLS itself *is* built: see
+  its status report, that the Client dropped them. Mutual TLS itself *is* built, and required: see
   [the Server](server.md#mutual-tls-proving-who-is-on-the-connection).
 - **Certificate revocation** — there is no CRL and no OCSP. A short `validity_days` plus
   renewal is what bounds an issued certificate.

@@ -54,6 +54,7 @@ fn start(settings: &str) -> Harness {
     let (shutdown_tx, shutdown) = shutdown_channel();
     let settings: toml::Table = settings.parse().expect("settings");
     let ctx = SupervisorContext {
+        endpoint_token: String::new(),
         name: "icinga2".to_string(),
         supervisor_dir: dir.path().to_path_buf(),
         config_dir: dir.path().join("config"),
@@ -119,7 +120,7 @@ async fn wait_for_file(path: &Path) {
 }
 
 /// Delivers Icinga's root configuration the way the fleet does (ADR-0019): the entry, and the role
-/// that says it is the root. The block no longer names it — the marking is the fleet's.
+/// that says it is the root. The block does not name it — the marking is the fleet's.
 fn write_config(harness: &Harness, body: &str) {
     std::fs::write(harness.config_dir().join("icinga2-conf"), body).expect("configuration");
     std::fs::write(
@@ -206,6 +207,7 @@ async fn enrolment_opens_the_gate_and_the_daemon_starts() {
 /// ADR-0019's validation gate, through the assembled adapter: a configuration Icinga refuses is
 /// answered `FAILED` and never reaches the running daemon — which is the only way the fleet can be
 /// told the truth about an apply Icinga aborts silently.
+/// Verifies: G-4, G-7
 #[tokio::test]
 async fn a_configuration_icinga_refuses_is_reported_failed() {
     let mut harness = start(
