@@ -895,46 +895,17 @@ check_template_release() {
 }
 
 # The Protocol Baseline — the pinned upstream opamp-spec version all protocol code is written
-# against (ADR-0009) — must stay a deliberate choice. This compares the pin against the latest
-# upstream release and warns on divergence, so falling behind is noticed rather than discovered.
-# Deliberately not an error: upstream tagging a release says nothing about this repository being
-# wrong, and a check that reddens CI for that would simply be disabled.
+# against (ADR-0009) — must stay a deliberate choice. scripts/check-protocol-baseline.sh holds the
+# check, so its own self-test can drive it against fixtures; here its lines become this report's.
 check_protocol_baseline() {
-  if [[ ! -f "$CONFORMANCE" ]]; then
-    add_error "Protocol Baseline: docs/CONFORMANCE.md not found"
-    return
-  fi
-
-  # The pin lives in a machine-readable marker so this check never has to parse prose.
-  local pinned
-  pinned="$(sed -nE 's/^<!--[[:space:]]*protocol-baseline:[[:space:]]*([^[:space:]]+)[[:space:]]*-->.*/\1/p' \
-    "$CONFORMANCE" | head -n1)"
-  if [[ -z "$pinned" ]]; then
-    add_error "docs/CONFORMANCE.md: no '<!-- protocol-baseline: vX.Y.Z -->' marker found"
-    return
-  fi
-
-  if ! command -v curl > /dev/null 2>&1; then
-    echo "Note: curl unavailable — skipping the Protocol Baseline currency check."
-    return
-  fi
-
-  # The newest entry of the releases list, not the 'releases/latest' endpoint: opamp-spec marks
-  # no release as "latest", so that endpoint answers 404.
-  local latest
-  latest="$(curl -fsS --max-time 10 \
-    "https://api.github.com/repos/open-telemetry/opamp-spec/releases?per_page=1" 2>/dev/null \
-    | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
-  if [[ -z "$latest" ]]; then
-    # Offline, rate-limited, or the API changed shape. Say so rather than passing silently —
-    # a check that quietly does nothing is worse than one that admits it did nothing.
-    echo "Note: could not reach the opamp-spec release API — skipping the Protocol Baseline currency check."
-    return
-  fi
-
-  if [[ "$pinned" != "$latest" ]]; then
-    add_warning "Protocol Baseline is $pinned, but open-telemetry/opamp-spec has released $latest. Moving the Baseline is a deliberate change: review the upstream changelog, then update docs/CONFORMANCE.md and the code."
-  fi
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "Error: "*) add_error "${line#Error: }" ;;
+      "Warning: "*) add_warning "${line#Warning: }" ;;
+      ?*) echo "$line" ;;
+    esac
+  done < <(bash "$ROOT/scripts/check-protocol-baseline.sh" "$CONFORMANCE")
 }
 
 collect_text_files

@@ -402,6 +402,7 @@ crates/               # Cargo workspace: opamp (shared) · fleet-core · fleet-s
 config/               # annotated example configuration files (server.toml, supervisor.toml)
 scripts/              # consistency checks and sensors (check-all.sh runs them all), run in CI
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
+interop/              # the Go side of the interop check against opamp-go (ADR-0009)
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 .githooks/            # git hooks: refuse a commit on main and a push while the checks are red
 .github/              # CI workflows, Dependabot, issue & pull request templates, code owners

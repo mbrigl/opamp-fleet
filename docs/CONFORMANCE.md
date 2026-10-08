@@ -303,7 +303,7 @@ resolving one by inventing semantics of this project's own.
 
 ## Status summary
 
-The base control loop is implemented on both ends and on both transports (ADR-0025 through
+The base control loop is implemented on both ends and on both transports (ADR-0009, ADR-0023,
 ADR-0025): status reporting, remote configuration gated by the config hash, effective-configuration
 and health reporting, identity handling (UUID v7, reassignment, server-generated identity), state
 recovery via `ReportFullState`, disconnect handling, and TLS. Supervisor Mode (ADR-0010) puts real

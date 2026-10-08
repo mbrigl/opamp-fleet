@@ -38,6 +38,7 @@ run() {
 }
 
 run "Documentation self-test" scripts/test-check-docs.sh
+run "Protocol Baseline self-test" scripts/test-check-protocol-baseline.sh
 run "Documentation consistency" scripts/check-docs.sh
 run "Traceability self-test" scripts/test-check-traceability.sh
 run "Traceability" scripts/check-traceability.sh
