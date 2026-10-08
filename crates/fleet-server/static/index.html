@@ -1793,29 +1793,42 @@
         }
       }
 
-      // Enrolments (ADR-0026 clause 22). A Server without [enrolment] answers 404 on both routes,
-      // and the tab says so instead of showing an empty queue that could never fill.
+      // Enrolments (ADR-0026 clause 22; the UI as a client of the API, ADR-0011). A Server without
+      // [enrolment] answers 404 on both routes, and the tab says so instead of showing an empty
+      // queue that could never fill.
       let enrolments = [];
-      function renderEnrolments(win) {
+      let enrolmentsShown = null;
+      const when = (ms) => new Date(ms).toLocaleString();
+      function renderEnrolments(win, failed) {
         $("enrolment-count").textContent = enrolments.length;
         const badge = $("enrolment-window");
-        if (win === null) {
+        if (failed) {
+          badge.className = "pill amber";
+          badge.textContent = "enrolment state unknown";
+          badge.title = failed;
+        } else if (win === null) {
           badge.className = "pill gray";
           badge.textContent = "enrolment not configured";
           badge.title = "set [enrolment] bootstrap_ca_file in server.toml to let hosts enrol";
-        } else if (win && win.open) {
+        } else if (win.open) {
           badge.className = "pill amber";
-          badge.textContent = `window open until ${new Date(win.until_ms).toLocaleTimeString()}`;
+          badge.textContent = `window open until ${when(win.until_ms)}`;
           badge.title = "hosts holding the bootstrap certificate may ask for a certificate until then";
         } else {
           badge.className = "pill gray";
           badge.textContent = "window closed";
           badge.title = "no host can ask for a certificate; open the window through POST /api/v1/enrolment/window";
         }
-        $("enrolments-empty").style.display = enrolments.length ? "none" : "block";
+        $("enrolments-error").textContent = failed || "";
+        $("enrolments-empty").style.display = enrolments.length || failed ? "none" : "block";
+        // Rebuilt only when the queue changed: an operator selecting a fingerprint to compare it
+        // with the Client's log must not lose the selection to a refresh.
+        const shown = JSON.stringify(enrolments);
+        if (shown === enrolmentsShown) return;
+        enrolmentsShown = shown;
         $("enrolments").innerHTML = enrolments.map((e) => `
           <tr>
-            <td>${esc(new Date(e.arrived_ms).toLocaleTimeString())}</td>
+            <td>${esc(when(e.arrived_ms))}</td>
             <td>${esc(e.peer || "—")}</td>
             <td>${esc(e.subject)}</td>
             <td><span class="fingerprint">${esc(e.key_fingerprint)}</span></td>
@@ -1831,10 +1844,12 @@
         let win;
         try {
           const res = await fetch("/api/v1/enrolment/window");
-          win = res.status === 404 ? null : res.ok ? await res.json() : undefined;
-          if (win === null) { enrolments = []; renderEnrolments(null); return; }
+          if (res.status === 404) { enrolments = []; renderEnrolments(null); return; }
+          if (!res.ok) { renderEnrolments(undefined, `the enrolment window could not be read: HTTP ${res.status}`); return; }
+          win = await res.json();
           const list = await fetch("/api/v1/enrolments");
-          enrolments = list.ok ? await list.json() : [];
+          if (!list.ok) { renderEnrolments(win, `the pending requests could not be read: HTTP ${list.status}`); return; }
+          enrolments = await list.json();
         } catch { return; }
         renderEnrolments(win);
       }
@@ -1843,17 +1858,19 @@
         const btn = e.target.closest(".enrolment-act");
         if (!btn) return;
         e.preventDefault();
-        const request = enrolments.find((r) => r.id === btn.dataset.id);
+        // The id is the requested key's fingerprint (ADR-0026 clause 22).
+        const fingerprint = btn.dataset.id;
         const approve = btn.dataset.act === "approve";
         const question = approve
-          ? `Approve the host whose key fingerprint is\n\n${request ? request.key_fingerprint : btn.dataset.id}\n\nOnly if it matches the key_fingerprint the Client logged on that host.`
-          : `Reject the request from ${request ? request.subject : "this host"}?`;
+          ? `Approve the host whose key fingerprint is\n\n${fingerprint}\n\nOnly if it matches the key_fingerprint the Client logged on that host.`
+          : `Reject the request whose key fingerprint is\n\n${fingerprint}?`;
         if (!confirm(question)) return;
         $("enrolments-error").textContent = "";
-        const res = await fetch(`/api/v1/enrolments/${encodeURIComponent(btn.dataset.id)}/${btn.dataset.act}`, { method: "POST" });
+        $("enrolment-result").textContent = "";
+        const res = await fetch(`/api/v1/enrolments/${encodeURIComponent(fingerprint)}/${btn.dataset.act}`, { method: "POST" });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) $("enrolments-error").textContent = body.error || `HTTP ${res.status}`;
-        else $("enrolment-result").textContent = `${request ? request.subject : "request"}: ${approve ? "approved" : "rejected"}`;
+        else $("enrolment-result").textContent = `${fingerprint.slice(0, 16)}…: ${approve ? "approved" : "rejected"}`;
         await refreshEnrolments();
       });
 

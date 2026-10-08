@@ -994,14 +994,16 @@ async fn set_labels(
         .expect("put labels")
 }
 
-/// The bundled UI's Enrolments tab reads the enrolment routes and shows the requested key's
-/// fingerprint — the field ADR-0026 clause 22 lists so an operator can match a request to the
-/// Client's log. This pins the names both sides use: the page asks for the routes and the field,
-/// and the OpenAPI document describes that field on a pending request. A rename on one side
-/// breaks here rather than in an operator's empty column.
-/// Verifies: ADR-0026
+/// The bundled UI is a client of the REST API and nothing more (ADR-0011 clause 13), so its
+/// Enrolments tab depends on the names the enrolment routes share with it: the routes it calls and
+/// the fields it shows, the requested key's fingerprint above all — what ADR-0026 clause 22 lists
+/// so an operator can match a request to the Client's log. The page asks for them, and the OpenAPI
+/// document describes them; a rename on one side breaks here rather than in an empty column. What
+/// the page does with them is not tested in the repository: it is one embedded page with no
+/// frontend toolchain to run it in.
+/// Verifies: ADR-0011
 #[tokio::test]
-async fn the_ui_shows_the_key_fingerprint_the_enrolment_api_lists() {
+async fn the_ui_and_the_enrolment_api_share_their_names() {
     let server = spawn().await;
     let client = reqwest::Client::new();
     let html = client
@@ -1013,11 +1015,14 @@ async fn the_ui_shows_the_key_fingerprint_the_enrolment_api_lists() {
         .await
         .expect("html");
     for needle in [
-        "data-tab=\"enrolments\"",
         "\"/api/v1/enrolment/window\"",
         "\"/api/v1/enrolments\"",
-        "e.key_fingerprint",
-        "/api/v1/enrolments/${encodeURIComponent(btn.dataset.id)}/${btn.dataset.act}",
+        "/api/v1/enrolments/${",
+        ".key_fingerprint",
+        ".bootstrap_subject",
+        ".bootstrap_fingerprint",
+        ".arrived_ms",
+        ".until_ms",
     ] {
         assert!(
             html.contains(needle),
@@ -1033,21 +1038,67 @@ async fn the_ui_shows_the_key_fingerprint_the_enrolment_api_lists() {
         .json()
         .await
         .expect("json");
-    let pending = &document["components"]["schemas"]["PendingEnrolment"]["properties"];
-    for field in [
-        "id",
-        "key_fingerprint",
-        "subject",
-        "peer",
-        "arrived_ms",
-        "bootstrap_fingerprint",
+    let schemas = &document["components"]["schemas"];
+    for (schema, fields) in [
+        (
+            "PendingEnrolment",
+            &[
+                "id",
+                "arrived_ms",
+                "peer",
+                "subject",
+                "key_fingerprint",
+                "bootstrap_subject",
+                "bootstrap_fingerprint",
+            ][..],
+        ),
+        ("EnrolmentWindow", &["open", "until_ms"][..]),
     ] {
-        assert!(
-            pending.get(field).is_some(),
-            "PendingEnrolment no longer has {field}: {pending}"
+        for field in fields {
+            assert!(
+                schemas[schema]["properties"].get(field).is_some(),
+                "{schema} no longer has {field}"
+            );
+        }
+    }
+    for path in [
+        "/api/v1/enrolment/window",
+        "/api/v1/enrolments",
+        "/api/v1/enrolments/{id}/approve",
+        "/api/v1/enrolments/{id}/reject",
+    ] {
+        assert!(document["paths"].get(path).is_some(), "no route {path}");
+    }
+}
+
+/// Approving an enrolment admits a host to the fleet, and the bundled UI now offers it as a press
+/// in the browser — so a cross-site page must not be able to fire it. Both enrolment decisions are
+/// body-less `POST`s behind the same Fetch Metadata guard as `restart`, which answers before the
+/// handler, whether or not enrolment is configured.
+/// Verifies: ADR-0026
+#[tokio::test]
+async fn a_cross_site_enrolment_decision_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    for act in ["approve", "reject"] {
+        let path = format!("/api/v1/enrolments/{}/{act}", "ab".repeat(32));
+        let cross = client
+            .post(url(server.rest_addr, &path))
+            .header("sec-fetch-site", "cross-site")
+            .send()
+            .await
+            .expect("decide");
+        assert_eq!(cross.status(), 403, "a cross-site {act} is refused");
+        let same_origin = client
+            .post(url(server.rest_addr, &path))
+            .header("sec-fetch-site", "same-origin")
+            .send()
+            .await
+            .expect("decide");
+        assert_ne!(
+            same_origin.status(),
+            403,
+            "a same-origin {act} is not a CSRF"
         );
     }
-    let paths = &document["paths"];
-    assert!(paths.get("/api/v1/enrolments/{id}/approve").is_some());
-    assert!(paths.get("/api/v1/enrolments/{id}/reject").is_some());
 }
