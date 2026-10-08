@@ -105,6 +105,9 @@
       .btn-ok:hover { background: var(--soft-green-fg); color: var(--soft-green-bg); }
       /* A button sized to sit inside a form line rather than to head one. */
       .btn-sm { padding: 4px 12px; font-size: 12px; }
+      /* A key fingerprint is compared character by character with the Client's log, so it is shown
+         whole, in the monospace face, and breaks anywhere rather than overflowing its cell. */
+      .fingerprint { font-family: var(--mono); font-size: 12px; word-break: break-all; }
 
       .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
 
@@ -288,6 +291,7 @@
         <button class="tab" data-tab="deployments">Deployments<span class="num" id="deployment-count">0</span></button>
         <button class="tab" data-tab="packages">Packages<span class="num" id="package-count">0</span></button>
         <button class="tab" data-tab="configurations">Configurations<span class="num" id="config-count">0</span></button>
+        <button class="tab" data-tab="enrolments">Enrolments<span class="num" id="enrolment-count">0</span></button>
       </nav>
 
       <div id="panel-configurations" class="tab-panel">
@@ -469,6 +473,36 @@
       </section>
       </div>
 
+      <!-- Enrolments (ADR-0026 clause 22): the hosts that asked for a certificate with the fleet's
+           bootstrap certificate, waiting for an operator. The key fingerprint is shown whole so it
+           can be matched against the `key_fingerprint` the Client logs on the host it came from;
+           approving and rejecting are per-row presses, never part of a form. -->
+      <div id="panel-enrolments" class="tab-panel">
+      <div class="card filters" style="align-items: center; gap: 12px;">
+        <span id="enrolment-window" class="pill gray">window closed</span>
+        <span class="sub">A host enrols with the fleet's bootstrap certificate while the enrolment window is open, and waits here until an operator approves it. Before approving, compare the <b>key fingerprint</b> with the <code>key_fingerprint</code> the Client logged on that host: only a match is the host you mean.</span>
+        <span id="enrolment-result" class="sub"></span>
+        <span id="enrolments-error" class="err"></span>
+      </div>
+
+      <div class="card table-wrap" style="margin-bottom: 20px;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 120px">Arrived</th>
+              <th style="width: 130px">From</th>
+              <th style="width: 16%">Subject</th>
+              <th>Key fingerprint (SHA-256)</th>
+              <th style="width: 18%">Bootstrap certificate</th>
+              <th style="width: 190px"></th>
+            </tr>
+          </thead>
+          <tbody id="enrolments"></tbody>
+        </table>
+        <div id="enrolments-empty" class="empty">No host is waiting.</div>
+      </div>
+      </div>
+
       <div id="panel-agents" class="tab-panel">
       <div class="card filters">
         <span class="dropdown">Filters ▾</span>
@@ -550,11 +584,11 @@
       });
       applyTheme(storedTheme());
 
-      // Tabs: which of the three managements is on screen. The choice lives in the URL's hash
+      // Tabs: which management is on screen. The choice lives in the URL's hash
       // rather than in storage — unlike the theme it is a place, not a preference, so a reload
       // comes back to the same tab and a link can point a colleague straight at #packages. An
       // unknown hash falls back to Agents, the tab the fleet is watched from.
-      const TABS = ["agents", "deployments", "packages", "configurations"];
+      const TABS = ["agents", "deployments", "packages", "configurations", "enrolments"];
       function showTab(name) {
         if (!TABS.includes(name)) name = "agents";
         document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
@@ -1759,14 +1793,80 @@
         }
       }
 
+      // Enrolments (ADR-0026 clause 22). A Server without [enrolment] answers 404 on both routes,
+      // and the tab says so instead of showing an empty queue that could never fill.
+      let enrolments = [];
+      function renderEnrolments(win) {
+        $("enrolment-count").textContent = enrolments.length;
+        const badge = $("enrolment-window");
+        if (win === null) {
+          badge.className = "pill gray";
+          badge.textContent = "enrolment not configured";
+          badge.title = "set [enrolment] bootstrap_ca_file in server.toml to let hosts enrol";
+        } else if (win && win.open) {
+          badge.className = "pill amber";
+          badge.textContent = `window open until ${new Date(win.until_ms).toLocaleTimeString()}`;
+          badge.title = "hosts holding the bootstrap certificate may ask for a certificate until then";
+        } else {
+          badge.className = "pill gray";
+          badge.textContent = "window closed";
+          badge.title = "no host can ask for a certificate; open the window through POST /api/v1/enrolment/window";
+        }
+        $("enrolments-empty").style.display = enrolments.length ? "none" : "block";
+        $("enrolments").innerHTML = enrolments.map((e) => `
+          <tr>
+            <td>${esc(new Date(e.arrived_ms).toLocaleTimeString())}</td>
+            <td>${esc(e.peer || "—")}</td>
+            <td>${esc(e.subject)}</td>
+            <td><span class="fingerprint">${esc(e.key_fingerprint)}</span></td>
+            <td>${esc(e.bootstrap_subject)}<br /><span class="fingerprint sub" title="the bootstrap certificate's fingerprint">${esc(e.bootstrap_fingerprint)}</span></td>
+            <td>
+              <button class="btn btn-ok btn-sm enrolment-act" data-act="approve" data-id="${esc(e.id)}" title="Sign this host's certificate — after comparing the key fingerprint with the Client's log">Approve</button>
+              <button class="btn btn-ghost btn-sm enrolment-act" data-act="reject" data-id="${esc(e.id)}" title="Refuse this request; the host's connection is closed">Reject</button>
+            </td>
+          </tr>`).join("");
+      }
+
+      async function refreshEnrolments() {
+        let win;
+        try {
+          const res = await fetch("/api/v1/enrolment/window");
+          win = res.status === 404 ? null : res.ok ? await res.json() : undefined;
+          if (win === null) { enrolments = []; renderEnrolments(null); return; }
+          const list = await fetch("/api/v1/enrolments");
+          enrolments = list.ok ? await list.json() : [];
+        } catch { return; }
+        renderEnrolments(win);
+      }
+
+      $("enrolments").addEventListener("click", async (e) => {
+        const btn = e.target.closest(".enrolment-act");
+        if (!btn) return;
+        e.preventDefault();
+        const request = enrolments.find((r) => r.id === btn.dataset.id);
+        const approve = btn.dataset.act === "approve";
+        const question = approve
+          ? `Approve the host whose key fingerprint is\n\n${request ? request.key_fingerprint : btn.dataset.id}\n\nOnly if it matches the key_fingerprint the Client logged on that host.`
+          : `Reject the request from ${request ? request.subject : "this host"}?`;
+        if (!confirm(question)) return;
+        $("enrolments-error").textContent = "";
+        const res = await fetch(`/api/v1/enrolments/${encodeURIComponent(btn.dataset.id)}/${btn.dataset.act}`, { method: "POST" });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) $("enrolments-error").textContent = body.error || `HTTP ${res.status}`;
+        else $("enrolment-result").textContent = `${request ? request.subject : "request"}: ${approve ? "approved" : "rejected"}`;
+        await refreshEnrolments();
+      });
+
       refreshConfigs();
       refreshPackages();
       refreshDeployments();
+      refreshEnrolments();
       refreshAgents();
       setInterval(refreshAgents, 2000);
       setInterval(refreshConfigs, 5000);
       setInterval(refreshPackages, 5000);
       setInterval(refreshDeployments, 5000);
+      setInterval(refreshEnrolments, 3000);
     </script>
   </body>
 </html>

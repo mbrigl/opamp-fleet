@@ -993,3 +993,61 @@ async fn set_labels(
         .await
         .expect("put labels")
 }
+
+/// The bundled UI's Enrolments tab reads the enrolment routes and shows the requested key's
+/// fingerprint — the field ADR-0026 clause 22 lists so an operator can match a request to the
+/// Client's log. This pins the names both sides use: the page asks for the routes and the field,
+/// and the OpenAPI document describes that field on a pending request. A rename on one side
+/// breaks here rather than in an operator's empty column.
+/// Verifies: ADR-0026
+#[tokio::test]
+async fn the_ui_shows_the_key_fingerprint_the_enrolment_api_lists() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let html = client
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    for needle in [
+        "data-tab=\"enrolments\"",
+        "\"/api/v1/enrolment/window\"",
+        "\"/api/v1/enrolments\"",
+        "e.key_fingerprint",
+        "/api/v1/enrolments/${encodeURIComponent(btn.dataset.id)}/${btn.dataset.act}",
+    ] {
+        assert!(
+            html.contains(needle),
+            "the UI no longer contains {needle:?}"
+        );
+    }
+
+    let document: serde_json::Value = client
+        .get(url(server.rest_addr, "/api/v1/openapi.json"))
+        .send()
+        .await
+        .expect("get the document")
+        .json()
+        .await
+        .expect("json");
+    let pending = &document["components"]["schemas"]["PendingEnrolment"]["properties"];
+    for field in [
+        "id",
+        "key_fingerprint",
+        "subject",
+        "peer",
+        "arrived_ms",
+        "bootstrap_fingerprint",
+    ] {
+        assert!(
+            pending.get(field).is_some(),
+            "PendingEnrolment no longer has {field}: {pending}"
+        );
+    }
+    let paths = &document["paths"];
+    assert!(paths.get("/api/v1/enrolments/{id}/approve").is_some());
+    assert!(paths.get("/api/v1/enrolments/{id}/reject").is_some());
+}
