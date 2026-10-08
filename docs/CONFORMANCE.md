@@ -20,6 +20,7 @@ against. It is the single authoritative statement of "which OpAMP" this code spe
 | **Upstream specification** | <https://github.com/open-telemetry/opamp-spec> |
 | **Upstream status** | Beta — the protocol itself is not yet stable |
 | **Last reconciled with upstream** | 2026-10-01 |
+| **Interop oracle** | [`opamp-go`](https://github.com/open-telemetry/opamp-go) `v0.25.0` (2026-09-29), which implements `opamp-spec` `v0.20.0`; pinned in [`interop/go.mod`](../interop/go.mod) — see [Interoperability](#interoperability) |
 
 Moving the Baseline to a newer upstream version is a deliberate change — see
 [Upgrading the Baseline](#upgrading-the-baseline) for what it obliges.
@@ -264,6 +265,31 @@ capability bit.
   is still not bound to an `instance_uid`. This project's own Client claims nothing, so its
   requests are signed as before.
 
+## Interoperability
+
+Both ends are checked against `opamp-go`, the reference implementation, in a scheduled job
+([ADR-0009](adr/0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md),
+[`interop.yml`](../.github/workflows/interop.yml)): `opamp-go`'s Client against our Server, and our
+Client against `opamp-go`'s Server, on the WebSocket and the plain HTTP transport. The scenarios are
+[`crates/fleet-agent/tests/interop_opamp_go.rs`](../crates/fleet-agent/tests/interop_opamp_go.rs);
+how a red run is triaged is in [`interop/README.md`](../interop/README.md).
+
+The oracle implements the Baseline's own `opamp-spec` version, so no row of this document lies
+beyond its reach. What the job reaches is narrower than the matrix:
+
+| Row | Reached by the oracle | Note |
+|---|---|---|
+| WebSocket transport, Plain HTTP transport | both directions | Every scenario runs on both. |
+| `sequence_num` | both directions | The test checks the numbers our Client sends for gaps; our Server asks for no full state while nothing was lost, and notices the gap when the Agent returns to it after reporting elsewhere. |
+| `ReportFullState` | both directions | Our Server asks for it from an Agent it has never seen and after a gap, and learns a description that changed in between; `opamp-go`'s Server asks our Client for it. |
+| `AcceptsRemoteConfig`, `ReportsRemoteConfig`, `OffersRemoteConfig` | both directions | Offer, `APPLIED` with the offered hash, and no repeated offer once applied. |
+| Capability negotiation | both directions, partly | Each side records what the other declared, and our Client stops reporting its effective configuration once `opamp-go`'s Server stops declaring `AcceptsEffectiveConfig`. `opamp-go`'s Client exposes no Server capabilities, so ours are read off the wire on plain HTTP only. |
+| `AgentIdentification`, `RequestInstanceUid` | both directions | Our Server mints the identity `opamp-go`'s Client requests; our Client adopts and persists one `opamp-go`'s Server assigns. |
+| `agent_disconnect` | our Client only | Our Client says goodbye on a graceful stop on both transports. Our Server's side is not decided: `opamp-go`'s plain-HTTP Client sends no `agent_disconnect`, and over WebSocket the goodbye and the closing socket mark the Agent disconnected alike. |
+| Transport security, Mutual TLS | both directions | Connect, report and a configuration round trip also run over `wss://` and `https://` on TLS 1.3 alone, against our Server's TLS and admission as the binary sets them up, and with our Client presenting its certificate to an `opamp-go` Server that requires one. A certificate another CA issued is refused by both, and our Server refuses a peer that offers none. The certificates come from a PKI the test generates. |
+| Authentication | partly | Only the refusal in the handshake is reached; the `401` for a revoked certificate is not, since the test Server keeps no revocation list. |
+| Packages, connection settings, own telemetry, Gateway Mode | no | Not in the scenario list of ADR-0009. |
+
 ## Deviations
 
 Deliberate departures from the Baseline, each with a reason. A deviation is a recorded decision, not
@@ -277,8 +303,10 @@ resolving one by inventing semantics of this project's own.
 
 ## Status summary
 
-The base control loop is implemented on both ends and on both transports (ADR-0025 through
-ADR-0025): status reporting, remote configuration gated by the config hash, effective-configuration
+The base control loop is implemented on both ends and on both transports
+([ADR-0009](adr/0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md),
+[ADR-0023](adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
+[ADR-0025](adr/0025-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md)): status reporting, remote configuration gated by the config hash, effective-configuration
 and health reporting, identity handling (UUID v7, reassignment, server-generated identity), state
 recovery via `ReportFullState`, disconnect handling, and TLS. Supervisor Mode (ADR-0010) puts real
 processes behind that loop: each configured Supervisor is its own Agent multiplexed over the
