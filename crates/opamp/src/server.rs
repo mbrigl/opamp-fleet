@@ -312,27 +312,39 @@ async fn upgrade<H: Handler>(
             .into_response();
     };
     let limit = endpoint.limit;
-    tokio::spawn(async move {
-        let upgraded = match on_upgrade.await {
-            Ok(upgraded) => upgraded,
-            Err(e) => {
-                warn!(error = %e, "a WebSocket upgrade failed");
-                endpoint.handler.on_closed(connection);
-                return;
-            }
-        };
-        let stream = pace::FrameMeter::new(hyper_util::rt::TokioIo::new(upgraded));
-        // The transport's own guard, so an oversized frame is refused before it is buffered whole;
-        // the loop still checks, because that is what turns the refusal into the 1009 close. The
-        // per-frame cap moves with it: left at its default it would refuse messages *below* the
-        // configured limit, which is the limit's business.
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(limit))
-            .max_frame_size(Some(limit));
-        let socket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
-        let messages = floor.map(pace::Messages::new);
-        serve_socket(socket, endpoint, connection, outbound, messages).await;
-    });
+    // A session served by a `Listener` closes when the listener asks it to; one served any other
+    // way runs until its peer leaves.
+    let sessions = request.extensions().get::<listen::Sessions>().cloned();
+    let session = {
+        let sessions = sessions.clone();
+        async move {
+            let upgraded = match on_upgrade.await {
+                Ok(upgraded) => upgraded,
+                Err(e) => {
+                    warn!(error = %e, "a WebSocket upgrade failed");
+                    endpoint.handler.on_closed(connection);
+                    return;
+                }
+            };
+            let stream = pace::FrameMeter::new(hyper_util::rt::TokioIo::new(upgraded));
+            // The transport's own guard, so an oversized frame is refused before it is buffered whole;
+            // the loop still checks, because that is what turns the refusal into the 1009 close. The
+            // per-frame cap moves with it: left at its default it would refuse messages *below* the
+            // configured limit, which is the limit's business.
+            let config = WebSocketConfig::default()
+                .max_message_size(Some(limit))
+                .max_frame_size(Some(limit));
+            let socket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
+            let messages = floor.map(pace::Messages::new);
+            serve_socket(socket, endpoint, connection, outbound, messages, sessions).await;
+        }
+    };
+    match &sessions {
+        Some(listener) => listener.spawn(session),
+        None => {
+            tokio::spawn(session);
+        }
+    }
     Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header(header::CONNECTION, "upgrade")
@@ -349,6 +361,7 @@ async fn serve_socket<H: Handler, S>(
     mut connection: H::Connection,
     mut outbound: Option<H::Outbound>,
     mut messages: Option<pace::Messages>,
+    mut sessions: Option<listen::Sessions>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -367,9 +380,21 @@ async fn serve_socket<H: Handler, S>(
     });
     loop {
         tokio::select! {
-            // What has arrived is read before a check judges it, so bytes that waited on this side
-            // while the loop was busy count for the peer.
+            // A shutdown comes first, so a peer that keeps sending cannot hold its session past it.
+            // Then what has arrived is read before a check judges it, so bytes that waited on this
+            // side while the loop was busy count for the peer.
             biased;
+            () = next_closing(&mut sessions) => {
+                // The listener is shutting down: the peer is told so, and reconnects to whatever
+                // serves this endpoint next.
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::Away,
+                        reason: "the server is shutting down".into(),
+                    })))
+                    .await;
+                break;
+            }
             incoming = socket.next() => {
                 let message = match incoming {
                     Some(Ok(message)) => message,
@@ -453,6 +478,14 @@ async fn serve_socket<H: Handler, S>(
         }
     }
     handler.on_closed(connection);
+}
+
+/// Resolves when the listener asks its sessions to close; never, for a session without one.
+async fn next_closing(sessions: &mut Option<listen::Sessions>) {
+    match sessions {
+        Some(sessions) => sessions.closing().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// The next check of a paced socket, and when it was due; never, for one without a floor.

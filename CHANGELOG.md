@@ -271,6 +271,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Fixed
 
+- **The Server shuts down gracefully on `SIGTERM`**
+  ([ADR-0012](docs/adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
+  clause 13, [ADR-0026](docs/adr/0026-the-fleet-record.md) clause 5). It took only `SIGINT` (Ctrl-C) as a shutdown,
+  so a service manager's stop, which sends `SIGTERM`, ended the process without draining the
+  planes or saving the Agent records. Both signals now drain and save. **What to do:** nothing.
+- **The Server writes its log to stderr**, as the manual says, and stdout carries only what a
+  command prints as its result. **What to do:** a log collector that read the Server's stdout reads
+  its stderr instead; under systemd both reach the journal unchanged.
+- **A Server that shuts down closes its WebSocket sessions before it saves the fleet**
+  ([ADR-0012](docs/adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
+  clause 13, [ADR-0026](docs/adr/0026-the-fleet-record.md) clause 5). The shutdown drain counted
+  HTTP connections only, so an Agent's WebSocket session kept being served after the drain and
+  after the Agent records were flushed, and ended without a close frame when the process exited.
+  A shutdown now tells every session at once, with the close code `1001` (going away), cuts what is
+  still open at the end of the drain, and only then saves the records. The Gateway's downstream
+  endpoint closes its sessions the same way. **What to do:** nothing; Agents reconnect as before.
+
 - **A named parent certificate that is missing is waited for, never trusted on sight**
   ([ADR-0019](docs/adr/0019-icinga-2.md) clause 12). An `icinga2` Supervisor whose
   `trusted_cert_file` names a file that is not there — not yet delivered, or a mistyped path —
@@ -1583,7 +1600,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   shows an unknown publisher and `rpm` reports no signature. macOS keeps the archive only.
 
 - **`service install --endpoint <url>`** writes the first configuration file without asking
-  (ADR-0021, extending [ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md)).
+  ([ADR-0021](docs/adr/0021-the-client-supervisor-installed-service-releases-and-installers.md)).
   It is what the installers above use, and what a provisioning run that has an endpoint but no
   terminal needs — `--interactive` is an error without one, on purpose. It writes the same file, is
   mutually exclusive with `--interactive`, and keeps an existing configuration rather than
