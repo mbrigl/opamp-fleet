@@ -70,6 +70,8 @@ jobs:
       # The check's own tests run first: a check that is wrong passes nothing worth trusting.
       - name: Self-test the documentation checks
         run: bash scripts/test-check-docs.sh
+      - name: Self-test the Protocol Baseline check
+        run: bash scripts/test-check-protocol-baseline.sh
       - name: Check documentation consistency
         run: bash scripts/check-docs.sh
 
