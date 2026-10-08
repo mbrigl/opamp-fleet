@@ -201,6 +201,12 @@ it (AGENTS.md links here).
   (needs `cargo install cargo-fuzz` and a nightly toolchain); the targets are listed in
   [`fuzz/Cargo.toml`](fuzz/Cargo.toml), and every parser that reads bytes from the network or a
   downloaded artifact has one (specification Q-2)
+- **Check interop against `opamp-go`:**
+  `cargo test -p fleet-agent --test interop_opamp_go -- --ignored --nocapture --test-threads=1`
+  (needs a Go toolchain on `PATH`, which nothing else here needs and the Dev Container does not
+  ship); the scheduled `Interop` workflow runs it weekly, and
+  [`interop/README.md`](interop/README.md) says what it covers and how a red run is triaged
+  (ADR-0010)
 - **Make development certificates:** `scripts/dev-pki.sh` — both binaries refuse to run without
   TLS (ADR-0012); it writes a CA, a Server certificate for `127.0.0.1`, an Agent certificate, and a
   `server.toml` and `supervisor.toml` that use them to `.dev-pki/`. The VS Code launch
@@ -396,6 +402,7 @@ crates/               # Cargo workspace: opamp (shared) · fleet-core · fleet-s
 config/               # annotated example configuration files (server.toml, supervisor.toml)
 scripts/              # consistency checks and sensors (check-all.sh runs them all), run in CI
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
+interop/              # the Go side of the interop check against opamp-go (ADR-0010)
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 .githooks/            # git hooks: refuse a commit on main and a push while the checks are red
 .github/              # CI workflows, Dependabot, issue & pull request templates, code owners
