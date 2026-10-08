@@ -17,7 +17,9 @@ link further are collected — as a backlog, not as decisions — in
 
 > **📖 Running it? Read the [User Manual](docs/manual/README.md)** — what each end can do, how to
 > start it, and every configuration key, split into [Server](docs/manual/server.md) and
-> [Client](docs/manual/client.md).
+> [Client](docs/manual/client.md). Setting up a fleet for the first time? Start with
+> [Setting up a fleet](docs/manual/setup.md): the certificates, both configurations, and enrolment,
+> in order.
 
 > For agent instructions, see [`AGENTS.md`](AGENTS.md) — the single source of truth for all coding agents.
 
@@ -216,11 +218,11 @@ it (AGENTS.md links here).
 - **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release
   and hand it to the Server) or `cargo run --bin opamp-package-sign -- --help` (build, hash, and
   sign an artifact out of any program) — both documented in
-  [the manual](docs/manual/tools.md); an installed release ships them beside the Client.
+  [the manual](docs/manual/tools.md). A release does not ship them: build them from a checkout.
 
 Both binaries read a TOML configuration file ([ADR-0009](docs/adr/0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md));
-every setting has a default, so they also start with no file at all. The annotated examples live in
-[`config/`](config/). [`scripts/check-rust.sh`](scripts/check-rust.sh) runs exactly these
+every setting has a default except the TLS material, without which neither starts. The annotated
+examples live in [`config/`](config/). [`scripts/check-rust.sh`](scripts/check-rust.sh) runs exactly these
 build/test/lint commands, locally through `scripts/check-all.sh` and in CI as the `rust` job of
 [`.github/workflows/checks.yml`](.github/workflows/checks.yml);
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) additionally checks the Client on Windows and
@@ -254,8 +256,8 @@ ready package artifact: the same file an operator downloads is the one a fleet i
 
 This section is a tour. The complete operator reference — every option and every configuration key
 of both ends — is the **[User Manual](docs/manual/README.md)**:
-[Server](docs/manual/server.md) · [Client](docs/manual/client.md) ·
-[Command-line tools](docs/manual/tools.md).
+[Setting up a fleet](docs/manual/setup.md) · [Server](docs/manual/server.md) ·
+[Client](docs/manual/client.md) · [Command-line tools](docs/manual/tools.md).
 
 A minimal closed control loop on one machine:
 
@@ -390,7 +392,7 @@ service that will not start.
 README.md             # overview & setup for humans
 CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
 AGENTS.md             # single source of truth for coding agents
-docs/manual/         # the user manual: Server, Client, and the operator tools, option by option
+docs/manual/         # the user manual: setting up a fleet, then Server, Client, and the operator tools, option by option
 docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
 docs/GLOSSARY.md      # the vocabulary everyone uses, kept current inline
 docs/CONVENTIONS.md   # how this project writes what no check decides, kept current inline

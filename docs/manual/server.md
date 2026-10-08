@@ -409,6 +409,11 @@ $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/
 $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/reject
 ```
 
+The UI's **Enrolments** tab shows the same queue: each request with its full key fingerprint, and
+an **Approve** and a **Reject** press on its row. Approving asks once more, quoting the fingerprint
+to compare with the Client's log. The tab also says whether the window is open; opening and closing
+it stays with the API calls above.
+
 Approving signs the request with `[client_ca]` and offers the certificate on that host's
 connection. The host stores it as `client-cert.pem` in its state directory and reconnects with it
 as a member; from then on it renews by itself. Rejecting answers the request `BadRequest` and

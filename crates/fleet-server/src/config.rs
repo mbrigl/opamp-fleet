@@ -462,8 +462,8 @@ pub struct ClientCaConfig {
     pub cert_file: PathBuf,
     /// PEM private key of the issuing CA.
     pub key_file: PathBuf,
-    /// How long an issued certificate is valid. Short is the point: this project has no revocation
-    /// story, so validity plus renewal is what bounds a certificate's reach (ADR-0022).
+    /// How long an issued certificate is valid. Short is the point: validity plus renewal bounds a
+    /// certificate nobody noticed was stolen, and revocation ends one that was (ADR-0022, ADR-0023).
     #[serde(default = "default_validity_days")]
     pub validity_days: u32,
 }
