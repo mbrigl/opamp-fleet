@@ -34,8 +34,9 @@ pub struct ClientCa {
 }
 
 impl ClientCa {
-    /// Loads the CA from `[client_ca]`. A key that does not match its certificate, or either file
-    /// being unreadable, fails startup rather than the first enrolment (ADR-0025).
+    /// Loads the CA from `[client_ca]`. Either file being unreadable, or a key that is not PKCS#8,
+    /// fails startup rather than the first enrolment (ADR-0025). Whether the key belongs to the
+    /// certificate is not checked here.
     pub fn from_config(config: &ClientCaConfig) -> Result<Self, String> {
         let cert_pem = std::fs::read_to_string(&config.cert_file)
             .map_err(|e| format!("cannot read {}: {e}", config.cert_file.display()))?;

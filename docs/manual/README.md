@@ -6,6 +6,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 
 | Part | Read it to |
 |---|---|
+| **[Setting up a fleet](setup.md)** | go from nothing to a running fleet, in order: the three certificate authorities and the files they make, the Server's and the Client's configuration, enrolling a host, and living with the certificates afterwards |
 | **[Server](server.md)** | run the control plane: the two listeners, Configurations and Selectors, packages and deployments, the REST API, authentication, enrolment, TLS |
 | **[Client](client.md)** | run a managed host, end to end: how it is built, the OS service, the on-disk layout, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
@@ -103,8 +104,10 @@ development set of them.
    changed by the earlier act: its row on the Agents tab shows the Configuration waiting, with a
    **roll out** control of its own.
 
-From here, [Server](server.md) covers targeting a subset of the fleet and distributing software, and
-[Client](client.md) covers putting a real Collector or a Foreign Agent under management.
+For a deployment that crosses a network, with certificates of your own, follow
+[Setting up a fleet](setup.md). From here, [Server](server.md) covers targeting a subset of the
+fleet and distributing software, and [Client](client.md) covers putting a real Collector or a
+Foreign Agent under management.
 
 ## Concepts both halves use
 
@@ -178,8 +181,6 @@ authority on all of it.
 - **`tls` and `proxy` in connection settings** — a Server offering either is told, in
   its status report, that the Client dropped them. Mutual TLS itself *is* built, and required: see
   [the Server](server.md#mutual-tls-proving-who-is-on-the-connection).
-- **Certificate revocation** — there is no CRL and no OCSP. A short `validity_days` plus
-  renewal is what bounds an issued certificate.
 - **Custom messages** (`CustomCapabilities` / `CustomMessage`) — planned, not implemented.
 - **Other connection settings** (`AcceptsOtherConnectionSettings`) — deliberately not implemented:
   the protocol leaves their meaning entirely to the Agent, so honouring the capability would mean

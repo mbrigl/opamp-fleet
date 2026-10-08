@@ -374,13 +374,17 @@ jobs:
           # RHEL, Fedora, openSUSE
           sudo dnf install ./${{ env.ARTIFACT }}_${{ needs.version.outputs.version }}_linux_amd64.rpm
 
-          sudo opamp-fleet service install --endpoint wss://<server>/v1/opamp
+          sudo opamp-fleet service install --interactive
           sudo systemctl start opamp-fleet
           \`\`\`
 
-          Use \`service install --interactive\` in place of \`--endpoint\` to be asked for the
-          credential and the private CA as well; both refuse to overwrite a configuration that is
-          already there.
+          \`--interactive\` asks for the endpoint, the private CA, the client certificate and its key,
+          and the package verification key. The Server admits a host by its client certificate alone,
+          so a new host is given a bootstrap certificate and enrols on an operator's approval;
+          \`docs/manual/setup.md\` walks through the certificates and the enrolment. In a provisioning
+          run, \`service install --endpoint wss://<server>:4320/v1/opamp\` writes the endpoint alone,
+          and the service refuses to start until \`[tls] cert_file\` and \`key_file\` are added to the
+          file. Neither form overwrites a configuration that is already there.
 
           On Windows the \`.msi\` asks for the installation folder and the endpoint. That folder
           holds the program; the configuration and the state go to \`%ProgramData%\opamp-fleet\`,
@@ -390,11 +394,14 @@ jobs:
           \`\`\`console
           msiexec /i ${{ env.ARTIFACT }}_${{ needs.version.outputs.version }}_windows_amd64.msi /qn ^
             INSTALLFOLDER="C:\Program Files\opamp-fleet" ^
-            ENDPOINT="wss://<server>/v1/opamp"
+            ENDPOINT="wss://<server>:4320/v1/opamp"
           \`\`\`
 
+          As with \`--endpoint\`, the service refuses to start until \`[tls] cert_file\` and \`key_file\`
+          are added to \`%ProgramData%\opamp-fleet\supervisor.toml\`.
+
           Removing the package stops and unregisters the service and leaves the configuration and
-          state behind, deliberately — a credential you typed is not deleted by an uninstall.
+          state behind, deliberately: they hold the host's identity and its certificate.
 
           ## Updating a fleet
 
@@ -402,24 +409,31 @@ jobs:
           (ADR-0020, ADR-0017) — the commit this build carries,
           \`${{ needs.version.outputs.full }}\`, is provenance and is not compared.
 
-          Upload **all** of them into **one** Set (ADR-0019) — identified by the package name, the
-          Agent type \`supervisor\`, and this release's version — with one entry per
-          platform: the Server offers each Agent the entry built for the machine it reported
-          (ADR-0019), so a mixed fleet updates from a single
-          \`[self_update] package = "supervisor"\`. Each file is named
-          \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0029), and the last two fields are exactly the
-          pair an Agent reports as \`os.type\` and \`host.arch\` — so the upload reads them out of
-          the name and needs no table. The Set is a draft until the final publication call, so all
-          five platforms release together (ADR-0014):
+          Upload **all** of them into **one** Package, identified by the Agent type \`supervisor\` and
+          this release's version, with one entry per platform. The Server offers each Agent the entry
+          built for the machine it reported (ADR-0019), so a mixed fleet updates from one Package.
+          Each file is named \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0029), and the last two
+          fields are exactly the pair an Agent reports as \`os.type\` and \`host.arch\`, so the upload
+          reads them out of the name. Then put the Package in a Deployment, sign every entry with your
+          package signing key, and roll it out; nothing reaches the fleet before that last call
+          (ADR-0021). The Deployment below reaches the hosts whose \`channel\` is \`stable\`: set it in a
+          host's \`[attributes]\`, or as a Server label with \`PUT /api/v1/agents/<uid>/labels\`. The
+          signatures come from \`opamp-package-sign\`, which is built from a checkout, not shipped here:
 
           \`\`\`console
-          set="http://<server>:4321/api/v1/packages/supervisor/supervisor/${{ needs.version.outputs.version }}"
-          curl -X PUT -H 'Content-Type: application/json' -d '{}' "\$set"
-          for f in *_${{ needs.version.outputs.version }}_*.tar.gz; do
+          api="https://<server>:4321/api/v1"   # the Operator plane: add --cacert, and -u <user> or a .netrc
+          v=${{ needs.version.outputs.version }}
+          curl -X PUT -H 'Content-Type: application/json' -d '{}' "\$api/packages/supervisor/\$v"
+          curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "stable"}}' "\$api/deployments/stable"
+          curl -X PUT "\$api/deployments/stable/packages/supervisor/\$v?replace=true"
+          for f in *_\${v}_*.tar.gz; do
             p=\${f%.tar.gz}; arch=\${p##*_}; os=\${p%_*}; os=\${os##*_}
-            curl -X PUT --data-binary @"\$f" "\$set/entries/\$os/\$arch"
+            curl -X PUT --data-binary @"\$f" "\$api/packages/supervisor/\$v/entries/\$os/\$arch"
+            sig=\$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type supervisor --version "\$v" "\$f")
+            curl -X PUT -H 'Content-Type: application/json' -d "{\\"signature\\": \\"\$sig\\"}" \\
+                 "\$api/deployments/stable/signatures/supervisor/\$v/\$os/\$arch"
           done
-          curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' "\$set/publication"
+          curl -X POST "\$api/deployments/stable/rollout"
           \`\`\`
 
           Each archive holds the Client under the name it is installed as, so it needs no repacking:
@@ -435,7 +449,7 @@ jobs:
           ./supervisor service start
           \`\`\`
 
-          Nothing is signed yet: Windows will show an unknown publisher, and \`rpm\` reports no
+          The installers carry no code signature: Windows will show an unknown publisher, and \`rpm\` reports no
           signature. \`SHA256SUMS\` covers every asset above.
           EOF
           gh release create "version/${{ needs.version.outputs.version }}" \
