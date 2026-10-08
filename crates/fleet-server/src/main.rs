@@ -198,7 +198,9 @@ fn bind(address: SocketAddr, plane: &str) -> std::net::TcpListener {
 
 #[tokio::main]
 async fn main() {
+    // The log goes to stderr, so that stdout carries only what a command prints as its result.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -415,10 +417,11 @@ async fn main() {
     // One signal, both planes: the interrupt is watched once, and the handle both servers hold
     // drains them together within a bounded window (ADR-0023).
     let handle = Handle::new();
+    let signalled = shutdown_signal();
     tokio::spawn({
         let handle = handle.clone();
         async move {
-            let _ = tokio::signal::ctrl_c().await;
+            signalled.await;
             info!("shutting down");
             listen::shut_down(&handle);
         }
@@ -447,6 +450,32 @@ async fn main() {
     // The graceful-shutdown flush (ADR-0013): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
+}
+
+/// The shutdown signal: `SIGTERM`, which a service manager sends on stop, or `SIGINT` from a
+/// terminal. Either one drains both planes and saves the fleet before the process exits. Both
+/// handlers are installed when this is called, not when the future is first polled, so a signal
+/// that arrives while the Server is still starting is not left to its default of ending the process.
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate =
+            signal(SignalKind::terminate()).expect("installing the SIGTERM handler");
+        let mut interrupt = signal(SignalKind::interrupt()).expect("installing the SIGINT handler");
+        async move {
+            tokio::select! {
+                _ = terminate.recv() => {}
+                _ = interrupt.recv() => {}
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
 }
 
 /// What a Server that signs no CSRs says once at startup (ADR-0033 clause 3): its hosts hold the

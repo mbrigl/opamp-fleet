@@ -452,3 +452,60 @@ async fn a_session_past_its_burst_is_answered_unavailable_with_retry_info() {
     assert_ne!(reply.flags & ServerToAgentFlags::ReportFullState as u64, 0);
     assert_eq!(server.state.snapshot()[0].sequence_num, 5);
 }
+
+/// A shutdown reaches the WebSocket sessions too: they outlive the HTTP connection they began on,
+/// so the drain does not count them, yet the record flush that follows `serve` must find none at
+/// work. A session is told why it ends — the close code for a server going away — and it is over,
+/// its Agent marked disconnected, by the time `serve` returns.
+///
+/// Verifies: ADR-0023, ADR-0013
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shutdown_closes_the_websocket_sessions_before_serve_returns() {
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+    opamp::tls::install_ring_provider();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(
+        fleet_server::fleet::AppState::new(dir.path().join("fleet-configs"))
+            .expect("open the configuration store"),
+    );
+    let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = opamp::server::listen::Handle::new();
+    let serving =
+        tokio::spawn(fleet_server::listen::plane(listener, None, 64, handle.clone()).serve(app));
+
+    let mut socket = connect(addr).await;
+    let uid = InstanceUid::default();
+    send(&mut socket, &full_report(&uid, "shutdown", 1)).await;
+    recv(&mut socket).await;
+    assert!(state.snapshot()[0].connected);
+
+    fleet_server::listen::shut_down(&handle);
+    tokio::time::timeout(Duration::from_secs(15), serving)
+        .await
+        .expect("serve returns within the drain")
+        .expect("the serve task")
+        .expect("serve");
+
+    // By now the session is over: its Agent is no longer carried by any connection.
+    assert!(
+        !state.snapshot()[0].connected,
+        "a WebSocket session outlived serve"
+    );
+    let close = loop {
+        match tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("the session ends within five seconds")
+        {
+            Some(Ok(Message::Close(frame))) => break frame,
+            Some(Ok(_)) => continue,
+            other => panic!("the session ended without a close frame: {other:?}"),
+        }
+    };
+    assert_eq!(
+        close.expect("a close frame with a code").code,
+        CloseCode::Away
+    );
+}
