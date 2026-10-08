@@ -81,7 +81,7 @@ how it is met.
 This project's own Client puts its `service.instance.name` in the common name and no
 `instance_uid` anywhere, so it never triggers that check. A peer implementation may, and
 interoperability with one is a stated target
-([ADR-0009](0009-protocol-baseline-and-conformance.md)). The difficulty is recognising a claim
+([ADR-0009](0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)). The difficulty is recognising a claim
 without reading an ordinary descriptive subject as one. The Baseline's `instance_uid` is 16 bytes
 and SHOULD be a UUID v7; its textual form is the canonical 8-4-4-4-12 hexadecimal form of RFC 9562,
 which a host name or a product name does not take by accident.

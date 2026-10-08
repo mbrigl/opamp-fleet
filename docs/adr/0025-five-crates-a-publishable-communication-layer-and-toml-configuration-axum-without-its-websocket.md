@@ -81,7 +81,7 @@ Client, and configure both binaries from strict TOML files.
 
 7. **What goes where.**
    - `opamp`, always: `proto` and `frame`, the generated types and the WebSocket framing
-     ([ADR-0009](0009-protocol-baseline-and-conformance.md)); `uid`, the `instance_uid` type;
+     ([ADR-0009](0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)); `uid`, the `instance_uid` type;
      `attributes`, constants for the Baseline keys this project matches on (`SERVICE_NAME`,
      `SERVICE_INSTANCE_NAME`, `SERVICE_NAMESPACE`, `SERVICE_VERSION`, `OS_TYPE`, `OS_DESCRIPTION`,
      `HOST_ARCH`) and the accessors over them, where `string_value` states once that an empty string

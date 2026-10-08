@@ -52,7 +52,7 @@ We will make `crates/opamp` the whole OpAMP communication layer: the wire layer 
 from values the application hands it and never from a file or a configuration format of its own.
 
 1. **The wire layer, without features.** `proto` (generated from the vendored Baseline schema with
-   protox, [ADR-0009](0009-protocol-baseline-and-conformance.md)), `frame`, `endpoint`, `uid`,
+   protox, [ADR-0009](0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)), `frame`, `endpoint`, `uid`,
    `attributes` and `BASELINE`. They depend on `prost`, `uuid` and `flate2` only.
 
 2. **One publishable crate, versioned by the Baseline.** `publish = true` for `opamp` alone, with

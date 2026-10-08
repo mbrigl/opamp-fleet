@@ -46,7 +46,7 @@ for `ReportsHeartbeat`.
 
 Capability negotiation is symmetrical: *"after the Agent learns about the capabilities of the
 Server the Agent MUST stop using the capabilities that the Server does not support."* With
-`opamp-go` as the behavioural oracle ([ADR-0009](0009-protocol-baseline-and-conformance.md)), a
+`opamp-go` as the behavioural oracle ([ADR-0009](0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)), a
 third-party Server may implement only the required bits, and this Client has to notice. Applied
 literally, field by field, the rule deadlocks: a Server that sends an offer without declaring
 `OffersConnectionSettings` and receives no acknowledgement re-offers forever. And one plausible gate

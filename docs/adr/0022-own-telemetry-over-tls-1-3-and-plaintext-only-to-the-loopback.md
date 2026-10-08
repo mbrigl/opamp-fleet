@@ -41,7 +41,7 @@ feature flag.
 
 **OTLP has a reference implementation, and it is the standard's own.** This project vendors the
 OpAMP schema because it owns that wire contract
-([ADR-0009](0009-protocol-baseline-and-conformance.md)). OTLP is not its protocol: its wire format,
+([ADR-0009](0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)). OTLP is not its protocol: its wire format,
 semantic conventions and versioning are maintained upstream, and `opentelemetry-otlp` is where that
 maintenance lands.
 
@@ -66,7 +66,7 @@ these fields, `opampsupervisor`, reads them otherwise: it builds its own-telemet
 received message alone, drops a signal whose endpoint is absent or empty, and logs *"Disabling own
 telemetry pipeline in the config"* when nothing is left — but only enters that path when the message
 names at least one of the three. `opamp-go` is this project's behavioural oracle
-([ADR-0009](0009-protocol-baseline-and-conformance.md)); here the literal reading would leave both
+([ADR-0009](0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)); here the literal reading would leave both
 ends unable to drive each other.
 
 How an offer is applied, acknowledged and persisted — the telemetry destinations as a class of offer
@@ -93,7 +93,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
    `reqwest-client` replaces the default blocking client; `grpc-tonic` stays off because the schema
    permits no gRPC destination. `tracing-opentelemetry` joins them at the version built against them
    — `0.33` against `opentelemetry` `0.32` — and that pairing is a decision, not a range to widen. No
-   OTLP schema is vendored ([ADR-0009](0009-protocol-baseline-and-conformance.md) covers OpAMP only).
+   OTLP schema is vendored ([ADR-0009](0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md) covers OpAMP only).
 
 2. **Names come from the standard where it has them.** Metric and attribute names are taken from
    `opentelemetry-semantic-conventions` (with `semconv_experimental`, since the process metrics are

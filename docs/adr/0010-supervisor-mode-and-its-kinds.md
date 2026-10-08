@@ -203,7 +203,7 @@ Supervisor Endpoint, and we will make each kind the authority on its own agent, 
     over string values and the question is about one member of the set. An operator's own
     attribute of the same key is left as written. `AvailableComponents` is not used for this: the
     message is *Development* in the pinned Baseline
-    ([ADR-0009](0009-protocol-baseline-and-conformance.md)) and Selectors do not match it.
+    ([ADR-0009](0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)) and Selectors do not match it.
 
 19. **A kind binds itself to one artifact's shape.** The derived paths are those of the artifact
     `opamp-package-fetch` builds. A tree packed differently does not fit, and the answer is to

@@ -22,7 +22,7 @@ pub struct FsAgentStore {
 
 /// The on-disk envelope — **this adapter's format, not the port's**. Scalars and the
 /// effective-config text stay readable; the wire-typed fields are protobuf bytes base64-inline,
-/// the one encoding whose compatibility rules the Baseline already defines (ADR-0035, ADR-0013).
+/// the one encoding whose compatibility rules the Baseline already defines (ADR-0009, ADR-0013).
 #[derive(Serialize, Deserialize)]
 struct Envelope {
     /// The envelope shape, so a future change can migrate deliberately.

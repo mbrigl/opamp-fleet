@@ -1,4 +1,4 @@
-// The OpAMP protobuf types, generated from the vendored, pinned schema (ADR-0035).
+// The OpAMP protobuf types, generated from the vendored, pinned schema (ADR-0009).
 //
 // Nothing else happens here, and nothing here needs more than this package: the schema ships
 // inside it, protox compiles it without a system `protoc`, and the output goes only to `OUT_DIR`.
