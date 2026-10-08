@@ -303,8 +303,10 @@ resolving one by inventing semantics of this project's own.
 
 ## Status summary
 
-The base control loop is implemented on both ends and on both transports (ADR-0009, ADR-0023,
-ADR-0025): status reporting, remote configuration gated by the config hash, effective-configuration
+The base control loop is implemented on both ends and on both transports
+([ADR-0009](adr/0009-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md),
+[ADR-0023](adr/0023-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
+[ADR-0025](adr/0025-five-crates-a-publishable-communication-layer-and-toml-configuration-axum-without-its-websocket.md)): status reporting, remote configuration gated by the config hash, effective-configuration
 and health reporting, identity handling (UUID v7, reassignment, server-generated identity), state
 recovery via `ReportFullState`, disconnect handling, and TLS. Supervisor Mode (ADR-0010) puts real
 processes behind that loop: each configured Supervisor is its own Agent multiplexed over the

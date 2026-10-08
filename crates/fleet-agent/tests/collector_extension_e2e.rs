@@ -147,10 +147,12 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
 
     // A Collector runs once it has a configuration, so the fleet gives it one — aimed at its type
     // alone, which the Client's own Agent does not share.
-    let collector_type = wait_until("the Collector's Supervisor to appear as an Agent", || {
-        view(&state.snapshot(), "otelcol").map(|a| a.service_name.clone())
-    })
-    .await;
+    let (collector_type, supervisor_uid) =
+        wait_until("the Collector's Supervisor to appear as an Agent", || {
+            view(&state.snapshot(), "otelcol")
+                .map(|a| (a.service_name.clone(), a.instance_uid.clone()))
+        })
+        .await;
     state
         .save_configuration(
             "collector",
@@ -190,7 +192,11 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
         instance_uid: opamp::uid::InstanceUid::default().as_bytes().to_vec(),
         sequence_num: 1,
         agent_description: Some(AgentDescription {
-            identifying_attributes: Vec::new(),
+            // A real extension states its own identity too; the Supervisor's must survive it.
+            identifying_attributes: vec![
+                string_attr("service.instance.id", "the-extensions-own-id"),
+                string_attr("service.instance.name", "the-extensions-own-name"),
+            ],
             non_identifying_attributes: vec![string_attr("collector.pipeline", "traces/otlp")],
         }),
         health: Some(ComponentHealth {
@@ -224,7 +230,7 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
         .expect("the extension reports");
 
     // All three reach the fleet, on the Supervisor's own Agent.
-    let reported_by = wait_until("the extension's report to reach the Server", || {
+    let reported_on = wait_until("the extension's report to reach the Server", || {
         let agents = state.snapshot();
         let agent = view(&agents, "otelcol")?;
         let reached = agent
@@ -233,16 +239,25 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
             .is_some_and(|value| value == "traces/otlp")
             && agent.health_status == "pipelines running"
             && agent.effective_config.contains("receivers: {otlp: {}}");
-        reached.then(|| agent.service_instance_name.clone())
+        reached.then(|| agent.instance_uid.clone())
     })
     .await;
+    // Content, not identity: the report lands on the Supervisor's own Agent, which keeps its
+    // instance_uid and its name, and the extension is no Agent of its own.
     assert_eq!(
-        reported_by, "otelcol",
-        "the report is folded into the Supervisor's Agent, not presented as an Agent of its own"
+        reported_on, supervisor_uid,
+        "the report moved the Supervisor's identity"
     );
+    let agents = state.snapshot();
     assert_eq!(
-        state.snapshot().len(),
+        agents.len(),
         2,
-        "the Client and its one Supervisor, and no Agent for the extension's own instance_uid"
+        "the Client and its one Supervisor, and no Agent for the extension"
+    );
+    assert!(
+        agents
+            .iter()
+            .all(|a| a.service_instance_name != "the-extensions-own-name"),
+        "the extension's own name replaced the Supervisor's"
     );
 }

@@ -11,7 +11,7 @@
 #   offline.
 #
 # The releases list's newest entry is read, not 'releases/latest': opamp-spec marks no release as
-# latest, so that endpoint answers 404. OPAMP_SPEC_RELEASES_URL overrides the address for a test.
+# latest, so that endpoint answers 404.
 #
 # Usage:
 #     scripts/check-protocol-baseline.sh [conformance file]
@@ -21,7 +21,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFORMANCE="${1:-$ROOT/docs/CONFORMANCE.md}"
-RELEASES="${OPAMP_SPEC_RELEASES_URL:-https://api.github.com/repos/open-telemetry/opamp-spec/releases?per_page=1}"
+RELEASES="https://api.github.com/repos/open-telemetry/opamp-spec/releases?per_page=1"
 
 if [[ ! -f "$CONFORMANCE" ]]; then
   echo "Error: Protocol Baseline: $CONFORMANCE not found"
@@ -32,7 +32,7 @@ fi
 pinned="$(sed -nE 's/^<!--[[:space:]]*protocol-baseline:[[:space:]]*([^[:space:]]+)[[:space:]]*-->.*/\1/p' \
   "$CONFORMANCE" | head -n1)"
 if [[ -z "$pinned" ]]; then
-  echo "Error: docs/CONFORMANCE.md: no '<!-- protocol-baseline: vX.Y.Z -->' marker found"
+  echo "Error: $CONFORMANCE: no '<!-- protocol-baseline: vX.Y.Z -->' marker found"
   exit 1
 fi
 

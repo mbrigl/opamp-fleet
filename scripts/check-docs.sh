@@ -89,9 +89,12 @@
 #  15. Protocol Baseline currency: the pinned OpAMP specification version in docs/CONFORMANCE.md
 #      is compared against the latest upstream release. A divergence is a *warning*, never an
 #      error — an upstream release is not a defect in this repository, and failing here would
-#      turn CI red for something outside it. Requires network; silently skipped without one, so
-#      every other check stays usable offline. It concerns this repository only, so it does not
-#      run against a fixture root passed by scripts/test-check-docs.sh.
+#      turn CI red for something outside it. Requires network; without one it prints a note and
+#      skips, so every other check stays usable offline. The check itself is
+#      scripts/check-protocol-baseline.sh, which scripts/test-check-protocol-baseline.sh drives
+#      against fixtures; a helper that is missing or fails without saying why is an error here.
+#      It concerns this repository only, so it does not run against a fixture root passed by
+#      scripts/test-check-docs.sh.
 #
 # Checks 5 and 6 read every text file of the repository, not a list of documentation extensions:
 # docs/adr/README.md states that code may reference an ADR number, so a verifier restricted to
@@ -898,14 +901,23 @@ check_template_release() {
 # against (ADR-0009) — must stay a deliberate choice. scripts/check-protocol-baseline.sh holds the
 # check, so its own self-test can drive it against fixtures; here its lines become this report's.
 check_protocol_baseline() {
-  local line
+  local helper="$ROOT/scripts/check-protocol-baseline.sh" output rc line said=0
+  if [[ ! -r "$helper" ]]; then
+    add_error "scripts/check-protocol-baseline.sh is missing — the Protocol Baseline check cannot run"
+    return
+  fi
+  output="$(bash "$helper" "$CONFORMANCE" 2>&1)"; rc=$?
   while IFS= read -r line; do
     case "$line" in
-      "Error: "*) add_error "${line#Error: }" ;;
+      "Error: "*) add_error "${line#Error: }"; said=1 ;;
       "Warning: "*) add_warning "${line#Warning: }" ;;
       ?*) echo "$line" ;;
     esac
-  done < <(bash "$ROOT/scripts/check-protocol-baseline.sh" "$CONFORMANCE")
+  done <<< "$output"
+  # A failure that names no error is the check not running, which must not read as a pass.
+  if ((rc != 0 && !said)); then
+    add_error "scripts/check-protocol-baseline.sh failed (exit $rc) without naming an error"
+  fi
 }
 
 collect_text_files
