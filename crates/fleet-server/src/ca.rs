@@ -185,7 +185,7 @@ impl ClientCa {
 
 /// 16 bytes from the system's secure random source, the top bit cleared so the serial is a
 /// positive integer (RFC 5280 §4.1.2.2).
-fn random_serial() -> Result<SerialNumber, String> {
+pub(crate) fn random_serial() -> Result<SerialNumber, String> {
     use ring::rand::SecureRandom as _;
     let mut bytes = [0u8; 16];
     ring::rand::SystemRandom::new()

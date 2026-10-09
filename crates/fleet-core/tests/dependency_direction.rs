@@ -87,6 +87,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("fs::packages", Adapter),
             ("fs::revocation", Adapter),
             ("listen", Adapter),
+            ("pki", Adapter),
             ("tls", Adapter),
             ("transport", Adapter),
         ],

@@ -20,7 +20,8 @@
 #       PUTs each Configuration to a running Server's REST API and rolls it out — the act that
 #       assigns it to the matching Agents (ADR-0027); a PUT alone reaches nobody.
 #       (default server-url: https://127.0.0.1:4321). The Operator plane serves TLS (ADR-0012); the
-#       CA curl trusts is $SEED_CACERT, or .dev-pki/ca.pem when scripts/dev-pki.sh made one.
+#       CA curl trusts is $SEED_CACERT, or .dev-pki/offline/server-ca.pem when scripts/dev-pki.sh
+#       made one.
 #   scripts/seed_test_configs.sh --offline [config-dir]
 #       Writes each Configuration as <config-dir>/<name>.json — the Server's own persistence
 #       format, loaded at its next start; no running Server needed. Default config-dir is
@@ -29,7 +30,12 @@
 #       stored, not assigned: under ADR-0027 only an Agent record that predates the ADR is
 #       seeded from it, so on a fresh fleet roll each one out once the Agents have enrolled
 #       (POST /api/v1/configurations/<name>/rollout, or the fleet view).
-# Both modes replace an existing Configuration of the same name.
+#   scripts/seed_test_configs.sh --enrol [server-url]
+#       For the development set of scripts/dev-pki.sh, whose Client enrols like any other host
+#       (ADR-0029): opens the enrolment window for ten minutes, waits up to a minute for requests,
+#       and approves every one it finds, printing each key fingerprint. Development only — on a
+#       real fleet an operator compares each fingerprint with the host's log before approving.
+# The first two modes replace an existing Configuration of the same name.
 #
 # Note on the contrib Collector: once its opampextension self-reports, the reported
 # service.name (the dist.name it was built with, "otelcol-contrib") replaces the name derived
@@ -55,14 +61,36 @@ if [ "${1:-}" = "--offline" ]; then
     mode=stage
     config_dir="${2:-$examples/../../fleet-configs}"
     mkdir -p "$config_dir"
+elif [ "${1:-}" = "--enrol" ]; then
+    mode=enrol
+    server="${2:-https://127.0.0.1:4321}"
 else
     server="${1:-https://127.0.0.1:4321}"
 fi
 
 curl_tls=()
-cacert="${SEED_CACERT:-$(dirname "$0")/../.dev-pki/ca.pem}"
+cacert="${SEED_CACERT:-$(dirname "$0")/../.dev-pki/offline/server-ca.pem}"
 if [ -f "$cacert" ]; then
     curl_tls=(--cacert "$cacert")
+fi
+
+if [ "$mode" = enrol ]; then
+    curl -fsS "${curl_tls[@]}" -X POST -H 'Content-Type: application/json' \
+        -d '{"open_for_secs": 600}' "$server/api/v1/enrolment/window" >/dev/null
+    for _ in $(seq 60); do
+        ids=$(curl -fsS "${curl_tls[@]}" "$server/api/v1/enrolments" | jq -r '.[].id')
+        [ -n "$ids" ] && break
+        sleep 1
+    done
+    if [ -z "$ids" ]; then
+        echo "no enrolment request arrived within a minute; is the Client running?" >&2
+        exit 1
+    fi
+    for id in $ids; do
+        curl -fsS "${curl_tls[@]}" -X POST "$server/api/v1/enrolments/$id/approve" >/dev/null
+        echo "approved the request with key fingerprint $id"
+    done
+    exit 0
 fi
 
 # seed <name> <file> <selector-json> [service_name]

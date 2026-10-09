@@ -210,9 +210,10 @@ it (AGENTS.md links here).
   [`interop/README.md`](interop/README.md) says what it covers and how a red run is triaged
   (ADR-0010)
 - **Make development certificates:** `scripts/dev-pki.sh` — both binaries refuse to run without
-  TLS (ADR-0012); it writes a CA, a Server certificate for `127.0.0.1`, an Agent certificate, and a
-  `server.toml` and `supervisor.toml` that use them to `.dev-pki/`. The VS Code launch
-  configurations run it when `.dev-pki/` has no configuration yet
+  TLS (ADR-0012); it runs the Server's own `server pki init` (ADR-0029), no other tool, and writes
+  the set and a `server.toml` and `supervisor.toml` that use it to `.dev-pki/`. The development
+  Client enrols with the bootstrap certificate; `scripts/seed_test_configs.sh --enrol` approves it.
+  The VS Code launch configurations run it when `.dev-pki/` has no configuration yet
 - **Run the Server:** `cargo run -p fleet-server -- --config .dev-pki/server.toml`
 - **Run the Client:** `cargo run -p fleet-agent -- --config .dev-pki/supervisor.toml`
 - **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release

@@ -19,7 +19,13 @@ fn usage() -> ! {
     eprintln!(
         "Usage: server [--config <server.toml>] [--version]\n       \
          server hash-credential --basic   (reads the password from standard input)\n       \
-         server audit-verify <config_dir>/audit"
+         server audit-verify <config_dir>/audit\n       \
+         server pki init --server-dir <dir> --offline-dir <dir> --name <dns|ip>... \
+         [--server-path <path>] [--host-path <path>] [--fleet <name>] [--ca-days <n>] \
+         [--server-days <n>] [--bootstrap-days <n>]\n       \
+         server pki server-cert --offline-dir <dir> --name <dns|ip>... --out <dir> [--days <n>]\n       \
+         server pki bootstrap-cert --offline-dir <dir> --out <dir> [--days <n>]\n       \
+         server pki status [--config <server.toml>] [--offline-dir <dir>]"
     );
     std::process::exit(2);
 }
@@ -60,6 +66,159 @@ fn audit_verify(dir: Option<String>) -> ! {
             eprintln!("the chain breaks at {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// The options of a `server pki` command, read as `--flag value` pairs; `--name` may repeat.
+struct PkiArgs {
+    values: std::collections::HashMap<String, String>,
+    names: Vec<String>,
+}
+
+impl PkiArgs {
+    fn parse(args: impl Iterator<Item = String>, allowed: &[&str]) -> Self {
+        let mut values = std::collections::HashMap::new();
+        let mut names = Vec::new();
+        let mut args = args.peekable();
+        while let Some(flag) = args.next() {
+            let Some(value) = args.next() else { usage() };
+            match flag.as_str() {
+                "--name" if allowed.contains(&"--name") => names.push(value),
+                flag if allowed.contains(&flag) => {
+                    if values.insert(flag.to_string(), value).is_some() {
+                        usage()
+                    }
+                }
+                _ => usage(),
+            }
+        }
+        PkiArgs { values, names }
+    }
+
+    fn path(&self, flag: &str) -> Option<PathBuf> {
+        self.values.get(flag).map(PathBuf::from)
+    }
+
+    fn required(&self, flag: &str) -> PathBuf {
+        self.path(flag).unwrap_or_else(|| {
+            eprintln!("{flag} is required");
+            std::process::exit(2);
+        })
+    }
+
+    fn days(&self, flag: &str, default: u32) -> u32 {
+        match self.values.get(flag) {
+            None => default,
+            Some(days) => days.parse().unwrap_or_else(|_| {
+                eprintln!("{flag} {days:?} is not a number of days");
+                std::process::exit(2);
+            }),
+        }
+    }
+}
+
+/// `server pki …` (ADR-0029): makes and inspects the fleet's certificate authorities, the
+/// Server's or a Gateway's certificate and the bootstrap certificate. Never a host certificate.
+fn pki(mut args: impl Iterator<Item = String>) -> ! {
+    use fleet_server::pki;
+    let done = |result: Result<Vec<String>, String>| -> ! {
+        match result {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    };
+    match args.next().as_deref() {
+        Some("init") => {
+            let a = PkiArgs::parse(
+                args,
+                &[
+                    "--server-dir",
+                    "--offline-dir",
+                    "--server-path",
+                    "--host-path",
+                    "--fleet",
+                    "--name",
+                    "--ca-days",
+                    "--server-days",
+                    "--bootstrap-days",
+                ],
+            );
+            done(pki::init(&pki::InitOptions {
+                server_dir: a.required("--server-dir"),
+                offline_dir: a.required("--offline-dir"),
+                server_path: a.path("--server-path"),
+                host_path: a.path("--host-path"),
+                fleet: a
+                    .values
+                    .get("--fleet")
+                    .cloned()
+                    .unwrap_or_else(|| pki::DEFAULT_FLEET.to_string()),
+                names: a.names.clone(),
+                ca_days: a.days("--ca-days", pki::CA_DAYS),
+                server_days: a.days("--server-days", pki::SERVER_DAYS),
+                bootstrap_days: a.days("--bootstrap-days", pki::BOOTSTRAP_DAYS),
+            }))
+        }
+        Some("server-cert") => {
+            let a = PkiArgs::parse(args, &["--offline-dir", "--name", "--out", "--days"]);
+            done(pki::server_cert(
+                &a.required("--offline-dir"),
+                &a.names,
+                a.days("--days", pki::SERVER_DAYS),
+                &a.required("--out"),
+            ))
+        }
+        Some("bootstrap-cert") => {
+            let a = PkiArgs::parse(args, &["--offline-dir", "--out", "--days"]);
+            done(pki::bootstrap_cert(
+                &a.required("--offline-dir"),
+                a.days("--days", pki::BOOTSTRAP_DAYS),
+                &a.required("--out"),
+            ))
+        }
+        Some("status") => {
+            let a = PkiArgs::parse(args, &["--config", "--offline-dir"]);
+            let config = a.path("--config").map(|path| {
+                ServerConfig::load(&path).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                })
+            });
+            if config.is_none() && a.path("--offline-dir").is_none() {
+                usage()
+            }
+            let endings = pki::status(config.as_ref(), a.path("--offline-dir").as_deref())
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
+            let now = time::OffsetDateTime::now_utc();
+            for ending in &endings {
+                let standing = match ending.standing(now) {
+                    pki::Standing::Fine => "ok",
+                    pki::Standing::Ending => "ENDS SOON",
+                    pki::Standing::Ended => "ENDED",
+                };
+                println!(
+                    "{standing:9} {} days  {}  serial {}  {}  ({})",
+                    ending.days_left(now),
+                    ending.not_after.date(),
+                    ending.serial,
+                    ending.subject,
+                    ending.file.display()
+                );
+            }
+            std::process::exit(pki::exit_code(&endings, now));
+        }
+        _ => usage(),
     }
 }
 
@@ -163,6 +322,7 @@ fn parse_args() -> PathBuf {
         match arg.as_str() {
             "hash-credential" => hash_credential(args.next()),
             "audit-verify" => audit_verify(args.next()),
+            "pki" => pki(args),
             "--config" => match args.next() {
                 Some(path) => config = PathBuf::from(path),
                 None => usage(),
@@ -340,6 +500,29 @@ async fn main() {
     if let Some(enrolment) = &enrolment {
         enrolment.set_audit(audit.clone());
     }
+    // Before a certificate the Server depends on ends, say so: at startup and once a day
+    // (ADR-0029 clause 11). Nothing stops; the hosts decide for themselves.
+    let watched = fleet_server::pki::depended_on(&config);
+    fleet_server::pki::warn_endings(
+        &watched,
+        Some(audit.as_ref()),
+        time::OffsetDateTime::now_utc(),
+    );
+    tokio::spawn({
+        let audit = audit.clone();
+        async move {
+            let mut daily = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            daily.tick().await;
+            loop {
+                daily.tick().await;
+                fleet_server::pki::warn_endings(
+                    &watched,
+                    Some(audit.as_ref()),
+                    time::OffsetDateTime::now_utc(),
+                );
+            }
+        }
+    });
     if let Some(warning) = config.rate_limit_warning() {
         // ADR-0012 clause 20.
         warn!("{warning}");

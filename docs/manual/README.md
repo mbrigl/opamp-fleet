@@ -51,12 +51,13 @@ This is the smallest complete deployment — one Server, one Client, one Configu
 starts without TLS material and a client certificate, so the first step makes a
 development set of them.
 
-1. **Create the development certificates.** [`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) needs
-   the `openssl` command-line tool. It writes a development CA, a Server certificate for `127.0.0.1`
-   and `::1`, a client certificate, and a bootstrap CA with a bootstrap certificate to try
-   enrolment with. Everything lands in `.dev-pki/`, which git ignores. The keys are unencrypted and
-   the CAs are throwaway, so use the set on a development machine only. The script refuses to
-   overwrite a directory that already holds a CA.
+1. **Create the development certificates.** [`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) makes
+   them with the Server's own `server pki init`, so it needs no other tool: the three CAs of
+   [Setting up a fleet](setup.md#the-certificates-at-a-glance), a Server certificate for
+   `localhost`, `127.0.0.1` and `::1`, and the bootstrap certificate the Client enrols with.
+   Everything lands in `.dev-pki/`, which git ignores. The keys are unencrypted and the CAs are
+   throwaway, so use the set on a development machine only. The script refuses to overwrite a
+   directory that already holds a set.
 
    ```console
    $ scripts/dev-pki.sh
@@ -74,15 +75,22 @@ development set of them.
    $ cargo run -p fleet-server -- --config .dev-pki/server.toml
    ```
 
-3. **Start a Client.** With no `[[supervisor]]` block it presents exactly one Agent: itself. It
-   presents the development client certificate, and it trusts the development CA.
+3. **Start a Client, and approve its enrolment.** With no `[[supervisor]]` block it presents
+   exactly one Agent: itself. It holds the bootstrap certificate and trusts the development server
+   CA, so it enrols like any host: it asks for a certificate, and the request waits for an
+   approval. In a development set the seed script opens the window and approves it:
 
    ```console
    $ cargo run -p fleet-agent -- --config .dev-pki/supervisor.toml
+   $ scripts/seed_test_configs.sh --enrol
+   approved the request with key fingerprint f1e9…
    ```
 
+   On a real fleet you compare the fingerprint with the Client's log first
+   ([Enrol the Client](setup.md#5-enrol-the-client)).
+
 4. **Open the UI** at <https://127.0.0.1:4321/>. Your browser does not know the development CA, so
-   import `.dev-pki/ca.pem` into its trust store first. The Agent is listed as *Connected*, with
+   import `.dev-pki/offline/server-ca.pem` into its trust store first. The Agent is listed as *Connected*, with
    the attributes it reported.
 
 5. **Create and roll out a Configuration.** In the UI, press **Configurations**, give it a name,
@@ -91,10 +99,10 @@ development set of them.
    reaches the fleet. The same two steps over the API, with `--cacert` naming the development CA:
 
    ```console
-   $ curl --cacert .dev-pki/ca.pem -X PUT -H 'Content-Type: application/json' \
+   $ curl --cacert .dev-pki/offline/server-ca.pem -X PUT -H 'Content-Type: application/json' \
           -d '{"selector": {}, "body": "receivers: {}"}' \
           https://127.0.0.1:4321/api/v1/configurations/base
-   $ curl --cacert .dev-pki/ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/base/rollout
+   $ curl --cacert .dev-pki/offline/server-ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/base/rollout
    ```
 
 6. **Watch the loop close.** A WebSocket Client receives it within a second, an HTTP Client on its

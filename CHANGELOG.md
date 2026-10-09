@@ -17,6 +17,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Added
 
+- **The Server makes the fleet's certificates itself**
+  ([ADR-0029](docs/adr/0029-the-server-makes-the-fleets-certificates-itself.md)).
+  `server pki init` makes the server CA, the client CA and the bootstrap CA, the Server's
+  certificate and the bootstrap certificate, split into a directory for the Server host and one
+  that stays offline, with `server.toml` and `supervisor.toml` fragments naming them.
+  `server pki server-cert` and `server pki bootstrap-cert` make the next server or Gateway
+  certificate and the next bootstrap certificate from the offline CAs, and `server pki status`
+  lists when each certificate ends, with an exit code for monitoring. The running Server warns,
+  logs and records `pki.expiring` 30 days before its own certificate or a CA it depends on ends,
+  and `pki.expired` once one has. `scripts/dev-pki.sh` no longer needs `openssl`; its development
+  Client enrols with the bootstrap certificate, and `scripts/seed_test_configs.sh --enrol`
+  approves it. **What to do:** nothing for an existing fleet, whose certificates keep working. A
+  development set made before is replaced by deleting `.dev-pki/` and running the script again.
+
 - **Admitted Agents are rate-limited per host**
   ([ADR-0012](docs/adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)). Every OpAMP message
   and every package download takes a token from the bucket of the host the certificate names — for

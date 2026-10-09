@@ -2,7 +2,8 @@
 
 [← User Manual](README.md) · [The Server](server.md) · [The Client](client.md)
 
-This page takes you from nothing to a running fleet, in order. You make the certificates,
+This page takes you from nothing to a running fleet, in order, with nothing but the project's
+own two programs. You make the certificates,
 configure and start the Server, configure and install a Client, and enrol it. The
 [Server](server.md) and [Client](client.md) pages describe every key; this page says which ones a
 real deployment needs, and why.
@@ -55,92 +56,77 @@ the bootstrap CA's key and the server CA's key stay off the Server.
 
 ## 1. Make the certificates
 
-Nothing in the fleet creates these for you. The commands below use the `openssl` command-line tool
-and P-256 keys. Run them on an operator's machine, in a directory only you can read. Replace
-`fleet.example.com` with the name your Clients will connect to.
-
-```console
-$ mkdir -m 700 fleet-pki && cd fleet-pki
-```
-
-Two helpers keep the commands short. `new_ca` makes a CA, valid for ten years. `issue` makes a
-leaf certificate signed by one of them:
-
-```bash
-new_ca() {   # new_ca <name> <subject CN>
-  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1-key.pem"
-  openssl req -x509 -new -key "$1-key.pem" -subj "/CN=$2" -days 3650 -sha256 \
-    -addext "basicConstraints=critical,CA:TRUE" \
-    -addext "keyUsage=critical,keyCertSign,cRLSign" -out "$1.pem"
-}
-issue() {    # issue <name> <subject CN> <signing CA> <serverAuth|clientAuth> <days> [subjectAltName]
-  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1-key.pem"
-  openssl req -new -key "$1-key.pem" -subj "/CN=$2" -out "$1.csr"
-  printf '%s\n' "basicConstraints=critical,CA:FALSE" "keyUsage=critical,digitalSignature" \
-    "extendedKeyUsage=$4" ${6:+"subjectAltName=$6"} > "$1.ext"
-  openssl x509 -req -in "$1.csr" -CA "$3.pem" -CAkey "$3-key.pem" -CAcreateserial \
-    -days "$5" -sha256 -extfile "$1.ext" -out "$1.pem"
-  rm -f "$1.csr" "$1.ext"
-}
-```
-
-Then make the set:
-
-```bash
-new_ca server-ca    "Example fleet server CA"
-new_ca client-ca    "Example fleet client CA"
-new_ca bootstrap-ca "Example fleet bootstrap CA"
-
-issue server    "fleet.example.com"        server-ca    serverAuth 397 "DNS:fleet.example.com,IP:127.0.0.1"
-issue bootstrap "Example fleet bootstrap"  bootstrap-ca clientAuth 30
-chmod 600 ./*-key.pem
-rm -f ./*.srl
-```
-
-That leaves these files, and where each one goes:
-
-| File | Goes to | Secret? |
-|---|---|---|
-| `server-ca.pem` | every Client (`[tls] ca_file`), and your browser | no |
-| `server-ca-key.pem` | nowhere: keep it offline, to sign the next server certificate | **yes** |
-| `server.pem`, `server-key.pem` | the Server (`[tls] cert_file`, `key_file`) | the key |
-| `client-ca.pem`, `client-ca-key.pem` | the Server (`[tls] client_ca_file`, `[client_ca]`) | the key |
-| `bootstrap-ca.pem` | the Server (`[enrolment] bootstrap_ca_file`) | no |
-| `bootstrap-ca-key.pem` | nowhere: keep it offline, to sign the next bootstrap certificate | **yes** |
-| `bootstrap.pem`, `bootstrap-key.pem` | every new Client (`[tls] cert_file`, `key_file`) | the key, but it opens nothing alone (see below) |
-
-**The server certificate must name the address the Clients use.** Clients check the name in
-`endpoint` against the certificate's subject alternative names. For a Server reached by IP
-address, add it as well, for example `"DNS:fleet.example.com,IP:10.0.0.5,IP:127.0.0.1"`. The
-`IP:127.0.0.1` entry is for you: it lets your browser and `curl` reach the Operator plane through
-an SSH tunnel (step 2). 397 days keeps the certificate within every browser's limit.
-
-**The bootstrap certificate is short-lived on purpose.** Anyone who copies it can ask for a
-certificate. What stops them is that a request also needs an open window and your approval. Make a
-fresh one with `issue bootstrap …` whenever you set up hosts after it has expired.
-
-**Formats the Server accepts.** The listener's key may be PKCS#8, SEC1 or PKCS#1, and `cert_file`
-may hold the certificate followed by its intermediates. The **client CA's key must be PKCS#8**,
-which is what `openssl genpkey` writes. An older key in another format converts with
-`openssl pkcs8 -topk8 -nocrypt -in old-key.pem -out client-ca-key.pem`. The keys may be ECDSA
-P-256 or P-384, Ed25519, or RSA, with one exception: the server certificate also serves the UI to
-your browser, and browsers do not accept Ed25519 there, so give the server certificate and the
-server CA an ECDSA or RSA key.
-
-## 2. Configure and start the Server
-
-A release ships the Client, not the Server. Build the Server from a checkout, on a Linux machine,
-copy the binary to the Server host, and give it an account of its own:
+The Server binary makes every certificate of this page itself, with `server pki`; no other tool
+is needed. A release ships the Client, not the Server, so build the Server from a checkout first,
+on a Linux machine:
 
 ```console
 $ cargo build --release -p fleet-server     # writes target/release/server
+```
+
+Run `pki init` on the machine where the offline keys are to stay, typically your own. Name every
+address the Clients will dial with `--name`, as a DNS name or an IP address; repeat it for each:
+
+```console
+$ server pki init --server-dir fleet-server --offline-dir fleet-offline \
+         --name fleet.example.com --name 10.0.0.5 \
+         --server-path /etc/opamp-fleet-server/tls --host-path /etc/opamp
+fleet-server: for the Server host — merge server.toml.fragment into its server.toml
+fleet-offline: keep offline — the server CA and bootstrap CA keys; give every new host server-ca.pem, bootstrap.pem and bootstrap-key.pem, as supervisor.toml.fragment names them
+bootstrap certificate serial: 6723c735dcae96984c18a6cc7df02d4e
+```
+
+`--server-path` and `--host-path` are where the files will live on the Server host and on a
+managed host; the two `.fragment` files name them there. Left out, they name the directories as
+`pki init` wrote them. It writes these files, and nothing else:
+
+| Directory | File | Goes to | Secret? |
+|---|---|---|---|
+| `--server-dir` | `server.pem`, `server-key.pem` | the Server (`[tls] cert_file`, `key_file`) | the key |
+| | `client-ca.pem`, `client-ca-key.pem` | the Server (`[tls] client_ca_file`, `[client_ca]`) | the key |
+| | `bootstrap-ca.pem` | the Server (`[enrolment] bootstrap_ca_file`) | no |
+| | `server.toml.fragment` | the Server's `server.toml`, merged in | no |
+| `--offline-dir` | `server-ca.pem` | every Client (`[tls] ca_file`), and your browser | no |
+| | `server-ca-key.pem` | nowhere: keep it offline, to sign the next server certificate | **yes** |
+| | `bootstrap-ca.pem`, `bootstrap-ca-key.pem` | nowhere: keep them offline, to sign the next bootstrap certificate | the key, **yes** |
+| | `bootstrap.pem`, `bootstrap-key.pem` | every new Client (`[tls] cert_file`, `key_file`) | the key, but it opens nothing alone (see below) |
+| | `supervisor.toml.fragment` | every new Client's `supervisor.toml`, merged in | no |
+
+The directories are created `0700` and every key `0600`. `pki init` refuses to write over a file
+that exists, and writes nothing at all then. Run on the Server host, it says so: move the offline
+directory off that host before the fleet goes live.
+
+What it makes, so you need not:
+
+- **Three CAs with names of their own**, `opamp-fleet server CA`, `opamp-fleet client CA` and
+  `opamp-fleet bootstrap CA`, each valid for ten years and able to sign no further CA. `--fleet`
+  replaces `opamp-fleet` in all three. The Server refuses to start when the bootstrap CA shares a
+  name with the client CA, so they never do.
+- **A server certificate** valid for 397 days, which keeps it within every browser's limit. It
+  carries every `--name`, and always `127.0.0.1` and `::1` as well, so your browser and `curl`
+  reach the Operator plane through an SSH tunnel (step 2). A wildcard or a name that is neither a
+  DNS name nor an address is refused.
+- **A bootstrap certificate** valid for 30 days. It is short-lived on purpose: anyone who copies it
+  can ask for a certificate, and what stops them is that a request also needs an open window and
+  your approval. Its serial is printed, because that is what revokes it (step 6).
+- **Keys the Server can read:** ECDSA P-256 in PKCS#8, the one form the client CA's key must have.
+
+`--ca-days`, `--server-days` and `--bootstrap-days` change the lifetimes. No certificate is made
+to outlive the CA that signs it; one asked to is cut to the CA's end, with a notice.
+
+## 2. Configure and start the Server
+
+Copy the Server binary from step 1 to the Server host and give it an account of its own:
+
+```console
 $ sudo install -m 755 server /usr/local/bin/server    # on the Server host, after copying it there
 $ sudo useradd --system --no-create-home --shell /usr/sbin/nologin opamp-fleet-server
 ```
 
-Copy the Server's five files to the Server host, for example to `/etc/opamp-fleet-server/tls/`,
-readable only by the account the Server runs as. Then write `/etc/opamp-fleet-server/server.toml`.
-Give every path absolutely:
+Copy the contents of `--server-dir` to the Server host, to the `--server-path` you gave
+(`/etc/opamp-fleet-server/tls/` above), readable only by the account the Server runs as. Then
+write `/etc/opamp-fleet-server/server.toml`: `server.toml.fragment` holds its `[tls]`,
+`[client_ca]` and `[enrolment]` sections, and the rest is yours. Give every path absolutely:
 
 ```toml
 # The Agent plane: where the fleet connects. 4320 is the protocol's default port.
@@ -167,8 +153,9 @@ bootstrap_ca_file = "/etc/opamp-fleet-server/tls/bootstrap-ca.pem"
 listen = "127.0.0.1:4321"
 ```
 
-Point `client_ca_file` and `[client_ca] cert_file` at the **same** certificate. The Server does
-not check that they match. If they differ, it signs certificates that its own handshake refuses.
+`client_ca_file` and `[client_ca] cert_file` name the **same** certificate, as the fragment writes
+them. The Server does not check that they match; if they differed, it would sign certificates that
+its own handshake refuses.
 
 **The Operator plane stays on the loopback** unless you decide otherwise. Reach it from your machine
 through an SSH tunnel:
@@ -251,9 +238,10 @@ reports normally, but takes no package. You can add the key later.
 
 ## 4. Configure and install a Client
 
-Each managed host needs three files from step 1: `server-ca.pem`, `bootstrap.pem` and
-`bootstrap-key.pem`. Copy them to the host, for example to `/etc/opamp/`, with the key readable by
-root only.
+Each managed host needs three files from `--offline-dir`: `server-ca.pem`, `bootstrap.pem` and
+`bootstrap-key.pem`. Copy them to the host, to the `--host-path` you gave (`/etc/opamp/` above),
+with the key readable by root only. `supervisor.toml.fragment` holds the `[tls]` section that names
+them.
 
 **Install the Client** from the release's `.deb`, `.rpm` or `.msi`. The package registers the
 service and leaves it stopped (see [Installing from a native package](client.md#installing-from-a-native-package)).
@@ -365,7 +353,8 @@ certificate has expired, and the Client keeps presenting it. To enrol it again:
    `client-csr.pending.pem` if they are there. The Client then falls back to the bootstrap pair in
    `supervisor.toml`, and logs the fingerprint of a fresh key once it reaches the Server with the
    window open.
-2. If that bootstrap certificate has expired too, issue a fresh one (step 1) and replace it.
+2. If that bootstrap certificate has expired too, make a fresh one, as the next paragraph but one
+   shows, and replace it.
 3. Open the window, start the service, and approve the fingerprint, as in step 5.
 
 **To shut a host out**, revoke its certificate by serial. The Server closes its sessions at once,
@@ -381,19 +370,46 @@ $ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' \
        https://127.0.0.1:4321/api/v1/revocations
 ```
 
-A bootstrap certificate is revoked the same way, with `"authority": "bootstrap"`; read its serial
-with `openssl x509 -noout -serial -in bootstrap.pem | cut -d= -f2`. See
+A bootstrap certificate is revoked the same way, with `"authority": "bootstrap"` and the serial
+`pki init` or `pki bootstrap-cert` printed; `server pki status` lists it again. See
 [Revocation](server.md#revocation-withdrawing-a-certificate) for Gateways and for lifting a
 revocation.
 
-**The server certificate is yours to renew.** Before it expires, issue a new one with the same
-names (`issue server …`), replace `server.pem` and `server-key.pem` on the Server, and restart it.
-The Clients reconnect on their own. They trust the server CA, not one particular certificate, so
-nothing changes on the hosts.
+**The server certificate and the bootstrap certificate are yours to renew**, from the offline
+directory:
 
-**The CAs outlast everything else**, so give them a long life. Replacing the server CA means
-giving every host the new `ca_file`. Replacing the client CA means every host enrols again: the
-Server renews only a certificate its current client CA issued.
+```console
+$ server pki server-cert --offline-dir fleet-offline --name fleet.example.com --name 10.0.0.5 --out next-server
+$ server pki bootstrap-cert --offline-dir fleet-offline --out next-bootstrap
+```
+
+Each writes into a new directory: `server.pem` and `server-key.pem`, or `bootstrap.pem` and
+`bootstrap-key.pem`. Replace the Server's two files and restart it; the Clients reconnect on their
+own. They trust the server CA, not one particular certificate, so nothing changes on the hosts. A
+new bootstrap pair goes to the hosts you set up next. `server-cert` also makes a **Gateway's**
+certificate: give it the Gateway's names and use the pair as its `[gateway.tls] cert_file` and
+`key_file`.
+
+**You are told before anything ends.** At startup and once a day, the Server reads when its own
+certificate, the client CA and the bootstrap CA end. Thirty days before — or in the last third of
+the life of a certificate that lives less than 90 days — it logs a warning naming the file and the
+date, and records `pki.expiring` in the audit; once one has ended, an error and `pki.expired`. It
+keeps serving either way. `server pki status` says the same on demand, for a configuration, an
+offline directory, or both, and its exit code suits a monitoring job: `0` when nothing is ending,
+`1` when something is, `2` when something has ended.
+
+```console
+$ server pki status --config /etc/opamp-fleet-server/server.toml
+ok        396 days  2027-11-10  serial 0d3d…  CN=fleet.example.com  (/etc/opamp-fleet-server/tls/server.pem)
+ok        3649 days  2036-10-06  serial 4e1b…  CN=opamp-fleet client CA  (/etc/opamp-fleet-server/tls/client-ca.pem)
+ok        3649 days  2036-10-06  serial 2068…  CN=opamp-fleet bootstrap CA  (/etc/opamp-fleet-server/tls/bootstrap-ca.pem)
+```
+
+**The CAs outlast everything else**, so they live ten years. This project's own ends accept a CA
+past its end, but a browser or another OpAMP implementation may not, which is why its end is
+announced. Replacing the server CA means giving every host the new `ca_file`. Replacing the client
+CA means every host enrols again: the Server renews only a certificate its current client CA
+issued.
 
 ## When a connection is refused
 
@@ -410,5 +426,5 @@ Server renews only a certificate its current client CA issued.
 | A `429` | Client | The host's address failed admission too often, and the Server is backing it off. Fix the certificate; the back-off ends by itself. |
 | The Server refuses to start, naming `shares a CA with [tls] client_ca_file` | Server | The bootstrap CA and the client CA have the same subject name. Make a bootstrap CA with a name of its own. |
 | The Server refuses to start, naming `[client_ca] … does not exist` | Server | A file of `[client_ca]` is missing. |
-| The Server refuses to start with `cannot read <key file>: …` | Server | The account the Server runs as cannot read the client CA's key, or, when the message ends in `Could not parse key pair`, the key is not PKCS#8. Convert it as [step 1](#1-make-the-certificates) shows. |
+| The Server refuses to start with `cannot read <key file>: …` | Server | The account the Server runs as cannot read the client CA's key, or, when the message ends in `Could not parse key pair`, the key is not PKCS#8. A client CA made by `server pki init` always is. |
 | Hosts enrol, but their certificates are refused at once | both | `[client_ca]` holds a key that does not belong to its certificate, or `client_ca_file` names another CA. The Server checks neither at startup. |
