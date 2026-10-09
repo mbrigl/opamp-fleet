@@ -325,23 +325,18 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     loop {
         // The sampler runs beside the transport, not inside it: process metrics are about the host,
         // and a Client that has lost its connection is exactly when they are worth having.
-        let outcome = {
-            let transport = transport::run(&mut engine, &mut config, &mut shutdown, &telemetry);
-            tokio::pin!(transport);
-            let mut tick = tokio::time::interval(telemetry.sample_interval());
-            tick.tick().await; // the first tick is immediate; sample on the ones after it
-            loop {
-                tokio::select! {
-                    outcome = &mut transport => break outcome?,
-                    _ = tick.tick(), if telemetry.reporting() => {
-                        let targets = sampling.lock().map(|t| t.clone()).unwrap_or_default();
-                        for target in &targets {
-                            telemetry.sample(&mut system, target);
-                        }
-                    }
+        let outcome = sample_beside(
+            transport::run(&mut engine, &mut config, &mut shutdown, &telemetry),
+            telemetry.sample_interval(),
+            || telemetry.reporting(),
+            || {
+                let targets = sampling.lock().map(|t| t.clone()).unwrap_or_default();
+                for target in &targets {
+                    telemetry.sample(&mut system, target);
                 }
-            }
-        };
+            },
+        )
+        .await?;
         match outcome {
             // Both exits flush first: the batch exporters hold spans and log records that have not
             // left yet, and a process that simply returns drops them. The stop path is exactly when
@@ -376,6 +371,34 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
                     // follows (the reverse never happens — 0 means "not offered").
                     engine
                         .declare_capability_all(opamp::proto::AgentCapabilities::ReportsHeartbeat);
+                }
+            }
+        }
+    }
+}
+
+/// Drives `transport` to its end, calling `sample` every `interval` while `reporting` says a
+/// destination is in force (ADR-0016).
+///
+/// `reporting` is asked on every tick, not once: a destination offered over the connection that is
+/// running comes into force halfway through `transport`. Asked once — as a `select!` precondition,
+/// which disables its branch for the whole of the call — sampling started only on the next
+/// reconnect, and a Client told where to report over a connection that held reported no metrics.
+async fn sample_beside<T>(
+    transport: impl std::future::Future<Output = T>,
+    interval: std::time::Duration,
+    reporting: impl Fn() -> bool,
+    mut sample: impl FnMut(),
+) -> T {
+    tokio::pin!(transport);
+    let mut tick = tokio::time::interval(interval);
+    tick.tick().await; // the first tick is immediate; sample on the ones after it
+    loop {
+        tokio::select! {
+            outcome = &mut transport => return outcome,
+            _ = tick.tick() => {
+                if reporting() {
+                    sample();
                 }
             }
         }
@@ -451,6 +474,36 @@ async fn ignore_sighup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A destination that comes into force while the connection holds is sampled from then on —
+    /// not from the next reconnect, which on a healthy connection never comes.
+    #[tokio::test(start_paused = true)]
+    async fn a_destination_offered_mid_connection_is_sampled_at_once() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let reporting = AtomicBool::new(false);
+        let samples = AtomicUsize::new(0);
+        let transport = async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            reporting.store(true, Ordering::SeqCst); // the offer arrives over this connection
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        };
+        sample_beside(
+            transport,
+            Duration::from_secs(10),
+            || reporting.load(Ordering::SeqCst),
+            || {
+                samples.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
+        assert_eq!(
+            samples.load(Ordering::SeqCst),
+            3,
+            "sampled at 10 s, 20 s and 30 s"
+        );
+    }
 
     #[tokio::test]
     async fn requested_resolves_after_the_flip_and_immediately_thereafter() {

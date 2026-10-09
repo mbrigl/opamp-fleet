@@ -241,6 +241,11 @@ pub use crate::engine::SamplingTarget;
 /// cannot express. One `Mutex` gives both a shared borrow and costs nothing else: every method
 /// under the lock is synchronous, so the guard is never held across an `.await` and no deadlock
 /// class is introduced. An `Arc` would buy a clone nobody needs.
+///
+/// **Replacing a destination never waits on the old one.** Shutting a provider down flushes what it
+/// holds, and an export to a destination that has gone silent takes its full timeout. `apply` runs
+/// inside the transport, so the providers it replaces are detached at once and shut down on a
+/// thread of their own; only [`Telemetry::shutdown`], on the way out, waits for every flush.
 #[derive(Default)]
 pub struct Telemetry {
     inner: std::sync::Mutex<Providers>,
@@ -253,6 +258,16 @@ struct Providers {
     loggers: Option<SdkLoggerProvider>,
     /// The endpoints in force, so an offer that repeats them rebuilds nothing.
     in_force: Endpoints,
+    /// Providers an offer replaced, still flushing on a thread of their own.
+    retiring: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// Providers taken out of service, detached from `tracing`, waiting to be shut down.
+#[derive(Default)]
+struct Retired {
+    meters: Option<SdkMeterProvider>,
+    tracers: Option<SdkTracerProvider>,
+    loggers: Option<SdkLoggerProvider>,
 }
 
 #[derive(Default, PartialEq, Eq, Clone)]
@@ -297,7 +312,8 @@ impl Telemetry {
 
         let mut refused = Vec::new();
         let resource = resource(description);
-        this.stop();
+        let retired = this.take();
+        this.retire(retired);
 
         if let Some(settings) = offered(settings.own_metrics.as_ref()) {
             match check(settings, "own_metrics")
@@ -403,10 +419,18 @@ impl Telemetry {
         self.providers().any()
     }
 
-    /// Stops every provider in force, flushing what it holds. Called before a new destination is
-    /// installed and on shutdown; an exporter that cannot flush is logged, never fatal.
+    /// Stops every provider in force and waits for each to flush what it holds — the ones in force
+    /// and the ones an earlier offer replaced. Called on the way out; an exporter that cannot flush
+    /// is logged, never fatal.
     pub fn shutdown(&self) {
-        self.providers().stop();
+        let (retired, retiring) = {
+            let mut this = self.providers();
+            (this.take(), std::mem::take(&mut this.retiring))
+        };
+        retired.shut_down();
+        for handle in retiring {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -416,25 +440,78 @@ impl Providers {
         self.meters.is_some() || self.tracers.is_some() || self.loggers.is_some()
     }
 
-    /// Stops and drops every provider, flushing what each holds.
-    fn stop(&mut self) {
-        if let Some(provider) = self.meters.take() {
+    /// Takes every provider out of service at once. The span layer and the log bridge are detached
+    /// here, before anything is shut down: a span opened or an event logged afterwards must not
+    /// reach an exporter that is closing, which is how a flush deadlocks.
+    fn take(&mut self) -> Retired {
+        let retired = Retired {
+            meters: self.meters.take(),
+            tracers: self.tracers.take(),
+            loggers: self.loggers.take(),
+        };
+        if retired.tracers.is_some() {
+            set_spans(None);
+        }
+        if retired.loggers.is_some() {
+            set_bridge(None);
+        }
+        retired
+    }
+
+    /// Shuts `retired` down on a thread of its own, so the caller does not wait for its flush.
+    /// Should no thread be had, it is shut down here instead: late, but not lost.
+    fn retire(&mut self, retired: Retired) {
+        self.retiring.retain(|handle| !handle.is_finished());
+        if !retired.any() {
+            return;
+        }
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Some(retired)));
+        let on_thread = shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("telemetry-retire".to_string())
+            .spawn(move || {
+                let retired = on_thread
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(retired) = retired {
+                    retired.shut_down();
+                }
+            });
+        match spawned {
+            Ok(handle) => self.retiring.push(handle),
+            Err(e) => {
+                warn!(error = %e, "no thread to retire the replaced exporters on; shutting them down here");
+                let retired = shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(retired) = retired {
+                    retired.shut_down();
+                }
+            }
+        }
+    }
+}
+
+impl Retired {
+    fn any(&self) -> bool {
+        self.meters.is_some() || self.tracers.is_some() || self.loggers.is_some()
+    }
+
+    /// Shuts every provider down, flushing what each holds.
+    fn shut_down(self) {
+        if let Some(provider) = self.meters {
             if let Err(e) = provider.shutdown() {
                 warn!(error = %e, "the metrics exporter did not shut down cleanly");
             }
         }
-        if let Some(provider) = self.tracers.take() {
-            // Detached before the provider goes, for the reason the bridge is: a span opened during
-            // shutdown must not reach an exporter that is closing.
-            set_spans(None);
+        if let Some(provider) = self.tracers {
             if let Err(e) = provider.shutdown() {
                 warn!(error = %e, "the traces exporter did not shut down cleanly");
             }
         }
-        if let Some(provider) = self.loggers.take() {
-            // Detach the bridge before the provider goes: an event logged during shutdown must not
-            // reach an exporter that is closing, which is how a flush deadlocks.
-            set_bridge(None);
+        if let Some(provider) = self.loggers {
             if let Err(e) = provider.shutdown() {
                 warn!(error = %e, "the logs exporter did not shut down cleanly");
             }
@@ -1128,6 +1205,110 @@ mod tests {
                 .is_some_and(reqwest::Error::is_timeout),
             "a silent destination must time out, got {outcome:?}"
         );
+    }
+
+    /// A destination that accepts a connection and never answers, for as long as the test runs.
+    async fn silent_destination() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/metrics", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut connections = Vec::new();
+            while let Ok((connection, _)) = listener.accept().await {
+                connections.push(connection);
+            }
+        });
+        endpoint
+    }
+
+    /// This process as an Agent to sample, so the exporter has something to flush.
+    fn this_process() -> SamplingTarget {
+        SamplingTarget {
+            uid: "0123456789abcdef0123456789abcdef".to_string(),
+            instance_name: "edge-01".to_string(),
+            service_name: "supervisor".to_string(),
+            pid: std::process::id(),
+        }
+    }
+
+    /// Replacing a destination returns at once even when the old one has gone silent: the flush of
+    /// the replaced exporter, which waits out its export timeout, happens off the caller — the
+    /// transport that applies the offer — and only `shutdown` on the way out waits for it.
+    /// Verifies: ADR-0016
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replacing_a_silent_destination_does_not_wait_for_its_flush() {
+        opamp::tls::install_ring_provider();
+        let telemetry = Telemetry::new();
+        let silent = ConnectionSettingsOffers {
+            own_metrics: Some(destination(&silent_destination().await)),
+            ..Default::default()
+        };
+        assert!(telemetry
+            .apply(&silent, &description(), &ClientConfig::default())
+            .is_empty());
+        telemetry.sample(&mut sysinfo::System::new(), &this_process());
+
+        let withdrawal = ConnectionSettingsOffers {
+            own_metrics: Some(destination("")),
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let refused = telemetry.apply(&withdrawal, &description(), &ClientConfig::default());
+        let took = started.elapsed();
+        assert!(refused.is_empty(), "{refused:?}");
+        assert!(!telemetry.reporting());
+        assert!(
+            took < Duration::from_secs(1),
+            "the offer waited {took:?} for the replaced exporter's flush"
+        );
+
+        // On the way out the flush is waited for, and it ends: the export gives up on its timeout.
+        let flushed = tokio::task::spawn_blocking(move || telemetry.shutdown());
+        tokio::time::timeout(Duration::from_secs(30), flushed)
+            .await
+            .expect("shutdown waits for the flush, and the flush ends")
+            .expect("shutdown");
+    }
+
+    /// A destination that refuses the connection costs nothing but the failed exports: sampling
+    /// goes on, a new offer is applied, and shutting down ends.
+    /// Verifies: ADR-0016
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_destination_that_refuses_the_connection_stops_nothing() {
+        opamp::tls::install_ring_provider();
+        // A port that was free a moment ago: nothing listens, so every connection is refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let telemetry = Telemetry::new();
+        let refusing = ConnectionSettingsOffers {
+            own_metrics: Some(destination(&format!("http://127.0.0.1:{port}/v1/metrics"))),
+            ..Default::default()
+        };
+        assert!(telemetry
+            .apply(&refusing, &description(), &ClientConfig::default())
+            .is_empty());
+        let mut system = sysinfo::System::new();
+        for _ in 0..3 {
+            telemetry.sample(&mut system, &this_process());
+        }
+        assert!(telemetry.reporting());
+
+        let elsewhere = ConnectionSettingsOffers {
+            own_metrics: Some(destination("http://127.0.0.1:4318/v1/metrics")),
+            ..Default::default()
+        };
+        assert!(telemetry
+            .apply(&elsewhere, &description(), &ClientConfig::default())
+            .is_empty());
+        assert!(telemetry.reporting());
+
+        let stopped = tokio::task::spawn_blocking(move || telemetry.shutdown());
+        tokio::time::timeout(Duration::from_secs(30), stopped)
+            .await
+            .expect("shutdown ends with the destination refusing")
+            .expect("shutdown");
     }
 
     /// The exporter's client offers TLS 1.3 and nothing older, so a destination that speaks only

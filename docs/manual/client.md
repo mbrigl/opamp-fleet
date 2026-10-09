@@ -31,6 +31,7 @@ puts things, and every configuration key.
 
 **When something is wrong**
 - [Connecting to the Server](#connecting-to-the-server)
+- [Its own telemetry](#its-own-telemetry)
 - [Troubleshooting](#troubleshooting)
 
 ## What the Client does
@@ -1783,6 +1784,26 @@ offered header would be a value the Server plants on every connection with no re
 plane. An `Authorization` header persisted in `connection-settings.pb` is dropped when the file is
 loaded, with one log line naming the header keys, and the file is rewritten without it. See
 [`docs/CONFORMANCE.md`](../CONFORMANCE.md).
+
+## Its own telemetry
+
+The Client reports on itself over OpenTelemetry, but only where the Server tells it to
+([ADR-0016](../adr/0016-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)). There is
+nothing to configure in `supervisor.toml`: the Server offers a destination per signal in its
+`[telemetry_offer]` ([the Server](server.md#the-fleets-own-telemetry)), and without an offer the
+Client builds no exporter and sends nothing.
+
+- **What it sends:** every 10 seconds the memory, CPU and uptime of its own process and of every
+  process it supervises, each under that Agent's identity; its own log output; and a trace for each
+  fleet operation — a package installed, a configuration applied, connection settings applied, a
+  self-update.
+- **How:** OTLP over HTTP. A destination is `https://`, in TLS 1.3, or `http://` to `127.0.0.1` or
+  `::1` alone; anything else is refused, and the offer is reported `FAILED` naming why.
+- **When the destination is down:** the Client runs on. Exports leave on threads of their own,
+  their queues drop rather than block, and each export gives up after 5 seconds. Nothing about a
+  destination is checked by connecting to it, so one that is down at the moment is applied as
+  offered and starts receiving once it is back. A new offer replaces the exporters at once; the
+  old ones flush in the background, and only stopping the Client waits for that flush.
 
 ## Troubleshooting
 

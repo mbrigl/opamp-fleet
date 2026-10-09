@@ -285,6 +285,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Fixed
 
+- **A Client offered its first own-telemetry destination over a running connection reports
+  metrics at once**
+  ([ADR-0016](docs/adr/0016-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)).
+  The sampler decided once per connection whether a destination was in force, so a Client that
+  learned of one over the connection already open — a Server given `[telemetry_offer]` and
+  restarted after the Client was up — sent logs and traces but no metrics until it next
+  reconnected. It now checks at every sample. **What to do:** nothing; a Client restarted after the
+  offer was not affected.
+- **A new own-telemetry destination no longer holds up the Client's connection**
+  ([ADR-0016](docs/adr/0016-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)).
+  Applying an offer shut the exporters it replaced down in place, and their flush to a destination
+  that had gone silent held the OpAMP connection for up to the export timeout per signal. The
+  replaced exporters are now detached at once and flushed on a thread of their own; only stopping
+  the Client waits for them. **What to do:** nothing.
 - **The Server shuts down gracefully on `SIGTERM`**
   ([ADR-0012](docs/adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
   clause 13, [ADR-0026](docs/adr/0026-the-fleet-record.md) clause 5). It took only `SIGINT` (Ctrl-C) as a shutdown,
