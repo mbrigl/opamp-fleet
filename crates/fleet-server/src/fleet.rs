@@ -1426,6 +1426,11 @@ impl AppState {
                 disconnected: false,
             };
         };
+        // The reply is addressed to the identity the Agent reported, even when it is re-keyed
+        // below: the Baseline makes a reply's instance_uid match the message's, and the Agent
+        // routes by it — a reply addressed to the new identity reaches no one, and the Agent goes
+        // on reporting under the old one. The new identity travels in agent_identification alone.
+        let reported = uid;
 
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let mut reply_flags = 0u64;
@@ -1806,7 +1811,7 @@ impl AppState {
 
         Processed {
             reply: ServerToAgent {
-                instance_uid: uid.as_bytes().to_vec(),
+                instance_uid: reported.as_bytes().to_vec(),
                 capabilities: self.capabilities(),
                 flags: reply_flags,
                 remote_config,
@@ -3341,6 +3346,11 @@ mod tests {
         rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
         let processed = state.process(rekey, Transport::WebSocket, Some(1));
         let new_uid = processed.uid.expect("the new identity");
+        assert_eq!(
+            processed.reply.instance_uid,
+            uid.as_bytes().to_vec(),
+            "the reply is addressed to the identity the Agent asked under"
+        );
         assert!(!dir.join("agents").join(format!("{uid}.json")).exists());
         assert!(dir.join("agents").join(format!("{new_uid}.json")).exists());
     }
@@ -3614,6 +3624,11 @@ mod tests {
         let new_uid = claimed.uid.expect("an identity");
         assert_ne!(new_uid, victim, "another host spoke for the Agent");
         assert_eq!(
+            claimed.reply.instance_uid,
+            victim.as_bytes().to_vec(),
+            "the reply is addressed to the identity the reporter sent, or it routes to no one"
+        );
+        assert_eq!(
             claimed
                 .reply
                 .agent_identification
@@ -3628,6 +3643,21 @@ mod tests {
                 .any(|agent| agent.instance_uid == victim.to_string()),
             "the claimed Agent's record moved"
         );
+
+        // Having adopted it, the reporter speaks under its new identity and is re-keyed no more:
+        // no further record appears for it.
+        let adopted = state.process_presented(
+            AgentToServer {
+                instance_uid: new_uid.as_bytes().to_vec(),
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&presented("h2", "02")),
+        );
+        assert_eq!(adopted.uid, Some(new_uid));
+        assert!(adopted.reply.agent_identification.is_none());
+        assert_eq!(state.snapshot().len(), 2, "one record per Agent, no more");
     }
 
     // ---- Who may fetch an uploaded artifact (ADR-0028) ----

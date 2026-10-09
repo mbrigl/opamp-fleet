@@ -492,7 +492,9 @@ async fn an_unknown_compressed_agent_is_asked_for_full_state_and_can_request_ide
     let assigned = reply.agent_identification.expect("an assigned identity");
     assert_eq!(assigned.new_instance_uid.len(), 16);
     assert_ne!(assigned.new_instance_uid, temporary.as_bytes().to_vec());
-    assert_eq!(reply.instance_uid, assigned.new_instance_uid);
+    // Addressed to the identity the Agent sent: the Baseline makes a reply's instance_uid match
+    // the message's, and an Agent routes by it before it knows the new one.
+    assert_eq!(reply.instance_uid, temporary.as_bytes().to_vec());
 }
 
 /// A poller past its burst is answered in the body: a `200` carrying the same `Unavailable` a

@@ -287,6 +287,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   A shutdown now tells every session at once, with the close code `1001` (going away), cuts what is
   still open at the end of the drain, and only then saves the records. The Gateway's downstream
   endpoint closes its sessions the same way. **What to do:** nothing; Agents reconnect as before.
+- **A re-keyed Agent takes its new identity, instead of leaving an empty record every heartbeat**
+  ([ADR-0022](docs/adr/0022-admission-by-a-client-certificate-alone.md) clause 7). When the Server
+  gave a reporter a new `instance_uid` — an identity bound to another host's certificate, a
+  duplicate on a second connection, or one the Agent asked for — it addressed the reply to the new
+  identity rather than to the one the Agent had sent. The Client routes replies by that field, so
+  it dropped the reply, never adopted the new identity, and reported under the old one again; each
+  report was re-keyed once more. After a certificate was re-issued to a new host, this left a
+  record with no type and no platform every heartbeat. The reply now names the identity the Agent
+  sent. **What to do:** forget the empty records such a host left behind; its Agent is re-keyed
+  once more and keeps the new identity.
 
 - **A named parent certificate that is missing is waited for, never trusted on sight**
   ([ADR-0019](docs/adr/0019-icinga-2.md) clause 12). An `icinga2` Supervisor whose
