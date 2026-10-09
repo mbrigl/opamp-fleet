@@ -293,6 +293,11 @@ async fn a_duplicate_uid_on_a_second_connection_is_rekeyed() {
     let mut second = connect(server.addr).await;
     send(&mut second, &full_report(&uid, "clone", 1)).await;
     let reply = recv(&mut second).await;
+    assert_eq!(
+        reply.instance_uid,
+        uid.as_bytes().to_vec(),
+        "the reply is addressed to the identity the newcomer sent, or it routes to no one"
+    );
     let assigned = reply
         .agent_identification
         .expect("the duplicate is rekeyed");
