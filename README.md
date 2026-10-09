@@ -69,91 +69,31 @@ the reasoning behind each structural choice lives in the ADRs ([`docs/adr/`](doc
 
 The picture keeps the shape of the [OpAMP reference architecture](https://opentelemetry.io/docs/specs/opamp/)
 — a supervisor owning a Collector, exchanging OpAMP with a backend — and extends it with what makes
-OpAMP Fleet different: an **API-first Server** whose contract is an OpenAPI REST API, a single
-**Client** whose two modes compose freely, **Supervisors as plugins** behind a hexagonal core — each
-exposing a **Supervisor Endpoint** for a Collector that speaks the protocol itself — a **Custom
-Supervisor** that brings a **non-OpAMP Foreign Agent** into the same control loop, and a
-**Connection Pool** that carries many Agents over few connections.
+OpAMP Fleet different: an **API-first Server** on two listeners, whose contract is an OpenAPI REST
+API, a single **Client** whose two modes compose freely, **Supervisors** whose compiled-in kinds
+each know their agent behind a hexagonal core — each exposing a **Supervisor Endpoint** for a
+Collector that speaks the protocol itself — and a **Connection Pool** that carries many Agents over
+few connections, every one of them admitted by a client certificate.
 
-```mermaid
-flowchart TB
-  UI("UI / Portal<br/>external · any frontend"):::ext
-  TB("Telemetry Backend"):::ext
+![The Server with its Operator and Agent planes, the Client with Supervisor Mode and Gateway Mode, and the agents, Collectors and downstream Clients they serve](docs/images/architecture.png)
 
-  subgraph SRV["OpAMP Fleet Server — API-first · Linux"]
-    direction TB
-    API("OpenAPI REST + SSE"):::server
-    LOOP("Fleet control loop<br/>config-hash diff · package delivery"):::server
-    ROUTE("Agent registry<br/>routed by instance_uid"):::server
-    STORE[("Configuration<br/>+ Packages")]:::store
-    API --> LOOP --> STORE
-    LOOP --- ROUTE
-  end
-
-  UI -->|"read fleet · change config"| API
-
-  subgraph HOST["Client — one process, two independent modes"]
-    direction TB
-    CORE("Supervision domain<br/>hexagonal core · ports"):::core
-    POOL("Connection Pool<br/>n Agents over m connections"):::core
-
-    subgraph SUP["Supervisor Mode"]
-      direction TB
-      CS("Collector Supervisor<br/>plugin"):::host
-      XS("Custom Supervisor<br/>plugin"):::host
-      LS(["Supervisor Endpoint<br/>loopback · always present"]):::local
-      CS --- LS
-    end
-
-    GW("Gateway Mode<br/>multiplexes other Clients"):::host
-
-    CORE --- CS
-    CORE --- XS
-    CORE --- POOL
-    GW --- POOL
-  end
-
-  ROUTE <==>|"OpAMP · each Agent = one instance_uid"| POOL
-
-  COL("Collector<br/>without opampextension"):::agent
-  COLX("Collector<br/>with opampextension"):::agent
-  FA("Foreign Agent<br/>needs a plugin of its own"):::agent
-  RC("Other Clients<br/>downstream"):::ext
-
-  CS -->|"config · restart · binary update"| COL
-  XS -->|"translate lifecycle to OpAMP"| FA
-  COLX -->|"OpAMP · loopback"| LS
-  RC -->|"OpAMP"| GW
-
-  COL -->|OTLP| TB
-  COLX -->|OTLP| TB
-  FA -.->|telemetry| TB
-
-  classDef server fill:#eef2ff,stroke:#6366f1,stroke-width:1px,color:#1e1b4b;
-  classDef core fill:#e0e7ff,stroke:#4f46e5,stroke-width:1px,color:#1e1b4b;
-  classDef host fill:#ecfdf5,stroke:#10b981,stroke-width:1px,color:#064e3b;
-  classDef agent fill:#f0fdfa,stroke:#14b8a6,stroke-width:1px,color:#134e4a;
-  classDef ext fill:#f8fafc,stroke:#94a3b8,stroke-width:1px,color:#0f172a;
-  classDef store fill:#fffbeb,stroke:#f59e0b,stroke-width:1px,color:#78350f;
-  classDef local fill:#d1fae5,stroke:#059669,stroke-width:1px,color:#064e3b;
-
-  style SRV fill:transparent,stroke:#6366f1,stroke-width:2px;
-  style HOST fill:transparent,stroke:#10b981,stroke-width:2px,stroke-dasharray:6 4;
-  style SUP fill:transparent,stroke:#34d399,stroke-width:1px,stroke-dasharray:3 3;
-```
+*The image carries its [Excalidraw](https://excalidraw.com) scene: open the PNG there to edit it,
+and export it again with "Embed scene" switched on.*
 
 On the wire the Server sees only **Agents**, told apart by `instance_uid` and never by the connection
-that carried them — so whether an Agent is a Collector Supervisor, a Custom Supervisor fronting a
-Foreign Agent, a Collector reporting through its own `opampextension`, or a Client several hops away
-behind a Gateway is invisible to it. The Supervisor Endpoint is bound to loopback and comes up with
-every supervisor; a Foreign Agent speaks no OpAMP, so nothing connects to it there and that is the
-whole of the handling. What separates a Collector from a Foreign Agent is which plugin has to exist
-for it, not whether it speaks OpAMP: one Collector supervisor serves every Collector, with or without
-the extension, while each kind of foreign agent needs a custom supervisor written for it. Adding a
-new kind of managed process means writing another plugin against the
-same ports — the core does not change. The terms used here (Server, Client, Agent, Client Modes,
-Supervisor Endpoint, Connection Pool, Collector/Custom Supervisor, Foreign Agent, Plugin, Port,
-Selector, Package, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md).
+that carried them — so whether an Agent is a Supervisor running a Collector or a Foreign Agent, a
+Collector reporting through its own `opampextension`, or a Client several hops away behind a
+Gateway is invisible to it. Every connection to the **Agent plane** is TLS 1.3 with a client
+certificate, which the Server's client CA issues once an operator approves a host's enrolment and
+renews by itself afterwards; the **Operator plane**, where the REST API and the UI live, is a
+listener of its own and stays on the loopback unless it is published behind a password. The
+Supervisor Endpoint is bound to loopback and admits only the process its Supervisor started, by a
+token. A Supervisor's **kind** is the authority on its agent: `collector` serves every Collector,
+with or without the extension; `icinga2`, `glpi` and `telegraf` each know their agent; `command`
+runs any other program and observes it from the outside. Adding a new kind of managed process
+means writing another kind against the same ports — the core does not change. The terms used here
+(Server, Client, Agent, Client Modes, Supervisor Endpoint, Connection Pool, Foreign Agent, Plugin, Port,
+Selector, Package, Deployment, …) are defined in [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md).
 
 ## Prerequisites
 
