@@ -97,12 +97,16 @@ async fn a_client_renews_each_certificate_before_it_expires() {
     );
     let config_path = dir.path().join("supervisor.toml");
     std::fs::write(&config_path, toml + &common::client_identity(dir.path())).expect("write");
+    // The Client's own account of what it did, for the failure message: without it a Client that
+    // never connects leaves nothing to read but the count.
+    let log_path = dir.path().join("client.log");
+    let log = std::fs::File::create(&log_path).expect("client log");
     let _client = ClientUnderTest(
         Command::new(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")
             .arg(&config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log.try_clone().expect("client log")))
+            .stderr(Stdio::from(log))
             .spawn()
             .expect("spawn the client"),
     );
@@ -126,7 +130,12 @@ async fn a_client_renews_each_certificate_before_it_expires() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert!(seen.len() >= 3, "only {} certificates in time", seen.len());
+    assert!(
+        seen.len() >= 3,
+        "only {} certificates in time; the Client logged:\n{}",
+        seen.len(),
+        std::fs::read_to_string(&log_path).unwrap_or_default()
+    );
     assert!(
         state
             .snapshot()
