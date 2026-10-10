@@ -1,10 +1,10 @@
 //! `opamp-fleetctl package fetch` — turns an agent release into package artifacts this fleet can
-//! install, and optionally uploads them (ADR-0026, ADR-0028).
+//! install, and optionally uploads them (ADR-0026, ADR-0029, ADR-0028).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
 //! them, and whether the container is one a Client can open at all. This tool holds that knowledge
-//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`,
+//! for the agent types the manual documents — `otelcol`, `otelcol-contrib`, `glpi-agent`,
 //! and `supervisor`, this fleet's own Client (ADR-0019) — and asks the
 //! operator only what it cannot know: which one, which version, which platforms, and where to send
 //! the result.
@@ -15,13 +15,13 @@
 //!   SHA-256 an operator can compare against the release page, and ADR-0026's line from author to
 //!   host stays unbroken. Every artifact is verified against the checksum *upstream* published
 //!   before anything else happens to it.
-//! - **Repacked only where it must be.** An agent whose upstream publishes no archive a Client can
-//!   install is repacked deterministically (ADR-0026). That is the one place the bytes change, and
-//!   the tool says so.
+//! - **Repacked only where it must be.** The GLPI Agent has no self-contained Linux archive — its
+//!   `.tar.gz` is source — so its AppImage is extracted and repacked deterministically (ADR-0029).
+//!   That is the one place the bytes change, and the tool says so.
 //!
 //! Interactive by default; every prompt has a flag, so the same tool serves a pipeline:
 //!   opamp-fleetctl package fetch                          # asks for everything
-//!   opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 --platform linux/amd64 --no-upload
+//!   opamp-fleetctl package fetch --agent glpi-agent --version 1.19 --platform linux/amd64 --no-upload
 
 use crate::package::sha256_file;
 use clap::ValueEnum;
@@ -34,13 +34,6 @@ const SERIES_SHOWN: usize = 3;
 
 /// The member cap a tree package is held to (ADR-0026). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
-)]
 const MAX_TREE_MEMBERS: usize = 10_000;
 
 /// What `package fetch` is asked for; every prompt has its flag.
@@ -84,6 +77,9 @@ enum AgentKind {
     /// The OpenTelemetry Collector, Contrib distribution — the one carrying `opampextension`.
     #[value(name = "otelcol-contrib")]
     OtelcolContrib,
+    /// The GLPI inventory agent.
+    #[value(name = "glpi-agent")]
+    GlpiAgent,
     /// This fleet's own Client — the package a Client updates *itself* from (ADR-0018, ADR-0019).
     #[value(name = "supervisor")]
     Supervisor,
@@ -109,6 +105,10 @@ impl AgentKind {
                 service_name: "otelcol-contrib",
                 repo: "open-telemetry/opentelemetry-collector-releases",
             },
+            AgentKind::GlpiAgent => Source {
+                service_name: "glpi-agent",
+                repo: "glpi-project/glpi-agent",
+            },
             // This repository's own releases. The Client is an Agent like any other (ADR-0018), so
             // the artifact that updates it is fetched the way every other agent's is — and since
             // ADR-0019 it is named and packed like one too, which is what makes that possible.
@@ -129,17 +129,23 @@ impl AgentKind {
         let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
         let rest = tag.strip_prefix(self.tag_prefix())?;
         let parts = rest.split('.').count();
-        // `v0.158.0`, `version/1.2.3` — three numeric parts behind the prefix, and nothing else.
-        let shaped = parts == 3;
+        let shaped = match self {
+            // `1.19`, `1.7.1` — two or three parts. `1.0-beta1` fails on the last part.
+            AgentKind::GlpiAgent => (2..=3).contains(&parts),
+            // `v0.158.0`, `version/1.2.3` — three numeric parts behind the prefix, and nothing
+            // else.
+            _ => parts == 3,
+        };
         (shaped && rest.split('.').all(numeric)).then(|| rest.to_string())
     }
 
     /// What each project puts in front of the version in its tags: `v`, the `version/` this
-    /// project's release workflow creates them under (ADR-0012).
+    /// project's release workflow creates them under (ADR-0012), and nothing at all for GLPI.
     fn tag_prefix(self) -> &'static str {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib => "v",
             AgentKind::Supervisor => "version/",
+            AgentKind::GlpiAgent => "",
         }
     }
 
@@ -163,6 +169,9 @@ impl AgentKind {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib => {
                 "linux, darwin, windows — as the release publishes".to_string()
+            }
+            AgentKind::GlpiAgent => {
+                group_platforms([("linux", "amd64"), ("windows", "amd64")].into_iter())
             }
             // Named rather than left to the release, unlike the Collectors': this is *this*
             // project's own build matrix (`.github/workflows/release.yml`), so it moves only when
@@ -203,6 +212,12 @@ impl AgentKind {
                 selector: &[("service.name", "otelcol-contrib")],
                 service_name: "",
                 body: include_str!("../../../config/examples/otelcol-contrib-conf.yaml"),
+            }],
+            AgentKind::GlpiAgent => &[DefaultConfiguration {
+                name: "glpi-agent-conf",
+                selector: &[],
+                service_name: "glpi-agent",
+                body: include_str!("../../../config/examples/glpi-agent-conf.cfg"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
             // deliberately does not own (ADR-0017 admits only `[[supervisor]]` blocks), and none
@@ -262,7 +277,7 @@ struct Plan {
 /// the same way, and the Collector changed its mind at 0.158.0.
 enum ChecksumSource {
     /// Files holding `<hash>  <name>` lines, `sha256sum` style — the artifact's line is looked up
-    /// by name. The Collector's pre-0.158 files.
+    /// by name. GLPI's combined file, the Collector's pre-0.158 files.
     ///
     /// Several, because a release may split them: 0.157.0 keeps its Windows assets in a file of
     /// their own. Which file holds a given artifact is answered by looking, not by a rule about
@@ -278,6 +293,9 @@ enum Action {
     /// Nothing. The artifact is uploaded exactly as upstream published it, so the hash the fleet
     /// verifies is the hash on the release page (ADR-0026).
     AsPublished,
+    /// Extract the AppImage and repack the tree deterministically (ADR-0029) — the one case where
+    /// upstream publishes no archive a Client can install.
+    RepackAppImage { wrapper: String },
 }
 
 /// `package fetch`: which agent, which version, which platforms, and whether to upload — each
@@ -495,6 +513,7 @@ fn select_platforms<'p>(available: &'p [Plan], wanted: &[String]) -> Result<Vec<
         .iter()
         .map(|p| match p.action {
             Action::AsPublished => format!("{}/{}", p.os, p.arch),
+            Action::RepackAppImage { .. } => format!("{}/{} (repacked)", p.os, p.arch),
         })
         .collect();
     let picked = MultiSelect::new()
@@ -626,6 +645,7 @@ async fn plans(
         AgentKind::Otelcol | AgentKind::OtelcolContrib => {
             Ok(collector_plans(agent, version, assets))
         }
+        AgentKind::GlpiAgent => Ok(glpi_plans(version, assets)),
         AgentKind::Supervisor => Ok(supervisor_plans(version, assets)),
     }
 }
@@ -750,6 +770,60 @@ fn collector_checksum(asset: &str, dist: &str, assets: &[(String, String)]) -> C
     ChecksumSource::Sums { urls }
 }
 
+/// GLPI publishes two self-contained builds: a portable zip for Windows, which travels as
+/// published, and an AppImage for Linux, which is repacked (ADR-0029). Everything else in the
+/// release is an installer for a machine to run, not an artifact a fleet installs.
+fn glpi_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
+    let sums: Option<String> = assets
+        .iter()
+        .find(|(name, _)| *name == format!("glpi-agent-{version}.sha256"))
+        .map(|(_, url)| url.clone());
+    let mut plans = Vec::new();
+
+    // The zip's name changed case at 1.9 (`glpi-agent-1.8-x64.zip` → `GLPI-Agent-1.9-x64.zip`),
+    // so it is matched case-insensitively rather than by a name that is right for some releases.
+    if let Some((name, url)) = assets.iter().find(|(name, _)| {
+        let lower = name.to_ascii_lowercase();
+        lower == format!("glpi-agent-{version}-x64.zip")
+    }) {
+        plans.push(Plan {
+            os: "windows".to_string(),
+            arch: "amd64".to_string(),
+            sources: vec![Download {
+                url: url.clone(),
+                checksum: ChecksumSource::Sums {
+                    urls: sums.clone().into_iter().collect(),
+                },
+            }],
+            action: Action::AsPublished,
+            out_name: name.clone(),
+            block_hint: "type = \"glpi\"  (docs/artifacts/glpi-agent.md)".to_string(),
+        });
+    }
+
+    if let Some((_, url)) = assets
+        .iter()
+        .find(|(name, _)| *name == format!("glpi-agent-{version}-x86_64.AppImage"))
+    {
+        plans.push(Plan {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+            sources: vec![Download {
+                url: url.clone(),
+                checksum: ChecksumSource::Sums {
+                    urls: sums.into_iter().collect(),
+                },
+            }],
+            action: Action::RepackAppImage {
+                wrapper: format!("glpi-agent-{version}"),
+            },
+            out_name: format!("glpi-agent_{version}_linux_amd64.tar.gz"),
+            block_hint: "type = \"glpi\"  (docs/artifacts/glpi-agent.md)".to_string(),
+        });
+    }
+    plans
+}
+
 /// Upstream's platform words in this fleet's vocabulary (ADR-0026), or `None` for one this fleet
 /// has no name for — an Agent reports `os.type` and `host.arch`, and a package entry no Agent can
 /// match is one nobody would ever be offered.
@@ -808,12 +882,24 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
         .cloned()
         .ok_or_else(|| "a plan with nothing to fetch".to_string())?;
 
+    let artifact = out_dir.join(&plan.out_name);
     match &plan.action {
         Action::AsPublished => {
             eprintln!("  as published — the fleet verifies upstream's own hash");
-            Ok(downloaded)
+            return Ok(downloaded);
         }
+        Action::RepackAppImage { wrapper } => repack_appimage(&downloaded, wrapper, &artifact)?,
     }
+    // What was downloaded was a means, not a result; leaving it beside the artifact invites
+    // uploading the wrong file.
+    for file in &fetched {
+        let _ = std::fs::remove_file(file);
+    }
+    eprintln!(
+        "  repacked  sha256 {}",
+        hex::encode(sha256_file(&artifact)?)
+    );
+    Ok(artifact)
 }
 
 /// The SHA-256 upstream published for this artifact, from whichever form the source uses.
@@ -862,6 +948,60 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
         .map(|(hash, _)| hash.trim().to_string())
 }
 
+/// Extracts the AppImage and packs the tree it holds (ADR-0029).
+///
+/// The AppImage is upstream's only self-contained Linux build, and extracting it here is what
+/// spares every fleet host the FUSE dependency — or the re-extraction on every start that avoiding
+/// FUSE otherwise costs. Extraction runs the AppImage's own runtime, so this step is Linux x86_64
+/// only; every other step of this tool runs anywhere.
+fn repack_appimage(appimage: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        return Err(
+            "extracting an AppImage runs it, so this repack needs Linux x86_64 — fetch the \
+             Windows artifact here and the Linux one on a Linux host"
+                .to_string(),
+        );
+    }
+    let staging = out.with_extension("staging");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(appimage, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("cannot make {} executable: {e}", appimage.display()))?;
+    }
+    eprintln!("  extracting the AppImage …");
+    let status = std::process::Command::new(
+        appimage
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve {}: {e}", appimage.display()))?,
+    )
+    .arg("--appimage-extract")
+    .current_dir(&staging)
+    .stdout(std::process::Stdio::null())
+    .status()
+    .map_err(|e| format!("cannot run the AppImage: {e}"))?;
+    if !status.success() {
+        return Err("--appimage-extract failed".to_string());
+    }
+
+    let tree = staging.join("squashfs-root");
+    // The desktop icon is a link to itself by another name, and the Debian packaging the AppImage
+    // is built from leaves links pointing at files no tree carries. Neither survives a package
+    // (ADR-0026), and neither is missed.
+    let _ = std::fs::remove_file(tree.join(".DirIcon"));
+    if !tree.join("AppRun").exists() {
+        return Err("the extracted tree has no AppRun".to_string());
+    }
+    eprintln!("  packing the tree …");
+    pack_tree(&tree, wrapper, out)?;
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(())
+}
+
 /// Packs a directory as a `.tar.gz` a Client can install as a tree — deterministically, and with
 /// every link resolved.
 ///
@@ -872,13 +1012,6 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 /// Links are resolved rather than carried because a tree package refuses them (ADR-0026): what a
 /// link names is not where it sits, which is the one thing a path check cannot judge. A link
 /// pointing at nothing is dropped.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
-)]
 fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
     let mut members = Vec::new();
     collect_members(root, Path::new(""), &mut members, &mut Vec::new())?;
@@ -949,13 +1082,6 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 /// while a second path to the same directory is legitimate duplication and must be packed again.
 /// Deduplicating by real path instead would leave one of the two names empty — and which one, on
 /// directory-read order, which is nobody's guarantee.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
-)]
 fn collect_members(
     root: &Path,
     prefix: &Path,
@@ -992,13 +1118,6 @@ fn collect_members(
 
 /// The mode to store, which off Unix is a decision rather than a reading: a tar written on Windows
 /// has no mode to carry, and a tree whose programs arrive unexecutable is a tree that will not run.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
-)]
 fn mode_of(meta: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
@@ -1320,7 +1439,7 @@ mod tests {
             .iter()
             .map(|agent| agent.source().service_name)
             .collect();
-        for expected in ["otelcol", "otelcol-contrib"] {
+        for expected in ["otelcol", "otelcol-contrib", "glpi-agent"] {
             assert!(offered.contains(&expected), "{expected} is not offered");
         }
     }
@@ -1343,6 +1462,17 @@ mod tests {
         ] {
             assert_eq!(AgentKind::Otelcol.version_of_tag(other), None, "{other}");
         }
+
+        // GLPI numbers releases with two parts and sometimes three, and never a leading `v`.
+        assert_eq!(
+            AgentKind::GlpiAgent.version_of_tag("1.19"),
+            Some("1.19".to_string())
+        );
+        assert_eq!(
+            AgentKind::GlpiAgent.version_of_tag("1.7.1"),
+            Some("1.7.1".to_string())
+        );
+        assert_eq!(AgentKind::GlpiAgent.version_of_tag("1.0-beta1"), None);
 
         // This project's own tags carry the prefix its release workflow creates them under, and
         // the round trip is what `--version` relies on: an operator types what the release page
@@ -1553,6 +1683,30 @@ mod tests {
             collector_checksum("otelcol_0.157.0_linux_amd64.tar.gz", "otelcol", &older),
             ChecksumSource::Sums { .. }
         ));
+    }
+
+    /// GLPI renamed its zip's case at 1.9, so both spellings have to be found — and the Linux
+    /// artifact is the one that gets repacked.
+    ///
+    /// The packing half of `docs/artifacts/glpi-agent.md`; its client half is in
+    /// `crates/fleet-agent/src/supervisor/glpi.rs`. An upstream that renames an asset should turn this
+    /// red rather than produce a run that quietly packs one platform.
+    /// Verifies: ADR-0029
+    #[test]
+    fn glpi_finds_both_zip_spellings_and_repacks_only_linux() {
+        for zip in ["GLPI-Agent-1.19-x64.zip", "glpi-agent-1.19-x64.zip"] {
+            let assets = vec![
+                asset(zip),
+                asset("glpi-agent-1.19-x86_64.AppImage"),
+                asset("glpi-agent-1.19.sha256"),
+            ];
+            let plans = glpi_plans("1.19", &assets);
+            assert_eq!(plans.len(), 2, "{zip}");
+            assert!(matches!(plans[0].action, Action::AsPublished), "{zip}");
+            assert_eq!(plans[0].out_name, zip, "the zip travels under its own name");
+            assert!(matches!(plans[1].action, Action::RepackAppImage { .. }));
+            assert_eq!(plans[1].out_name, "glpi-agent_1.19_linux_amd64.tar.gz");
+        }
     }
 
     /// A directory reached through a link is packed **under the linked name too**, with its

@@ -163,19 +163,19 @@ state_dir = "client-state"
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the
 # Client presents itself as a single Agent, as above.
 #
-# There are two kinds of Supervisor, `collector` and `command`. Both
-# know nothing about the agent they run, so their blocks say everything. A **wrapper** — a kind
-# that knows its agent, when a build carries one — has a block that says which host runs it and
-# little else. A key that a
+# There are three kinds of Supervisor, and they fall into two groups. `collector` and `command`
+# know nothing about the agent they run, so their blocks say everything. `glpi` is a
+# **wrapper**: it knows its agent, so its block says which host runs it and
+# little else — a wrapped block is two lines. A key that a
 # wrapper supplies is refused by name rather than silently overridden, and the message says what
 # supplies the value now.
 #
 # This Client reports the kinds it carries as attributes of its own Agent
-# (supervisor.kind.collector = "true", one key per kind), so a Supervisor set the Server rolls out
+# (supervisor.kind.glpi = "true", one key per kind), so a Supervisor set the Server rolls out
 # can be aimed at the Clients that can actually run it.
 #
 # Timing is the fleet's policy first. These two apply to every Managed Process; a wrapped kind
-# (when a build carries one) corrects them where its agent demands it, and only
+# corrects them where its agent demands it, and only
 # an unwrapped block may state its own.
 # [supervisors]
 # stop_timeout_secs = 10   # graceful-stop budget before the process is killed
@@ -186,7 +186,7 @@ state_dir = "client-state"
 # delivered_args = false   # whether a Server-delivered block may state its own arguments
 # remote_config_disabled = []   # Supervisor names whose Agents take no remote configuration and
 #                               # run only on the files placed in <supervisor_dir>/<name>/config/,
-#                               # e.g. ["otelcol"]; a delivered block must repeat their running
+#                               # e.g. ["glpi"]; a delivered block must repeat their running
 #                               # block exactly
 # server_manages_set = true     # false: the Server offers this Client no Supervisor set, and the
 #                               # [[supervisor]] blocks below, including any a set wrote earlier,
@@ -198,8 +198,8 @@ state_dir = "client-state"
 # Every Supervisor therefore takes package updates; there is no second shape and no opt-out.
 #
 # An absolute path is refused at startup: the Client manages only programs it installs. To bring
-# an agent the machine already carries under management, repack it and upload it as a Set.
-# Anything in between — ./x, bin/x —
+# an agent the machine already carries under management, repack it and upload it as a Set — the
+# GLPI Agent page walks through exactly that. Anything in between — ./x, bin/x —
 # fails at startup rather than being guessed at, and a bare name is NOT searched for in $PATH; it
 # names a file in that one directory.
 #
@@ -256,7 +256,7 @@ state_dir = "client-state"
 # args = []                # extra arguments, appended after the --config flags
 # endpoint_port = 4321     # the Supervisor Endpoint on 127.0.0.1 the extension connects to
 # stop_timeout_secs = 10   # optional: overrides [supervisors] for this block. Only a kind that
-# apply_grace_secs = 3     # knows nothing about its agent takes these — a wrapper would hold the
+# apply_grace_secs = 3     # knows nothing about its agent takes these — a wrapper holds the
 #                          # value instead, because how long an agent needs is the agent's
 #                          # property, not this host's.
 # [supervisor.env]         # optional environment for the process
@@ -328,3 +328,17 @@ state_dir = "client-state"
 # labels): keyed by that Agent's uid, matched by the same Selectors, and effective at once. The
 # [attributes] table at the top of this file still describes the *host*, and every Agent on it
 # carries those.
+
+# 5. The GLPI Agent, under a kind of its own — and the same two lines on Linux and on Windows,
+# which is the point. Its two platform invocations differ in nearly everything (the program's name
+# and place in the tree, four Perl -I paths on Windows, the script named by path rather than by
+# --script), and none of those differences is anybody's decision: they follow from the artifact
+# this project itself packs. The kind also holds --daemon --no-fork, which are supervision
+# requirements rather than preferences, and points --vardir outside program/, which a package swap
+# replaces whole.
+#
+# The recipe, the enrolment-free setup and what the agent needs before it reports anything are in
+# docs/manual/glpi-agent.md; the artifact itself in docs/artifacts/glpi-agent.md.
+# [[supervisor]]
+# type = "glpi"
+# name = "glpi"

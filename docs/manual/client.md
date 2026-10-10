@@ -1160,16 +1160,18 @@ Each `[[supervisor]]` block runs one Supervisor managing one local process, and 
 Server as its own Agent. Without any block the Client presents itself as a single Agent and manages
 nothing.
 
-Two plugin types ship today.
+Three plugin types ship today, in two groups.
 
-**Both know nothing about the agent they run**, so their blocks say everything: `collector` for an
+**Two know nothing about the agent they run**, so their blocks say everything: `collector` for an
 OpenTelemetry Collector, and `command` for any other process — a **Foreign Agent** that speaks no
 OpAMP.
 
-**A wrapper**, when a build carries one, knows one agent's program, its layout on each platform and its
-invocation, so its block says which host runs it and little else.
+**One is a wrapper**, knowing one agent's program, its layout on each platform and its
+invocation, so its block says which host runs it and little else: `glpi` for the GLPI
+inventory agent, whose Linux and Windows invocations share almost nothing.
 
-A new kind of process means a new plugin, not a change to the core.
+A new kind of process means a new plugin, not a change to the core — which is what the last one
+demonstrates.
 
 ### The Server can manage the set
 
@@ -1255,7 +1257,7 @@ system already configures. Name them in `[supervisors]`:
 
 ```toml
 [supervisors]
-remote_config_disabled = ["otelcol"]   # Supervisor names, by their block's `name`
+remote_config_disabled = ["glpi"]   # Supervisor names, by their block's `name`
 ```
 
 The key is read from this file only. The Server never writes `[supervisors]`, so a Supervisor set
@@ -1272,7 +1274,8 @@ set unless `server_manages_set = false`
   It still restarts on command and still takes signed packages. A configuration that arrives anyway
   is not stored, not written, not applied and not answered; the Client logs one warning per hash.
 - **What it runs on.** The files you place in `<supervisor_dir>/<name>/config/`, under the names its
-  kind reads: any unroled file for `collector`, and
+  kind reads: any unroled file for `collector`,
+  `glpi-agent-conf` for `glpi`, and
   for `command` whatever its `args` name. Roles go into `.supplementary`, one `<file> <role>` per
   line. Nothing else writes into that directory while the switch is on. Without such a file a
   `collector` waits and says so.
@@ -1280,7 +1283,7 @@ set unless `server_manages_set = false`
   block exactly, every key included, whatever `delivered_args` and `delivered_env` allow. A
   delivered block that adds a listed Supervisor carries only `type`, `name` and the key naming its
   program where the kind does not name its own: `binary` for `collector`, `command` for `command`,
-  and nothing more for a wrapped kind. Otherwise the whole set is refused before
+  nothing more for `glpi`. Otherwise the whole set is refused before
   anything stops. Any other key would be remote configuration by another route: a Collector reads
   a whole configuration from `--config=yaml:…` or an environment variable.
 - **What happens to a configuration delivered earlier.** When a listed Supervisor starts, the
@@ -1305,7 +1308,7 @@ false` as well to close that. A change to the list takes effect when the Client 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `type` | — | `"collector"` or `"command"` — one section each below. Required. |
+| `type` | — | `"collector"`, `"command"`, or `"glpi"` — one section each below. Required. |
 | `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
 | `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
@@ -1317,7 +1320,7 @@ false` as well to close that. A change to the list takes effect when the Client 
 #### Wrapped and unwrapped kinds
 
 `collector` and `command` know nothing about the agent they run, so their blocks say everything.
-A **wrapper**, when a build carries one, knows its agent's program, its layout and
+`glpi` is a **wrapper**: it knows its agent's program, its layout and
 its invocation, so its block says which host runs it and little else — two lines.
 
 A key a wrapper supplies is **refused by name** rather than silently overridden, and the message
@@ -1325,14 +1328,14 @@ says what supplies the value now. The same check runs on a Supervisor set the Se
 block that would not work is refused *before* any running process is touched.
 
 This Client reports the kinds it was compiled with as attributes of its own Agent — one key per
-kind, `supervisor.kind.collector = "true"` — so a Supervisor set can be aimed with a Selector at the
+kind, `supervisor.kind.glpi = "true"` — so a Supervisor set can be aimed with a Selector at the
 Clients that can actually run it.
 
-The published build carries every kind. A wrapper, when the code base carries one, is a Cargo feature named after its `type`, so
+The published build carries every kind. Each wrapper is a Cargo feature named after its `type`, so
 a build for hosts that run only some of them leaves the others out:
 
 ```sh
-cargo build --release -p fleet-agent --no-default-features --features <type>
+cargo build --release -p fleet-agent --no-default-features --features glpi
 ```
 
 `collector` and `command` are always there. A block naming a kind the build does not carry fails
@@ -1356,7 +1359,7 @@ apply_grace_secs = 3     # how long a restart must hold before an apply is ackno
 retain_previous_secs = 86400
 ```
 
-A **wrapped kind**, when a build carries one, **corrects them** where its agent's own behaviour demands it.
+A **wrapped kind corrects them** where its agent's own behaviour demands it.
 Only a block of an **unwrapped** kind may state its own, because there no kind
 exists to hold the value.
 
@@ -1479,6 +1482,31 @@ FLB_LOG_LEVEL = "info"
 Here `fluent-bit-conf` is the *name of the Configuration on the Server* — that is what the entry file
 is called.
 
+### `type = "glpi"`
+
+For the GLPI inventory agent. The block is two lines on **both** platforms, which is the whole
+point: its Linux and Windows invocations differ in the program's name and place in the tree, in
+four Perl `-I` paths, and in whether the script is named by `--script` or by path — and not one of
+those differences is a decision anybody makes.
+
+```toml
+[[supervisor]]
+type = "glpi"
+name = "glpi"
+```
+
+The kind also holds `--daemon --no-fork`, which are supervision requirements rather than
+preferences: without the first the agent runs its tasks once and exits into a restart loop, without
+the second it detaches and leaves the Supervisor holding a pid that ends immediately. Its state
+goes beside the tree rather than inside `program/`, which a package swap replaces whole.
+
+The recipe is [Delivering and supervising the GLPI Agent](glpi-agent.md); the artifact is
+[`docs/artifacts/glpi-agent.md`](../artifacts/glpi-agent.md).
+
+A complete worked example — a third party's release repacked and delivered, run as a foreground
+daemon, with the Windows interpreter invocation and the bootstrap of its configuration — is the
+[GLPI Agent recipe](glpi-agent.md).
+
 ## How a block names its program
 
 `binary` and `command` take a **bare file name** — `otelcol-contrib`, not a path. It names a file in
@@ -1489,7 +1517,8 @@ Server replace what is in it. Every Agent therefore consents to package updates,
 Anything with a path separator in it — `/usr/local/bin/otelcol`, `./x`, `bin/x` — is a startup error
 naming the rule, rather than a guess. A program the machine's package manager installed is not
 something this Client supervises; to bring one under management, repack it as a package and deliver
-it from the Server.
+it from the Server. The [GLPI Agent](glpi-agent.md) recipe shows what that
+looks like for a real agent.
 
 One thing to know about a bare name: it is **not** searched for in `$PATH`. It names a file in that
 one directory, and the first copy arrives by package like every later one.
@@ -1618,7 +1647,8 @@ the count is logged rather than passed over in silence.
 Two more things worth knowing. **A `.tar.gz` carries file modes and is the right format for a
 tree** on Unix; a `.7z` and a `.zip` are opened too, but both store Windows attributes rather than
 Unix modes, so only the program is made executable and a helper binary beside it would not be —
-which costs nothing for a tree that runs on Windows.
+which costs nothing for a tree that runs on Windows, and is why the GLPI Agent's portable Windows
+build ships as the `.zip` upstream published (see the [GLPI Agent recipe](glpi-agent.md)).
 
 ## Updating the Client itself
 

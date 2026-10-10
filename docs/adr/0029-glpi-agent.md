@@ -1,6 +1,6 @@
 # ADR-0029: The GLPI Agent gets a kind of its own, and its packages are upstream's portable zip as published and its AppImage repacked as a self-contained tree
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/glpi.rs, the `glpi` feature of crates/fleet-agent/Cargo.toml, glpi_plans and repack_appimage in opamp-fleetctl package fetch, config/examples/glpi-agent-conf.cfg, docs/artifacts/glpi-agent.md, docs/manual/glpi-agent.md
