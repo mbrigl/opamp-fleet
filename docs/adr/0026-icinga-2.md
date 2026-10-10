@@ -1,6 +1,6 @@
 # ADR-0026: Icinga 2 runs as the `icinga2` kind from a repacked vendor tree, enrols with its Icinga master, and reaches the hosts whose glibc is at least its build host's
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/icinga2.rs, the `icinga2` feature of crates/fleet-agent/Cargo.toml, the kind's use of the preflight, version parser and process-group stop of crates/fleet-agent/src/supervisor/process.rs, the Icinga tests in crates/fleet-agent/src/reconfigure.rs and crates/fleet-agent/src/supervisor/mod.rs, crates/fleet-agent/src/bin/stub_icinga2.rs, crates/fleet-agent/tests/icinga2_supervisor.rs, icinga2_plans and windows_plan in opamp-fleetctl package fetch, the Dev Container image and its system packages, config/examples/icinga2-*.conf, docs/artifacts/icinga2.md, docs/manual/icinga2.md
