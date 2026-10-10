@@ -1,16 +1,17 @@
-# ADR-0019: Icinga 2 runs as the `icinga2` kind from a repacked vendor tree, enrols with its Icinga master, and reaches the hosts whose glibc is at least its build host's
+# ADR-0034: Icinga 2 runs as the `icinga2` kind from a repacked vendor tree, enrols with its Icinga master, and reaches the hosts whose glibc is at least its build host's
 
-- **Status:** ⚪ superseded by [ADR-0034](0034-icinga-2.md)
-- **Date:** 2026-08-21
+- **Status:** 🟡 proposed
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/supervisor/icinga2.rs, the preflight, version parser and process-group stop in crates/fleet-agent/src/supervisor/process.rs, icinga2_plans and windows_plan in opamp-package-fetch, the Dev Container image and its system packages, docs/artifacts/icinga2.md
+- **Applies to:** crates/fleet-agent/src/supervisor/icinga2.rs, the preflight, version parser and process-group stop in crates/fleet-agent/src/supervisor/process.rs, icinga2_plans and windows_plan in opamp-fleetctl package fetch, the Dev Container image and its system packages, docs/artifacts/icinga2.md
+- **Supersedes:** [ADR-0019](0019-icinga-2.md)
 
 ## Context
 
 Icinga 2 should reach a host the way every other Managed Process does: a package the Server
 offers and the Client unpacks, updates and rolls back, never a distribution package installed
 beside the fleet. The target is the Icinga **Agent** role, which needs a certificate signed by an
-Icinga master. A kind knows its own agent ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), and
+Icinga master. A kind knows its own agent ([ADR-0032](0032-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), and
 Icinga 2 is the agent where a kind is not merely shorter than a recipe but required. A spike against
 Icinga 2.14.6 measured why. A repacked tree runs from any directory — `strace` showed no compiled-in
 path touched — but only under conditions no block can carry:
@@ -58,7 +59,7 @@ root fails on a Linux CA bundle, which holds no code-signing roots.
 
 We will run Icinga 2 in the Agent role as a compiled-in `icinga2` kind that derives its whole
 command line, gates starts and applies on what Icinga needs, and enrols with the Icinga master
-over the `pki` subcommands — from a link-free tree `opamp-package-fetch` repacks out of the vendor's
+over the `pki` subcommands — from a link-free tree `opamp-fleetctl package fetch` repacks out of the vendor's
 packages, bundling everything but glibc and built on a pinned Dev Container whose glibc is the
 artifact's reach.
 
@@ -80,7 +81,7 @@ artifact's reach.
 
    No `parent_host` means a standalone node: no enrolment, local checks only. All four are
    rollable: the `[[supervisor]]` blocks are the fleet-managed half of the Client's configuration
-   ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), and the two files travel as
+   ([ADR-0032](0032-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), and the two files travel as
    Configurations (clause 11).
 
 3. **`node_name` defaults to the host's FQDN.** Resolved with `getaddrinfo` and `AI_CANONNAME` (the
@@ -123,7 +124,7 @@ artifact's reach.
    Agent type-specific"*), so `main` is the `icinga2` kind's own value, read by no other kind (to a
    Collector any non-empty role means "written, never passed as `--config`",
    [ADR-0025](0025-configurations-and-the-rest-api.md)). Where no entry carries it, the entry named
-   `icinga2-conf` — the one `opamp-package-fetch` uploads — is the root. Two entries carrying it are
+   `icinga2-conf` — the one `opamp-fleetctl package fetch` uploads — is the root. Two entries carrying it are
    a reason not to start, naming both. The root is resolved on every spawn.
 
 8. **No process until it can do its job.** The kind's `build()` yields no process while the root
@@ -185,13 +186,13 @@ artifact's reach.
     and nothing is swapped, so a running Managed Process is never stopped for a package that could
     not run. Icinga's preflight is `--version` with `LD_LIBRARY_PATH=${staged}/lib`; the other kinds
     use their version arguments (`command`: its `version_args`). The health gate and rollback of
-    [ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md) remain the second line.
+    [ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md) remain the second line.
 
 16. **A version probe may bring its own parser.** `VersionProbe` takes an optional parse function,
     strict SemVer by default; Icinga's reads `r2.14.6-1` as `2.14.6`.
 
 17. **The artifact is the vendor's packages, repacked into one normalised, link-free tree.**
-    `opamp-package-fetch --agent icinga2` builds, under the wrapper `icinga2-<version>`:
+    `opamp-fleetctl package fetch --agent icinga2` builds, under the wrapper `icinga2-<version>`:
 
     ```
     sbin/icinga2[.exe]      the daemon (Windows: and the check plugins)
@@ -206,7 +207,7 @@ artifact's reach.
     so the copyright files travel. The Linux daemon is taken from `usr/lib`, not the `/usr/sbin`
     shell wrapper. The container is **`.tar.gz` on every platform**, Windows included — the only one
     carrying the executable bit. Packing is the deterministic tree packing of
-    [ADR-0018](0018-glpi-agent-and-telegraf.md) clause 7. The artifact is uploaded as the Package of
+    [ADR-0033](0033-glpi-agent-and-telegraf.md) clause 7. The artifact is uploaded as the Package of
     Agent type `icinga2` at the Icinga version, one entry per platform.
 
 18. **Linux: every library but glibc rides along, verified from the repository index.** The sources
@@ -252,7 +253,7 @@ artifact's reach.
     kind has no other form to fall back on. Until it has, Windows hosts are not served by this kind.
 
 24. **The artifact document is `docs/artifacts/icinga2.md`**, held by two tests: one on the repack
-    plan in `opamp-package-fetch` (the Debian repack, the MSI payload, the wrapper directory, the
+    plan in `opamp-fleetctl package fetch` (the Debian repack, the MSI payload, the wrapper directory, the
     output names), one on the kind's constants, `cfg`-gated per platform.
 
 **Out of scope:** the RPM repack (needed only for a deployment that must run the vendor's own Red
@@ -387,7 +388,7 @@ keys.
   (`crates/fleet-agent/tests/supervisor_process.rs`) and
   `a_package_that_fails_the_configured_version_check_is_refused`
   (`crates/fleet-agent/tests/packages_e2e.rs`).
-- `crates/fleet-tools/src/bin/opamp-package-fetch.rs`:
+- `crates/fleet-tools/src/fetch.rs`:
   `the_repository_index_yields_a_packages_filename_digest_and_libc_floor`,
   `icinga_2s_line_is_the_reach_of_the_host_it_is_read_on`,
   `every_distro_the_tool_builds_for_has_a_stated_reach`,

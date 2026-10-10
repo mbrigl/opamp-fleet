@@ -1,9 +1,10 @@
-# ADR-0009: Five crates in one Cargo workspace on tokio and axum without its WebSocket — the whole OpAMP communication layer in the publishable `opamp` crate reading WebSocket frames itself, an internal shared crate by measurement — and TOML configuration
+# ADR-0031: Five crates in one Cargo workspace on tokio and axum without its WebSocket — the whole OpAMP communication layer in the publishable `opamp` crate reading WebSocket frames itself, an internal shared crate by measurement — and TOML configuration
 
-- **Status:** ⚪ superseded by [ADR-0031](0031-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)
-- **Date:** 2026-10-04
+- **Status:** 🟡 proposed
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** Cargo.toml, `crates/opamp/` (its manifest and `[features]`, `build.rs`, `src/`, `LICENSE`, `NOTICE` and `README.md`), crates/fleet-core/, every OpAMP connection and listener of `crates/fleet-server/` and `crates/fleet-agent/` (the Server's two planes, the Client's upstream connection and its verification probe, the Gateway's downstream endpoint and upstream pool, the Supervisor Endpoint), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, the Client's `Session` in `crates/fleet-agent/src/transport/`, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, server.toml and supervisor.toml, the per-feature lint in `.github/workflows/ci.yml` and `README.md`, and every new crate, module placement or dependency
+- **Supersedes:** [ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)
 
 ## Context
 
@@ -63,9 +64,10 @@ protocol — the baked version and its grammar, the PEM readers, the platform al
 project's own, and lives in an internal crate.
 **How does a test reach the Client?** Cargo hands a test a helper binary's path
 (`CARGO_BIN_EXE_<name>`) only in an integration test, and an integration test links only a
-package's library. **Where do operator tools live?** `opamp-package-sign` and `opamp-package-fetch`
-run on an operator's machine, ship in no release, and use a few Client items: the 7z Unix-mode
-convention, the unpackers, and the TLS provider helper.
+package's library. **Where do operator tools live?** `opamp-fleetctl`, the operator tool
+([ADR-0030](0030-the-operator-tools-are-one-program-released-for-linux-and-macos.md)), runs on an
+operator's machine and uses a few Client items: the 7z Unix-mode convention, the unpackers, and
+the TLS provider helper.
 
 Operators hand-edit both configuration files, often over SSH; a format's failure modes matter more
 than its expressiveness. YAML's indentation and implicit typing (`no` → `false`) are classic sources
@@ -219,7 +221,7 @@ binaries from strict TOML files.
       file means is known.
     - `fleet-core`: `version`, the version helper
       ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md)); `platform`, the platform alias
-      table ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+      table ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
 
 18. **What the measurement leaves where it is.** The Server's router and admission, the Server's CA,
     the Client's CSR flow, the persistence of its connection settings, the choice of which TLS and
@@ -243,12 +245,14 @@ binaries from strict TOML files.
     such as a file mode. The stubs stay in `fleet-agent`, because `CARGO_BIN_EXE_*` resolves only inside
     the crate that declares them.
 
-22. **The operator package tools are their own crate, depending on the Client.**
-    `crates/fleet-tools` produces `opamp-package-fetch` and `opamp-package-sign` and has no library.
-    The arrow points one way: `fleet-tools` uses `fleet_agent::archive` and `opamp::tls` rather than
-    restating them, and its tests open what the tools produce with the Client's own unpacker. Nothing
+22. **The operator tool is its own crate, depending on the Client.**
+    `crates/fleet-tools` produces `opamp-fleetctl` (ADR-0030) and has no library.
+    The arrow points one way: `fleet-tools` uses `fleet_agent::archive`, `opamp::tls` and the
+    reading of a certificate's end in `fleet-core` that the Server shares (ADR-0029) rather than
+    restating them, and its tests open what the tool produces with the Client's own unpacker. Nothing
     in `fleet-agent`, `fleet-server` or `opamp` depends on `fleet-tools`. Tool-only dependencies (the 7z
-    writer, release listing) are declared there, so `cargo build -p fleet-agent` does not build them.
+    writer, release listing) are declared there, so `cargo build -p fleet-agent` does not build them,
+    and so is the code that makes the fleet's certificate authorities, which no end runs.
 
 23. **Both binaries are configured from TOML.** `server.toml` and `supervisor.toml`, parsed with the
     `toml` crate into `serde` structs. Each binary takes the path from `--config`, defaulting to the
@@ -265,7 +269,7 @@ binaries from strict TOML files.
 **Out of scope:** the CSR flow and the Server's CA, which stay in the application with ADR-0022;
 finer features, such as one per transport; a release routine for the crate; where the PEM
 material comes from on disk; where an installed service looks for its configuration file on each OS
-([ADR-0021](0021-the-client-supervisor-installed-service-releases-and-installers.md)); the listener layout
+([ADR-0035](0035-the-client-supervisor-installed-service-releases-and-installers.md)); the listener layout
 ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)); whether a release ships the operator
 tools.
 

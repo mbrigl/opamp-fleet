@@ -18,7 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 ### Added
 
 - **The Server makes the fleet's certificates itself**
-  ([ADR-0029](docs/adr/0029-the-server-makes-the-fleets-certificates-itself.md)).
+  ([ADR-0029](docs/adr/0029-the-operator-tool-makes-the-fleets-certificates-and-the-server-says-before-they-end.md)).
   `server pki init` makes the server CA, the client CA and the bootstrap CA, the Server's
   certificate and the bootstrap certificate, split into a directory for the Server host and one
   that stays offline, with `server.toml` and `supervisor.toml` fragments naming them.

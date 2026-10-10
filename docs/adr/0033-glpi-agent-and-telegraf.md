@@ -1,9 +1,10 @@
-# ADR-0018: The GLPI Agent and Telegraf each get a kind of their own, and their packages are upstream's artifacts as published or repacked as a self-contained tree
+# ADR-0033: The GLPI Agent and Telegraf each get a kind of their own, and their packages are upstream's artifacts as published or repacked as a self-contained tree
 
-- **Status:** ⚪ superseded by [ADR-0033](0033-glpi-agent-and-telegraf.md)
-- **Date:** 2026-08-21
+- **Status:** 🟡 proposed
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/supervisor/glpi.rs, crates/fleet-agent/src/supervisor/telegraf.rs, the zip container in crates/fleet-agent/src/archive.rs, glpi_plans and telegraf_plans in opamp-package-fetch, docs/artifacts/glpi-agent.md, docs/artifacts/telegraf.md
+- **Applies to:** crates/fleet-agent/src/supervisor/glpi.rs, crates/fleet-agent/src/supervisor/telegraf.rs, the zip container in crates/fleet-agent/src/archive.rs, glpi_plans and telegraf_plans in opamp-fleetctl package fetch, docs/artifacts/glpi-agent.md, docs/artifacts/telegraf.md
+- **Supersedes:** [ADR-0018](0018-glpi-agent-and-telegraf.md)
 
 ## Context
 
@@ -12,7 +13,7 @@ The fleet manages two third-party agents beyond the Collector: the
 suite — and InfluxData's Telegraf. Both should be ordinary Managed Processes: a package the Client
 installs into its own Supervisor directory, updates with a health gate and rolls back, a
 Configuration rolled out from the Server, a restart issued from it. A kind knows its own agent
-([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)): what follows from the artifact and the platform
+([ADR-0032](0032-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)): what follows from the artifact and the platform
 is compiled in, and a block holds only what an operator decides.
 
 **The GLPI Agent** is a Perl application, not a single binary:
@@ -36,7 +37,7 @@ the x86_64 **AppImage**, which as published needs `libfuse2` or re-extracts ~45 
 Its extracted tree is relocatable by design (`AppRun.env` resolves everything from `$ORIGIN`, and a
 bundled glibc-2.27 compatibility runtime serves older and newer hosts); it holds 219 symlinks, 38 of
 them dangling. Dereferenced and link-free it still runs (8 284 members, 259 MB — inside the tree
-limits of [ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Five links are directories, and one is
+limits of [ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Five links are directories, and one is
 load-bearing: `usr/share/perl/5.26` → `5.26.1` is the name the bundled `PERL5LIB` uses.
 
 The two platform invocations of GLPI differ in nearly everything — program, its place in the tree,
@@ -101,7 +102,7 @@ link-free tree where it does not.
 
 5. **The Windows package is upstream's portable zip, byte for byte.** The Client opens `.zip` as a
    third container beside `.tar.gz` and `.7z`: detected by its leading bytes, held to exactly the
-   member and tree rules of [ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md), read-only, and
+   member and tree rules of [ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md), read-only, and
    unencrypted (a confidential artifact is a `.7z`). Like a `.7z` it carries no Unix modes, which
    costs a Windows tree nothing. It is read through the [`zip`](https://crates.io/crates/zip) crate
    with `default-features = false` and `deflate` only, so decompression runs on the
@@ -109,7 +110,7 @@ link-free tree where it does not.
    published, the hash an Agent verifies is upstream's own, and the artifact may even be a
    referenced package pointing at the release asset.
 
-6. **The Linux package is the AppImage, repacked by `opamp-package-fetch`.** The tool verifies the
+6. **The Linux package is the AppImage, repacked by `opamp-fleetctl package fetch`.** The tool verifies the
    AppImage against the release's `glpi-agent-<version>.sha256` (looked up by name), extracts it,
    refuses if `AppRun` is missing, drops `.DirIcon` and the dangling links, dereferences every other
    link — a linked directory is packed under the linked name too, with its contents — and packs the
@@ -153,7 +154,7 @@ link-free tree where it does not.
 13. **Neither agent speaks OpAMP to the Client.** Both kinds refuse an `endpoint_port`; their
     Endpoint is bound and nothing connects.
 
-14. **Each Configuration name is part of the contract.** `opamp-package-fetch` uploads
+14. **Each Configuration name is part of the contract.** `opamp-fleetctl package fetch` uploads
     `glpi-agent-conf` (body `config/examples/glpi-agent-conf.cfg`) and `telegraf-conf` (body
     `config/examples/telegraf-conf.toml`) beside the package when the Server holds none of that name,
     never overwriting an existing one and distributing nothing. The name is the file name the kind
@@ -168,7 +169,7 @@ link-free tree where it does not.
 **Out of scope:** a GLPI health probe against the agent's embedded web interface (port 62354)
 instead of process aliveness; a Linux arm64 GLPI package (no AppImage exists for it; a source
 distribution plus a relocatable Perl is the only visible route); a reproducible tree mode for
-`opamp-package-sign pack`.
+`opamp-fleetctl package pack`.
 
 ## Alternatives considered
 
@@ -260,7 +261,7 @@ distribution plus a relocatable Perl is the only visible route); a reproducible 
   `extracts_the_named_member_from_a_zip_wherever_the_archive_keeps_it`,
   `a_zip_tree_lands_whole_with_the_wrapper_directory_dropped`,
   `a_hostile_zip_member_refuses_the_archive`, `a_zip_past_the_budget_is_refused`.
-- `crates/fleet-tools/src/bin/opamp-package-fetch.rs`:
+- `crates/fleet-tools/src/fetch.rs`:
   `glpi_finds_both_zip_spellings_and_repacks_only_linux`,
   `a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang`,
   `telegraf_urls_carry_upstreams_spelling_and_the_platform_this_fleet_names`,

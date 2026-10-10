@@ -1,9 +1,9 @@
-# ADR-0029: The Server binary makes the fleet's certificate authorities, its own certificate and the bootstrap certificate itself, and says before any of them ends
+# ADR-0029: The operator tool makes the fleet's certificate authorities, the Server's certificate and the bootstrap certificate, and the Server says before any of them ends
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-09
 - **Deciders:** Markus Brigl
-- **Applies to:** the `pki` subcommands of the Server binary in `crates/fleet-server/src/main.rs` and the module that carries them, the expiry warnings of the running Server, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), and every document that tells an operator how to make or inspect a certificate
+- **Applies to:** the `pki` commands of `opamp-fleetctl` in `crates/fleet-tools/` and the module that carries them, the Server's `pki status` command in `crates/fleet-server/src/main.rs` and the module that carries it, the reading of a certificate's end in `crates/fleet-core/`, the expiry warnings of the running Server, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), and every document that tells an operator how to make or inspect a certificate
 
 ## Context
 
@@ -46,23 +46,32 @@ The forces:
   implementation may refuse what this project's own ends accept, and nothing tells the operator
   that a CA or the Server's own certificate is about to end. The first sign of an expired CA is an
   outage somewhere else.
-- **The Server binary is what an operator already has.** It is built from a checkout and runs on
-  Linux, as an ordinary foreground process.
+- **The operator tool is what an operator has first.** `opamp-fleetctl` is published with every
+  release for Linux and macOS and runs on the operator's own machine
+  ([ADR-0030](0030-the-operator-tools-are-one-program-released-for-linux-and-macos.md)), before any
+  Server exists; the Server binary runs on the Server host, where two of the three CA keys are not
+  to be.
 
 ## Decision
 
-We will give the Server binary `pki` subcommands that make, with `rcgen`, the three certificate
-authorities, the Server's and a Gateway's certificate and the bootstrap certificate, and that
-say when each of them ends, and have the running Server warn before a certificate it depends on
+We will give the operator tool `opamp-fleetctl` `pki` commands that make, with `rcgen`, the three
+certificate authorities, the Server's and a Gateway's certificate and the bootstrap certificate,
+give both programs a `pki status` command that says when the certificates each can see end, and
+have the running Server warn before a certificate it depends on
 ends, so that no step of setting up or running a fleet needs `openssl` or another external tool
 and no certificate ends unannounced.
 
-1. **Four subcommands.** `server pki init` makes a fleet's certificates from nothing;
-   `server pki server-cert` makes a server certificate from the existing server CA, for the Server
-   or for a Gateway; `server pki bootstrap-cert` makes a bootstrap certificate from the existing
-   bootstrap CA; `server pki status` says when each certificate ends. Each runs and exits like
-   `hash-credential` and `audit-verify`, before the Server starts serving. None of them makes a
-   host certificate: a host obtains its certificate through enrolment alone (ADR-0022).
+1. **Three commands that make, and a status where the files are.** `opamp-fleetctl pki init` makes
+   a fleet's certificates from nothing; `opamp-fleetctl pki server-cert` makes a server certificate
+   from the existing server CA, for the Server or for a Gateway; `opamp-fleetctl pki
+   bootstrap-cert` makes a bootstrap certificate from the existing bootstrap CA. `opamp-fleetctl
+   pki status` says when the certificates in the offline directory end, and `server pki status`
+   when those of the Server host do; the Server's runs and exits like `hash-credential` and
+   `audit-verify`, before the Server starts serving. The Server binary carries no code that makes a
+   CA, a server certificate or a bootstrap certificate. How a certificate's end is read and when it
+   counts as ending (clause 11) is one piece of code in `fleet-core`, so both commands and the
+   running Server judge alike. None of the commands makes a host certificate: a host obtains its
+   certificate through enrolment alone (ADR-0022).
 
 2. **No dependency beyond ADR-0022 clause 12.** The commands use `rcgen` with the features that
    clause states, and `time`. Every key is ECDSA P-256 and written as PKCS#8 PEM, the form
@@ -82,8 +91,8 @@ and no certificate ends unannounced.
    absolute path of `--offline-dir`). The command prints which directory goes where, and the
    bootstrap certificate's serial.
 
-4. **`init` is meant to run where the offline keys are to stay.** That is the operator's Linux
-   machine the Server binary was built on. Run on the Server host, it is followed by moving
+4. **`init` is meant to run where the offline keys are to stay.** That is the operator's Linux or
+   macOS machine, the one `opamp-fleetctl` is downloaded to. Run on the Server host, it is followed by moving
    `--offline-dir` off it, and the command says so when both directories are on one file system.
 
 5. **The CAs are told apart by subject and sign no CA.** `--fleet <name>` (default `opamp-fleet`;
@@ -100,7 +109,7 @@ and no certificate ends unannounced.
    its subject is the first `--name`.
 
 7. **`server-cert` serves the Server and a Gateway alike.**
-   `server pki server-cert --offline-dir <dir> --name … --out <dir>` signs `server.pem` and
+   `opamp-fleetctl pki server-cert --offline-dir <dir> --name … --out <dir>` signs `server.pem` and
    `server-key.pem` in `--out` with `server-ca-key.pem`. For the Server they replace the files of
    `[tls]`, and the Server is restarted on them; for a Gateway they are its `[gateway.tls]`
    `cert_file` and `key_file`
@@ -112,7 +121,7 @@ and no certificate ends unannounced.
    `digitalSignature`, `clientAuth`, its subject the bootstrap CA's with `CA` dropped (`CN=<name>
    bootstrap`). One serves every new host; what limits it is the enrolment window and the
    operator's approval (ADR-0022 clauses 20 and 21).
-   `server pki bootstrap-cert --offline-dir <dir> --out <dir>` signs a new `bootstrap.pem` and
+   `opamp-fleetctl pki bootstrap-cert --offline-dir <dir> --out <dir>` signs a new `bootstrap.pem` and
    `bootstrap-key.pem` in `--out` with `bootstrap-ca-key.pem` and prints its serial, which is what
    revokes it ([ADR-0023](0023-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)).
 
@@ -140,15 +149,15 @@ and no certificate ends unannounced.
     the hosts it serves decide for themselves, and a Server that refuses to start cannot be told
     to renew.
 
-12. **`server pki status` says when each certificate ends.** Given `--config <server.toml>`, an
-    `--offline-dir <dir>`, or both, it lists every certificate it finds there — the files of
-    clause 11, and the server CA, the bootstrap CA and the bootstrap certificate in the offline
-    directory — with its subject, its serial, its end and the days left. It exits `0` when none
+12. **`pki status` says when each certificate ends.** `server pki status --config <server.toml>`
+    lists the files of clause 11; `opamp-fleetctl pki status --offline-dir <dir>` lists the server
+    CA, the bootstrap CA and the bootstrap certificate in the offline directory. Each prints every
+    certificate with its subject, its serial, its end and the days left, and exits `0` when none
     is ending in the sense of clause 11, `1` when one is, and `2` when one has ended, so a
     monitoring job can run it; a fresh 30-day bootstrap certificate is not ending.
 
 13. **The project uses its own commands.** `scripts/dev-pki.sh` makes its development set with
-    `cargo run -p fleet-server -- pki init`, writes a complete `server.toml` and `supervisor.toml`
+    `cargo run -p fleet-tools -- pki init`, writes a complete `server.toml` and `supervisor.toml`
     from the fragments, and needs no `openssl`. Its development Client holds the bootstrap pair
     and enrols like any other host; `scripts/seed_test_configs.sh` opens the window and approves
     its request. The operator manual describes the `pki` commands, reads a serial with
@@ -164,18 +173,22 @@ specification rules out; encrypting keys at rest, a hardware security module, or
 prompt; replacing a CA, which every host's configuration or enrolment follows; limiting the
 running Server's signatures to its CA's end, which would change ADR-0022 clause 9; certificate
 revocation lists or OCSP; ACME and certificates from a public CA, which the Server reads as they
-are; a `pki` command on the Client binary; running the commands on Windows or macOS, where the
-Server does not run.
+are; a `pki` command on the Client binary; the making commands on Windows, for which the operator tool
+is not built (ADR-0030); the Server's `pki status` on Windows or macOS, where the Server does not run.
 
 ## Alternatives considered
 
 - **Keep `openssl` and document it better.** Rejected: the rules stay in prose an operator has to
   get right by hand, and a system tool whose behaviour differs between versions stays a
   prerequisite of every fleet.
-- **A separate operator tool in `fleet-tools`.** It would keep certificate making out of the binary
-  that runs the fleet, but it is one more binary to build and keep at the same version as the
-  Server whose requirements it encodes; the split of clause 3 keeps the offline keys off the
-  Server host either way.
+- **All four commands on the Server binary.** The Server binary is certain to be at hand, but it
+  is the binary of the host the server CA's and the bootstrap CA's keys are kept away from, and it
+  would carry code no running Server uses. With the operator tool published (ADR-0030), the one
+  argument for it — no second binary to obtain — is gone; the version both share is the release's.
+- **`pki status` in one program only.** The Server host does not hold the server CA's certificate
+  and the operator's machine does not hold `server.toml`, so either program alone sees only half of
+  the certificates, and the server CA's end — which every host's trust hangs on — would be visible
+  nowhere.
 - **A `pki` command on the Client binary.** The Client is the one program a release ships, but it
   lands on every host, and every host would then carry the means to make a CA.
 - **Issue a host certificate from the command line**, offline with the client CA's key or through
@@ -214,7 +227,7 @@ Server does not run.
   the requirements a hand-made certificate can miss are written once, in code that is tested; the
   offline keys have a place of their own from the first command on; an ending CA or server
   certificate is announced 30 days ahead in the log, the audit and a command a monitor can run.
-- Negative / trade-offs: the Server binary grows a second role beside serving; the development
+- Negative / trade-offs: the Server binary carries `pki status` beside serving, and the operator tool a second job beside packages; the development
   Client enrols instead of starting with a ready certificate, which adds an approval to a fresh
   development setup; keys at rest are only as safe as the place they are kept; a host certificate
   signed by the running Server can still outlive its CA, which the warnings announce rather than
@@ -242,7 +255,8 @@ Tests that will carry `Verifies: ADR-0029`:
 - A certificate asked to outlive its CA ends with the CA (clause 9).
 - A Server whose client CA ends within 30 days logs the warning and records `pki.expiring` at
   startup, and one whose CA has ended records `pki.expired` and keeps serving (clause 11).
-- `pki status` lists each file with its serial and end, and exits `0`, `1` and `2` for a set with
+- Both `pki status` commands, and the running Server, judge one certificate alike (clauses 1 and 11).
+- Each `pki status` lists each file with its serial and end, and exits `0`, `1` and `2` for a set with
   no, an ending and an ended certificate (clause 12).
 - `scripts/dev-pki.sh` runs with no `openssl` on `PATH` (clause 13).
 

@@ -1,9 +1,10 @@
-# ADR-0021: The Client is the program `supervisor`, installs itself as a native service named after a build-time product name from a versioned layout it can rewrite with a first configuration that authenticates and encrypts, and ships as `.tar.gz` archives and native installers that run that install
+# ADR-0035: The Client is the program `supervisor`, installs itself as a native service named after a build-time product name from a versioned layout it can rewrite with a first configuration that authenticates and encrypts, and ships as `.tar.gz` archives and native installers that run that install
 
-- **Status:** ⚪ superseded by [ADR-0035](0035-the-client-supervisor-installed-service-releases-and-installers.md)
-- **Date:** 2026-10-06
+- **Status:** 🟡 proposed
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `.github/workflows/release.yml`, `packaging/`, the program, Agent type and configuration-file names of the Client, `service install --endpoint`, and every path, name or account an installed Client uses
+- **Supersedes:** [ADR-0021](0021-the-client-supervisor-installed-service-releases-and-installers.md)
 
 ## Context
 
@@ -50,7 +51,7 @@ Forces:
   without that file. It must at once be a systemd unit name, a launchd label, an SCM service name
   and a directory name on every platform.
 - **Nothing ships the configuration.** A release artifact is the bare binary, and the Client loads
-  defaults when its file is absent ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)) — so a service
+  defaults when its file is absent ([ADR-0031](0031-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)) — so a service
   installed without one starts, dials the development default, and manages nothing, silently.
   `install` is also the command an Ansible play, an MDM profile or an MSI invokes: a prompt there
   does not fail, it hangs. And a first configuration names a client identity: a certificate and
@@ -107,7 +108,7 @@ deliver the same binary and run its own `service install`.
    and the default when no subcommand is given — and `service install | uninstall | start | stop |
    status`. The global flags are `--config` (default `supervisor.toml`) and `--state-dir`; every
    service verb takes `--user`. There is no environment-variable configuration: the Client is
-   file-configured ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)) and a registered
+   file-configured ([ADR-0031](0031-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)) and a registered
    service carries the configuration's *path*, never its content. clap's `version` is wired to
    `opamp::version::current()` ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md) clause 5). The daemon code lives in
    `crates/fleet-agent/src/service/` (`runtime`, `layout`, `manager`, `run_as`, and the Windows-only
@@ -316,7 +317,7 @@ deliver the same binary and run its own `service install`.
       for again. It is the one proof the Server admits a peer by
       ([ADR-0022](0022-admission-by-a-client-certificate-alone.md)).
     - **The package verification key**, the Ed25519 public key written as
-      `[packages] verification_key` ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). An empty
+      `[packages] verification_key` ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). An empty
       answer is accepted, and the install then says that the Client installs no package, its own
       update included, until a key is configured.
 
@@ -399,10 +400,10 @@ deliver the same binary and run its own `service install`.
 
 26. **The package that carries the Client is `supervisor` too.** `[self_update] package` defaults to
     the Agent type ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md) clause 2), and a Server offers a
-    package under the Agent type it is built for ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) — so
+    package under the Agent type it is built for ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) — so
     the release a fleet uploads for its Clients is a package for Agent type `supervisor`, and no
     per-host setting is needed. A Configuration carrying the Client's `[[supervisor]]` blocks
-    ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) is typed `supervisor` as well.
+    ([ADR-0032](0032-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) is typed `supervisor` as well.
 
 27. **The program is `supervisor`.** `supervisor.exe` on Windows: the binary Cargo builds
     (`[[bin]] name = "supervisor"` in the package `fleet-agent`), the file in every version directory
@@ -455,20 +456,23 @@ deliver the same binary and run its own `service install`.
     depending on an Intel runner label that keeps being retired. **Windows on arm64 is out** until a
     deployment asks for it; adding it is one row.
 
-31. **Every archive is a `.tar.gz` written by `opamp-package-sign pack --format tar.gz`.** The packer
+31. **Every archive is a `.tar.gz` written by `opamp-fleetctl package pack --format tar.gz`,** the
+    operator tool the same run builds and publishes
+    ([ADR-0030](0030-the-operator-tools-are-one-program-released-for-linux-and-macos.md)). The packer
     names the single member after the program, with its executable mode, so **a release archive is a
     valid package artifact unmodified**: the operator uploads the file they downloaded, and the
     SHA-256 the packer prints is both the published checksum and the hash an Agent verifies
-    ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). `.tar.gz` because it is the container every
+    ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). `.tar.gz` because it is the container every
     other agent's package ships as and the one that carries the executable bit and unpacks the same
     way on every platform. `.7z` remains a package container the Client opens and the packer writes,
-    including encrypted ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); a release has no use for
+    including encrypted ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); a release has no use for
     encryption.
 
-32. **Every asset is named `supervisor_<version>_<os>_<arch>.<ext>`.** Four fields separated by `_`:
+32. **Every asset of the Client is named `supervisor_<version>_<os>_<arch>.<ext>`,** and the
+    operator tool's by the same grammar under its own name (ADR-0030). Four fields separated by `_`:
     the package name, the base version `MAJOR.MINOR.PATCH` without build metadata, and the platform
     in the vocabulary an Agent reports as `os.type` and `host.arch`
-    ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). **All artifacts of a target share the stem** and differ
+    ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). **All artifacts of a target share the stem** and differ
     in extension alone:
 
     | | artifact |
@@ -494,12 +498,13 @@ deliver the same binary and run its own `service install`.
     version starts at the first separator followed by a digit, and the rest is the name. A tail it
     does not know fills no field rather than a guess, because a wrong platform is an entry no Agent is
     ever offered. Accepting `-` serves upstream artifacts named by upstream. The release notes' upload
-    loop splits on `_` and needs to be told neither name nor version.
+    loop selects the `supervisor_` stem and splits the rest on `_`, so it needs to be told no platform.
 
-34. **What is published.** A GitHub release named after the version holds the five archives, the
-    two `.deb`, the two `.rpm`, the `.msi` and one `SHA256SUMS` covering every asset. The notes say
-    which file is for which purpose, give the per-platform install commands and the procedure that
-    uploads the archives as one package for Agent type `supervisor`, and state the full baked
+34. **What is published.** A GitHub release named after the version holds the Client's five
+    archives, the two `.deb`, the two `.rpm`, the `.msi`, the four archives of the operator tool
+    (ADR-0030) and one `SHA256SUMS` covering every asset. The notes say which file is for which
+    purpose, give the per-platform install commands and the procedure that uploads the Client's
+    archives, selected by their `supervisor_` stem, as one package for Agent type `supervisor`, and state the full baked
     version string as provenance — the upload uses the release number, since versions are compared
     without build metadata ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md)). Nothing is signed. A change to the asset
     names or containers breaks operators' scripts and is named in `CHANGELOG.md` and the release

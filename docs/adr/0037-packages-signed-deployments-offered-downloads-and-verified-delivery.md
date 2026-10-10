@@ -1,9 +1,10 @@
-# ADR-0028: A Package is one release of an Agent type at a version, a Deployment that signs it is the only thing rolled out, a host or a Gateway fetches only what its Agents are offered, and a Supervisor installs only a signed package from an allowed source and rolls back only to a predecessor
+# ADR-0037: A Package is one release of an Agent type at a version, a Deployment that signs it is the only thing rolled out, a host or a Gateway fetches only what its Agents are offered, and a Supervisor installs only a signed package from an allowed source and rolls back only to a predecessor
 
-- **Status:** ⚪ superseded by [ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)
-- **Date:** 2026-10-06
+- **Status:** 🟡 proposed
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, deployment and download routes of `crates/fleet-server/src/api.rs` with the download handler `download_package`, `packages_dir` and the package limits in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, what a host speaks for in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fleet.rs`, the `download.refused` audit entry, the startup notice of `crates/fleet-server/src/main.rs` when `[client_ca]` is absent, the platform table in `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI, `docs/SPECIFICATION.md` and its Non-Goal "Authorization and multi-tenancy", the Gateway's package cache and its download route in `crates/fleet-agent/src/gateway/` (`cache.rs`, the route in `mod.rs`, the offers `registry.rs` records), the cache directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs` and the Client's waiting on `Retry-After` there, `crates/fleet-agent/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` and their parsing in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, and the `sign` command of `opamp-package-sign`
+- **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, deployment and download routes of `crates/fleet-server/src/api.rs` with the download handler `download_package`, `packages_dir` and the package limits in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, what a host speaks for in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fleet.rs`, the `download.refused` audit entry, the startup notice of `crates/fleet-server/src/main.rs` when `[client_ca]` is absent, the platform table in `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI, `docs/SPECIFICATION.md` and its Non-Goal "Authorization and multi-tenancy", the Gateway's package cache and its download route in `crates/fleet-agent/src/gateway/` (`cache.rs`, the route in `mod.rs`, the offers `registry.rs` records), the cache directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs` and the Client's waiting on `Retry-After` there, `crates/fleet-agent/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` and their parsing in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, and the `package sign` command of `opamp-fleetctl`
+- **Supersedes:** [ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)
 
 ## Context
 
@@ -24,12 +25,12 @@ verifies, installs and reports each package through `Downloading → Installing 
 InstallFailed`. The path runs from what the Server holds and how an artifact gets there, through
 how an operator aims, signs and releases it and who may fetch it, to the Agent that downloads,
 verifies, unpacks, swaps, health-gates and rolls it back. When content reaches an Agent and the
-version test it must pass are [ADR-0027](0027-rollout-and-what-reaches-an-agent.md)'s.
+version test it must pass are [ADR-0036](0036-rollout-and-what-reaches-an-agent.md)'s.
 
 The store, and which of the held artifacts can be meant for a given Agent at all:
 
 - **A release is one version across several artifacts.** The release pipeline
-  ([ADR-0021](0021-the-client-supervisor-installed-service-releases-and-installers.md)) publishes five platform builds
+  ([ADR-0035](0035-the-client-supervisor-installed-service-releases-and-installers.md)) publishes five platform builds
   of one version, and upstream projects publish more. The store needs an object that *is* that
   release, or "which version is this at" has one answer per platform and a half-finished upload
   looks like a rollout in progress.
@@ -58,9 +59,9 @@ The store, and which of the held artifacts can be meant for a given Agent at all
   Baseline defines as "a reverse FQDN that uniquely identifies the Agent type".
 
 What identifies a Package — its name on the wire, its hash, its layout and routes — and how a
-Package is aimed, signed and released: [ADR-0027](0027-rollout-and-what-reaches-an-agent.md)
-clause 9 requires an aim, its resource-level act (ADR-0027 clause 5) needs an object to name, and
-ADR-0027 clause 19 asks for counts. Four observations shape it:
+Package is aimed, signed and released: [ADR-0036](0036-rollout-and-what-reaches-an-agent.md)
+clause 9 requires an aim, its resource-level act (ADR-0036 clause 5) needs an object to name, and
+ADR-0036 clause 19 asks for counts. Four observations shape it:
 
 - **A name beside the Agent type is a second identity for one thing.** The type decides fit; a
   free-form name would decide nothing but would group, and the only thing it could add — two
@@ -94,7 +95,7 @@ membership. None of these says which member may fetch which artifact. Today
 Platform are all in the path and the query, and both are easy to guess.
 
 Membership is fleet-wide, but releases are not. A rollout releases a pinned Package to one Agent
-at a time ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clauses 2, 3, 5), and a
+at a time ([ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clauses 2, 3, 5), and a
 Deployment aims at a partition of the fleet by a host property such as `channel`, `region` or
 `tenant` (clause 25). With
 the route open, a host in one partition can fetch another partition's builds. It can fetch a
@@ -125,7 +126,7 @@ Forces on the download route and the Gateway:
 - **What reaches an Agent is already decided, per Agent.** Its package offer is composed from its
   assignment alone. The offer is the assigned Package's entry for the Platform the Agent reports,
   signed by the Deployment that released it
-  ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clause 3,
+  ([ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clause 3,
   clause 28). Type fit is a
   mandatory precondition of every offer
   (clause 9). The download
@@ -137,7 +138,7 @@ Forces on the download route and the Gateway:
 - **Configurations already reach only their own Agent.** A composed config map travels in the
   `ServerToAgent` addressed to one `instance_uid`. It is composed from what was released to that
   Agent ([ADR-0025](0025-configurations-and-the-rest-api.md) clauses 6, 7,
-  [ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clause 3). It answers only reports the host
+  [ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clause 3). It answers only reports the host
   may make for that `instance_uid`. No route on the Agent plane serves configurations.
 - **Without a cache in the Gateway, downloads behind it do not reach the Server.** A Client resolves a path
   `download_url` against its own OpAMP endpoint (`resolve_url` in
@@ -157,7 +158,7 @@ Forces on the download route and the Gateway:
   (`labels::effective_description`). A compromised host can therefore report another partition's
   key and value, such as the Client's own `[attributes]` table would, under a fresh
   `instance_uid`. That Agent waits in the fleet view
-  ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clause 6). The next bulk rollout of that
+  ([ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clause 6). The next bulk rollout of that
   partition's Deployment assigns it, and the host can then fetch what was released to it. This
   holds for a partition set by a Server label as well, because a reported attribute with the
   label's key satisfies the same Selector. What this decision bounds is fetching what was released
@@ -212,7 +213,7 @@ forces on the Agent:
 - **A running process cannot reliably replace its own binary**, so the work crosses a process
   boundary (the specification's *Updater*). For a Managed Process that boundary already exists:
   the Supervisor owns its process's stop, spawn and apply-grace health gate
-  ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). The Client's own binary is the other case
+  ([ADR-0032](0032-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). The Client's own binary is the other case
   ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)).
 - **Verification protects the host; the source set bounds what is exposed.** An artifact URL may
   point at the Server's download route or at a mirror or release page, so what stands between the
@@ -228,7 +229,7 @@ forces on the Agent:
 - **An upstream release is an archive.** `opentelemetry-collector-releases` publishes `.tar.gz`,
   `.deb`, `.rpm` and `.msi`, never a bare binary, with a `checksums.txt` of SHA-256 values and
   sigstore keyless signatures. The GLPI Agent's portable Windows build is a `.zip`
-  ([ADR-0018](0018-glpi-agent-and-telegraf.md)). An in-house agent may have to stay confidential
+  ([ADR-0033](0033-glpi-agent-and-telegraf.md)). An in-house agent may have to stay confidential
   wherever it is stored. The protocol carries one file per package and leaves multi-file packages
   to "any file format that allows storing multiple files in a single file".
 - **Many agents are more than one file.** Fluent Bit ships an executable plus the shared objects
@@ -275,7 +276,7 @@ starts, and keep the superseded version for a configurable window.
    to an old one. There is no untyped package and no moment in which one exists. The store keeps
    every version openly as its own package until an operator deletes it — there is no hidden
    "previous" artifact and no automatic pruning, and the store is not where rollback happens
-   ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clause 18). The type is compared
+   ([ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clause 18). The type is compared
    **raw** (clause 9); the version orders as [ADR-0011](0011-versions-resolved-in-the-internal-crate.md) clause 9 orders versions.
 
 3. **A package holds one entry per Platform, so a duplicate is unrepresentable.** Entries are a map
@@ -283,7 +284,7 @@ starts, and keep the superseded version for a configurable window.
    holds replaces it; deleting the last one leaves an empty package, kept, because a package being
    assembled is a normal state and deleting the package is its own act. One entry suffices; five
    platforms are five entries under one identity. When an entry may be written at all is
-   [ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clause 8's rule.
+   [ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clause 8's rule.
 
 4. **An entry is an uploaded artifact or a reference to one.**
    - **Uploaded:** the body of an entry upload is the artifact. The Server streams it to a staging
@@ -338,7 +339,7 @@ starts, and keep the superseded version for a configurable window.
    - the Client reports `host.arch` as `amd64`/`arm64` and `os.type` as `darwin`, mapping Rust's
      constants, so a Supervisor and a Collector's `opampextension` report the same string;
    - the release artifacts carry the same two tokens in their file names (the file-name format is
-     [ADR-0021](0021-the-client-supervisor-installed-service-releases-and-installers.md)'s), so the upload of a release
+     [ADR-0035](0035-the-client-supervisor-installed-service-releases-and-installers.md)'s), so the upload of a release
      is a loop over its files with `os` and `arch` read straight out of each name.
 
 8. **A request that names bytes names their Platform; one that names the package does not.** The
@@ -438,7 +439,7 @@ starts, and keep the superseded version for a configurable window.
     no Selector route and no rollout route; the OpenAPI document follows.
 
 21. **The version test reads the claim under the Agent type**, because that is the key an Agent
-    reports its status under; [ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clauses 10–13
+    reports its status under; [ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clauses 10–13
     are otherwise unchanged.
 
 22. **A Deployment is a name, a Selector, Packages and signatures.** The name — the one human-chosen
@@ -484,7 +485,7 @@ starts, and keep the superseded version for a configurable window.
 
 28. **The signature lives on the Deployment, per `(Package, Platform)`, and the wire is unchanged.**
     `PUT|DELETE /api/v1/deployments/{name}/signatures/{type}/{version}/{os}/{arch}` with the hex
-    Ed25519 signature (as `opamp-package-sign` prints it). A signature for a Package the Deployment
+    Ed25519 signature (as `opamp-fleetctl package sign` prints it). A signature for a Package the Deployment
     does not hold is `404`, an empty one `400`; removing a Package from a Deployment takes its
     signatures with it. What an Agent receives in `DownloadableFile.signature` is the signature held
     by the Deployment its assignment was released through, not whichever claims it now. **The
@@ -495,7 +496,7 @@ starts, and keep the superseded version for a configurable window.
     The same Package in two Deployments is signed in each.
 
 29. **Rollout acts name a Deployment.** `POST /api/v1/deployments/{name}/rollout` releases to every
-    Agent it claims and would move (ADR-0027 clauses 9–13), skipping Agents another Deployment also
+    Agent it claims and would move (ADR-0036 clauses 9–13), skipping Agents another Deployment also
     claims, and answers `assigned_agents`; a Deployment holding no Package is refused (`409`). **A
     Deployment that lacks a signature for any entry of any Package it holds is refused (`409`)**,
     with a message naming each such Package by its display name and the platforms it is unsigned
@@ -577,9 +578,9 @@ this object is called a Deployment.
 
 36. **An offer stands until the assignment changes, not until it was last sent.** The hash gate
     suppresses re-sending an offer whose `all_packages_hash` the Agent has echoed
-    ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clause 3). It does not withdraw the
+    ([ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clause 3). It does not withdraw the
     offer, so an Agent retrying after a failed install can fetch again. Neither connection state nor
-    the version test ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clause 17) enters the
+    the version test ([ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clause 17) enters the
     test. Matching does not enter it either: a version that waits for an operator's press is no
     one's offer, and it cannot be fetched until the press releases it.
 
@@ -776,7 +777,7 @@ this object is called a Deployment.
 50. **The Supervisor is the updater, and only a Client holding a verification key takes
     packages.** With `[packages] verification_key` set, every Supervisor-backed Agent declares
     `AcceptsPackages` and `ReportsPackageStatuses` (every Managed Process is one this Client
-    installed, [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Without it, no Agent of
+    installed, [ADR-0032](0032-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Without it, no Agent of
     this Client declares `AcceptsPackages` — neither a Supervisor nor the Client's own Agent
     ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)) — and the Client says so at startup, once,
     naming `[packages] verification_key` as what to set. A package offered to such an Agent
@@ -854,7 +855,7 @@ this object is called a Deployment.
     50). The signature covers a statement of what the artifact is, not its bytes:
     `opamp-fleet-package-v1`, the Agent type (the offered package's name), the version and the
     artifact's SHA-256 in lowercase hex, one per line, each ended by a newline
-    (`fleet_core::package::statement`). `opamp-package-sign sign --agent-type … --version …` makes
+    (`fleet_core::package::statement`). `opamp-fleetctl package sign --agent-type … --version …` makes
     it. Since the hash is in the statement and checked against the streamed bytes first, the
     signature still covers the artifact exactly as published, archive and all — and holds for that
     type and version alone. Where a Deployment
@@ -891,7 +892,7 @@ this object is called a Deployment.
     relative path *inside* the package, e.g. `bin/fluent-bit`; absent, the package is one file. It
     is validated at startup — non-empty, relative, no `.` or `..` — and it says *where inside*,
     never *whether*: the program's bare file name stays the consent
-    ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Being written in the
+    ([ADR-0032](0032-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Being written in the
     configuration, the spawn path `program/tree/<program_path>` is known before any package exists.
     - `program_path` matches a member by its **trailing path components**, so `bin/fluent-bit`
       finds `fluent-bit-3.1.0/bin/fluent-bit` and stays right at the next release. No match fails
@@ -923,11 +924,11 @@ this object is called a Deployment.
 
     The artifact is unpacked to the staged name first, beside what runs; a raw artifact is moved
     there rather than copied when it can be. A kind that declares a preflight proves the staged
-    program runs before anything is stopped ([ADR-0019](0019-icinga-2.md)). Then the Managed
+    program runs before anything is stopped ([ADR-0034](0034-icinga-2.md)). Then the Managed
     Process is stopped, the live name renamed to the predecessor, the staged name renamed to the
     live one — so the live name is always the old package or the new one, never a mixture — and
     the process is spawned and must survive `apply_grace_secs`
-    ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Surviving is `Installed`, after which the
+    ([ADR-0032](0032-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Surviving is `Installed`, after which the
     program is asked for its version again. A spawn failing with `ETXTBSY` right after the swap is
     retried briefly rather than rolled back. When there is nothing to run yet (no Configuration),
     the package is installed and reported `Installed`; the configuration that arrives starts it.
@@ -965,7 +966,7 @@ this object is called a Deployment.
     update keeps its own rules ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)).
 
 **Out of scope:** which package reaches which Agent and when
-([ADR-0027](0027-rollout-and-what-reaches-an-agent.md)); verifying upstream sigstore/cosign
+([ADR-0036](0036-rollout-and-what-reaches-an-agent.md)); verifying upstream sigstore/cosign
 signatures; a retention policy for superseded Packages; Deployments carrying Configurations;
 inequality in Selectors; refusing an overlapping Selector at write time; whether
 `[self_update] package` should be renamed, since its value is an Agent type; addons, and
@@ -1070,7 +1071,7 @@ allowed origin.
 - **Allow whatever is a candidate for the host's Agents** (what matching would release now). This
   would let a host fetch a build the operator saved but did not release. That breaks the rule that
   a release happens only by an operator's act
-  ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md) clause 1).
+  ([ADR-0036](0036-rollout-and-what-reaches-an-agent.md) clause 1).
 - **Limit a Gateway to the Agents currently carried on its connections.** The Server would have to
   track which connection or host carries each Agent, which it does not do today: the register
   binds nothing to a Gateway, and `owner` is a WebSocket connection id. That tracking would buy

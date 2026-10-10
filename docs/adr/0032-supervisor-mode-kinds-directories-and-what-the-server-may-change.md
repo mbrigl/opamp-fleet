@@ -1,9 +1,10 @@
-# ADR-0017: Supervisor Mode is a hexagonal core whose compiled-in kinds are the authority on their own agents, each Supervisor owns one directory and runs only a program installed there, and the Server manages the set and each Supervisor's configuration only as far as the package signature and the host allow
+# ADR-0032: Supervisor Mode is a hexagonal core whose compiled-in kinds are the authority on their own agents, each Supervisor owns one directory and runs only a program installed there, and the Server manages the set and each Supervisor's configuration only as far as the package signature and the host allow
 
-- **Status:** ⚪ superseded by [ADR-0032](0032-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)
-- **Date:** 2026-10-06
+- **Status:** 🟡 proposed
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, process runner, endpoint, placeholders, start, every kind and the delivered-block check (`check_delivered_block`) each kind states, the Client's own Agent in `build_engine`, the capability set and the handling of a received or stored remote configuration of the Client's own Agent and of a Supervisor's Agent in agent.rs), crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` and `remote_config_disabled` keys), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[[supervisor]]` blocks and the `[supervisors]` section of supervisor.toml (among them `delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`), docs/artifacts/
+- **Supersedes:** [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)
 
 ## Context
 
@@ -17,7 +18,7 @@ whose lifecycle, configuration and health a Plugin translates into OpAMP.
 
 The specification asks for a hexagonal core: the supervision domain written against two Ports, the
 Server-facing side speaking OpAMP and the Managed-Process side (lifecycle, configuration, health),
-with Plugins as adapters. [ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) keeps such seams as
+with Plugins as adapters. [ADR-0031](0031-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) keeps such seams as
 modules until a need makes them crates and requires a typo in the hand-edited TOML to fail loudly
 at startup. serde cannot combine `#[serde(flatten)]` with `deny_unknown_fields`
 (serde-rs/serde#1547), so a block whose kind-specific keys sit beside the common ones cannot be one
@@ -30,7 +31,7 @@ timeout, and watchdog-restarts it with exponential backoff. It configures its ag
 an absolute `agent.executable` plus `args` — because it supervises a binary somebody else
 installed. This Client is in the opposite position: it installs every program it supervises, into
 a directory it owns, from an artifact this project packs (clauses 21 and 24). It is the one end that can know an
-agent's layout, and `opamp-package-fetch` already carries per-agent knowledge (service name,
+agent's layout, and `opamp-fleetctl package fetch` already carries per-agent knowledge (service name,
 release source, default Configuration names). Writing that knowledge into every host's TOML by
 hand — two platform-specific blocks for the GLPI Agent, nine layout keys for Icinga 2 — is a
 transcription that goes stale when an artifact moves.
@@ -41,14 +42,14 @@ first-class beside restart (`ExecReload`, `reload-or-restart`). OpAMP itself onl
 configuration and packages, and its only process command is restart.
 
 A package update swaps files: the running program is renamed aside, the artifact is written beside
-it and renamed into place ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). All of that needs
+it and renamed into place ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). All of that needs
 write permission on the **directory**. A program in a system directory such as `/usr/local/bin`
 cannot be updated by a Client that does not run as root, and the failure would appear at rollout
 time on every matched host rather than at startup on one. A Client that also supervised programs
 installed by someone else would have two kinds of Managed Process — one it can update, roll back
 and health-gate, one it merely runs — and every package, version and rollback decision would carry
-both cases. Repacking vendor software into relocatable trees ([ADR-0018](0018-glpi-agent-and-telegraf.md),
-[ADR-0019](0019-icinga-2.md)) brings such agents under fleet ownership instead.
+both cases. Repacking vendor software into relocatable trees ([ADR-0033](0033-glpi-agent-and-telegraf.md),
+[ADR-0034](0034-icinga-2.md)) brings such agents under fleet ownership instead.
 
 `state_dir` is state: hardened hosts mount `/var/lib` `noexec` and size it for state, not for
 several Collector binaries. An artifact staged under one filesystem and installed on another is
@@ -59,7 +60,7 @@ path written there drifts silently when the Supervisor's directory moves or the 
 renamed: the process starts happily on a file nobody writes to.
 
 What the fleet needs to manage on a Client is which Supervisors it runs. Everything else in
-`supervisor.toml` ([ADR-0021](0021-the-client-supervisor-installed-service-releases-and-installers.md)) — the Server
+`supervisor.toml` ([ADR-0035](0035-the-client-supervisor-installed-service-releases-and-installers.md)) — the Server
 endpoint, the credential, the state directory, the instance name — is host-local trust and wiring;
 a Server that could rewrite it could cut a Client off with one bad push. The specification allows
 an Agent's effective configuration to "merge in local configuration". The program a Supervisor
@@ -93,7 +94,7 @@ write any files into a Supervisor's own `config/` directory and restart its proc
 agent's configuration language allows — a Telegraf `inputs.exec`, an Icinga `CheckCommand`, a
 Collector receiver bound to any port — it allows as the process's account. Package delivery on the
 same channel stops at a signature the operator's key makes
-([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); a remote configuration has no
+([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); a remote configuration has no
 such stop. An operator may run an agent whose configuration is too sensitive to take from a
 compromised Server, or which another system already configures, and every Supervisor's Agent
 declaring `AcceptsRemoteConfig` as part of the constant `AGENT_CAPABILITIES` gives the host no way
@@ -153,11 +154,11 @@ and records roles in `.supplementary` ([ADR-0025](0025-configurations-and-the-re
 - `command` always starts with the block's `args` and `env`; whatever configuration the Foreign
   Agent reads is the one those arguments name, `${config_dir}` included.
 - `telegraf` starts with `--config <config_dir>/telegraf-conf`; with no such file Telegraf exits and
-  the Runner reports it ([ADR-0018](0018-glpi-agent-and-telegraf.md)).
-- `glpi` starts with `--conf-file=<config_dir>/glpi-agent-conf` ([ADR-0018](0018-glpi-agent-and-telegraf.md)).
+  the Runner reports it ([ADR-0033](0033-glpi-agent-and-telegraf.md)).
+- `glpi` starts with `--conf-file=<config_dir>/glpi-agent-conf` ([ADR-0033](0033-glpi-agent-and-telegraf.md)).
 - `icinga2` takes as its root the entry with `role = "main"` in `.supplementary`, else
   `icinga2-conf`; with neither it does not start and reports *awaiting Icinga's root
-  configuration* ([ADR-0019](0019-icinga-2.md)). Its `ticket_file` and `trusted_cert_file` are
+  configuration* ([ADR-0034](0034-icinga-2.md)). Its `ticket_file` and `trusted_cert_file` are
   the block's, wherever they point.
 
 A Supervisor's stored `remote-config.pb` itself is read by no kind. It restores, at start, the
@@ -211,10 +212,10 @@ remote configuration and run only on what the operator placed on the host.
 
 3. **A block is parsed in two stages.** The core takes the common keys — `type`, `name`,
    `service_name` ([ADR-0015](0015-what-an-agent-reports-about-itself.md)), `endpoint_port`,
-   `program_path` ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), `stop_timeout_secs`,
+   `program_path` ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), `stop_timeout_secs`,
    `apply_grace_secs`, `retain_previous_secs` — and the program key the kind names (`binary` for
    `collector`, `command` for `command`), which clause 22 resolves. Everything else is the kind's,
-   parsed with `deny_unknown_fields`. `name` follows the instance-name grammar of [ADR-0021](0021-the-client-supervisor-installed-service-releases-and-installers.md), because it is
+   parsed with `deny_unknown_fields`. `name` follows the instance-name grammar of [ADR-0035](0035-the-client-supervisor-installed-service-releases-and-installers.md), because it is
    a directory name, and is unique across blocks.
 
 4. **Each Supervisor is one Agent; the pool is one connection.** Every Supervisor has its own
@@ -236,7 +237,7 @@ remote configuration and run only on what the operator placed on the host.
    watchdog-restart an unexpectedly exited process with exponential backoff; stop gracefully with
    SIGTERM → wait up to the stop timeout → kill on Unix, `Child::kill` on Windows. On Client
    shutdown the Managed Processes stop first, then each Agent's `agent_disconnect` goes out, within
-   the service managers' stop budgets ([ADR-0021](0021-the-client-supervisor-installed-service-releases-and-installers.md)).
+   the service managers' stop budgets ([ADR-0035](0035-the-client-supervisor-installed-service-releases-and-installers.md)).
    The Collector Supervisor passes each written configuration entry as its own `--config` (never a
    supplementary entry, [ADR-0025](0025-configurations-and-the-rest-api.md)), appends its extra
    `args`, does not start before a configuration exists, and manipulates no YAML.
@@ -265,7 +266,7 @@ remote configuration and run only on what the operator placed on the host.
 
 10. **Install and update run behind the Plugin, in one contract.** `ApplyPackage` hands the adapter
     a verified artifact and expects a health-gated outcome with rollback on failure
-    ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). The swap on `InstallTarget` (one file or a
+    ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). The swap on `InstallTarget` (one file or a
     tree) is the shared default; a kind whose installation is not a file swap implements the step
     itself inside the same contract. Resolving the program and declaring `AcceptsPackages` stay in
     the core (clauses 22 and 23), because a capability the Server acts on must derive from what the core reads, never from per-kind behaviour.
@@ -312,8 +313,8 @@ remote configuration and run only on what the operator placed on the host.
 
 15. **Each wrapped agent is decided in an ADR of its own.** The rule here is general; what a
     particular kind knows is not, and an upstream that moves a path should touch one document:
-    `glpi` and `telegraf` in [ADR-0018](0018-glpi-agent-and-telegraf.md), `icinga2` in
-    [ADR-0019](0019-icinga-2.md). `collector` and `command` are decided in clause 16.
+    `glpi` and `telegraf` in [ADR-0033](0033-glpi-agent-and-telegraf.md), `icinga2` in
+    [ADR-0034](0034-icinga-2.md). `collector` and `command` are decided in clause 16.
 
 16. **What stays in a block, stays for a stated reason.**
     - `collector` is one kind for both distributions and keeps `binary`: `otelcol` and
@@ -332,11 +333,11 @@ remote configuration and run only on what the operator placed on the host.
     - `command` keeps `args`, `env` and `version_args`: without them most Foreign Agents never find
       their configuration and report no version, and each fails visibly when wrong.
     - A wrapped kind may keep a key where a decision exists that nobody else can make — `icinga2`
-      keeps its enrolment ([ADR-0019](0019-icinga-2.md)).
+      keeps its enrolment ([ADR-0034](0034-icinga-2.md)).
 
 17. **Timing is a fleet policy, then a kind's correction — never a host's.** `[supervisors]`
     holds `stop_timeout_secs` (default 10) and `apply_grace_secs` (default 3); `[updates]` holds
-    `retain_previous_secs` (default one day, [ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). A
+    `retain_previous_secs` (default one day, [ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). A
     wrapped kind may correct any of the three where its agent demands it (Icinga 2's shutdown
     drains for up to a minute), and its blocks may state none of them. Only `collector` and
     `command` blocks may override them, because there no kind exists to hold the value.
@@ -350,7 +351,7 @@ remote configuration and run only on what the operator placed on the host.
     ([ADR-0010](0010-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)) and Selectors do not match it.
 
 19. **A kind binds itself to one artifact's shape.** The derived paths are those of the artifact
-    `opamp-package-fetch` builds. A tree packed differently does not fit, and the answer is to
+    `opamp-fleetctl package fetch` builds. A tree packed differently does not fit, and the answer is to
     repack it with the tool, not to reopen a key.
 
 20. **Every wrapped agent has an artifact document, pinned by two tests.** The shape a kind runs
@@ -383,7 +384,7 @@ remote configuration and run only on what the operator placed on the host.
 
    One knob moves state and program together. Staging beside `program/` makes a raw artifact's
    install a rename on one filesystem. The directory is `program/`, not `bin/`, because it holds a
-   whole tree for a multi-file package ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Moving
+   whole tree for a multi-file package ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Moving
    `supervisor_dir` on a running host leaves the old tree behind and migrates nothing; each
    Supervisor then registers as a new Agent.
 
@@ -408,8 +409,8 @@ remote configuration and run only on what the operator placed on the host.
 
 24. **A vendor agent is brought in by repacking.** An agent installed by the machine's package
    manager is not supervised here; it is repacked as a relocatable artifact and delivered as a
-   package ([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md), [ADR-0018](0018-glpi-agent-and-telegraf.md),
-   [ADR-0019](0019-icinga-2.md)). The manual documents the fleet-delivered route for every agent it
+   package ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md), [ADR-0033](0033-glpi-agent-and-telegraf.md),
+   [ADR-0034](0034-icinga-2.md)). The manual documents the fleet-delivered route for every agent it
    describes.
 
 25. **The Client's own consent stays explicit.** `[self_update]` names the package it takes
@@ -524,11 +525,11 @@ remote configuration and run only on what the operator placed on the host.
     states which of its settings name a file the Supervisor reads; in a delivered block each must
     be `${config_dir}/` followed by a relative path with no `..`, `.` or root component, unless it
     equals the running block's value and the block still names the same parent and node. The
-    `icinga2` kind states `ticket_file` and `trusted_cert_file` ([ADR-0019](0019-icinga-2.md)); its
+    `icinga2` kind states `ticket_file` and `trusted_cert_file` ([ADR-0034](0034-icinga-2.md)); its
     `node_name`, which names the host's certificate and key files, is a plain name with no
     separator in every block. A delivered `icinga2` block that names a `parent_host` must name
     `trusted_cert_file`: trust on first use is for a parent an operator chose, not one the Server
-    names. [ADR-0019](0019-icinga-2.md) stands otherwise for an operator-written block.
+    names. [ADR-0034](0034-icinga-2.md) stands otherwise for an operator-written block.
 
 40. **What is checked is what is written.** The rewritten `supervisor.toml` is rendered before
     anything stops, with every delivered table and its sub-tables placed in the order of the set,
@@ -602,7 +603,7 @@ remote configuration and run only on what the operator placed on the host.
 47. **Switching it back on hands the set to the Server again.** When the key returns to `true`,
     the next start declares both capabilities, reports no hash — unless that earlier start warned
     that it could not remove `remote-config.pb` itself — and is offered whatever set is
-    released to the Client's own Agent ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md)).
+    released to the Client's own Agent ([ADR-0036](0036-rollout-and-what-reaches-an-agent.md)).
     The first applied offer replaces the `[[supervisor]]` array, the operator's blocks included,
     and purges each Supervisor it removes (clauses 33 and 34).
 
@@ -702,7 +703,7 @@ remote configuration and run only on what the operator placed on the host.
 
 55. **Switching it back on hands `config/` to the Server again.** When a name leaves the list, the
     next start declares both capabilities, reports no hash, and is offered whatever is released to
-    that Agent ([ADR-0027](0027-rollout-and-what-reaches-an-agent.md)). The first stored offer
+    that Agent ([ADR-0036](0036-rollout-and-what-reaches-an-agent.md)). The first stored offer
     replaces every file in `config/` ([ADR-0025](0025-configurations-and-the-rest-api.md) clause 9),
     the operator's included.
 
@@ -714,7 +715,7 @@ reconciling a locally edited `[[supervisor]]` set against the last applied offer
 opt-in reaping of orphaned directories; migrating a Supervisor tree when its root moves; a
 supervise-only mode for programs this Client does not install, which would need its own decision
 and capability model; how a multi-file tree is unpacked and swapped
-([ADR-0028](0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); keeping some blocks from the Server while it
+([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); keeping some blocks from the Server while it
 manages the others; how the fleet view or the REST API shows that a host keeps its set, beyond the
 capability set the Server already lists; any change on the Server, the REST API or the bundled UI
 for either switch; the restart command and package delivery to a listed Supervisor, which stay as
@@ -1033,7 +1034,7 @@ none (the empty map, as for any Supervisor before its first remote configuration
   keeps its set; reporting a listed Supervisor's local files as its effective configuration when
   its process reports none; whether an `icinga2` Agent should refuse to enrol on trust on first use
   when its block names a `trusted_cert_file` that does not exist, rather than fall back to `pki
-  save-cert` (ADR-0019), which is not decided here; storing an offer so that a stop part-way leaves
+  save-cert` (ADR-0034), which is not decided here; storing an offer so that a stop part-way leaves
   no file the drop of clause 52 cannot attribute.
 
 ## Enforcement
@@ -1075,7 +1076,7 @@ none (the empty map, as for any Supervisor before its first remote configuration
   `telegraf.rs` and `icinga2.rs`; the packing side is `glpi_finds_both_zip_spellings_and_repacks_only_linux`,
   `telegraf_urls_carry_upstreams_spelling_and_the_platform_this_fleet_names` and
   `icinga_2s_windows_artifact_is_the_msi_verified_by_its_publisher` in
-  `crates/fleet-tools/src/bin/opamp-package-fetch.rs`. Each names its document.
+  `crates/fleet-tools/src/fetch.rs`. Each names its document.
 - [`crates/fleet-agent/src/reconfigure.rs`](../../crates/fleet-agent/src/reconfigure.rs) tests:
   `a_delivered_block_may_not_add_environment_the_operator_did_not_allow`,
   `a_loader_variable_is_refused_whatever_the_operator_allowed`,
