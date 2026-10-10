@@ -73,6 +73,13 @@ services:
     environment:
       FE_SERVERS: "fe1:${DORIS_SUBNET_PREFIX:-10.250.0}.10:9010"
       FE_ID: "1"
+      # The image's JDK (17.0.2) cannot read cgroup v2 on a kernel whose /proc/cgroups no longer
+      # lists the v2-only controllers (memory, cpuset, io — gone on 7.0): its container detection
+      # throws, BDB JE's first look at the OS MXBean fails with it, and the FE exits at startup with
+      # "Could not initialize class com.sleepycat.je.utilint.JVMSystemUtils". Without container
+      # detection the JVM sizes itself from the host, which costs nothing here: fe.conf fixes the
+      # heap at -Xmx8192m anyway. Drop this once the image ships a JDK that reads the newer layout.
+      JAVA_TOOL_OPTIONS: "-XX:-UseContainerSupport"
     volumes:
       - doris-fe-meta:/opt/apache-doris/fe/doris-meta
     ports:
@@ -82,7 +89,10 @@ services:
       default:
         ipv4_address: "${DORIS_SUBNET_PREFIX:-10.250.0}.10"
     healthcheck:
-      test: ["CMD-SHELL", "mysql -uroot -h127.0.0.1 -P9030 -N -e 'SELECT 1' >/dev/null"]
+      # Not `SELECT 1`: since Doris 4 even that is planned onto a BE ("No backend available as scan
+      # node"), and the BE waits for this check — the two would wait on each other forever.
+      # SHOW FRONTENDS is answered by the FE alone, from its own metadata.
+      test: ["CMD-SHELL", "mysql -uroot -h127.0.0.1 -P9030 -N -e 'SHOW FRONTENDS' >/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 60
