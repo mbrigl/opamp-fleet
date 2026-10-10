@@ -1119,18 +1119,24 @@ enum Reloaded {
 /// for an agent that re-reads its configuration on `SIGHUP` (ADR-0017). Off Unix the Runner then
 /// applies by restarting, so one block serves every platform.
 #[cfg(unix)]
-#[expect(
-    dead_code,
-    reason = "only the wrapped kinds that reload by signal call it"
+#[cfg_attr(
+    not(feature = "icinga2"),
+    expect(
+        dead_code,
+        reason = "only the wrapped kinds that reload by signal call it"
+    )
 )]
 pub(crate) fn sighup() -> Option<i32> {
     Some(libc::SIGHUP)
 }
 
 #[cfg(not(unix))]
-#[expect(
-    dead_code,
-    reason = "only the wrapped kinds that reload by signal call it"
+#[cfg_attr(
+    not(feature = "icinga2"),
+    expect(
+        dead_code,
+        reason = "only the wrapped kinds that reload by signal call it"
+    )
 )]
 pub(crate) fn sighup() -> Option<i32> {
     None

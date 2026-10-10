@@ -17,8 +17,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Removed
 
-- **The Supervisor kinds `icinga2`, `glpi` and `telegraf`** are no longer in the Client, and
-  `opamp-fleetctl package fetch` no longer offers `--agent icinga2`, `glpi-agent` or `telegraf`.
+- **The Supervisor kinds `glpi` and `telegraf`** are no longer in the Client, and
+  `opamp-fleetctl package fetch` no longer offers `--agent glpi-agent` or `telegraf`.
   A `[[supervisor]]` block of one of these types is an unknown type now: the Client refuses to
   start on it, and a Supervisor set the Server delivers with one is refused. **What to do:** before
   upgrading, remove those blocks from `supervisor.toml` and from every Supervisor set on the Server.
@@ -254,6 +254,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   registered. It takes the `--user`, `--root` and `--data-root` the Client was installed with
   ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)).
   **What to do:** nothing; restart the service after it to apply the change.
+
+- **Icinga 2 is managed by the fleet, end to end** — a new Supervisor kind `icinga2`, compiled into
+  the Client by default as the `icinga2` feature ([ADR-0029](docs/adr/0029-icinga-2.md)). The fleet
+  ships the program, creates its directories, enrols it with an Icinga master, distributes its
+  configuration, and updates and rolls it back — with nothing installed through `apt`, `dnf` or an
+  MSI — and the artifact carries the check plugins, so a rolled-out Agent can actually check
+  something. The daemon is stopped as a process group with Icinga's own 60 seconds, and every
+  configuration is validated before it is applied. The recipe is
+  [docs/manual/icinga2.md](docs/manual/icinga2.md). **What to do:** nothing, unless you run Icinga.
+  - **A block holds only the enrolment:** `type = "icinga2"`, `name`, and at most `parent_host`,
+    `node_name`, `ticket_file` and `trusted_cert_file`. `node_name` defaults to the host's FQDN,
+    taken only when the resolved name contains a dot. Icinga's root file is the Configuration
+    marked `role = "main"` on the Server; where nothing is marked, `icinga2-conf` stands in.
+  - **A named parent certificate is waited for, never trusted on sight.** Once `trusted_cert_file`
+    names a file, enrolment waits until it arrives and the Agent stays unhealthy, naming the path.
+    Only a block that names no `trusted_cert_file` trusts the parent on first contact, and logs
+    that it did. A block the Server delivers reads `ticket_file` and `trusted_cert_file` only from
+    `${config_dir}/`, and one that names a `parent_host` must name `trusted_cert_file` too
+    ([ADR-0017](docs/adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)).
+  - **`opamp-fleetctl package fetch --agent icinga2`** repacks the vendor's Debian packages into
+    one tree for **Linux amd64**: built on the oldest glibc you serve, it reaches Debian, Ubuntu and
+    Red Hat hosts alike, and the agent menu names that reach, read off the build host. When the
+    build host lacks a library, the refusal's `apt-get install` line names only the packages that
+    provide it. The upload also stores `icinga2-conf` and `icinga2-zones` from
+    `config/examples/`, left untouched where the Server already holds them; the per-host ticket and
+    parent certificate are not among them. `--platform windows/amd64` builds a Windows tree from
+    the MSI, verified by Icinga's Authenticode signature, but it is unproven on a Windows host —
+    keep Windows hosts on their MSI installation and outside the fleet.
+
+- **An artifact document per wrapped agent**, under [`docs/artifacts/`](docs/artifacts/): what the
+  artifact is, per platform — source, assets, integrity, repack, the delivered tree, and what the
+  Client derives from it. Each is pinned by two tests, one on the packing side and one in the kind,
+  so an upstream release that moves a path turns a test red instead of a rollout.
 
 ### Changed
 

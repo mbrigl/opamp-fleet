@@ -820,6 +820,50 @@ mod tests {
         .expect("consented");
     }
 
+    /// A listed `icinga2` enrols only with the parent the operator wrote: a delivered block that
+    /// names another parent or node, or points the pin at a file in `${config_dir}` — which, with
+    /// remote configuration off, nothing writes, so enrolment would fall back to trust on first
+    /// use — is refused naming the key, although ADR-0017 alone would let it through
+    /// (ADR-0017 clause 54).
+    /// Verifies: ADR-0017
+    #[cfg(feature = "icinga2")]
+    #[test]
+    fn a_listed_icinga2_keeps_the_parent_and_the_pin_the_operator_wrote() {
+        let globals = "[supervisors]\nremote_config_disabled = [\"icinga\"]\n";
+        // The operator placed the parent's certificate in `config/` by hand.
+        let operators = format!(
+            "{ICINGA}node_name = \"host-1\"\ntrusted_cert_file = \"${{config_dir}}/parent.crt\"\n"
+        );
+        let config = running(globals, &operators);
+        crate::supervisor::check_delivered_block(&config, &delivered(&operators))
+            .expect("the operator's own block, delivered back");
+        let pin_missing = "trusted_cert_file = \"${config_dir}/parent.crt\"\n";
+        for (key, block) in [
+            (
+                "parent_host",
+                operators.replace("master.example", "evil.example"),
+            ),
+            ("node_name", operators.replace("host-1", "host-2")),
+            (
+                "trusted_cert_file",
+                operators.replace("parent.crt", "absent.crt"),
+            ),
+        ] {
+            let block = delivered(&block);
+            crate::supervisor::check_delivered_block(&running("", &operators), &block)
+                .expect("what ADR-0017 alone lets through");
+            let err = crate::supervisor::check_delivered_block(&config, &block).expect_err(key);
+            assert!(err.contains(key) && err.contains("\"icinga\""), "{err}");
+        }
+        // Added under a listed name, the block cannot bring a parent either.
+        let err = crate::supervisor::check_delivered_block(
+            &running(globals, ""),
+            &delivered(&format!("{ICINGA}{pin_missing}")),
+        )
+        .expect_err("an added listed icinga2 with a parent");
+        assert!(err.contains("parent_host"), "{err}");
+    }
+
     /// A listed Supervisor that does not run yet is added naming its program and nothing else:
     /// `type`, `name` and the kind's program key where the kind does not name its own pass, and
     /// any further key — an empty one included — fails the offer naming it (ADR-0017 clause 54).
@@ -851,6 +895,12 @@ mod tests {
             ),
         )
         .expect("collector");
+        #[cfg(feature = "icinga2")]
+        crate::supervisor::check_delivered_block(
+            &config,
+            &delivered("[[supervisor]]\ntype = \"icinga2\"\nname = \"agent\"\n"),
+        )
+        .expect("icinga2, which names its own program");
     }
 
     /// The switch lives where the Server cannot write: a set that removes the listed block and
@@ -922,6 +972,71 @@ mod tests {
         assert_eq!(status.status, RemoteConfigStatuses::Failed as i32);
         assert!(status.error_message.contains("args"), "{status:?}");
         assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
+    }
+
+    #[cfg(feature = "icinga2")]
+    const ICINGA: &str = "[[supervisor]]\ntype = \"icinga2\"\nname = \"icinga\"\n\
+                          parent_host = \"master.example\"\n";
+
+    /// Verifies: ADR-0017
+    #[cfg(feature = "icinga2")]
+    #[test]
+    fn a_delivered_icinga2_block_reads_files_only_from_its_config_dir() {
+        let pin = "trusted_cert_file = \"${config_dir}/parent.crt\"\n";
+        for ticket in [
+            "/etc/shadow",
+            "${config_dir}/../../client-key.pem",
+            "${supervisor_dir}/ticket",
+            "${config_dir}/",
+        ] {
+            let block = delivered(&format!("{ICINGA}{pin}ticket_file = \"{ticket}\"\n"));
+            let err = crate::supervisor::check_delivered_block(&running("", ""), &block)
+                .expect_err(ticket);
+            assert!(err.contains("ticket_file"), "{err}");
+        }
+        let inside = delivered(&format!(
+            "{ICINGA}{pin}ticket_file = \"${{config_dir}}/ticket\"\n"
+        ));
+        crate::supervisor::check_delivered_block(&running("", ""), &inside).expect("inside");
+    }
+
+    /// The operator's ticket goes only to the operator's parent: a delivered block that keeps the
+    /// ticket file but names another parent is refused, and a node name is one plain name.
+    /// Verifies: ADR-0017
+    #[cfg(feature = "icinga2")]
+    #[test]
+    fn a_delivered_icinga2_block_cannot_send_the_operators_ticket_elsewhere() {
+        let operators = format!("{ICINGA}ticket_file = \"/etc/icinga2/ticket\"\n");
+        let elsewhere = delivered(
+            "[[supervisor]]\ntype = \"icinga2\"\nname = \"icinga\"\n\
+             parent_host = \"evil.example\"\nticket_file = \"/etc/icinga2/ticket\"\n\
+             trusted_cert_file = \"${config_dir}/evil.crt\"\n",
+        );
+        let err = crate::supervisor::check_delivered_block(&running("", &operators), &elsewhere)
+            .expect_err("the ticket to another parent");
+        assert!(err.contains("ticket_file"), "{err}");
+
+        for node_name in ["/etc/fleet/client", "../../etc/ssl/certs/x", "a\\b", ".."] {
+            let block = delivered(&format!(
+                "{ICINGA}trusted_cert_file = \"${{config_dir}}/p.crt\"\nnode_name = {node_name:?}\n"
+            ));
+            let err = validate_offered_block(&running("", ""), &block).expect_err(node_name);
+            assert!(err.contains("node_name"), "{err}");
+        }
+        let standalone = delivered("[[supervisor]]\ntype = \"icinga2\"\nname = \"icinga\"\n");
+        crate::supervisor::check_delivered_block(&running("", ""), &standalone)
+            .expect("no parent, nothing to pin");
+    }
+
+    /// Verifies: ADR-0017
+    #[cfg(feature = "icinga2")]
+    #[test]
+    fn a_delivered_icinga2_block_must_pin_its_parent() {
+        let err = crate::supervisor::check_delivered_block(&running("", ""), &delivered(ICINGA))
+            .expect_err("no pin");
+        assert!(err.contains("trusted_cert_file"), "{err}");
+        crate::supervisor::check_delivered_block(&running("", ICINGA), &delivered(ICINGA))
+            .expect("the operator's own block, unchanged, keeps its trust on first use");
     }
 
     /// ADR-0017: a Server-delivered block that names an **absolute** program path is refused as a
