@@ -1,17 +1,21 @@
 # Development observability stack
 
 OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry (ADR-0016), stored
-in one place. It is a Compose project of its own ([`compose.yaml`](compose.yaml)) that runs on the
+in one place — twice: in ClickHouse and, side by side, in Apache Doris. It is a Compose project of its own ([`compose.yaml`](compose.yaml)) that runs on the
 host, apart from the Dev Container: start it when you want to look, leave it off when you do not.
 This is a **development tool**: nothing shipped depends on it, it holds no credentials worth having,
 and it retains 24 h of data on a local volume.
 
 ```
-Agent ──OTLP/HTTP:4318──▶ OpenTelemetry Collector ──▶ ClickHouse ──▶ Grafana :3001
-                                                       otel_traces
-                                                       otel_logs
-                                                       otel_metrics_gauge
+                                                   ┌─▶ ClickHouse ───┐
+Agent ──OTLP/HTTP:4318──▶ OpenTelemetry Collector ─┤                 ├──▶ Grafana :3001
+                                                   └─▶ Apache Doris ─┘
+                                otel_traces · otel_logs · otel_metrics_gauge, in each
 ```
+
+"One store" below is about the *shape*: all three signals in one SQL database. Doris is a second
+such store next to ClickHouse, fed the same data, so the two can be compared on it — see
+[Doris, side by side](#doris-side-by-side).
 
 ## Why one store
 
@@ -55,7 +59,11 @@ docker compose -f observability/compose.yaml down       # stop; the data is kept
 docker compose -f observability/compose.yaml down -v    # stop, and throw the data away
 ```
 
-Or `cd observability` and leave out the `-f`. It needs roughly 2 GB of memory.
+Or `cd observability` and leave out the `-f`. ClickHouse, the Collector and Grafana need roughly
+2 GB of memory; Doris adds far more — its FE is a JVM with a fixed 8 GB heap, and its BE takes up to
+90 % of the host's memory as its own limit. Plan for 12 GB or more while Doris is up, and expect the
+first start to take a few minutes: the BE registers with the FE, and only once the FE reports it
+alive do the Collector and Grafana start.
 
 Grafana is on <http://localhost:3001> — anonymous access is enabled, so there is nothing to log in
 to (`admin` / `admin` if you want to edit and save). It opens on **Fleet Agents — Overview**.
@@ -184,7 +192,8 @@ them into a single series.
 
 ## What is already there
 
-Three dashboards are provisioned from `grafana/dashboards/` into the **OpAMP** folder:
+Three dashboards are provisioned from `grafana/dashboards/` into the **OpAMP** folder, each with a
+**(Doris)** twin over the Doris copy of the data ([Doris, side by side](#doris-side-by-side)):
 
 | Dashboard | Shows |
 | --------- | ----- |
@@ -240,6 +249,59 @@ Hence:
   still holds; what it no longer reports is the join's own nulls.
 - **`"showPoints": "auto"`** — a sample with no neighbour is drawn as a point instead of vanishing.
 
+## Doris, side by side
+
+The Collector writes every signal to Doris as well ([otel-collector.yaml](otel-collector.yaml),
+exporter `doris`), and every dashboard has a **(Doris)** twin over the same data. Doris runs as one
+FE (`doris-fe`: metadata, SQL on the MySQL port 9030, the HTTP API on 8030) and one BE
+(`doris-be`: storage and execution).
+
+**Grafana needs no Doris plugin to query it.** Doris speaks the MySQL protocol, so the `Doris`
+datasource is Grafana's built-in MySQL one, and the twins' macros are MySQL's
+(`$__timeFilter`, `$__timeGroup`, `$__timeFrom()`). On top of that, the **Grafana Doris app**
+(VeloDB's `velodb-doris-app`) adds a log *Discover* page and a Jaeger-like *Traces* page over the
+same tables. It is not in Grafana's plugin catalog and it is unsigned: the one-shot
+`grafana-doris-app` service installs a pinned release checked against its SHA-256, and
+`GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS` names it.
+
+**The twins are generated, never edited.** [`grafana/doris-dashboards.py`](grafana/doris-dashboards.py)
+copies each ClickHouse dashboard — layout, units, options — and replaces the datasource, the SQL,
+the title, the uid and the links. After changing a ClickHouse dashboard, run it again; a panel it
+has no Doris query for fails the run, so a new panel cannot ship without its twin.
+
+**Why the SQL is not a copy.** The Doris exporter owns a schema of its own, and it differs from
+ClickHouse's in more than spelling:
+
+| | ClickHouse | Doris |
+|---|---|---|
+| Columns | `Timestamp`, `ServiceName`, `SeverityText`, `TimeUnix`, `MetricName`, `Value` | `timestamp` everywhere, `service_name`, `severity_text`, `metric_name`, `value` |
+| Attributes | `Map`: `ResourceAttributes['service.instance.id']` | `VARIANT`: `CAST(resource_attributes['service.instance.id'] AS STRING)` |
+| Span duration | nanoseconds | **microseconds** |
+| Span status | `Error`, `Ok`, `Unset` | `STATUS_CODE_ERROR`, `STATUS_CODE_OK`, `STATUS_CODE_UNSET` — mapped back in the twins' SQL |
+| Service and Client | in the attribute maps | also as columns: `service_name`, `service_instance_id` (the *Resource's*, i.e. the Client's) |
+
+**Time zone.** The exporter writes `DATETIME` without an offset, in the zone it is given:
+`timezone: UTC`, and the datasource's session reads UTC (`timezone: "+00:00"`). Change one and not
+the other, and every panel shifts by the difference.
+
+**Fixed addresses.** The Doris images register FE and BE with each other by IP only, so the
+project network has a subnet of its own, `10.250.0.0/24`. If that collides with a network on the
+host, set `DORIS_SUBNET_PREFIX` (e.g. `DORIS_SUBNET_PREFIX=10.251.7`) — before the first start, since
+the BE's address is stored in the FE's metadata volume; afterwards, `down -v` first.
+
+**`vm.max_map_count`.** Doris asks the host for 2000000, far above common defaults (262144 on
+many hosts), and rootless Podman cannot change it. The BE image skips that check, so it starts anyway — fine for a development
+load. For more, on the host: `sudo sysctl -w vm.max_map_count=2000000`.
+
+**Neither store depends on the other at runtime.** Each exporter queues on its own: a Doris that is
+down fills its queue and drops from it, and ClickHouse in the same pipelines never waits. At
+*startup* it does matter — the Doris exporter creates its tables when the Collector starts, so the
+Collector waits for a healthy BE. To run ClickHouse alone, take `doris` out of the three pipelines.
+
+**What the twins do not verify.** The Doris exporter is `alpha` in the Collector, and so is the
+Doris app on Grafana 13: both are checked here against their sources, not by a test in this
+repository.
+
 ## Starting from an empty store
 
 There is no seeder here: what fills these dashboards is a Client, which is also the only thing that
@@ -252,6 +314,13 @@ gauges and quantiles read the same, anything counted doubles. To start clean:
 ```sh
 curl -s 'http://localhost:8123/?user=otel&password=otel' --data-binary \
   "TRUNCATE TABLE otel.otel_logs; TRUNCATE TABLE otel.otel_traces; TRUNCATE TABLE otel.otel_metrics_gauge"
+```
+
+And Doris, through its MySQL port (any MySQL client; `root`, no password):
+
+```sh
+mysql -h 127.0.0.1 -P 9030 -uroot otel \
+  -e "TRUNCATE TABLE otel_logs; TRUNCATE TABLE otel_traces; TRUNCATE TABLE otel_metrics_gauge"
 ```
 
 ## Checking that data arrives
@@ -271,6 +340,15 @@ curl -s 'http://localhost:8123/?user=otel&password=otel' --data-binary "
   SELECT 'logs',              count(),        max(Timestamp)         FROM otel.otel_logs
   UNION ALL
   SELECT 'traces',            count(),        max(Timestamp)         FROM otel.otel_traces"
+```
+
+The same question to Doris:
+
+```sh
+mysql -h 127.0.0.1 -P 9030 -uroot otel -e "
+  SELECT 'metrics' AS kind, COUNT(*) AS n, MAX(timestamp) AS newest FROM otel_metrics_gauge
+  UNION ALL SELECT 'logs',   COUNT(*), MAX(timestamp) FROM otel_logs
+  UNION ALL SELECT 'traces', COUNT(*), MAX(timestamp) FROM otel_traces"
 ```
 
 If a dashboard stays empty but the counts above are non-zero, the fault is in the panel, not the
@@ -300,3 +378,5 @@ ORDER BY l.Timestamp
 | 3001 | Grafana | The UI |
 | 8123 | ClickHouse | HTTP interface — `curl`-able, and what the checks above use |
 | 9000 | ClickHouse | Native protocol — what the Collector and Grafana speak |
+| 8030 | Doris FE | HTTP API and web UI; where the Collector's stream load starts |
+| 9030 | Doris FE | MySQL protocol — what Grafana, the Doris app and `mysql` speak |

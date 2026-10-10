@@ -40,3 +40,24 @@ datasources:
         durationUnit: nanoseconds
     secureJsonData:
       password: otel
+
+  # The same data in Apache Doris, for the "(Doris)" twins of the dashboards. Doris speaks the
+  # MySQL protocol on the FE's port 9030, so Grafana's built-in MySQL datasource is the driver: no
+  # plugin needed to query it, and the dashboards' macros are MySQL's ($__timeFilter, $__timeGroup).
+  - name: Doris
+    uid: doris
+    type: mysql
+    access: proxy
+    url: doris-fe:9030
+    user: root
+    jsonData:
+      database: otel
+      # The Collector writes Doris timestamps as UTC without an offset (otel-collector.yaml,
+      # `timezone: UTC`); the session must read them in the same zone, or $__timeFilter's
+      # FROM_UNIXTIME and the returned times are shifted by the FE's own zone.
+      timezone: "+00:00"
+      maxOpenConns: 10
+      maxIdleConns: 5
+      connMaxLifetime: 14400
+    secureJsonData:
+      password: ""
