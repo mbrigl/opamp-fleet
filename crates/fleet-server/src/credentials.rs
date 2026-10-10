@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::phc::PasswordHash;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::http::{header, HeaderMap};
 use base64::Engine as _;
@@ -82,7 +83,7 @@ impl Credentials {
                 .fill(&mut secret)
                 .map_err(|_| "no secure random source".to_string())?;
             Argon2::new(Algorithm::Argon2id, Version::V0x13, costliest)
-                .hash_password(&secret, &salt()?)
+                .hash_password_with_salt(&secret, &salt()?)
                 .map_err(|e| format!("cannot make the comparison hash: {e}"))?
                 .to_string()
         };
@@ -231,8 +232,7 @@ pub fn check_basic(phc: &str) -> Result<Params, String> {
     }
     let output = hash.hash.map_or(0, |output| output.len());
     let salt = hash.salt.map_or(0, |salt| salt.len());
-    // The salt is base64 in the string: 22 characters carry 16 bytes.
-    if output < MIN_OUTPUT_LEN || salt < MIN_SALT_LEN * 4 / 3 {
+    if output < MIN_OUTPUT_LEN || salt < MIN_SALT_LEN {
         return Err(format!(
             "is an Argon2id hash shorter than {MIN_OUTPUT_LEN} bytes or with a salt shorter than \
              {MIN_SALT_LEN} bytes — make it again with `server hash-credential --basic`"
@@ -250,7 +250,7 @@ pub fn hash_basic(password: &str) -> Result<String, String> {
         return Err("a password must not be empty".to_string());
     }
     Ok(argon2id()
-        .hash_password(password.as_bytes(), &salt()?)
+        .hash_password_with_salt(password.as_bytes(), &salt()?)
         .map_err(|e| format!("cannot hash the password: {e}"))?
         .to_string())
 }
@@ -264,13 +264,13 @@ fn argon2id() -> Argon2<'static> {
     )
 }
 
-fn salt() -> Result<SaltString, String> {
+fn salt() -> Result<[u8; MIN_SALT_LEN], String> {
     use ring::rand::SecureRandom as _;
-    let mut bytes = [0u8; 16];
+    let mut bytes = [0u8; MIN_SALT_LEN];
     ring::rand::SystemRandom::new()
         .fill(&mut bytes)
         .map_err(|_| "no secure random source for a salt".to_string())?;
-    SaltString::encode_b64(&bytes).map_err(|e| format!("cannot encode the salt: {e}"))
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -356,7 +356,7 @@ mod tests {
             Version::V0x13,
             Params::new(1024, 1, 1, None).expect("params"),
         )
-        .hash_password(b"x", &salt().expect("salt"))
+        .hash_password_with_salt(b"x", &salt().expect("salt"))
         .expect("hash")
         .to_string();
         assert!(check_basic(&cheap).expect_err("cheap").contains("cheaper"));
@@ -407,7 +407,7 @@ mod tests {
             Version::V0x13,
             Params::new(MIN_MEMORY_KIB * 2, 3, 1, None).expect("params"),
         )
-        .hash_password(b"s3cret", &salt().expect("salt"))
+        .hash_password_with_salt(b"s3cret", &salt().expect("salt"))
         .expect("hash")
         .to_string();
         let users = BTreeMap::from([("ops".to_string(), costly)]);
@@ -424,9 +424,23 @@ mod tests {
             Version::V0x13,
             Params::new(MIN_MEMORY_KIB, MIN_ITERATIONS, MIN_PARALLELISM, Some(16)).expect("params"),
         )
-        .hash_password(b"x", &salt().expect("salt"))
+        .hash_password_with_salt(b"x", &salt().expect("salt"))
         .expect("hash")
         .to_string();
         assert!(check_basic(&short).expect_err("short").contains("shorter"));
+    }
+
+    #[test]
+    fn a_short_salt_is_refused() {
+        let short = argon2id()
+            .hash_password_with_salt(b"x", &[7u8; MIN_SALT_LEN - 4])
+            .expect("hash")
+            .to_string();
+        assert!(check_basic(&short).expect_err("short").contains("shorter"));
+        let enough = argon2id()
+            .hash_password_with_salt(b"x", &salt().expect("salt"))
+            .expect("hash")
+            .to_string();
+        check_basic(&enough).expect("a salt of MIN_SALT_LEN bytes");
     }
 }
