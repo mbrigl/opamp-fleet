@@ -5,18 +5,18 @@
 
 **Who reads this.** Whoever changes how the GLPI Agent is packed, and whoever changes what the
 `glpi` kind knows. It is the one place both sides state the same facts
-([ADR-0037](../adr/0037-a-kind-knows-its-own-agent.md) clause 9,
-[ADR-0031](../adr/0031-the-glpi-agent.md)).
+([ADR-0017](../adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clause 9,
+[ADR-0018](../adr/0018-glpi-agent-and-telegraf.md)).
 
 This is the artifact where the document earns most, because it is the one this project **repacks**
 rather than ships as published: on Linux the tree's internal layout is ours, so an upstream that
 moves something inside it is a change both sides have to answer
-([ADR-0031](../adr/0031-the-glpi-agent.md)).
+([ADR-0018](../adr/0018-glpi-agent-and-telegraf.md)).
 
 | | |
 |---|---|
-| Packed by | `glpi_plans` in `crates/package-tools/src/bin/opamp-package-fetch.rs` |
-| Run by | `crates/client/src/supervisor/glpi.rs` |
+| Packed by | `glpi_plans` in `crates/fleet-tools/src/bin/opamp-package-fetch.rs` |
+| Run by | `crates/fleet-agent/src/supervisor/glpi.rs` |
 | Agent type | `glpi-agent` |
 
 ## 1. Source
@@ -62,7 +62,7 @@ tree whose agent could not find its own modules.
 
 ## 5. Form in the delivered tree
 
-A **tree package** ([ADR-0015](../adr/0015-package-delivery-for-managed-processes.md)), unpacked to
+A **tree package** ([ADR-0028](../adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), unpacked to
 `<supervisor_dir>/program/tree/`, and the two platforms differ in nearly everything below it:
 
 | | Linux | Windows |
@@ -99,13 +99,13 @@ Four of those are not preferences:
 - **`--no-fork`.** Without it the agent detaches, leaving the Supervisor holding a pid that ends
   immediately while the real process runs on unsupervised.
 - **`--vardir` outside `program/`.** A package swap replaces that directory whole
-  ([ADR-0015](../adr/0015-package-delivery-for-managed-processes.md)); state kept inside it would be thrown away with
+  ([ADR-0028](../adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); state kept inside it would be thrown away with
   every update, taking the inventory history along. The agent does not create it and exits if it is
   missing, so the kind names it among the directories the spawn guarantees — an installation that
   failed for want of a directory would be this Client's failure, not the host's.
 - **The file logging.** A daemon with no console has nowhere else to write.
 
-The **working directory** is the one place this kind overrides ADR-0037's general rule (start in
+The **working directory** is the one place this kind overrides ADR-0017's general rule (start in
 the directory the program lives in). On Linux the program *is* the tree root's `AppRun`, so the
 rule is already right. On Windows the program sits at `perl/bin/`, and the bundled Perl expects the
 tree root — which is exactly what upstream's own portable `.bat` launcher sets before invoking the

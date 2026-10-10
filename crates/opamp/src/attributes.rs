@@ -1,11 +1,11 @@
-//! The Baseline's attribute keys, and reading a string out of a set of them (ADR-0005).
+//! The Baseline's attribute keys, and reading a string out of a set of them (ADR-0009).
 //!
 //! An `AgentDescription` carries its identity as `KeyValue` pairs, and the keys are fixed strings
 //! the Baseline names. Both ends match on the same ones —
-//! [ADR-0022](../../../docs/adr/0022-agent-type-instance-name-and-the-supervisor-name.md)
+//! [ADR-0015](../../../docs/adr/0015-what-an-agent-reports-about-itself.md)
 //! gives `service.name` and `service.instance.name` their meaning, and
-//! [ADR-0021](../../../docs/adr/0021-one-platform-vocabulary.md) and
-//! [ADR-0016](../../../docs/adr/0016-a-package-is-a-versioned-set.md) make them
+//! [ADR-0028](../../../docs/adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md) and
+//! [ADR-0028](../../../docs/adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md) make them
 //! decide *which binary a host is offered*.
 //!
 //! Spelled as literals at each use, a typo in one of them is not a compile error: it is a Selector
@@ -15,27 +15,27 @@
 use crate::proto::{any_value, AnyValue, ArrayValue, KeyValue};
 
 /// The Agent *type* — a Collector distribution, this Client — never an operator's name for one
-/// (ADR-0022). A package is matched against it (ADR-0016).
+/// (ADR-0015). A package is matched against it (ADR-0028).
 pub const SERVICE_NAME: &str = "service.name";
-/// The operator's name for one Agent (ADR-0022).
+/// The operator's name for one Agent (ADR-0015).
 pub const SERVICE_INSTANCE_NAME: &str = "service.instance.name";
 /// The namespace an Agent runs in, reported only where the environment uses one.
 pub const SERVICE_NAMESPACE: &str = "service.namespace";
 /// The version the Agent reports for itself.
 pub const SERVICE_VERSION: &str = "service.version";
 /// The operating system in the semantic-convention spelling (`linux`, `darwin`, `windows`) — half
-/// of the platform a package artifact is chosen by (ADR-0021).
+/// of the platform a package artifact is chosen by (ADR-0028).
 pub const OS_TYPE: &str = "os.type";
 /// The human-readable operating system description, e.g. `Ubuntu 26.04 LTS`.
 pub const OS_DESCRIPTION: &str = "os.description";
 /// The architecture in the semantic-convention spelling (`amd64`, `arm64`) — the other half of the
-/// platform (ADR-0021).
+/// platform (ADR-0028).
 pub const HOST_ARCH: &str = "host.arch";
 
 /// The string value of `key`, or `None` when the attribute is absent, holds another type, or is
 /// empty.
 ///
-/// **An empty string is not a value.** That rule is load-bearing rather than tidy: ADR-0016 refuses
+/// **An empty string is not a value.** That rule is load-bearing rather than tidy: ADR-0028 refuses
 /// to offer a package to an Agent of another type, and an Agent reporting `service.name = ""` must
 /// therefore match no package at all rather than match every untyped one. Stating it here is the
 /// point of the module — one of the two copies this replaces enforced it and the other did not.
@@ -50,57 +50,6 @@ pub fn string_value<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a str
             any_value::Value::StringValue(s) if !s.is_empty() => Some(s.as_str()),
             _ => None,
         })
-}
-
-/// Spellings of an operating system that mean a canonical [`OS_TYPE`] value.
-///
-/// Deliberately short: it exists for what this project does **not** control — an older release file
-/// name, a foreign build system, an Agent that predates the convention — not as a general
-/// vocabulary. Everything this project produces is already canonical.
-const OS_ALIASES: &[(&str, &str)] = &[
-    ("macos", "darwin"),
-    ("osx", "darwin"),
-    ("win", "windows"),
-    ("win32", "windows"),
-    ("win64", "windows"),
-];
-
-/// Spellings of an architecture that mean a canonical [`HOST_ARCH`] value. Rust's own
-/// `std::env::consts::ARCH` is among them, which is why an Agent reporting its platform reads the
-/// same table the Server matches it against.
-const ARCH_ALIASES: &[(&str, &str)] = &[
-    ("x86_64", "amd64"),
-    ("x86-64", "amd64"),
-    ("x64", "amd64"),
-    ("aarch64", "arm64"),
-];
-
-/// The canonical `os.type` for a spelling of it — the input unchanged when the table has never
-/// heard of it.
-///
-/// One table for both ends, because they are two halves of one comparison: the Client writes this
-/// value into its `os.type` attribute and the Server matches an artifact's platform against it
-/// (ADR-0021). Two tables that disagreed would not fail — they would offer a host the wrong binary,
-/// or none, and say nothing.
-#[must_use]
-pub fn canonical_os(raw: &str) -> &str {
-    canonical(raw, OS_ALIASES)
-}
-
-/// The canonical `host.arch` for a spelling of it — the input unchanged when the table has never
-/// heard of it. See [`canonical_os`] for why this is shared.
-#[must_use]
-pub fn canonical_arch(raw: &str) -> &str {
-    canonical(raw, ARCH_ALIASES)
-}
-
-/// Unknown tokens pass through rather than being refused: the fleet may run a system this table has
-/// never heard of, and serving it under its own name is a better failure than not serving it.
-fn canonical<'a>(raw: &'a str, aliases: &[(&'static str, &'static str)]) -> &'a str {
-    aliases
-        .iter()
-        .find(|(from, _)| from.eq_ignore_ascii_case(raw))
-        .map_or(raw, |(_, to)| *to)
 }
 
 /// One attribute as the protocol carries it: a key and a string value.
@@ -182,8 +131,9 @@ mod tests {
         assert_eq!(string_value(&attrs, SERVICE_INSTANCE_NAME), Some("edge-01"));
     }
 
-    /// The rule ADR-0016 leans on: an Agent that reports its type as an empty string reports no
+    /// The rule ADR-0028 leans on: an Agent that reports its type as an empty string reports no
     /// type, so it matches no package rather than every untyped one.
+    /// Verifies: ADR-0009
     #[test]
     fn an_empty_string_is_not_a_value() {
         assert_eq!(string_value(&attrs(), SERVICE_VERSION), None);
@@ -207,54 +157,6 @@ mod tests {
             string_attr(SERVICE_NAME, "second"),
         ];
         assert_eq!(string_value(&attrs, SERVICE_NAME), Some("first"));
-    }
-
-    /// The pairs both ends depend on agreeing: the Client writes the left, the Server matches an
-    /// artifact's platform against the right (ADR-0021).
-    #[test]
-    fn folds_the_spellings_this_project_does_not_control() {
-        assert_eq!(canonical_os("macos"), "darwin");
-        assert_eq!(canonical_os("osx"), "darwin");
-        for win in ["win", "win32", "win64"] {
-            assert_eq!(canonical_os(win), "windows");
-        }
-        assert_eq!(canonical_arch("x86_64"), "amd64");
-        assert_eq!(canonical_arch("x86-64"), "amd64");
-        assert_eq!(canonical_arch("x64"), "amd64");
-        assert_eq!(canonical_arch("aarch64"), "arm64");
-    }
-
-    /// Rust names the host one way and the semantic conventions another, and this is the table that
-    /// bridges them — so what a Client compiled by rustc reports is a token the Server knows.
-    #[test]
-    fn what_rust_calls_this_machine_folds_onto_a_canonical_token() {
-        assert_eq!(
-            canonical_os(std::env::consts::OS),
-            canonical_os(canonical_os(std::env::consts::OS)),
-            "canonicalising twice is canonicalising once"
-        );
-        assert_eq!(
-            canonical_arch("x86_64"),
-            canonical_arch("amd64"),
-            "rustc's spelling and the convention's are one machine"
-        );
-        assert_eq!(canonical_os("macos"), canonical_os("darwin"));
-    }
-
-    /// A system the table has never heard of is served under its own name rather than refused: a
-    /// fleet may run one, and offering it nothing would be the worse failure.
-    #[test]
-    fn an_unknown_token_passes_through_unchanged() {
-        assert_eq!(canonical_os("plan9"), "plan9");
-        assert_eq!(canonical_arch("riscv64"), "riscv64");
-        assert_eq!(canonical_os(""), "");
-        // Already canonical stays put — the table never folds a token onto another canonical one.
-        for os in ["linux", "darwin", "windows"] {
-            assert_eq!(canonical_os(os), os);
-        }
-        for arch in ["amd64", "arm64"] {
-            assert_eq!(canonical_arch(arch), arch);
-        }
     }
 
     #[test]

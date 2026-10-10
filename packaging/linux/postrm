@@ -1,26 +1,26 @@
 #!/bin/sh
-# Post-removal for the `.deb` and the `.rpm` alike (ADR-0020).
+# Post-removal for the `.deb` and the `.rpm` alike (ADR-0021).
 #
 # `service uninstall` (already run in the pre-removal) deliberately deletes nothing — that rule
-# (ADR-0010) protects the *manual* flows, where the layout is the operator's. A package removal is
+# (ADR-0021) protects the *manual* flows, where the layout is the operator's. A package removal is
 # different: the operator asked this host to stop being managed, and what the package flow created
 # it cleanly takes back —
 #
 #   remove:  the PATH symlink and the executable layout — every staged version and the `current`
-#            pointer, which live under `/opt`. The data root stays: this host's identity and a
-#            credential the operator typed are not binaries, and a reinstall picks them back up.
+#            pointer, which live under `/opt`. The data root stays: this host's identity and the
+#            configuration the operator wrote are not binaries, and a reinstall picks them back up.
 #   purge:   (dpkg only) all of the above and the data root itself — state, logs and
 #            configuration included. Purge is dpkg's word for "leave nothing"; rpm has no
 #            equivalent and stays at remove-level cleanup.
 #
-# That distinction is ADR-0020's, with the paths redrawn across the two roots by ADR-0010 clause 9.
+# That distinction is ADR-0021's, with the paths redrawn across the two roots by ADR-0021 clause 8.
 #
 # Only on a real removal. dpkg calls `postrm upgrade <new>` mid-upgrade, where the new version's
 # post-install re-lays the link; rpm's `%postun` gets the count of remaining instances, where `1`
 # means a replacement is installed. Cleaning up there would undo the successor's work.
 #
 # The paths name the default system roots (`default_layout_root` and `default_root` in
-# crates/client/src/service/manager.rs) — the only roots a packaged install ever uses. An install
+# crates/fleet-agent/src/service/manager.rs) — the only roots a packaged install ever uses. An install
 # rooted elsewhere with `--root` is a manual one and is deliberately not touched.
 #
 # `-L` guards the symlink removal: only a symlink is ours to delete. A regular file at that path

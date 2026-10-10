@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Seeds one minimal test Configuration (ADR-0012) per example supervisor from config/supervisor.toml,
+# Seeds one minimal test Configuration (ADR-0025) per example supervisor from config/supervisor.toml,
 # each aimed at the Agent that should receive it — the two Collectors by Selector, the two
-# Foreign Agents by Agent type (ADR-0012), whose bodies are formats no other kind of Agent
+# Foreign Agents by Agent type (ADR-0025), whose bodies are formats no other kind of Agent
 # could read:
 #
 #   otelcol-contrib-conf  →  selector service.name = otelcol-contrib  (opampextension, self-reporting)
@@ -13,22 +13,29 @@
 # A Configuration's name is the file name its entry gets in the Supervisor's config directory,
 # so each block must read exactly that path — "${config_dir}/telegraf-conf",
 # "--conf-file=${config_dir}/glpi-agent-conf". Names carry no extension: they follow the
-# ADR-0010 grammar (lowercase letters, digits and '-'), which admits no dot.
+# ADR-0021 grammar (lowercase letters, digits and '-'), which admits no dot.
 #
 # Two modes:
 #   scripts/seed_test_configs.sh [server-url]
 #       PUTs each Configuration to a running Server's REST API and rolls it out — the act that
-#       assigns it to the matching Agents (ADR-0030); a PUT alone reaches nobody.
-#       (default server-url: http://127.0.0.1:4321).
+#       assigns it to the matching Agents (ADR-0027); a PUT alone reaches nobody.
+#       (default server-url: https://127.0.0.1:4321). The Operator plane serves TLS (ADR-0012); the
+#       CA curl trusts is $SEED_CACERT, or .dev-pki/offline/server-ca.pem when scripts/dev-pki.sh
+#       made one.
 #   scripts/seed_test_configs.sh --offline [config-dir]
 #       Writes each Configuration as <config-dir>/<name>.json — the Server's own persistence
 #       format, loaded at its next start; no running Server needed. Default config-dir is
 #       fleet-configs/ in the repository root (the server.toml default). This is what
 #       scripts/install_tools.sh runs after installing the processes. A staged Configuration is
-#       stored, not assigned: under ADR-0030 only an Agent record that predates the ADR is
+#       stored, not assigned: under ADR-0027 only an Agent record that predates the ADR is
 #       seeded from it, so on a fresh fleet roll each one out once the Agents have enrolled
 #       (POST /api/v1/configurations/<name>/rollout, or the fleet view).
-# Both modes replace an existing Configuration of the same name.
+#   scripts/seed_test_configs.sh --enrol [server-url]
+#       For the development set of scripts/dev-pki.sh, whose Client enrols like any other host
+#       (ADR-0029): opens the enrolment window for ten minutes, waits up to a minute for requests,
+#       and approves every one it finds, printing each key fingerprint. Development only — on a
+#       real fleet an operator compares each fingerprint with the host's log before approving.
+# The first two modes replace an existing Configuration of the same name.
 #
 # Note on the contrib Collector: once its opampextension self-reports, the reported
 # service.name (the dist.name it was built with, "otelcol-contrib") replaces the name derived
@@ -54,13 +61,41 @@ if [ "${1:-}" = "--offline" ]; then
     mode=stage
     config_dir="${2:-$examples/../../fleet-configs}"
     mkdir -p "$config_dir"
+elif [ "${1:-}" = "--enrol" ]; then
+    mode=enrol
+    server="${2:-https://127.0.0.1:4321}"
 else
-    server="${1:-http://127.0.0.1:4321}"
+    server="${1:-https://127.0.0.1:4321}"
+fi
+
+curl_tls=()
+cacert="${SEED_CACERT:-$(dirname "$0")/../.dev-pki/offline/server-ca.pem}"
+if [ -f "$cacert" ]; then
+    curl_tls=(--cacert "$cacert")
+fi
+
+if [ "$mode" = enrol ]; then
+    curl -fsS "${curl_tls[@]}" -X POST -H 'Content-Type: application/json' \
+        -d '{"open_for_secs": 600}' "$server/api/v1/enrolment/window" >/dev/null
+    for _ in $(seq 60); do
+        ids=$(curl -fsS "${curl_tls[@]}" "$server/api/v1/enrolments" | jq -r '.[].id')
+        [ -n "$ids" ] && break
+        sleep 1
+    done
+    if [ -z "$ids" ]; then
+        echo "no enrolment request arrived within a minute; is the Client running?" >&2
+        exit 1
+    fi
+    for id in $ids; do
+        curl -fsS "${curl_tls[@]}" -X POST "$server/api/v1/enrolments/$id/approve" >/dev/null
+        echo "approved the request with key fingerprint $id"
+    done
+    exit 0
 fi
 
 # seed <name> <file> <selector-json> [service_name]
 #   selector-json  equality pairs as a JSON object; {} matches every Agent of the type below
-#   service_name   the Agent type this Configuration is for (ADR-0012); omitted means every type
+#   service_name   the Agent type this Configuration is for (ADR-0025); omitted means every type
 seed() {
     local name="$1" file="$2" selector="$3" type="${4:-}"
     local spec aimed_at
@@ -76,9 +111,9 @@ seed() {
         jq --arg name "$name" '{name: $name} + .' <<<"$spec" >"$config_dir/$name.json"
         echo "staged $name.json ($aimed_at)"
     else
-        curl -fsS -X PUT -H 'Content-Type: application/json' -d @- \
+        curl -fsS "${curl_tls[@]}" -X PUT -H 'Content-Type: application/json' -d @- \
             "$server/api/v1/configurations/$name" <<<"$spec" >/dev/null
-        curl -fsS -X POST "$server/api/v1/configurations/$name/rollout" >/dev/null
+        curl -fsS "${curl_tls[@]}" -X POST "$server/api/v1/configurations/$name/rollout" >/dev/null
         echo "PUT and rolled out $name ($aimed_at)"
     fi
 }
@@ -87,7 +122,7 @@ seed otelcol-contrib-conf "$examples/otelcol-contrib-conf.yaml" '{"service.name"
 seed otelcol-conf "$examples/otelcol-conf.yaml" '{"service.name": "otelcol"}'
 seed telegraf-conf "$examples/telegraf-conf.toml" '{}' telegraf
 seed glpi-agent-conf "$examples/glpi-agent-conf.cfg" '{}' glpi-agent
-# Icinga 2 reads one root file and includes the rest by name (ADR-0033), so both entries are seeded.
+# Icinga 2 reads one root file and includes the rest by name (ADR-0019), so both entries are seeded.
 # Its ticket is per host and a secret, so it is deliberately not seeded here — see docs/manual/icinga2.md.
 seed icinga2-conf "$examples/icinga2-conf.conf" '{}' icinga2
 seed icinga2-zones "$examples/icinga2-zones.conf" '{}' icinga2
@@ -95,5 +130,5 @@ seed icinga2-zones "$examples/icinga2-zones.conf" '{}' icinga2
 if [ "$mode" = stage ]; then
     echo "Done — the Server holds these Configurations from its next start; roll them out to assign them."
 else
-    echo "Done — inspect with: curl $server/api/v1/configurations"
+    echo "Done — inspect with: curl ${curl_tls[*]} $server/api/v1/configurations"
 fi

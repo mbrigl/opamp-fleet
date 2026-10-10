@@ -5,18 +5,18 @@
 
 **Who reads this.** Whoever changes how Icinga 2 is packed, and whoever changes what the `icinga2`
 kind knows. It is the one place both sides state the same facts
-([ADR-0037](../adr/0037-a-kind-knows-its-own-agent.md) clause 9,
-[ADR-0033](../adr/0033-icinga-2-supervision-and-enrolment.md)).
+([ADR-0017](../adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clause 9,
+[ADR-0019](../adr/0019-icinga-2.md)).
 
 Icinga 2 publishes **no portable tree at all** — distribution packages and an MSI, and nothing
 else — so both platforms are repacked here
-([ADR-0034](../adr/0034-repacked-icinga-2-artifacts.md)). The tree's
+([ADR-0019](../adr/0019-icinga-2.md)). The tree's
 layout is therefore entirely this project's, and the whole reason this document exists.
 
 | | |
 |---|---|
-| Packed by | `icinga2_plans` / `windows_plan` in `crates/package-tools/src/bin/opamp-package-fetch.rs` |
-| Run by | `crates/client/src/supervisor/icinga2.rs` |
+| Packed by | `icinga2_plans` / `windows_plan` in `crates/fleet-tools/src/bin/opamp-package-fetch.rs` |
+| Run by | `crates/fleet-agent/src/supervisor/icinga2.rs` |
 | Agent type | `icinga2` |
 
 ## 1. Source
@@ -50,7 +50,7 @@ and why it prints the vendor's own glibc floor before the rollout rather than af
 | | |
 |---|---|
 | Linux | the SHA-256 the Debian index already states for each `.deb` — no separate checksum file is fetched |
-| Windows | **the publisher's signature**, `O=Icinga GmbH`: Icinga publishes no digest for the MSI ([ADR-0034](../adr/0034-repacked-icinga-2-artifacts.md)) |
+| Windows | **the publisher's signature**, `O=Icinga GmbH`: Icinga publishes no digest for the MSI ([ADR-0019](../adr/0019-icinga-2.md)) |
 
 ## 4. Treatment
 
@@ -84,7 +84,7 @@ wrapper, and what the Supervisor must spawn is the real program.
 The check plugins sit **beside the daemon in `sbin/` on Windows** rather than in `plugins/`: a
 Windows program finds its DLLs in its own directory first, and separating the check executables
 from the runtime they share with the daemon would break them
-([ADR-0034](../adr/0034-repacked-icinga-2-artifacts.md)).
+([ADR-0019](../adr/0019-icinga-2.md)).
 
 ## 6. What the Client derives
 
@@ -127,8 +127,8 @@ running daemon is stopped.
 **Which entry is the root is stated by a role, not by a name.** The daemon is pointed at one file,
 from which it `include`s the rest, and being unroled says *"this is configuration"* rather than
 *"this is the root"* — so the fleet marks the root with `role = "main"`
-([ADR-0012](../adr/0012-selector-targeted-configurations-and-rest-api.md),
-[ADR-0033](../adr/0033-icinga-2-supervision-and-enrolment.md)). Where nothing is
+([ADR-0025](../adr/0025-configurations-and-the-rest-api.md),
+[ADR-0019](../adr/0019-icinga-2.md)). Where nothing is
 marked, the conventional name `icinga2-conf` stands in, which is what this tool uploads. Two
 entries marked `main` are a reason not to start, naming both.
 

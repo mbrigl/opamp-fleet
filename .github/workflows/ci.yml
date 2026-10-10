@@ -1,9 +1,11 @@
 name: CI
 
-# Enforces the Definition of Done (AGENTS.md §5) on the stack decided in ADR-0005: build, test,
-# lint, and format on Linux, plus release builds of the Client on every platform it ships on —
-# Linux, Windows, and macOS — and of the Server on Linux only (docs/SPECIFICATION.md).
-# The commands MUST match README.md → "Build, Test & Run", the single source of truth.
+# What the Definition of Done (AGENTS.md §5) asks beyond Linux, on the stack of ADR-0009: the
+# Client checked and tested on Windows and macOS, and release builds of the Client on every
+# platform it ships on — Linux, Windows, and macOS — and of the Server on Linux only
+# (docs/SPECIFICATION.md). Build, test and lint on Linux are the 'rust' job of checks.yml, which
+# runs scripts/check-rust.sh as the local gate does. The commands MUST match README.md →
+# "Build, Test & Run", the single source of truth.
 
 on:
   pull_request:
@@ -14,22 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  build-test-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      # rustup honours rust-toolchain.toml (stable + rustfmt + clippy) on first use.
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --workspace --locked
-      - name: Test
-        run: cargo test --workspace --locked
-      - name: Lint & format check
-        run: |
-          cargo fmt --all --check
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  # ADR-0010: the client carries platform-specific service paths (the Windows SCM shim, launchd
+  # ADR-0021: the client carries platform-specific service paths (the Windows SCM shim, launchd
   # semantics) that a Linux-only lint never compiles. Keep them honest: clippy and tests on the
   # real platforms. Actual service registration still needs the manual smoke checklist
   # (README.md → "Running as an OS service") — CI runners cannot exercise systemd/launchd/SCM.
@@ -44,9 +31,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy -p client --all-targets --locked -- -D warnings
+        run: cargo clippy -p fleet-agent --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test -p client --locked
+        run: cargo test -p fleet-agent --locked
 
   # The Client ships on Linux, macOS, and Windows; the Server on Linux only.
   release-build:
@@ -56,10 +43,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: client-linux, os: ubuntu-latest, package: client, binary: target/release/supervisor }
-          - { name: client-windows, os: windows-latest, package: client, binary: target/release/supervisor.exe }
-          - { name: client-macos, os: macos-latest, package: client, binary: target/release/supervisor }
-          - { name: server-linux, os: ubuntu-latest, package: server, binary: target/release/server }
+          - { name: client-linux, os: ubuntu-latest, package: fleet-agent, binary: target/release/supervisor }
+          - { name: client-windows, os: windows-latest, package: fleet-agent, binary: target/release/supervisor.exe }
+          - { name: client-macos, os: macos-latest, package: fleet-agent, binary: target/release/supervisor }
+          - { name: server-linux, os: ubuntu-latest, package: fleet-server, binary: target/release/server }
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2

@@ -12,7 +12,7 @@ other agent uses — with the same block shape on both platforms.
 
 **The fleet owns the installation.** Nothing is preinstalled, and the host needs neither Perl nor
 FUSE. A program is named by a **bare file name**, which is the only shape a block accepts
-([ADR-0018](../adr/0018-supervisor-directory-and-client-installed-programs.md)), so an agent the
+([ADR-0017](../adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), so an agent the
 machine's package manager installed cannot be supervised where it sits — the way across is to
 repack that version and deliver it, which is what this page does. A host may keep its
 `apt`/`dnf`/MSI installation; it simply stays outside the fleet, and
@@ -33,7 +33,7 @@ repack that version and deliver it, which is what this page does. A host may kee
 
 The [rollout walkthrough](rollout.md) ships a program the fleet builds. Here the program is a
 third party's release, and the only work is repacking it into something the Client can unpack
-(ADR-0031) — after that it is an ordinary package, and everything the walkthrough says about
+(ADR-0018) — after that it is an ordinary package, and everything the walkthrough says about
 rollout, health-gating and rollback applies unchanged. Three things are specific to this agent:
 
 - **It must be made to run in the foreground**, which its own flags do — see
@@ -98,7 +98,7 @@ the checksum upstream published, repacks what has to be repacked, and uploads if
 
 ```console
 $ opamp-package-fetch --agent glpi-agent --version 1.19 \
-      --platform windows/amd64 --platform linux/amd64 --server http://127.0.0.1:4320
+      --platform windows/amd64 --platform linux/amd64 --server https://127.0.0.1:4321
 ```
 
 What that does differs per platform, and the difference is worth knowing:
@@ -187,13 +187,14 @@ into every host's file — in two variants, as it had to be until now.
 
 The configuration the fleet delivers is an ordinary Configuration — typed `glpi-agent` so it
 reaches no other kind of Agent, named `glpi-agent-conf` because that is the file name the
-`--conf-file` argument expects, written in the GLPI Agent's own `key = value` format:
+`--conf-file` argument expects, written in the GLPI Agent's own `key = value` format.
+`--cacert ca.pem` names the CA that signed the Server's certificate:
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "glpi-agent", "selector": {}, "body": "server = https://glpi.example.com/front/inventory.php\n"}' \
-       http://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf
-$ curl -X POST http://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf/rollout
+       https://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/glpi-agent-conf/rollout
 ```
 
 A minimal body to start from is `config/examples/glpi-agent-conf.cfg` in this repository;
@@ -222,7 +223,7 @@ rolled-out Configuration then lands in `config/` with nothing reading it.
 | Field | What it shows for this Agent |
 |---|---|
 | `service_name` | `glpi-agent` — aim Configurations (and Selectors) at this. |
-| `capabilities` | `AcceptsPackages` and `AcceptsRestartCommand`: the fleet updates this program and the fleet-view restart works. |
+| `capabilities` | `AcceptsPackages` and `AcceptsRestartCommand`: the fleet updates this program and the fleet-view restart works. `AcceptsPackages` needs `[packages] verification_key` on the Client. |
 | `packages` | `Installed` with the Package's version once the tree is in place, or `InstallFailed` with the reason the artifact would not run here. |
 | `service_version` | Usually absent — see the note on `service.version` in [step 3](#3-the-block). The Package's version above says which release is installed. |
 | `healthy`, `health_status` | The crash-loop hold before the first Configuration; healthy once the daemon runs. |

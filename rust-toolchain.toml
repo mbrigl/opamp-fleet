@@ -1,4 +1,4 @@
-# Pin the toolchain so every contributor and CI build on the same Rust (ADR-0005).
+# Pin the toolchain so every contributor and CI build on the same Rust (ADR-0009).
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]

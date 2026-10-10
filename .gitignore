@@ -1,5 +1,6 @@
-# Dev Container
-.devcontainer/devcontainer-lock.json
+# Dev Container: .devcontainer/devcontainer-lock.json is deliberately NOT ignored — the resolved
+# Feature versions and digests are tracked, so the same commit yields the same environment until
+# the lock is refreshed on purpose (ADR-0002, AGENTS.md, section 6).
 
 # Build artifacts
 /dist/
@@ -10,19 +11,28 @@
 #
 # Deliberately *not* anchored to the repository root: these are relative defaults, so they are
 # created under whatever directory the process runs in — and `cargo test` runs a crate's unit tests
-# with its package directory as the working directory, which puts `crates/client/client-state/` in
+# with its package directory as the working directory, which puts `crates/fleet-agent/client-state/` in
 # the tree. Anchored patterns left those untracked and waiting to be committed by accident.
 fleet-configs/
 client-state/
 # Package artifacts are programs — hundreds of megabytes each; they belong in a store, never in
-# the repository (ADR-0015).
+# the repository (ADR-0028).
 fleet-packages/
 
-# Environment files
-/.env
-/.env.local
-/.env.*.local
+# Environment files — never tracked, in any directory (they may hold secrets);
+# a secrets-free .env.example stays tracked
+.env*
+!.env.example
 
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Per-user agent settings
+.claude/settings.local.json
+
+# Session artifacts — plans, handoff notes, scratch files (AGENTS.md, section 4)
+.scratch/
+
+# Development certificates from scripts/dev-pki.sh — throwaway keys, never committed.
+.dev-pki/

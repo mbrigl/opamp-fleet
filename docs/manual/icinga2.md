@@ -10,7 +10,7 @@ obtains its certificate from the Icinga master, distributes its configuration, a
 it back — with nothing installed on the host through `apt`, `dnf`, or an MSI.
 
 That is more than the [GLPI recipe](glpi-agent.md) does, and it needs a Supervisor kind of its own
-([ADR-0033](../adr/0033-icinga-2-supervision-and-enrolment.md)), because Icinga 2 is not
+([ADR-0019](../adr/0019-icinga-2.md)), because Icinga 2 is not
 built to be relocated: it must be *told*, on every invocation, where its state, its template library
 and its account are — and it creates none of those directories itself.
 
@@ -29,7 +29,7 @@ and its account are — and it creates none of those directories itself.
 
 `type = "icinga2"` builds the daemon's whole command line — around ten `-D` constants and the
 directories behind them — out of the artifact it delivers, the platform, and the account it runs
-as ([ADR-0033](../adr/0033-icinga-2-supervision-and-enrolment.md)). None of it is
+as ([ADR-0019](../adr/0019-icinga-2.md)). None of it is
 written on a host any more, and getting any of it wrong used to produce a daemon that starts and
 quietly uses the wrong files:
 
@@ -55,18 +55,18 @@ it: what follows is only what an operator decides.
 
 Icinga publishes distribution packages and an MSI, no portable tree — so the artifact is repacked
 from the vendor's own packages
-([ADR-0034](../adr/0034-repacked-icinga-2-artifacts.md)).
+([ADR-0019](../adr/0019-icinga-2.md)).
 
 Build it **on** the distribution you are building for — the tree carries the libraries the build
 host resolves, so the build host is the decision, not a flag (see the two rules below). This
 project's Dev Container is that host: it is pinned to Debian 12 and carries Icinga's runtime
 libraries for exactly this reason
-([ADR-0002](../adr/0002-dev-container-runtime.md)), so the
+([ADR-0019](../adr/0019-icinga-2.md)), so the
 Debian 12 artifact is built in it directly:
 
 ```console
 $ cargo run --bin opamp-package-fetch -- --agent icinga2 --version 2.16.5 --distro bookworm \
-      --platform linux/amd64 --server http://127.0.0.1:4321
+      --platform linux/amd64 --server https://127.0.0.1:4321
   reading https://packages.icinga.com/debian/dists/icinga-bookworm/main/binary-amd64/Packages.gz …
   reading https://deb.debian.org/debian/dists/bookworm/main/binary-amd64/Packages.gz …
   this build needs glibc >= 2.34 on every host it is rolled out to
@@ -90,7 +90,7 @@ Two things about that command line, each of which costs an attempt to discover:
 
 Add `--platform windows/amd64` to build the Windows artifact in the same run. It is repacked from
 the MSI and verified by Icinga's own Authenticode signature
-([ADR-0034](../adr/0034-repacked-icinga-2-artifacts.md)) rather than by a
+([ADR-0019](../adr/0019-icinga-2.md)) rather than by a
 digest, so it needs no particular build host and no glibc floor applies to it.
 
 To build for a **different** reach — an older distribution than the Dev Container, for hosts it does
@@ -110,7 +110,7 @@ container also needs Icinga's runtime libraries installed once — see the refus
 The tree carries the daemon, the template library, **the check plugins**
 (`monitoring-plugins`, 47 of them, with the libraries they need), and the vendor copyright files.
 For Icinga 2 2.16.5 on Debian 12 that is 140 files and 75 MB unpacked — well inside the limits a
-package tree is held to ([ADR-0015](../adr/0015-package-delivery-for-managed-processes.md)).
+package tree is held to ([ADR-0028](../adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
 
 The plugins come from the distribution rather than from Icinga, and one of them needs a word: Debian
 ships `check_http` through `update-alternatives`, so it exists only after a package is *installed* —
@@ -126,9 +126,9 @@ Two rules follow from what the tree carries:
   and not a flag.
 - **The glibc line it prints is the artifact's reach.** A tree built on Debian 13 does not run on
   Debian 12 or RHEL 9; one built on Debian 11 runs on all of them, across families, because glibc is
-  backward compatible (ADR-0034). Build on the oldest distribution you must serve — that is the one
+  backward compatible (ADR-0019). Build on the oldest distribution you must serve — that is the one
   decision this step really carries, and for this project it has been made once, as the Dev
-  Container's image pin (ADR-0002). Bumping that pin narrows every artifact built afterwards.
+  Container's image pin (ADR-0019). Bumping that pin narrows every artifact built afterwards.
 
 If the build host is missing a library any of the packages depend on, the tool stops rather than
 packing an incomplete tree — and prints the `apt-get install` line that fixes it, naming the
@@ -150,7 +150,7 @@ tool reads them out of that distribution's package index rather than this page l
 ## 2. The block
 
 Four keys, and each describes the Icinga installation this host is **joining** — nothing this
-Client can compute (ADR-0033). The block is the same on both platforms:
+Client can compute (ADR-0019). The block is the same on both platforms:
 
 ```toml
 [[supervisor]]
@@ -200,19 +200,22 @@ manager installed; nothing supervises it.
 
 ## 3. Enrolment: the ticket
 
-The Icinga master stays the certificate authority — the fleet Server signs nothing and never sees a
-private key ([ADR-0033](../adr/0033-icinga-2-supervision-and-enrolment.md)).
-What the fleet transports is the **ticket**, which the master computes for one node name:
+The Icinga master stays the certificate authority for Icinga — the fleet Server signs no Icinga
+certificate and never sees an Icinga private key ([ADR-0019](../adr/0019-icinga-2.md)).
+What the fleet transports is the **ticket**, which the master computes for one node name. The
+calls below go to the Operator plane over TLS; `--cacert ca.pem` names the CA that signed the
+Server's certificate, and `-u` carries the [`[rest.auth]`](server.md#the-operator-plane-restauth)
+credential:
 
 ```console
 $ icinga2 pki ticket --cn edge-01.example.com          # on the Icinga master
 d9c8…
 
-$ curl -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "icinga2", "role": "supplementary",
             "selector": {"service.instance.name": "edge-01"},
             "body": "d9c8…"}' \
-       http://127.0.0.1:4321/api/v1/configurations/icinga2-ticket
+       https://127.0.0.1:4321/api/v1/configurations/icinga2-ticket
 ```
 
 `role = "supplementary"` writes it as a file the Supervisor reads and nothing else consumes, and the
@@ -225,8 +228,12 @@ Two variations:
   Configuration and name it in `trusted_cert_file`. It is the parent's **own** certificate —
   `DataDir/certs/<master-cn>.crt` on the master — **not** the CA that signed it: Icinga compares
   what the parent presents against this file, so a CA certificate here fails every enrolment with
-  *"Peer certificate does not match trusted certificate"*. Without a pinned certificate the
-  Supervisor trusts what the parent presents on first contact, and logs that it did.
+  *"Peer certificate does not match trusted certificate"*. Once `trusted_cert_file` names a file,
+  enrolment waits until that file is there — the Agent stays unhealthy and says which path it
+  waits for — and never falls back to trusting the parent on sight. Only a block that names no
+  `trusted_cert_file` at all trusts what the parent presents on first contact, and logs that it did.
+  Unlike the ticket, the parent certificate stays needed after enrolment: a renewal pins the parent
+  again, so keep its Configuration released for as long as the block names it.
 - **No ticket at all.** The request lands in the master's signing queue; the Agent stays unhealthy
   until someone runs `icinga2 ca sign <hash>` there. That is correct behaviour, not a fault.
 
@@ -237,8 +244,8 @@ against the including file, so the delivered entries can reference each other by
 knowing any absolute path:
 
 ```console
-$ curl -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
-       -d @icinga2-conf.json http://127.0.0.1:4321/api/v1/configurations/icinga2-conf
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+       -d @icinga2-conf.json https://127.0.0.1:4321/api/v1/configurations/icinga2-conf
 ```
 
 with a body along the lines of [`config/examples/icinga2-conf.conf`](../../config/examples/icinga2-conf.conf):
@@ -258,12 +265,26 @@ the cluster protocol, into `DataDir/api/zones`.
 
 ## 5. Roll it out
 
+The Package reaches hosts through a Deployment that holds it and signs every entry
+([step 5 of the walkthrough](rollout.md#5-put-it-in-a-deployment-and-sign-it-there)):
+
 ```console
-$ curl -u fleet-admin:secret -X POST \
-       http://127.0.0.1:4321/api/v1/packages/icinga2/icinga2/2.16.4/rollout
-$ curl -u fleet-admin:secret -X POST \
-       http://127.0.0.1:4321/api/v1/configurations/icinga2-conf/rollout
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+       -d '{"selector": {"channel": "stable"}}' https://127.0.0.1:4321/api/v1/deployments/stable
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT \
+       https://127.0.0.1:4321/api/v1/deployments/stable/packages/icinga2/2.16.5
+$ curl --cacert ca.pem -u fleet-admin:secret -X PUT -H 'Content-Type: application/json' \
+       -d "{\"signature\": \"$sig\"}" \
+       https://127.0.0.1:4321/api/v1/deployments/stable/signatures/icinga2/2.16.5/linux/amd64
+$ curl --cacert ca.pem -u fleet-admin:secret -X POST \
+       https://127.0.0.1:4321/api/v1/deployments/stable/rollout
+$ curl --cacert ca.pem -u fleet-admin:secret -X POST \
+       https://127.0.0.1:4321/api/v1/configurations/icinga2-conf/rollout
 ```
+
+`$sig` is the artifact's signature from `opamp-package-sign sign --agent-type icinga2 --version …`,
+which holds for that type and version alone. A Client takes the package only
+with `[packages] verification_key` set.
 
 ## What to expect in the fleet view
 
@@ -290,7 +311,7 @@ rather than inside it.
   capabilities — `check_icmp` and its relatives — will not work. Local checks do.
 - **The build host decides the reach, and only glibc bounds it.** glibc cannot travel and is
   backward compatible, so **one** artifact serves every host whose glibc is at least the build
-  host's — across distribution families (ADR-0034). Build on the oldest system you serve: a Debian 11
+  host's — across distribution families (ADR-0019). Build on the oldest system you serve: a Debian 11
   build (`libc6 >= 2.30`) covers Debian, Ubuntu, and RHEL 9 and 10 alike.
 - **A tree built on Debian carries Debian's OpenSSL layout.** Icinga's cluster TLS is unaffected —
   its certificates are named by explicit paths — but a check that reaches for the *system* trust
@@ -307,7 +328,7 @@ rather than inside it.
   artifact, roll it out, and see whether the daemon finds `include_dir`, `plugin_dir` and its
   libraries from `${supervisor_dir}/program/tree` without the registry keys the MSI writes. Until
   someone has done that and this page says so, keep Windows hosts on their MSI installation and
-  outside the fleet. The RPM repack is not built and is optional under ADR-0034.
+  outside the fleet. The RPM repack is not built and is optional under ADR-0019.
 - **Removing the Supervisor removes its certificate with the directory.** The Icinga master still
   holds the signed certificate for that node — `icinga2 ca remove` there is the operator's, and the
   Supervisor says so when it is retired.
@@ -316,7 +337,7 @@ rather than inside it.
 
 | Symptom | Cause |
 |---|---|
-| `awaiting the certificate for <node>` | Enrolment has not succeeded. The health's error names why: an unreachable parent, an invalid ticket, or a signature nobody granted yet. It retries with backoff; the daemon deliberately does not start meanwhile. |
+| `awaiting the certificate for <node>` | Enrolment has not succeeded. The health's error names why: an unreachable parent, an invalid ticket, a signature nobody granted yet, or a parent certificate named in `trusted_cert_file` that has not arrived (the error names the path). It retries with backoff; the daemon deliberately does not start meanwhile. |
 | `awaiting the configuration …` | No root Configuration has arrived yet: nothing delivered carries `role = "main"`, and no entry is named `icinga2-conf` either. |
 | `two configurations claim to be the root` | Two delivered entries carry `role = "main"`. The message names both; take the role off the one that is not Icinga's root file. |
 | `remote_config_status = FAILED` with a syntax error | Icinga refused the configuration. The running daemon kept the previous one — fix the Configuration and roll out again. |

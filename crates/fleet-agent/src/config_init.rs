@@ -1,0 +1,807 @@
+//! The first configuration file, written by `service install` (ADR-0021).
+//!
+//! A release artifact is the bare binary (ADR-0021), so a fresh host has nothing to copy from, and
+//! [`ClientConfig::load`](crate::config::ClientConfig::load) answers a missing file with the
+//! development defaults — a service that installs, starts, dials `127.0.0.1`, and manages nothing.
+//! This module is the way out of that state: it asks the handful of questions a fresh host cannot
+//! answer for itself, writes the file, and hands it back to the ordinary loader for validation.
+//!
+//! The split here is deliberate. [`ask`] is the only part that touches a terminal; [`render`] is a
+//! pure function from answers to TOML, and [`write_new`] is the one that refuses to overwrite. The
+//! two that decide what lands on disk are therefore testable without a tty — and they are what
+//! [`run_with_endpoint`] reuses to serve a packaged install, which has an answer but no terminal.
+
+use std::io::{IsTerminal, Write as _};
+use std::path::{Path, PathBuf};
+
+use dialoguer::{Confirm, Input};
+
+use crate::config::ClientConfig;
+
+/// The file name written inside the install root when the operator named no `--config` path
+/// (ADR-0021): one rule for systemd, launchd, and the SCM instead of an `/etc` vs `/Library` vs
+/// `%ProgramData%` policy per platform.
+pub const FILE_NAME: &str = "supervisor.toml";
+
+/// What the questionnaire asked for. Everything else in `supervisor.toml` has a default that is right
+/// on a fresh host, and is written as a comment rather than as a value (ADR-0021).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answers {
+    /// The Server's OpAMP endpoint; its scheme selects the transport (ADR-0012).
+    pub endpoint: String,
+    /// The operator's name for this Client, reported as `service.instance.name` (ADR-0015) — which
+    /// of the fleet's Clients this is. Not its `service.name`: that is the Agent *type*, the
+    /// constant `supervisor` (ADR-0021), the same on every host and nothing to ask about.
+    pub name: String,
+    /// A private CA for a `wss://` / `https://` endpoint (ADR-0012), or `None` for the built-in
+    /// webpki roots.
+    pub ca_file: Option<PathBuf>,
+    /// The client certificate and key this Client presents (ADR-0022): a bootstrap certificate to
+    /// enrol with, or one already issued. Written as `[tls] cert_file` and `key_file` either way.
+    /// The questionnaire always asks for it; `None` only where no question was put — a packaged
+    /// install — and the file then fails the install's validation and stays on disk to be
+    /// completed (ADR-0021).
+    pub identity: Option<(PathBuf, PathBuf)>,
+    /// The hex Ed25519 key packages are verified against (ADR-0028); `None` takes no package until
+    /// one is set.
+    pub verification_key: Option<String>,
+    /// The package name `[self_update]` consents to (ADR-0020), or `None` for the withdrawal.
+    /// `Some` is the default and what the questionnaire defaults to (ADR-0020): a Client the fleet
+    /// cannot update has to be updated by hand on every host. `None` renders as an explicit
+    /// `enabled = false`, so the file says which of the two it is either way.
+    pub self_update_package: Option<String>,
+}
+
+/// Ask, write, and report — the whole of `--interactive` (ADR-0021).
+///
+/// A file that already exists is kept, not overwritten and not merged: it holds answers typed once
+/// and edits made since, and a re-install that eats them is a worse failure than one that declines
+/// to write. The written file is left on disk even when it fails to load afterwards, so a typo is
+/// corrected by editing rather than by answering everything again.
+///
+/// # Errors
+/// Returns an error when stdin is not a terminal, when a prompt fails, or when the file cannot be
+/// created.
+pub fn run(path: &Path) -> Result<(), String> {
+    if keeping_existing(path) {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(format!(
+            "--interactive needs a terminal on stdin, and there is none. Write {} first and \
+             install without the flag — a provisioning run must not block on a question nobody \
+             can answer.",
+            path.display()
+        ));
+    }
+    println!(
+        "No configuration at {} — answering these writes it (everything else keeps its default).",
+        path.display()
+    );
+    let answers = ask()?;
+    write_new(path, &render(&answers))?;
+    println!("wrote {}", path.display());
+    Ok(())
+}
+
+/// Write the first configuration from an endpoint *given* rather than asked for — the whole of
+/// `--endpoint` (ADR-0021 clause 42).
+///
+/// This is the half of ADR-0021 a packaged install can reach. An MSI dialog and a `%post` script
+/// both have an answer and no terminal, and [`run`] is deliberately an error without one; the file
+/// they need is the same file, rendered by the same [`render`] and created by the same
+/// [`write_new`], so the never-overwrite rule and the `0600` mode are not restated here.
+///
+/// Only the endpoint and the self-update consent are taken. The client identity is a pair of files
+/// the operator puts on the host, so it has no non-interactive twin: a file written from these
+/// answers alone fails the install's validation and stays on disk to be completed (ADR-0021).
+///
+/// # Errors
+/// Returns an error if the endpoint is not one the loader would accept, or if the file cannot be
+/// created.
+pub fn run_with_endpoint(
+    path: &Path,
+    endpoint: &str,
+    self_update: Option<&str>,
+) -> Result<(), String> {
+    if keeping_existing(path) {
+        return Ok(());
+    }
+    // Before the file is created, not after: an install that wrote an unusable file and then failed
+    // to load it would leave the operator correcting a file they never typed.
+    validate_endpoint(endpoint)?;
+    let answers = Answers {
+        endpoint: endpoint.trim().to_string(),
+        name: ClientConfig::default().name,
+        ca_file: None,
+        identity: None,
+        verification_key: None,
+        self_update_package: self_update.map(str::to_string),
+    };
+    write_new(path, &render(&answers))?;
+    println!("wrote {} for {}", path.display(), answers.endpoint);
+    Ok(())
+}
+
+/// Whether a configuration is already there — in which case it is kept, whichever path asked.
+///
+/// ADR-0021's rule is that a file somebody answered or edited is never overwritten by a later
+/// install, and a packaged re-install is exactly the later install it had in mind. A leftover
+/// `[auth]` in it is no reason to fail or to warn: the Client ignores the section.
+fn keeping_existing(path: &Path) -> bool {
+    if path.exists() {
+        println!("keeping the configuration already at {}", path.display());
+        return true;
+    }
+    false
+}
+
+/// Put the questions to the operator. The only function here that reads a terminal.
+///
+/// # Errors
+/// Returns an error if a prompt cannot be read.
+pub fn ask() -> Result<Answers, String> {
+    let defaults = ClientConfig::default();
+
+    let endpoint: String = Input::new()
+        .with_prompt("Server OpAMP endpoint")
+        .default(defaults.endpoint.clone())
+        .validate_with(|input: &String| validate_endpoint(input))
+        .interact_text()
+        .map_err(prompt_failed)?;
+
+    let name: String = Input::new()
+        .with_prompt("This Agent's name (service.instance.name)")
+        .default(defaults.name.clone())
+        .validate_with(|input: &String| {
+            if input.trim().is_empty() {
+                Err("the name cannot be empty".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .interact_text()
+        .map_err(prompt_failed)?;
+
+    // Only worth asking when the endpoint is one TLS applies to: a private CA behind `ws://` is a
+    // question with no consequence.
+    let ca_file = if is_tls_endpoint(&endpoint)
+        && Confirm::new()
+            .with_prompt("Does the Server present a certificate from a private CA?")
+            .default(false)
+            .interact()
+            .map_err(prompt_failed)?
+    {
+        let file: String = Input::new()
+            .with_prompt("PEM CA bundle path")
+            .validate_with(|input: &String| {
+                if Path::new(input.trim()).is_file() {
+                    Ok(())
+                } else {
+                    Err("no readable file at that path".to_string())
+                }
+            })
+            .interact_text()
+            .map_err(prompt_failed)?;
+        Some(PathBuf::from(file.trim()))
+    } else {
+        None
+    };
+
+    // The client identity (ADR-0022): a bootstrap certificate this host enrols with, or one an
+    // operator already issued. Both are a certificate and its key; the Server tells them apart.
+    // There is no answer without one, and no question asks for a credential (ADR-0021).
+    let readable = |input: &String| {
+        if Path::new(input.trim()).is_file() {
+            Ok(())
+        } else {
+            Err("no readable file at that path".to_string())
+        }
+    };
+    let cert: String = Input::new()
+        .with_prompt("Client certificate — a bootstrap certificate to enrol with, or an issued one (PEM path)")
+        .validate_with(readable)
+        .interact_text()
+        .map_err(prompt_failed)?;
+    let key: String = Input::new()
+        .with_prompt("Its private key (PEM path)")
+        .validate_with(readable)
+        .interact_text()
+        .map_err(prompt_failed)?;
+    let identity = Some((PathBuf::from(cert.trim()), PathBuf::from(key.trim())));
+
+    // Without it nothing is installed, the Client's own updates included (ADR-0028); an empty
+    // answer is allowed and said so.
+    let key_hex: String = Input::new()
+        .with_prompt("Package verification key (hex Ed25519 public key; empty takes no packages)")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(prompt_failed)?;
+    let verification_key = (!key_hex.trim().is_empty()).then(|| key_hex.trim().to_string());
+    if verification_key.is_none() {
+        println!("no verification key: this Client installs no package until one is set");
+    }
+
+    // Last, and defaulting to yes (ADR-0020). It is still the
+    // largest grant in this file — the Server may replace the binary that manages every other
+    // binary on the host — but the alternative is a fleet whose own agent is the one thing left to
+    // patch by hand, and the package name below is what the grant is narrowed to.
+    let self_update_package =
+        if Confirm::new()
+            .with_prompt("Allow the Server to update this Client's own binary?")
+            .default(true)
+            .interact()
+            .map_err(prompt_failed)?
+        {
+            Some(
+            Input::new()
+                .with_prompt("Name of the package that carries this Client")
+                .default(crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string())
+                .validate_with(|input: &String| {
+                    if input.trim().is_empty() {
+                        Err("the package name is the whole of the protection; it cannot be empty"
+                            .to_string())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .interact_text()
+                .map_err(prompt_failed)?,
+        )
+        } else {
+            None
+        };
+
+    Ok(Answers {
+        endpoint: endpoint.trim().to_string(),
+        name: name.trim().to_string(),
+        ca_file,
+        identity,
+        verification_key,
+        self_update_package,
+    })
+}
+
+/// Render the answers as `supervisor.toml`. Pure, so what lands on disk is testable without a tty.
+///
+/// Values go through `toml`'s own string encoder rather than into `"{}"`: a name may contain a
+/// quote, and a Windows path is full of backslashes. The file has no `[auth]` section: the Client
+/// sends no credential (ADR-0021 clause 17).
+#[must_use]
+pub fn render(answers: &Answers) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "# OpAMP Fleet Client configuration, written by\n\
+         # `supervisor service install`. It is an ordinary file from here on:\n\
+         # edit it by hand, and restart the service to apply.\n\n",
+    );
+    out.push_str(&format!("endpoint = {}\n", toml_string(&answers.endpoint)));
+    out.push_str(&format!("name = {}\n", toml_string(&answers.name)));
+    out.push_str(commented_top_level_keys());
+
+    if answers.ca_file.is_some() || answers.identity.is_some() {
+        out.push_str(
+            "\n# TLS toward the Server. ca_file *replaces* the built-in webpki roots; the\n\
+             # certificate and key are this Client's identity — a bootstrap certificate\n\
+             # until the Server issues one, which the state directory then holds.\n[tls]\n",
+        );
+        if let Some(ca) = &answers.ca_file {
+            out.push_str(&format!(
+                "ca_file = {}\n",
+                toml_string(&ca.to_string_lossy())
+            ));
+        }
+        if let Some((cert, key)) = &answers.identity {
+            out.push_str(&format!(
+                "cert_file = {}\n",
+                toml_string(&cert.to_string_lossy())
+            ));
+            out.push_str(&format!(
+                "key_file = {}\n",
+                toml_string(&key.to_string_lossy())
+            ));
+        }
+    }
+
+    if let Some(key) = &answers.verification_key {
+        out.push_str(
+            "\n# Every package is verified against this key; without it nothing is installed.\n\
+             [packages]\n",
+        );
+        out.push_str(&format!("verification_key = {}\n", toml_string(key)));
+    }
+
+    match &answers.self_update_package {
+        Some(package) => {
+            out.push_str(
+                "\n# Consent for the Server to replace this Client's own binary. The name is what\n\
+                 # the consent is narrowed to: an offer under any other name is refused and\n\
+                 # reported, never applied. Write `enabled = false` to withdraw the consent.\n\
+                 [self_update]\n",
+            );
+            out.push_str(&format!("package = {}\n", toml_string(package)));
+        }
+        None => out.push_str(
+            "\n# The Server may NOT replace this Client's own binary. Written out because the\n\
+             # consent otherwise stands by default: this Client is then the one program in the\n\
+             # fleet that has to be updated by hand on this host.\n\
+             [self_update]\n\
+             enabled = false\n",
+        ),
+    }
+
+    out.push_str(
+        "\n# Machine-level attributes the Server's Selectors match on:\n\
+         # [attributes]\n\
+         # env = \"prod\"\n\
+         \n\
+         # Processes this Client manages are added by hand, one [[supervisor]] block\n\
+         # each; see docs/manual/client.md for the blocks and what each key means.\n",
+    );
+    out
+}
+
+/// The top-level keys that are right on a fresh host, as comments — and they are emitted **before
+/// the first table**, which is not cosmetic: a top-level key written after `[tls]` or
+/// `[self_update]` belongs to that table, so an operator who uncomments `poll_interval_secs` under
+/// one would be setting a key the section does not have and the load would refuse the file. The
+/// commented *tables* at the end of `render` are safe wherever they stand, being tables themselves.
+fn commented_top_level_keys() -> &'static str {
+    "\n# Not asked, because these are right on a fresh host. Uncomment to change:\n\
+     # poll_interval_secs = 30          # plain-HTTP polling only; WebSocket is pushed\n\
+     # heartbeat_interval_secs = 30     # 0 disables heartbeats\n\
+     # max_message_size_bytes = 67108864\n\
+     # state_dir = \"/absolute/path\"     # an absolute path here is what the service unit\n\
+     #                                  # carries; otherwise the install root's state/ is used\n\
+     # supervisor_dir = \"/opt/opamp-fleet/supervisors\"\n"
+}
+
+/// Create the file, never replacing one that is there, and never wider than its owner on Unix.
+///
+/// `create_new` is what makes "do not overwrite" a property of the syscall rather than of a check
+/// that raced. The mode is set in the same call for the same reason: the file names where the
+/// private key lies and may hold `[packages] archive_key` (ADR-0021 clause 18), before any later
+/// `set_permissions` could narrow it.
+///
+/// # Errors
+/// Returns an error if the parent cannot be created or the file already exists.
+pub fn write_new(path: &Path, contents: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Whether TLS applies to this endpoint, and a private CA is therefore worth asking about.
+fn is_tls_endpoint(endpoint: &str) -> bool {
+    let endpoint = endpoint.trim();
+    endpoint.starts_with("wss://") || endpoint.starts_with("https://")
+}
+
+/// Reuse the loader's own rule for what an endpoint may look like, so the questionnaire cannot
+/// accept a value the next step rejects.
+fn validate_endpoint(endpoint: &str) -> Result<(), String> {
+    ClientConfig {
+        endpoint: endpoint.trim().to_string(),
+        ..ClientConfig::default()
+    }
+    .transport()
+    .map(|_| ())
+}
+
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_string()).to_string()
+}
+
+fn prompt_failed(e: dialoguer::Error) -> String {
+    format!("cannot read the answer: {e}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The baseline: everything optional declined, except the self-update consent, which since
+    /// ADR-0020 is what declining nothing means.
+    fn answers() -> Answers {
+        Answers {
+            endpoint: "wss://fleet.example.com/v1/opamp".to_string(),
+            name: "host-01".to_string(),
+            ca_file: None,
+            identity: None,
+            verification_key: None,
+            self_update_package: Some(crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string()),
+        }
+    }
+
+    /// What the questionnaire writes holds everything the Client needs at startup — the identity
+    /// and the key — so an install never registers a service that would refuse to start
+    /// (ADR-0021).
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_complete_answer_writes_a_file_the_client_starts_with() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert = dir.path().join("bootstrap.pem");
+        let key = dir.path().join("bootstrap-key.pem");
+        std::fs::write(&cert, "cert").expect("write");
+        std::fs::write(&key, "key").expect("write");
+        let path = dir.path().join(FILE_NAME);
+        let given = Answers {
+            identity: Some((cert.clone(), key.clone())),
+            verification_key: Some(hex::encode([7u8; 32])),
+            ..answers()
+        };
+        write_new(&path, &render(&given)).expect("write");
+        let loaded = ClientConfig::load(&path).expect("the written file loads");
+        loaded
+            .check_admission()
+            .expect("the Client would start with it");
+        let tls = loaded.tls.as_ref().expect("tls");
+        assert_eq!(tls.cert_file.as_deref(), Some(cert.as_path()));
+        assert_eq!(tls.key_file.as_deref(), Some(key.as_path()));
+        assert_eq!(
+            loaded.package_key(),
+            Some(&[7u8; 32][..]),
+            "the key as answered"
+        );
+    }
+
+    /// The questionnaire suggests the loader's default, and that default is one its own endpoint
+    /// rule accepts: TLS, to the loopback literal — never a plaintext or a host-name answer.
+    /// Verifies: ADR-0021
+    #[test]
+    fn the_suggested_endpoint_is_tls_on_the_loopback() {
+        let suggested = ClientConfig::default().endpoint;
+        assert_eq!(suggested, "wss://127.0.0.1:4320/v1/opamp");
+        assert!(is_tls_endpoint(&suggested));
+        validate_endpoint(&suggested).expect("the suggestion passes the questionnaire's rule");
+    }
+
+    /// A packaged install has an endpoint and no terminal: the file it writes carries no identity,
+    /// fails the validation the Client applies at startup, and stays on disk to be completed rather
+    /// than answered again (ADR-0021).
+    /// Verifies: ADR-0021
+    #[test]
+    fn installer_answers_alone_fail_validation_and_stay_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", None).expect("write");
+        let loaded = ClientConfig::load(&path).expect("it parses");
+        let err = loaded.check_admission().expect_err("no identity");
+        assert!(err.contains("cert_file and key_file"), "{err}");
+        assert!(path.exists(), "left on disk to be completed");
+    }
+
+    /// The endpoint rule is the startup rule: plaintext only to a loopback literal, and the name
+    /// `localhost` is not one (ADR-0021).
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_plaintext_endpoint_is_accepted_only_on_a_loopback_literal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for refused in [
+            "ws://fleet.example.com/v1/opamp",
+            "http://localhost:4320/v1/opamp",
+        ] {
+            let path = dir.path().join(format!("{}.toml", refused.len()));
+            let err = run_with_endpoint(&path, refused, None).expect_err(refused);
+            assert!(err.starts_with("endpoint"), "the setting is named: {err}");
+            assert!(!path.exists(), "nothing written for {refused}");
+        }
+        let path = dir.path().join("loopback.toml");
+        run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", None).expect("loopback literal");
+    }
+
+    /// The point of the whole exercise: what the questionnaire writes must load, and must load as
+    /// the answers that were given.
+    /// Verifies: ADR-0021
+    #[test]
+    fn the_rendered_file_loads_as_what_was_answered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let given = Answers {
+            ca_file: Some(PathBuf::from("/etc/ssl/private-ca.pem")),
+            self_update_package: Some("our-own-client".to_string()),
+            ..answers()
+        };
+        write_new(&path, &render(&given)).expect("write");
+
+        let loaded = ClientConfig::load(&path).expect("the written file loads");
+        assert_eq!(loaded.endpoint, given.endpoint);
+        assert_eq!(loaded.name, given.name);
+        // The name that was answered, not the default — an operator whose Set is named otherwise
+        // must get that name written verbatim.
+        assert_eq!(loaded.self_update_package(), Some("our-own-client"));
+        assert_eq!(
+            loaded.tls.expect("tls").ca_file,
+            Some(PathBuf::from("/etc/ssl/private-ca.pem"))
+        );
+    }
+
+    /// No answer puts an `[auth]` section in the file: the questionnaire asks for no credential,
+    /// and the Client sends none (ADR-0021 clause 17).
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_rendered_file_has_no_auth_section() {
+        let given = Answers {
+            ca_file: Some(PathBuf::from("/etc/ssl/private-ca.pem")),
+            identity: Some((PathBuf::from("/c.pem"), PathBuf::from("/k.pem"))),
+            verification_key: Some(hex::encode([7u8; 32])),
+            ..answers()
+        };
+        for rendered in [
+            render(&given),
+            render(&answers()),
+            render(&Answers {
+                self_update_package: None,
+                ..given.clone()
+            }),
+        ] {
+            assert!(!rendered.contains("[auth]"), "{rendered}");
+            for key in ["bearer_token", "username", "password"] {
+                assert!(!rendered.contains(key), "{key} in {rendered}");
+            }
+        }
+    }
+
+    /// ADR-0021 clause 42: the packaged path has to produce a file the loader accepts, carrying the
+    /// endpoint that was given — the same guarantee the questionnaire has, without a terminal.
+    /// Verifies: ADR-0021
+    #[test]
+    fn an_endpoint_given_is_written_and_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+
+        run_with_endpoint(
+            &path,
+            "wss://fleet.example.com/v1/opamp",
+            Some(crate::supervisor::agent::CLIENT_AGENT_TYPE),
+        )
+        .expect("write");
+
+        let loaded = ClientConfig::load(&path).expect("the written file loads");
+        assert_eq!(loaded.endpoint, "wss://fleet.example.com/v1/opamp");
+        // The self-update consent the installer passed is written, standing by default (ADR-0020).
+        assert_eq!(loaded.self_update_package(), Some("supervisor"));
+    }
+
+    /// The withdrawal has a non-interactive twin too (`--no-self-update`, the MSI's cleared
+    /// checkbox): it writes the section out as `enabled = false` rather than omitting it, because
+    /// an omitted section is the consent.
+    #[test]
+    fn an_installer_can_withhold_the_self_update_consent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+
+        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", None).expect("write");
+
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(text.contains("enabled = false"), "{text}");
+        let loaded = ClientConfig::load(&path).expect("the written file loads");
+        assert_eq!(loaded.self_update_package(), None);
+    }
+
+    /// The file is validated *before* it exists, not after. An install that wrote an unusable file
+    /// and then failed to load it would leave the operator fixing a file they never typed.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_bad_endpoint_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+
+        let err = run_with_endpoint(&path, "fleet.example.com", None).expect_err("no scheme");
+        assert!(!err.is_empty());
+        assert!(!path.exists(), "nothing may be left behind");
+    }
+
+    /// ADR-0021 clause 16 holds on the packaged path too: a `.deb` reinstalled over a configured
+    /// host must not eat what somebody answered into the first install, or edited since.
+    /// Verifies: ADR-0021
+    #[test]
+    fn an_endpoint_given_never_overwrites_an_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        write_new(&path, "endpoint = \"wss://kept/v1/opamp\"\n").expect("first write");
+
+        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", None)
+            .expect("kept, not an error");
+
+        let loaded = ClientConfig::load(&path).expect("load");
+        assert_eq!(loaded.endpoint, "wss://kept/v1/opamp");
+    }
+
+    /// An answer is not a well-behaved identifier. Rendering it into `"{}"` would produce a file
+    /// that either fails to parse or parses as a different value.
+    #[test]
+    fn quotes_and_backslashes_in_an_answer_survive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let nasty = r#"a"b\c	d"#;
+        let given = Answers {
+            name: nasty.to_string(),
+            ca_file: Some(PathBuf::from(r"C:\ProgramData\opamp\ca.pem")),
+            ..answers()
+        };
+        write_new(&path, &render(&given)).expect("write");
+
+        let loaded = ClientConfig::load(&path).expect("load");
+        assert_eq!(loaded.name, nasty);
+        assert_eq!(
+            loaded.tls.expect("tls").ca_file,
+            Some(PathBuf::from(r"C:\ProgramData\opamp\ca.pem"))
+        );
+    }
+
+    /// A declined section is absent rather than empty — a bare `[tls]` would say nothing.
+    /// `[self_update]` is the one exception and it is the point of ADR-0020: absent now *means*
+    /// consent, so both answers are written out. The consent names its package; the withdrawal says
+    /// `enabled = false`. A reader of the file can tell which was answered either way.
+    /// Verifies: ADR-0020
+    #[test]
+    fn declined_sections_are_absent_rather_than_empty_and_the_consent_is_always_written() {
+        let rendered = render(&answers());
+        assert!(!rendered.contains("\n[auth]"));
+        assert!(!rendered.contains("\n[tls]"));
+        assert!(rendered.contains("\n[self_update]"));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        write_new(&path, &rendered).expect("write");
+        let loaded = ClientConfig::load(&path).expect("load");
+        assert!(loaded.leftover_auth.is_none());
+        assert!(loaded.tls.is_none());
+        assert_eq!(loaded.self_update_package(), Some("supervisor"));
+
+        // The other answer, spelled out rather than omitted.
+        let withdrawn = render(&Answers {
+            self_update_package: None,
+            ..answers()
+        });
+        assert!(withdrawn.contains("\n[self_update]"));
+        let path = dir.path().join("withdrawn.toml");
+        write_new(&path, &withdrawn).expect("write");
+        assert_eq!(
+            ClientConfig::load(&path)
+                .expect("load")
+                .self_update_package(),
+            None
+        );
+    }
+
+    /// The commented tail must stay comments: an operator who never touches it has a file that
+    /// still loads, and the keys named there must be spelled the way the loader knows them
+    /// (`deny_unknown_fields` would catch a typo the moment they uncomment one).
+    #[test]
+    fn the_commented_tail_is_inert_and_uncommenting_it_works() {
+        // Every table this file can carry, present at once. That is the combination the ordering
+        // has to survive: a commented top-level key written *after* a table belongs to that table,
+        // so uncommenting `poll_interval_secs` under `[tls]` or `[self_update]` would set a key
+        // those sections do not have and `deny_unknown_fields` would refuse the whole file. The
+        // rendered order — scalars, commented scalars, then tables — is what keeps it inert.
+        let given = Answers {
+            ca_file: Some(PathBuf::from("/etc/ssl/private-ca.pem")),
+            identity: Some((PathBuf::from("/c.pem"), PathBuf::from("/k.pem"))),
+            ..answers()
+        };
+        let rendered = render(&given);
+        let uncommented: String = rendered
+            .lines()
+            .map(|line| match line.strip_prefix("# ") {
+                // Only the key lines, not the prose: the prose is indented under a key or ends in
+                // a full sentence, and none of it starts with a known key.
+                Some(rest)
+                    if rest.starts_with("poll_interval_secs")
+                        || rest.starts_with("heartbeat_interval_secs")
+                        || rest.starts_with("max_message_size_bytes") =>
+                {
+                    rest.split('#').next().unwrap_or(rest).trim().to_string()
+                }
+                _ => line.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let loaded: ClientConfig = toml::from_str(&uncommented).expect("the tail's keys are real");
+        assert_eq!(loaded.poll_interval_secs, 30);
+        assert_eq!(loaded.heartbeat_interval_secs, 30);
+        assert_eq!(loaded.max_message_size_bytes, 67_108_864);
+        // The keys landed at the top level, not inside whichever table happened to precede them.
+        assert!(loaded.tls.is_some());
+        assert_eq!(loaded.self_update_package(), Some("supervisor"));
+    }
+
+    /// The refusal that protects answers typed once (ADR-0021).
+    /// Verifies: ADR-0021
+    #[test]
+    fn an_existing_file_is_never_overwritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        write_new(&path, "endpoint = \"ws://first/v1/opamp\"\n").expect("first write");
+
+        let err = write_new(&path, "endpoint = \"ws://second/v1/opamp\"\n")
+            .expect_err("the second write is refused");
+        assert!(err.contains("cannot create"), "{err}");
+        let kept = std::fs::read_to_string(&path).expect("read");
+        assert!(kept.contains("first"), "the original survives: {kept}");
+    }
+
+    /// `run` on an existing file is not an error — a re-install keeps what is there and carries
+    /// on, which is what makes `service install` idempotent (ADR-0021). Reached without a tty
+    /// precisely because the existing-file branch returns before the terminal is consulted.
+    /// Verifies: ADR-0021
+    #[test]
+    fn run_keeps_an_existing_file_without_asking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        write_new(&path, "endpoint = \"wss://kept/v1/opamp\"\n").expect("write");
+
+        run(&path).expect("an existing file is kept, not an error");
+        assert!(std::fs::read_to_string(&path)
+            .expect("read")
+            .contains("kept"));
+    }
+
+    /// Without a terminal there is nobody to answer, and blocking a provisioning run forever is
+    /// the failure mode this refuses (ADR-0021). Under `cargo test` stdin is not a tty, which is
+    /// exactly the condition being asserted.
+    /// Verifies: ADR-0021
+    #[test]
+    fn interactive_without_a_terminal_fails_instead_of_blocking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let err = run(&path).expect_err("no terminal, no questionnaire");
+        assert!(err.contains("needs a terminal"), "{err}");
+        assert!(!path.exists(), "nothing was written");
+    }
+
+    /// Verifies: ADR-0021
+    #[test]
+    fn the_file_is_not_readable_by_the_rest_of_the_machine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        write_new(&path, "endpoint = \"ws://x/v1/opamp\"\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "a file naming the private key is the owner's alone"
+            );
+        }
+    }
+
+    /// Verifies: ADR-0021
+    #[test]
+    fn an_endpoint_is_validated_by_the_loaders_own_rule() {
+        assert!(validate_endpoint("wss://fleet.example.com/v1/opamp").is_ok());
+        assert!(validate_endpoint("  http://127.0.0.1:4320/v1/opamp  ").is_ok());
+        let err = validate_endpoint("fleet.example.com").expect_err("no scheme");
+        assert!(err.contains("must start with"), "{err}");
+    }
+
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_private_ca_is_only_asked_about_where_tls_applies() {
+        assert!(is_tls_endpoint("wss://x/v1/opamp"));
+        assert!(is_tls_endpoint("https://x/v1/opamp"));
+        assert!(!is_tls_endpoint("ws://x/v1/opamp"));
+        assert!(!is_tls_endpoint("http://x/v1/opamp"));
+    }
+}

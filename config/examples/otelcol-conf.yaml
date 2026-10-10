@@ -1,6 +1,6 @@
 # Minimal test Configuration for the "otelcol" supervisor example in config/supervisor.toml —
 # the core otelcol distribution, no opampextension: the Supervisor observes it from the outside.
-# Distributed by scripts/seed_test_configs.sh as Configuration "otelcol-conf" (ADR-0012).
+# Distributed by scripts/seed_test_configs.sh as Configuration "otelcol-conf" (ADR-0025).
 # Ports are offset so it can run alongside the otelcol-contrib collector on the same host.
 
 receivers:

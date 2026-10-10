@@ -13,7 +13,7 @@ The example is `promtail` — one static binary, which is the requirement (see
 - [Limits worth knowing first](#limits-worth-knowing-first)
 - [1. Configure the Supervisor](#1-configure-the-supervisor)
 - [2. Build the artifact](#2-build-the-artifact)
-- [3. Sign it](#3-sign-it-optional-but-decide-fleet-wide)
+- [3. Sign it](#3-sign-it)
 - [4. Give it to the Server](#4-give-it-to-the-server)
 - [5. Put it in a deployment and sign it there](#5-put-it-in-a-deployment-and-sign-it-there)
 - [6. Roll it out](#6-roll-it-out)
@@ -44,10 +44,13 @@ Reading them first is cheaper than discovering them at rollout time.
 ## 1. Configure the Supervisor
 
 The program's *written form* is the whole of this host's consent to being updated. A
-bare file name puts the program in a directory the Client owns, and that is what makes this Agent
-declare `AcceptsPackages`:
+bare file name puts the program in a directory the Client owns. Together with the fleet's
+verification key, that is what makes this Agent declare `AcceptsPackages`:
 
 ```toml
+[packages]
+verification_key = "<the public key from step 3>"
+
 [[supervisor]]
 type = "command"
 name = "promtail"
@@ -55,6 +58,9 @@ command = "promtail"                  # bare: <supervisor_dir>/promtail/program/
 args = ["-config.file=${config_dir}/promtail-conf"]
 version_args = ["--version"]
 ```
+
+Without `[packages] verification_key` the Client takes no package at all, and says so at startup
+([ADR-0028](../adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
 
 Two things this block gets right that are easy to get wrong:
 
@@ -67,8 +73,8 @@ Two things this block gets right that are easy to get wrong:
 
 **Nothing has to be installed on the host first.** Start the Client with the program absent and the
 Agent comes up, connects, and reports `no process installed` — a Supervisor with no process, said
-plainly, rather than a spawn error. It declares `AcceptsPackages` all the same, so the first
-version arrives the same way every later one does.
+plainly, rather than a spawn error. With the verification key set it declares `AcceptsPackages`
+all the same, so the first version arrives the same way every later one does.
 
 **The block does not have to be written on the host either.** A Configuration typed
 `supervisor` — the Client's own Agent type — whose body carries this `[[supervisor]]` block rolls
@@ -161,20 +167,22 @@ same way (`command = "otelcol-contrib"`, or `binary = …` for a `collector` blo
 install fails with *"the archive holds no member named …"*. Repack with `--program-name` when
 you want a different name on disk.
 
-## 3. Sign it (optional, but decide fleet-wide)
+## 3. Sign it
 
 ```console
 $ opamp-package-sign keygen --out fleet-signing.pk8     # prints the public key (hex)
-$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 promtail-3.0.0.tar.gz)
+$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+      promtail-3.0.0.tar.gz)
 ```
 
-Put the public key in every Client's `[packages] verification_key`. This is fleet-wide by nature:
-with a key configured, an **unsigned** package is refused; without one, a **signed** package is
-refused. Decide once, for all hosts.
+Put the public key in every Client's `[packages] verification_key`. Signing is not optional: a
+Client without the key takes no package, an offer without a signature is refused before anything is
+downloaded, and the Server offers no entry its Deployment has not signed
+([ADR-0028](../adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Keep the private key
+off the Server host.
 
-The signature matters more than it looks: the package download route is unauthenticated by design,
-so the content hash and this signature — not access control — are what protect an
-installed binary.
+The download route requires the Client's certificate, and the content hash and this signature are
+what protect an installed binary.
 
 ## 4. Give it to the Server
 
@@ -183,9 +191,12 @@ either upload the artifact as an entry, or point the Server at one hosted elsewh
 this step reaches any host, and nothing in the next one does either: a stored Package aims at
 nobody at all.
 
+The calls go to the Operator plane over TLS. `--cacert ca.pem` names the CA that signed the
+Server's certificate; off the loopback, add the operator credential with `-u`.
+
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4321/api/v1/packages/promtail/3.0.0
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{}' \
+       https://127.0.0.1:4321/api/v1/packages/promtail/3.0.0
 ```
 
 The **Agent type** (the first path segment) is compared raw against the `service.name` the Agents
@@ -199,8 +210,8 @@ so no hash is passed here. `os` and `arch` say which machines this artifact runs
 offers an Agent only the entry built for the platform it reported.
 
 ```console
-$ curl -X PUT --data-binary @promtail-3.0.0.tar.gz \
-       "http://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64"
+$ curl --cacert ca.pem -X PUT --data-binary @promtail-3.0.0.tar.gz \
+       "https://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64"
 ```
 
 No signature here — it goes on the deployment in step 5. Passing `?signature=` is refused with a
@@ -215,22 +226,34 @@ and `amd64`, `arm64`. The tokens off an upstream release file name work too (`ma
 host is offered its own binary:
 
 ```console
-$ curl -X PUT --data-binary @promtail-3.0.0-linux-arm64.tar.gz \
-       "http://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/arm64"
+$ curl --cacert ca.pem -X PUT --data-binary @promtail-3.0.0-linux-arm64.tar.gz \
+       "https://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/arm64"
 ```
 
 **Or reference** — the Server stores the address and *your* SHA-256, offers them verbatim, and
-never downloads the artifact. This is where the hash from step 2 is required, because nothing else
-stands between the mirror and the fleet:
+never downloads the artifact. This is where the hash from step 2 is required, because the hash and
+the signature are what stand between the mirror and the fleet. The `url` must be `https://`;
+`http://` is refused unless its host is `127.0.0.1` or `[::1]`:
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
        -d "{\"url\": \"https://mirror.example/promtail-3.0.0.tar.gz\", \"sha256\": \"$sha\"}" \
-       http://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64/source
+       https://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64/source
 ```
 
 The Agent type has nothing to do with the member name inside the archive — only the *member* has
 to match the configured program.
+
+A Client downloads from the mirror only when its `[packages] allowed_sources` lists it:
+
+```toml
+[packages]
+allowed_sources = ["https://mirror.example/"]
+```
+
+Every redirect hop is checked against the same list, and the Client presents its certificate to
+its own Server alone (see
+[Where a download may come from](client.md#where-a-download-may-come-from)).
 
 ## 5. Put it in a deployment and sign it there
 
@@ -238,11 +261,11 @@ A **Deployment** is the channel this release goes to: a name, a Selector, the Pa
 each artifact's signature. It is the only thing that is rolled out.
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "beta"}}' \
-       http://127.0.0.1:4321/api/v1/deployments/canary
-$ curl -X PUT http://127.0.0.1:4321/api/v1/deployments/canary/packages/promtail/3.0.0
-$ curl -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
-       http://127.0.0.1:4321/api/v1/deployments/canary/signatures/promtail/3.0.0/linux/amd64
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "beta"}}' \
+       https://127.0.0.1:4321/api/v1/deployments/canary
+$ curl --cacert ca.pem -X PUT https://127.0.0.1:4321/api/v1/deployments/canary/packages/promtail/3.0.0
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
+       https://127.0.0.1:4321/api/v1/deployments/canary/signatures/promtail/3.0.0/linux/amd64
 ```
 
 Each Selector pair must equal an attribute the Agent reported — `channel` here comes from
@@ -254,17 +277,21 @@ with every other one. That is the price of the model and it is worth saying out 
 no "everyone" shortcut.** A host that carries no such value belongs to no Deployment and waits.
 
 The signature belongs here rather than to the artifact because what you are signing off on is a
-release to a set of machines. The same Package in two channels is signed in each; a platform left
-unsigned is offered unsigned, which a Client with `verification_key` set refuses on arrival.
+release to a set of machines. The same Package in two channels is signed in each. Sign every
+platform the Package holds: the Server offers no unsigned entry, and the next step's rollout is
+refused while any entry lacks a signature.
 
 ## 6. Roll it out
 
 **The rollout act is what distributes** — nothing before this press changed any host:
 
 ```console
-$ curl -X POST http://127.0.0.1:4321/api/v1/deployments/canary/rollout
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/canary/rollout
 {"assigned_agents": 3}
 ```
+
+A Deployment that lacks a signature for any entry is refused `409`. The message names each Package
+and the platforms it is unsigned for, and nothing is released.
 
 Check the channel's counts first — they are on `GET /api/v1/deployments` and on its row in the UI.
 `claiming_agents` is who is in the channel: `0` means the Selector missed. `targeted_agents` is who
@@ -278,9 +305,9 @@ the Package *waiting*, with a per-Agent **roll out** control — press that, or 
 act, when it should follow. To try one host first, use the per-Agent act:
 
 ```console
-$ curl -X POST -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
        -d '{"deployment": "canary"}' \
-       http://127.0.0.1:4321/api/v1/agents/<instance_uid>/rollout
+       https://127.0.0.1:4321/api/v1/agents/<instance_uid>/rollout
 ```
 
 It must be the Deployment that actually claims that Agent, and it is refused while a second one
@@ -297,10 +324,10 @@ Configuration into its `config/` directory under that Configuration's own name, 
 pointed at it by the `-config.file=${config_dir}/promtail-conf` argument from step 1:
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' \
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
        -d '{"service_name": "promtail", "selector": {"env": "canary"}, "body": "server:\n  http_listen_port: 9080\n"}' \
-       http://127.0.0.1:4321/api/v1/configurations/promtail-conf
-$ curl -X POST http://127.0.0.1:4321/api/v1/configurations/promtail-conf/rollout
+       https://127.0.0.1:4321/api/v1/configurations/promtail-conf
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/promtail-conf/rollout
 ```
 
 The first call only stores — saving never distributes; the second is the rollout act that
@@ -313,16 +340,16 @@ it was rolled out — an edit waits, visible per Agent on the fleet view, until 
 ## 8. Watch it land
 
 ```console
-$ curl -s http://127.0.0.1:4321/api/v1/agents | jq '.[] | select(.service_name=="promtail")'
+$ curl -s --cacert ca.pem https://127.0.0.1:4321/api/v1/agents | jq '.[] | select(.service_name=="promtail")'
 ```
 
 What to look for, in the order it happens:
 
 | Field | What it tells you |
 |---|---|
-| `capabilities` contains `AcceptsPackages` | The block's program is named the way step 1 describes. If it is missing, nothing else below will happen. |
+| `capabilities` contains `AcceptsPackages` | The block's program is named the way step 1 describes, and the Client holds `[packages] verification_key`. If it is missing, nothing else below will happen. |
 | `packages[].status` | `Downloading` — with `download_percent` and `download_bytes_per_second`, re-reported every 5 s — then `Installing`, then `Installed` or `InstallFailed`. |
-| `packages[].error` | Why an install failed: a missing member, a hash mismatch, a wrong archive key. |
+| `packages[].error` | Why an install failed: a missing member, a hash mismatch, a signature that does not verify, a source not allowed, a wrong archive key. |
 | `packages[].version` | The version the Agent has installed; empty until the first one lands. |
 | `service_version` | What `version_args` probed from the program — but **probed once, when the Supervisor started**. After an in-place package update it still shows the version that was running then; `packages[].version` above is the field that tracks what was installed. A Collector reporting through its own `opampextension` is the exception: it re-reports for itself. |
 | `healthy`, `health_status` | `no process installed` before the first package; healthy once it runs. |
@@ -339,14 +366,14 @@ old one stays in the store beside it. The channel is the constant; **what it hol
 which is why the swap is explicit:
 
 ```console
-$ curl -X PUT -H 'Content-Type: application/json' -d '{}' \
-       http://127.0.0.1:4321/api/v1/packages/promtail/3.1.0
-$ curl -X PUT --data-binary @promtail-3.1.0.tar.gz \
-       "http://127.0.0.1:4321/api/v1/packages/promtail/3.1.0/entries/linux/amd64"
-$ curl -X PUT "http://127.0.0.1:4321/api/v1/deployments/canary/packages/promtail/3.1.0?replace=true"
-$ curl -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
-       http://127.0.0.1:4321/api/v1/deployments/canary/signatures/promtail/3.1.0/linux/amd64
-$ curl -X POST http://127.0.0.1:4321/api/v1/deployments/canary/rollout
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{}' \
+       https://127.0.0.1:4321/api/v1/packages/promtail/3.1.0
+$ curl --cacert ca.pem -X PUT --data-binary @promtail-3.1.0.tar.gz \
+       "https://127.0.0.1:4321/api/v1/packages/promtail/3.1.0/entries/linux/amd64"
+$ curl --cacert ca.pem -X PUT "https://127.0.0.1:4321/api/v1/deployments/canary/packages/promtail/3.1.0?replace=true"
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
+       https://127.0.0.1:4321/api/v1/deployments/canary/signatures/promtail/3.1.0/linux/amd64
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/canary/rollout
 ```
 
 Without `?replace=true` the third line answers `409` naming 3.0.0 — a channel holds one Package per
@@ -356,14 +383,14 @@ something that happens.
 The channel is untouched, and 3.0.0 stays in the store beside 3.1.0 — but **putting 3.0.0 back in the
 channel is not how you take 3.1.0 back**. A Package reaches an Agent only as an upgrade over the version
 that Agent reports installed
-([ADR-0035](../adr/0035-what-reaches-an-agent.md)), so once the channel reports
+([ADR-0027](../adr/0027-rollout-and-what-reaches-an-agent.md)), so once the channel reports
 3.1.0 the older one reaches nobody: the channel's act answers `{"assigned_agents": 0}` and the
 per-Agent act answers `409`. An Agent that reports no version for the package is measured by the
 version it reports *running* instead
-([ADR-0035](../adr/0035-what-reaches-an-agent.md)),
+([ADR-0027](../adr/0027-rollout-and-what-reaches-an-agent.md)),
 so this holds on a host the fleet has never installed anything on — and where an Agent reports both,
 the version it reports *running* decides and the package status is not read beside it
-([ADR-0035](../adr/0035-what-reaches-an-agent.md) points 2 and 3), so a record left behind by an
+([ADR-0027](../adr/0027-rollout-and-what-reaches-an-agent.md) points 2 and 3), so a record left behind by an
 install that did not take cannot strand the host.
 
 What takes a bad version back is the host: the version 3.1.0 superseded is kept for
@@ -376,16 +403,19 @@ only moves forward.
 
 | Symptom | Cause |
 |---|---|
-| The Agent never shows `AcceptsPackages` | Every Supervisor declares it, so the Agent is not the one you think it is — check which Supervisor the row belongs to. The startup log states, per Supervisor, what it resolved and what it decided. |
+| The Agent never shows `AcceptsPackages` | The Client has no `[packages] verification_key`, and says so at startup. With the key every Supervisor declares it, so otherwise the Agent is not the one you think it is — check which Supervisor the row belongs to. The startup log states, per Supervisor, what it resolved and what it decided. |
 | `InstallFailed`, "holds no member named …" | The archive's member name does not match the configured program. The error lists what the archive *does* hold; repack with `--program-name`. |
 | `InstallFailed`, "holds no member at …" | A tree package whose `program_path` names nothing in the archive. The error lists what it holds — check the path from its end, not from the archive root. |
 | `InstallFailed`, "matches N members" | `program_path` is ambiguous; write more of the path. |
 | `InstallFailed`, "climbs out" / "is an absolute path" / "not a file or a directory" | The archive carries a member this Client will not write — a `..` path, an absolute one, or a link. Nothing was unpacked and the running tree is untouched. |
-| An agent shows a package version it is not running | Its record outlived the binary it describes — a version switch that did not take effect, or an older Client reinstalled on top of the state. The fleet reads what the agent reports *running* beside the claim and offers that version again (ADR-0035); the Client drops such a record when it starts. |
+| An agent shows a package version it is not running | Its record outlived the binary it describes — a version switch that did not take effect, or an older Client reinstalled on top of the state. The fleet reads what the agent reports *running* beside the claim and offers that version again (ADR-0027); the Client drops such a record when it starts. |
 | The agent stops starting right after a successful install | The artifact was some container the Client does not open — not gzip, 7z, or zip — so it was installed as if it *were* the program. Repack as `.tar.gz`. |
 | `InstallFailed`, "holds an encrypted member" | An encrypted `.zip`. Encryption is the `.7z` format's job, where `[packages] archive_key` opens it; repack, or publish the zip unencrypted. |
 | `InstallFailed`, wrong archive key | `[packages] archive_key` is missing or not the one the `.7z` was packed with. |
-| A signed package is refused | No `verification_key` on that Client — a Client without one refuses *signed* packages, not only unsigned ones. |
+| A package is refused naming `[packages] verification_key` | That Client has no key, and a Client without one takes no package. Set the fleet's public key. |
+| `InstallFailed`, the signature does not verify | The Client's `verification_key` is not the key the Deployment's signature was made with, or the signature belongs to another artifact. |
+| `InstallFailed`, naming an origin | The download URL, or a redirect hop, leads outside the Server's own origin and `[packages] allowed_sources`. List the mirror's `https://` prefix. |
+| The rollout answers `409` naming unsigned platforms | Sign each named entry on the Deployment (step 5), then press again. |
 | An Agent that accepts packages is offered nothing | Two Deployments claim it, and an Agent belongs to at most one; `package_conflict` on its fleet row names both. Narrow one Selector. |
 | An Agent shows no deployment at all | It carries no attribute any channel's Selector matches. That is the ordinary state right after an enrolment — label it into a channel (`PUT /api/v1/agents/<uid>/labels`) or set `channel` in its `[attributes]`. |
 | A package shows `in no deployment` | Stored and unreachable: nothing aims it. Put it in a channel. |
@@ -393,4 +423,4 @@ only moves forward.
 | An upload answers `400` about a signature | Signatures belong to the deployment that offers the bytes; the message names the route. |
 | The package routes answer `404` | Package delivery is not configured on the Server (`packages_dir`). |
 | An upload answers `400`, "invalid platform" | `os`/`arch` are required and must be file-name-safe: lowercase letters, digits and `_`, at most 16 characters. |
-| An Agent that accepts packages is offered nothing, and there is no conflict | No artifact for its platform. Check its `os.type` and `host.arch` on its fleet row against the platforms the package holds — this is the case the whole mechanism exists to make visible rather than fatal. |
+| An Agent that accepts packages is offered nothing, and there is no conflict | No signed artifact for its platform. Check its `os.type` and `host.arch` on its fleet row against the platforms the package holds — this is the case the whole mechanism exists to make visible rather than fatal. |

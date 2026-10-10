@@ -1,12 +1,16 @@
 # Minimal test Configuration for the "otelcol-contrib" supervisor example in config/supervisor.toml —
 # an otelcol-contrib WITH the opampextension reporting into the Supervisor Endpoint on port 4321.
-# Distributed by scripts/seed_test_configs.sh as Configuration "otelcol-contrib-conf" (ADR-0012).
+# Distributed by scripts/seed_test_configs.sh as Configuration "otelcol-contrib-conf" (ADR-0025).
 
 extensions:
   opamp:
     server:
       ws:
         endpoint: ws://127.0.0.1:4321/v1/opamp
+        # The token the Supervisor hands its Managed Process (ADR-0014); without it the endpoint
+        # answers 401.
+        headers:
+          Authorization: "Bearer ${env:OPAMP_SUPERVISOR_TOKEN}"
         tls:
           insecure: true
 

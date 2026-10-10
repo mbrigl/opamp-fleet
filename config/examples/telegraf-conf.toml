@@ -1,12 +1,12 @@
 # Minimal test Configuration for the "telegraf" supervisor example in config/supervisor.toml —
 # a Foreign Agent under the generic "command" Supervisor, observed from the outside.
-# Distributed by scripts/seed_test_configs.sh as Configuration "telegraf-conf" (ADR-0012),
-# typed `telegraf` (ADR-0012) so it reaches no other kind of Agent — the block states no
+# Distributed by scripts/seed_test_configs.sh as Configuration "telegraf-conf" (ADR-0025),
+# typed `telegraf` (ADR-0025) so it reaches no other kind of Agent — the block states no
 # service_name, so this Agent's type is its program's file name.
 #
 # The Configuration's NAME is the file name written into the Supervisor's config directory, so
 # the block must read exactly that file: args = ["--config", "${config_dir}/telegraf-conf"].
-# A name carries no extension: Configuration names follow the ADR-0010 grammar (lowercase
+# A name carries no extension: Configuration names follow the ADR-0021 grammar (lowercase
 # letters, digits and '-'), and neither Telegraf nor the Supervisor cares what the file is called.
 #
 # Roll it out before the supervisor block reaches the host: Telegraf exits on a `--config` that
@@ -15,7 +15,7 @@
 # signals exist, so Telegraf re-reads this file instead of being restarted, and restarts on Windows.
 #
 # ${config_dir} and ${supervisor_dir} are NOT expanded here: they are placeholders for a block's
-# own strings (ADR-0018). Paths in a Configuration body are written out.
+# own strings (ADR-0017). Paths in a Configuration body are written out.
 
 [agent]
   interval = "10s"

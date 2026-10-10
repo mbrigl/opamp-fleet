@@ -5,8 +5,8 @@
 
 **Who reads this.** Whoever changes how Telegraf is packed, and whoever changes what the `telegraf`
 kind knows. It is the one place both sides state the same facts, so a release that moves something
-can be answered on both at once ([ADR-0037](../adr/0037-a-kind-knows-its-own-agent.md) clause 9,
-[ADR-0038](../adr/0038-telegraf-gets-a-kind-of-its-own.md)).
+can be answered on both at once ([ADR-0017](../adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clause 9,
+[ADR-0018](../adr/0018-glpi-agent-and-telegraf.md)).
 
 It is the thinnest of the three artifact documents, because the artifact is installed exactly as
 InfluxData published it: there is no repack to keep in step, and no tree whose internal layout
@@ -14,8 +14,8 @@ anybody could get wrong.
 
 | | |
 |---|---|
-| Packed by | `telegraf_plans` in `crates/package-tools/src/bin/opamp-package-fetch.rs` |
-| Run by | `crates/client/src/supervisor/telegraf.rs` |
+| Packed by | `telegraf_plans` in `crates/fleet-tools/src/bin/opamp-package-fetch.rs` |
+| Run by | `crates/fleet-agent/src/supervisor/telegraf.rs` |
 | Agent type | `telegraf` |
 
 ## 1. Source
@@ -31,7 +31,7 @@ list cannot be read from anywhere and is this tool's own (`TELEGRAF_PLATFORMS`).
 ## 2. Assets per platform
 
 `telegraf-<version>_<os>_<arch>.tar.gz`, and `.zip` for Windows. Upstream spells 32-bit `i386`
-where this fleet says `386` ([ADR-0021](../adr/0021-one-platform-vocabulary.md)); the mapping is the
+where this fleet says `386` ([ADR-0028](../adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); the mapping is the
 third and fourth column of `TELEGRAF_PLATFORMS`:
 
 | This fleet | Upstream |
@@ -55,14 +55,14 @@ unpacked, gathered or rewritten.
 
 ## 5. Form in the delivered tree
 
-A **single-file package** ([ADR-0015](../adr/0015-package-delivery-for-managed-processes.md)). The archive wraps
+A **single-file package** ([ADR-0028](../adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). The archive wraps
 everything in a version-named directory, and the program sits at `usr/bin/telegraf` on Unix but at
 the archive root on Windows — and **neither matters**, because the Client finds the member by its
 *file name*. That is the whole reason this kind has no `program_path`.
 
 The installed program therefore lands in this Supervisor's own `program/` directory
-([ADR-0018](../adr/0018-supervisor-directory-and-client-installed-programs.md)), which is also where the process
-starts ([ADR-0037](../adr/0037-a-kind-knows-its-own-agent.md)).
+([ADR-0017](../adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), which is also where the process
+starts ([ADR-0017](../adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)).
 
 ## 6. What the Client derives
 
@@ -85,7 +85,7 @@ block.
 
 The **version arguments serve twice**: as the probe that gives the Agent its `service.version`, and
 as the preflight run against a *staged* program before the running one is stopped
-([ADR-0033](../adr/0033-icinga-2-supervision-and-enrolment.md)). What makes them a version
+([ADR-0019](../adr/0019-icinga-2.md)). What makes them a version
 probe is what makes them a safe check — cheap, and touching no state.
 
 ## 7. Configurations
