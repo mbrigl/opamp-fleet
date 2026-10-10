@@ -1,9 +1,9 @@
 # ADR-0026: A Package is one release of an Agent type at a version, a Deployment that signs it is the only thing rolled out, a host or a Gateway fetches only what its Agents are offered, and a Supervisor installs only a signed package from an allowed source and rolls back only to a predecessor
 
 - **Status:** 🟢 accepted
-- **Date:** 2026-10-06
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, deployment and download routes of `crates/fleet-server/src/api.rs` with the download handler `download_package`, `packages_dir` and the package limits in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, what a host speaks for in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fleet.rs`, the `download.refused` audit entry, the startup notice of `crates/fleet-server/src/main.rs` when `[client_ca]` is absent, the platform table in `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI, `docs/SPECIFICATION.md` and its Non-Goal "Authorization and multi-tenancy", the Gateway's package cache and its download route in `crates/fleet-agent/src/gateway/` (`cache.rs`, the route in `mod.rs`, the offers `registry.rs` records), the cache directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs` and the Client's waiting on `Retry-After` there, `crates/fleet-agent/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` and their parsing in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, the `sign` command of `opamp-package-sign`, and the deterministic repack of `opamp-package-fetch`
+- **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, deployment and download routes of `crates/fleet-server/src/api.rs` with the download handler `download_package`, `packages_dir` and the package limits in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, what a host speaks for in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fleet.rs`, the `download.refused` audit entry, the startup notice of `crates/fleet-server/src/main.rs` when `[client_ca]` is absent, the platform table in `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI, `docs/SPECIFICATION.md` and its Non-Goal "Authorization and multi-tenancy", the Gateway's package cache and its download route in `crates/fleet-agent/src/gateway/` (`cache.rs`, the route in `mod.rs`, the offers `registry.rs` records), the cache directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs` and the Client's waiting on `Retry-After` there, `crates/fleet-agent/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` and their parsing in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, the `package sign` command of `opamp-fleetctl`, and the deterministic repack of `opamp-fleetctl package fetch`
 
 ## Context
 
@@ -340,7 +340,7 @@ starts, and keep the superseded version for a configurable window.
      constants, so a Supervisor and a Collector's `opampextension` report the same string;
    - the release artifacts carry the same two tokens in their file names (the file-name format is
      [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)'s), so the upload of a release
-     is a loop over its files with `os` and `arch` read straight out of each name.
+     is a loop over the Client's archives with `os` and `arch` read straight out of each name.
 
 8. **A request that names bytes names their Platform; one that names the package does not.** The
    entry upload, the entry source, the entry delete and the artifact download all carry `os` and
@@ -485,7 +485,7 @@ starts, and keep the superseded version for a configurable window.
 
 28. **The signature lives on the Deployment, per `(Package, Platform)`, and the wire is unchanged.**
     `PUT|DELETE /api/v1/deployments/{name}/signatures/{type}/{version}/{os}/{arch}` with the hex
-    Ed25519 signature (as `opamp-package-sign` prints it). A signature for a Package the Deployment
+    Ed25519 signature (as `opamp-fleetctl package sign` prints it). A signature for a Package the Deployment
     does not hold is `404`, an empty one `400`; removing a Package from a Deployment takes its
     signatures with it. What an Agent receives in `DownloadableFile.signature` is the signature held
     by the Deployment its assignment was released through, not whichever claims it now. **The
@@ -855,7 +855,7 @@ this object is called a Deployment.
     50). The signature covers a statement of what the artifact is, not its bytes:
     `opamp-fleet-package-v1`, the Agent type (the offered package's name), the version and the
     artifact's SHA-256 in lowercase hex, one per line, each ended by a newline
-    (`fleet_core::package::statement`). `opamp-package-sign sign --agent-type … --version …` makes
+    (`fleet_core::package::statement`). `opamp-fleetctl package sign --agent-type … --version …` makes
     it. Since the hash is in the statement and checked against the streamed bytes first, the
     signature still covers the artifact exactly as published, archive and all — and holds for that
     type and version alone. Where a Deployment
@@ -976,7 +976,7 @@ this object is called a Deployment.
     travel byte for byte: the hash an Agent verifies is upstream's own, and the artifact may even
     be a referenced package pointing at the release asset.
 
-67. **Every repack `opamp-package-fetch` makes is deterministic.** Where an upstream
+67. **Every repack `opamp-fleetctl package fetch` makes is deterministic.** Where an upstream
     publishes no artifact a Client can run as published, the tool repacks it on the operator's
     host, before it is signed, into a `.tar.gz` that keeps file modes. The repack has a fixed
     member order and zeroed times and ownership, and it carries no link: every link is
@@ -1000,7 +1000,7 @@ tenancy on the Operator plane; keeping the Gateway's cache and the offers it ser
 restart of the Gateway, and the Gateway's own Supervisors fetching through the cache; resuming an
 interrupted download with range requests; distributing the archive key, the verification key or
 the allow-list; keeping more than one predecessor; scoping an offered header to a path below an
-allowed origin; a reproducible tree mode for `opamp-package-sign pack`.
+allowed origin; a reproducible tree mode for `opamp-fleetctl package pack`.
 
 ## Alternatives considered
 
@@ -1727,7 +1727,7 @@ Each test of clauses 35–49 carries a `Verifies:` marker citing this decision
   `retention_defaults_globally_and_is_overridable_per_supervisor` in
   [`config.rs`](../../crates/fleet-agent/src/config.rs).
 - Deterministic repack (clause 67): `a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang`
-  in [`opamp-package-fetch.rs`](../../crates/fleet-tools/src/bin/opamp-package-fetch.rs) — a linked directory's contents under
+  in [`fetch.rs`](../../crates/fleet-tools/src/fetch.rs) — a linked directory's contents under
   both names, a link that names nothing dropped, a cycle that ends, and the packed tree one a
   Client installs.
 - Mandatory signature (clauses 50, 54): `without_a_verification_key_no_agent_takes_packages` in
@@ -1758,5 +1758,5 @@ source that inspects the handshake, so review of every change to
 missing key at startup is a log line in
 [`service/runtime.rs`](../../crates/fleet-agent/src/service/runtime.rs) that no test reads. That a
 repack yields the same bytes twice (clause 67) has no test of its own: `pack_tree` in
-[`opamp-package-fetch.rs`](../../crates/fleet-tools/src/bin/opamp-package-fetch.rs) fixes order, times and ownership, and review
+[`fetch.rs`](../../crates/fleet-tools/src/fetch.rs) fixes order, times and ownership, and review
 of every change to it keeps them.

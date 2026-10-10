@@ -1,23 +1,15 @@
-//! The certificates `server pki init` makes are all a fleet needs (ADR-0027): a Server configured
-//! from `server.toml.fragment` admits the real Client configured from `supervisor.toml.fragment`
-//! once its enrolment is approved, with no certificate made by anything else.
+//! The certificates `opamp-fleetctl pki init` makes are all a fleet needs (ADR-0027, ADR-0028): a
+//! Server configured from `server.toml.fragment` admits the real Client configured from
+//! `supervisor.toml.fragment` once its enrolment is approved, with no certificate made by anything
+//! else. The program is run as an operator runs it; the Server and the Client run in this process.
 
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fleet_server::fleet::AppState;
 use fleet_server::revocation::Revocations;
-
-struct ClientUnderTest(Child);
-
-impl Drop for ClientUnderTest {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 /// The sections of `server.toml.fragment`, read as the Server reads them.
 #[derive(serde::Deserialize)]
@@ -56,18 +48,18 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
     let dir = tempfile::tempdir().expect("tempdir");
     let server_dir = dir.path().join("server");
     let offline_dir = dir.path().join("offline");
-    fleet_server::pki::init(&fleet_server::pki::InitOptions {
-        server_dir: server_dir.clone(),
-        offline_dir: offline_dir.clone(),
-        server_path: None,
-        host_path: None,
-        fleet: fleet_server::pki::DEFAULT_FLEET.to_string(),
-        names: vec!["localhost".to_string()],
-        ca_days: fleet_server::pki::CA_DAYS,
-        server_days: fleet_server::pki::SERVER_DAYS,
-        bootstrap_days: fleet_server::pki::BOOTSTRAP_DAYS,
-    })
-    .expect("pki init");
+    let made = Command::new(env!("CARGO_BIN_EXE_opamp-fleetctl"))
+        .args(["pki", "init", "--name", "localhost", "--server-dir"])
+        .arg(&server_dir)
+        .arg("--offline-dir")
+        .arg(&offline_dir)
+        .output()
+        .expect("run opamp-fleetctl");
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
 
     // The Server, built from the fragment as `main` builds it from `server.toml`.
     let fragment: Fragment = toml::from_str(
@@ -131,15 +123,15 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
         ),
     )
     .expect("write supervisor.toml");
-    let _client = ClientUnderTest(
-        Command::new(env!("CARGO_BIN_EXE_supervisor"))
-            .arg("--config")
-            .arg(&config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn the client"),
-    );
+    let (stop, shutdown) = fleet_agent::shutdown::shutdown_channel();
+    let client = tokio::spawn(fleet_agent::service::runtime::run_until_shutdown(
+        fleet_agent::service::runtime::RunSpec {
+            config_path,
+            state_dir: None,
+            service: false,
+        },
+        shutdown,
+    ));
 
     let id = until("an enrolment request", Duration::from_secs(20), || {
         enrolment
@@ -164,4 +156,9 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
         1,
         "one approval, one certificate"
     );
+    let _ = stop.send(true);
+    client
+        .await
+        .expect("the Client task")
+        .expect("the Client ran until it was stopped");
 }

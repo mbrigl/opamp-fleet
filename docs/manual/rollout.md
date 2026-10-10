@@ -89,29 +89,29 @@ to push.
 ## 2. Build the artifact
 
 **For the Collector this step and the next two are one command.**
-[`opamp-package-fetch`](tools.md#opamp-package-fetch) knows where the OpenTelemetry Collector
+[`opamp-fleetctl package fetch`](tools.md#package-fetch) knows where the OpenTelemetry Collector
 (`otelcol`, `otelcol-contrib`) publishes, and asks what it cannot
 know — which agent, which of the last five versions, which platforms, and where to upload:
 
 ```console
-$ opamp-package-fetch
+$ opamp-fleetctl package fetch
 ```
 
 It verifies every download against the SHA-256 upstream published, leaves the artifact untouched
 wherever upstream's container is one a Client can open — so the hash the fleet verifies is the
 one on the release page — and repacks only where upstream ships no installable archive. It never
 rolls anything out: reaching a host is still [step 5](#6-roll-it-out). The full
-option list is in [the tools page](tools.md#opamp-package-fetch); if you take that route, read
+option list is in [the tools page](tools.md#package-fetch); if you take that route, read
 on at [step 5](#6-roll-it-out).
 
 For anything else — your own agent, or a project that tool has never heard of — the rest of this
 step is how an artifact is built by hand.
 
-`opamp-package-sign pack` writes the two containers worth writing, with the member named the
+`opamp-fleetctl package pack` writes the two containers worth writing, with the member named the
 way the Supervisor will look for it, and prints the artifact's SHA-256:
 
 ```console
-$ opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail
+$ opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail
 wrote promtail-3.0.0.tar.gz holding "promtail" — a Supervisor whose program is named "promtail" installs it
 sha256 (hex):
 84736f3e2d7d3dc260f172df23063bb044aaa7d576dd8f7b8021a58d6c772461
@@ -124,7 +124,7 @@ sha256 (hex):
 | `--program-name <name>` | The member name inside the archive. Defaults to the packed file's own name — set it when an upstream build is called `promtail-3.0.0-linux-amd64` but the Supervisor's program is `promtail`. |
 | `--archive-key <key>` | AES-256-encrypts a `7z`. The value goes into `[packages] archive_key` on every Client that receives the package; the Server never learns it. |
 
-Only the hex hash goes to stdout, so it composes: `sha=$(opamp-package-sign pack …)`.
+Only the hex hash goes to stdout, so it composes: `sha=$(opamp-fleetctl package pack …)`.
 
 **A `.tar.gz` is reproducible.** Modification time, owner, and group are zeroed, so packing the
 same program twice gives the same bytes and the same hash. That matters in a system where a hash
@@ -135,7 +135,7 @@ time, so take the hash from the artifact you actually upload, which is what the 
 An encrypted artifact instead:
 
 ```console
-$ opamp-package-sign pack --format 7z --archive-key "$FLEET_ARCHIVE_KEY" \
+$ opamp-fleetctl package pack --format 7z --archive-key "$FLEET_ARCHIVE_KEY" \
       --out promtail-3.0.0.7z ./promtail
 ```
 
@@ -158,7 +158,7 @@ Check what it holds and whether the member name matches your block:
 
 ```console
 $ tar tzf otelcol-contrib_0.109.0_linux_amd64.tar.gz
-$ opamp-package-sign sha256 otelcol-contrib_0.109.0_linux_amd64.tar.gz
+$ opamp-fleetctl package sha256 otelcol-contrib_0.109.0_linux_amd64.tar.gz
 ```
 
 The member is named after the **distribution** — `otelcol-contrib` in the Contrib archive,
@@ -170,8 +170,8 @@ you want a different name on disk.
 ## 3. Sign it
 
 ```console
-$ opamp-package-sign keygen --out fleet-signing.pk8     # prints the public key (hex)
-$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+$ opamp-fleetctl package keygen --out fleet-signing.pk8     # prints the public key (hex)
+$ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
       promtail-3.0.0.tar.gz)
 ```
 

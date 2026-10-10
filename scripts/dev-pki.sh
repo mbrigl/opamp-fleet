@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Creates the certificates a development Server and Client need, since both refuse to run without
-# them (ADR-0012, ADR-0020), with the Server's own `server pki init` (ADR-0027) — no openssl.
+# them (ADR-0012, ADR-0020), with the operator tool's `opamp-fleetctl pki init` (ADR-0027,
+# ADR-0028) — no openssl.
 # Everything lands in one directory, gitignored, and is for a development machine only: the keys
 # are unencrypted and the CAs are throwaway.
 #
@@ -36,7 +37,7 @@ mkdir -p "$OUT"
 chmod 700 "$OUT"
 OUT="$(cd "$OUT" && pwd)"  # the configurations name the set by absolute path
 
-(cd "$ROOT" && cargo run -q -p fleet-server -- pki init \
+(cd "$ROOT" && cargo run -q -p fleet-tools -- pki init \
   --server-dir "$OUT/server" --offline-dir "$OUT/offline" \
   --fleet "opamp-fleet development" --name localhost)
 

@@ -56,21 +56,18 @@ the bootstrap CA's key and the server CA's key stay off the Server.
 
 ## 1. Make the certificates
 
-The Server binary makes every certificate of this page itself, with `server pki`; no other tool
-is needed. A release ships the Client, not the Server, so build the Server from a checkout first,
-on a Linux machine:
+The operator tool `opamp-fleetctl` makes every certificate of this page, with its `pki` commands;
+no other tool is needed. Every release publishes it for Linux and macOS
+([Getting it](tools.md#getting-it)); download it to the machine where the offline keys are to stay,
+typically your own, not the Server host.
+
+Run `pki init` there. Name every address the Clients will dial with `--name`, as a DNS name or an
+IP address; repeat it for each:
 
 ```console
-$ cargo build --release -p fleet-server     # writes target/release/server
-```
-
-Run `pki init` on the machine where the offline keys are to stay, typically your own. Name every
-address the Clients will dial with `--name`, as a DNS name or an IP address; repeat it for each:
-
-```console
-$ server pki init --server-dir fleet-server --offline-dir fleet-offline \
-         --name fleet.example.com --name 10.0.0.5 \
-         --server-path /etc/opamp-fleet-server/tls --host-path /etc/opamp
+$ opamp-fleetctl pki init --server-dir fleet-server --offline-dir fleet-offline \
+                         --name fleet.example.com --name 10.0.0.5 \
+                         --server-path /etc/opamp-fleet-server/tls --host-path /etc/opamp
 fleet-server: for the Server host — merge server.toml.fragment into its server.toml
 fleet-offline: keep offline — the server CA and bootstrap CA keys; give every new host server-ca.pem, bootstrap.pem and bootstrap-key.pem, as supervisor.toml.fragment names them
 bootstrap certificate serial: 6723c735dcae96984c18a6cc7df02d4e
@@ -116,9 +113,11 @@ to outlive the CA that signs it; one asked to is cut to the CA's end, with a not
 
 ## 2. Configure and start the Server
 
-Copy the Server binary from step 1 to the Server host and give it an account of its own:
+A release ships the Client and the operator tool, not the Server, so build the Server from a
+checkout, on a Linux machine, then copy it to the Server host and give it an account of its own:
 
 ```console
+$ cargo build --release -p fleet-server                 # writes target/release/server
 $ sudo install -m 755 server /usr/local/bin/server    # on the Server host, after copying it there
 $ sudo useradd --system --no-create-home --shell /usr/sbin/nologin opamp-fleet-server
 ```
@@ -225,11 +224,11 @@ first.
 ## 3. Make the package signing key
 
 A Client installs software only when an operator's key has signed it, and that includes its own
-updates. Make that key once, with the `opamp-package-sign` tool. Like the Server, it is built from a
-checkout ([Command-line tools](tools.md)):
+updates. Make that key once, with the operator tool's `package keygen`
+([The operator tool](tools.md#packing-and-signing)):
 
 ```console
-$ opamp-package-sign keygen --out fleet-signing.pk8
+$ opamp-fleetctl package keygen --out fleet-signing.pk8
 3b6a27bc…        # the public key: every Client's [packages] verification_key
 ```
 
@@ -371,7 +370,7 @@ $ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' \
 ```
 
 A bootstrap certificate is revoked the same way, with `"authority": "bootstrap"` and the serial
-`pki init` or `pki bootstrap-cert` printed; `server pki status` lists it again. See
+`pki init` or `pki bootstrap-cert` printed; `opamp-fleetctl pki status` lists it again. See
 [Revocation](server.md#revocation-withdrawing-a-certificate) for Gateways and for lifting a
 revocation.
 
@@ -379,8 +378,8 @@ revocation.
 directory:
 
 ```console
-$ server pki server-cert --offline-dir fleet-offline --name fleet.example.com --name 10.0.0.5 --out next-server
-$ server pki bootstrap-cert --offline-dir fleet-offline --out next-bootstrap
+$ opamp-fleetctl pki server-cert --offline-dir fleet-offline --name fleet.example.com --name 10.0.0.5 --out next-server
+$ opamp-fleetctl pki bootstrap-cert --offline-dir fleet-offline --out next-bootstrap
 ```
 
 Each writes into a new directory: `server.pem` and `server-key.pem`, or `bootstrap.pem` and
@@ -394,9 +393,10 @@ certificate: give it the Gateway's names and use the pair as its `[gateway.tls] 
 certificate, the client CA and the bootstrap CA end. Thirty days before — or in the last third of
 the life of a certificate that lives less than 90 days — it logs a warning naming the file and the
 date, and records `pki.expiring` in the audit; once one has ended, an error and `pki.expired`. It
-keeps serving either way. `server pki status` says the same on demand, for a configuration, an
-offline directory, or both, and its exit code suits a monitoring job: `0` when nothing is ending,
-`1` when something is, `2` when something has ended.
+keeps serving either way. `server pki status --config <server.toml>` says the same on demand for
+the Server host's certificates, and `opamp-fleetctl pki status --offline-dir <dir>` for the offline
+directory's. Both exit by a code that suits a monitoring job: `0` when nothing is ending, `1` when
+something is, `2` when something has ended.
 
 ```console
 $ server pki status --config /etc/opamp-fleet-server/server.toml
@@ -426,5 +426,5 @@ issued.
 | A `429` | Client | The host's address failed admission too often, and the Server is backing it off. Fix the certificate; the back-off ends by itself. |
 | The Server refuses to start, naming `shares a CA with [tls] client_ca_file` | Server | The bootstrap CA and the client CA have the same subject name. Make a bootstrap CA with a name of its own. |
 | The Server refuses to start, naming `[client_ca] … does not exist` | Server | A file of `[client_ca]` is missing. |
-| The Server refuses to start with `cannot read <key file>: …` | Server | The account the Server runs as cannot read the client CA's key, or, when the message ends in `Could not parse key pair`, the key is not PKCS#8. A client CA made by `server pki init` always is. |
+| The Server refuses to start with `cannot read <key file>: …` | Server | The account the Server runs as cannot read the client CA's key, or, when the message ends in `Could not parse key pair`, the key is not PKCS#8. A client CA made by `opamp-fleetctl pki init` always is. |
 | Hosts enrol, but their certificates are refused at once | both | `[client_ca]` holds a key that does not belong to its certificate, or `client_ca_file` names another CA. The Server checks neither at startup. |

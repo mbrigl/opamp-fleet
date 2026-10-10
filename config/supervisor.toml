@@ -123,8 +123,8 @@ state_dir = "client-state"
 # takes package delivery by naming its program with a bare file name (see the blocks below);
 # *which* artifact it then receives is the Server's decision, expressed as that package's
 # Deployment — never a key in this file.
-# Generate a key and sign artifacts with the `opamp-package-sign` helper
-# (cargo run -p fleet-tools --bin opamp-package-sign -- keygen): its keygen output is this value.
+# Generate a key and sign artifacts with the operator tool (`opamp-fleetctl package keygen`, then
+# `opamp-fleetctl package sign`): its keygen output is this value.
 #
 # A download goes to the Server's own origin, or to a source listed in allowed_sources: https://
 # URL prefixes, checked on every redirect hop. This Client's certificate is shown to its Server

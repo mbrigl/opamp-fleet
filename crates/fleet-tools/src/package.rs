@@ -1,5 +1,5 @@
-//! `opamp-package-sign` — an operator helper for building and signing OpAMP Fleet packages
-//! (ADR-0026).
+//! `opamp-fleetctl package` — fetching, building, hashing and signing OpAMP Fleet packages
+//! (ADR-0026, ADR-0028).
 //!
 //! Package signatures are **raw Ed25519** over a statement of what the artifact is — its Agent
 //! type, its version and its SHA-256 (`fleet_core::package::statement`, ADR-0026) — verified by
@@ -9,16 +9,17 @@
 //! it writes container formats [`fleet_agent::archive`] can open, with the member named the way the
 //! Supervisor will look for it, and its tests open what it wrote with that same module.
 //!
-//! It is an operator tool, and lives in its own crate for that reason (ADR-0009): nothing the
-//! Server or Client runtime does depends on it, and a managed host never runs it.
+//! It is part of the operator tool, which lives in its own crate for that reason (ADR-0009,
+//! ADR-0028): nothing the Server or Client runtime does depends on it, and a managed host never
+//! runs it. `fetch` is [`crate::fetch`]; the rest is here.
 //!
 //! Typical use — build an artifact, sign it, upload it:
 //!
 //! ```text
-//! opamp-package-sign keygen --out fleet-signing.pk8   # prints the public key (hex) to stdout
+//! opamp-fleetctl package keygen --out fleet-signing.pk8   # prints the public key (hex) to stdout
 //! # put that hex in the Client's `[packages] verification_key`
-//! sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
-//! sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+//! sha=$(opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail)
+//! sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
 //!       promtail-3.0.0.tar.gz)
 //! curl -X PUT "http://<server>:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64?signature=$sig" \
 //!      --data-binary @promtail-3.0.0.tar.gz
@@ -28,24 +29,17 @@
 //! status messages go to stderr.
 
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Subcommand, ValueEnum};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
 
-#[derive(Parser)]
-#[command(
-    name = "opamp-package-sign",
-    about = "Build, hash, and sign OpAMP Fleet packages"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
+/// The commands of `opamp-fleetctl package` (ADR-0028 clause 1).
 #[derive(Subcommand)]
-enum Command {
+pub enum Command {
+    /// Fetch a release of a known agent, verify it against upstream's checksum, and optionally
+    /// upload it to a Server with its default configuration.
+    Fetch(crate::fetch::Args),
     /// Generate an Ed25519 signing key, write the private key to a file, and print the public key
     /// (hex) — the value for the Client's `[packages] verification_key`.
     Keygen {
@@ -115,7 +109,7 @@ enum Command {
 
 /// The package container formats a Client can open (ADR-0026).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum Format {
+pub enum Format {
     /// A gzip-compressed tar — what `opentelemetry-collector-releases` and most projects publish.
     #[value(name = "tar.gz")]
     TarGz,
@@ -133,18 +127,19 @@ enum Format {
 #[cfg(test)]
 use fleet_agent::archive;
 
-fn main() -> ExitCode {
-    match run(Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn run(cli: Cli) -> Result<(), String> {
-    match cli.command {
+/// Runs one `package` command.
+///
+/// # Errors
+/// Returns the message to print when the command fails.
+pub fn run(command: Command) -> Result<(), String> {
+    match command {
+        // One thread: fetching is a sequence of downloads with a question between them, and the
+        // prompts block by nature — there is nothing for a multi-threaded runtime to overlap.
+        Command::Fetch(args) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("cannot start the runtime: {e}"))?
+            .block_on(crate::fetch::run(args)),
         Command::Keygen { out } => {
             let rng = ring::rand::SystemRandom::new();
             let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
@@ -365,14 +360,12 @@ mod tests {
         program_name: Option<&str>,
         archive_key: Option<&str>,
     ) -> Result<(), String> {
-        run(Cli {
-            command: Command::Pack {
-                program: program.to_path_buf(),
-                out: out.to_path_buf(),
-                format,
-                program_name: program_name.map(str::to_string),
-                archive_key: archive_key.map(str::to_string),
-            },
+        run(Command::Pack {
+            program: program.to_path_buf(),
+            out: out.to_path_buf(),
+            format,
+            program_name: program_name.map(str::to_string),
+            archive_key: archive_key.map(str::to_string),
         })
     }
 
@@ -587,10 +580,8 @@ mod tests {
         std::fs::write(&artifact, b"a-managed-process-binary").expect("write artifact");
 
         // keygen writes the key and yields the public key; sign yields the signature.
-        run(Cli {
-            command: Command::Keygen {
-                out: keyfile.clone(),
-            },
+        run(Command::Keygen {
+            out: keyfile.clone(),
         })
         .expect("keygen");
         let keypair = load_key(&keyfile).expect("load");
@@ -598,7 +589,8 @@ mod tests {
         let bytes = std::fs::read(&artifact).expect("read");
         let signature = keypair.sign(&bytes).as_ref().to_vec();
 
-        // The exact check from fleet_agent::packages::verify — raw Ed25519, public key, over the bytes.
+        // The exact check from fleet_agent::packages::verify — raw Ed25519, public key, over the
+        // bytes.
         ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public)
             .verify(&bytes, &signature)
             .expect("the client verifier accepts the tool's signature");

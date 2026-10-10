@@ -18,7 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 ### Added
 
 - **The Server makes the fleet's certificates itself**
-  ([ADR-0027](docs/adr/0027-the-server-makes-the-fleets-certificates-itself.md)).
+  ([ADR-0027](docs/adr/0027-the-operator-tool-makes-the-fleets-certificates-and-the-server-says-before-they-end.md)).
   `server pki init` makes the server CA, the client CA and the bootstrap CA, the Server's
   certificate and the bootstrap certificate, split into a directory for the Server host and one
   that stays offline, with `server.toml` and `supervisor.toml` fragments naming them.
@@ -290,6 +290,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   ([ADR-0009](docs/adr/0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). A
   plaintext Gateway now drains for at most 35 seconds on shutdown, as a TLS one already did.
   **What to do:** nothing.
+
+- **The operator tools are one program, `opamp-fleetctl`, and every release publishes it for Linux
+  and macOS**
+  ([ADR-0028](docs/adr/0028-the-operator-tools-are-one-program-released-for-linux-and-macos.md)).
+  `opamp-fleetctl package` holds `fetch`, `pack`, `sha256`, `sign`, `keygen` and `public-key`,
+  with the options and output they had; `opamp-fleetctl pki` holds `init`, `server-cert`,
+  `bootstrap-cert` and `status --offline-dir`. A release now carries
+  `opamp-fleetctl_<version>_<os>_<arch>.tar.gz` for `linux` and `darwin` on `amd64` and `arm64`,
+  covered by `SHA256SUMS`; it is downloaded, not uploaded to a Server. The Server binary keeps
+  `server pki status --config <server.toml>` and makes no certificate any more. **What to do:**
+  every script that calls the old names breaks, with no alias:
+  `opamp-package-fetch …` becomes `opamp-fleetctl package fetch …`,
+  `opamp-package-sign <command> …` becomes `opamp-fleetctl package <command> …`,
+  `server pki init`, `server-cert` and `bootstrap-cert` become `opamp-fleetctl pki …` with the
+  same options, and `server pki status --offline-dir <dir>` becomes
+  `opamp-fleetctl pki status --offline-dir <dir>`. Certificates, keys and signatures made before
+  keep working. An upload loop over a release's assets selects `supervisor_<version>_*.tar.gz`,
+  not `*_<version>_*.tar.gz`, or it puts an `opamp-fleetctl` archive into the `supervisor`
+  Package.
 
 ### Fixed
 
@@ -1132,7 +1151,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `--version`, `--platform`, `--out-dir`, `--server` and `--no-upload` make it scriptable.
   Artifacts travel **as published** wherever upstream's container is one a Client can open, so
   the hash the fleet verifies is the one on the release page. See
-  [the tools page](docs/manual/tools.md#opamp-package-fetch).
+  [the tools page](docs/manual/tools.md#package-fetch).
   **What to do:** nothing; it is a new tool beside `opamp-package-sign`, which still builds an
   artifact out of any program you have.
 - **A `command` Supervisor can reload instead of restart**

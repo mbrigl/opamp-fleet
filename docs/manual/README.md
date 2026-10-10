@@ -49,8 +49,8 @@ starts without TLS material and a client certificate, so the first step makes a
 development set of them.
 
 1. **Create the development certificates.** [`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) makes
-   them with the Server's own `server pki init`, so it needs no other tool: the three CAs of
-   [Setting up a fleet](setup.md#the-certificates-at-a-glance), a Server certificate for
+   them with the operator tool's `opamp-fleetctl pki init`, so it needs no other tool: the three CAs
+   of [Setting up a fleet](setup.md#the-certificates-at-a-glance), a Server certificate for
    `localhost`, `127.0.0.1` and `::1`, and the bootstrap certificate the Client enrols with.
    Everything lands in `.dev-pki/`, which git ignores. The keys are unencrypted and the CAs are
    throwaway, so use the set on a development machine only. The script refuses to overwrite a

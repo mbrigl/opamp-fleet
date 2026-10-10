@@ -1,7 +1,9 @@
 //! What the Server and the Client implement identically that is this project's own rather than
-//! OpAMP's (ADR-0009): the version this build reports and its grammar, and the platform vocabulary. The
-//! protocol and its transport, TLS included, are in the `opamp` crate (ADR-0009).
+//! OpAMP's (ADR-0009): the version this build reports and its grammar, the platform vocabulary, and
+//! when a certificate counts as ending (ADR-0027). The protocol and its transport, TLS included,
+//! are in the `opamp` crate (ADR-0009).
 
+pub mod ending;
 pub mod package;
 pub mod platform;
 pub mod renewal;
