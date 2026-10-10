@@ -1025,16 +1025,13 @@ mod tests {
     /// Verifies: ADR-0022
     #[test]
     fn a_weak_argon2id_hash_is_refused() {
-        use argon2::password_hash::{PasswordHasher as _, SaltString};
+        use argon2::password_hash::PasswordHasher as _;
         let cheap = argon2::Argon2::new(
             argon2::Algorithm::Argon2id,
             argon2::Version::V0x13,
             argon2::Params::new(4096, 1, 1, None).expect("params"),
         )
-        .hash_password(
-            b"secret",
-            &SaltString::encode_b64(b"0123456789abcdef").expect("salt"),
-        )
+        .hash_password_with_salt(b"secret", b"0123456789abcdef")
         .expect("hash")
         .to_string();
         let auth: RestAuthConfig =
