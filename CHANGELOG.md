@@ -160,6 +160,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   ([ADR-0018](docs/adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)).
   **What to do:** nothing; restart the service after it to apply the change.
 
+- **Telegraf is managed by the fleet** — a new Supervisor kind `telegraf`, compiled into the Client
+  by default as the `telegraf` feature ([ADR-0026](docs/adr/0026-telegraf.md)). A block is
+  `type = "telegraf"` and `name`; the kind derives the program, `--config` and the preflight, and
+  applies a new configuration with `SIGHUP` where the platform has signals and with a restart on
+  Windows, so one Supervisor set serves a mixed fleet. **What to do:** nothing, unless you run
+  Telegraf.
+  - **`opamp-fleetctl package fetch --agent telegraf`** fetches the archives from InfluxData's CDN
+    for Linux (amd64, arm64, 386), macOS (amd64, arm64) and Windows (amd64, arm64), verified against
+    the `.DIGESTS` file beside each, and uploads them as published. The upload also stores the
+    default configuration `telegraf-conf` from `config/examples/`, left untouched where the Server
+    already holds it.
+
+- **An artifact document per wrapped agent**, under [`docs/artifacts/`](docs/artifacts/): what the
+  artifact is, per platform — source, assets, integrity, repack, the delivered tree, and what the
+  Client derives from it. Each is pinned by two tests, one on the packing side and one in the kind,
+  so an upstream release that moves a path turns a test red instead of a rollout.
+
 ### Changed
 
 - **The development observability stack runs on the host, from `observability/`,** apart from

@@ -11,6 +11,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 | **[Client](client.md)** | run a managed host, end to end: how it is built, the OS service, the on-disk layout, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
 | **[Command-line tools](tools.md)** | get software into the fleet: fetch a known agent's release and hand it to the Server, or build, hash, and sign an artifact out of any program |
+| **[Artifact documents](../artifacts/)** | for maintainers: what each wrapped agent's artifact *is* — source, assets, integrity, repack, the delivered tree, and what the Client derives from it. One per wrapped agent: [Telegraf](../artifacts/telegraf.md) |
 
 The two halves interlock in three places, and each is described on both sides: **authentication**
 (the Client presents a client certificate the Server accepts, and a new host is

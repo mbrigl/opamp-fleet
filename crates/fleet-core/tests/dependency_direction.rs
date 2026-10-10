@@ -141,6 +141,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("supervisor::command", Adapter),
             ("supervisor::endpoint", Adapter),
             ("supervisor::process", Adapter),
+            ("supervisor::telegraf", Adapter),
             ("telemetry", Adapter),
             ("tls", Adapter),
             ("transport", Adapter),
