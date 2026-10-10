@@ -96,10 +96,7 @@ fn run_service() -> Result<(), String> {
         .get()
         .cloned()
         .ok_or_else(|| "the service spec was not initialised".to_string())?;
-    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("cannot build the tokio runtime: {e}"))?;
+    let tokio_runtime = runtime::daemon_runtime()?;
 
     // Now serving: accept Stop and Shutdown.
     status_handle
@@ -109,7 +106,9 @@ fn run_service() -> Result<(), String> {
         ))
         .map_err(|e| format!("cannot report Running: {e}"))?;
 
-    let result = tokio_runtime.block_on(runtime::run_until_shutdown(spec, shutdown));
+    let result = tokio_runtime.block_on(runtime::on_a_worker(runtime::run_until_shutdown(
+        spec, shutdown,
+    )));
 
     // Report the *outcome*, not a blanket success. The SCM decides whether to run the recovery
     // actions from the exit code in this final status: a `Stopped` carrying `Win32(0)` is a clean
