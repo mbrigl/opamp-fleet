@@ -11,7 +11,7 @@ the keys it makes are the ones to keep off that host
 
 | Command | Use it to |
 |---|---|
-| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
+| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, the GLPI Agent, or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
 | **[`package pack`, `sha256`, `keygen`, `sign`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, and make the package signing key |
 | **[`pki init`, `server-cert`, `bootstrap-cert`, `status`](#pki)** | make the fleet's certificate authorities, the Server's or a Gateway's certificate and the bootstrap certificate, and say when they end |
 
@@ -53,13 +53,14 @@ $ sha=$(opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail)
 
 ### What it does
 
-For three agent types it knows where the release lives, what the assets are called, and which
+For five agent types it knows where the release lives, what the assets are called, and which
 checksum file goes with them:
 
 | `--agent` | Where it fetches from | What arrives |
 |---|---|---|
 | `otelcol` | `open-telemetry/opentelemetry-collector-releases` | the core Collector's `.tar.gz`, as published |
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
+| `glpi-agent` | `glpi-project/glpi-agent` | Windows: the portable `.zip`, as published · Linux: a `.tar.gz` repacked from the AppImage |
 | `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0017](../adr/0017-the-client-updates-itself-under-its-own-agent-type.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
 
 Four things it does on every run:
@@ -84,6 +85,7 @@ $ opamp-fleetctl package fetch
 Which agent:
   otelcol          linux, darwin, windows — as the release publishes
 > otelcol-contrib  linux, darwin, windows — as the release publishes
+  glpi-agent       linux/amd64 windows/amd64
   supervisor       linux/amd64+arm64 darwin/arm64+amd64 windows/amd64
 Reading the last releases of open-telemetry/opentelemetry-collector-releases …
 Which version› 0.158.0
@@ -105,8 +107,9 @@ question below shows what *that release* actually has. One needs a word:
 The version list is the **three most recent release series**, newest first — a series being a
 `major.minor` line, of which only its newest patch is offered. That is the difference between a
 list you can go back through and one you cannot. An
-older patch of a series already on the list is not a choice anyone makes, so it is not offered.
-Release candidates and the tags a repository keeps for other things
+older patch of a series already on the list is not a choice anyone makes, so it is not offered;
+where an agent versions in two parts and has no patch to collapse (GLPI's `1.15`), the list is
+simply the last three versions. Release candidates and the tags a repository keeps for other things
 (the Collector repository tags its builder alongside) are filtered out.
 
 The platform list is what *that release actually publishes*, read from its assets rather than
@@ -127,7 +130,7 @@ $ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
 
 | Option | Meaning |
 |---|---|
-| `--agent <name>` | `otelcol`, `otelcol-contrib`, or `supervisor` (this fleet's own Client). |
+| `--agent <name>` | `otelcol`, `otelcol-contrib`, `glpi-agent`, or `supervisor` (this fleet's own Client). |
 | `--version <v>` | The version **as upstream numbers it** — `0.158.0`, `1.19` — never the tag (`v0.158.0`). Omitted, the last five are offered. |
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
@@ -176,6 +179,7 @@ released binary:
 |---|---|---|
 | `otelcol` | `otelcol-conf` | Selector `service.name = otelcol` |
 | `otelcol-contrib` | `otelcol-contrib-conf` | Selector `service.name = otelcol-contrib` |
+| `glpi-agent` | `glpi-agent-conf` | Agent type `glpi-agent` |
 | `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks ([ADR-0016](../adr/0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) |
 
 Two rules keep this from surprising anyone:
@@ -239,6 +243,9 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 - **GitHub rate-limits unauthenticated requests to 60 per hour** per address. A run costs two
   requests (one to list versions, one to read a release), so this is only reached by scripting.
   The error says so rather than leaving you guessing.
+- **The GLPI Linux repack needs Linux x86_64**, because extracting an AppImage means running it.
+  Every other agent, platform, and step runs anywhere the tool builds. Fetch the Windows artifact
+  wherever you like and the Linux one on a Linux host.
 - **Only amd64 and arm64 (and 386 where published)** are named, matching what Agents report as
   `os.type` and `host.arch`.
 

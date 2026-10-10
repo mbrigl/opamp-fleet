@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 #
-# Seeds one minimal test Configuration (ADR-0021) per example Collector from config/supervisor.toml,
-# each aimed at the Agent that should receive it — the two Collectors by Selector:
+# Seeds one minimal test Configuration (ADR-0021) per example supervisor from config/supervisor.toml,
+# each aimed at the Agent that should receive it — the two Collectors by Selector, the
+# Foreign Agents by Agent type (ADR-0021), whose bodies are formats no other kind of Agent
+# could read:
 #
 #   otelcol-contrib-conf  →  selector service.name = otelcol-contrib  (opampextension, self-reporting)
 #   otelcol-conf          →  selector service.name = otelcol          (core otelcol, observed externally)
+#   glpi-agent-conf       →  type glpi-agent                          (command Supervisor, restart on apply)
 #
 # A Configuration's name is the file name its entry gets in the Supervisor's config directory,
-# so a block that reads one must read exactly that path. Names carry no extension: they follow the
+# so each block must read exactly that path —
+# "--conf-file=${config_dir}/glpi-agent-conf". Names carry no extension: they follow the
 # ADR-0018 grammar (lowercase letters, digits and '-'), which admits no dot.
 #
 # Two modes:
@@ -115,6 +119,7 @@ seed() {
 
 seed otelcol-contrib-conf "$examples/otelcol-contrib-conf.yaml" '{"service.name": "otelcol-contrib"}'
 seed otelcol-conf "$examples/otelcol-conf.yaml" '{"service.name": "otelcol"}'
+seed glpi-agent-conf "$examples/glpi-agent-conf.cfg" '{}' glpi-agent
 
 if [ "$mode" = stage ]; then
     echo "Done — the Server holds these Configurations from its next start; roll them out to assign them."

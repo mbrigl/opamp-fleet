@@ -32,5 +32,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 for feature in "" client server; do
   cargo clippy -p opamp --all-targets --locked --no-default-features --features "$feature" -- -D warnings
 done
-cargo clippy -p fleet-agent --all-targets --locked --no-default-features -- -D warnings
+for feature in "" glpi; do
+  cargo clippy -p fleet-agent --all-targets --locked --no-default-features --features "$feature" -- -D warnings
+done
 cargo test -p fleet-agent --locked --no-default-features

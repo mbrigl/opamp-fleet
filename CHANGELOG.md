@@ -160,6 +160,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   ([ADR-0018](docs/adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)).
   **What to do:** nothing; restart the service after it to apply the change.
 
+- **The GLPI Agent is managed by the fleet** — a new Supervisor kind `glpi`, compiled into the
+  Client by default as the `glpi` feature ([ADR-0026](docs/adr/0026-glpi-agent.md)). A block is
+  `type = "glpi"` and `name`, the same on Linux and Windows; the kind derives the command line and
+  keeps the agent's state in `${supervisor_dir}/agent-state`, outside the tree an update replaces,
+  which the Client makes before every spawn. The recipe is
+  [docs/manual/glpi-agent.md](docs/manual/glpi-agent.md). **What to do:** nothing, unless you run
+  the GLPI Agent.
+  - **`opamp-fleetctl package fetch --agent glpi-agent`** takes the official portable Windows zip
+    as published and builds the Linux artifact deterministically from the official AppImage,
+    extracted once so no fleet host needs FUSE; both are amd64, and Linux arm64 is not supported
+    because upstream publishes no AppImage for it. The agent menu names the platforms, and the
+    version question still shows the last three releases, since the GLPI Agent versions in two
+    parts (`1.15`). The upload also stores the default configuration `glpi-agent-conf` from
+    `config/examples/`, left untouched where the Server already holds it.
+
+- **An artifact document per wrapped agent**, under [`docs/artifacts/`](docs/artifacts/): what the
+  artifact is, per platform — source, assets, integrity, repack, the delivered tree, and what the
+  Client derives from it. Each is pinned by two tests, one on the packing side and one in the kind,
+  so an upstream release that moves a path turns a test red instead of a rollout.
+
 ### Changed
 
 - **The development observability stack runs on the host, from `observability/`,** apart from
