@@ -34,8 +34,10 @@ pub use crate::engine::SELF_AGENT_INDEX;
 /// the other way, what an Engine index is shifted back by to find the block it came from.
 pub const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
 
-/// The compiled-in plugin registry (ADR-0017). A new process kind is a new module and one line
-/// here — the supervision core stays untouched (goal 8).
+/// The compiled-in plugin registry (ADR-0017 clause 2). A new process kind is a new module and one
+/// line here — the supervision core stays untouched (goal 8). A wrapped kind is there only when
+/// its feature is, so what a build carries, reports (clause 18) and refuses as unknown all follow
+/// from this one list.
 fn registry() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(collector::CollectorPlugin),
@@ -691,24 +693,34 @@ mod tests {
         config
     }
 
+    /// The claim of ADR-0017 in one assertion: every wrapped kind's block is `type` and `name`, and
+    /// it validates whole — the program resolves inside this Supervisor's own directory, the Agent
+    /// type is stated, the timing comes from the fleet, and the kind's own strict parse accepts an
+    /// empty table.
+    // Verifies: ADR-0017
+    #[test]
+    fn every_wrapped_kinds_block_is_two_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (kind, _) in WRAPPED.iter().filter(|(_, compiled)| *compiled) {
+            let config: ClientConfig = toml::from_str(&format!(
+                "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\
+                 [[supervisor]]\ntype = {kind:?}\nname = {kind:?}\n",
+                state = dir.path().join("state").to_string_lossy(),
+            ))
+            .unwrap_or_else(|e| panic!("{kind}: {e}"));
+            validate_block(&config, &config.supervisors[0])
+                .unwrap_or_else(|e| panic!("{kind} needs more than two lines: {e}"));
+        }
+    }
+
     /// A Client says which kinds it carries, one key per kind (ADR-0017 clause 18), so a Selector
     /// can aim a Supervisor set at the Clients that can actually run it — rather than the Server
     /// learning from a `FAILED` that it aimed at a Client too old to have the plugin.
+    /// Which keys those are is `a_build_carries_exactly_the_wrapped_kinds_its_features_name`'s;
+    /// this is what the key does to a value the operator already wrote.
     // Verifies: ADR-0017
     #[test]
     fn a_client_reports_the_kinds_it_was_compiled_with() {
-        let reported = kind_attributes(BTreeMap::new());
-        for plugin in registry() {
-            assert_eq!(
-                reported
-                    .get(&format!("supervisor.kind.{}", plugin.kind()))
-                    .map(String::as_str),
-                Some("true"),
-                "{} is compiled in and unreported",
-                plugin.kind()
-            );
-        }
-
         // An operator's own value under the same key is left alone: a configured attribute is the
         // host's statement about itself, and this only fills in what nothing else said.
         let stated = kind_attributes(
@@ -720,6 +732,65 @@ mod tests {
             stated.get("supervisor.kind.command").map(String::as_str),
             Some("no")
         );
+    }
+
+    /// The wrapped kinds, each with whether this build's features carry it (ADR-0017 clause 2).
+    const WRAPPED: [(&str, bool); 0] = [];
+
+    /// A build's kinds are the core's two and the wrapped ones its features name — no more, so a
+    /// Selector aimed at `supervisor.kind.glpi` never reaches a build without it, and no fewer
+    /// (ADR-0017 clauses 2 and 18).
+    // Verifies: ADR-0017
+    #[test]
+    fn a_build_carries_exactly_the_wrapped_kinds_its_features_name() {
+        let mut expected = vec!["collector", "command"];
+        expected.extend(WRAPPED.iter().filter(|(_, c)| *c).map(|(kind, _)| *kind));
+        expected.sort_unstable();
+        let mut compiled: Vec<&str> = registry().iter().map(|plugin| plugin.kind()).collect();
+        compiled.sort_unstable();
+        assert_eq!(compiled, expected);
+
+        let attributes = kind_attributes(BTreeMap::new());
+        assert!(
+            attributes.values().all(|value| value == "true"),
+            "{attributes:?}"
+        );
+        let reported: Vec<String> = attributes.into_keys().collect();
+        let expected: Vec<String> = expected
+            .iter()
+            .map(|kind| format!("supervisor.kind.{kind}"))
+            .collect();
+        assert_eq!(
+            reported, expected,
+            "BTreeMap keys and the sorted list agree on order"
+        );
+    }
+
+    /// A wrapped kind this build leaves out is an unknown `type` like any other: startup and an
+    /// offered set both refuse the block, naming the kinds the build does carry (ADR-0017 clause
+    /// 2). The default build carries every kind, so this decides something in the
+    /// `--no-default-features` run of CI.
+    // Verifies: ADR-0017
+    #[test]
+    fn a_kind_left_out_of_the_build_is_an_unknown_type() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (kind, _) in WRAPPED.iter().filter(|(_, compiled)| !*compiled) {
+            let config: ClientConfig = toml::from_str(&format!(
+                "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\
+                 [[supervisor]]\ntype = {kind:?}\nname = {kind:?}\n",
+                state = dir.path().join("state").to_string_lossy(),
+            ))
+            .unwrap_or_else(|e| panic!("{kind}: {e}"));
+            let error = validate_block(&config, &config.supervisors[0])
+                .expect_err(&format!("{kind} is not in this build"));
+            assert!(error.contains("unknown type"), "{kind} -> {error}");
+            let known = error
+                .split_once("(known: ")
+                .and_then(|(_, rest)| rest.strip_suffix(')'))
+                .unwrap_or_else(|| panic!("{kind}: the refusal names the known kinds: {error}"));
+            let compiled: Vec<&str> = registry().iter().map(|plugin| plugin.kind()).collect();
+            assert_eq!(known, compiled.join(", "), "{kind} is not among them");
+        }
     }
 
     /// And where a kind states no correction, the fleet's policy reaches the Supervisor unchanged

@@ -1279,6 +1279,20 @@ This Client reports the kinds it was compiled with as attributes of its own Agen
 kind, `supervisor.kind.collector = "true"` — so a Supervisor set can be aimed with a Selector at the
 Clients that can actually run it.
 
+The published build carries every kind. A wrapper, when the code base carries one, is a Cargo feature named after its `type`, so
+a build for hosts that run only some of them leaves the others out:
+
+```sh
+cargo build --release -p fleet-agent --no-default-features --features <type>
+```
+
+`collector` and `command` are always there. A block naming a kind the build does not carry fails
+startup, and an offered set naming one is refused, as an unknown `type` naming the kinds that are
+there. Publish such a build under a package name of its own and set `[self_update] package` to it
+on its hosts: they otherwise take the full build at their next self-update. A full-build host that
+took the smaller one keeps running it, reporting fewer kinds, or, when one of its blocks names a
+kind the smaller build lacks, fails its start and rolls back.
+
 #### Timing is the fleet's, then the agent's
 
 Three keys describe *time*, and all three are the deployment's policy first:
