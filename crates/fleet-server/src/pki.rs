@@ -707,6 +707,8 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
     if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_private_dir(parent)?;
     }
+    // `mut` is used only by the Unix block below; on Windows there is nothing to set.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
