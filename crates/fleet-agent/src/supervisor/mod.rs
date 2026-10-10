@@ -13,6 +13,8 @@ pub mod endpoint;
 pub mod ports;
 pub mod process;
 pub mod restart;
+#[cfg(feature = "telegraf")]
+pub mod telegraf;
 
 use std::collections::BTreeMap;
 
@@ -42,6 +44,8 @@ fn registry() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(collector::CollectorPlugin),
         Box::new(command::CommandPlugin),
+        #[cfg(feature = "telegraf")]
+        Box::new(telegraf::TelegrafPlugin),
     ]
 }
 
@@ -735,7 +739,7 @@ mod tests {
     }
 
     /// The wrapped kinds, each with whether this build's features carry it (ADR-0017 clause 2).
-    const WRAPPED: [(&str, bool); 0] = [];
+    const WRAPPED: [(&str, bool); 1] = [("telegraf", cfg!(feature = "telegraf"))];
 
     /// A build's kinds are the core's two and the wrapped ones its features name — no more, so a
     /// Selector aimed at `supervisor.kind.glpi` never reaches a build without it, and no fewer

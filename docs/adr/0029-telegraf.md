@@ -1,6 +1,6 @@
 # ADR-0029: Telegraf gets a kind of its own that reloads it the platform's way, and its package is upstream's single-file archive as published
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/telegraf.rs, the `telegraf` feature of crates/fleet-agent/Cargo.toml, telegraf_plans and TELEGRAF_PLATFORMS in opamp-fleetctl package fetch, config/examples/telegraf-conf.toml, docs/artifacts/telegraf.md
