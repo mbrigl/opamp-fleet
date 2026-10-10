@@ -161,6 +161,10 @@ async fn spawn_bounded_gateway(
     tokio::sync::watch::Sender<bool>,
     tempfile::TempDir,
 ) {
+    // What the binary does first (`main.rs`): the Gateway fetches its revocation list as soon as it
+    // starts, and reqwest refuses to build that client before a provider is installed — which,
+    // left to the test's own `client()`, happened only when another test had got there first.
+    opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     // Bound here and handed over, so no parallel test can take the port before the Gateway uses it.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
