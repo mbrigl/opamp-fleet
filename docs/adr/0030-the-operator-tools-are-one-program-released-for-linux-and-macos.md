@@ -43,8 +43,8 @@ The forces:
   both be found, and a search for either finds the other.
 - **The release is a contract too.** It is one workflow run from one version
   ([ADR-0035](0035-the-client-supervisor-installed-service-releases-and-installers.md) clause 30),
-  and it already builds the packer for every Client target, because the release archives are
-  packed by it (clause 31 there). Its assets are listed exhaustively (clause 34 there), and
+  and every row of its build matrix already builds the packer for the runner it runs on, Windows
+  included, because the Client's archives are packed by it (clause 31 there). Its assets are listed exhaustively (clause 34 there), and
   nothing in it is signed: one `SHA256SUMS` covers every asset.
 
 ## Decision
@@ -52,8 +52,8 @@ The forces:
 We will build the operator tools as one program, `opamp-fleetctl`, from `crates/fleet-tools`, and
 publish it in every release as a `.tar.gz` for Linux and macOS on amd64 and arm64.
 
-1. **One program, two command trees.** `opamp-fleetctl package` holds `fetch`, `pack`, `sign`,
-   `keygen` and `public-key`, each with the options and output it has today;
+1. **One program, two command trees.** `opamp-fleetctl package` holds `fetch`, `pack`, `sha256`,
+   `sign`, `keygen` and `public-key`, each with the options and output it has today;
    `opamp-fleetctl pki` holds `init`, `server-cert`, `bootstrap-cert` and `status` as ADR-0029 states them.
    `opamp-fleetctl --version` prints the version every binary of this project prints
    ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md)). No other program name exists for
@@ -62,17 +62,21 @@ publish it in every release as a `.tar.gz` for Linux and macOS on amd64 and arm6
 2. **The crate builds exactly this program.** `crates/fleet-tools` has no library and one binary,
    `opamp-fleetctl`, and keeps the dependency direction of
    [ADR-0031](0031-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)
-   clause 22: it uses the Client's and the internal crate's items, and nothing depends on it.
+   clause 22: it uses the Client's and the internal crate's items, and nothing depends on it. The
+   program is `src/main.rs`, which parses the command line, with one module per command tree,
+   `src/package.rs` and `src/pki.rs`; the release fetcher behind `package fetch` is
+   `src/fetch.rs`.
 
 3. **Built in the release run, from the release's version, for four targets.**
    `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin` and
    `x86_64-apple-darwin`, each in the row of the Client's build matrix for the same target. Each
    row whose target runs on its runner asserts that `opamp-fleetctl --version` reports the release
-   version, as the Client's build does. No Windows build is made.
+   version, as the Client's build does. The Windows row builds the program for its runner only as
+   the packer of the Client's archive; no Windows archive of it is published.
 
 4. **One archive per target, named like the Client's.**
-   `opamp-fleetctl_<version>_<os>_<arch>.tar.gz`, by the grammar and platform tokens of
-   ADR-0035 clauses 32 and 33, packed by `opamp-fleetctl package pack --format tar.gz` with the one
+   `opamp-fleetctl_<version>_<os>_<arch>.tar.gz`, by the grammar of ADR-0035 clause 32 and the
+   platform tokens of its clause 30, packed by `opamp-fleetctl package pack --format tar.gz` with the one
    member `opamp-fleetctl` and its executable mode. No `.deb`, `.rpm` or `.msi` carries it. The
    four archives are assets of the release beside the Client's and are covered by the same
    `SHA256SUMS`.
@@ -137,8 +141,8 @@ states.
   <https://developer.hashicorp.com/nomad/commands/tls/ca-create>,
   <https://developer.hashicorp.com/consul/commands/tls/ca>
 - This project: ADR-0029 on which keys stay off the Server host, ADR-0037 on why a package is
-  signed by a key the operator holds, ADR-0035 clauses 29 to 34 on the release, its naming and its
-  assets.
+  signed by a key the operator holds, ADR-0035 clause 29 on the member a package
+  artifact carries and clauses 30 to 34 on the release, its naming and its assets.
 
 ## Consequences
 
@@ -149,7 +153,10 @@ states.
   downloads.
 - Negative / trade-offs: four more builds and four more assets per release; the release now
   carries a program that makes keys, and like every asset it is checked by its `SHA256SUMS` alone;
-  an operator on Windows still builds from a checkout; renaming the tools changes the text of
+  an operator on Windows still builds from a checkout; every script that calls
+  `opamp-package-fetch`, `opamp-package-sign` or `server pki init`, `server-cert` or
+  `bootstrap-cert` breaks, with no alias to soften it, which `CHANGELOG.md` and the notes of the
+  release that carries the change name as ADR-0035 clause 34 asks; renaming the tools changes the text of
   every accepted ADR that named them, which is why ADR-0031 to ADR-0037 restate them, and the
   references to the superseded numbers across the code and the manual follow when those are
   accepted.
@@ -162,7 +169,8 @@ states.
 Tests that will carry `Verifies: ADR-0030`:
 
 - The command tree: `opamp-fleetctl --help` lists `package` and `pki` and nothing else beside
-  `help`; `package --help` lists `fetch`, `pack`, `sign`, `keygen` and `public-key`; `pki --help`
+  `help`; `package --help` lists `fetch`, `pack`, `sha256`, `sign`, `keygen` and
+  `public-key`; `pki --help`
   lists `init`, `server-cert`, `bootstrap-cert` and `status`; `--version` prints the baked version
   (clause 1).
 - The crate: `crates/fleet-tools` declares exactly one binary target, `opamp-fleetctl`, and no
@@ -170,11 +178,13 @@ Tests that will carry `Verifies: ADR-0030`:
 - The release workflow, read as data: it builds `opamp-fleetctl` for exactly the four targets of
   clause 3, asserts its version where the target runs, names each archive
   `opamp-fleetctl_<version>_<os>_<arch>.tar.gz`, packs it with `opamp-fleetctl package pack
-  --format tar.gz`, and includes it in `SHA256SUMS`; no Windows row and no installer names it
-  (clauses 3 and 4).
+  --format tar.gz`, and includes it in `SHA256SUMS`; no `opamp-fleetctl_*_windows_*` asset and no
+  installer names it (clauses 3 and 4).
 
 - The release notes' upload loop, read out of the workflow, selects `supervisor_<version>_*.tar.gz`
-  and matches no `opamp-fleetctl_` archive (clause 5).
+  and matches no `opamp-fleetctl_` archive, and `package fetch --agent supervisor`, given a release
+  that also holds `opamp-fleetctl_1.2.3_linux_amd64.tar.gz`, plans only the `supervisor_` archives
+  (clause 5).
 
 **Not mechanically decidable:** that the release notes describe the archives as the operator
 tool and not as packages (clause 5) is held by review of the release notes in the workflow.

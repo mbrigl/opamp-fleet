@@ -3,7 +3,7 @@
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-09
 - **Deciders:** Markus Brigl
-- **Applies to:** the `pki` commands of `opamp-fleetctl` in `crates/fleet-tools/` and the module that carries them, the Server's `pki status` command in `crates/fleet-server/src/main.rs` and the module that carries it, the reading of a certificate's end in `crates/fleet-core/`, the expiry warnings of the running Server, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), and every document that tells an operator how to make or inspect a certificate
+- **Applies to:** the `pki` commands of `opamp-fleetctl` in `crates/fleet-tools/` and the module that carries them, the Server's `pki status` command in `crates/fleet-server/src/main.rs` and the module that carries it, the ending rule in `crates/fleet-core/`, the expiry warnings of the running Server, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), and every document that tells an operator how to make or inspect a certificate
 
 ## Context
 
@@ -68,9 +68,9 @@ and no certificate ends unannounced.
    pki status` says when the certificates in the offline directory end, and `server pki status`
    when those of the Server host do; the Server's runs and exits like `hash-credential` and
    `audit-verify`, before the Server starts serving. The Server binary carries no code that makes a
-   CA, a server certificate or a bootstrap certificate. How a certificate's end is read and when it
-   counts as ending (clause 11) is one piece of code in `fleet-core`, so both commands and the
-   running Server judge alike. None of the commands makes a host certificate: a host obtains its
+   CA, a server certificate or a bootstrap certificate. When a certificate counts as ending (clause 11)
+   is one rule in `fleet-core`, plain date arithmetic, so both commands and the running Server judge
+   alike; each program reads the certificate itself. None of the commands makes a host certificate: a host obtains its
    certificate through enrolment alone (ADR-0022).
 
 2. **No dependency beyond ADR-0022 clause 12.** The commands use `rcgen` with the features that
@@ -173,8 +173,8 @@ specification rules out; encrypting keys at rest, a hardware security module, or
 prompt; replacing a CA, which every host's configuration or enrolment follows; limiting the
 running Server's signatures to its CA's end, which would change ADR-0022 clause 9; certificate
 revocation lists or OCSP; ACME and certificates from a public CA, which the Server reads as they
-are; a `pki` command on the Client binary; the making commands on Windows, for which the operator tool
-is not built (ADR-0030); the Server's `pki status` on Windows or macOS, where the Server does not run.
+are; a `pki` command on the Client binary; the operator tool on Windows, where it
+is not published (ADR-0030); the Server's `pki status` on Windows or macOS, where the Server does not run.
 
 ## Alternatives considered
 
@@ -185,6 +185,12 @@ is not built (ADR-0030); the Server's `pki status` on Windows or macOS, where th
   is the binary of the host the server CA's and the bootstrap CA's keys are kept away from, and it
   would carry code no running Server uses. With the operator tool published (ADR-0030), the one
   argument for it — no second binary to obtain — is gone; the version both share is the release's.
+- **The whole reading of a certificate's end in `fleet-core`.** One function from file to verdict,
+  but it would give the internal crate its first dependencies (`x509-parser`, `time`, the PEM
+  reader), which every end then compiles for a rule only two programs apply; the date rule alone
+  needs none.
+- **`fleet-tools` depending on `fleet-server` for the rule.** No new code in `fleet-core`, but the
+  operator tool would link the Server's library, its router included, for a dozen lines.
 - **`pki status` in one program only.** The Server host does not hold the server CA's certificate
   and the operator's machine does not hold `server.toml`, so either program alone sees only half of
   the certificates, and the server CA's end — which every host's trust hangs on — would be visible
@@ -247,8 +253,12 @@ Tests that will carry `Verifies: ADR-0029`:
 - The CAs' subjects are distinct, carry a path length of 0, and pass the Server's startup check;
   a server certificate carries every `--name`, `IP:127.0.0.1` and `IP:::1`, and a wildcard or empty
   `--name` is refused (clauses 5 and 6).
-- End to end: a Server started on `server.toml.fragment` admits a Client started on
-  `supervisor.toml.fragment` once its enrolment is approved (clauses 3, 6, 8 and 13).
+- End to end, in `crates/fleet-tools/tests/`: `opamp-fleetctl pki init` makes the set, a Server
+  started on `server.toml.fragment` — `fleet-server` as a development dependency of `fleet-tools`,
+  which links into no artifact — admits a Client started on `supervisor.toml.fragment` through
+  `fleet-agent` once its enrolment is approved (clauses 3, 6, 8 and 13).
+- The Server binary refuses `pki init`, `pki server-cert` and `pki bootstrap-cert` as unknown
+  commands, and its usage names `pki status` alone (clause 1).
 - `server-cert` and `bootstrap-cert` sign with the offline CA; a Client that trusts the old
   `server-ca.pem` accepts the new server certificate, and the printed serial revokes the new
   bootstrap certificate (clauses 7 and 8).

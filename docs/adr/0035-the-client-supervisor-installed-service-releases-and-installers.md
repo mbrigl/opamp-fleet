@@ -459,7 +459,7 @@ deliver the same binary and run its own `service install`.
 31. **Every archive is a `.tar.gz` written by `opamp-fleetctl package pack --format tar.gz`,** the
     operator tool the same run builds and publishes
     ([ADR-0030](0030-the-operator-tools-are-one-program-released-for-linux-and-macos.md)). The packer
-    names the single member after the program, with its executable mode, so **a release archive is a
+    names the single member after the program, with its executable mode, so **the Client's release archive is a
     valid package artifact unmodified**: the operator uploads the file they downloaded, and the
     SHA-256 the packer prints is both the published checksum and the hash an Agent verifies
     ([ADR-0037](0037-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). `.tar.gz` because it is the container every
@@ -512,8 +512,10 @@ deliver the same binary and run its own `service install`.
 
 ### The installers
 
-35. **Two classes of asset, and only one is a package artifact.** The archive is opened by the
-    Client on a self-update and parsed by the fleet view; the `.deb`, `.rpm` and `.msi` are opened by
+35. **Three classes of asset, and only one is a package artifact.** The Client's archive is opened
+    by the Client on a self-update and parsed by the fleet view; the operator tool's archives
+    ([ADR-0030](0030-the-operator-tools-are-one-program-released-for-linux-and-macos.md)) are
+    downloaded to an operator's machine and are no package of the fleet; the `.deb`, `.rpm` and `.msi` are opened by
     `dpkg`, `rpm` and Windows Installer and by nothing in the fleet path. The installers are
     **additive operator artifacts**: they never replace the archive, which is the only format the
     fleet can install.
@@ -931,7 +933,7 @@ packaging the Server, which an operator deploys rather than the fleet.
   the file. The startup notice names the section on every start until then.
 - Positive: one word for one thing, from the Agent type in the fleet view to the file an operator
   edits; the Client's release is an ordinary fleet package in the container every agent uses.
-- Positive: a release archive is installable by the fleet unmodified, so the hash published is the
+- Positive: the Client's release archive is installable by the fleet unmodified, so the hash published is the
   hash an Agent verifies; a build that lost its tags fails instead of publishing a `-dev` artifact.
 - Positive: first contact is one command per platform — `apt install`, `dnf install`, a double
   click — and removal is real. The installers are wrappers around the one install path, and a

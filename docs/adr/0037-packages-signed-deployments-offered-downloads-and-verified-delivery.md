@@ -340,7 +340,7 @@ starts, and keep the superseded version for a configurable window.
      constants, so a Supervisor and a Collector's `opampextension` report the same string;
    - the release artifacts carry the same two tokens in their file names (the file-name format is
      [ADR-0035](0035-the-client-supervisor-installed-service-releases-and-installers.md)'s), so the upload of a release
-     is a loop over its files with `os` and `arch` read straight out of each name.
+     is a loop over the Client's archives with `os` and `arch` read straight out of each name.
 
 8. **A request that names bytes names their Platform; one that names the package does not.** The
    entry upload, the entry source, the entry delete and the artifact download all carry `os` and
