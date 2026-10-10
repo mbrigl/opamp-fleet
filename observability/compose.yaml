@@ -1,0 +1,104 @@
+# The development observability stack, as a Compose project of its own: OTLP in, Grafana out.
+#
+#   traces  ─┐
+#   metrics ─┼─▶ OpenTelemetry Collector ──▶ ClickHouse ──▶ Grafana
+#   logs    ─┘
+#
+# One store instead of Tempo + Prometheus + Loki: one query language for all three signals, one
+# place to retain and delete, and joins *across* signals that three separate stores cannot do at
+# all. What it costs is named in README.md — read it before assuming this is strictly better.
+#
+# Nothing shipped depends on it. It exists so own telemetry (ADR-0016) can be looked at while
+# working on the Client and the Server, and it runs on the *host*, apart from the Dev Container:
+# start it when you want it, from this directory or with `-f observability/compose.yaml`. The Dev
+# Container reaches the Collector through the host (README.md → "Reaching it from the Dev
+# Container"); it needs no Docker socket for that, so ADR-0002 stands as it is.
+#
+# Every relative path below resolves against this file's directory, the Compose project directory.
+# The bind mounts carry `z`: on an SELinux host (Fedora, RHEL) a file mounted without it is
+# unreadable inside the container, and nothing says so — Grafana comes up with no datasource and
+# no dashboards, and the Collector without its configuration. Docker and hosts without SELinux
+# ignore the option.
+#
+# Ports published on the host, on OBSERVABILITY_BIND (default 0.0.0.0 — every interface):
+#   4317 OTLP/gRPC, 4318 OTLP/HTTP, 8888 Collector self-metrics, 13133 Collector health,
+#   3001 Grafana, 8123 ClickHouse HTTP, 9000 ClickHouse native.
+
+name: opamp-observability
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8.22.13
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: otel
+      CLICKHOUSE_USER: otel
+      CLICKHOUSE_PASSWORD: otel
+    # ClickHouse opens a lot of files; below this it refuses to start on many hosts.
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ports:
+      - "${OBSERVABILITY_BIND:-0.0.0.0}:8123:8123"   # HTTP — what `curl` and README.md's checks use
+      - "${OBSERVABILITY_BIND:-0.0.0.0}:9000:9000"   # native protocol — what the Collector and Grafana speak
+    healthcheck:
+      # The client is in the image, so this needs no extra tool and tests the thing that matters:
+      # that the server answers a query as the user the Collector will connect as.
+      test: ["CMD", "clickhouse-client", "--user", "otel", "--password", "otel", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro,z
+    ports:
+      - "${OBSERVABILITY_BIND:-0.0.0.0}:4317:4317"     # OTLP/gRPC
+      - "${OBSERVABILITY_BIND:-0.0.0.0}:4318:4318"     # OTLP/HTTP  <- the Client's exporters speak this
+      - "${OBSERVABILITY_BIND:-0.0.0.0}:8888:8888"     # the Collector's own Prometheus metrics
+      - "${OBSERVABILITY_BIND:-0.0.0.0}:13133:13133"   # health_check extension
+    depends_on:
+      clickhouse:
+        # Not `service_started`: the exporter creates its tables on the first batch, and a
+        # ClickHouse that is still opening its databases fails that in a way the retry can outlive.
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    restart: unless-stopped
+    environment:
+      # Not Grafana's default 3000. Set on Grafana itself rather than only on the host side, so
+      # `grafana:3001` inside the Compose network and `localhost:3001` on the host are one port.
+      GF_SERVER_HTTP_PORT: "3001"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Open the stack read-only, so looking at a dashboard costs no login.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      # The ClickHouse datasource is not built in. `_SYNC` because the plugin has to be on disk
+      # before Grafana reads the provisioning below — the async variant races it. Unpinned on
+      # purpose: Grafana resolves the newest version compatible with itself, and a pin here goes
+      # stale against the image above. To pin, append it: "grafana-clickhouse-datasource@4.20.0".
+      GF_PLUGINS_PREINSTALL_SYNC: grafana-clickhouse-datasource
+      # Opens straight on the overview instead of Grafana's welcome page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/agents-overview.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro,z
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro,z
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${OBSERVABILITY_BIND:-0.0.0.0}:3001:3001"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  clickhouse-data:
+  grafana-data:

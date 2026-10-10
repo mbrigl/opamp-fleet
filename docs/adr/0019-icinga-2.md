@@ -397,6 +397,6 @@ keys.
   `icinga_2s_windows_artifact_is_the_msi_verified_by_its_publisher`.
 
 **Not mechanically decidable:** the process-group stop (clause 10) has no dedicated test; the Dev
-Container pin (clause 20) is a reviewed line in `.devcontainer/docker-compose.yml` whose meaning — a
+Container pin (clause 20) is a reviewed line in `.devcontainer/devcontainer.json` whose meaning — a
 glibc floor — no check reads; and whether a repacked tree runs on Windows (clause 23) needs a
 Windows host. Review holds these.

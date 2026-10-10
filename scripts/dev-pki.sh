@@ -12,7 +12,8 @@
 #                  supervisor.toml.fragment
 #   server.toml / supervisor.toml
 #                  a Server and a Client configuration that use the set, every other key at its
-#                  default
+#                  default but one: server.toml offers the fleet's own telemetry to the
+#                  observability stack in observability/, so the fleet monitors itself
 #
 # The development Client holds the bootstrap certificate and enrols like any other host: start the
 # Server and the Client, then approve its request with `scripts/seed_test_configs.sh --enrol`.
@@ -39,7 +40,15 @@ OUT="$(cd "$OUT" && pwd)"  # the configurations name the set by absolute path
   --server-dir "$OUT/server" --offline-dir "$OUT/offline" \
   --fleet "opamp-fleet development" --name localhost)
 
-cp "$OUT/server/server.toml.fragment" "$OUT/server.toml"
+{
+  cat "$OUT/server/server.toml.fragment"
+  echo
+  echo '# The fleet'"'"'s own telemetry, to the stack in observability/ (see config/server.toml).'
+  echo '[telemetry_offer]'
+  echo 'metrics_endpoint = "http://127.0.0.1:4318/v1/metrics"'
+  echo 'traces_endpoint = "http://127.0.0.1:4318/v1/traces"'
+  echo 'logs_endpoint = "http://127.0.0.1:4318/v1/logs"'
+} >"$OUT/server.toml"
 {
   echo 'endpoint = "wss://127.0.0.1:4320/v1/opamp"'
   echo

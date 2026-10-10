@@ -155,6 +155,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Changed
 
+- **The example configuration and the development set monitor the fleet by default.**
+  `config/server.toml` now has `[telemetry_offer]` switched on, pointing at the development
+  observability stack on `http://127.0.0.1:4318`, and the `server.toml` that `scripts/dev-pki.sh`
+  writes carries the same section. The Server's own default is unchanged: without the section,
+  nothing is offered. **What to do:** a `server.toml` copied from `config/server.toml` for
+  production must replace the development shape with an `https://` destination (shape (2) in the
+  file) or comment it out. A development set made before keeps its old `server.toml`; delete
+  `.dev-pki/` and run the script again, or add the section by hand.
 - **Breaking: a host fetches from the download route only the artifact offered to its own
   Agents** ([ADR-0028](docs/adr/0028-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
   An uploaded artifact is served only to a certificate whose host speaks for an Agent that a

@@ -1,9 +1,10 @@
 # Development observability stack
 
 OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry (ADR-0016), stored
-in one place, and up already whenever the Dev Container is. This is a **development tool**: nothing
-shipped depends on it, it holds no credentials worth having, and it retains 24 h of data on a local
-volume.
+in one place. It is a Compose project of its own ([`compose.yaml`](compose.yaml)) that runs on the
+host, apart from the Dev Container: start it when you want to look, leave it off when you do not.
+This is a **development tool**: nothing shipped depends on it, it holds no credentials worth having,
+and it retains 24 h of data on a local volume.
 
 ```
 Agent ──OTLP/HTTP:4318──▶ OpenTelemetry Collector ──▶ ClickHouse ──▶ Grafana :3001
@@ -46,10 +47,15 @@ What it costs, stated plainly rather than discovered later:
 
 ## Start
 
-There is nothing to start. The Dev Container **is** this Compose project
-([`docker-compose.yml`](docker-compose.yml)): the workspace container VS Code attaches to is one of
-its four services and these three are the others, so they come up with the container and go down
-with it.
+On the **host**, from the repository root (Podman's `podman compose` takes the same arguments):
+
+```sh
+docker compose -f observability/compose.yaml up -d      # start, in the background
+docker compose -f observability/compose.yaml down       # stop; the data is kept
+docker compose -f observability/compose.yaml down -v    # stop, and throw the data away
+```
+
+Or `cd observability` and leave out the `-f`. It needs roughly 2 GB of memory.
 
 Grafana is on <http://localhost:3001> — anonymous access is enabled, so there is nothing to log in
 to (`admin` / `admin` if you want to edit and save). It opens on **Fleet Agents — Overview**.
@@ -58,59 +64,73 @@ The first start pulls the ClickHouse datasource plugin, so give Grafana a few se
 usual and make sure the machine has network access. Without it, Grafana starts with no datasource
 and every panel reports one.
 
-To leave the stack out of the next start, drop the names from `runServices` in
-[`devcontainer.json`](devcontainer.json) — from inside the container there is no daemon to start
-them by hand, so that list is the on/off switch.
-
-### Reaching it
-
-- **The Collector is on the workspace container's loopback.** It shares that container's network
-  namespace, so `http://localhost:4318` inside the container is the same endpoint as on the host —
-  which is what the refusal below requires. Its ports are published by the `workspace` service for
-  the same reason; `otel-collector` is not a resolvable name from the other containers.
-- **Grafana and ClickHouse are ordinary neighbours**, reached by service name: `grafana:3001`,
-  `clickhouse:9000`. From the host's browser Grafana stays on <http://localhost:3001>.
-
-### Driving Compose by hand
-
-A host-side action, always (ADR-0002 — the container has no Docker daemon). From the repository root
-on the host:
+**Every port is published on every interface of the host**, as the stack has always been. On a
+machine that sits on a network you do not trust, bind them to the loopback instead:
 
 ```sh
-docker compose -f .devcontainer/docker-compose.yml restart otel-collector   # one service
-docker compose -f .devcontainer/docker-compose.yml down                     # all four, data kept
+OBSERVABILITY_BIND=127.0.0.1 docker compose -f observability/compose.yaml up -d
 ```
 
-`down -v` throws the ClickHouse and Grafana volumes away with it. Note that `up` here starts the
-`workspace` container too — the stack has no separate compose file to bring up on its own any more,
-and the Collector could not run without that container in any case, since it lives in its network
-namespace.
+Whether the Dev Container still reaches a port bound to the host's loopback depends on the
+container engine and its network mode, so check with the `curl` under
+[Checking that data arrives](#checking-that-data-arrives) from inside the container.
+
+### Reaching it from the Dev Container
+
+The Dev Container has no Docker socket ([ADR-0002](../docs/adr/0002-dev-container-runtime.md)) and
+needs none for this: it reaches the Collector **through the host**, over the ports published above.
+
+The Client sends own telemetry in plaintext to a loopback IP literal and nowhere else
+([ADR-0016](../docs/adr/0016-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)), so
+`http://host.docker.internal:4318` is refused inside the container just like any other address.
+That is why the container forwards the host's Collector onto its own loopback:
+[`.devcontainer/forward-otlp.sh`](../.devcontainer/forward-otlp.sh), run by `postStartCommand` on
+every start, listens on `127.0.0.1:4317` and `127.0.0.1:4318` inside the container and passes each
+connection on to the same port on the host. The hop to the host stays on this machine.
+
+| From | Collector (OTLP/HTTP) | Grafana | ClickHouse |
+| ---- | --------------------- | ------- | ---------- |
+| the host | `http://127.0.0.1:4318` | <http://localhost:3001> | `localhost:9000` / `:8123` |
+| the Dev Container | `http://127.0.0.1:4318` (forwarded) | the host's browser | `host.docker.internal:9000` / `:8123` |
+
+So `http://127.0.0.1:4318/v1/logs` means the same Collector on the host and in the container, and a
+`server.toml` needs no second spelling. The forwarder is there whether the stack runs or not: while
+it is down, an export fails and the Client reports it, and the next one after `up` arrives.
+
+**The forwarder holds 4317 and 4318 on the container's loopback.** A Collector run *inside* the
+container as a Managed Process — the first example in `config/supervisor.toml` receives on
+`127.0.0.1:4318` — finds the port taken. Give that one another port, or stop the forwarder first
+(`pkill -f 'socat TCP-LISTEN:431[78]'`); the script leaves a port alone that something else holds
+when the container starts.
+
+The host is reached by the name Podman and Docker Desktop both give it, `host.docker.internal`.
+Docker Engine on Linux gives it no name; set `OTLP_FORWARD_HOST` in the container's environment to
+the host's address on the bridge (usually `172.17.0.1`).
 
 ## Pointing this Server's Agents at it
 
 The destination is not a Client setting — the Server names it, and the Client reports to what it is
-offered. Add to `server.toml`:
+offered. The annotated example [`config/server.toml`](../config/server.toml) and the `server.toml`
+that `scripts/dev-pki.sh` writes both already carry it, so a development fleet monitors itself from
+its first start. Any other `server.toml` needs:
 
 ```toml
 [telemetry_offer]
-metrics_endpoint = "http://localhost:4318/v1/metrics"
-traces_endpoint  = "http://localhost:4318/v1/traces"
-logs_endpoint    = "http://localhost:4318/v1/logs"
+metrics_endpoint = "http://127.0.0.1:4318/v1/metrics"
+traces_endpoint  = "http://127.0.0.1:4318/v1/traces"
+logs_endpoint    = "http://127.0.0.1:4318/v1/logs"
 ```
 
 Two things this stack is shaped around:
 
 - **Full URLs with path.** The Server appends no `/v1/metrics` for you, and the Collector's OTLP/HTTP
   receiver routes on that path. An endpoint without it disappears into a 404.
-- **`http://` only inside the private address space.** The Client refuses a cleartext destination
-  outside loopback and the private ranges — `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` — by
-  design ([ADR-0016](../docs/adr/0016-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)).
-  That is why every port here is published to the host: an Agent on the same machine reaches
-  `http://localhost:4318` and is satisfied. An Agent elsewhere on the LAN reaches the Collector's
-  host by address — `http://192.168.10.5:4318/v1/metrics` — and is satisfied too. What is refused,
-  and reported rather than warned about, is a public address and a **host name**: the judgement is
-  made on the address, since a name can be re-pointed after the offer was admitted. For anything
-  beyond the LAN, terminate TLS in front of the Collector and offer the `https://` URL.
+- **`http://` only to `127.0.0.1` or `[::1]`.** The Client refuses every other cleartext
+  destination — a private address, a host name, even `localhost` — and reports the refusal rather
+  than warning about it ([ADR-0016](../docs/adr/0016-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)).
+  An Agent on the host, or in the Dev Container through its forwarder, reaches
+  `http://127.0.0.1:4318` and is satisfied. An Agent on another machine is not: terminate TLS in
+  front of the Collector and offer the `https://` URL.
 
 Agents receive the offer only if they declare the matching capability (`ReportsOwnMetrics`,
 `ReportsOwnTraces`, `ReportsOwnLogs`), and each signal is independent — offer one, two, or all three.
@@ -238,11 +258,11 @@ curl -s 'http://localhost:8123/?user=otel&password=otel' --data-binary \
 
 ```sh
 # Does the Collector accept OTLP at all?
-curl -i -X POST http://localhost:4318/v1/traces \
+curl -i -X POST http://127.0.0.1:4318/v1/traces \
      -H 'Content-Type: application/json' --data '{"resourceSpans":[]}'
 
 # What is the Collector itself doing?
-docker compose -f .devcontainer/docker-compose.yml logs -f otel-collector
+docker compose -f observability/compose.yaml logs -f otel-collector   # on the host
 
 # What made it into ClickHouse? One query, all three signals — which is the point of one store.
 curl -s 'http://localhost:8123/?user=otel&password=otel' --data-binary "
@@ -276,6 +296,7 @@ ORDER BY l.Timestamp
 | 4318 | Collector | OTLP/HTTP — what the Client exports to |
 | 4317 | Collector | OTLP/gRPC — for anything else you want to point here |
 | 8888 | Collector | The Collector's own metrics |
+| 13133 | Collector | Health check |
 | 3001 | Grafana | The UI |
 | 8123 | ClickHouse | HTTP interface — `curl`-able, and what the checks above use |
 | 9000 | ClickHouse | Native protocol — what the Collector and Grafana speak |

@@ -51,9 +51,11 @@
 
   // System packages the base image does not carry, installed once when the container is created.
   //
-  // The first five are *developer tooling* — nothing shipped depends on them, which is why they
+  // The first six are *developer tooling* — nothing shipped depends on them, which is why they
   // need no ADR (AGENTS.md §3.6) — and each earns its place:
   //
+  //   socat     forwards the host's OpenTelemetry Collector onto this container's loopback, see
+  //             `postStartCommand` below.
   //   llvm      `llvm-lib`, without which `cargo xwin` cannot typecheck the Client for Windows.
   //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
   //             ordinary local run, so a Windows-only compile error reaches CI instead of the
@@ -74,7 +76,13 @@
   //   * The `1.74.0` / `32` in the names are bookworm's versions and move with the image pin above.
   //   * `libboost-regex1.74.0` pulls `libicu72` in, so ICU rides along in the artifact. Icinga 2
   //     2.14.6 did not link `boost_regex` at all; 2.16.5 does.
-  "postCreateCommand": "git config core.hooksPath .githooks && sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends llvm msitools osslsigncode rpm2cpio cpio libboost-coroutine1.74.0 libboost-filesystem1.74.0 libboost-iostreams1.74.0 libboost-program-options1.74.0 libboost-regex1.74.0 libboost-thread1.74.0 libprotobuf-lite32",
+  "postCreateCommand": "git config core.hooksPath .githooks && sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends socat llvm msitools osslsigncode rpm2cpio cpio libboost-coroutine1.74.0 libboost-filesystem1.74.0 libboost-iostreams1.74.0 libboost-program-options1.74.0 libboost-regex1.74.0 libboost-thread1.74.0 libprotobuf-lite32",
+
+  // Runs inside the container on every start. The development observability stack runs on the host,
+  // apart from this container (observability/compose.yaml); this puts its Collector on the
+  // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
+  // plaintext to a loopback IP literal alone (ADR-0016). See observability/README.md.
+  "postStartCommand": ".devcontainer/forward-otlp.sh",
 
   "customizations": {
     // VS Code extensions installed inside the container
@@ -107,7 +115,12 @@
   "forwardPorts": [4321],
   "portsAttributes": {
     "4320": { "label": "OpAMP Fleet Server (Agent plane: OpAMP + downloads)" },
-    "4321": { "label": "OpAMP Fleet Server (Operator plane: REST + UI)" }
+    "4321": { "label": "OpAMP Fleet Server (Operator plane: REST + UI)" },
+    // The forwarder of `postStartCommand` listens here and leads to the host's Collector. VS Code
+    // would offer to forward these ports back to the host, onto the ports the Collector already
+    // holds there; labelled for the Ports view, ignored by the auto-forwarder.
+    "4317": { "label": "OTLP/gRPC → host Collector", "onAutoForward": "ignore" },
+    "4318": { "label": "OTLP/HTTP → host Collector", "onAutoForward": "ignore" }
   },
 
   "hostRequirements": {

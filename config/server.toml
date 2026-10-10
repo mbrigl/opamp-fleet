@@ -1,5 +1,7 @@
 # OpAMP Fleet Server configuration (ADR-0009). Every setting has a default, shown here, except [tls]:
-# the Server refuses to start without a certificate and key (ADR-0012). For development,
+# the Server refuses to start without a certificate and key (ADR-0012). One section is switched on
+# that is off by default: [telemetry_offer], so the fleet reports its own telemetry to the
+# development observability stack out of the box. For development,
 # scripts/dev-pki.sh creates a set and a server.toml that uses it. Start with:
 # cargo run -p fleet-server -- --config .dev-pki/server.toml
 #
@@ -242,17 +244,20 @@ client_ca_file = "client-ca.pem"
 # To stop a fleet: set the endpoints empty, restart the Server, let the Agents acknowledge, then
 # remove the section.
 #
-# Pick ONE of the three shapes below. They are alternatives, not a sequence — switching on two of
-# them leaves the file with a duplicated table header, which is an error rather than a merge.
+# Three shapes follow; (1) is SWITCHED ON, so the fleet monitors itself from the first start. They
+# are alternatives, not a sequence — to use (2) or (3), comment (1) out first: two of them switched
+# on leave the file with a duplicated table header, which is an error rather than a merge.
 #
-# (1) Development — the stack in .devcontainer/ comes up with the Dev Container and publishes
-#     the Collector's OTLP/HTTP port on the host. Cleartext is accepted here because the address
-#     is a loopback literal, the one place plaintext is allowed (ADR-0016) — 127.0.0.1, not the
-#     name localhost, and why the ports are published rather than left on a compose network.
-# [telemetry_offer]
-# metrics_endpoint = "http://127.0.0.1:4318/v1/metrics"
-# traces_endpoint = "http://127.0.0.1:4318/v1/traces"
-# logs_endpoint = "http://127.0.0.1:4318/v1/logs"
+# (1) Development, ON — the stack in observability/ runs on the host and publishes the Collector's
+#     OTLP/HTTP port there; inside the Dev Container, .devcontainer/forward-otlp.sh puts that port
+#     on the container's loopback, so the same URL reaches the same Collector in both places.
+#     Cleartext is accepted here because the address is a loopback literal, the one place
+#     plaintext is allowed (ADR-0016) — 127.0.0.1, not the name localhost. While the stack is
+#     down, the exports fail and the Agents keep running; the next export after it is up arrives.
+[telemetry_offer]
+metrics_endpoint = "http://127.0.0.1:4318/v1/metrics"
+traces_endpoint = "http://127.0.0.1:4318/v1/traces"
+logs_endpoint = "http://127.0.0.1:4318/v1/logs"
 
 # (2) Production — TLS in front of the collector, and a token if it wants one. An Agent REFUSES a
 #     cleartext destination anywhere but 127.0.0.1 or ::1 — a LAN address and a host name included
