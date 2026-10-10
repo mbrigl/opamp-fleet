@@ -41,6 +41,23 @@ fn client_ca(dir: &Path) -> fleet_server::ca::ClientCa {
     fleet_server::ca::ClientCa::from_config(&config).expect("client ca")
 }
 
+/// The Client as a command whose main thread has no more stack than Windows gives one (1 MiB, of
+/// which a debug build on Linux needs half for the same frames): on Unix through `ulimit -s`, so
+/// that a daemon that runs on the main thread overflows here as it did on Windows. Windows itself
+/// runs the binary as it is.
+fn windows_sized_main_thread(program: &str) -> Command {
+    if cfg!(unix) {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("ulimit -s 512 && exec \"$0\" \"$@\"")
+            .arg(program);
+        command
+    } else {
+        Command::new(program)
+    }
+}
+
 /// The serial, life and host of the certificate the Client holds, if it holds one.
 fn issued(state_dir: &Path) -> Option<(Vec<u8>, time::OffsetDateTime, Option<String>)> {
     let pem = std::fs::read(state_dir.join("client-cert.pem")).ok()?;
@@ -66,7 +83,8 @@ fn issued(state_dir: &Path) -> Option<(Vec<u8>, time::OffsetDateTime, Option<Str
 }
 
 /// Each certificate is replaced before it expires, over and over, and the Client stays with the
-/// Server throughout. The connection presents no certificate here, so the host that every
+/// Server throughout — on a main thread no larger than Windows gives it, which the daemon once
+/// overflowed the moment it applied the offered connection settings. The connection presents no certificate here, so the host that every
 /// generation carries on is the renewal proof's doing (ADR-0022 clause 27).
 /// Verifies: ADR-0022
 #[tokio::test]
@@ -97,12 +115,16 @@ async fn a_client_renews_each_certificate_before_it_expires() {
     );
     let config_path = dir.path().join("supervisor.toml");
     std::fs::write(&config_path, toml + &common::client_identity(dir.path())).expect("write");
+    // The Client's own account of what it did, for the failure message: without it a Client that
+    // never connects leaves nothing to read but the count.
+    let log_path = dir.path().join("client.log");
+    let log = std::fs::File::create(&log_path).expect("client log");
     let _client = ClientUnderTest(
-        Command::new(env!("CARGO_BIN_EXE_supervisor"))
+        windows_sized_main_thread(env!("CARGO_BIN_EXE_supervisor"))
             .arg("--config")
             .arg(&config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log.try_clone().expect("client log")))
+            .stderr(Stdio::from(log))
             .spawn()
             .expect("spawn the client"),
     );
@@ -126,7 +148,12 @@ async fn a_client_renews_each_certificate_before_it_expires() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert!(seen.len() >= 3, "only {} certificates in time", seen.len());
+    assert!(
+        seen.len() >= 3,
+        "only {} certificates in time; the Client logged:\n{}",
+        seen.len(),
+        std::fs::read_to_string(&log_path).unwrap_or_default()
+    );
     assert!(
         state
             .snapshot()
