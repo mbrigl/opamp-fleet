@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and the delivered-block check (`check_delivered_block`) each kind states, the Client's own Agent in `build_engine`, the capability set and the handling of a received or stored remote configuration of the Client's own Agent and of a Supervisor's Agent in agent.rs), crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` and `remote_config_disabled` keys), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[[supervisor]]` blocks and the `[supervisors]` section of supervisor.toml (among them `delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`), the artifact documents under docs/artifacts/ each wrapped kind adds
+- **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and the delivered-block check (`check_delivered_block`) each kind states, the Client's own Agent in `build_engine`, the capability set and the handling of a received or stored remote configuration of the Client's own Agent and of a Supervisor's Agent in agent.rs), crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` and `remote_config_disabled` keys), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[[supervisor]]` blocks and the `[supervisors]` section of supervisor.toml (among them `delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`), the `[features]` table of crates/fleet-agent/Cargo.toml, the artifact documents under docs/artifacts/ each wrapped kind adds
 
 ## Context
 
@@ -205,11 +205,20 @@ remote configuration and run only on what the operator placed on the host.
    free of process handles. The Server-facing Port is the engine seam the transports consume —
    build reports, handle a `ServerToAgent`, produce disconnects — over *n* Agents.
 
-2. **A compiled-in registry selected by `type`.** The kinds are `collector` (the Collector
-   Supervisor), `command` (the Custom Supervisor for any Foreign Agent), and the wrapped kinds,
-   each of which knows one third-party agent (clause 15). A new process kind is one module and one
-   registry line (`registry()` in `supervisor/mod.rs`); the core stays untouched. An unknown
-   `type` fails startup naming the known ones. Plugins are not loaded dynamically.
+2. **A compiled-in registry selected by `type`, each wrapped kind a Cargo feature.** The kinds are
+   `collector` (the Collector Supervisor), `command` (the Custom Supervisor for any Foreign Agent),
+   and the wrapped kinds, each of which knows one third-party agent (clause 15). A new process
+   kind is one module and one registry line (`registry()` in `supervisor/mod.rs`); the core stays untouched. Each wrapped kind
+   is a feature of `fleet-agent` named after its `type`, and the default features are all of them,
+   so the published build carries every kind and a build that leaves one out is built with
+   `--no-default-features --features <kinds>`. A new wrapped kind is a feature too, in the default
+   set. `collector` and `command` are always compiled in: they are the integration paths the
+   specification names, and `command` runs any Foreign Agent no wrapper covers. An unknown `type`,
+   one this build does not carry, fails startup naming the known ones. Plugins are not loaded
+   dynamically. A build's kinds are what its own Agent reports (clause 18). A build that leaves a
+   kind out is published under a package name of its own (clause 25); a self-update into a build
+   that lacks a kind a block on the host names fails its start and is rolled back like any failed
+   attempt ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)).
 
 3. **A block is parsed in two stages.** The core takes the common keys — `type`, `name`,
    `service_name` ([ADR-0015](0015-what-an-agent-reports-about-itself.md)), `endpoint_port`,
@@ -781,6 +790,13 @@ Windows through a job object.
   a host, and data nothing tests re-creates the transcription; a compiled-in constant fails a test
   when the artifact moves.
 - **One list attribute for the kinds.** A Selector could match it only by spelling the whole list.
+- **Every kind always compiled in.** It is the simpler build, but a host that runs one wrapped
+  agent then carries the code, the attack surface and the reported capability of all of them.
+- **A feature for `collector` and `command` too.** A build without either has no way left to run
+  a Collector or an unwrapped agent; the two are the core's own paths, not a vendor's.
+- **A self-update package derived from the build's kinds.** It names a package per combination of
+  features and decides at build time what the operator decides in `[self_update]`; the probation
+  already rolls back a build that cannot read the host's blocks.
 - **A denylist of dangerous variables alone** — `LD_PRELOAD` is one of many; `PYTHONPATH`,
   `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `BASH_ENV` and every program's own plugin variable reach as
   far, and the list never ends. An allow-list the operator writes ends it; the loader variables are
@@ -985,6 +1001,11 @@ Windows through a job object.
   program's directory. Kind-specific installs carry their own rollback burden.
 - Negative / trade-offs: an Agent cannot be tagged per block before its first message; a label
   covers it from the first exchange on. One attribute per kind reads worse than a list.
+- Positive: a build carries only the wrapped kinds its hosts run, and its own Agent says which.
+- Negative / trade-offs: every combination of features is a build that must keep compiling; the
+  gate lints each wrapped kind alone and the build with none beside the default, on Linux. A build with
+  fewer kinds needs its own package name, or its hosts take the full build at the next
+  self-update.
 - Negative / trade-offs: a kind is coupled to one artifact's shape — "bring your own tree" is a
   packaging question, not a configuration one. The documents' prose has no test behind it.
 - Follow-ups (by topic): extension-configuration injection; plain-HTTP polling on the Endpoint;
@@ -1068,8 +1089,14 @@ Windows through a job object.
 ## Enforcement
 
 - Registry, defaults and refusals, in `crates/fleet-agent/src/supervisor/mod.rs`:
+  `every_wrapped_kinds_block_is_two_lines`,
   `an_unwrapped_kind_still_says_everything_itself`, `a_client_reports_the_kinds_it_was_compiled_with`,
-  `the_fleets_timing_reaches_a_supervisor_that_says_nothing`. That a wrapped
+  `the_fleets_timing_reaches_a_supervisor_that_says_nothing`,
+  `a_build_carries_exactly_the_wrapped_kinds_its_features_name`,
+  `a_kind_left_out_of_the_build_is_an_unknown_type`. `scripts/check-rust.sh` lints `fleet-agent`
+  on Linux without any wrapped kind and with each one alone, and runs its tests without any, so a
+  smaller build stays compiling and the second test decides something. Windows and macOS lint the
+  default build only; a smaller build there is checked by whoever builds one. That a wrapped
   kind's block needs neither a program nor a type, that restating a derived value is refused
   (clause 13), and that a kind's timing correction reaches its Supervisor (clause 17) is shown
   with a wrapped kind, by the tests its ADR names.

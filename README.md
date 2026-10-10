@@ -130,6 +130,10 @@ it (AGENTS.md links here).
   `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features --features "$f" -- -D warnings; done`
   — inside the workspace Cargo builds `opamp` once with every feature any crate asks for, so only a
   build of each feature on its own shows that it stands alone (ADR-0009).
+- **Lint and test `fleet-agent` with fewer Supervisor kinds:**
+  `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings && cargo test -p fleet-agent --no-default-features`
+  — a wrapped kind, when the code base carries one, is a feature, so only these show that a build leaving
+  one out compiles and refuses its `type` (ADR-0016).
 - **Check the Windows build:**
   `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings`
   (needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; the Dev
