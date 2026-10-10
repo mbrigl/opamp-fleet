@@ -71,7 +71,7 @@ fn ensure_safe_package_name(name: &str) -> Result<(), String> {
 /// and hashed as it arrives, never assembled in memory. Only a signature check reads it back,
 /// because Ed25519 verifies over the whole message. `staging_dir` is the receiving Agent's own
 /// (ADR-0017), so the install that follows is a rename inside one filesystem.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 pub async fn download_and_verify(
     package: &PackageDownload,
     config: &ClientConfig,
@@ -701,7 +701,7 @@ mod tests {
 
     /// A `503` and a `429` with `Retry-After` from the Client's own Server origin are waited out,
     /// and the download goes on.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_download_waits_out_retry_after_from_its_server_origin() {
         let (server, count) = answering(vec![(503, Some("30")), (429, Some("30"))]).await;
@@ -722,7 +722,7 @@ mod tests {
 
     /// The waits of one download are bounded: a Server origin that keeps answering `503` makes the
     /// download fail once the next wait would pass the bound.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_download_gives_up_once_its_waits_reach_the_bound() {
         let (server, count) = answering(vec![(503, Some("30")); 100]).await;
@@ -751,7 +751,7 @@ mod tests {
 
     /// A `Retry-After: 0` does not make the download ask in a tight loop for ever: the asking ends
     /// at the deadline, after a bounded number of requests.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_retry_after_of_zero_does_not_loop_without_bound() {
         let (server, count) = answering(vec![(503, Some("0")); 1000]).await;
@@ -777,7 +777,7 @@ mod tests {
 
     /// The time the requests take counts against the bound, not only the waits: a slow origin
     /// exhausts it although the waits alone would not.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn request_time_counts_against_the_bound() {
         let count = std::sync::Arc::new(AtomicU64::new(0));
@@ -825,7 +825,7 @@ mod tests {
     }
 
     /// A `503` whose `Retry-After` is an HTTP date, missing or unreadable is not waited out.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn an_unusable_retry_after_is_not_waited_out() {
         for after in [Some("Wed, 21 Oct 2015 07:28:00 GMT"), None, Some("soon")] {
@@ -852,7 +852,7 @@ mod tests {
 
     /// A `503` with `Retry-After` from the host a redirect off the Server's origin led to is not
     /// waited out.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_retry_after_after_a_redirect_off_the_origin_is_not_waited_out() {
         let (mirror, count) = answering(vec![(503, Some("1"))]).await;
@@ -892,7 +892,7 @@ mod tests {
 
     /// A `503` with `Retry-After` from a host that is not the Client's own Server origin is not
     /// waited out: the response comes back as it is, for the download to fail on.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_retry_after_from_another_host_fails_the_download() {
         let (server, count) = answering(vec![(503, Some("1"))]).await;
@@ -919,7 +919,7 @@ mod tests {
 
     /// What labels the download span must not carry what authorises the download: the span goes to
     /// a destination the Server named (ADR-0016 clause 13), and a pre-signed URL is a credential.
-    /// Verifies: ADR-0028, ADR-0016
+    /// Verifies: ADR-0037, ADR-0016
     #[test]
     fn the_download_source_drops_whatever_authorises_it() {
         assert_eq!(
@@ -977,7 +977,7 @@ mod tests {
 
     /// A header value is a credential, and this struct travels inside a `Debug`-deriving type that
     /// a log line could one day print. The key is diagnosable, the value never appears.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_download_never_debug_prints_its_header_values() {
         let mut package = offer(vec![0u8; 32], Vec::new());
@@ -1018,7 +1018,7 @@ mod tests {
     /// A package name is a file-name token, not a path: the safe set mirrors what the Server
     /// validates before it stores one, and anything that could steer the staged file elsewhere —
     /// a separator, a lone `..`, an empty or over-long name — is refused.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_traversing_package_name_is_refused() {
         assert!(ensure_safe_package_name("otelcol").is_ok());
@@ -1051,7 +1051,7 @@ mod tests {
     /// End to end at the sink: a traversing name is refused by `download_and_verify` before any URL
     /// is resolved or a byte is written, so nothing lands outside the staging directory — and the
     /// error is the one the caller reports as a failed package status.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn download_refuses_to_stage_a_traversing_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1080,7 +1080,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn the_cap_triggers_only_past_the_limit() {
         assert!(over_cap(1000, 1024).is_none(), "within the ceiling is fine");
@@ -1100,7 +1100,7 @@ mod tests {
         (keypair, public)
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn content_hash_mismatch_is_refused() {
         let (keypair, public) = keypair();
@@ -1125,7 +1125,7 @@ mod tests {
     /// There is no unsigned posture: no key, or no signature, is refused before anything is
     /// downloaded, and a signature that does not verify refuses the artifact. The Client's own
     /// update takes the same path.
-    /// Verifies: ADR-0028, ADR-0020
+    /// Verifies: ADR-0037, ADR-0020
     #[test]
     fn signature_policy_is_enforced() {
         let (keypair, public) = keypair();
@@ -1162,7 +1162,7 @@ mod tests {
 
     /// The signature covers which Agent type the artifact is for and at which version: the same
     /// signed bytes offered as another type's program, or under another version, are refused.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_signature_does_not_carry_over_to_another_type_or_version() {
         let (keypair, public) = keypair();
@@ -1188,7 +1188,7 @@ mod tests {
 
     /// A download goes to the Server's own origin, or below a configured prefix at a `/` boundary,
     /// and nowhere else; plaintext is held to the loopback literals even there.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_source_is_allowed_only_below_a_prefix_or_at_the_server() {
         let config = ClientConfig {
@@ -1221,7 +1221,7 @@ mod tests {
 
     /// An `allowed_sources` entry is an https prefix and nothing else: plaintext only on a loopback
     /// literal, never on a host name, and no credentials, query or fragment.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn an_allowed_source_must_be_a_plain_https_prefix() {
         assert!(parse_source("https://mirror.example/releases").is_ok());

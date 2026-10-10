@@ -732,7 +732,7 @@ mod tests {
     /// wrote instead of keeping it as the operator's (ADR-0017 clause 52). The store is stopped
     /// by a directory standing where the next offer's entry file goes — `create_private_dir`
     /// resets the mode of `config/`, so a failed removal cannot be staged from here.
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn a_store_cut_short_leaves_no_previous_entry_file_beside_a_new_pb() {
         let dir = tempfile::tempdir().expect("tempdir");

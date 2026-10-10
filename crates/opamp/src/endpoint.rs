@@ -182,7 +182,7 @@ mod tests {
 
     /// The rule this module exists for: a small gzip that decompresses past the limit is refused,
     /// and decompression stops at the limit rather than running to completion first.
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[test]
     fn a_gzip_bomb_buys_no_more_memory_than_a_plain_body_would() {
         let body = gzipped(&vec![b'a'; 10 * 1024 * 1024]);
@@ -196,7 +196,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[test]
     fn what_is_not_gzip_under_a_gzip_header_is_refused() {
         assert_eq!(
@@ -211,7 +211,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[test]
     fn an_encoding_this_endpoint_does_not_implement_names_itself() {
         assert_eq!(
@@ -224,7 +224,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0009, ADR-0012
+    /// Verifies: ADR-0031, ADR-0012
     #[test]
     fn only_the_loopback_literals_are_loopback() {
         for host in ["127.0.0.1", "::1", "[::1]"] {
@@ -243,7 +243,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[test]
     fn plaintext_urls_are_accepted_on_the_loopback_literals_alone() {
         for url in [

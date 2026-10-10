@@ -585,7 +585,7 @@ pub(crate) mod tests {
     /// ADR-0027 point 2: a rollout pins a snapshot. Editing the saved revision afterwards changes
     /// nothing for an Agent assigned the pinned one, and the candidate hash moves so the fleet
     /// view can show a newer save waiting.
-    // Verifies: ADR-0027
+    // Verifies: ADR-0036
     #[test]
     fn an_assignment_pins_a_snapshot_and_later_edits_wait() {
         let memory = Memory::default();

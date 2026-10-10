@@ -586,7 +586,7 @@ async fn a_declared_reload_applies_without_a_restart() {
 /// `reload-or-restart` (ADR-0017): a process that dies on its reload signal — the stub without
 /// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
 /// files, and the apply is acknowledged from that restart rather than failed.
-// Verifies: ADR-0017
+// Verifies: ADR-0032
 #[cfg(unix)]
 #[tokio::test]
 async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead() {
@@ -892,7 +892,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() 
     let _ = harness.task.await;
 }
 
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -926,7 +926,7 @@ async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
 
 /// The case ADR-0028 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
 /// Supervisor takes the member named after its own binary and installs that.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -971,7 +971,7 @@ async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
 /// not installed yet, and the Server delivers it. A plugin with nothing to run — a Collector
 /// awaiting its configuration — must not turn that into a failed install, which would delete the
 /// binary that was just put in place.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1006,7 +1006,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     let _ = harness.task.await;
 }
 
-// Verifies: ADR-0028, G-10
+// Verifies: ADR-0037, G-10
 #[tokio::test]
 async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1038,7 +1038,7 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
 /// ADR-0028: a *first* install that will not start has nothing to roll back to, so it is **kept**
 /// rather than discarded — the verified binary stays in `program/`. Discarding it would empty the
 /// directory and set the Server re-offering the same artifact in a loop.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1069,7 +1069,7 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
 /// ADR-0028: a program that keeps failing to start is **held** after a few tries, not restarted
 /// forever — the loop that hammered the Server with re-downloads is bounded. A held Supervisor
 /// reports it plainly.
-// Verifies: ADR-0028
+// Verifies: ADR-0037
 #[tokio::test]
 async fn a_program_that_keeps_crashing_is_held_not_looped() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1101,7 +1101,7 @@ async fn a_program_that_keeps_crashing_is_held_not_looped() {
 
 /// ADR-0028: a successful update does not delete the version it superseded — it is retained for the
 /// window, with a marker recording the deadline, so an operator has a fallback.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_successful_update_keeps_the_previous_version_for_the_window() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1197,7 +1197,7 @@ fn tree_harness(root: &Path) -> Harness {
 
 /// The case ADR-0028 exists for: an agent that is a program *plus* what it loads, arriving with
 /// nothing on the host first — and then being replaced the same way.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1252,7 +1252,7 @@ async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
 
 /// The health gate, one level up: a tree whose program will not stay up puts the *whole* previous
 /// tree back — libraries included, since half of each would run nothing.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_tree_that_will_not_stay_up_is_rolled_back_whole() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1298,7 +1298,7 @@ async fn a_tree_that_will_not_stay_up_is_rolled_back_whole() {
 
 /// The archive names a member the configuration does not — refused, with the old tree left exactly
 /// where it was.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -579,7 +579,7 @@ mod tests {
 
     /// The Supervisor-set apply refuses to run on a host that keeps its set, whatever put a set in
     /// front of it: nothing is written and nothing is sent (ADR-0017 clause 43).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn the_supervisor_set_apply_refuses_to_run_on_a_host_that_keeps_its_set() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -612,7 +612,7 @@ mod tests {
 
     /// A shutdown ends a download that is waiting out a `Retry-After` from its Server origin: the
     /// call returns at once, and no failure is reported for the download.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_shutdown_stops_a_download_waiting_out_retry_after() {
         opamp::tls::install_ring_provider();
@@ -710,7 +710,7 @@ mod tests {
     /// The Baseline permits interim status reports while a package downloads, and this is what
     /// they are for: a transfer that takes longer than a moment stays visible instead of looking
     /// like a stuck install. Driven by a server that trickles the artifact out.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_slow_download_is_reported_as_downloading_with_progress() {
         opamp::tls::install_ring_provider();

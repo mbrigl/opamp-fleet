@@ -19,7 +19,7 @@ pub fn statement(agent_type: &str, version: &str, content_hash: &[u8]) -> Vec<u8
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn the_statement_names_type_version_and_hash() {
         assert_eq!(

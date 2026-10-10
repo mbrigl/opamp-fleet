@@ -1310,7 +1310,7 @@ mod tests {
     /// waits it out instead of reporting a program that cannot run — the race a staged package
     /// meets when another thread forks while it is being written.
     /// Linux alone refuses to exec a file held open for writing, so the race exists only there.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0034
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_program_busy_for_a_moment_is_run_once_it_is_free() {
@@ -1457,7 +1457,7 @@ mod tests {
 
     /// ADR-0028: a retained predecessor is swept only once its deadline passes, never before, and
     /// the marker goes with it.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_retained_backup_is_swept_only_after_its_deadline() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1482,7 +1482,7 @@ mod tests {
 
     /// A backup with no marker is not something this Runner retained (a half-finished install
     /// leaves one), so a sweep leaves it alone.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_sweep_leaves_an_unmarked_backup_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1494,7 +1494,7 @@ mod tests {
 
     /// Dropping a backup takes its marker too, so a superseding update does not leave a dangling
     /// deadline behind.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn dropping_a_backup_clears_its_marker() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -114,7 +114,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: ADR-0017, ADR-0014, G-1, G-6, G-14
+// Verifies: ADR-0032, ADR-0014, G-1, G-6, G-14
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -552,7 +552,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 /// A delivered Supervisor set with one block the Client refuses is refused whole: the running
 /// Supervisor keeps its process, `supervisor.toml` keeps every byte, and the Client's own Agent
 /// reports the refusal.
-/// Verifies: ADR-0017
+/// Verifies: ADR-0032
 #[tokio::test]
 async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
     let (addr, state, dir) = spawn_server().await;
@@ -653,7 +653,7 @@ async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
 /// the listed one, whose Agent declares neither remote-configuration capability. Switched back on,
 /// the next start declares both, is offered what is released, and the stored offer replaces every
 /// file in `config/`, the operator's included (clauses 3 and 8).
-/// Verifies: ADR-0017
+/// Verifies: ADR-0032
 #[tokio::test]
 async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
     let (addr, state, dir) = spawn_server().await;
@@ -771,7 +771,7 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
 /// the Client's own Agent declares neither remote-configuration capability and reports no status.
 /// Switched back on, the next start is offered the released set, and it replaces the
 /// `[[supervisor]]` array, the operator's block included (clauses 22, 25 and 27).
-/// Verifies: ADR-0017
+/// Verifies: ADR-0032
 #[tokio::test]
 async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {
     let (addr, state, dir) = spawn_server().await;

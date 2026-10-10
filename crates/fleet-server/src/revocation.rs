@@ -953,7 +953,7 @@ mod tests {
 
     /// A host speaks for the `instance_uid`s that reported with its certificate, a host the
     /// register does not know for none, and a Gateway for any Agent.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_host_speaks_for_the_agents_bound_to_it_and_a_gateway_for_any() {
         let (revocations, _) = open(&Memory::default());

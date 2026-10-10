@@ -140,7 +140,7 @@ fn report() -> Option<AgentToServer> {
 
 /// The probe proves a connection over either transport with the trust, the identity and the
 /// credential the description names — and fails without the identity the server asks for.
-/// Verifies: ADR-0009
+/// Verifies: ADR-0031
 #[tokio::test]
 async fn the_probe_connects_with_the_described_material_on_both_transports() {
     let pki = Pki::new();
@@ -162,7 +162,7 @@ async fn the_probe_connects_with_the_described_material_on_both_transports() {
 }
 
 /// An OpAMP endpoint never legitimately redirects, so the client does not follow one.
-/// Verifies: ADR-0009
+/// Verifies: ADR-0031
 #[tokio::test]
 async fn a_redirect_is_not_followed() {
     let pki = Pki::new();

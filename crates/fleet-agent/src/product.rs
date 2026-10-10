@@ -36,7 +36,7 @@ mod tests {
 
     /// The build script is the only thing that can enforce the grammar, so this asserts what it
     /// let through rather than re-implementing the check.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn product_name_satisfies_the_grammar() {
         assert!(!PRODUCT_NAME.is_empty() && PRODUCT_NAME.len() <= 32);
@@ -46,7 +46,7 @@ mod tests {
         assert!(!PRODUCT_NAME.starts_with('-') && !PRODUCT_NAME.ends_with('-'));
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn display_name_is_prose() {
         assert!(!PRODUCT_DISPLAY_NAME.trim().is_empty());

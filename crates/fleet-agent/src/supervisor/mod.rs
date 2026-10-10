@@ -742,7 +742,7 @@ mod tests {
     /// And a block that states one anyway is refused, naming what supplies it now — the pattern
     /// `package` and `accepts_packages` already run (ADR-0017 clause 13). Silently preferring one
     /// of the two is how a host quietly differs from what the fleet believes.
-    // Verifies: ADR-0017
+    // Verifies: ADR-0032
     #[test]
     fn a_wrapped_block_that_restates_a_derived_value_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -773,7 +773,7 @@ mod tests {
     /// type is stated, the timing comes from the fleet, and the kind's own strict parse accepts an
     /// empty table. Icinga adds only its enrolment, and stands here without it as a standalone
     /// node.
-    // Verifies: ADR-0017
+    // Verifies: ADR-0032
     #[test]
     fn every_wrapped_kinds_block_is_two_lines() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -792,7 +792,7 @@ mod tests {
     /// A Client says which kinds it carries, one key per kind (ADR-0017 clause 18), so a Selector
     /// can aim a Supervisor set at the Clients that can actually run it — rather than the Server
     /// learning from a `FAILED` that it aimed at a Client too old to have the plugin.
-    // Verifies: ADR-0017
+    // Verifies: ADR-0032
     #[test]
     fn a_client_reports_the_kinds_it_was_compiled_with() {
         let reported = kind_attributes(BTreeMap::new());
@@ -929,7 +929,7 @@ mod tests {
     ///
     /// The `program/` directory is created either way, before the first package: the swap renames
     /// inside it, so it has to exist beforehand rather than after.
-    /// Verifies: ADR-0017, ADR-0028
+    /// Verifies: ADR-0032, ADR-0037
     #[tokio::test]
     async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -964,7 +964,7 @@ mod tests {
     /// Without the operator's verification key, no Agent of this Client takes packages — neither a
     /// Supervisor nor the Client's own Agent, whose self-update consent stands — so nothing can be
     /// installed unsigned (ADR-0028, ADR-0020).
-    /// Verifies: ADR-0028, ADR-0020, Q-1
+    /// Verifies: ADR-0037, ADR-0020, Q-1
     #[tokio::test]
     async fn without_a_verification_key_no_agent_takes_packages() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1185,7 +1185,7 @@ mod tests {
 
     /// A listed name no block carries starts the Client and earns one notice naming it; one equal
     /// to the Client's own name says that Agent is not covered (ADR-0017 clause 49).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn a_listed_name_without_a_block_is_a_notice_not_a_refusal() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1205,7 +1205,7 @@ mod tests {
     /// the entry files it wrote and `.supplementary` go while their bytes are still the stored
     /// ones, an overwritten entry and an operator's own file stay, and the `.pb` goes (ADR-0017
     /// clause 32).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn a_listed_supervisor_drops_the_stored_remote_config_and_keeps_the_operators_files() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1238,7 +1238,7 @@ mod tests {
     /// A stored configuration whose files cannot be removed stops the Supervisor before its kind
     /// starts on them, and at startup that fails the whole Client: it fails closed rather than run
     /// the Server's configuration under a switch that says it does not (ADR-0017 clause 52).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn a_stored_remote_config_that_cannot_be_removed_fails_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1263,7 +1263,7 @@ mod tests {
 
     /// A stored `.pb` that does not decode is deleted, and `config/` is left exactly as it is,
     /// since nothing says which of its files the Server wrote (ADR-0017 clause 52).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn an_undecodable_stored_remote_config_is_deleted_and_config_is_left_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1288,7 +1288,7 @@ mod tests {
 
     /// A listed Supervisor restarted over a stored configuration reports no status and no hash,
     /// and declares neither remote-configuration capability (ADR-0017 clauses 50 and 52).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn a_listed_supervisor_reports_no_remote_config_status_after_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1322,7 +1322,7 @@ mod tests {
     /// The switch covers Supervisors only: the Client's own name in the list earns a notice, and
     /// its Agent still declares `AcceptsRemoteConfig` for its Supervisor set (ADR-0017 clause 49
     /// and out of scope).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn the_clients_own_agent_keeps_accepting_its_supervisor_set_when_its_name_is_listed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1361,7 +1361,7 @@ mod tests {
     /// start — the `.pb` and the unchanged entry copies, not a copy changed since — and is not
     /// reported; the Agent declares neither remote-configuration bit. With the key `true` the same
     /// stored set is restored as applied (ADR-0017 clauses 42 and 44).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn a_host_that_keeps_its_set_drops_the_stored_set_and_reports_no_status() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1406,7 +1406,7 @@ mod tests {
 
     /// A `remote-config.pb` that cannot be read or deleted is a warning, not a refusal: nothing
     /// runs on it, and it is still not reported (ADR-0017 clause 44).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn a_stored_set_that_cannot_be_removed_does_not_stop_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1421,7 +1421,7 @@ mod tests {
 
     /// `remote-config.pb` goes before the copies, so a copy that cannot be removed leaves no hash
     /// behind: switched back on, the next start reports none (ADR-0017 clauses 44 and 47).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn a_copy_that_cannot_be_removed_still_leaves_no_hash_to_report() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1452,7 +1452,7 @@ mod tests {
 
     /// A stored set that does not decode is deleted, and `config/` is left as it is (ADR-0017
     /// clause 24).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn an_undecodable_stored_set_is_deleted_and_config_is_left_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1479,7 +1479,7 @@ mod tests {
 
     /// The removal is logged once naming the stored hash, and a set offered to the built Client
     /// anyway is logged once per hash (ADR-0017 clauses 43 and 44).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[tokio::test]
     async fn the_removed_stored_set_is_logged_naming_its_hash() {
         #[derive(Clone, Default)]
@@ -1541,7 +1541,7 @@ mod tests {
     /// The notice for the Client's own name in `remote_config_disabled` (ADR-0017 clause 49) points
     /// at `server_manages_set`, and on a host that keeps its set says the set is the host's
     /// already (ADR-0017).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn the_own_name_notice_points_at_server_manages_set() {
         let dir = tempfile::tempdir().expect("tempdir");

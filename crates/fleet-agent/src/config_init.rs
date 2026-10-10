@@ -431,7 +431,7 @@ mod tests {
     /// What the questionnaire writes holds everything the Client needs at startup — the identity
     /// and the key — so an install never registers a service that would refuse to start
     /// (ADR-0021).
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn a_complete_answer_writes_a_file_the_client_starts_with() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -462,7 +462,7 @@ mod tests {
 
     /// The questionnaire suggests the loader's default, and that default is one its own endpoint
     /// rule accepts: TLS, to the loopback literal — never a plaintext or a host-name answer.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn the_suggested_endpoint_is_tls_on_the_loopback() {
         let suggested = ClientConfig::default().endpoint;
@@ -474,7 +474,7 @@ mod tests {
     /// A packaged install has an endpoint and no terminal: the file it writes carries no identity,
     /// fails the validation the Client applies at startup, and stays on disk to be completed rather
     /// than answered again (ADR-0021).
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn installer_answers_alone_fail_validation_and_stay_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -488,7 +488,7 @@ mod tests {
 
     /// The endpoint rule is the startup rule: plaintext only to a loopback literal, and the name
     /// `localhost` is not one (ADR-0021).
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn a_plaintext_endpoint_is_accepted_only_on_a_loopback_literal() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -507,7 +507,7 @@ mod tests {
 
     /// The point of the whole exercise: what the questionnaire writes must load, and must load as
     /// the answers that were given.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn the_rendered_file_loads_as_what_was_answered() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -533,7 +533,7 @@ mod tests {
 
     /// No answer puts an `[auth]` section in the file: the questionnaire asks for no credential,
     /// and the Client sends none (ADR-0021 clause 17).
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn a_rendered_file_has_no_auth_section() {
         let given = Answers {
@@ -559,7 +559,7 @@ mod tests {
 
     /// ADR-0021 clause 42: the packaged path has to produce a file the loader accepts, carrying the
     /// endpoint that was given — the same guarantee the questionnaire has, without a terminal.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn an_endpoint_given_is_written_and_loads() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -596,7 +596,7 @@ mod tests {
 
     /// The file is validated *before* it exists, not after. An install that wrote an unusable file
     /// and then failed to load it would leave the operator fixing a file they never typed.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn a_bad_endpoint_is_refused_before_anything_is_written() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -609,7 +609,7 @@ mod tests {
 
     /// ADR-0021 clause 16 holds on the packaged path too: a `.deb` reinstalled over a configured
     /// host must not eat what somebody answered into the first install, or edited since.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn an_endpoint_given_never_overwrites_an_existing_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -723,7 +723,7 @@ mod tests {
     }
 
     /// The refusal that protects answers typed once (ADR-0021).
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn an_existing_file_is_never_overwritten() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -740,7 +740,7 @@ mod tests {
     /// `run` on an existing file is not an error — a re-install keeps what is there and carries
     /// on, which is what makes `service install` idempotent (ADR-0021). Reached without a tty
     /// precisely because the existing-file branch returns before the terminal is consulted.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn run_keeps_an_existing_file_without_asking() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -756,7 +756,7 @@ mod tests {
     /// Without a terminal there is nobody to answer, and blocking a provisioning run forever is
     /// the failure mode this refuses (ADR-0021). Under `cargo test` stdin is not a tty, which is
     /// exactly the condition being asserted.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn interactive_without_a_terminal_fails_instead_of_blocking() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -766,7 +766,7 @@ mod tests {
         assert!(!path.exists(), "nothing was written");
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn the_file_is_not_readable_by_the_rest_of_the_machine() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -787,7 +787,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn an_endpoint_is_validated_by_the_loaders_own_rule() {
         assert!(validate_endpoint("wss://fleet.example.com/v1/opamp").is_ok());
@@ -796,7 +796,7 @@ mod tests {
         assert!(err.contains("must start with"), "{err}");
     }
 
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn a_private_ca_is_only_asked_about_where_tls_applies() {
         assert!(is_tls_endpoint("wss://x/v1/opamp"));

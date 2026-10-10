@@ -1516,7 +1516,7 @@ mod tests {
     /// A `trusted_cert_file` that is named but not there — not yet delivered, or mistyped — never
     /// falls back to trust on first use: enrolment fails, nothing is saved from the parent, and it
     /// pins the file once it arrives.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0034
     #[tokio::test]
     async fn a_named_parent_certificate_that_is_missing_is_waited_for_not_trusted_on_sight() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1642,7 +1642,7 @@ mod tests {
     /// A renewal whose named parent certificate is gone waits for it too: the pin kept from the
     /// first enrolment is not reused and the parent is not trusted on sight, while the held
     /// certificate is kept untouched.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0034
     #[tokio::test]
     async fn a_renewal_whose_named_parent_certificate_is_gone_waits_for_it() {
         let dir = tempfile::tempdir().expect("tempdir");

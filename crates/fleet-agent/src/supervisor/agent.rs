@@ -1636,7 +1636,7 @@ mod tests {
     /// The Client's own Agent is one *kind* of thing across the whole fleet, so its type is the
     /// constant `supervisor` (ADR-0021) and not whatever the operator called this instance — which
     /// is what lets one Selector on the type aim at every Client in the fleet at once (ADR-0015).
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn the_clients_own_agent_reports_its_type_and_its_configured_name_separately() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1658,7 +1658,7 @@ mod tests {
     /// gives the program, its service and its configuration file the same word, so the Agent's
     /// *role* is the one name this thing has anywhere — which is the point, and
     /// which is why the two constants are asserted to agree rather than to differ.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn the_clients_own_agent_type_is_the_one_name_this_program_has() {
         assert_eq!(CLIENT_AGENT_TYPE, "supervisor");
@@ -2200,7 +2200,7 @@ mod tests {
     /// replace it: the Server offers because the Agent reports running something older, and a
     /// Client that answered "in sync" from its record would strand the host on what it runs, for
     /// good.
-    // Verifies: ADR-0027
+    // Verifies: ADR-0036
     #[test]
     fn the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2262,7 +2262,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_package_offer_for_the_named_package_is_acknowledged_installing_and_handed_over() {
         use opamp::proto::{
@@ -2399,7 +2399,7 @@ mod tests {
     /// An `Addon` is not a Managed Process's binary, and the only thing this Client can do with a
     /// package is *be* that binary — so an offer carrying nothing but addons is refused rather
     /// than installed over the process they were meant to extend, and the refusal is reported.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn an_addon_package_is_refused_instead_of_overwriting_the_binary() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
@@ -2457,7 +2457,7 @@ mod tests {
 
     /// An offer of two top-level packages is refused whole: an Agent has one binary to replace,
     /// and picking one of the two would let the order of a map decide what runs.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn an_offer_of_two_top_level_packages_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2494,7 +2494,7 @@ mod tests {
 
     /// A Supervisor takes a package only for its own Agent type, and never one older than it
     /// runs: both are refused before anything is downloaded, and the reason is reported.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_package_for_another_type_or_an_older_version_is_refused() {
         use crate::supervisor::ports::AgentStorage as _;
@@ -2714,7 +2714,7 @@ mod tests {
     /// The headers a `DownloadableFile` names travel to the download that has to use them — the
     /// credential a referenced source needs (ADR-0028), which the Server fills from the operator's
     /// configuration.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_package_offer_hands_its_download_headers_to_the_transport() {
         use opamp::proto::{
@@ -2766,7 +2766,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_failed_package_reports_installed_failed_and_keeps_the_old_version() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3086,7 +3086,7 @@ mod tests {
 
     /// A listed Supervisor's Agent is built without either remote-configuration bit, and keeps
     /// every other capability a Supervisor declares (ADR-0017 clause 50).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn a_supervisor_with_remote_config_disabled_declares_neither_remote_config_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3111,7 +3111,7 @@ mod tests {
 
     /// An offer that arrives anyway is ignored: nothing stored, no entry file, nothing pending for
     /// the process adapter, and no status reported (ADR-0017 clause 51).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn a_remote_config_offered_anyway_is_neither_stored_nor_applied_nor_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3142,7 +3142,7 @@ mod tests {
 
     /// The warning about an ignored offer is said once per hash seen since start (ADR-0017 clause
     /// 31), so a Server resending the same offer does not flood the log.
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn an_ignored_remote_config_is_logged_once_per_hash() {
         #[derive(Clone, Default)]
@@ -3187,7 +3187,7 @@ mod tests {
     /// What an ignored offer leaves behind is bounded whatever the Server sends: at most
     /// `IGNORED_CONFIGS_CAP` remembered digests however many distinct hashes arrive, and a long
     /// hash cut short in the log (ADR-0017 clause 51).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn what_ignored_remote_configs_leave_behind_is_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3225,7 +3225,7 @@ mod tests {
     /// The Client's own Agent on a host that keeps its set is built without either
     /// remote-configuration bit and keeps everything else it declares, self-update included
     /// (ADR-0017 clause 42).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn the_own_agent_of_a_host_that_keeps_its_set_declares_neither_remote_config_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3254,7 +3254,7 @@ mod tests {
 
     /// A set offered anyway is not stored, not handed to the Supervisor-set apply, and not
     /// answered (ADR-0017 clause 43).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn a_set_offered_anyway_to_a_host_that_keeps_it_is_neither_stored_nor_applied_nor_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3287,7 +3287,7 @@ mod tests {
 
     /// The warning about an ignored set is said once per hash and names the key that keeps the
     /// set on the host (ADR-0017 clause 43).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn a_set_ignored_by_a_host_that_keeps_it_is_logged_once_per_hash() {
         #[derive(Clone, Default)]

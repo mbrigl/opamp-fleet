@@ -326,7 +326,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[test]
     fn the_scheme_picks_the_transport_and_anything_else_is_refused() {
         assert_eq!(Scheme::of("wss://h/v1/opamp"), Ok(Scheme::WebSocket));
@@ -337,7 +337,7 @@ mod tests {
         assert!(Scheme::of("h/v1/opamp").is_err());
     }
 
-    /// Verifies: ADR-0009, ADR-0012
+    /// Verifies: ADR-0031, ADR-0012
     #[test]
     fn plaintext_is_refused_off_the_loopback_literals() {
         let allowed = |endpoint| connection(endpoint, Some("Bearer t")).scheme();
@@ -366,7 +366,7 @@ mod tests {
             .is_err());
     }
 
-    /// Verifies: ADR-0009, ADR-0012
+    /// Verifies: ADR-0031, ADR-0012
     #[tokio::test]
     async fn plaintext_off_the_loopback_is_refused_before_connecting() {
         let refused = connection("ws://192.0.2.1:9/v1/opamp", None);
@@ -394,7 +394,7 @@ mod tests {
         assert!(!shown.contains("secret"), "{shown}");
     }
 
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[test]
     fn no_tls_material_still_offers_tls_1_3_alone() {
         let config = ClientTls::default()

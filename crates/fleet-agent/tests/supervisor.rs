@@ -272,7 +272,7 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
 /// ADR-0017 clause 53 end to end: a listed Collector runs on the files the operator placed in its
 /// `config/` directory, and the Server's last configuration stored there before the switch is not
 /// among what it is started with.
-/// Verifies: ADR-0017
+/// Verifies: ADR-0032
 #[test]
 fn a_listed_collector_runs_on_the_entries_the_operator_placed() {
     use fleet_agent::supervisor::ports::AgentStorage as _;

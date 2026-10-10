@@ -135,7 +135,7 @@ mod tests {
     /// The client identity is all a Client needs to start: a file naming one passes with no
     /// `[auth]`, and a file without one is refused, naming `[tls] cert_file` and `key_file` — the
     /// Server would refuse it in the handshake anyway.
-    /// Verifies: ADR-0022, ADR-0021, Q-1
+    /// Verifies: ADR-0022, ADR-0035, Q-1
     #[test]
     fn admission_needs_a_client_identity_and_nothing_else() {
         let dir = tempfile::tempdir().expect("tempdir");

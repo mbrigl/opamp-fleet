@@ -3358,7 +3358,7 @@ mod tests {
     /// There is no seed. A record carrying no assignment fields loads as **assigned nothing** —
     /// the Server never invents a rollout at startup — and what it could receive shows up as
     /// waiting instead, which is the one thing an operator has to act on.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_record_without_assignments_loads_assigned_to_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -3401,7 +3401,7 @@ mod tests {
 
     /// ADR-0027: saving proposes, the acts assign — and an Agent that appears after the bulk act
     /// waits for one of its own (point 6).
-    // Verifies: ADR-0027
+    // Verifies: ADR-0036
     #[test]
     fn rollout_acts_assign_and_a_late_agent_waits() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -3746,7 +3746,7 @@ mod tests {
     /// An artifact is fetched by a host only through an Agent it speaks for: the host whose Agent
     /// it was released to, not another host, not a host the register does not know, and not for
     /// another Platform or version — until that other host is marked as a Gateway.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn an_artifact_is_offered_to_a_host_only_through_an_agent_it_speaks_for() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3785,7 +3785,7 @@ mod tests {
 
     /// An Agent that echoes the aggregate hash of its offer is not sent it again, and can still
     /// fetch it — a retry after a failed install re-reads an offer no longer re-sent.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn an_offer_still_stands_after_its_hash_is_echoed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3804,7 +3804,7 @@ mod tests {
 
     /// A version saved into the channel but not yet released by an operator's press is no one's
     /// offer: not the Agent's host's, not a Gateway's — while the version released before stays.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_version_waiting_for_its_press_is_offered_to_no_host() {
         let dir = tempfile::tempdir().expect("tempdir");

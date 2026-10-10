@@ -693,7 +693,7 @@ mod tests {
 
     /// Without `[client_ca]` the Server says at startup that an uploaded artifact needs a
     /// certificate naming a host, and how one is named; with it, it says nothing.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_server_without_client_ca_says_uploaded_artifacts_need_a_host() {
         let notice = uploaded_artifacts_notice(false).expect("a notice");

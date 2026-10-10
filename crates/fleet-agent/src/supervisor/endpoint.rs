@@ -398,7 +398,7 @@ mod tests {
     /// the WebSocket upgrade is dropped, other connections are served while it hangs, and the
     /// endpoint serves the next one afterwards — the measure, since a listener that died would
     /// drop the first connection too.
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[tokio::test]
     async fn a_half_finished_upgrade_is_dropped_and_the_endpoint_keeps_serving() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

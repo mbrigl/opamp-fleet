@@ -196,7 +196,7 @@ fn spawn_server() -> (
 /// The kill is the assertion the stand-in service manager cannot make, and the reason this test
 /// exists: `RestartPolicy::OnFailure` is what a self-update relies on to come back at all, and on
 /// Windows it is a set of recovery actions this Client registers itself.
-/// Verifies: ADR-0020, ADR-0021, G-11
+/// Verifies: ADR-0020, ADR-0035, G-11
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_stop() {

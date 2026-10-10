@@ -1038,7 +1038,7 @@ mod tests {
     /// To make room the cache deletes what no current offer names before what one does, each
     /// least recently used first, no more than the room it needs, and nothing when even deleting
     /// everything would not make room beside what other fetches reserved.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn room_is_made_from_artifacts_no_longer_offered_first() {
         let held = HashMap::from([
@@ -1069,7 +1069,7 @@ mod tests {
 
     /// Only a path on the Server's own download route with a SHA-256 is an artifact the Gateway
     /// caches; an absolute URL is not, whichever host it names.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn only_a_path_on_the_servers_route_is_cached() {
         let file = |url: &str, hash: Vec<u8>| DownloadableFile {
@@ -1105,7 +1105,7 @@ mod tests {
 
     /// The first five lines of a host in a minute are logged, the rest counted, and the count is
     /// logged with the host's first line of the next minute. Hosts are counted apart.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn refusals_are_logged_five_a_minute_per_host_and_the_rest_counted() {
         let mut log = RefusalLog::default();
@@ -1250,7 +1250,7 @@ mod tests {
 
     /// Requests for an artifact being fetched are told to come back instead of waiting, and the
     /// upstream serves the one fetch.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn requests_while_fetching_are_answered_busy_and_the_upstream_serves_one() {
         let bytes = b"the-binary".to_vec();
@@ -1284,7 +1284,7 @@ mod tests {
 
     /// What an earlier run left in the cache directory is gone once the Gateway opens it, and the
     /// directory the first fetch creates is the owner's alone.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn the_cache_is_emptied_at_start_and_owner_only() {
         let bytes = b"the-binary".to_vec();
@@ -1329,7 +1329,7 @@ mod tests {
     /// Two offered artifacts that do not fit together: a request fetches an evicted one again,
     /// but only once per relayed offer of it, so requests cannot make the two evict each other in a
     /// loop. The next relayed offer re-arms it.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn an_evicted_offered_artifact_is_fetched_again_on_a_request_once_per_offer() {
         let (a_bytes, b_bytes) = (vec![1u8; 10], vec![2u8; 10]);
@@ -1375,7 +1375,7 @@ mod tests {
 
     /// A file whose deletion fails stays counted, so the room it takes is not handed out, and is
     /// deleted on a later attempt — without touching a newer copy of the same artifact.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_file_whose_deletion_fails_stays_counted_until_deleted() {
         static FAILURES: AtomicUsize = AtomicUsize::new(1);
@@ -1439,7 +1439,7 @@ mod tests {
 
     /// A held artifact whose file disappeared is not served, and is forgotten; with no refetch left
     /// under the current offer the request is answered `Nothing`.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_held_artifact_whose_file_disappeared_is_forgotten() {
         let bytes = b"the-binary".to_vec();
@@ -1462,7 +1462,7 @@ mod tests {
 
     /// An offered artifact evicted between the lookup and the open — its file gone — is decided
     /// again: the refetch the current offer allows starts, and the request is told to come back.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn an_artifact_evicted_between_lookup_and_open_is_fetched_again() {
         let bytes = b"the-binary".to_vec();
@@ -1489,7 +1489,7 @@ mod tests {
 
     /// One host reporting fresh `instance_uid`s binds no more than its share, and at the global cap
     /// an idle binding makes room: another host's new Agent is still bound and its offer recorded.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_host_flooding_instance_uids_cannot_keep_another_hosts_agent_from_being_bound() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1542,7 +1542,7 @@ mod tests {
     }
 
     /// Past its grace a fetch must keep an average of 64 KiB/s since the grace ended.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_fetch_below_the_pace_floor_is_cut() {
         let kib64 = 64 * 1024;
@@ -1554,7 +1554,7 @@ mod tests {
 
     /// A fetch the Server defers with `503` and `Retry-After` gives its slot back while it waits,
     /// asks again, and completes.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_deferred_fetch_gives_its_slot_back_while_it_waits() {
         let bytes = b"the-binary".to_vec();
@@ -1618,7 +1618,7 @@ mod tests {
 
     /// A shutdown ends a fetch that waits out the Server's `Retry-After`: nothing is left marked as
     /// being fetched.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_shutdown_ends_a_fetch_that_waits_out_retry_after() {
         let count = Arc::new(AtomicUsize::new(0));
@@ -1661,7 +1661,7 @@ mod tests {
     }
 
     /// A fetch cannot reserve room that other fetches hold.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn a_fetch_cannot_reserve_room_other_fetches_hold() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1676,7 +1676,7 @@ mod tests {
     }
 
     /// At most four fetches run at once; a fifth waits for a slot.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn no_more_than_four_fetches_run_at_once() {
         let versions = ["1", "2", "3", "4", "5"];
@@ -1711,7 +1711,7 @@ mod tests {
     }
 
     /// An offer relayed over a certificate that names no host is not recorded and starts no fetch.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn an_offer_over_a_certificate_naming_no_host_records_nothing_and_fetches_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1725,7 +1725,7 @@ mod tests {
     }
 
     /// A fetch whose task ends without settling leaves no entry and no reservation behind.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[tokio::test]
     async fn an_unfinished_fetch_leaves_no_entry_behind() {
         let dir = tempfile::tempdir().expect("tempdir");

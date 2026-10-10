@@ -139,7 +139,7 @@ mod tests {
 
     /// The data root keeps no inherited right — `BUILTIN\Users` read among them — and full control
     /// only for LocalSystem and the Administrators, each granted by SID.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn the_data_root_is_cut_off_from_what_every_local_user_inherits() {
         let args: Vec<String> = restrict_args(std::path::Path::new(r"C:\ProgramData\opamp-fleet"))

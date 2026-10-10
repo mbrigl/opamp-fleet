@@ -962,7 +962,7 @@ mod tests {
         assert!(err.contains("at least one"), "{err}");
     }
 
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[test]
     fn rejects_unknown_keys() {
         assert!(toml::from_str::<ServerConfig>("listne = \"0.0.0.0:1\"").is_err());

@@ -330,7 +330,7 @@ mod tests {
     /// A message is in flight from the first byte of its first data frame until its final frame
     /// has arrived whole, and only its data counts as progress; control frames between its
     /// fragments change neither.
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[test]
     fn data_frames_carry_a_message_and_control_frames_do_not() {
         // A masked binary frame without FIN carrying 3 bytes, then a masked Ping with a payload.
@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// A socket that only pings has no message in flight.
-    /// Verifies: ADR-0009
+    /// Verifies: ADR-0031
     #[test]
     fn pings_alone_put_no_message_in_flight() {
         let ping = full_ping();

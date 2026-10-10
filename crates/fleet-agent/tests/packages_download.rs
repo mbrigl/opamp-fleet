@@ -135,7 +135,7 @@ fn download_with(url: String, headers: &[(&str, &str)]) -> PackageDownload {
 
 /// A body whose `Content-Length` already exceeds the ceiling is refused before a byte is written,
 /// and nothing is left staged.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_body_too_large_by_its_content_length_is_refused() {
     let addr = spawn().await;
@@ -159,7 +159,7 @@ async fn a_body_too_large_by_its_content_length_is_refused() {
 
 /// A chunked body that advertises no length is stopped the moment the stream crosses the ceiling —
 /// the case an attacker would use to dodge the up-front check.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_chunked_body_is_stopped_once_it_crosses_the_ceiling() {
     let addr = spawn().await;
@@ -204,7 +204,7 @@ async fn a_body_within_the_ceiling_streams_through_to_verification() {
 /// An artifact URL may legitimately redirect — a mirror (ADR-0028) is often a CDN that bounces the
 /// download to signed storage — so the download follows it. Reaching the artifact (and then failing
 /// only on the deliberately wrong content hash) proves the redirect was followed, not refused.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_download_follows_a_redirect_to_the_mirror() {
     let addr = spawn().await;
@@ -230,7 +230,7 @@ async fn a_download_follows_a_redirect_to_the_mirror() {
 /// artifact at all. Reaching the content-hash check (which then fails on the deliberately wrong
 /// hash) is what proves the credential travelled; before this was implemented the same call failed
 /// with `401 Unauthorized`.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_download_carries_the_headers_the_offer_named() {
     let addr = spawn().await;
@@ -275,7 +275,7 @@ async fn a_download_without_the_headers_is_refused_by_a_guarded_source() {
 /// would otherwise be handed to wherever a mirror points — which is how a mirror harvests it. The
 /// second origin here refuses anything carrying the token, so a leak surfaces as `401` and the
 /// correct behaviour reaches the hash check.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn an_offered_header_does_not_follow_a_redirect_to_another_origin() {
     let addr = spawn().await;
@@ -324,7 +324,7 @@ async fn an_offered_header_survives_a_redirect_within_the_same_origin() {
 
 /// A header the offer names that is not a valid HTTP header fails the download loudly rather than
 /// being skipped, and the message names the key without its value.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn an_unusable_offered_header_fails_the_download_by_name() {
     let addr = spawn().await;
@@ -352,7 +352,7 @@ async fn an_unusable_offered_header_fails_the_download_by_name() {
 /// between the hash check and the installer re-opening it (TOCTOU). It starts deliberately wide here
 /// and must be narrowed; the hardening happens before a byte is written, so even a failing download
 /// leaves it owner-only.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[cfg(unix)]
 #[tokio::test]
 async fn the_staging_directory_is_kept_owner_only() {
@@ -408,7 +408,7 @@ async fn counted_source() -> (SocketAddr, std::sync::Arc<std::sync::atomic::Atom
 
 /// A source outside `[packages] allowed_sources` is refused before a request is sent: the check is
 /// on the absence of the request, not on the outcome of the download.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_source_that_is_not_allowed_is_refused_without_a_request() {
     let (unlisted, hits) = counted_source().await;
@@ -433,7 +433,7 @@ async fn a_source_that_is_not_allowed_is_refused_without_a_request() {
 
 /// There is no unsigned posture: an offer carrying no signature, and any offer to a Client holding
 /// no verification key, is refused before a request reaches the source, naming what is missing.
-/// Verifies: ADR-0028, ADR-0020
+/// Verifies: ADR-0037, ADR-0020
 #[tokio::test]
 async fn an_unsigned_offer_or_an_unkeyed_client_fetches_nothing() {
     let (source, hits) = counted_source().await;
@@ -478,7 +478,7 @@ async fn an_unsigned_offer_or_an_unkeyed_client_fetches_nothing() {
 
 /// Every redirect hop is checked: an allowed mirror that bounces the download to a host the
 /// operator did not list fails the download, naming that origin.
-/// Verifies: ADR-0028
+/// Verifies: ADR-0037
 #[tokio::test]
 async fn a_redirect_to_a_source_that_is_not_allowed_fails_the_download() {
     let addr = spawn().await;
@@ -568,7 +568,7 @@ async fn tls_origin(
 
 /// This Client's certificate goes to its own Server's origin and to no other: a download the
 /// Server redirects to a mirror reaches the mirror without it.
-/// Verifies: ADR-0022, ADR-0028
+/// Verifies: ADR-0022, ADR-0037
 #[tokio::test]
 async fn the_client_certificate_goes_to_the_servers_origin_alone() {
     opamp::tls::install_ring_provider();

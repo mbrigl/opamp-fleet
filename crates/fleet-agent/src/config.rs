@@ -1233,7 +1233,7 @@ mod tests {
     /// ADR-0021. The log is on by default with a bound that cannot be removed, and `[logging]` is
     /// the machine's — so a typo in it fails startup rather than quietly disabling the one thing
     /// that would have explained the next failure.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn the_log_file_is_on_by_default_and_its_retention_is_not_optional() {
         let defaults = ClientConfig::default().logging;
@@ -1278,7 +1278,7 @@ mod tests {
     /// configuration is ordinarily the defaults and a warning; a missing one with the *old* name
     /// beside it is an upgraded host that would otherwise come up on the development endpoint and
     /// manage nothing, which is the failure nobody sees.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0035
     #[test]
     fn the_configurations_old_name_beside_the_new_one_is_refused_rather_than_defaulted() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1399,7 +1399,7 @@ mod tests {
     /// The artifact download has a ceiling so a Server cannot fill the staging disk before the hash
     /// is checked; it defaults to the Server's own per-package limit, is configurable, and zero is
     /// a bound that could carry nothing rather than "unlimited", so it fails startup.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn the_artifact_size_limit_defaults_is_configurable_and_rejects_zero() {
         assert_eq!(ClientConfig::default().max_artifact_size_bytes, 1 << 30);
@@ -1447,7 +1447,7 @@ mod tests {
 
     /// The Gateway's package cache holds ten gibibytes by default, and zero is a bound that could
     /// hold nothing rather than "unlimited", so it fails startup.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn the_package_cache_defaults_to_ten_gib_and_rejects_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1506,7 +1506,7 @@ mod tests {
     /// `package` would name the artifact (the Server's Selector does, ADR-0028), and
     /// `accepts_packages` would say whether to take one (ADR-0017 derives that from the program's
     /// path). An operator who has either in a file believes it does something.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn the_retired_package_keys_are_refused() {
         let block = |extra: &str| {
@@ -1543,7 +1543,7 @@ mod tests {
 
     /// One shape (ADR-0017): a bare name, which is what puts the program in a directory this
     /// Client owns and may therefore replace. Everything else is refused rather than guessed at.
-    // Verifies: ADR-0017
+    // Verifies: ADR-0032
     #[test]
     fn a_bare_name_resolves_and_everything_else_is_refused() {
         let dir = PathBuf::from("/srv/fleet/otelcol");
@@ -1575,7 +1575,7 @@ mod tests {
     /// With a tree (ADR-0028) the program is one file *inside* the package, so the spawn path is
     /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0017
     /// made it mean, which is consent and nothing else.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_tree_spawns_from_the_path_written_inside_the_package() {
         let dir = PathBuf::from("/srv/fleet/fluent-bit");
@@ -1599,7 +1599,7 @@ mod tests {
 
     /// Refused at startup, where the operator is still looking at the file — not at rollout time
     /// on every matched host, which is where the archive sanitizer would catch the same thing.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_program_path_must_stay_inside_the_package() {
         assert_eq!(
@@ -1755,7 +1755,7 @@ mod tests {
         ClientConfig::load(&path).expect("plaintext on a loopback literal loads");
     }
 
-    /// Verifies: ADR-0012, ADR-0009
+    /// Verifies: ADR-0012, ADR-0031
     #[test]
     fn rejects_an_unknown_scheme_and_unknown_keys() {
         let cfg = ClientConfig {
@@ -1808,7 +1808,7 @@ mod tests {
 
     /// ADR-0028: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
     /// block overrides it for itself — the shape `apply_grace_secs` has.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn retention_defaults_globally_and_is_overridable_per_supervisor() {
         let default: ClientConfig = toml::from_str("").expect("parse");
@@ -1878,7 +1878,7 @@ mod tests {
 
     /// The switch is a list of Supervisor names in `[supervisors]`, empty unless the operator
     /// writes one (ADR-0017 clause 48).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn remote_config_disabled_defaults_to_empty_and_lists_supervisor_names() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1905,7 +1905,7 @@ mod tests {
 
     /// A value no block can ever carry fails startup, naming the key and the value (ADR-0017
     /// clause 29).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn a_remote_config_disabled_name_outside_the_instance_name_grammar_fails_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1924,7 +1924,7 @@ mod tests {
 
     /// The switch is a boolean in `[supervisors]`, `true` unless the operator writes `false`
     /// (ADR-0017 clause 41).
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0032
     #[test]
     fn server_manages_set_defaults_to_true_and_reads_false() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2058,7 +2058,7 @@ mod tests {
     /// took then. It loads — a Client the Server updated must keep connecting — the notice names
     /// the section, and nothing from it reaches the connection: no `Authorization` value, and the
     /// effective configuration reported upstream carries none of its secrets.
-    /// Verifies: ADR-0022, ADR-0021
+    /// Verifies: ADR-0022, ADR-0035
     #[test]
     fn a_leftover_auth_section_is_ignored_with_a_notice() {
         let dir = tempfile::tempdir().expect("tempdir");

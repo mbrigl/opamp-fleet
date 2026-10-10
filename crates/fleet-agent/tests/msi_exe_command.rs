@@ -178,7 +178,7 @@ fn install_args(parsed: cli::Parsed) -> cli::InstallArgs {
     }
 }
 
-/// Verifies: ADR-0021
+/// Verifies: ADR-0035
 #[test]
 fn register_service_with_endpoint_survives_the_crt() {
     let args = install_args(parse(&exe_commands()["RegisterServiceWithEndpoint"]));
@@ -186,7 +186,7 @@ fn register_service_with_endpoint_survives_the_crt() {
     assert!(!args.interactive);
 }
 
-/// Verifies: ADR-0021
+/// Verifies: ADR-0035
 #[test]
 fn register_service_survives_the_crt() {
     let args = install_args(parse(&exe_commands()["RegisterService"]));
@@ -198,7 +198,7 @@ fn register_service_survives_the_crt() {
 ///
 /// This is also what keeps error 1722 out. A directory property resolves with a trailing backslash,
 /// and there is no command line for one to reach.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0035
 #[test]
 fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
     for (id, command) in exe_commands() {
@@ -223,7 +223,7 @@ fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
 /// --endpoint` would then reject. And it must stay confined to the UI sequence: leaking it into a
 /// silent install would write the development default on every unattended host, the state
 /// ADR-0021 refuses to manufacture.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0035
 #[test]
 fn endpoint_prefill_is_the_development_server_and_interactive_only() {
     let element = set_property("ENDPOINT");
@@ -321,7 +321,7 @@ fn the_withdrawal_condition_reads_both_spellings_of_off() {
     );
 }
 
-/// Verifies: ADR-0021
+/// Verifies: ADR-0035
 #[test]
 fn stop_and_unregister_survive_the_crt() {
     let commands = exe_commands();
@@ -343,7 +343,7 @@ fn stop_and_unregister_survive_the_crt() {
 /// certificate and its key, as `cert_file` and `key_file`, in the configuration under
 /// `%ProgramData%` — not in the installation folder, which holds only the payload. It mentions no
 /// credential, since the Client reads none.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0035
 #[test]
 fn the_endpoint_dialog_names_the_identity_and_no_credential() {
     let path =

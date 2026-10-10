@@ -1175,7 +1175,7 @@ mod tests {
 
     /// ADR-0028: the identity is the triple, entries are per platform, and the whole Set —
     /// entries and selector — survives a reopen.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_set_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1232,7 +1232,7 @@ mod tests {
 
     /// An entry its Deployment holds no signature for is offered to nobody, and the Deployment
     /// names it as what keeps it from being rolled out (ADR-0028).
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn an_entry_its_deployment_has_not_signed_is_not_a_candidate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1440,7 +1440,7 @@ mod tests {
     /// Both halves of the trade are asserted here rather than only the convenient one — including
     /// that a Managed Process numbered below its Set can be moved backwards, which is the cost the
     /// ADR records under Consequences.
-    // Verifies: ADR-0027
+    // Verifies: ADR-0036
     #[test]
     fn the_version_an_agent_runs_wins_over_the_version_it_claims() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1604,7 +1604,7 @@ mod tests {
     /// Only the Package its channel holds is a candidate. A Deployment holds one Package per type
     /// (ADR-0028), so there is no second contender to rank or refuse: the store answers what the
     /// channel points at, or nothing.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn only_the_package_its_ring_holds_is_a_candidate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1635,7 +1635,7 @@ mod tests {
 
     /// Fit before aim (ADR-0028): an entry for another platform, or a Set for another
     /// Agent type, is never a candidate — and an Agent reporting neither fits nothing.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn fit_is_mandatory_platform_and_type() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1666,7 +1666,7 @@ mod tests {
 
     /// Both sides of the platform comparison are canonicalised (ADR-0028): an artifact uploaded
     /// as `macos`/`x86_64` reaches an Agent reporting `darwin`/`amd64`.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn both_sides_of_the_comparison_are_canonicalised() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1688,7 +1688,7 @@ mod tests {
 
     /// The offered download URL names the whole identity, so two versions of one name never serve
     /// each other's bytes.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn the_offer_carries_a_download_url_naming_the_identity() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1739,7 +1739,7 @@ mod tests {
     }
 
     /// Deleting an entry frees its artifact; deleting the Set takes the directory with it.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn deletion_frees_entries_and_sets() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1761,7 +1761,7 @@ mod tests {
 
     /// A corrupt artifact fails the reopen loudly — a corrupt distribution artifact must never
     /// ship (ADR-0009's principle).
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_corrupt_artifact_fails_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1786,7 +1786,7 @@ mod tests {
 
     /// The store directory and each Set's metadata are owner-only (ADR-0028): a referenced
     /// source's headers may carry a token.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[cfg(unix)]
     #[test]
     fn the_store_and_its_metadata_are_owner_only() {
@@ -1820,7 +1820,7 @@ mod tests {
     ///
     /// Both shapes an older Server left behind are covered: loose files in the store root, and
     /// `<name>@<version>@<type>/set.json` directories.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_store_in_an_older_layout_refuses_to_open_and_names_what_is_in_the_way() {
         // Loose files in the store root.
@@ -1859,7 +1859,7 @@ mod tests {
 
     /// The identity grammar keeps the triple a safe directory name and an unambiguous parse:
     /// `@` and path separators are refused.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn identity_tokens_are_bounded() {
         assert!(PackageId::new("otelcol", "1.2.3-rc.1+abc").is_ok());
@@ -1901,7 +1901,7 @@ mod tests {
     /// Every artifact `offer_for_assigned` names is one `offers` answers yes for, and nothing else
     /// is — across assignments, Agent types, Platforms, signed and unsigned Deployments, and
     /// artifacts the store does not hold.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn the_download_and_the_offer_test_one_predicate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1964,7 +1964,7 @@ mod tests {
 
     /// An Agent that reports another Agent type than its assigned Package's is offered nothing, and
     /// cannot fetch it (ADR-0028 clause 9).
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn an_agent_reporting_another_type_is_offered_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1990,7 +1990,7 @@ mod tests {
 
     /// An entry the assigned Deployment holds no signature for is neither offered nor fetched,
     /// though another entry of the same Package is signed.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn an_entry_its_deployment_does_not_sign_is_not_offered() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2026,7 +2026,7 @@ mod tests {
 
     /// A referenced entry is offered from its source, and the download route never serves it: the
     /// Server holds no bytes for it.
-    /// Verifies: ADR-0028
+    /// Verifies: ADR-0037
     #[test]
     fn a_referenced_entry_is_never_offered_for_the_route() {
         let dir = tempfile::tempdir().expect("tempdir");
