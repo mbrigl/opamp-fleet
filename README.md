@@ -346,10 +346,11 @@ config/               # annotated example configuration files (server.toml, supe
 scripts/              # consistency checks and sensors (check-all.sh runs them all), run in CI
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 interop/              # the Go side of the interop check against opamp-go (ADR-0010)
+observability/        # the development observability stack — Collector, ClickHouse, Grafana — run on the host
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 .githooks/            # git hooks: refuse a commit on main and a push while the checks are red
 .github/              # CI workflows, Dependabot, issue & pull request templates, code owners
-.devcontainer/        # Dev Container definition (base image + Features + observability stack)
+.devcontainer/        # Dev Container definition (base image + Features + the OTLP forwarder)
 .vscode/              # shared editor settings
 .editorconfig         # editor-neutral formatting baseline
 .gitattributes        # line-ending normalization (LF everywhere)
@@ -361,34 +362,28 @@ rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 
 ## Dev Container
 
-The environment is defined by [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)
-and [`.devcontainer/docker-compose.yml`](.devcontainer/docker-compose.yml): a prebuilt base image
-with Dev Container Features and VS Code extensions layered on top — no Dockerfile. Customise it by
+The environment is defined by [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json):
+a prebuilt base image with Dev Container Features and VS Code extensions layered on top — no Dockerfile. Customise it by
 adding Features, switching the base image, or adding extensions. Features are pinned by major tag
 and resolved in the committed `devcontainer-lock.json`. Extensions are listed by identifier only,
 because a published extension version cannot be repointed and a version suffix is VS Code-specific.
 
-### The observability stack comes with it
+### The observability stack runs beside it
 
-The workspace container is one service in a Compose project; the other three are the development
-observability stack — Collector, ClickHouse and Grafana — declared in the same file and documented
-in [`.devcontainer/OBSERVABILITY.md`](.devcontainer/OBSERVABILITY.md). They start and stop with the
-container, and from inside it:
+The development observability stack — Collector, ClickHouse and Grafana — is a Compose project of
+its own in [`observability/`](observability/README.md). It runs on the **host**, apart from the
+container, and is started when you want it:
 
-| Reach                | at                            |
-| -------------------- | ----------------------------- |
-| Collector (OTLP/HTTP)| `http://localhost:4318`       |
-| Grafana              | `http://grafana:3001`         |
-| ClickHouse           | `clickhouse:9000` / `:8123`   |
+```sh
+docker compose -f observability/compose.yaml up -d     # on the host, from the repository root
+```
 
-The Collector answers on `localhost` because it shares the workspace container's network namespace:
-the Client refuses a cleartext OTLP destination outside the private address space ([ADR-0016](docs/adr/0016-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)),
-so a `server.toml` naming `http://localhost:4318/v1/logs` has to mean the same thing inside the
-container as on the host. Grafana stays on <http://localhost:3001> from the host's browser.
-
-To run without the stack — it wants roughly 2 GB — remove the services from `runServices` in
-[`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json); there is no daemon inside the
-container to start them by hand.
+The container reaches the Collector through the host. Since the Client sends own telemetry in
+plaintext to a loopback IP literal alone ([ADR-0016](docs/adr/0016-own-telemetry-over-tls-1-3-and-plaintext-only-to-the-loopback.md)),
+[`.devcontainer/forward-otlp.sh`](.devcontainer/forward-otlp.sh) puts the host's Collector on the
+container's loopback on every start: `http://127.0.0.1:4318` inside the container is the Collector
+on the host, so a `server.toml` naming `http://127.0.0.1:4318/v1/logs` means the same thing in both
+places. Grafana is on <http://localhost:3001> in the host's browser.
 
 ### Host container management
 
