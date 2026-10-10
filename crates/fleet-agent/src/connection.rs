@@ -624,6 +624,8 @@ mod tests {
     /// Verifies: ADR-0014, ADR-0021
     #[tokio::test]
     async fn verify_sends_no_authorization_even_when_one_is_offered() {
+        // The `http` probe builds a reqwest client, which needs a process-wide provider.
+        opamp::tls::install_ring_provider();
         for scheme in ["ws", "http"] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await

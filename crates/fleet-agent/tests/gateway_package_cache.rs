@@ -308,6 +308,9 @@ async fn spawn_gateway(
     dir: &Path,
     package_cache_bytes: u64,
 ) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+    // What the binary does first (`main.rs`): the Gateway fetches its revocation list as soon as it
+    // starts, before the test's own `client()` would install the provider.
+    opamp::tls::install_ring_provider();
     let (cert, key) = pki.issue("127.0.0.1", None);
     let write = |file: &str, content: &str| {
         let path = dir.join(file);
