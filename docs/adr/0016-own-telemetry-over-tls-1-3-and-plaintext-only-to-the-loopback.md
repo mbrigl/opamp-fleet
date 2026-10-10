@@ -34,8 +34,8 @@ writes through `tracing`. Traces are the control loop's existing lifecycles — 
 apply, a package install, a self-update — which already have phases and an outcome the Server is
 told; they are spans to map, not an instrumentation project. Making them needs a producer: the log
 bridge converts `tracing` *events* and says so itself (*"This crate does not convert `tracing` spans
-into OpenTelemetry spans. Use `tracing-opentelemetry` for that."*). `tracing-opentelemetry` `0.33`
-is built against the `opentelemetry` `0.32` this workspace runs, and with it entering a `tracing`
+into OpenTelemetry spans. Use `tracing-opentelemetry` for that."*). `tracing-opentelemetry` `0.34`
+is built against the `opentelemetry` `0.33` this workspace runs, and with it entering a `tracing`
 span activates its OpenTelemetry context, so the log appender picks up the trace context with no
 feature flag.
 
@@ -86,13 +86,13 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
    stated rather than inherited:
 
    ```toml
-   opentelemetry-otlp = { version = "0.32", default-features = false,
+   opentelemetry-otlp = { version = "0.33", default-features = false,
                           features = ["http-proto", "reqwest-client", "trace", "metrics", "logs"] }
    ```
 
    `reqwest-client` replaces the default blocking client; `grpc-tonic` stays off because the schema
    permits no gRPC destination. `tracing-opentelemetry` joins them at the version built against them
-   — `0.33` against `opentelemetry` `0.32` — and that pairing is a decision, not a range to widen. No
+   — `0.34` against `opentelemetry` `0.33` — and that pairing is a decision, not a range to widen. No
    OTLP schema is vendored ([ADR-0010](0010-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md) covers OpAMP only).
 
 2. **Names come from the standard where it has them.** Metric and attribute names are taken from
@@ -370,10 +370,10 @@ on the Agent that drops the three capability bits.
   [`opentelemetry-proto`](https://github.com/open-telemetry/opentelemetry-proto), the schema
   deliberately not copied.
 - [`opentelemetry-appender-tracing`](https://docs.rs/opentelemetry-appender-tracing/latest/opentelemetry_appender_tracing/)
-  `0.32` — `OpenTelemetryTracingBridge`, its statement that it does not convert spans, and the
+  `0.33` — `OpenTelemetryTracingBridge`, its statement that it does not convert spans, and the
   changelog entry removing `experimental_use_tracing_span_context` (fixing
   [opentelemetry-rust#3190](https://github.com/open-telemetry/opentelemetry-rust/issues/3190)).
-- [`tracing-opentelemetry` 0.33.0](https://docs.rs/tracing-opentelemetry/0.33.0/tracing_opentelemetry/)
+- [`tracing-opentelemetry` 0.34.0](https://docs.rs/tracing-opentelemetry/0.34.0/tracing_opentelemetry/)
   — `OpenTelemetryLayer`, the reserved `otel.*` fields, `with_context_activation`; and the history of
   log/trace correlation between the two crates,
   [opentelemetry-rust#1378](https://github.com/open-telemetry/opentelemetry-rust/issues/1378),
