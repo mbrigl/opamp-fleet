@@ -725,7 +725,7 @@ impl ServerConfig {
         let Some(tls) = &self.tls else {
             return Err(
                 "[tls] is required — the Agent plane always serves TLS 1.3; set cert_file and \
-                 key_file (scripts/dev-pki.sh makes a development set)"
+                 key_file (`server pki init` makes a set, scripts/dev-pki.sh a development one)"
                     .to_string(),
             );
         };

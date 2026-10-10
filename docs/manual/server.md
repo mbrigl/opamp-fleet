@@ -64,8 +64,10 @@ The Server refuses to start without `[tls]` and `[tls] client_ca_file`, and the 
 is missing. It also refuses an `[auth]` section, and a credential key in `[connection_offer]`: the
 Agent plane admits by client certificate alone (see
 [Upgrading to admission by certificate alone](#upgrading-to-admission-by-certificate-alone)). For
-a first run on one machine, [`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) makes a development
-set of certificates and a `server.toml` that uses it; the [quick start](README.md#quick-start-a-closed-loop-on-one-machine)
+a fleet, `server pki init` makes every certificate the Server and a new host need
+([Setting up a fleet](setup.md#1-make-the-certificates)); for a first run on one machine,
+[`scripts/dev-pki.sh`](../../scripts/dev-pki.sh) makes a development set with it, and a
+`server.toml` that uses it; the [quick start](README.md#quick-start-a-closed-loop-on-one-machine)
 walks through it.
 
 There are **two listeners, split by audience**
@@ -448,8 +450,9 @@ $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/certificates
 Revoke a certificate by the CA that issued it — `client` for the client CA, `bootstrap` for the
 bootstrap CA of `[enrolment]` — and its serial. A revocation reaches every renewal of that
 certificate too, so revoking the one a host enrolled with is enough even after it renewed, and it
-stays in force until the last of those renewals has expired. `openssl x509 -noout -serial` prints
-the serial of a certificate you hold; colons, case and leading zeros do not matter. A renewal
+stays in force until the last of those renewals has expired. `server pki status` prints the serial
+of a certificate you hold, and `pki init` and `pki bootstrap-cert` print the bootstrap
+certificate's as they make it; colons, case and leading zeros do not matter. A renewal
 descends from the certificate its renewal proof names, through a Gateway too; a client that sends
 no proof renews from the certificate its connection presented — behind a Gateway the Gateway's, so
 revoking the Gateway revokes those renewals as well, and those Agents enrol again. A revoked
