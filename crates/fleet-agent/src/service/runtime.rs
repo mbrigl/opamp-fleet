@@ -59,6 +59,38 @@ fn spawn_gateway(
     }))
 }
 
+/// The stack of every thread the daemon runs on: the 8 MiB a Linux main thread has, where the
+/// daemon has always run. Windows gives its main thread 1 MiB and the thread the SCM starts a
+/// service on no more, and the daemon's future overflowed that the moment it applied offered
+/// connection settings — so the daemon never runs on a thread whose stack it did not choose.
+pub const DAEMON_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+/// The runtime the daemon runs on, its worker threads sized by [`DAEMON_STACK_SIZE`]. Both entry
+/// points build it: [`run_foreground`] and the Windows SCM shim.
+///
+/// # Errors
+/// Returns an error if the runtime cannot be built.
+pub fn daemon_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(DAEMON_STACK_SIZE)
+        .build()
+        .map_err(|e| format!("cannot build the tokio runtime: {e}"))
+}
+
+/// Runs `daemon` as a task on one of [`daemon_runtime`]'s workers instead of on the thread that
+/// blocks on the runtime, whose stack belongs to the platform. A panic in it stays a panic.
+pub async fn on_a_worker<F>(daemon: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match tokio::spawn(daemon).await {
+        Ok(output) => output,
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
+    }
+}
+
 /// Build the runtime and run the daemon until the platform shutdown signal (`SIGTERM`/`SIGINT` on
 /// Unix, Ctrl-C on Windows). The standalone foreground path; the Windows SCM shim supplies its own
 /// runtime and shutdown source and calls [`run_until_shutdown`] directly.
@@ -66,10 +98,7 @@ fn spawn_gateway(
 /// # Errors
 /// Returns an error if the runtime cannot be built or the daemon fails to start.
 pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("cannot build the tokio runtime: {e}"))?;
+    let runtime = daemon_runtime()?;
     let exit = runtime.block_on(async {
         let (tx, shutdown) = shutdown_channel();
         tokio::spawn(async move {
@@ -78,7 +107,7 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
         });
         #[cfg(unix)]
         tokio::spawn(ignore_sighup());
-        run_until_shutdown(spec, shutdown).await
+        on_a_worker(run_until_shutdown(spec, shutdown)).await
     })?;
     if exit == Exit::RestartForUpdate {
         // Not an error, but it has to look like one: systemd's `Restart=on-failure` and launchd's
