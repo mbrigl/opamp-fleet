@@ -64,9 +64,9 @@ mod tests {
         assert_eq!(lived(0, 400), Standing::Fine);
         assert_eq!(lived(380, 20), Standing::Ending);
         assert_eq!(lived(30, -1), Standing::Ended);
-        // A fresh 30-day bootstrap certificate is not ending; its last third is.
-        assert_eq!(lived(0, 30), Standing::Fine);
-        assert_eq!(lived(21, 9), Standing::Ending);
+        // A fresh 10-day bootstrap certificate is not ending; its last third is.
+        assert_eq!(lived(0, 10), Standing::Fine);
+        assert_eq!(lived(7, 3), Standing::Ending);
     }
 
     // Verifies: ADR-0027

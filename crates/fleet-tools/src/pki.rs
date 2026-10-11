@@ -24,9 +24,9 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 pub const CA_DAYS: u32 = 3650;
 /// How long a server certificate lives unless told otherwise: within every browser's limit.
 pub const SERVER_DAYS: u32 = 397;
-/// How long a bootstrap certificate lives unless told otherwise: short, it is shared by every new
-/// host.
-pub const BOOTSTRAP_DAYS: u32 = 30;
+/// How long a bootstrap certificate lives unless told otherwise: short, it carries a host only to
+/// its first certificate and is shared by every new host.
+pub const BOOTSTRAP_DAYS: u32 = 10;
 /// The fleet's name in the CAs' subjects unless told otherwise.
 pub const DEFAULT_FLEET: &str = "opamp-fleet";
 
@@ -1106,5 +1106,20 @@ mod tests {
         assert!(endings[2].line(now).contains(&format!("serial {serial}")));
         // A directory `init` did not write is refused, not listed as empty.
         assert!(status(root.path()).is_err());
+    }
+
+    /// The bootstrap certificate `init` makes lives 10 days unless told otherwise.
+    // Verifies: ADR-0027
+    #[test]
+    fn the_bootstrap_certificate_lives_ten_days_by_default() {
+        let root = tempfile::tempdir().expect("tempdir");
+        init(&options(root.path())).expect("init");
+        let der = parsed(&root.path().join("offline").join("bootstrap.pem"));
+        let (_, cert) = X509Certificate::from_der(&der).expect("x509");
+        let left = cert.validity().not_after.to_datetime() - OffsetDateTime::now_utc();
+        assert!(
+            left <= Duration::days(10) && left > Duration::days(10) - Duration::minutes(1),
+            "the bootstrap certificate ends in {left}"
+        );
     }
 }

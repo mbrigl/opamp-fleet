@@ -44,6 +44,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   copies ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)).
   **What to do:** nothing; the originals can be removed after the install. A file written before
   keeps the paths it has.
+- **A bootstrap certificate lives 10 days by default, not 30** — `opamp-fleetctl pki init` and
+  `pki bootstrap-cert` make it shorter-lived, since it carries a host only to its first certificate
+  and every new host shares it
+  ([ADR-0027](docs/adr/0027-the-operator-tool-makes-the-fleets-certificates-and-the-server-says-before-they-end.md)
+  clause 9). Hosts already enrolled are unaffected. **What to do:** issue a fresh one with
+  `pki bootstrap-cert` before enrolling hosts more than 10 days after the last, or pass
+  `--days` / `--bootstrap-days` to keep a longer life.
 ### Fixed
 
 - **`service install` keeps the state directory under the data root** — a configuration that

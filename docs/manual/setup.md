@@ -103,7 +103,7 @@ What it makes, so you need not:
   carries every `--name`, and always `127.0.0.1` and `::1` as well, so your browser and `curl`
   reach the Operator plane through an SSH tunnel (step 2). A wildcard or a name that is neither a
   DNS name nor an address is refused.
-- **A bootstrap certificate** valid for 30 days. It is short-lived on purpose: anyone who copies it
+- **A bootstrap certificate** valid for 10 days. It is short-lived on purpose: anyone who copies it
   can ask for a certificate, and what stops them is that a request also needs an open window and
   your approval. Its serial is printed, because that is what revokes it (step 6).
 - **Keys the Server can read:** ECDSA P-256 in PKCS#8, the one form the client CA's key must have.

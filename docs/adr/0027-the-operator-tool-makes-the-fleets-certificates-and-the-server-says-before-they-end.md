@@ -126,7 +126,8 @@ and no certificate ends unannounced.
    revokes it ([ADR-0021](0021-certificate-revocation-that-follows-renewal-and-reaches-the-gateways.md)).
 
 9. **Lifetimes by default, each overridable, never past the CA.** The CAs live 3650 days, a server
-   certificate 397 days, the bootstrap certificate 30 days; `--days` overrides the one certificate
+   certificate 397 days, the bootstrap certificate 10 days, because it carries a host only to its
+   first certificate and every new host shares it; `--days` overrides the one certificate
    a command makes, and `init` takes `--ca-days`, `--server-days` and `--bootstrap-days`. A
    certificate a `pki` command signs ends no later than the CA that signs it, and one asked to
    outlive it is cut to the CA's end with a notice. Host certificates are the running Server's,
@@ -154,7 +155,7 @@ and no certificate ends unannounced.
     CA, the bootstrap CA and the bootstrap certificate in the offline directory. Each prints every
     certificate with its subject, its serial, its end and the days left, and exits `0` when none
     is ending in the sense of clause 11, `1` when one is, and `2` when one has ended, so a
-    monitoring job can run it; a fresh 30-day bootstrap certificate is not ending.
+    monitoring job can run it; a fresh 10-day bootstrap certificate is not ending.
 
 13. **The project uses its own commands.** `scripts/dev-pki.sh` makes its development set with
     `cargo run -p fleet-tools -- pki init`, writes a complete `server.toml` and `supervisor.toml`
