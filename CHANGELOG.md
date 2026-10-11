@@ -15,6 +15,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ## [0.5.1]
 
+### Changed
+
+- **The development `server.toml` serves the Agent plane on every interface** —
+  `scripts/dev-pki.sh` now writes `listen = "0.0.0.0:4320"`, so a Client on another machine
+  reaches a development Server. **What to do:** add the line at the top of an existing
+  `.dev-pki/server.toml`, or delete `.dev-pki/` and run the script again.
+- **The development `server.toml` offers no telemetry until asked** — `scripts/dev-pki.sh` now
+  writes `[telemetry_offer]` commented out, so a development fleet without the observability stack
+  running does not report into nothing. **What to do:** uncomment the section once the stack in
+  `observability/` runs; an existing `.dev-pki/server.toml` keeps what it has.
 ## [0.5.0] - 2026-10-11
 
 ### Added

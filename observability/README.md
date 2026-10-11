@@ -118,9 +118,9 @@ the host's address on the bridge (usually `172.17.0.1`).
 ## Pointing this Server's Agents at it
 
 The destination is not a Client setting — the Server names it, and the Client reports to what it is
-offered. The annotated example [`config/server.toml`](../config/server.toml) and the `server.toml`
-that `scripts/dev-pki.sh` writes both already carry it, so a development fleet monitors itself from
-its first start. Any other `server.toml` needs:
+offered. The annotated example [`config/server.toml`](../config/server.toml) already carries it.
+The `server.toml` that `scripts/dev-pki.sh` writes carries it commented out; uncomment it once the
+stack runs. Any other `server.toml` needs:
 
 ```toml
 [telemetry_offer]

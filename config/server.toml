@@ -254,10 +254,10 @@ client_ca_file = "client-ca.pem"
 #     Cleartext is accepted here because the address is a loopback literal, the one place
 #     plaintext is allowed — 127.0.0.1, not the name localhost. While the stack is
 #     down, the exports fail and the Agents keep running; the next export after it is up arrives.
-[telemetry_offer]
-metrics_endpoint = "http://127.0.0.1:4318/v1/metrics"
-traces_endpoint = "http://127.0.0.1:4318/v1/traces"
-logs_endpoint = "http://127.0.0.1:4318/v1/logs"
+# [telemetry_offer]
+# metrics_endpoint = "http://127.0.0.1:4318/v1/metrics"
+# traces_endpoint = "http://127.0.0.1:4318/v1/traces"
+# logs_endpoint = "http://127.0.0.1:4318/v1/logs"
 
 # (2) Production — TLS in front of the collector, and a token if it wants one. An Agent REFUSES a
 #     cleartext destination anywhere but 127.0.0.1 or ::1 — a LAN address and a host name included:
