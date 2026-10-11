@@ -193,29 +193,16 @@ pub struct InstallArgs {
     /// Withdraw the Client's consent to be updated by the Server, in the configuration this
     /// install writes.
     ///
-    /// The consent stands by default (ADR-0018): without this flag the written file names the
-    /// package that carries this Client and the fleet can replace it like any other program. With
-    /// it, the file says `enabled = false` and this Client becomes the one program on the host that
-    /// has to be updated by hand. The other non-interactive half of `--interactive`, for the same
+    /// The consent stands by default (ADR-0018): without this flag the written file says
+    /// `[packages] self_update = true` and the fleet can replace this Client like any other
+    /// program once a verification key is set. With it, the file says `self_update = false` and
+    /// this Client becomes the one program on the host that has to be updated by hand. The other non-interactive half of `--interactive`, for the same
     /// installers `--endpoint` serves — the MSI's checkbox, and a `.deb`/`.rpm` post-install.
     ///
     /// Only ever affects a file this install *creates*; an existing configuration is kept
     /// untouched, as it is for every other answer here.
     #[arg(long, conflicts_with = "interactive")]
     pub no_self_update: bool,
-    /// Name the package that carries this Client instead of taking its Agent type.
-    ///
-    /// The name is what the consent is narrowed to — an offer under any other name is refused and
-    /// reported, never applied — and the default is the Client's own Agent type, `supervisor` since
-    /// ADR-0019, which is what a Set carrying it is keyed by anyway. Name something else only if
-    /// your Set does.
-    #[arg(
-        long,
-        value_name = "NAME",
-        conflicts_with = "interactive",
-        conflicts_with = "no_self_update"
-    )]
-    pub self_update_package: Option<String>,
     // ADR-0019.
     /// Run the service as this account instead of root/`LocalSystem`, and hand this
     /// installation's files — both roots — over to it.
@@ -403,10 +390,10 @@ mod tests {
         assert_eq!(args.endpoint, None);
     }
 
-    /// ADR-0018: the consent travels on the same non-interactive path the endpoint does, and it
-    /// stands unless the install withdraws it. The two flags are mutually exclusive — naming a
-    /// package while withdrawing the consent is a contradiction, not a precedence to resolve — and
-    /// neither may ride `--interactive`, which asks instead.
+    /// ADR-0018: the withdrawal travels on the same non-interactive path the endpoint does, and
+    /// the consent stands unless the install withdraws it. No flag names the package — it is the
+    /// Client's own Agent type — and the withdrawal may not ride `--interactive`, which writes the
+    /// consent and leaves its effect to the verification key.
     /// Verifies: ADR-0018
     #[test]
     fn install_carries_the_self_update_answer_without_a_terminal() {
@@ -418,7 +405,6 @@ mod tests {
             "ws://h/v1/opamp",
         ]);
         assert!(!standing.no_self_update, "the consent stands by default");
-        assert_eq!(standing.self_update_package, None, "and takes its own name");
 
         let withdrawn = install(&[
             "client",
@@ -430,23 +416,13 @@ mod tests {
         ]);
         assert!(withdrawn.no_self_update);
 
-        let named = install(&[
-            "client",
-            "service",
-            "install",
-            "--endpoint",
-            "ws://h/v1/opamp",
-            "--self-update-package",
-            "our-client",
-        ]);
-        assert_eq!(named.self_update_package.as_deref(), Some("our-client"));
-
-        for contradiction in [
+        for refused in [
             vec![
                 "client",
                 "service",
                 "install",
-                "--no-self-update",
+                "--endpoint",
+                "ws://h/v1/opamp",
                 "--self-update-package",
                 "x",
             ],
@@ -456,19 +432,11 @@ mod tests {
                 "install",
                 "--interactive",
                 "--no-self-update",
-            ],
-            vec![
-                "client",
-                "service",
-                "install",
-                "--interactive",
-                "--self-update-package",
-                "x",
             ],
         ] {
             assert!(
-                super::Cli::try_parse_from(&contradiction).is_err(),
-                "{contradiction:?} must be refused rather than resolved"
+                super::Cli::try_parse_from(&refused).is_err(),
+                "{refused:?} must be refused"
             );
         }
     }

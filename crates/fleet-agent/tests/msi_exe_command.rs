@@ -265,7 +265,6 @@ fn the_self_update_answer_rides_both_register_actions() {
             !standing.no_self_update,
             "{id} withdrew a consent nobody withdrew"
         );
-        assert_eq!(standing.self_update_package, None);
 
         // Withdrawal: the same line with the property set.
         let withdrawn = install_args(parse_with(command, &flag));

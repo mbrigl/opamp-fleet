@@ -278,7 +278,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
 
 20. **A self-update stays one trace across its restart.** The trace id and the span id of the
     `self.update` span go into the update marker
-    ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)) as hex, and the process that comes up after the
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)) as hex, and the process that comes up after the
     restart opens `commit` or `roll_back` as a child of that span, its parent marked remote. A marker
     without ids, or with ids that do not parse, makes the post-restart span open its own trace; a
     trace is never a reason to fail an update. `self.update` itself records no status — the process

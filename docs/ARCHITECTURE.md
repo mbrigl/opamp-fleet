@@ -48,7 +48,7 @@ than anywhere else, and none beats one that has stopped being true.
   `allowed_sources` names. What arrives is checked against its hash and the operator's signature
   ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
 - **The service manager** starts the Client and restarts it after a self-update
-  ([ADR-0018](adr/0018-the-client-updates-itself-from-a-signed-package.md)).
+  ([ADR-0018](adr/0018-the-client-updates-itself-under-its-own-agent-type.md)).
 - **Upstream**, the opamp-spec release named as the Protocol Baseline in
   [`CONFORMANCE.md`](CONFORMANCE.md) fixes the wire format.
 
@@ -151,7 +151,7 @@ core module names an adapter or a technology, and when a module has no role.
   ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
 - **Client self-update** — `update` is the Client updating itself
-  ([ADR-0018](adr/0018-the-client-updates-itself-from-a-signed-package.md)). It owns the port `SelfUpdater` and
+  ([ADR-0018](adr/0018-the-client-updates-itself-under-its-own-agent-type.md)). It owns the port `SelfUpdater` and
   `SelfUpdate`, the state the Engine keeps about it: armed or not, probation committed, restart
   due. `update::installer` implements the port on the version directories and holds the start-up
   check of the process that follows an install.

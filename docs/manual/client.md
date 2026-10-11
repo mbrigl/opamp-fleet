@@ -315,7 +315,7 @@ the service — and every Managed Process its Supervisors spawn — runs as the 
 the install hands its files over to it: the configuration file, the state directory, **and the
 executable layout**. The layout too because
 the self-update runs *inside* the service — a layout the account cannot write would silently end
-[server-driven updates](#self_update) for that host.
+[server-driven updates](#updating-the-client-itself) for that host.
 
 On Linux and macOS the account must already exist; the install refuses early if it does not:
 
@@ -366,8 +366,6 @@ PEM CA bundle path: /etc/opamp/ca.pem
 Client certificate — a bootstrap certificate to enrol with, or an issued one (PEM path): /etc/opamp/bootstrap.pem
 Its private key (PEM path): /etc/opamp/bootstrap-key.pem
 Package verification key (hex Ed25519 public key; empty takes no packages): 3b6a27bc…
-Allow the Server to update this Client's own binary? [Y/n]: y
-Name of the package that carries this Client [supervisor]:
 wrote /var/lib/opamp-fleet/supervisor.toml
 installed opamp-fleet
 …
@@ -384,11 +382,10 @@ What it asks about is only what has no useful default here
   [enrol](#enrolment-the-first-certificate) with, or a certificate the client CA already issued.
   It is required, and a path that names no readable file is asked for again: the certificate is
   the one proof the Server admits a host by;
-- **the package verification key** ([`[packages]`](#packages)). An empty answer is accepted, and the
-  install then says that this Client installs no package, its own update included, until a key is
-  set;
-- and last, defaulting to **yes**, consent for the Server to replace this Client's own binary
-  ([`[self_update]`](#self_update)).
+- **the package verification key** ([`[packages]`](#packages)). It also decides whether the Server
+  may update this Client: the file is written with `self_update = true`, which takes effect once a
+  key is set. An empty answer is accepted, and the install then says that this Client installs no
+  package, its own update included, until a key is set.
 
 Everything else is written into the file as commented defaults. No question asks for a
 credential, and the file it writes has no `[auth]` section; on Unix the file is created mode
@@ -908,6 +905,7 @@ The Server is upgraded before its Clients: a Server that demands a credential an
 
 ```toml
 [packages]
+self_update = true
 verification_key = "<hex-encoded Ed25519 public key>"
 allowed_sources = ["https://mirror.example.com/releases/"]
 archive_key = "the key an encrypted .7z was packed with"
@@ -915,6 +913,7 @@ archive_key = "the key an encrypted .7z was packed with"
 
 | Key | Meaning |
 |---|---|
+| `self_update` | Consent for the Server to replace this Client's own binary. `true` by default, and an absent key or `[packages]` section is the consent; `false` withdraws it, and the Supervisors keep taking their packages. It takes effect only while `verification_key` is set. See [Updating the Client itself](#updating-the-client-itself). |
 | `verification_key` | **Required to take any package.** Every Server-offered package must carry a valid Ed25519 signature over its artifact, and the signature must verify against this key. Without it, no Agent of this Client declares `AcceptsPackages` — neither a Supervisor nor the Client's own Agent — and the Client says so once at startup. A package offered regardless is refused before anything is downloaded and reported `InstallFailed`, naming the key. A malformed key fails startup. Generate the key with `opamp-fleetctl package keygen` (see [the Server](server.md#packages-and-deployments-distributing-software)). |
 | `allowed_sources` | `https://` URL prefixes a download may come from besides the Server's own origin. Empty by default. See [Where a download may come from](#where-a-download-may-come-from). |
 | `archive_key` | Opens an encrypted `.7z` artifact. One secret for the fleet — a single archive serves every Agent. The Server never learns this key; the artifact stays encrypted wherever it is stored and is opened only on the host that runs it. |
@@ -954,33 +953,15 @@ needs no entry, and an empty list allows it alone.
 Every download is TLS 1.3, on this Client's trust: `[tls] ca_file` when it is set, the system's
 trust store otherwise.
 
-### `[self_update]`
+Every install path writes `self_update` into the file it creates: `service install
+--no-self-update` and the MSI's cleared checkbox, or `SELFUPDATE=0` on a silent deploy, write
+`false`; the `--interactive` questionnaire, which does not ask, and every other path write `true`.
 
-```toml
-[self_update]
-enabled = true                     # the default; false withdraws the consent
-package = "supervisor"             # the default: this Client's own Agent type
-```
-
-See [Updating the Client itself](#updating-the-client-itself). **An absent section is the consent**
-([ADR-0018](../adr/0018-the-client-updates-itself-from-a-signed-package.md)): a Client the fleet
-cannot update is the one program on the host left to patch by hand. What bounds it is the name — an
-offer under any other is refused and reported, never applied. The default name is this Client's own
-Agent type, `supervisor`, which is the type the Package carrying this Client is built for. The
-consent takes effect only while [`[packages] verification_key`](#packages) is set: without the key
-the Client's own Agent declares no package capability, and the Client says so at startup.
-
-To withdraw the consent, say so; there is no third state:
-
-```toml
-[self_update]
-enabled = false
-```
-
-An empty `package` with `enabled = true` fails at startup rather than widening the consent to
-whatever the Server offers next. Every install path can answer this: `service install
---no-self-update`, `--self-update-package <NAME>`, the `--interactive` questionnaire (which asks and
-defaults to yes), and the MSI's checkbox or `SELFUPDATE=0` on a silent deploy.
+A `[self_update]` section, which earlier releases wrote, fails startup with a message naming
+`[packages] self_update` as its replacement
+([ADR-0018](../adr/0018-the-client-updates-itself-under-its-own-agent-type.md)). Replace it by hand
+before such a host takes this release: `enabled = false` becomes `self_update = false`, and
+`package` has no replacement.
 
 ## Gateway Mode: carrying other Clients
 
@@ -1174,7 +1155,7 @@ effect when the Client next starts.
   `ReportsRemoteConfig`, so the Server offers it no set, whatever a rollout is aimed at. Everything
   else it declares stays, self-update included: it still reports its status, its health and this
   file as its effective configuration, takes connection settings, and takes a signed Client
-  package where `[self_update]` consents. A set that arrives anyway is not stored, not applied and
+  package where `[packages] self_update` consents. A set that arrives anyway is not stored, not applied and
   not answered; the Client logs one warning per hash.
 - **The blocks stay yours.** Nothing in this file is rewritten when you set the key. Every
   `[[supervisor]]` block runs as written, **including blocks a set the Server delivered earlier
@@ -1191,7 +1172,7 @@ effect when the Client next starts.
   `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command` Supervisor's program
   reads — is named in `remote_config_disabled`. Otherwise the Server can configure such a
   Supervisor to rewrite this file, and the key changes at the next start. A signed Client build
-  can still replace the Client itself where `[self_update]` consents, and that build reads the
+  can still replace the Client itself where `[packages] self_update` consents, and that build reads the
   key.
 - **Switching it back on.** Set the key to `true`, or remove it, and restart the Client. Its own
   Agent declares both capabilities again, reports no hash — unless that earlier start warned that
@@ -1288,9 +1269,10 @@ cargo build --release -p fleet-agent --no-default-features --features <type>
 
 `collector` and `command` are always there. A block naming a kind the build does not carry fails
 startup, and an offered set naming one is refused, as an unknown `type` naming the kinds that are
-there. Publish such a build under a package name of its own and set `[self_update] package` to it
-on its hosts: they otherwise take the full build at their next self-update. A full-build host that
-took the smaller one keeps running it, reporting fewer kinds, or, when one of its blocks names a
+there. Such a build carries the same Agent type as the full one, `supervisor`, and a Package is
+identified by type and version alone, so its hosts take the full build at their next self-update.
+Withdraw the consent on them (`self_update = false` under [`[packages]`](#packages)) and update
+them through their own channel. A full-build host that took the smaller one keeps running it, reporting fewer kinds, or, when one of its blocks names a
 kind the smaller build lacks, fails its start and rolls back.
 
 #### Timing is the fleet's, then the agent's
@@ -1573,25 +1555,26 @@ which costs nothing for a tree that runs on Windows.
 ## Updating the Client itself
 
 The Client is always its own Agent, so the Server can always see which version a host runs. Letting
-the Server *replace* that version is a consent that stands by default, and the consent **names the
-package**:
+the Server *replace* that version is a consent that stands by default, and it takes one package,
+named after this Client's own Agent type, `supervisor`:
 
 ```toml
-[self_update]
-package = "supervisor"
+[packages]
+self_update = true                 # the default
+verification_key = "<hex-encoded Ed25519 public key>"
 ```
 
-The consent takes effect only while `[packages] verification_key` is set, and the artifact must
+The consent takes effect only while `verification_key` is set, and the artifact must
 carry a signature that verifies against it
-([ADR-0018](../adr/0018-the-client-updates-itself-from-a-signed-package.md)). An offer without a
+([ADR-0018](../adr/0018-the-client-updates-itself-under-its-own-agent-type.md)). An offer without a
 signature, or with one that does not verify, is reported `InstallFailed` and nothing is staged. An
 offer older than the running version is refused too: a signature carries no ordering, so an old
 release stays validly signed forever.
 
 An offer under any other name is refused and reported, never applied. That is one of two independent
 guards, and it is the one on this side of the wire: the Server will not offer a package built for
-another Agent type either, and this Client's type is the constant `supervisor` — the same string,
-which is why the Package that carries the Client is typed with it. The Agent type *is* the name a
+another Agent type either, and this Client's type is the constant `supervisor`, compiled into the
+binary and not configurable — which is why the Package that carries the Client is typed with it. The Agent type *is* the name a
 Package carries on the wire
 ([ADR-0026](../adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), so the two cannot
 drift apart.
@@ -1612,7 +1595,7 @@ Self-update therefore requires an installed service — it is the service manage
 restart.
 
 **What the Client says it has is the version it runs**, whether a package put it there or a `.deb`,
-an `.rpm`, an MSI or a hand did. It reports that under the name `[self_update]` consents to from its
+an `.rpm`, an MSI or a hand did. It reports that under its Agent type, the name the consent takes, from its
 very first report, which is what lets the Server hold a Package against it: since
 [ADR-0025](../adr/0025-rollout-and-what-reaches-an-agent.md) a Package reaches an Agent only as
 an **upgrade**, so a Client is never offered the version it already runs, and never an older one.
@@ -1626,7 +1609,7 @@ the state — so installing an older Client afterwards comes up on top of that r
 does not name the version the running binary *is* is discarded at startup, with a warning naming
 both versions. The Client then reports the version it actually runs, the Server sees its published
 package as the upgrade it now is, and the host is updated back to it. To hold a host on an older
-Client, withdraw its consent with `enabled = false` under `[self_update]`.
+Client, withdraw its consent with `self_update = false` under `[packages]`.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
 `supervisor_<version>_<os>_<arch>.tar.gz`
@@ -1654,10 +1637,8 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signatu
        https://<server>:4321/api/v1/deployments/stable/signatures/supervisor/1.2.3/linux/amd64
 ```
 
-The type **is** the name `[self_update] package` consents to, because a Package carries its Agent
-type on the wire and has no separate name. Setting that key to anything else therefore refuses
-every offer this Client will ever get, visibly, on its fleet row. The *file* keeps its published
-name. The rollout act that releases it is the Deployment's, as for any Package (see
+The type **is** the name the consent takes, because a Package carries its Agent type on the wire
+and has no separate name. The *file* keeps its published name. The rollout act that releases it is the Deployment's, as for any Package (see
 [the rollout walkthrough](rollout.md#6-roll-it-out)).
 
 The staged binary's `self-check` compares that against what it reports, ignoring the commit the

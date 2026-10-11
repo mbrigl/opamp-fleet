@@ -1,9 +1,9 @@
-# ADR-0018: The Client updates itself only from a signed package — as its own Agent, by a consent that stands, through a staged version and a restart it does not issue
+# ADR-0018: The Client updates itself only from a signed package — as its own Agent, under its own Agent type, by a consent that stands, through a staged version and a restart it does not issue
 
 - **Status:** 🟢 accepted
-- **Date:** 2026-10-03
+- **Date:** 2026-10-11
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/update/ (mod.rs and installer.rs), the Client's own Agent in crates/fleet-agent/src/supervisor/, the `[self_update]` section, the self-update flags of `service install`, the MSI `SELFUPDATE` property, and the startup notice on a missing `[packages] verification_key`
+- **Applies to:** crates/fleet-agent/src/update/ (mod.rs and installer.rs), the Client's own Agent in crates/fleet-agent/src/supervisor/, the `self_update` key of `[packages]` and its parsing in crates/fleet-agent/src/config.rs, the refusal of a `[self_update]` section, the self-update flags of `service install`, the questionnaire's handling of the consent in crates/fleet-agent/src/config_init.rs, the MSI `SELFUPDATE` property, and the startup notice on a missing `[packages] verification_key`
 
 ## Context
 
@@ -36,14 +36,26 @@ to replacing the program that does the replacing.
   the host is the largest grant a Server holds, and an offer meant for another program must never be
   written over the Client.
 
+Three properties of the consent follow from the last problem. **It is one decision.** A
+questionnaire that asks for the verification key and then whether the Server may update the Client
+splits it over two questions, yet the second answer has no effect without the first: a "yes" with
+no key updates nothing, and with a key a "yes" is what the default already says. **Only one
+package name can carry this Client**, the Agent type its own Agent reports, because a Server offers
+a package under the Agent type it is built for
+([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Any other
+name points at another program's package or at none, so a configurable name is a way to
+misconfigure the narrowing and nothing else. **It belongs beside what it depends on.** The key that
+decides whether it takes effect sits in `[packages]`; a consent in a section of its own makes a
+reader of the file join two sections to learn whether this Client updates itself.
+
 Windows locks a running `.exe`; side-by-side version directories make that moot on every platform,
 because the new binary is never written over the old one. There is no upstream answer to copy: the
 OpenTelemetry `opampsupervisor` updates the Collector and has no self-update section.
 
 ## Decision
 
-We will make the Client its own Agent, let it take one named package, signed, by a consent that
-stands unless it is withdrawn, and update it by staging a new version beside the running one,
+We will make the Client its own Agent, let it take only the package named after its own Agent type,
+signed, by a consent that stands unless it is withdrawn, and update it by staging a new version beside the running one,
 proving the new binary before committing to it, and letting the service manager perform the
 restart.
 
@@ -54,38 +66,50 @@ restart.
    supervises something is visible in its own fleet, and nobody has to ask which Client version a
    host runs.
 
-2. **The consent stands by default and is narrowed to one package name.** `[self_update]` has two
-   keys, both optional, and unknown keys are refused:
+2. **The consent is `[packages] self_update`, it stands by default, and the one package it admits
+   is the Client's own Agent type.** The key sits beside `verification_key`, which decides whether
+   it takes effect:
 
-   | key | default | meaning |
-   |---|---|---|
-   | `enabled` | `true` | `false` withdraws the consent |
-   | `package` | the Client's own Agent type, `supervisor` | the only package name this Agent installs |
+   ```toml
+   [packages]
+   self_update = true
+   verification_key = "<hex-encoded Ed25519 public key>"
+   ```
 
-   An absent section is consent. While the consent stands and `[packages] verification_key` is
-   set, the Client's own Agent declares `AcceptsPackages` and `ReportsPackageStatuses` and
-   **refuses any offered top-level package whose name is not the configured one**, reporting
-   `InstallFailed` with that reason and installing nothing. With `enabled = false` it declares no
-   package capability, and no offer can reach it. **With the consent standing but no
-   verification key, it declares no package capability either**, and the Client says so at
-   startup, naming the missing `[packages] verification_key`: the consent is kept, and it takes
-   effect once the key is set.
-   The default is not a wildcard: the name a Server offers a package under is the Agent type it is
-   built for ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), so the default is the one package that
-   could legitimately be this Client. **An empty `package` with the consent standing fails at load**,
-   naming the key: the name is the whole of the narrowing, and an empty one would widen it to
-   whatever the Server offers next.
+   `self_update` defaults to `true`; `false` withdraws the consent. **The package name is not
+   configurable**: it is the Agent type compiled into the binary, `supervisor` (clause 1), the
+   constant the Client's own Agent reports as `service.name`. The name a Server offers this
+   Client's package under is therefore the name the Client reports, and the same in every variant
+   build, whatever its product name: one package Set serves them all
+   ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 9).
 
-3. **Every install path can answer the consent, and the answer is written into the configuration.**
-   `service install --no-self-update` withdraws it and `--self-update-package <NAME>` names another
-   package (the two conflict); both ride the non-interactive `--endpoint` path
-   ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 42). The interactive
-   questionnaire asks it last and defaults to yes. The MSI shows a checked-by-default checkbox on its
-   endpoint dialog backed by the public property `SELFUPDATE` (default `1`); `SELFUPDATE=0` or an
-   empty value withdraws it, so `msiexec /qn … SELFUPDATE=0` is how Intune or Group Policy declines.
-   Whatever was answered, the first configuration carries a `[self_update]` section — `package = …`
-   or `enabled = false` — so the decision is visible and editable on the host; no installer holds
-   state of its own.
+   An absent key is consent, and so is an absent `[packages]`. While the consent stands and
+   `verification_key` is set, the Client's own Agent declares `AcceptsPackages` and
+   `ReportsPackageStatuses` and **refuses any offered top-level package whose name is not its Agent
+   type**, reporting `InstallFailed` with that reason and installing nothing. With
+   `self_update = false` it declares no package capability, and no offer can reach it; the
+   Supervisor Agents still take theirs. **With the consent standing but no verification key, it
+   declares no package capability either**, and the Client says so at startup, naming the missing
+   `[packages] verification_key`: the consent is kept, and it takes effect once the key is set.
+   Whether a consenting Client updates itself is thus decided by the key alone.
+
+   **A `[self_update]` section fails the load**, whatever it holds, with a message naming
+   `[packages] self_update` as the key that replaces it. Ignoring it would turn a written
+   `enabled = false` into consent the moment a key is set; honouring it would keep two spellings of
+   one decision alive for good.
+
+3. **Every install path can withdraw the consent, none asks for a name, and the answer is written
+   into the configuration.** `service install --no-self-update` withdraws it on the non-interactive
+   `--endpoint` path
+   ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 42).
+   **The interactive questionnaire asks nothing about it**: it writes the consent, and the
+   verification key it asks for just before decides whether the consent takes effect (clause 2).
+   An empty key is accepted, and the install says that the Client installs no package, its own
+   update included, until a key is set. The MSI shows a checked-by-default checkbox on its endpoint
+   dialog backed by the public property `SELFUPDATE` (default `1`); `SELFUPDATE=0` or an empty value
+   withdraws it, so `msiexec /qn … SELFUPDATE=0` is how Intune or Group Policy declines. Whatever
+   path wrote it, the first configuration carries `[packages] self_update = true` or `= false`, so
+   the decision is visible and editable on the host; no installer holds state of its own.
 
 4. **An offer is checked before anything is staged.** The offered version is Server-controlled and
    names a directory, so it must parse as a version, and the directory it derives must be a direct
@@ -193,11 +217,30 @@ different Windows layout.
   holds. The signature binds the bytes to a key the operator keeps off the Server.
 - **Consent with no name.** The first artifact meant for another program would be written over the
   Client, and that failure is not recoverable remotely.
-- **Consent off unless explicitly given**, or off in the loader with the installers writing the
-  section. The first leaves every host whose install path did not ask un-updatable and silent about
-  it; the second makes one file mean "no" on one host and "yes" on another.
-- **A third state, "ask the Server whether it has one for us".** No such negotiation exists in the
-  Baseline; inventing one would extend the protocol for a configuration question.
+- **A configurable package name, defaulting to the Agent type.** The only name that can
+  legitimately carry this Client is its Agent type; any other names another program's package or
+  none, so the freedom could only misconfigure the narrowing.
+- **The name from the product name.** Every variant build would need a package Set of its own,
+  where today one serves them all; ADR-0019 clause 9 keeps the product name off the Agent type for
+  that reason.
+- **The name from the running file's name.** Renaming or linking the binary would redirect the
+  self-update to another package.
+- **Ask for the consent in the questionnaire.** The question comes after the
+  verification key and its answer does nothing without one, so the operator answers one decision
+  twice. Who must decline keeps `--no-self-update`, the MSI checkbox and the file.
+- **The consent in a `[self_update]` section of its own.** It names one decision
+  whose effect hangs on a key in another section.
+- **The questionnaire writes `self_update = false` when the key is left empty.** A key added later
+  would then need a second edit before it takes effect, and the file would hold two answers that
+  can disagree.
+- **The key alone, with no withdrawal.** A host whose Client is updated through another channel —
+  the OS package manager, a golden image — needs a way to decline the self-update that does not
+  also cost it every other package.
+- **Ignore a leftover `[self_update]` section with a notice.** A host that withdrew the consent
+  with `enabled = false` would update itself once a key is set, without anyone having said yes.
+- **Honour a leftover `enabled = false` and ignore the rest.** No host would stop loading, but the
+  old spelling would stay a second way to say the same thing, and the loader would carry the
+  migration for good.
 
 ## Sources / Prior art
 
@@ -223,7 +266,24 @@ different Windows layout.
 ## Consequences
 
 - Positive: the fleet patches its own agent, and the Client is visible in its own fleet — version,
-  health, connection — on every host. The consent is askable at install time and visible after.
+  health, connection — on every host. The consent is answered once, by the verification key, and
+  visible after.
+- Positive: the narrowing cannot be misconfigured. The package a Server offers this Client is the
+  Agent type the fleet view shows for it.
+- Negative / trade-offs: an operator who wants to decline the self-update interactively edits the
+  file after the install; the questionnaire offers no "no".
+- Negative / trade-offs: **every configuration an installer of release 0.4.6 or earlier wrote
+  carries a `[self_update]` section, so it fails to load.** A host that takes this version by
+  self-update cannot read its file, counts failed attempts and rolls back to the previous version
+  (clause 9), and the Server sees the update fail. Each host's file has to be changed by hand, the
+  section replaced by `[packages] self_update`, before this version is rolled out to it; a host
+  upgraded through its OS package manager does not start until then. A configuration that named
+  another package takes `supervisor` once rewritten.
+- Negative / trade-offs: **a reduced build can no longer be kept apart by package name.** A build
+  that leaves kinds out carries the same Agent type as the full one, and a Package is identified by
+  type and version alone, so the two cannot both be published at one version, and a host running
+  the reduced build takes the full one at its next self-update. Such hosts withdraw the consent
+  (`self_update = false`) and are updated through their own channel.
 - Negative / trade-offs: every Client is an extra Agent, not opt-in; fleet counts and anything aimed
   at "every Agent" grow by one row per host.
 - Positive: a compromised Server cannot install a binary of its own making over the Client; it
@@ -251,8 +311,7 @@ different Windows layout.
 - [`tests/self_update_e2e.rs`](../../crates/fleet-agent/tests/self_update_e2e.rs), with the real Server
   and Client binaries: `the_client_installs_a_version_of_itself_and_reports_it_installed`,
   `managed_processes_stop_cleanly_on_the_self_update_restart`,
-  `a_set_at_the_running_version_reaches_nobody`,
-  `a_package_under_another_name_is_refused_and_the_client_keeps_running`.
+  `a_set_at_the_running_version_reaches_nobody`.
 - [`update/installer.rs`](../../crates/fleet-agent/src/update/installer.rs): `install_refuses_a_downgrade`,
   `install_refuses_a_version_that_would_escape_the_layout`, the `the_probe_refuses_*` tests,
   `the_probe_ignores_the_commit_a_build_came_from`,
@@ -261,10 +320,10 @@ different Windows layout.
   `committing_replaces_the_marker_with_an_installed_outcome`; and
   `an_unreadable_configuration_resolves_the_update_in_flight` in
   [`service/runtime.rs`](../../crates/fleet-agent/src/service/runtime.rs).
-- The consent: `self_update_consent_stands_by_default_and_is_narrowed_to_a_package_name` and
-  `an_empty_self_update_package_is_refused_while_the_consent_stands`
+- The consent: `self_update_consent_stands_by_default_and_is_narrowed_to_the_agent_type` and
+  `a_self_update_section_fails_the_load_naming_the_packages_key`
   ([`config.rs`](../../crates/fleet-agent/src/config.rs)),
-  `the_self_agent_refuses_a_package_it_was_not_configured_to_take`
+  `the_self_agent_refuses_a_package_not_named_after_its_agent_type`
   ([`supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs)),
   `install_carries_the_self_update_answer_without_a_terminal`
   ([`cli.rs`](../../crates/fleet-agent/src/cli.rs)),
@@ -287,6 +346,8 @@ different Windows layout.
   [`service-smoke.yml`](../../.github/workflows/service-smoke.yml).
 
 **Not mechanically decidable:** the non-atomic Windows pointer switch is a window no test can hit
-on purpose. That the Client names the missing `[packages] verification_key` at startup
-(clause 2) is a log line in [`service/runtime.rs`](../../crates/fleet-agent/src/service/runtime.rs)
-that no test reads.
+on purpose. That the Client names the missing `[packages] verification_key` at startup (clause 2) is a log
+line in [`service/runtime.rs`](../../crates/fleet-agent/src/service/runtime.rs) that no test reads. That the
+questionnaire asks nothing about the consent (clause 3) is a review question on `ask` in
+[`config_init.rs`](../../crates/fleet-agent/src/config_init.rs), which reads a terminal that
+`cargo test` does not have.

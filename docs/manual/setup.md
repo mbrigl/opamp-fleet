@@ -255,8 +255,6 @@ PEM CA bundle path: /etc/opamp/server-ca.pem
 Client certificate — a bootstrap certificate to enrol with, or an issued one (PEM path): /etc/opamp/bootstrap.pem
 Its private key (PEM path): /etc/opamp/bootstrap-key.pem
 Package verification key (hex Ed25519 public key; empty takes no packages): 3b6a27bc…
-Allow the Server to update this Client's own binary? [Y/n]: y
-Name of the package that carries this Client [supervisor]:
 wrote /var/lib/opamp-fleet/supervisor.toml
 ```
 

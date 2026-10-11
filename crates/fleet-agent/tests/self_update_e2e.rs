@@ -456,7 +456,7 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
 
-fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> String {
+fn config_toml(addr: std::net::SocketAddr, state_dir: &Path) -> String {
     format!(
         concat!(
             "endpoint = \"ws://{addr}/v1/opamp\"\n",
@@ -464,14 +464,11 @@ fn config_toml(addr: std::net::SocketAddr, state_dir: &Path, package: &str) -> S
             "state_dir = {state:?}\n",
             "heartbeat_interval_secs = 1\n\n",
             "[packages]\n",
-            "verification_key = \"{key}\"\n\n",
-            "[self_update]\n",
-            "package = \"{package}\"\n",
+            "verification_key = \"{key}\"\n",
         ),
         addr = addr,
         state = state_dir.to_string_lossy(),
         key = signing_key().1,
-        package = package,
     )
 }
 
@@ -511,7 +508,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
-        config_toml(addr, &state_dir, "supervisor") + &common::client_identity(dir.path()),
+        config_toml(addr, &state_dir) + &common::client_identity(dir.path()),
     )
     .expect("write config");
 
@@ -637,8 +634,6 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
                 "heartbeat_interval_secs = 1\n\n",
                 "[packages]\n",
                 "verification_key = \"{key}\"\n\n",
-                "[self_update]\n",
-                "package = \"supervisor\"\n\n",
                 "[[supervisor]]\n",
                 "type = \"command\"\n",
                 "name = \"managed\"\n",
@@ -747,7 +742,7 @@ async fn a_set_at_the_running_version_reaches_nobody() {
     let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
-        config_toml(addr, &state_dir, "supervisor") + &common::client_identity(dir.path()),
+        config_toml(addr, &state_dir) + &common::client_identity(dir.path()),
     )
     .expect("write config");
 
@@ -805,113 +800,6 @@ async fn a_set_at_the_running_version_reaches_nobody() {
     );
 }
 
-/// The name in `[self_update]` is the whole of the protection on this side of the wire (ADR-0018):
-/// anything not called what that section says is refused and reported — never applied, and never a
-/// reason to restart.
-///
-/// The *offered* name is the Agent type itself (ADR-0026), so a mistyped artifact — a Collector
-/// binary typed `supervisor` but named `otelcol` — is not representable: a Package of type
-/// `supervisor` is always offered under the name `supervisor`. What is reachable, and what this
-/// test drives, is the operator error ADR-0026 names in its Consequences: `[self_update] package`
-/// set to something that is *not* this Client's Agent type. The Client then refuses every offer it
-/// will ever get, visibly, on its fleet row — which is the behaviour that has to be observable,
-/// since nothing else would say so.
-/// Verifies: ADR-0018
-#[tokio::test]
-async fn a_package_under_another_name_is_refused_and_the_client_keeps_running() {
-    let _serial = one_at_a_time().await;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
-    let version = version_of(&client);
-
-    // A perfectly good Client artifact, correctly typed — offered to a Client whose
-    // `[self_update] package` names something else.
-    let artifact = std::fs::read(&client).expect("read the client binary");
-    let store_dir = tempfile::tempdir().expect("store dir");
-    let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    // Typed as this Client's own Agent type and numbered above what it runs, so that neither of
-    // the Server's guards fires — ADR-0026's type check nor ADR-0025's upgrade test. The offer
-    // arrives; the Client's own name check (ADR-0018) is then all that is left, and it is looking
-    // at a configured name that does not match.
-    let set =
-        fleet_server::packages::PackageId::new("supervisor", NEWER_VERSION).expect("package id");
-    store.create(&set).expect("create package");
-    store
-        .put_entry(&set, &this_host(), artifact)
-        .expect("put entry");
-
-    let (addr, state) = spawn_server(store).await;
-    let root = dir.path().join("install");
-    let program = install_layout(&root, &client);
-    let previous = std::fs::canonicalize(root.join("current")).expect("current resolves");
-    let state_dir = dir.path().join("client-state");
-    let config = dir.path().join("supervisor.toml");
-    std::fs::write(
-        &config,
-        config_toml(addr, &state_dir, "otelcol") + &common::client_identity(dir.path()),
-    )
-    .expect("write config");
-
-    let mut service = Supervised::start(&program, &config);
-
-    // A saved Package reaches nobody (ADR-0025): the rollout act releases it, and it needs the
-    // Client's Agent to be known and fitted — so it is retried until the first report arrived.
-    wait_until("the rollout act to reach the agent", || {
-        service.tend();
-        state
-            .rollout_deployment(&ring_holding(&state, &set))
-            .ok()
-            .filter(|assigned| *assigned >= 1)
-            .map(|_| ())
-    })
-    .await;
-
-    // An offer refused outright has no package status to hang the reason on — the report carries
-    // it, and the fleet view shows it as `package_error`.
-    let error = wait_until("the offer to be refused", || {
-        service.tend();
-        let snapshot = state.snapshot();
-        let agent = view(&snapshot, "self-updating-client")?;
-        (!agent.package_error.is_empty()).then(|| agent.package_error.clone())
-    })
-    .await;
-
-    assert!(
-        error.contains("supervisor") && error.contains("otelcol"),
-        "the refusal names both what it takes and what it was offered: {error:?}"
-    );
-    // Nothing was installed: the only package this Client reports is the one it *is* — its own
-    // binary, at the version it runs, which it states whether or not a package put it there
-    // (ADR-0025). The refused offer left nothing behind.
-    let snapshot = state.snapshot();
-    let agent = view(&snapshot, "self-updating-client").expect("the client's own agent");
-    let names: Vec<&str> = agent.packages.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["otelcol"],
-        "nothing was installed — and the misconfiguration shows twice: this Client reports its \
-         own binary under the name it was told to consent to, which is not the name any offer \
-         for it will ever carry"
-    );
-    assert_eq!(
-        agent.packages[0].version,
-        fleet_core::version::identity(&version)
-            .expect("this build's version parses")
-            .to_string(),
-        "and what it reports installed is still the binary that is running"
-    );
-    assert!(
-        service.exits.is_empty(),
-        "a refused package is not a reason to restart: exits {:?}",
-        service.exits
-    );
-    assert_eq!(
-        std::fs::canonicalize(root.join("current")).expect("current resolves"),
-        previous,
-        "nothing was pointed anywhere else"
-    );
-}
-
 /// A self-update whose signature does not verify against `[packages] verification_key` fails with
 /// `InstallFailed` naming the signature, nothing is staged, and the Client keeps running the
 /// version it runs. The Server never offers an unsigned Package (ADR-0026), so a signature over
@@ -941,7 +829,7 @@ async fn a_self_update_whose_signature_does_not_verify_is_refused_and_the_client
     let config = dir.path().join("supervisor.toml");
     std::fs::write(
         &config,
-        config_toml(addr, &state_dir, "supervisor") + &common::client_identity(dir.path()),
+        config_toml(addr, &state_dir) + &common::client_identity(dir.path()),
     )
     .expect("write config");
 
