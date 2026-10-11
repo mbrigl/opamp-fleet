@@ -151,7 +151,7 @@ hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 hyper = { version = "1", default-features = false, features = ["server", "http1"] }
 # Code-first OpenAPI for the REST API (ADR-0023): the document is derived from the registered
 # routes and schemas at compile time, so contract and behaviour cannot drift.
-utoipa = "5"
+utoipa = "6"
 utoipa-axum = "0.2"
 # Reads the repository in build.rs to compute the baked-in version (ADR-0011). Build-dependency
 # only — nothing of it ships in a binary. Default features off: no HTTPS/SSH transports, the
