@@ -37,7 +37,7 @@ Forces:
   would force a re-registration on every update, and Windows locks a running `.exe`. A stable
   pointer into side-by-side version directories makes an update a pointer switch.
 - **The layout is rewritten at runtime by the daemon itself** — the self-update stages versions and
-  swings the pointer while the service runs ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)). So the
+  swings the pointer while the service runs ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)). So the
   layout must stand where the platform lets the service execute it *and* where the service's own
   account may write it. On Fedora, RHEL and openSUSE Leap 16 / SLES 16 the SELinux targeted policy
   is enforcing by default, and systemd (`init_t`) may not execute a file labelled `var_lib_t`: a
@@ -60,7 +60,7 @@ Forces:
 
 An operator needs something to install, and a fleet needs something to hand its Server. They are
 different questions. The fleet needs one artifact per platform that the Client itself can open and
-install as a self-update ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)). A host needs what its
+install as a self-update ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)). A host needs what its
 platform expects — `apt` and `dnf` with an inventory, an upgrade path and a clean removal; on
 Windows an `.msi`, the only thing Intune, Group Policy and SCCM deploy.
 `opentelemetry-collector-releases` and Elastic Agent both publish native packages *beside* their
@@ -326,13 +326,12 @@ deliver the same binary and run its own `service install`.
       answer is accepted, and the install then says that the Client installs no package, its own
       update included, until a key is configured.
 
-    Last it asks whether the Server may update this Client, **defaulting to yes**, and the name of
-    the package that carries it, defaulting to the Agent type; the consent's meaning and default
-    are [ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)'s. Everything else is written as commented
-    defaults, so the file stays a starting point for hand-editing. The non-interactive answers an
-    installer can give — `--endpoint`
-    (clause 42), `--no-self-update` and
-    `--self-update-package` ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)) — conflict with
+    It asks nothing about the self-update: the file carries `[packages] self_update = true`, and the
+    verification key decides whether that takes effect
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)). Everything else is
+    written as commented defaults, so the file stays a starting point for hand-editing. The
+    non-interactive answers an installer can give — `--endpoint` (clause 42) and `--no-self-update`
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)) — conflict with
     `--interactive`, go through the same renderer, the same endpoint rule and the same
     never-overwrite write, and never include a client identity. A file written from them alone
     therefore fails clause 19 and stays on disk for the operator to complete.
@@ -404,8 +403,8 @@ deliver the same binary and run its own `service install`.
     `service.name` ([`agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs)), the same on every
     host, because every Client in a fleet is the same kind of thing.
 
-26. **The package that carries the Client is `supervisor` too.** `[self_update] package` defaults to
-    the Agent type ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md) clause 2), and a Server offers a
+26. **The package that carries the Client is `supervisor` too.** The self-update takes only the
+    package named after the Agent type ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md) clause 2), and a Server offers a
     package under the Agent type it is built for ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) — so
     the release a fleet uploads for its Clients is a package for Agent type `supervisor`, and no
     per-host setting is needed. A Configuration carrying the Client's `[[supervisor]]` blocks
@@ -601,7 +600,7 @@ deliver the same binary and run its own `service install`.
     |---|---|---|
     | `INSTALLFOLDER` | `InstallDirDlg`, via `WIXUI_INSTALLDIR` | where the payload goes; default `C:\Program Files\<PRODUCT_NAME>` |
     | `ENDPOINT` | `EndpointDlg`, an `Edit` control | `service install --endpoint`; empty means none |
-    | `SELFUPDATE` | `EndpointDlg`, a checkbox, default `1` | the consent of [ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md) clause 3 |
+    | `SELFUPDATE` | `EndpointDlg`, a checkbox, default `1` | the consent of [ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md) clause 3 |
 
     `INSTALLFOLDER` is **one directory the operator configures**, holding only the delivered payload.
     The layout and the state directory go to `%ProgramData%\<PRODUCT_NAME>` and no root reaches the
@@ -665,7 +664,7 @@ deliver the same binary and run its own `service install`.
     the rule the Client applies to its endpoint at startup before anything is written: a `ws://` or
     `http://` endpoint whose host is not `127.0.0.1` or `::1` is refused, naming the setting, and
     `localhost` is no exception. It conflicts with `--interactive`; it
-    carries the self-update answer ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md) clause 3). It
+    carries the self-update answer ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md) clause 3). It
     has no siblings for the CA file or the client identity, and it takes no credential, since
     there is none ([ADR-0020](0020-admission-by-a-client-certificate-alone.md)). The installers
     do not write TOML themselves; one flag on the command that owns the file is the smaller thing.
@@ -675,7 +674,7 @@ deliver the same binary and run its own `service install`.
     refuses at startup, never one it runs on unauthenticated.
 
 **Out of scope:** staging, verifying, rolling back and pruning versions in this layout, and the
-self-update consent ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)); whether
+self-update consent ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)); whether
 variant builds are ever published, and where their `UpgradeCode`s are recorded; how an operator
 discovers what is installed on a host; creating the `--run-as` account in the packages; a confined
 SELinux policy module; configuration reload on `SIGHUP`; `Type=notify` integration; the startup

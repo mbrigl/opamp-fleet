@@ -14,7 +14,7 @@
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 
-use dialoguer::{Confirm, Input};
+use dialoguer::Input;
 
 use crate::config::ClientConfig;
 
@@ -54,11 +54,11 @@ pub struct Answers {
     /// The hex Ed25519 key packages are verified against (ADR-0026); `None` takes no package until
     /// one is set.
     pub verification_key: Option<String>,
-    /// The package name `[self_update]` consents to (ADR-0018), or `None` for the withdrawal.
-    /// `Some` is the default and what the questionnaire defaults to (ADR-0018): a Client the fleet
-    /// cannot update has to be updated by hand on every host. `None` renders as an explicit
-    /// `enabled = false`, so the file says which of the two it is either way.
-    pub self_update_package: Option<String>,
+    /// `[packages] self_update` (ADR-0018): whether the Server may replace this Client's own
+    /// binary. The questionnaire does not ask — it writes `true`, and the verification key decides
+    /// whether that takes effect; only `--no-self-update` and the MSI's checkbox write `false`. It
+    /// is written either way, so the file says which of the two it is.
+    pub self_update: bool,
 }
 
 /// Ask, write, and report — the whole of `--interactive` (ADR-0019).
@@ -185,11 +185,7 @@ fn copy_owner_only(from: &Path, to: &Path) -> Result<(), String> {
 /// # Errors
 /// Returns an error if the endpoint is not one the loader would accept, or if the file cannot be
 /// created.
-pub fn run_with_endpoint(
-    path: &Path,
-    endpoint: &str,
-    self_update: Option<&str>,
-) -> Result<(), String> {
+pub fn run_with_endpoint(path: &Path, endpoint: &str, self_update: bool) -> Result<(), String> {
     if keeping_existing(path) {
         return Ok(());
     }
@@ -202,7 +198,7 @@ pub fn run_with_endpoint(
         ca_file: None,
         identity: None,
         verification_key: None,
-        self_update_package: self_update.map(str::to_string),
+        self_update,
     };
     write_new(path, &render(&answers))?;
     println!("wrote {} for {}", path.display(), answers.endpoint);
@@ -298,43 +294,14 @@ pub fn ask() -> Result<Answers, String> {
         println!("no verification key: this Client installs no package until one is set");
     }
 
-    // Last, and defaulting to yes (ADR-0018). It is still the
-    // largest grant in this file — the Server may replace the binary that manages every other
-    // binary on the host — but the alternative is a fleet whose own agent is the one thing left to
-    // patch by hand, and the package name below is what the grant is narrowed to.
-    let self_update_package =
-        if Confirm::new()
-            .with_prompt("Allow the Server to update this Client's own binary?")
-            .default(true)
-            .interact()
-            .map_err(prompt_failed)?
-        {
-            Some(
-            Input::new()
-                .with_prompt("Name of the package that carries this Client")
-                .default(crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string())
-                .validate_with(|input: &String| {
-                    if input.trim().is_empty() {
-                        Err("the package name is the whole of the protection; it cannot be empty"
-                            .to_string())
-                    } else {
-                        Ok(())
-                    }
-                })
-                .interact_text()
-                .map_err(prompt_failed)?,
-        )
-        } else {
-            None
-        };
-
     Ok(Answers {
         endpoint: endpoint.trim().to_string(),
         name: name.trim().to_string(),
         ca_file,
         identity,
         verification_key,
-        self_update_package,
+        // Not asked (ADR-0018): the key above decides whether the consent takes effect.
+        self_update: true,
     })
 }
 
@@ -379,31 +346,24 @@ pub fn render(answers: &Answers) -> String {
         }
     }
 
-    if let Some(key) = &answers.verification_key {
-        out.push_str(
-            "\n# Every package is verified against this key; without it nothing is installed.\n\
-             [packages]\n",
-        );
-        out.push_str(&format!("verification_key = {}\n", toml_string(key)));
-    }
-
-    match &answers.self_update_package {
-        Some(package) => {
-            out.push_str(
-                "\n# Consent for the Server to replace this Client's own binary. The name is what\n\
-                 # the consent is narrowed to: an offer under any other name is refused and\n\
-                 # reported, never applied. Write `enabled = false` to withdraw the consent.\n\
-                 [self_update]\n",
-            );
-            out.push_str(&format!("package = {}\n", toml_string(package)));
-        }
-        None => out.push_str(
-            "\n# The Server may NOT replace this Client's own binary. Written out because the\n\
-             # consent otherwise stands by default: this Client is then the one program in the\n\
-             # fleet that has to be updated by hand on this host.\n\
-             [self_update]\n\
-             enabled = false\n",
-        ),
+    out.push_str(if answers.self_update {
+        "\n# self_update: consent for the Server to replace this Client's own binary, with\n\
+         # the package named after its Agent type alone. Write `false` to withdraw it.\n\
+         # Every package, this Client's own included, is verified against\n\
+         # verification_key; without the key nothing is installed.\n\
+         [packages]\n\
+         self_update = true\n"
+    } else {
+        "\n# The Server may NOT replace this Client's own binary. Written out because the\n\
+         # consent otherwise stands by default: this Client is then the one program in the\n\
+         # fleet that has to be updated by hand on this host. Every package is verified\n\
+         # against verification_key; without the key nothing is installed.\n\
+         [packages]\n\
+         self_update = false\n"
+    });
+    match &answers.verification_key {
+        Some(key) => out.push_str(&format!("verification_key = {}\n", toml_string(key))),
+        None => out.push_str("# verification_key = \"<hex-encoded Ed25519 public key>\"\n"),
     }
 
     out.push_str(
@@ -419,7 +379,7 @@ pub fn render(answers: &Answers) -> String {
 
 /// The top-level keys that are right on a fresh host, as comments — and they are emitted **before
 /// the first table**, which is not cosmetic: a top-level key written after `[tls]` or
-/// `[self_update]` belongs to that table, so an operator who uncomments `poll_interval_secs` under
+/// `[packages]` belongs to that table, so an operator who uncomments `poll_interval_secs` under
 /// one would be setting a key the section does not have and the load would refuse the file. The
 /// commented *tables* at the end of `render` are safe wherever they stand, being tables themselves.
 fn commented_top_level_keys() -> &'static str {
@@ -500,7 +460,7 @@ mod tests {
             ca_file: None,
             identity: None,
             verification_key: None,
-            self_update_package: Some(crate::supervisor::agent::CLIENT_AGENT_TYPE.to_string()),
+            self_update: true,
         }
     }
 
@@ -555,7 +515,7 @@ mod tests {
     fn installer_answers_alone_fail_validation_and_stay_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
-        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", None).expect("write");
+        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", false).expect("write");
         let loaded = ClientConfig::load(&path).expect("it parses");
         let err = loaded.check_admission().expect_err("no identity");
         assert!(err.contains("cert_file and key_file"), "{err}");
@@ -573,12 +533,12 @@ mod tests {
             "http://localhost:4320/v1/opamp",
         ] {
             let path = dir.path().join(format!("{}.toml", refused.len()));
-            let err = run_with_endpoint(&path, refused, None).expect_err(refused);
+            let err = run_with_endpoint(&path, refused, false).expect_err(refused);
             assert!(err.starts_with("endpoint"), "the setting is named: {err}");
             assert!(!path.exists(), "nothing written for {refused}");
         }
         let path = dir.path().join("loopback.toml");
-        run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", None).expect("loopback literal");
+        run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", false).expect("loopback literal");
     }
 
     /// The point of the whole exercise: what the questionnaire writes must load, and must load as
@@ -590,7 +550,7 @@ mod tests {
         let path = dir.path().join(FILE_NAME);
         let given = Answers {
             ca_file: Some(PathBuf::from("/etc/ssl/private-ca.pem")),
-            self_update_package: Some("our-own-client".to_string()),
+            verification_key: Some(hex::encode([7u8; 32])),
             ..answers()
         };
         write_new(&path, &render(&given)).expect("write");
@@ -598,9 +558,8 @@ mod tests {
         let loaded = ClientConfig::load(&path).expect("the written file loads");
         assert_eq!(loaded.endpoint, given.endpoint);
         assert_eq!(loaded.name, given.name);
-        // The name that was answered, not the default — an operator whose Set is named otherwise
-        // must get that name written verbatim.
-        assert_eq!(loaded.self_update_package(), Some("our-own-client"));
+        assert_eq!(loaded.package_key(), Some(&[7u8; 32][..]));
+        assert_eq!(loaded.self_update_package(), Some("supervisor"));
         assert_eq!(
             loaded.tls.expect("tls").ca_file,
             Some(PathBuf::from("/etc/ssl/private-ca.pem"))
@@ -622,7 +581,7 @@ mod tests {
             render(&given),
             render(&answers()),
             render(&Answers {
-                self_update_package: None,
+                self_update: false,
                 ..given.clone()
             }),
         ] {
@@ -641,12 +600,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
 
-        run_with_endpoint(
-            &path,
-            "wss://fleet.example.com/v1/opamp",
-            Some(crate::supervisor::agent::CLIENT_AGENT_TYPE),
-        )
-        .expect("write");
+        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", true).expect("write");
 
         let loaded = ClientConfig::load(&path).expect("the written file loads");
         assert_eq!(loaded.endpoint, "wss://fleet.example.com/v1/opamp");
@@ -655,17 +609,21 @@ mod tests {
     }
 
     /// The withdrawal has a non-interactive twin too (`--no-self-update`, the MSI's cleared
-    /// checkbox): it writes the section out as `enabled = false` rather than omitting it, because
-    /// an omitted section is the consent.
+    /// checkbox): it writes `[packages] self_update = false` rather than omitting the key, because
+    /// an omitted key is the consent.
+    /// Verifies: ADR-0018
     #[test]
     fn an_installer_can_withhold_the_self_update_consent() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
 
-        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", None).expect("write");
+        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", false).expect("write");
 
         let text = std::fs::read_to_string(&path).expect("read back");
-        assert!(text.contains("enabled = false"), "{text}");
+        assert!(
+            text.contains("\n[packages]\nself_update = false\n"),
+            "{text}"
+        );
         let loaded = ClientConfig::load(&path).expect("the written file loads");
         assert_eq!(loaded.self_update_package(), None);
     }
@@ -678,7 +636,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
 
-        let err = run_with_endpoint(&path, "fleet.example.com", None).expect_err("no scheme");
+        let err = run_with_endpoint(&path, "fleet.example.com", false).expect_err("no scheme");
         assert!(!err.is_empty());
         assert!(!path.exists(), "nothing may be left behind");
     }
@@ -692,7 +650,7 @@ mod tests {
         let path = dir.path().join(FILE_NAME);
         write_new(&path, "endpoint = \"wss://kept/v1/opamp\"\n").expect("first write");
 
-        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", None)
+        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", false)
             .expect("kept, not an error");
 
         let loaded = ClientConfig::load(&path).expect("load");
@@ -722,16 +680,20 @@ mod tests {
     }
 
     /// A declined section is absent rather than empty — a bare `[tls]` would say nothing.
-    /// `[self_update]` is the one exception and it is the point of ADR-0018: absent now *means*
-    /// consent, so both answers are written out. The consent names its package; the withdrawal says
-    /// `enabled = false`. A reader of the file can tell which was answered either way.
+    /// `[packages]` is the one exception and it is the point of ADR-0018: an absent `self_update`
+    /// *means* consent, so both answers are written out, `self_update = true` or `= false`, with the
+    /// verification key or a commented line for it. A reader of the file can tell which it is.
     /// Verifies: ADR-0018
     #[test]
     fn declined_sections_are_absent_rather_than_empty_and_the_consent_is_always_written() {
         let rendered = render(&answers());
         assert!(!rendered.contains("\n[auth]"));
         assert!(!rendered.contains("\n[tls]"));
-        assert!(rendered.contains("\n[self_update]"));
+        assert!(
+            rendered.contains("\n[packages]\nself_update = true\n"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("\n[self_update]"));
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
@@ -743,10 +705,13 @@ mod tests {
 
         // The other answer, spelled out rather than omitted.
         let withdrawn = render(&Answers {
-            self_update_package: None,
+            self_update: false,
             ..answers()
         });
-        assert!(withdrawn.contains("\n[self_update]"));
+        assert!(
+            withdrawn.contains("\n[packages]\nself_update = false\n"),
+            "{withdrawn}"
+        );
         let path = dir.path().join("withdrawn.toml");
         write_new(&path, &withdrawn).expect("write");
         assert_eq!(
@@ -764,7 +729,7 @@ mod tests {
     fn the_commented_tail_is_inert_and_uncommenting_it_works() {
         // Every table this file can carry, present at once. That is the combination the ordering
         // has to survive: a commented top-level key written *after* a table belongs to that table,
-        // so uncommenting `poll_interval_secs` under `[tls]` or `[self_update]` would set a key
+        // so uncommenting `poll_interval_secs` under `[tls]` or `[packages]` would set a key
         // those sections do not have and `deny_unknown_fields` would refuse the whole file. The
         // rendered order — scalars, commented scalars, then tables — is what keeps it inert.
         let given = Answers {

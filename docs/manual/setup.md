@@ -254,8 +254,6 @@ CA certificate of the Server — the CA that signed its certificate (PEM path): 
 Bootstrap certificate this Client enrols with (PEM path): /etc/opamp/bootstrap.pem
 Private key of the bootstrap certificate (PEM path): /etc/opamp/bootstrap-key.pem
 Package verification key (hex Ed25519 public key; empty takes no packages): 3b6a27bc…
-Allow the Server to update this Client's own binary? [Y/n]: y
-Name of the package that carries this Client [supervisor]:
 copied /var/lib/opamp-fleet/server-ca.pem
 copied /var/lib/opamp-fleet/bootstrap.pem
 copied /var/lib/opamp-fleet/bootstrap-key.pem

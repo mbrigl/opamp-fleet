@@ -1075,15 +1075,13 @@ mod tests {
             ca_file = "/tmp/server-ca.pem"
 
             [packages]
+            self_update = false
             verification_key = "bb"
             allowed_sources = ["https://evil.example/"]
 
             [supervisors]
             delivered_args = true
             delivered_env = ["LD_PRELOAD"]
-
-            [self_update]
-            package = "evil"
 
             [gateway]
             listen = "0.0.0.0:4320"

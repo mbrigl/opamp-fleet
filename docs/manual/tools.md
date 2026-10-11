@@ -60,7 +60,7 @@ checksum file goes with them:
 |---|---|---|
 | `otelcol` | `open-telemetry/opentelemetry-collector-releases` | the core Collector's `.tar.gz`, as published |
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
-| `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0018](../adr/0018-the-client-updates-itself-from-a-signed-package.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
+| `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0018](../adr/0018-the-client-updates-itself-under-its-own-agent-type.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
 
 Four things it does on every run:
 
@@ -152,12 +152,12 @@ Done. What a Supervisor needs to install these:
 
 For `--agent supervisor` there is no block to print — nothing supervises a Client — so the hint is
 the consent that lets it take the package over itself, which is also its default
-([ADR-0018](../adr/0018-the-client-updates-itself-from-a-signed-package.md)):
+([ADR-0018](../adr/0018-the-client-updates-itself-under-its-own-agent-type.md)):
 
 ```
 Done. What a Client needs to take these:
   linux/amd64  ./artifacts/supervisor_1.2.3_linux_amd64.tar.gz
-      [self_update] package = "supervisor"  (the default)
+      [packages] self_update = true  (the default)
 ```
 
 With `--no-upload` (or a declined prompt) it also prints the two `curl` calls that would have

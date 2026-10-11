@@ -127,7 +127,7 @@ The Client's own Agent is built by `AgentState::new` in
 `ReportsOwnMetrics`, `ReportsOwnTraces` and `ReportsOwnLogs`. `build_engine` in
 `crates/fleet-agent/src/supervisor/mod.rs` adds `ReportsHeartbeat` when heartbeats are enabled,
 and `AcceptsPackages` with `ReportsPackageStatuses` when `[self_update]` consents and a
-verification key is configured ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)).
+verification key is configured ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)).
 Its effective configuration is the redacted text of `supervisor.toml`. Only `AcceptsRemoteConfig`
 and `ReportsRemoteConfig` concern the set. Clauses 50 and 51 build the same mechanism for a
 Supervisor: `AgentState` can be restored without both bits, and then ignores an offer that arrives
@@ -218,7 +218,7 @@ remote configuration and run only on what the operator placed on the host.
    dynamically. A build's kinds are what its own Agent reports (clause 18). A build that leaves a
    kind out is published under a package name of its own (clause 25); a self-update into a build
    that lacks a kind a block on the host names fails its start and is rolled back like any failed
-   attempt ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)).
+   attempt ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)).
 
 3. **A block is parsed in two stages.** The core takes the common keys — `type`, `name`,
    `service_name` ([ADR-0015](0015-what-an-agent-reports-about-itself.md)), `endpoint_port`,
@@ -232,7 +232,7 @@ remote configuration and run only on what the operator placed on the host.
    persisted `instance_uid`, `sequence_num` and capability set, and all of them ride the Client's
    single upstream connection, disambiguated by `instance_uid` alone — the n-over-m model of
    [ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) with m fixed at one. The Client's own Agent
-   ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)) is always present beside them, with or without
+   ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)) is always present beside them, with or without
    any `[[supervisor]]` block. The Server needs no Supervisor-specific code.
 
 5. **The Supervisor Endpoint is WebSocket-only on loopback.** Bound for every Supervisor at start
@@ -304,7 +304,7 @@ remote configuration and run only on what the operator placed on the host.
     Client-wide `[attributes]` describe the host. A configuration a freshly self-updated version
     refuses is that update's failed attempt: a run resolves the update in flight even when the file
     does not load, so the host returns to the version that could read it
-    ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)).
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)).
 
 14. **A kind states what it knows, and the spawn applies it.** `Plugin::defaults()` returns
     `KindDefaults`, compile-time constants resolved per platform: the program's file name, its
@@ -424,7 +424,7 @@ remote configuration and run only on what the operator placed on the host.
    describes.
 
 25. **The Client's own consent stays explicit.** `[self_update]` names the package it takes
-   ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)); nothing about it is derived from a path. A
+   ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)); nothing about it is derived from a path. A
    package written over the Client takes the host out of reach, which is where implicit consent
    would be wrong.
 
@@ -606,7 +606,7 @@ remote configuration and run only on what the operator placed on the host.
     `remote_config_disabled`. Otherwise the Server can configure such a Supervisor to rewrite
     `supervisor.toml`, and the key flips at the next start. A signed Client build can also still
     replace the Client's own program where `[self_update]` consents
-    ([ADR-0018](0018-the-client-updates-itself-from-a-signed-package.md)), and that program reads
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)), and that program reads
     the key.
 
 47. **Switching it back on hands the set to the Server again.** When the key returns to `true`,

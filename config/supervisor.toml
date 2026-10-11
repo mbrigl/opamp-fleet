@@ -129,37 +129,34 @@ state_dir = "client-state"
 # A download goes to the Server's own origin, or to a source listed in allowed_sources: https://
 # URL prefixes, checked on every redirect hop. This Client's certificate is shown to its Server
 # alone, and an offered download header only to an allowed source.
+#
+# self_update is the consent for the Server to replace *this Client's own* binary. **Absent — as
+# here — means the consent stands**: a Client the fleet cannot update is the one program
+# on the host that has to be patched by hand. It takes effect once verification_key is set. Write
+# `self_update = false` to withdraw it, and the Client's own Agent then declares no package
+# capability at all — no offer can reach it; the Supervisors still take theirs.
+#
+# The consent takes one package, named after this Client's own Agent type, `supervisor`, and the
+# name is not configurable: an offer under any other name is refused and reported, never applied.
+# This is one of two independent guards, and it is the one on this side of the wire — the Server
+# will not offer a package built for another Agent type either. Neither replaces the other: an
+# operator who typed a Collector artifact as `supervisor` gets past the Server, and this name is
+# what is left.
+#
+# What happens on an accepted offer: the artifact is verified like any other, staged as a new
+# version *beside* the running one in the versioned install layout, and proved by running
+# `supervisor self-check` on it before the `current` pointer moves. The process then exits and asks
+# the service manager to restart it — it does not restart itself. A marker in state_dir carries the
+# outcome across that restart: the new version commits itself once it reaches the Server, and one
+# that will not stay up is rolled back to its predecessor after three attempts.
 # [packages]
+# self_update = true                 # the default; false withdraws the consent entirely
 # verification_key = "<hex-encoded Ed25519 public key>"
 # allowed_sources = ["https://mirror.example.com/releases/"]
 # archive_key = "the key an encrypted .7z was packed with"   # opens an encrypted
 #                          # artifact. One secret for the fleet — a single archive serves every
 #                          # Agent. The Server never learns this key; the artifact stays encrypted
 #                          # wherever it is stored and is opened only on the host that runs it.
-
-# Consent for the Server to replace *this Client's own* binary. **Absent — as here — means the
-# consent stands**, under the name below: a Client the fleet cannot update is the one
-# program on the host that has to be patched by hand. Write `enabled = false` to withdraw it, and
-# the Client's Agent then declares no package capability at all — no offer can reach it.
-#
-# Unlike a [[supervisor]], which only consents while the Server picks the artifact, the
-# Client must NAME its package: an offer under any other name is refused and reported, never
-# applied. This is one of two independent guards, and it is the one on this side of the wire — the
-# Server will not offer a package built for another Agent type either, and this Client's
-# own type is the constant `supervisor`. Neither replaces the other: an operator who typed a
-# Collector artifact as `supervisor` gets past the Server, and this name is what is left.
-#
-# What happens on an accepted offer: the artifact is verified like any other, staged as a new
-# version *beside* the running one in the versioned install layout, and proved by running
-# `client self-check` on it before the `current` pointer moves. The process then exits and asks the
-# service manager to restart it — it does not restart itself. A marker in state_dir carries the
-# outcome across that restart: the new version commits itself once it reaches the Server, and one
-# that will not stay up is rolled back to its predecessor after three attempts.
-#
-# Both lines below are the defaults, shown to be edited rather than because they must be written.
-# [self_update]
-# enabled = true                     # false withdraws the consent entirely
-# package = "supervisor"             # the Client's own Agent type; name yours if your Set differs
 
 # ── Supervisor Mode ────────────────────────────────────────
 # Each [[supervisor]] block runs one Supervisor managing one local process; each appears to the
