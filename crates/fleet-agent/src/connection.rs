@@ -16,7 +16,8 @@ use tracing::warn;
 
 use crate::config::ClientConfig;
 
-const SETTINGS_FILE: &str = "connection-settings.pb";
+/// The persisted connection settings, in the state directory.
+pub const SETTINGS_FILE: &str = "connection-settings.pb";
 
 /// The persisted settings in force, or `None` on a fresh state dir (an unreadable file is
 /// dropped with a warning — `supervisor.toml` then applies, never a half-read override).

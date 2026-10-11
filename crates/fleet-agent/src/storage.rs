@@ -17,7 +17,8 @@ use tracing::warn;
 
 use crate::supervisor::ports::{AgentStorage, InstalledPackage};
 
-const UID_FILE: &str = "instance-uid";
+/// The file that keeps the `instance_uid`.
+pub const UID_FILE: &str = "instance-uid";
 const CONFIG_PB_FILE: &str = "remote-config.pb";
 const CONFIG_DIR: &str = "config";
 const PACKAGE_FILE: &str = "installed-package.json";

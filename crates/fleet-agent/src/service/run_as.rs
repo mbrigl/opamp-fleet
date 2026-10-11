@@ -166,6 +166,47 @@ fn chown_tree(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Give each of `paths` the owner of `like`, the configuration of an installed Client: what
+/// `service config` creates belongs to the account the service runs as (ADR-0018 clause 13), not
+/// to the administrator who ran it. A missing path is skipped.
+///
+/// Each path is re-owned as what it is (`lchown`) and nothing is walked: the state directory
+/// belongs to that account, which could swap a directory for a link while root walked it, so the
+/// caller names exactly the files it wrote.
+///
+/// On Windows there is nothing to do: the handover granted the account Modify with inheritance, so
+/// what is created under the data root is the account's to use already.
+///
+/// # Errors
+/// Returns an error naming the path whose owner could not be changed.
+pub fn match_owner(like: &Path, paths: &[&Path]) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let Ok(owner) = std::fs::symlink_metadata(like) else {
+            return Ok(());
+        };
+        for path in paths {
+            let Ok(meta) = std::fs::symlink_metadata(path) else {
+                continue;
+            };
+            if (meta.uid(), meta.gid()) == (owner.uid(), owner.gid()) {
+                continue;
+            }
+            std::os::unix::fs::lchown(path, Some(owner.uid()), Some(owner.gid())).map_err(|e| {
+                format!(
+                    "cannot give {} the owner of {}: {e}",
+                    path.display(),
+                    like.display()
+                )
+            })?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (like, paths);
+    Ok(())
+}
+
 /// The passwordless Windows account forms — the only ones `--run-as` accepts, because a password
 /// parameter must not exist (ADR-0018: it would stand in the process list and the installer log).
 ///

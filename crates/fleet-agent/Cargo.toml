@@ -29,8 +29,7 @@ opamp = { workspace = true, features = ["client", "server"] }
 fleet-core.workspace = true
 # ADR-0018: service lifecycle and the content hash in the install layout's manifest.
 service-manager.workspace = true
-# ADR-0018: the questionnaire `service install --interactive` runs, and the hidden prompt the
-# credential in it is typed into.
+# ADR-0018: the questionnaire `service install --interactive` and `service config` run.
 dialoguer.workspace = true
 sha2.workspace = true
 tokio.workspace = true
@@ -39,7 +38,8 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 # ADR-0016: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
-# the file — comments, ordering, formatting — exactly as written.
+# the file — comments, ordering, formatting — exactly as written; the questionnaire's edit of an
+# existing file does the same (ADR-0018 clause 16).
 toml_edit.workspace = true
 futures-util.workspace = true
 tracing.workspace = true

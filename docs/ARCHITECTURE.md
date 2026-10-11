@@ -84,7 +84,7 @@ Five crates in one workspace ([ADR-0009](adr/0009-five-crates-the-whole-opamp-co
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0006](adr/0006-architecture-style.md)): a **core** that holds the domain and owns its
 **ports**, **adapters** that bind a port to a technology, and a **composition root** — `lib.rs`,
-`main.rs`, and on the Client `supervisor` and `service::runtime` — that wires the two. Every
+`main.rs`, and on the Client `supervisor`, `service::runtime` and `service::enrol` — that wires the two. Every
 module's role is listed in
 [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs), which fails when a
 core module names an adapter or a technology, and when a module has no role.
@@ -187,7 +187,10 @@ probation that commits or rolls back.
 
 **A host joins and stays.** A fresh host presents a bootstrap certificate while an operator has
 the enrolment window open; its CSR waits until an operator approves it, and the certificate it
-gets names a new host. From then on the Client renews at two thirds of the certificate's life,
+gets names a new host. The questionnaire of `service install --interactive` and `service config`
+does this before the service is registered: `service::enrol` runs the Client's own Agent over the
+ordinary `transport` with the bootstrap pair until the issued certificate is in the state
+directory ([ADR-0018](adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)). From then on the Client renews at two thirds of the certificate's life,
 proving with the old key which certificate it renews. A revocation closes the sessions it
 concerns at once and follows every renewal.
 

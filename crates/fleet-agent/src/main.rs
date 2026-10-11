@@ -4,11 +4,13 @@
 
 use std::path::{Path, PathBuf};
 
-use fleet_agent::cli::{self, Command, InstallArgs, ServiceAction};
+use fleet_agent::cli::{self, Command, ConfigArgs, InstallArgs, ServiceAction};
 use fleet_agent::config::ClientConfig;
 use fleet_agent::config_init;
 use fleet_agent::service::runtime::{self, RunSpec};
-use fleet_agent::service::{layout, manager, run_as, windows_rights, ServiceControl, ServiceLevel};
+use fleet_agent::service::{
+    enrol, layout, manager, run_as, windows_rights, ServiceControl, ServiceLevel,
+};
 use fleet_agent::update;
 
 fn main() {
@@ -107,6 +109,7 @@ fn service_command(
 ) -> Result<(), String> {
     match action {
         ServiceAction::Install(args) => install(config_path, config_named, args),
+        ServiceAction::Config(args) => configure(config_path, config_named, args),
         ServiceAction::Uninstall(scope) => {
             manager::uninstall(ServiceLevel::from(*scope))?;
             println!(
@@ -177,8 +180,9 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         data_root.join(config_init::FILE_NAME)
     };
 
+    let mut written = config_init::Written::default();
     if args.interactive {
-        config_init::run(&config_path)?;
+        written = ask(&config_path, &data_root)?;
     } else if let Some(endpoint) = &args.endpoint {
         // The same file, from an answer given rather than asked for (ADR-0018): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with
@@ -197,7 +201,27 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
 
     // Fail on a broken configuration now, not at the service's first start. After the write, so
     // that a file just answered into existence is held to the same rule as any other.
-    let config = ClientConfig::load(&config_path)?;
+    let mut config = ClientConfig::load(&config_path)?;
+    // The state directory the service will run with — where an issued certificate counts.
+    let state_dir = config.service_state_dir(&data_root);
+    config.state_dir.clone_from(&state_dir);
+    // On Windows every local user inherits read access under %ProgramData%; the data root, and a
+    // state directory placed elsewhere, are cut off from it before anyone is granted anything
+    // (H8) — and before an enrolment writes its private key there. Unix needs nothing here: the
+    // Client writes its secrets owner-only itself.
+    std::fs::create_dir_all(&data_root)
+        .map_err(|e| format!("cannot create {}: {e}", data_root.display()))?;
+    windows_rights::restrict_data_root(level, &data_root)?;
+    if !state_dir.starts_with(&data_root) {
+        std::fs::create_dir_all(&state_dir)
+            .map_err(|e| format!("cannot create the state directory: {e}"))?;
+        windows_rights::restrict_data_root(level, &state_dir)?;
+    }
+    // Before anything is staged or registered (ADR-0018 clause 19): an enrolment that is stopped
+    // leaves the answered file and nothing else.
+    if let Some(bootstrap) = &written.bootstrap {
+        enrol::run(&config, bootstrap)?;
+    }
     // And held to what the Client needs at startup. A packaged install registers the service even
     // so — it has an endpoint and no client identity to write — but never starts it, and the
     // service refuses to run until the file names one (ADR-0018). Said loudly here.
@@ -212,12 +236,6 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     let layout = layout::Layout::new(&layout_root);
     let program = layout::stage_current_exe(&layout)?;
 
-    let state_dir = if config.state_dir.is_absolute() {
-        config.state_dir.clone()
-    } else {
-        data_root.join(layout::STATE_DIR_NAME)
-    };
-
     manager::install(&manager::InstallSpec {
         level,
         program: program.clone(),
@@ -225,18 +243,6 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         state_dir: state_dir.clone(),
         run_as: run_as.as_ref().map(|r| r.account().to_string()),
     })?;
-
-    // On Windows every local user inherits read access under %ProgramData%; the data root, and a
-    // state directory placed elsewhere, are cut off from it before anyone is granted anything
-    // (H8). Unix needs nothing here: the Client writes its secrets owner-only itself.
-    std::fs::create_dir_all(&data_root)
-        .map_err(|e| format!("cannot create {}: {e}", data_root.display()))?;
-    windows_rights::restrict_data_root(level, &data_root)?;
-    if !state_dir.starts_with(&data_root) {
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| format!("cannot create the state directory: {e}"))?;
-        windows_rights::restrict_data_root(level, &state_dir)?;
-    }
 
     // The handover (ADR-0018 clause 13): both roots belong to the account —
     // config and state because the service reads and rewrites them (ADR-0016), the executable
@@ -246,6 +252,14 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
         run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path])?;
+        // The copy beside a configuration named outside the data root is not under it.
+        run_as.hand_over(
+            &written
+                .copies
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>(),
+        )?;
     }
 
     println!("installed {}", manager::service_name());
@@ -260,6 +274,58 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     let user = if args.scope.user { " --user" } else { "" };
     println!("start it with: supervisor service start{user}");
     Ok(())
+}
+
+/// `service config`: the questionnaire of `install --interactive` against an installed Client, and
+/// its enrolment when it holds no certificate yet — registering nothing (ADR-0018 clause 15).
+fn configure(config_path: &Path, config_named: bool, args: &ConfigArgs) -> Result<(), String> {
+    let level = ServiceLevel::from(args.scope);
+    // The file and the state directory, found as `install` laid them out.
+    let data_root = match args.data_root() {
+        Some(data) => absolute(data)?,
+        None => manager::default_root(level)?,
+    };
+    let config_path = if config_named {
+        absolute(config_path)?
+    } else {
+        data_root.join(config_init::FILE_NAME)
+    };
+    let written = ask(&config_path, &data_root)?;
+
+    let mut config = ClientConfig::load(&config_path)?;
+    let state_dir = config.service_state_dir(&data_root);
+    config.state_dir.clone_from(&state_dir);
+    if let Some(bootstrap) = &written.bootstrap {
+        enrol::run(&config, bootstrap)?;
+    }
+    // What this run created belongs to whoever owns the configuration — the service's account when
+    // it runs as one (ADR-0018 clause 13) — not to the administrator who ran it.
+    let mut created = enrol::written(&state_dir);
+    created.extend(written.copies.iter().cloned());
+    run_as::match_owner(
+        &config_path,
+        &created.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+    )?;
+    if let Err(e) = config.check_admission() {
+        println!("warning: {}: {e}", config_path.display());
+    }
+
+    let user = if args.scope.user { " --user" } else { "" };
+    println!(
+        "restart the service to apply: supervisor service stop{user} && \
+         supervisor service start{user}"
+    );
+    Ok(())
+}
+
+/// The questionnaire against the file at `config_path`, offering what it holds and asking for the
+/// bootstrap pair only while the state directory under `data_root` holds no issued certificate
+/// (ADR-0018 clauses 16, 17).
+fn ask(config_path: &Path, data_root: &Path) -> Result<config_init::Written, String> {
+    let current = ClientConfig::load(config_path)?;
+    let mut in_service = current.clone();
+    in_service.state_dir = current.service_state_dir(data_root);
+    config_init::run(config_path, &current, in_service.is_enrolled())
 }
 
 /// Absolutize without requiring existence (`canonicalize` would fail for a config file that

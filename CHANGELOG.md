@@ -153,6 +153,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 - **A CSR naming another Agent's `instance_uid` is refused**
   ([ADR-0019](docs/adr/0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). The Client of
   this project names none and is not affected.
+- **`service config` asks the questionnaire of `install --interactive` again on an installed
+  Client** — each question offers what `supervisor.toml` holds, only the asked keys change, and a
+  host that holds no certificate yet is enrolled with the Server on the spot; nothing is
+  registered. It takes the `--user`, `--root` and `--data-root` the Client was installed with
+  ([ADR-0018](docs/adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)).
+  **What to do:** nothing; restart the service after it to apply the change.
 
 ### Changed
 
@@ -318,6 +324,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `scripts/dev-pki.sh` now writes `listen = "0.0.0.0:4320"`, so a Client on another machine
   reaches a development Server. **What to do:** add the line at the top of an existing
   `.dev-pki/server.toml`, or delete `.dev-pki/` and run the script again.
+- **`service install --interactive` enrols the host itself, and edits an existing
+  `supervisor.toml` instead of keeping it** — the CA is asked for on every `wss://` or `https://`
+  endpoint and copied beside the file as `server-ca.pem`. The bootstrap certificate and its key are
+  asked for only while the host holds no issued certificate, are neither copied nor written into
+  the file, and are used at once: the install sends the enrolment request, logs its key
+  fingerprint and waits for an operator's approval before it registers the service. On a
+  configured host every question offers what the file holds, and only the asked keys change
+  ([ADR-0018](docs/adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)).
+  **What to do:** open the enrolment window before running `--interactive` on a new host, and
+  approve the request it waits for. A file that names a bootstrap pair keeps it, and a service
+  started on it enrols as before.
 
 ### Fixed
 
@@ -402,6 +419,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   same moment.** The check that runs a staged package before it replaces the running one, and the
   version probe, now wait out the moment Linux refuses to run a freshly written file, as a start
   already did.
+- **`service install` keeps the state directory under the data root** — a configuration that
+  names no absolute `state_dir` now gets `<data root>/state`, as
+  [ADR-0018](docs/adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)
+  states; before, the install took `client-state` in the working directory of the shell it ran
+  from, typically the operator's home directory. **What to do:** on a host installed that way,
+  uninstall, delete that `client-state` directory and install again; the host enrols anew.
 
 ## [0.4.5] - 2026-08-24
 
