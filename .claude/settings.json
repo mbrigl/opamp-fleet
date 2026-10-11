@@ -1,11 +1,11 @@
 {
   "includeCoAuthoredBy": false,
   "permissions": {
-    "ask": [
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(gh:*)"
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)"
     ]
   }
 }
