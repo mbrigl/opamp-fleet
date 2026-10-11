@@ -1,7 +1,7 @@
 # ADR-0019: The Client is the program `supervisor`, installs itself as a native service named after a build-time product name from a versioned layout it can rewrite with a first configuration that authenticates and encrypts, and ships as `.tar.gz` archives and native installers that run that install
 
 - **Status:** 🟢 accepted
-- **Date:** 2026-10-06
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `.github/workflows/release.yml`, `packaging/`, the program, Agent type and configuration-file names of the Client, `service install --endpoint`, and every path, name or account an installed Client uses
 
@@ -455,8 +455,10 @@ deliver the same binary and run its own `service install`.
     depending on an Intel runner label that keeps being retired. **Windows on arm64 is out** until a
     deployment asks for it; adding it is one row.
 
-31. **Every archive is a `.tar.gz` written by `opamp-package-sign pack --format tar.gz`.** The packer
-    names the single member after the program, with its executable mode, so **a release archive is a
+31. **Every archive is a `.tar.gz` written by `opamp-fleetctl package pack --format tar.gz`,** the
+    operator tool the same run builds and publishes
+    ([ADR-0028](0028-one-operator-program-that-makes-the-fleets-certificates.md)). The packer
+    names the single member after the program, with its executable mode, so **the Client's release archive is a
     valid package artifact unmodified**: the operator uploads the file they downloaded, and the
     SHA-256 the packer prints is both the published checksum and the hash an Agent verifies
     ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). `.tar.gz` because it is the container every
@@ -465,7 +467,8 @@ deliver the same binary and run its own `service install`.
     including encrypted ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); a release has no use for
     encryption.
 
-32. **Every asset is named `supervisor_<version>_<os>_<arch>.<ext>`.** Four fields separated by `_`:
+32. **Every asset of the Client is named `supervisor_<version>_<os>_<arch>.<ext>`,** and the
+    operator tool's by the same grammar under its own name (ADR-0028). Four fields separated by `_`:
     the package name, the base version `MAJOR.MINOR.PATCH` without build metadata, and the platform
     in the vocabulary an Agent reports as `os.type` and `host.arch`
     ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). **All artifacts of a target share the stem** and differ
@@ -494,12 +497,13 @@ deliver the same binary and run its own `service install`.
     version starts at the first separator followed by a digit, and the rest is the name. A tail it
     does not know fills no field rather than a guess, because a wrong platform is an entry no Agent is
     ever offered. Accepting `-` serves upstream artifacts named by upstream. The release notes' upload
-    loop splits on `_` and needs to be told neither name nor version.
+    loop selects the `supervisor_` stem and splits the rest on `_`, so it needs to be told no platform.
 
-34. **What is published.** A GitHub release named after the version holds the five archives, the
-    two `.deb`, the two `.rpm`, the `.msi` and one `SHA256SUMS` covering every asset. The notes say
-    which file is for which purpose, give the per-platform install commands and the procedure that
-    uploads the archives as one package for Agent type `supervisor`, and state the full baked
+34. **What is published.** A GitHub release named after the version holds the Client's five
+    archives, the two `.deb`, the two `.rpm`, the `.msi`, the four archives of the operator tool
+    (ADR-0028) and one `SHA256SUMS` covering every asset. The notes say which file is for which
+    purpose, give the per-platform install commands and the procedure that uploads the Client's
+    archives, selected by their `supervisor_` stem, as one package for Agent type `supervisor`, and state the full baked
     version string as provenance — the upload uses the release number, since versions are compared
     without build metadata ([ADR-0012](0012-versions-resolved-in-the-internal-crate.md)). Nothing is signed. A change to the asset
     names or containers breaks operators' scripts and is named in `CHANGELOG.md` and the release
@@ -507,8 +511,10 @@ deliver the same binary and run its own `service install`.
 
 ### The installers
 
-35. **Two classes of asset, and only one is a package artifact.** The archive is opened by the
-    Client on a self-update and parsed by the fleet view; the `.deb`, `.rpm` and `.msi` are opened by
+35. **Three classes of asset, and only one is a package artifact.** The Client's archive is opened
+    by the Client on a self-update and parsed by the fleet view; the operator tool's archives
+    ([ADR-0028](0028-one-operator-program-that-makes-the-fleets-certificates.md)) are
+    downloaded to an operator's machine and are no package of the fleet; the `.deb`, `.rpm` and `.msi` are opened by
     `dpkg`, `rpm` and Windows Installer and by nothing in the fleet path. The installers are
     **additive operator artifacts**: they never replace the archive, which is the only format the
     fleet can install.
@@ -926,7 +932,7 @@ packaging the Server, which an operator deploys rather than the fleet.
   the file. The startup notice names the section on every start until then.
 - Positive: one word for one thing, from the Agent type in the fleet view to the file an operator
   edits; the Client's release is an ordinary fleet package in the container every agent uses.
-- Positive: a release archive is installable by the fleet unmodified, so the hash published is the
+- Positive: the Client's release archive is installable by the fleet unmodified, so the hash published is the
   hash an Agent verifies; a build that lost its tags fails instead of publishing a `-dev` artifact.
 - Positive: first contact is one command per platform — `apt install`, `dnf install`, a double
   click — and removal is real. The installers are wrappers around the one install path, and a

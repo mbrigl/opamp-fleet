@@ -1,7 +1,7 @@
 # ADR-0025: A rollout is an explicit act per Agent that pins what it releases, and a package reaches an Agent only when it fits, is aimed at it, and moves it forward from what it runs
 
 - **Status:** 🟢 accepted
-- **Date:** 2026-08-20
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** the assignments and rollout acts in `crates/fleet-server/src/fleet.rs`, the saved and retained revisions in `crates/fleet-server/src/configs.rs`, the matching and offer functions of `crates/fleet-server/src/packages.rs`, the rollout routes of `crates/fleet-server/src/api.rs`, the persisted Agent record, the rollout column of the bundled UI, the Client's check of an offer for its own package
 
@@ -131,7 +131,7 @@ claims to have).
 14. **A package is numbered in the space its program numbers itself.** For a program that
     self-reports an orderable version — the Client and any OpAMP-aware Managed Process — a package
     numbered below it can never reach it. An operator numbering a package by hand takes the
-    program's own number; `opamp-package-fetch` already names a release that way
+    program's own number; `opamp-fleetctl package fetch` already names a release that way
     ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)).
 
 15. **The Client applies the same rule to an offer it receives.** For the package that carries the

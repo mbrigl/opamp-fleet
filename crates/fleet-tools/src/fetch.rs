@@ -1,5 +1,5 @@
-//! `opamp-package-fetch` — an operator helper that turns an agent release into package artifacts
-//! this fleet can install, and optionally uploads them (ADR-0026).
+//! `opamp-fleetctl package fetch` — turns an agent release into package artifacts this fleet can
+//! install, and optionally uploads them (ADR-0026, ADR-0028).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
@@ -20,15 +20,13 @@
 //!   the tool says so.
 //!
 //! Interactive by default; every prompt has a flag, so the same tool serves a pipeline:
-//!   opamp-package-fetch                                   # asks for everything
-//!   opamp-package-fetch --agent otelcol-contrib --version 0.158.0 --platform linux/amd64 --no-upload
+//!   opamp-fleetctl package fetch                          # asks for everything
+//!   opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 --platform linux/amd64 --no-upload
 
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-
-use clap::{Parser, ValueEnum};
+use clap::ValueEnum;
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 
 /// How many release series the operator is offered. Enough to reach the release before last when
 /// one turns out badly, few enough to read without scrolling.
@@ -37,7 +35,7 @@ const SERIES_SHOWN: usize = 3;
 /// The member cap a tree package is held to (ADR-0026). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
 #[cfg_attr(
-    not(test),
+    any(not(test), not(unix)),
     expect(
         dead_code,
         reason = "only an agent whose upstream publishes no installable archive is repacked"
@@ -45,12 +43,9 @@ const SERIES_SHOWN: usize = 3;
 )]
 const MAX_TREE_MEMBERS: usize = 10_000;
 
-#[derive(Parser)]
-#[command(
-    name = "opamp-package-fetch",
-    about = "Fetch an agent release and turn it into fleet package artifacts"
-)]
-struct Cli {
+/// What `package fetch` is asked for; every prompt has its flag.
+#[derive(clap::Args)]
+pub struct Args {
     /// Which agent to fetch. Omitted, it is asked for.
     #[arg(long, value_enum)]
     agent: Option<AgentKind>,
@@ -196,13 +191,13 @@ impl AgentKind {
                 name: "otelcol-conf",
                 selector: &[("service.name", "otelcol")],
                 service_name: "",
-                body: include_str!("../../../../config/examples/otelcol-conf.yaml"),
+                body: include_str!("../../../config/examples/otelcol-conf.yaml"),
             }],
             AgentKind::OtelcolContrib => &[DefaultConfiguration {
                 name: "otelcol-contrib-conf",
                 selector: &[("service.name", "otelcol-contrib")],
                 service_name: "",
-                body: include_str!("../../../../config/examples/otelcol-contrib-conf.yaml"),
+                body: include_str!("../../../config/examples/otelcol-contrib-conf.yaml"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
             // deliberately does not own (ADR-0017 admits only `[[supervisor]]` blocks), and none
@@ -280,30 +275,19 @@ enum Action {
     AsPublished,
 }
 
-/// One thread: this tool is a sequence of downloads with a question between them, and the prompts
-/// block by nature — there is nothing for a multi-threaded runtime to overlap.
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
-    // reqwest is built with `rustls-no-provider`, which refuses to construct a TLS client until a
-    // process-wide provider exists (ADR-0013).
-    opamp::tls::install_ring_provider();
-    match run(Cli::parse()).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-async fn run(cli: Cli) -> Result<(), String> {
-    let agent = match cli.agent {
+/// `package fetch`: which agent, which version, which platforms, and whether to upload — each
+/// asked for when its flag is missing.
+///
+/// # Errors
+/// Returns the message to print when a download, a check or an upload fails.
+pub async fn run(args: Args) -> Result<(), String> {
+    let agent = match args.agent {
         Some(agent) => agent,
         None => choose_agent()?,
     };
     let source = agent.source();
 
-    let version = match cli.version.clone() {
+    let version = match args.version.clone() {
         Some(version) => version,
         None => choose_version(agent, &source).await?,
     };
@@ -329,17 +313,17 @@ async fn run(cli: Cli) -> Result<(), String> {
             source.service_name
         ));
     }
-    let chosen = select_platforms(&available, &cli.platforms)?;
+    let chosen = select_platforms(&available, &args.platforms)?;
 
-    std::fs::create_dir_all(&cli.out_dir)
-        .map_err(|e| format!("cannot create {}: {e}", cli.out_dir.display()))?;
+    std::fs::create_dir_all(&args.out_dir)
+        .map_err(|e| format!("cannot create {}: {e}", args.out_dir.display()))?;
     let mut produced: Vec<(&Plan, PathBuf)> = Vec::new();
     for plan in &chosen {
-        let artifact = produce(plan, &cli.out_dir).await?;
+        let artifact = produce(plan, &args.out_dir).await?;
         produced.push((plan, artifact));
     }
 
-    let server = upload_target(&cli)?;
+    let server = upload_target(&args)?;
     if let Some(server) = &server {
         for (plan, artifact) in &produced {
             upload(server, source.service_name, &version, plan, artifact).await?;
@@ -510,11 +494,11 @@ fn select_platforms<'p>(available: &'p [Plan], wanted: &[String]) -> Result<Vec<
 
 /// Where to upload, if anywhere. `--no-upload` answers it, `--server` answers it, and otherwise it
 /// is a question — with the artifacts already written, so a "no" here has still produced them.
-fn upload_target(cli: &Cli) -> Result<Option<String>, String> {
-    if cli.no_upload {
+fn upload_target(args: &Args) -> Result<Option<String>, String> {
+    if args.no_upload {
         return Ok(None);
     }
-    if let Some(server) = &cli.server {
+    if let Some(server) = &args.server {
         return Ok(Some(server.trim_end_matches('/').to_string()));
     }
     let wants = Confirm::new()
@@ -866,13 +850,13 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 ///
 /// Determinism is not tidiness: the fleet decides whether to distribute by content hash, so an
 /// artifact that differed by when it was packed would be a rollout nobody asked for. Times, owners
-/// and order are therefore fixed, exactly as `opamp-package-sign pack` fixes them for one file.
+/// and order are therefore fixed, exactly as `package pack` fixes them for one file.
 ///
 /// Links are resolved rather than carried because a tree package refuses them (ADR-0026): what a
 /// link names is not where it sits, which is the one thing a path check cannot judge. A link
 /// pointing at nothing is dropped.
 #[cfg_attr(
-    not(test),
+    any(not(test), not(unix)),
     expect(
         dead_code,
         reason = "only an agent whose upstream publishes no installable archive is repacked"
@@ -949,7 +933,7 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 /// Deduplicating by real path instead would leave one of the two names empty — and which one, on
 /// directory-read order, which is nobody's guarantee.
 #[cfg_attr(
-    not(test),
+    any(not(test), not(unix)),
     expect(
         dead_code,
         reason = "only an agent whose upstream publishes no installable archive is repacked"
@@ -992,7 +976,7 @@ fn collect_members(
 /// The mode to store, which off Unix is a decision rather than a reading: a tar written on Windows
 /// has no mode to carry, and a tree whose programs arrive unexecutable is a tree that will not run.
 #[cfg_attr(
-    not(test),
+    any(not(test), not(unix)),
     expect(
         dead_code,
         reason = "only an agent whose upstream publishes no installable archive is repacked"
@@ -1187,7 +1171,7 @@ fn http() -> Result<reqwest::Client, String> {
         // An artifact is hundreds of megabytes over someone else's CDN; a whole-request timeout
         // would kill a working download on principle, so only the connect phase is bounded.
         .connect_timeout(std::time::Duration::from_secs(30))
-        .user_agent("opamp-package-fetch")
+        .user_agent("opamp-fleetctl")
         .build()
         .map_err(|e| format!("cannot build an HTTP client: {e}"))
 }
@@ -1429,6 +1413,23 @@ mod tests {
             contrib[0].out_name,
             "otelcol-contrib_0.158.0_linux_amd64.tar.gz"
         );
+    }
+
+    /// The release also carries the operator tool's archives, named like the Client's
+    /// (ADR-0028 clause 18); they are selected by stem, never by version and platform alone, so none
+    /// of them becomes the `supervisor` Package's entry for its platform (clause 5).
+    // Verifies: ADR-0028
+    #[test]
+    fn the_supervisor_passes_over_the_operator_tools_archives() {
+        let assets = vec![
+            asset("opamp-fleetctl_1.2.3_linux_amd64.tar.gz"),
+            asset("opamp-fleetctl_1.2.3_darwin_arm64.tar.gz"),
+            asset("supervisor_1.2.3_linux_amd64.tar.gz"),
+            asset("SHA256SUMS"),
+        ];
+        let plans = supervisor_plans("1.2.3", &assets);
+        let names: Vec<&str> = plans.iter().map(|p| p.out_name.as_str()).collect();
+        assert_eq!(names, ["supervisor_1.2.3_linux_amd64.tar.gz"]);
     }
 
     /// This project's own release is fetched like any other agent's (ADR-0019): the `.tar.gz` per

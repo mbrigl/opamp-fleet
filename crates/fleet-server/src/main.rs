@@ -19,7 +19,8 @@ fn usage() -> ! {
     eprintln!(
         "Usage: server [--config <server.toml>] [--version]\n       \
          server hash-credential --basic   (reads the password from standard input)\n       \
-         server audit-verify <config_dir>/audit"
+         server audit-verify <config_dir>/audit\n       \
+         server pki status --config <server.toml>"
     );
     std::process::exit(2);
 }
@@ -61,6 +62,46 @@ fn audit_verify(dir: Option<String>) -> ! {
             std::process::exit(1);
         }
     }
+}
+
+/// `server pki status --config <server.toml>` (ADR-0028 clause 12): when each certificate the
+/// Server host depends on ends. The commands that make certificates are the operator tool's
+/// (ADR-0028); the Server binary makes none.
+fn pki(mut args: impl Iterator<Item = String>) -> ! {
+    use fleet_server::pki;
+    let (Some("status"), Some("--config"), Some(path), None) = (
+        args.next().as_deref(),
+        args.next().as_deref(),
+        args.next(),
+        args.next(),
+    ) else {
+        usage()
+    };
+    let config = ServerConfig::load(&PathBuf::from(path)).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    let endings = pki::status(&config).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    let now = time::OffsetDateTime::now_utc();
+    for ending in &endings {
+        let standing = match ending.standing(now) {
+            fleet_core::ending::Standing::Fine => "ok",
+            fleet_core::ending::Standing::Ending => "ENDS SOON",
+            fleet_core::ending::Standing::Ended => "ENDED",
+        };
+        println!(
+            "{standing:9} {} days  {}  serial {}  {}  ({})",
+            ending.days_left(now),
+            ending.not_after.date(),
+            ending.serial,
+            ending.subject,
+            ending.file.display()
+        );
+    }
+    std::process::exit(pki::exit_code(&endings, now));
 }
 
 /// What makes the entry `server.toml` keeps from a secret.
@@ -163,6 +204,7 @@ fn parse_args() -> PathBuf {
         match arg.as_str() {
             "hash-credential" => hash_credential(args.next()),
             "audit-verify" => audit_verify(args.next()),
+            "pki" => pki(args),
             "--config" => match args.next() {
                 Some(path) => config = PathBuf::from(path),
                 None => usage(),
@@ -340,6 +382,29 @@ async fn main() {
     if let Some(enrolment) = &enrolment {
         enrolment.set_audit(audit.clone());
     }
+    // Before a certificate the Server depends on ends, say so: at startup and once a day
+    // (ADR-0028 clause 11). Nothing stops; the hosts decide for themselves.
+    let watched = fleet_server::pki::depended_on(&config);
+    fleet_server::pki::warn_endings(
+        &watched,
+        Some(audit.as_ref()),
+        time::OffsetDateTime::now_utc(),
+    );
+    tokio::spawn({
+        let audit = audit.clone();
+        async move {
+            let mut daily = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            daily.tick().await;
+            loop {
+                daily.tick().await;
+                fleet_server::pki::warn_endings(
+                    &watched,
+                    Some(audit.as_ref()),
+                    time::OffsetDateTime::now_utc(),
+                );
+            }
+        }
+    });
     if let Some(warning) = config.rate_limit_warning() {
         // ADR-0013 clause 20.
         warn!("{warning}");

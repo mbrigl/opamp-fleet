@@ -634,7 +634,7 @@ fn check_signature(bytes: &[u8], signature: &[u8], key: &[u8]) -> Result<(), Str
         .verify(bytes, signature)
         .map_err(|_| {
             "the artifact's signature is invalid — it must cover the Agent type, the version and \
-             the SHA-256 (opamp-package-sign sign --agent-type … --version …)"
+             the SHA-256 (opamp-fleetctl package sign --agent-type … --version …)"
                 .to_string()
         })
 }

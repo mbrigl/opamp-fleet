@@ -50,6 +50,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
         "fleet-core",
         &[
             ("", Root),
+            ("ending", Core),
             ("package", Core),
             ("platform", Core),
             ("renewal", Core),
@@ -87,6 +88,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("fs::packages", Adapter),
             ("fs::revocation", Adapter),
             ("listen", Adapter),
+            ("pki", Adapter),
             ("tls", Adapter),
             ("transport", Adapter),
         ],
@@ -147,10 +149,12 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     (
         "fleet-tools",
         &[
-            // Two command-line programs and no library: nothing here is core, and a module added to
-            // the crate has to be given a role like anywhere else.
-            ("bin::opamp-package-fetch", Root),
-            ("bin::opamp-package-sign", Root),
+            // One command-line program and no library (ADR-0028): nothing here is core, and a
+            // module added to the crate has to be given a role like anywhere else.
+            ("main", Root),
+            ("fetch", Adapter),
+            ("package", Adapter),
+            ("pki", Adapter),
         ],
     ),
 ];

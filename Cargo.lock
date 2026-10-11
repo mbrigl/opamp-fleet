@@ -875,17 +875,23 @@ dependencies = [
  "flate2",
  "fleet-agent",
  "fleet-core",
+ "fleet-server",
  "hex",
  "opamp",
+ "rcgen",
  "reqwest",
  "ring",
  "rustls",
+ "serde",
  "serde_json",
  "sevenz-rust2",
  "sha2 0.10.9",
  "tar",
  "tempfile",
+ "time",
  "tokio",
+ "toml",
+ "x509-parser",
 ]
 
 [[package]]

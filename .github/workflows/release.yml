@@ -1,16 +1,18 @@
 name: Release
 
 # Builds the Client for every target it ships on and publishes one `.tar.gz` per target
-# (ADR-0019, the container and the artifact name included).
+# (ADR-0019, the container and the artifact name included), and the operator tool `opamp-fleetctl`
+# for Linux and macOS beside it (ADR-0028).
 #
 # The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
 # `version/*` tag from it (ADR-0012) — *before* it builds, so ADR-0012's `build.rs` finds a tag on
 # HEAD and bakes the same number into the binary with its commit metadata. The binary learns its
 # version as any build does; this workflow decides the number and types the tag.
 #
-# The artifacts are packed by this project's own `opamp-package-sign`, so each one is also a valid
-# package artifact for a fleet self-update (ADR-0026, ADR-0018) — the file an operator downloads is
-# the file they hand the Server.
+# The artifacts are packed by this project's own `opamp-fleetctl package pack`, so each Client archive
+# is also a valid package artifact for a fleet self-update (ADR-0026, ADR-0018) — the file an operator
+# downloads is the file they hand the Server. The operator tool's archives are not packages of the
+# fleet: they are downloaded, never uploaded (ADR-0028 clause 19).
 
 on:
   workflow_dispatch:
@@ -40,6 +42,8 @@ env:
   # published Set serve every variant build. They live in crates/fleet-agent/Cargo.toml and
   # packaging/windows/supervisor.wxs, not here.
   ARTIFACT: supervisor
+  # The operator tool's program and the stem of its archives (ADR-0028 clause 18).
+  OPERATOR_TOOL: opamp-fleetctl
 
 jobs:
   # Decides the number, makes it a tag, and proves the compiler saw it. Everything below is named
@@ -163,14 +167,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: amd64, suffix: "", native: true }
-          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true }
-          - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true }
+          # `operator_tool`: this row also builds and publishes `opamp-fleetctl` for its target
+          # (ADR-0028 clause 17). Every row builds it for its runner as the packer.
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: amd64, suffix: "", native: true, operator_tool: true }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true, operator_tool: true }
+          - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true, operator_tool: true }
           # Cross-compiled from the arm64 runner, which Apple's toolchain does natively — steadier
           # than depending on an Intel macOS runner label (ADR-0019). Nothing here can run it, so
-          # the version assertion below is skipped for this one row.
-          - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false }
-          - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: amd64, suffix: ".exe", native: true }
+          # the version assertions below are skipped for this one row.
+          - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false, operator_tool: true }
+          # No operator tool for Windows: it would need its own way to keep a key readable by its
+          # owner alone (ADR-0028).
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: amd64, suffix: ".exe", native: true, operator_tool: false }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -183,9 +191,13 @@ jobs:
         run: rustup target add ${{ matrix.target }}
       - name: Build the Client
         run: cargo build --release -p fleet-agent --bin supervisor --target ${{ matrix.target }} --locked
-      # A host build: it runs here, on this runner, to pack the artifact.
+      # A host build: it runs here, on this runner, to pack the artifacts.
       - name: Build the packer
-        run: cargo build --release -p fleet-tools --bin opamp-package-sign --locked
+        run: cargo build --release -p fleet-tools --bin opamp-fleetctl --locked
+      # A target build: the program this row publishes (ADR-0028 clause 17).
+      - name: Build the operator tool
+        if: matrix.operator_tool
+        run: cargo build --release -p fleet-tools --bin opamp-fleetctl --target ${{ matrix.target }} --locked
       - name: The binary agrees with the name it will be given
         if: matrix.native
         run: |
@@ -193,6 +205,15 @@ jobs:
           expected='${{ needs.version.outputs.full }}'
           if [ "$reported" != "$expected" ]; then
             echo "::error::this target reports $reported, the release is $expected"
+            exit 1
+          fi
+      - name: The operator tool agrees with the name it will be given
+        if: matrix.native && matrix.operator_tool
+        run: |
+          reported=$(./target/${{ matrix.target }}/release/opamp-fleetctl --version | awk '{print $NF}')
+          expected='${{ needs.version.outputs.full }}'
+          if [ "$reported" != "$expected" ]; then
+            echo "::error::this target's operator tool reports $reported, the release is $expected"
             exit 1
           fi
       - name: Pack
@@ -205,7 +226,7 @@ jobs:
           # The packer names the single member after the program — `supervisor`, which is
           # what a Client looks for in a package it is offered — and prints the SHA-256 on stdout.
           # The *file* is named after the Set (ADR-0019); the member inside it is the product.
-          sha=$(./target/release/opamp-package-sign${{ matrix.suffix }} pack \
+          sha=$(./target/release/opamp-fleetctl${{ matrix.suffix }} package pack \
             --format tar.gz \
             --out "$name" \
             "target/${{ matrix.target }}/release/supervisor${{ matrix.suffix }}")
@@ -214,6 +235,30 @@ jobs:
           # Every artifact of this row shares these four fields; only the extension differs
           # (ADR-0019 clause 32).
           echo "STEM=${name%.tar.gz}" >> "$GITHUB_ENV"
+
+      # ---- ADR-0028: the operator tool, one archive per target, named like the Client's. ----
+      - name: Pack the operator tool
+        id: pack_tool
+        if: matrix.operator_tool
+        run: |
+          set -euo pipefail
+          name="${OPERATOR_TOOL}_${{ needs.version.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz"
+          # One member, `opamp-fleetctl`, with its executable mode; the checksum joins SHA256SUMS
+          # like every other asset's.
+          sha=$(./target/release/opamp-fleetctl package pack \
+            --format tar.gz \
+            --out "$name" \
+            "target/${{ matrix.target }}/release/opamp-fleetctl")
+          echo "$sha  $name" > "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        if: matrix.operator_tool
+        with:
+          name: ${{ steps.pack_tool.outputs.name }}
+          path: |
+            ${{ steps.pack_tool.outputs.name }}
+            ${{ steps.pack_tool.outputs.name }}.sha256
+          if-no-files-found: error
 
       # ---- ADR-0019: the native installers, beside the archive and never instead of it. ----
       #
@@ -349,15 +394,39 @@ jobs:
         run: |
           cd artifacts
           cat > notes.md <<EOF
-          Client ${{ needs.version.outputs.version }} for Linux, macOS and Windows.
+          Client ${{ needs.version.outputs.version }} for Linux, macOS and Windows, and the operator tool
+          \`${{ env.OPERATOR_TOOL }}\` for Linux and macOS.
 
-          The assets come in two kinds, and picking the wrong one is the only way to get this wrong
-          (ADR-0019):
+          The assets come in three kinds, and picking the wrong one is the only way to get this wrong
+          (ADR-0019, ADR-0028):
 
           | you want to | take |
           |---|---|
           | install this on a host | the \`.deb\`, \`.rpm\` or \`.msi\` |
-          | update a fleet from its Server | the \`.tar.gz\` |
+          | update a fleet from its Server | the \`${{ env.ARTIFACT }}_*.tar.gz\` |
+          | make the fleet's certificates, a signing key and signed packages | the \`${{ env.OPERATOR_TOOL }}_*.tar.gz\` for your machine |
+
+          ## The operator tool
+
+          \`${{ env.OPERATOR_TOOL }}_${{ needs.version.outputs.version }}_<os>_<arch>.tar.gz\` holds one program,
+          \`${{ env.OPERATOR_TOOL }}\`, for the machine you operate the fleet from — Linux or macOS, amd64 or
+          arm64. It is downloaded, never uploaded to a Server: it is not a package of the fleet, and
+          no Client installs it. \`${{ env.OPERATOR_TOOL }} pki\` makes the fleet's certificates and
+          \`${{ env.OPERATOR_TOOL }} package\` fetches, packs and signs packages; the keys they make belong
+          on this machine, not on the Server host (ADR-0028).
+
+          \`\`\`console
+          tar xzf ${{ env.OPERATOR_TOOL }}_${{ needs.version.outputs.version }}_linux_amd64.tar.gz
+          ./${{ env.OPERATOR_TOOL }} --version
+          \`\`\`
+
+          It replaces \`opamp-package-fetch\`, \`opamp-package-sign\` and the Server's \`pki init\`,
+          \`pki server-cert\` and \`pki bootstrap-cert\`, with no alias: \`opamp-package-fetch …\` is
+          now \`${{ env.OPERATOR_TOOL }} package fetch …\`, \`opamp-package-sign <command> …\` is
+          \`${{ env.OPERATOR_TOOL }} package <command> …\`, and \`server pki <command> …\` is
+          \`${{ env.OPERATOR_TOOL }} pki <command> …\` with the same options; the Server keeps
+          \`server pki status --config\`. A script that uploads a release's \`*_<version>_*.tar.gz\`
+          now also catches the operator tool's archives: select \`${{ env.ARTIFACT }}_<version>_*.tar.gz\`.
 
           ## Installing on a host
 
@@ -405,8 +474,8 @@ jobs:
 
           ## Updating a fleet
 
-          Hand the \`.tar.gz\` artifacts to a Server under its release number for a Client self-update
-          (ADR-0018, ADR-0012) — the commit this build carries,
+          Hand the \`${{ env.ARTIFACT }}_*.tar.gz\` artifacts to a Server under its release number for a
+          Client self-update (ADR-0018, ADR-0012) — the commit this build carries,
           \`${{ needs.version.outputs.full }}\`, is provenance and is not compared.
 
           Upload **all** of them into **one** Package, identified by the Agent type \`supervisor\` and
@@ -418,7 +487,7 @@ jobs:
           package signing key, and roll it out; nothing reaches the fleet before that last call
           (ADR-0026). The Deployment below reaches the hosts whose \`channel\` is \`stable\`: set it in a
           host's \`[attributes]\`, or as a Server label with \`PUT /api/v1/agents/<uid>/labels\`. The
-          signatures come from \`opamp-package-sign\`, which is built from a checkout, not shipped here:
+          signatures come from the operator tool above:
 
           \`\`\`console
           api="https://<server>:4321/api/v1"   # the Operator plane: add --cacert, and -u <user> or a .netrc
@@ -426,17 +495,17 @@ jobs:
           curl -X PUT -H 'Content-Type: application/json' -d '{}' "\$api/packages/supervisor/\$v"
           curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "stable"}}' "\$api/deployments/stable"
           curl -X PUT "\$api/deployments/stable/packages/supervisor/\$v?replace=true"
-          for f in *_\${v}_*.tar.gz; do
+          for f in ${{ env.ARTIFACT }}_\${v}_*.tar.gz; do
             p=\${f%.tar.gz}; arch=\${p##*_}; os=\${p%_*}; os=\${os##*_}
             curl -X PUT --data-binary @"\$f" "\$api/packages/supervisor/\$v/entries/\$os/\$arch"
-            sig=\$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type supervisor --version "\$v" "\$f")
+            sig=\$(${{ env.OPERATOR_TOOL }} package sign --key fleet-signing.pk8 --agent-type supervisor --version "\$v" "\$f")
             curl -X PUT -H 'Content-Type: application/json' -d "{\\"signature\\": \\"\$sig\\"}" \\
                  "\$api/deployments/stable/signatures/supervisor/\$v/\$os/\$arch"
           done
           curl -X POST "\$api/deployments/stable/rollout"
           \`\`\`
 
-          Each archive holds the Client under the name it is installed as, so it needs no repacking:
+          Each Client archive holds the Client under the name it is installed as, so it needs no repacking:
           the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0026).
 
           Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
