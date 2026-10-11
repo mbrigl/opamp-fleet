@@ -306,15 +306,21 @@ deliver the same binary and run its own `service install`.
       again with a message saying that beyond the loopback the endpoint must be `wss://` or
       `https://`.
     - **The Agent `name`**, reported as `service.instance.name`.
-    - **The CA file**, only for a `wss://` or `https://` endpoint, when the Server's certificate
-      is signed by a private CA ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
-    - **The client identity**, as one of two answers, each a certificate file and its key file
-      written as `[tls] cert_file` and `key_file`: a **bootstrap certificate** and its key, with
-      which the Client enrols and waits until an operator approves its request, or a **client
-      certificate** and its key already issued by the Server's client CA. The identity is
-      required: there is no answer without one, and a path that names no readable file is asked
-      for again. It is the one proof the Server admits a peer by
-      ([ADR-0020](0020-admission-by-a-client-certificate-alone.md)).
+    - **The CA certificate of the Server**, the CA that signed the Server's certificate, written as
+      `[tls] ca_file`. It is asked for every `wss://` or `https://` endpoint, without a question
+      before it: the Server always presents a certificate of the fleet's own CA
+      ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
+    - **The bootstrap certificate and its private key**, written as `[tls] cert_file` and
+      `key_file`, with which the Client enrols and waits until an operator approves its request.
+      A certificate already issued by the Server's client CA goes in the same two keys, by
+      editing the file. The identity is required: there is no answer without one, and a path
+      that names no readable file, here or for the CA, is asked for again. It is the one proof the
+      Server admits a peer by ([ADR-0020](0020-admission-by-a-client-certificate-alone.md)).
+    - **The answered files are copied beside the written file**, as `server-ca.pem`,
+      `bootstrap.pem` and `bootstrap-key.pem`, owner-only on Unix, and the file names the copies.
+      The configuration then depends on nothing outside its own directory. A copy left by an
+      earlier install is replaced. The copies are handed over to the service account with the file
+      (clause 13).
     - **The package verification key**, the Ed25519 public key written as
       `[packages] verification_key` ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). An empty
       answer is accepted, and the install then says that the Client installs no package, its own
@@ -342,7 +348,8 @@ deliver the same binary and run its own `service install`.
 
 18. **The written file is treated as holding a secret:** mode `0600` on Unix; on Windows it
     inherits the data root's ACL, administrator-owned at system scope. It holds no credential. It
-    names where the client identity's private key lies, and it may hold `[packages] archive_key`,
+    names where the client identity's private key lies — beside it, where the questionnaire copied
+    it (clause 17), mode `0600` as well — and it may hold `[packages] archive_key`,
     the fleet's archive decryption secret, which an operator adds by editing the file the
     installer created.
 
@@ -552,7 +559,7 @@ deliver the same binary and run its own `service install`.
 
     The second `service install` is a re-install, which is idempotent and writes the configuration
     that `service install` refuses to overwrite once it exists. The first step is `--interactive`,
-    which asks for the client identity — a bootstrap certificate or an issued one, and its key —
+    which asks for the client identity — the bootstrap certificate and its private key —
     and not `--endpoint` alone: a configuration holding only an endpoint is one the Client refuses
     at startup, so printing it as the whole first step would present an unauthenticated Client as
     the default. The alternative it prints for writing the file by hand names the endpoint together
@@ -1073,8 +1080,8 @@ packaging the Server, which an operator deploys rather than the fleet.
 **Not mechanically decidable:** that the layout starts under an enforcing SELinux policy — no CI
 runner enforces it, so the manual checklist in [`README.md`](../../README.md) carries that step.
 The questionnaire's prompts (clause 17) read a terminal, which `cargo test` does not have: that no
-answer skips the client identity, that no question asks for a credential, that a certificate or key
-path naming no readable file and a refused endpoint are asked for again, and that an empty
+answer skips the client identity, that no question asks for a credential, that a CA, certificate or
+key path naming no readable file and a refused endpoint are asked for again, and that an empty
 verification key is named, are review questions on `ask` in `config_init.rs`.
 `service install` (clauses 19, 20) validates only on the way to registering a service, so the
 warnings it prints and its load of an existing file are not run by any test; the rules it applies

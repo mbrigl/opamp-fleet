@@ -25,6 +25,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   writes `[telemetry_offer]` commented out, so a development fleet without the observability stack
   running does not report into nothing. **What to do:** uncomment the section once the stack in
   `observability/` runs; an existing `.dev-pki/server.toml` keeps what it has.
+- **`service install --interactive` asks for the Server's CA and the bootstrap certificate by
+  name, and copies them beside `supervisor.toml`** — the question whether the Server's certificate
+  comes from a private CA is gone: the CA is asked for on every `wss://` or `https://` endpoint.
+  The CA, the bootstrap certificate and its key are copied into the configuration's directory as
+  `server-ca.pem`, `bootstrap.pem` and `bootstrap-key.pem`, owner-only, and the file names the
+  copies ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)).
+  **What to do:** nothing; the originals can be removed after the install. A file written before
+  keeps the paths it has.
 ## [0.5.0] - 2026-10-11
 
 ### Added

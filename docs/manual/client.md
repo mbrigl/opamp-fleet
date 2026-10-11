@@ -361,13 +361,15 @@ $ opamp-fleet service install --interactive        # root / Administrator
 No configuration at /var/lib/opamp-fleet/supervisor.toml — answering these writes it (everything else keeps its default).
 Server OpAMP endpoint [wss://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com/v1/opamp
 This Agent's name (service.instance.name) [Supervisor Agent]: host-01
-Does the Server present a certificate from a private CA? [y/N]: y
-PEM CA bundle path: /etc/opamp/ca.pem
-Client certificate — a bootstrap certificate to enrol with, or an issued one (PEM path): /etc/opamp/bootstrap.pem
-Its private key (PEM path): /etc/opamp/bootstrap-key.pem
+CA certificate of the Server — the CA that signed its certificate (PEM path): /etc/opamp/ca.pem
+Bootstrap certificate this Client enrols with (PEM path): /etc/opamp/bootstrap.pem
+Private key of the bootstrap certificate (PEM path): /etc/opamp/bootstrap-key.pem
 Package verification key (hex Ed25519 public key; empty takes no packages): 3b6a27bc…
 Allow the Server to update this Client's own binary? [Y/n]: y
 Name of the package that carries this Client [supervisor]:
+copied /var/lib/opamp-fleet/server-ca.pem
+copied /var/lib/opamp-fleet/bootstrap.pem
+copied /var/lib/opamp-fleet/bootstrap-key.pem
 wrote /var/lib/opamp-fleet/supervisor.toml
 installed opamp-fleet
 …
@@ -379,20 +381,23 @@ What it asks about is only what has no useful default here
 - **the endpoint**, suggesting `wss://127.0.0.1:4320/v1/opamp`. A `ws://` or `http://` endpoint is
   refused unless its host is `127.0.0.1` or `::1`, and the question is asked again;
 - **the Agent's name**;
-- **a private CA**, when the endpoint is `wss://` or `https://` ([`[tls]`](#tls));
-- **the client identity**, a certificate and its key: a **bootstrap certificate** to
-  [enrol](#enrolment-the-first-certificate) with, or a certificate the client CA already issued.
-  It is required, and a path that names no readable file is asked for again: the certificate is
-  the one proof the Server admits a host by;
+- **the CA certificate of the Server**, the CA that signed its certificate, whenever the endpoint
+  is `wss://` or `https://` ([`[tls]`](#tls));
+- **the bootstrap certificate and its private key**, to [enrol](#enrolment-the-first-certificate)
+  with. They are required: the certificate is the one proof the Server admits a host by. A
+  certificate the client CA already issued goes in the same `[tls]` keys, by editing the file. A
+  path that names no readable file, here or for the CA, is asked for again;
 - **the package verification key** ([`[packages]`](#packages)). An empty answer is accepted, and the
   install then says that this Client installs no package, its own update included, until a key is
   set;
 - and last, defaulting to **yes**, consent for the Server to replace this Client's own binary
   ([`[self_update]`](#self_update)).
 
-Everything else is written into the file as commented defaults. No question asks for a
-credential, and the file it writes has no `[auth]` section; on Unix the file is created mode
-`0600`.
+The CA, the certificate and the key are copied beside `supervisor.toml`, as `server-ca.pem`,
+`bootstrap.pem` and `bootstrap-key.pem`, owner-only, and the file names the copies. The originals
+can be removed afterwards. Everything else is written into the file as commented defaults. No
+question asks for a credential, and the file it writes has no `[auth]` section; on Unix the file
+is created mode `0600`.
 
 Four rules worth knowing before you script around it:
 
@@ -670,6 +675,9 @@ and macOS, and a directory junction on Windows, where junctions need no special 
 ```
 <data-root>/
   supervisor.toml           the file you edit
+  server-ca.pem             copies of the answered files, if --interactive wrote the file
+  bootstrap.pem
+  bootstrap-key.pem
   state/
     instance-uid            this host's identity to the Server
     remote-config.pb        the last configuration it received

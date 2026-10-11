@@ -177,8 +177,9 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         data_root.join(config_init::FILE_NAME)
     };
 
+    let mut copies = Vec::new();
     if args.interactive {
-        config_init::run(&config_path)?;
+        copies = config_init::run(&config_path)?;
     } else if let Some(endpoint) = &args.endpoint {
         // The same file, from an answer given rather than asked for (ADR-0019): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with
@@ -254,6 +255,8 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
         run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path])?;
+        // The copies beside a configuration named outside the data root are not under it.
+        run_as.hand_over(&copies.iter().map(PathBuf::as_path).collect::<Vec<_>>())?;
     }
 
     println!("installed {}", manager::service_name());

@@ -23,6 +23,14 @@ use crate::config::ClientConfig;
 /// `%ProgramData%` policy per platform.
 pub const FILE_NAME: &str = "supervisor.toml";
 
+/// The names the questionnaire copies the answered files to, beside [`FILE_NAME`] (ADR-0019): the
+/// Server's CA, the bootstrap certificate, and its private key.
+pub const SERVER_CA_FILE: &str = "server-ca.pem";
+/// See [`SERVER_CA_FILE`].
+pub const BOOTSTRAP_CERT_FILE: &str = "bootstrap.pem";
+/// See [`SERVER_CA_FILE`].
+pub const BOOTSTRAP_KEY_FILE: &str = "bootstrap-key.pem";
+
 /// What the questionnaire asked for. Everything else in `supervisor.toml` has a default that is right
 /// on a fresh host, and is written as a comment rather than as a value (ADR-0019).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,8 +41,9 @@ pub struct Answers {
     /// of the fleet's Clients this is. Not its `service.name`: that is the Agent *type*, the
     /// constant `supervisor` (ADR-0019), the same on every host and nothing to ask about.
     pub name: String,
-    /// A private CA for a `wss://` / `https://` endpoint (ADR-0012), or `None` for the built-in
-    /// webpki roots.
+    /// The CA that signed the Server's certificate, for a `wss://` / `https://` endpoint (ADR-0012).
+    /// The questionnaire always asks for it there; `None` for a loopback `ws://` / `http://`
+    /// endpoint, or where no question was put — a packaged install.
     pub ca_file: Option<PathBuf>,
     /// The client certificate and key this Client presents (ADR-0020): a bootstrap certificate to
     /// enrol with, or one already issued. Written as `[tls] cert_file` and `key_file` either way.
@@ -59,12 +68,16 @@ pub struct Answers {
 /// to write. The written file is left on disk even when it fails to load afterwards, so a typo is
 /// corrected by editing rather than by answering everything again.
 ///
+/// The answered CA, certificate and key are copied beside the file first, and the file names the
+/// copies ([`copy_beside`]). Returns the copies, which the install hands over to the service account
+/// with the file itself.
+///
 /// # Errors
-/// Returns an error when stdin is not a terminal, when a prompt fails, or when the file cannot be
-/// created.
-pub fn run(path: &Path) -> Result<(), String> {
+/// Returns an error when stdin is not a terminal, when a prompt fails, or when a file cannot be
+/// copied or created.
+pub fn run(path: &Path) -> Result<Vec<PathBuf>, String> {
     if keeping_existing(path) {
-        return Ok(());
+        return Ok(Vec::new());
     }
     if !std::io::stdin().is_terminal() {
         return Err(format!(
@@ -78,10 +91,83 @@ pub fn run(path: &Path) -> Result<(), String> {
         "No configuration at {} — answering these writes it (everything else keeps its default).",
         path.display()
     );
-    let answers = ask()?;
+    let (answers, copies) = copy_beside(ask()?, path)?;
+    for copy in &copies {
+        println!("copied {}", copy.display());
+    }
     write_new(path, &render(&answers))?;
     println!("wrote {}", path.display());
-    Ok(())
+    Ok(copies)
+}
+
+/// Copy the answered CA, certificate and key into the directory of the configuration at `config`,
+/// under fixed names, and return the answers naming the copies together with the copies' paths.
+///
+/// The configuration then depends on nothing outside its own directory: the files it names survive
+/// the removal of wherever the operator brought them from, and they live where the file and the
+/// state do — in the data root, which the install hands over and an uninstall keeps (ADR-0019). Each
+/// copy is written owner-only to a temporary name and renamed into place, so a reinstall replaces
+/// a copy left by an earlier one, and a file the operator already put at the target is read before
+/// anything is written there.
+///
+/// # Errors
+/// Returns an error naming the file that could not be read or written.
+pub fn copy_beside(answers: Answers, config: &Path) -> Result<(Answers, Vec<PathBuf>), String> {
+    let dir = std::path::absolute(config)
+        .map_err(|e| format!("cannot resolve {}: {e}", config.display()))?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("{} names no directory", config.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let mut copies = Vec::new();
+    let mut copy = |from: &Path, name: &str| -> Result<PathBuf, String> {
+        let to = dir.join(name);
+        copy_owner_only(from, &to)?;
+        copies.push(to.clone());
+        Ok(to)
+    };
+    let ca_file = match &answers.ca_file {
+        Some(ca) => Some(copy(ca, SERVER_CA_FILE)?),
+        None => None,
+    };
+    let identity = match &answers.identity {
+        Some((cert, key)) => Some((
+            copy(cert, BOOTSTRAP_CERT_FILE)?,
+            copy(key, BOOTSTRAP_KEY_FILE)?,
+        )),
+        None => None,
+    };
+    Ok((
+        Answers {
+            ca_file,
+            identity,
+            ..answers
+        },
+        copies,
+    ))
+}
+
+/// Copy one file to `to`, owner-only on Unix, through a temporary name beside it.
+fn copy_owner_only(from: &Path, to: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(from).map_err(|e| format!("cannot read {}: {e}", from.display()))?;
+    let partial = to.with_extension("pem.partial");
+    // A leftover from an interrupted run would make `create_new` refuse.
+    let _ = std::fs::remove_file(&partial);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+        .open(&partial)
+        .and_then(|mut file| file.write_all(&bytes))
+        .and_then(|()| std::fs::rename(&partial, to))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&partial);
+            format!("cannot write {}: {e}", to.display())
+        })
 }
 
 /// Write the first configuration from an endpoint *given* rather than asked for — the whole of
@@ -163,34 +249,6 @@ pub fn ask() -> Result<Answers, String> {
         .interact_text()
         .map_err(prompt_failed)?;
 
-    // Only worth asking when the endpoint is one TLS applies to: a private CA behind `ws://` is a
-    // question with no consequence.
-    let ca_file = if is_tls_endpoint(&endpoint)
-        && Confirm::new()
-            .with_prompt("Does the Server present a certificate from a private CA?")
-            .default(false)
-            .interact()
-            .map_err(prompt_failed)?
-    {
-        let file: String = Input::new()
-            .with_prompt("PEM CA bundle path")
-            .validate_with(|input: &String| {
-                if Path::new(input.trim()).is_file() {
-                    Ok(())
-                } else {
-                    Err("no readable file at that path".to_string())
-                }
-            })
-            .interact_text()
-            .map_err(prompt_failed)?;
-        Some(PathBuf::from(file.trim()))
-    } else {
-        None
-    };
-
-    // The client identity (ADR-0020): a bootstrap certificate this host enrols with, or one an
-    // operator already issued. Both are a certificate and its key; the Server tells them apart.
-    // There is no answer without one, and no question asks for a credential (ADR-0019).
     let readable = |input: &String| {
         if Path::new(input.trim()).is_file() {
             Ok(())
@@ -198,13 +256,31 @@ pub fn ask() -> Result<Answers, String> {
             Err("no readable file at that path".to_string())
         }
     };
+
+    // The Server's CA, asked for wherever TLS applies: the Server always presents a certificate of
+    // the fleet's own CA. A loopback `ws://` endpoint has no certificate to trust.
+    let ca_file = if is_tls_endpoint(&endpoint) {
+        let file: String = Input::new()
+            .with_prompt(
+                "CA certificate of the Server — the CA that signed its certificate (PEM path)",
+            )
+            .validate_with(readable)
+            .interact_text()
+            .map_err(prompt_failed)?;
+        Some(PathBuf::from(file.trim()))
+    } else {
+        None
+    };
+
+    // The client identity (ADR-0020): the bootstrap certificate this host enrols with. There is
+    // no answer without one, and no question asks for a credential (ADR-0019).
     let cert: String = Input::new()
-        .with_prompt("Client certificate — a bootstrap certificate to enrol with, or an issued one (PEM path)")
+        .with_prompt("Bootstrap certificate this Client enrols with (PEM path)")
         .validate_with(readable)
         .interact_text()
         .map_err(prompt_failed)?;
     let key: String = Input::new()
-        .with_prompt("Its private key (PEM path)")
+        .with_prompt("Private key of the bootstrap certificate (PEM path)")
         .validate_with(readable)
         .interact_text()
         .map_err(prompt_failed)?;
@@ -386,7 +462,7 @@ pub fn write_new(path: &Path, contents: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// Whether TLS applies to this endpoint, and a private CA is therefore worth asking about.
+/// Whether TLS applies to this endpoint, and the Server's CA is therefore asked for.
 fn is_tls_endpoint(endpoint: &str) -> bool {
     let endpoint = endpoint.trim();
     endpoint.starts_with("wss://") || endpoint.starts_with("https://")
@@ -787,6 +863,85 @@ mod tests {
         }
     }
 
+    /// The answered files land beside the configuration under fixed names, owner-only, and the
+    /// rendered file names the copies — so it loads and admits with the originals gone.
+    /// Verifies: ADR-0019
+    #[test]
+    fn the_answered_files_are_copied_beside_the_configuration() {
+        let from = tempfile::tempdir().expect("tempdir");
+        let to = tempfile::tempdir().expect("tempdir");
+        let ca = from.path().join("my-ca.pem");
+        let cert = from.path().join("boot.pem");
+        let key = from.path().join("boot-key.pem");
+        for (file, body) in [(&ca, "ca"), (&cert, "cert"), (&key, "key")] {
+            std::fs::write(file, body).expect("write");
+        }
+        let path = to.path().join(FILE_NAME);
+        let (copied, copies) = copy_beside(
+            Answers {
+                ca_file: Some(ca),
+                identity: Some((cert, key)),
+                ..answers()
+            },
+            &path,
+        )
+        .expect("copy");
+
+        let expected = [SERVER_CA_FILE, BOOTSTRAP_CERT_FILE, BOOTSTRAP_KEY_FILE]
+            .map(|name| to.path().join(name));
+        assert_eq!(copies, expected);
+        for (copy, body) in expected.iter().zip(["ca", "cert", "key"]) {
+            assert_eq!(std::fs::read_to_string(copy).expect("read"), body);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = std::fs::metadata(copy)
+                    .expect("metadata")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600, "{}", copy.display());
+            }
+        }
+
+        drop(from);
+        write_new(&path, &render(&copied)).expect("write");
+        let loaded = ClientConfig::load(&path).expect("the written file loads");
+        loaded.check_admission().expect("the copies admit");
+        let tls = loaded.tls.expect("tls");
+        assert_eq!(tls.ca_file.as_deref(), Some(expected[0].as_path()));
+        assert_eq!(tls.cert_file.as_deref(), Some(expected[1].as_path()));
+        assert_eq!(tls.key_file.as_deref(), Some(expected[2].as_path()));
+    }
+
+    /// An answer that already names the target is read before the target is written, so it is kept
+    /// rather than truncated; a copy left by an earlier install is replaced.
+    /// Verifies: ADR-0019
+    #[test]
+    fn a_copy_onto_itself_keeps_the_file_and_an_old_copy_is_replaced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let cert = dir.path().join(BOOTSTRAP_CERT_FILE);
+        let key = dir.path().join("elsewhere-key.pem");
+        std::fs::write(&cert, "cert").expect("write");
+        std::fs::write(&key, "new key").expect("write");
+        std::fs::write(dir.path().join(BOOTSTRAP_KEY_FILE), "old key").expect("write");
+
+        copy_beside(
+            Answers {
+                identity: Some((cert.clone(), key)),
+                ..answers()
+            },
+            &path,
+        )
+        .expect("copy");
+
+        assert_eq!(std::fs::read_to_string(&cert).expect("read"), "cert");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(BOOTSTRAP_KEY_FILE)).expect("read"),
+            "new key"
+        );
+    }
+
     /// Verifies: ADR-0019
     #[test]
     fn an_endpoint_is_validated_by_the_loaders_own_rule() {
@@ -798,7 +953,7 @@ mod tests {
 
     /// Verifies: ADR-0019
     #[test]
-    fn a_private_ca_is_only_asked_about_where_tls_applies() {
+    fn the_server_ca_is_asked_for_where_tls_applies() {
         assert!(is_tls_endpoint("wss://x/v1/opamp"));
         assert!(is_tls_endpoint("https://x/v1/opamp"));
         assert!(!is_tls_endpoint("ws://x/v1/opamp"));

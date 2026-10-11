@@ -250,18 +250,21 @@ Then let it write its configuration by asking you:
 $ sudo opamp-fleet service install --interactive
 Server OpAMP endpoint [wss://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com:4320/v1/opamp
 This Agent's name (service.instance.name) [Supervisor Agent]: host-01
-Does the Server present a certificate from a private CA? [y/N]: y
-PEM CA bundle path: /etc/opamp/server-ca.pem
-Client certificate — a bootstrap certificate to enrol with, or an issued one (PEM path): /etc/opamp/bootstrap.pem
-Its private key (PEM path): /etc/opamp/bootstrap-key.pem
+CA certificate of the Server — the CA that signed its certificate (PEM path): /etc/opamp/server-ca.pem
+Bootstrap certificate this Client enrols with (PEM path): /etc/opamp/bootstrap.pem
+Private key of the bootstrap certificate (PEM path): /etc/opamp/bootstrap-key.pem
 Package verification key (hex Ed25519 public key; empty takes no packages): 3b6a27bc…
 Allow the Server to update this Client's own binary? [Y/n]: y
 Name of the package that carries this Client [supervisor]:
+copied /var/lib/opamp-fleet/server-ca.pem
+copied /var/lib/opamp-fleet/bootstrap.pem
+copied /var/lib/opamp-fleet/bootstrap-key.pem
 wrote /var/lib/opamp-fleet/supervisor.toml
 ```
 
 Or write the file yourself, which suits configuration management. This is what matters of what
-the questions above write, at `/var/lib/opamp-fleet/supervisor.toml` on Linux:
+the questions above write, at `/var/lib/opamp-fleet/supervisor.toml` on Linux. The questions name
+the copies beside it; a file written by hand names the files wherever they are:
 
 ```toml
 endpoint = "wss://fleet.example.com:4320/v1/opamp"   # wss:// pushes changes; https:// polls
