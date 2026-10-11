@@ -1,5 +1,5 @@
-# One receiver, one exporter — the Collector is the only thing an Agent needs to know about, and
-# since the move to ClickHouse it is also the only thing that knows where the data lands.
+# One receiver, two exporters — the Collector is the only thing an Agent needs to know about, and
+# the only thing that knows where the data lands: ClickHouse and Apache Doris, each signal to both.
 
 receivers:
   otlp:
@@ -58,6 +58,42 @@ exporters:
       enabled: true
       queue_size: 1000
 
+  # The same data into Apache Doris, so the two stores can be compared side by side. The exporter
+  # owns this schema too, but it is not ClickHouse's: snake_case columns, attributes as VARIANT,
+  # span durations in MICROSECONDS and status codes spelled `STATUS_CODE_ERROR` — which is why the
+  # Doris dashboards are queries of their own rather than copies.
+  doris:
+    # Stream load starts at the FE, which redirects it to the BE by the address the BE registered
+    # with (compose.yaml) — reachable here because the Collector shares that network.
+    endpoint: http://doris-fe:8030
+    mysql_endpoint: doris-fe:9030   # for CREATE DATABASE/TABLE; host:port, no scheme
+    username: root
+    password: ""
+    database: otel
+    table:
+      logs: otel_logs
+      traces: otel_traces
+      metrics: otel_metrics          # a prefix: the tables are otel_metrics_gauge, _sum, …
+    create_schema: true
+    replication_num: 1               # one BE; more replicas than BEs fails every CREATE TABLE
+    # Timestamps go in as DATETIME without an offset, in this zone. UTC, because Grafana's session
+    # (provisioning/datasources) reads them as UTC; the default, the Collector's local zone, would
+    # shift every point by the host's offset.
+    timezone: UTC
+    # The same retention as ClickHouse's TTL above: one day of daily partitions.
+    history_days: 1
+    timeout: 10s
+    # Each exporter queues on its own, so a Doris that is down or slow fills its own queue and
+    # drops from it — and ClickHouse, in the same pipelines, never waits for it.
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+
   # Uncomment `debug` in a pipeline below to see what actually arrives.
   debug:
     verbosity: basic
@@ -80,12 +116,12 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [clickhouse]
+      exporters: [clickhouse, doris]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [clickhouse]
+      exporters: [clickhouse, doris]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [clickhouse]
+      exporters: [clickhouse, doris]

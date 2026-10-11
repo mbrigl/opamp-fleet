@@ -156,6 +156,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Changed
 
+- **The development observability stack runs on the host, from `observability/`,** apart from
+  the Dev Container, and keeps the fleet's own telemetry in ClickHouse and Apache Doris side by
+  side. `config/server.toml` and the `server.toml` that `scripts/dev-pki.sh` writes carry the
+  `[telemetry_offer]` that points at it, commented out, so a development fleet without the stack
+  running does not report into nothing. **What to do:** start the stack with
+  `docker compose -f observability/compose.yaml up -d`, then uncomment the section.
 - **Breaking: a host fetches from the download route only the artifact offered to its own
   Agents** ([ADR-0024](docs/adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
   An uploaded artifact is served only to a certificate whose host speaks for an Agent that a
@@ -297,6 +303,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   signatures made before keep working. An upload loop over a release's assets selects `supervisor_<version>_*.tar.gz`,
   not `*_<version>_*.tar.gz`, or it puts an `opamp-fleetctl` archive into the `supervisor`
   Package.
+- **The development `server.toml` serves the Agent plane on every interface** —
+  `scripts/dev-pki.sh` now writes `listen = "0.0.0.0:4320"`, so a Client on another machine
+  reaches a development Server. **What to do:** add the line at the top of an existing
+  `.dev-pki/server.toml`, or delete `.dev-pki/` and run the script again.
 
 ### Fixed
 
