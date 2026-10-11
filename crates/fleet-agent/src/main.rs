@@ -213,11 +213,7 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     let layout = layout::Layout::new(&layout_root);
     let program = layout::stage_current_exe(&layout)?;
 
-    let state_dir = if config.state_dir.is_absolute() {
-        config.state_dir.clone()
-    } else {
-        data_root.join(layout::STATE_DIR_NAME)
-    };
+    let state_dir = config.service_state_dir(&data_root);
 
     manager::install(&manager::InstallSpec {
         level,

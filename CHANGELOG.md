@@ -44,6 +44,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   copies ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)).
   **What to do:** nothing; the originals can be removed after the install. A file written before
   keeps the paths it has.
+### Fixed
+
+- **`service install` keeps the state directory under the data root** — a configuration that
+  names no absolute `state_dir` now gets `<data root>/state`, as
+  [ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)
+  states; before, the install took `client-state` in the working directory of the shell it ran
+  from, typically the operator's home directory. **What to do:** on a host installed that way,
+  uninstall, delete that `client-state` directory and install again; the host enrols anew.
+
 ## [0.5.0] - 2026-10-11
 
 ### Added

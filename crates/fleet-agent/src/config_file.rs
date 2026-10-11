@@ -34,6 +34,7 @@ impl ClientConfig {
         // `state_dir` defaults to the relative `client-state`, so leaving these relative would make
         // the ordinary configuration the broken one: the program would be looked for under itself,
         // and a Collector that did start could not find the configuration written for it.
+        config.state_dir_as_written = config.state_dir.clone();
         config.state_dir = absolute(&config.state_dir);
         config.supervisor_dir = config.supervisor_dir.as_deref().map(absolute);
         // Each allowed download source is held to ADR-0026's rules now, not at the first offer.
@@ -44,6 +45,20 @@ impl ClientConfig {
             }
         }
         config.checked(path)
+    }
+
+    /// The state directory a service installed from this file runs with (ADR-0019): the one the
+    /// file names when it names an absolute one, and `<data root>/state` otherwise.
+    ///
+    /// Decided on the value as written, because [`state_dir`](Self::state_dir) is already resolved
+    /// against the installing shell's working directory, which the service never shares. Meaningful
+    /// only on a configuration returned by [`load`](Self::load).
+    pub fn service_state_dir(&self, data_root: &Path) -> PathBuf {
+        if self.state_dir_as_written.is_absolute() {
+            self.state_dir_as_written.clone()
+        } else {
+            data_root.join(crate::service::layout::STATE_DIR_NAME)
+        }
     }
 
     /// What this Client must hold before it connects (ADR-0020, ADR-0019): a client certificate —
@@ -170,5 +185,43 @@ mod tests {
         leftover
             .check_admission()
             .expect("a leftover [auth] beside a certificate");
+    }
+
+    /// An installed service keeps its state in `<data root>/state` unless the file names an
+    /// absolute directory — whatever the working directory of the shell that installs. `load`
+    /// resolves a relative `state_dir` against that directory; the install must not take it.
+    /// Verifies: ADR-0019
+    #[test]
+    fn an_installed_service_keeps_its_state_under_the_data_root_unless_named_absolutely() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_root = dir.path().join("data");
+        let path = dir.path().join("supervisor.toml");
+        let installed = |text: &str| {
+            std::fs::write(&path, text).expect("write");
+            ClientConfig::load(&path)
+                .expect("load")
+                .service_state_dir(&data_root)
+        };
+
+        // The file the questionnaire writes names none: the default `client-state` is relative.
+        assert_eq!(installed(""), data_root.join("state"));
+        assert_eq!(
+            installed("state_dir = \"elsewhere\"\n"),
+            data_root.join("state")
+        );
+        // Absent file, defaults: the same.
+        assert_eq!(
+            ClientConfig::load(&dir.path().join("absent.toml"))
+                .expect("defaults")
+                .service_state_dir(&data_root),
+            data_root.join("state")
+        );
+
+        let named = dir.path().join("named-state");
+        assert_eq!(
+            installed(&format!("state_dir = '{}'\n", named.display())),
+            named,
+            "an absolute state_dir is the operator's choice and is kept"
+        );
     }
 }
