@@ -300,10 +300,10 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `--user` | every `service` action | Target the current user's service manager instead of the system one. Useful in development; the default is a system service that starts at boot. |
-| `--root <dir>` | `service install` | The layout root: `versions/` and the `current` pointer. Given alone it also takes the data — `supervisor.toml` and `state/` — so everything lands under the one directory you named, whose file labeling is then yours to manage. Without it the defaults apply per platform and scope, and on Linux system installs they are two directories: `/opt/opamp-fleet` for the layout, `/var/lib/opamp-fleet` for the data, because SELinux never lets systemd start a binary labeled for `/var/lib`. macOS uses `/Library/Application Support/opamp-fleet`, Windows `%ProgramData%\opamp-fleet`, and user scope the user's own data directory — one directory each. No path is ever fixed. See [On-disk layout](#on-disk-layout). |
-| `--data-root <dir>` | `service install` | The data root — `supervisor.toml` and `state/` — when it is to differ from the layout root. A packaged install, the MSI included, passes neither flag and takes the platform defaults. |
-| `--interactive` | `service install` | Ask for the settings a fresh host cannot guess and write the configuration file before registering the service. See below. |
-| `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file just as `--interactive` does. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: those are files the operator puts on the host and names in the file. |
+| `--root <dir>` | `service install`, `service config` | The layout root: `versions/` and the `current` pointer. Given alone it also takes the data — `supervisor.toml` and `state/` — so everything lands under the one directory you named, whose file labeling is then yours to manage. Without it the defaults apply per platform and scope, and on Linux system installs they are two directories: `/opt/opamp-fleet` for the layout, `/var/lib/opamp-fleet` for the data, because SELinux never lets systemd start a binary labeled for `/var/lib`. macOS uses `/Library/Application Support/opamp-fleet`, Windows `%ProgramData%\opamp-fleet`, and user scope the user's own data directory — one directory each. No path is ever fixed. See [On-disk layout](#on-disk-layout). |
+| `--data-root <dir>` | `service install`, `service config` | The data root — `supervisor.toml` and `state/` — when it is to differ from the layout root. A packaged install, the MSI included, passes neither flag and takes the platform defaults. |
+| `--interactive` | `service install` | Ask for the settings a fresh host cannot guess, write or edit the configuration file, and enrol a host that holds no certificate yet, before registering the service. See below. |
+| `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file untouched. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: those are files the operator puts on the host and names in the file. |
 | `--run-as <account>` | `service install` | Run the service as this account instead of root/`LocalSystem`, and hand its files over to it. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
 
 ### Running it under its own account
@@ -350,56 +350,96 @@ Two consequences to weigh before using it:
 Re-running `install` with a different `--run-as` re-registers and re-owns the same directories;
 without the flag it registers exactly as before — root/`LocalSystem`, no handover.
 
-### The first configuration, on a host that has none
+### The questionnaire: `--interactive` and `service config`
 
 A release artifact is the bare binary, so a freshly downloaded Client has no `supervisor.toml` to
 edit. Without one it still installs, but the service refuses to start: the defaults hold no client
-certificate. `--interactive` is the way past that:
+certificate. `--interactive` is the way past that. It needs the Server reachable and its
+[enrolment window](setup.md#5-enrol-the-client) open, because it enrols the host before it
+registers the service:
 
 ```console
 $ opamp-fleet service install --interactive        # root / Administrator
 No configuration at /var/lib/opamp-fleet/supervisor.toml — answering these writes it (everything else keeps its default).
 Server OpAMP endpoint [wss://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com/v1/opamp
 This Agent's name (service.instance.name) [Supervisor Agent]: host-01
-Does the Server present a certificate from a private CA? [y/N]: y
-PEM CA bundle path: /etc/opamp/ca.pem
-Client certificate — a bootstrap certificate to enrol with, or an issued one (PEM path): /etc/opamp/bootstrap.pem
-Its private key (PEM path): /etc/opamp/bootstrap-key.pem
+CA certificate of the Server — the CA that signed its certificate (PEM path): /etc/opamp/ca.pem
+Bootstrap certificate this Client enrols with (PEM path): /etc/opamp/bootstrap.pem
+Private key of the bootstrap certificate (PEM path): /etc/opamp/bootstrap-key.pem
 Package verification key (hex Ed25519 public key; empty takes no packages): 3b6a27bc…
+copied /var/lib/opamp-fleet/server-ca.pem
 wrote /var/lib/opamp-fleet/supervisor.toml
+enrolling with wss://fleet.example.com/v1/opamp: an operator approves this host's request by the key fingerprint logged below (Ctrl-C stops waiting)
+INFO certificate request generated; an enrolling host waits for an operator's approval key_fingerprint=3f9a…
+enrolled: the issued certificate is in /var/lib/opamp-fleet/state
 installed opamp-fleet
 …
 ```
 
-What it asks about is only what has no useful default here
+`service config` asks the same questions of an installed Client and registers nothing. Each
+question offers what the file holds as its default, so Enter keeps it; afterwards restart the
+service to apply what changed:
+
+```console
+$ opamp-fleet service config                       # root / Administrator
+Editing /var/lib/opamp-fleet/supervisor.toml — Enter keeps the value shown (everything not asked stays as it is).
+Server OpAMP endpoint [wss://fleet.example.com/v1/opamp]:
+This Agent's name (service.instance.name) [host-01]: web-01
+CA certificate of the Server — the CA that signed its certificate (PEM path) [/var/lib/opamp-fleet/server-ca.pem]:
+enrolled: this Client holds a certificate the Server issued
+Package verification key (hex Ed25519 public key; - removes it) [3b6a27bc…]:
+copied /var/lib/opamp-fleet/server-ca.pem
+wrote /var/lib/opamp-fleet/supervisor.toml
+restart the service to apply: supervisor service stop && supervisor service start
+```
+
+It finds the file the way `install` does: `--config` when you name one, and otherwise
+`supervisor.toml` in the data root of the scope — pass the `--user`, `--root` and `--data-root`
+the Client was installed with. The file has to load before anything is asked; one that does not
+parse is corrected by hand, and the error names it.
+
+What the questionnaire asks about is only what has no useful default on a fresh host
 ([ADR-0019](../adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)):
 
 - **the endpoint**, suggesting `wss://127.0.0.1:4320/v1/opamp`. A `ws://` or `http://` endpoint is
   refused unless its host is `127.0.0.1` or `::1`, and the question is asked again;
 - **the Agent's name**;
-- **a private CA**, when the endpoint is `wss://` or `https://` ([`[tls]`](#tls));
-- **the client identity**, a certificate and its key: a **bootstrap certificate** to
-  [enrol](#enrolment-the-first-certificate) with, or a certificate the client CA already issued.
-  It is required, and a path that names no readable file is asked for again: the certificate is
-  the one proof the Server admits a host by;
+- **the CA certificate of the Server**, the CA that signed its certificate, whenever the endpoint
+  is `wss://` or `https://` ([`[tls]`](#tls)). It is copied beside `supervisor.toml` as
+  `server-ca.pem`, owner-only, and the file names the copy; the original can be removed
+  afterwards;
+- **the bootstrap certificate and its private key, only while the host is not enrolled** — while
+  its state directory holds no `client-cert.pem` and `client-key.pem`. They are neither copied nor
+  written into the file: the questionnaire [enrols](#enrolment-the-first-certificate) with them
+  where they lie, logs the request's key fingerprint and waits until an operator approves it, then
+  stores the issued certificate in the state directory. Ctrl-C stops the wait; the file stays
+  written, nothing is registered, and running the questionnaire again asks again and resumes the
+  same request, printing its fingerprint. A request an operator rejected stays rejected: the
+  Server's refusal is logged and the wait goes on, so stop it, delete `client-key.pending.pem` and
+  `client-csr.pending.pem` from the state directory, and run the questionnaire again for a fresh
+  request. A path that names no readable file, here or for the CA, is asked for again;
 - **the package verification key** ([`[packages]`](#packages)). It also decides whether the Server
-  may update this Client: the file is written with `self_update = true`, which takes effect once a
-  key is set. An empty answer is accepted, and the install then says that this Client installs no
-  package, its own update included, until a key is set.
+  may update this Client: a new file is written with `self_update = true`, which takes effect once
+  a key is set. An empty answer is accepted, and the questionnaire then says that this Client
+  installs no package, its own update included, until a key is set. Where the file holds a key,
+  `-` removes it.
 
-Everything else is written into the file as commented defaults. No question asks for a
-credential, and the file it writes has no `[auth]` section; on Unix the file is created mode
-`0600`.
+A new file gets everything else as commented defaults. An existing file is edited in place: only
+the keys asked about change, and every other key, every comment, the `[[supervisor]]` blocks and
+the self-update consent stay as you wrote them. No question asks for a credential, and the
+questionnaire writes no `[auth]` section; on Unix the file is mode `0600` and keeps its owner.
 
 Four rules worth knowing before you script around it:
 
-- **Interactivity is never assumed.** Without the flag, `install` asks nothing. It prints a warning
-  when the path it is about to bake into the unit holds no file, or a file without a client
-  certificate.
-- **An existing file is kept, never overwritten.** Re-running `--interactive` on a configured host
-  says so and carries on, so a re-install cannot eat the answers typed into the first one, or the edits made since.
-- **No terminal, no questionnaire.** `--interactive` in a provisioning run, a container build, or a
-  pipeline fails with a message instead of blocking forever on an answer nobody can give.
+- **Interactivity is never assumed.** Without the flag, `install` asks nothing and never touches
+  an existing file. It prints a warning when the path it is about to bake into the unit holds no
+  file, or a file without a client certificate.
+- **Defaults are what is there.** Re-running `--interactive` or `service config` on a configured
+  host offers every answer typed into the first one, or edited since, and keeps whatever it does
+  not ask about.
+- **No terminal, no questionnaire.** `--interactive` or `service config` in a provisioning run, a
+  container build, or a pipeline fails with a message instead of blocking forever on an answer
+  nobody can give.
 - **Where it writes:** the path from `--config` when you name one, and otherwise
   `supervisor.toml` inside the data root. The file is validated by the ordinary loader before the
   service is registered; a file that does not parse, or a plaintext endpoint off the loopback,
@@ -667,6 +707,7 @@ and macOS, and a directory junction on Windows, where junctions need no special 
 ```
 <data-root>/
   supervisor.toml           the file you edit
+  server-ca.pem             the copy of the answered CA, if the questionnaire wrote the file
   state/
     instance-uid            this host's identity to the Server
     remote-config.pb        the last configuration it received
@@ -855,9 +896,11 @@ transports, to its Server's own origin and to no other host.
 
 #### Enrolment: the first certificate
 
-A fresh host is given a bootstrap certificate and its key, written as `cert_file` and `key_file`.
-The bootstrap certificate comes from the CA the Server names in `[enrolment] bootstrap_ca_file`.
-Enrolment then runs like this:
+A fresh host is given a bootstrap certificate and its key. The bootstrap certificate comes from the
+CA the Server names in `[enrolment] bootstrap_ca_file`. The [questionnaire](#the-questionnaire---interactive-and-service-config)
+enrols with the pair where it lies before the service is registered, and copies neither file; a
+file written by hand names the pair as `cert_file` and `key_file`, and the service enrols when it
+starts. Enrolment runs the same either way:
 
 1. An operator opens the Server's enrolment window (see
    [the Server](server.md#enrolment-a-new-host-approved-by-an-operator)).

@@ -96,6 +96,11 @@ pub struct ClientConfig {
     /// creates it. `None` only for a configuration never loaded from a path (tests, defaults).
     #[serde(skip)]
     pub path: Option<PathBuf>,
+    /// `state_dir` as the file wrote it, before [`load`](Self::load) resolved it against the
+    /// working directory — what an install decides on (see
+    /// [`service_state_dir`](Self::service_state_dir)).
+    #[serde(skip)]
+    pub state_dir_as_written: PathBuf,
     /// The largest OpAMP message the Client accepts or sends, on either transport and in either
     /// direction — the Supervisor Endpoint included. The Baseline requires the limit, recommends
     /// this default, and asks that it be configurable.
@@ -905,6 +910,7 @@ impl Default for ClientConfig {
             package_key: None,
             source: None,
             path: None,
+            state_dir_as_written: default_state_dir(),
             max_message_size_bytes: default_max_message_size(),
             max_artifact_size_bytes: default_max_artifact_size(),
             supervisors: Vec::new(),

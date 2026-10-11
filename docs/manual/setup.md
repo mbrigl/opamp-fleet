@@ -103,7 +103,7 @@ What it makes, so you need not:
   carries every `--name`, and always `127.0.0.1` and `::1` as well, so your browser and `curl`
   reach the Operator plane through an SSH tunnel (step 2). A wildcard or a name that is neither a
   DNS name nor an address is refused.
-- **A bootstrap certificate** valid for 10 days. It is short-lived on purpose: anyone who copies it
+- **A bootstrap certificate** valid for 30 days. It is short-lived on purpose: anyone who copies it
   can ask for a certificate, and what stops them is that a request also needs an open window and
   your approval. Its serial is printed, because that is what revokes it (step 6).
 - **Keys the Server can read:** ECDSA P-256 in PKCS#8, the one form the client CA's key must have.
@@ -244,22 +244,35 @@ them.
 
 **Install the Client** from the release's `.deb`, `.rpm` or `.msi`. The package registers the
 service and leaves it stopped (see [Installing from a native package](client.md#installing-from-a-native-package)).
-Then let it write its configuration by asking you:
+Then let it write its configuration by asking you. The questions end with the host's enrolment,
+so first **open the enrolment window** as [step 5](#5-enrol-the-client) shows, and have the
+**Enrolments** tab at hand to approve the request the install waits for:
 
 ```console
 $ sudo opamp-fleet service install --interactive
 Server OpAMP endpoint [wss://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com:4320/v1/opamp
 This Agent's name (service.instance.name) [Supervisor Agent]: host-01
-Does the Server present a certificate from a private CA? [y/N]: y
-PEM CA bundle path: /etc/opamp/server-ca.pem
-Client certificate — a bootstrap certificate to enrol with, or an issued one (PEM path): /etc/opamp/bootstrap.pem
-Its private key (PEM path): /etc/opamp/bootstrap-key.pem
+CA certificate of the Server — the CA that signed its certificate (PEM path): /etc/opamp/server-ca.pem
+Bootstrap certificate this Client enrols with (PEM path): /etc/opamp/bootstrap.pem
+Private key of the bootstrap certificate (PEM path): /etc/opamp/bootstrap-key.pem
 Package verification key (hex Ed25519 public key; empty takes no packages): 3b6a27bc…
+copied /var/lib/opamp-fleet/server-ca.pem
 wrote /var/lib/opamp-fleet/supervisor.toml
+enrolling with wss://fleet.example.com:4320/v1/opamp: an operator approves this host's request by the key fingerprint logged below (Ctrl-C stops waiting)
+INFO certificate request generated; an enrolling host waits for an operator's approval key_fingerprint=3f9a…
+enrolled: the issued certificate is in /var/lib/opamp-fleet/state
+installed opamp-fleet
 ```
 
-Or write the file yourself, which suits configuration management. This is what matters of what
-the questions above write, at `/var/lib/opamp-fleet/supervisor.toml` on Linux:
+Approve the fingerprint it logs, as step 5 describes, and the install carries on. The bootstrap
+pair is used only for this request: it is not copied, and `/etc/opamp/bootstrap*.pem` can be
+removed afterwards. Later changes go through `sudo opamp-fleet service config`, which asks the same
+questions with the current values as defaults
+([The questionnaire](client.md#the-questionnaire---interactive-and-service-config)).
+
+Or write the file yourself, which suits configuration management. This is what matters of a file
+written by hand, at `/var/lib/opamp-fleet/supervisor.toml` on Linux. It names the bootstrap pair,
+and the service enrols with it when it starts:
 
 ```toml
 endpoint = "wss://fleet.example.com:4320/v1/opamp"   # wss:// pushes changes; https:// polls
@@ -280,15 +293,16 @@ A few things worth knowing about these keys:
   other CA. Leave it out only when the Server's certificate comes from a public CA.
 - **`name` becomes the certificate's subject.** The certificate the Server issues carries it as its
   common name, and the fleet view shows it.
-- **The bootstrap pair stays in the file after enrolment.** Once the host holds an issued
+- **A bootstrap pair in the file stays there after enrolment.** Once the host holds an issued
   certificate, it stores the certificate in its state directory as `client-cert.pem` and
   `client-key.pem` and uses that pair instead. The bootstrap pair is what it falls back to if you
-  delete them.
+  delete them. A file the questionnaire wrote names no pair.
 - **A host that should run agents** gets `[[supervisor]]` blocks: see
   [Supervisors](client.md#supervisors-putting-a-process-under-management). Enrol it first, then add
   them.
 
-Do not start the service yet: the enrolment window is still closed.
+A host configured by hand does not start yet: the enrolment window is still closed. A host the
+questionnaire enrolled is ready; start it with `sudo systemctl start opamp-fleet`.
 
 ## 5. Enrol the Client
 
@@ -300,7 +314,8 @@ $ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' \
 {"open":true,"until_ms":…}
 ```
 
-**Start the Client** and read the key fingerprint it logs:
+**Start a Client configured by hand** and read the key fingerprint it logs. A Client the
+questionnaire enrols logs the fingerprint on the terminal it runs on:
 
 ```console
 $ sudo systemctl start opamp-fleet
@@ -347,12 +362,13 @@ certificate has expired, and the Client keeps presenting it. To enrol it again:
 
 1. On the host, stop the service and delete `client-cert.pem` and `client-key.pem` from its state
    directory (`/var/lib/opamp-fleet/state/` on Linux), and `client-key.pending.pem` and
-   `client-csr.pending.pem` if they are there. The Client then falls back to the bootstrap pair in
-   `supervisor.toml`, and logs the fingerprint of a fresh key once it reaches the Server with the
-   window open.
-2. If that bootstrap certificate has expired too, make a fresh one, as the next paragraph but one
-   shows, and replace it.
-3. Open the window, start the service, and approve the fingerprint, as in step 5.
+   `client-csr.pending.pem` if they are there.
+2. If the bootstrap certificate has expired too, make a fresh one, as the next paragraph but one
+   shows.
+3. Open the window, run `sudo opamp-fleet service config`, which asks for the bootstrap pair again
+   now that the host holds no certificate, and approve the fingerprint it logs, as in step 5. Then
+   start the service. A host whose `supervisor.toml` names the bootstrap pair can instead simply be
+   started, and logs the fingerprint once it reaches the Server.
 
 **To shut a host out**, revoke its certificate by serial. The Server closes its sessions at once,
 refuses it from then on, and no renewal of that certificate is accepted either. A host that has

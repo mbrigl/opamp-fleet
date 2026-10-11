@@ -140,6 +140,73 @@ async fn an_enrolment_needs_no_heartbeat() {
     .await;
 }
 
+/// The questionnaire's enrolment (ADR-0019 clause 17) carries a host to its first certificate with
+/// the bootstrap pair where it lies: it returns once an operator approved the request, the issued
+/// certificate is in the state directory, and nothing was copied beside the configuration.
+/// Verifies: ADR-0019
+#[tokio::test]
+async fn the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_nothing() {
+    let served = Served::start(600).await;
+    let pki = served.dir.path();
+    let data_root = pki.join("data");
+    std::fs::create_dir_all(&data_root).expect("data root");
+    let config_path = data_root.join("supervisor.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "endpoint = \"wss://localhost:{}/v1/opamp\"\nstate_dir = {:?}\n\
+             [tls]\nca_file = {:?}\n",
+            served.port,
+            served.state_dir.display().to_string(),
+            pki.join("client-ca.pem").display().to_string(),
+        ),
+    )
+    .expect("write");
+    let config = fleet_agent::config::ClientConfig::load(&config_path).expect("load");
+    assert!(!config.is_enrolled());
+
+    let (_stop, shutdown) = fleet_agent::shutdown::shutdown_channel();
+    let enrolling = tokio::spawn(fleet_agent::service::enrol::enrol(
+        config,
+        fleet_agent::config_init::Bootstrap {
+            cert: pki.join("bootstrap.pem"),
+            key: pki.join("bootstrap-key.pem"),
+        },
+        shutdown,
+    ));
+    let id = until("an enrolment request", Duration::from_secs(20), || {
+        served
+            .enrolment
+            .pending()
+            .first()
+            .map(|pending| pending.id.clone())
+    })
+    .await;
+    assert_eq!(
+        fleet_agent::csr::pending_fingerprint(&served.state_dir).as_deref(),
+        Some(id.as_str()),
+        "a resumed enrolment prints the id the operator approves by"
+    );
+    served.state.approve_enrolment(&id).expect("approve");
+    tokio::time::timeout(Duration::from_secs(20), enrolling)
+        .await
+        .expect("the enrolment ends once the certificate is stored")
+        .expect("task")
+        .expect("enrolled");
+
+    assert!(held(&served.state_dir).is_some(), "the issued certificate");
+    let config = fleet_agent::config::ClientConfig::load(&config_path).expect("load");
+    assert!(config.is_enrolled());
+    config
+        .check_admission()
+        .expect("the service starts on the issued certificate alone");
+    let beside: Vec<_> = std::fs::read_dir(&data_root)
+        .expect("list")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(beside, ["supervisor.toml"], "nothing copied beside it");
+}
+
 /// Enrols the real Client and lets it renew once, checking after each step that the register holds
 /// one certificate per step, and that the one an approval issued is registered under the key
 /// fingerprint the request was listed and approved by.

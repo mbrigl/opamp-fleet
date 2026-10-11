@@ -74,6 +74,17 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// The SHA-256 fingerprint of the key a request in flight asks to be certified — the one logged
+/// when the request was generated, and the `id` the Server's queue lists it under (ADR-0021
+/// clause 22). `None` when no request is in flight or its key cannot be read.
+#[must_use]
+pub fn pending_fingerprint(state_dir: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let pem = std::fs::read_to_string(state_dir.join(PENDING_KEY_FILE)).ok()?;
+    let key = KeyPair::from_pem(&pem).ok()?;
+    Some(hex::encode(Sha256::digest(key.public_key_raw())))
+}
+
 /// The request in flight, if one is: its key and its CSR are both on disk.
 fn pending(config: &ClientConfig) -> Option<Vec<u8>> {
     if !config.state_dir.join(PENDING_KEY_FILE).exists() {

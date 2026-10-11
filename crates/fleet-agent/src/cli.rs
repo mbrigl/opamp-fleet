@@ -127,13 +127,19 @@ pub struct RunArgs {
     pub service: bool,
 }
 
-/// Service-lifecycle actions (`service install|uninstall|start|stop|status`).
+/// Service-lifecycle actions (`service install|config|uninstall|start|stop|status`).
 #[derive(Debug, Subcommand)]
 pub enum ServiceAction {
     // ADR-0019 decides the layout this lays out.
     /// Register this instance as a system (or `--user`) service and lay out the versioned
     /// install.
     Install(InstallArgs),
+    // ADR-0019 clauses 15–17.
+    /// Ask the questionnaire of `install --interactive` again, offering what the configuration
+    /// holds as the defaults, and enrol with the Server if this Client holds no certificate yet.
+    ///
+    /// Registers nothing. Restart the service afterwards to apply what changed.
+    Config(ConfigArgs),
     /// Deregister the service (the install layout and state are never deleted).
     Uninstall(ScopeArgs),
     /// Start the installed service.
@@ -169,12 +175,13 @@ pub struct InstallArgs {
     #[arg(long)]
     pub data_root: Option<PathBuf>,
     // ADR-0019.
-    /// Ask for the settings a fresh host cannot guess and write the configuration file before
-    /// registering the service.
+    /// Ask for the settings a fresh host cannot guess, write the configuration file, and enrol
+    /// this host with the Server if it holds no certificate yet, before registering the service.
     ///
     /// Off by default, because `install` is the command a provisioning run invokes and it must
-    /// never block on a question. An existing file is kept, never overwritten. With no terminal
-    /// on stdin this fails rather than waiting for an answer that cannot come.
+    /// never block on a question. An existing file is edited in place, each question offering what
+    /// it holds. With no terminal on stdin this fails rather than waiting for an answer that cannot
+    /// come.
     #[arg(long)]
     pub interactive: bool,
     // ADR-0019.
@@ -182,11 +189,11 @@ pub struct InstallArgs {
     ///
     /// The non-interactive half of `--interactive`, for an install driven by a packaged installer:
     /// the MSI's endpoint dialog and a `.deb`/`.rpm` post-install both have an answer and no
-    /// terminal. An existing file is kept, never overwritten, exactly as with `--interactive`.
+    /// terminal. An existing file is kept, never overwritten.
     ///
-    /// Only the endpoint. The client identity is a certificate and its key already on the host:
-    /// name them in the file afterwards as `[tls] cert_file` and `key_file`, or use
-    /// `--interactive`.
+    /// Only the endpoint. The client identity comes from an enrolment: name a bootstrap
+    /// certificate and its key in the file afterwards as `[tls] cert_file` and `key_file`, or run
+    /// `service config`.
     #[arg(long, value_name = "URL", conflicts_with = "interactive")]
     pub endpoint: Option<String>,
     // ADR-0018.
@@ -214,6 +221,30 @@ pub struct InstallArgs {
     /// stand in the process list and in the installer log (ADR-0019).
     #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub run_as: Option<String>,
+}
+
+/// Arguments for `service config`: where the installed configuration is, named as `install`
+/// named it (ADR-0019 clause 15).
+#[derive(Debug, clap::Args)]
+pub struct ConfigArgs {
+    /// System or `--user` scope.
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+    /// The `--root` the Client was installed with; alone it is also the data root.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+    /// The `--data-root` the Client was installed with.
+    #[arg(long)]
+    pub data_root: Option<PathBuf>,
+}
+
+impl ConfigArgs {
+    /// The data root these flags name, if they name one: `--data-root`, else `--root`, the way
+    /// `install` resolves them (ADR-0019 clause 8).
+    #[must_use]
+    pub fn data_root(&self) -> Option<&PathBuf> {
+        self.data_root.as_ref().or(self.root.as_ref())
+    }
 }
 
 /// Whether an action targets the system service or the current user's service.
@@ -363,6 +394,37 @@ mod tests {
         ]);
         assert_eq!(args.root, Some(PathBuf::from("/opt/opamp-fleet")));
         assert_eq!(args.data_root, Some(PathBuf::from("/var/lib/opamp-fleet")));
+    }
+
+    /// `service config` finds the configuration with the flags `install` took, `--data-root`
+    /// winning over `--root` exactly as there.
+    /// Verifies: ADR-0019
+    #[test]
+    fn config_takes_the_install_roots() {
+        let config = |args: &[&str]| match parse(args).command {
+            Some(Command::Service {
+                action: ServiceAction::Config(config),
+            }) => config,
+            other => panic!("expected `service config`, parsed {other:?}"),
+        };
+        let bare = config(&["client", "service", "config"]);
+        assert!(!bare.scope.user);
+        assert_eq!(bare.data_root(), None);
+
+        let root = config(&["client", "service", "config", "--user", "--root", "/opt/x"]);
+        assert!(root.scope.user);
+        assert_eq!(root.data_root(), Some(&PathBuf::from("/opt/x")));
+
+        let both = config(&[
+            "client",
+            "service",
+            "config",
+            "--root",
+            "/opt/x",
+            "--data-root",
+            "/var/lib/x",
+        ]);
+        assert_eq!(both.data_root(), Some(&PathBuf::from("/var/lib/x")));
     }
 
     /// ADR-0019: interactivity is something the operator asks for. Every invocation that existed
