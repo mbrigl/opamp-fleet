@@ -30,8 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+      # fleet-tools too: the release packs every Client archive with `opamp-fleetctl`, Windows
+      # included, and publishes it for macOS (ADR-0025).
       - name: Clippy
-        run: cargo clippy -p fleet-agent --all-targets --locked -- -D warnings
+        run: cargo clippy -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test -p fleet-agent --locked
 

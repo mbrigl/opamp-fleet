@@ -75,7 +75,7 @@ mod unix_attributes {
 /// The `windows_attributes` value that carries `mode` as a regular file's Unix mode.
 ///
 /// The full `st_mode` goes in, file-type bits and all, because that is what `stat` hands 7-Zip and
-/// what the link check on the way back out reads. Used by `opamp-package-sign pack`; kept here
+/// what the link check on the way back out reads. Used by `opamp-fleetctl package pack`; kept here
 /// beside the code that decodes it, so the convention has one definition rather than two that can
 /// drift apart.
 #[must_use]

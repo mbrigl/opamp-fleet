@@ -150,15 +150,17 @@ it (AGENTS.md links here).
   [`interop/README.md`](interop/README.md) says what it covers and how a red run is triaged
   (ADR-0010)
 - **Make development certificates:** `scripts/dev-pki.sh` — both binaries refuse to run without
-  TLS (ADR-0012); it writes a CA, a Server certificate for `127.0.0.1`, an Agent certificate, and a
-  `server.toml` and `supervisor.toml` that use them to `.dev-pki/`. The VS Code launch
-  configurations run it when `.dev-pki/` has no configuration yet
+  TLS (ADR-0012); it runs the operator tool's `opamp-fleetctl pki init` (ADR-0025), no other tool,
+  and writes the set and a `server.toml` and `supervisor.toml` that use it to `.dev-pki/`. The
+  development Client enrols with the bootstrap certificate; `scripts/seed_test_configs.sh --enrol` approves it.
+  The VS Code launch configurations run it when `.dev-pki/` has no configuration yet
 - **Run the Server:** `cargo run -p fleet-server -- --config .dev-pki/server.toml`
 - **Run the Client:** `cargo run -p fleet-agent -- --config .dev-pki/supervisor.toml`
-- **Run an operator tool:** `cargo run --bin opamp-package-fetch` (fetch a known agent's release
-  and hand it to the Server) or `cargo run --bin opamp-package-sign -- --help` (build, hash, and
-  sign an artifact out of any program) — both documented in
-  [the manual](docs/manual/tools.md). A release does not ship them: build them from a checkout.
+- **Run the operator tool:** `cargo run --bin opamp-fleetctl -- package fetch` (fetch a known
+  agent's release and hand it to the Server), `cargo run --bin opamp-fleetctl -- package --help`
+  (build, hash, and sign an artifact out of any program) or `cargo run --bin opamp-fleetctl -- pki
+  --help` (the fleet's certificates) — documented in [the manual](docs/manual/tools.md). Every
+  release also publishes it for Linux and macOS (ADR-0025).
 
 Both binaries read a TOML configuration file ([ADR-0009](docs/adr/0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md));
 every setting has a default except the TLS material, without which neither starts. The annotated

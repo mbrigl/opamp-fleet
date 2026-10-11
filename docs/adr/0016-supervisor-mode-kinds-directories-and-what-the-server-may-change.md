@@ -1,7 +1,7 @@
 # ADR-0016: Supervisor Mode is a hexagonal core whose compiled-in kinds are the authority on their own agents, each Supervisor owns one directory and runs only a program installed there, and the Server manages the set and each Supervisor's configuration only as far as the package signature and the host allow
 
 - **Status:** 🟢 accepted
-- **Date:** 2026-10-06
+- **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and the delivered-block check (`check_delivered_block`) each kind states, the Client's own Agent in `build_engine`, the capability set and the handling of a received or stored remote configuration of the Client's own Agent and of a Supervisor's Agent in agent.rs), crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` and `remote_config_disabled` keys), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[[supervisor]]` blocks and the `[supervisors]` section of supervisor.toml (among them `delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`), the artifact documents under docs/artifacts/ each wrapped kind adds
 
@@ -30,7 +30,7 @@ timeout, and watchdog-restarts it with exponential backoff. It configures its ag
 an absolute `agent.executable` plus `args` — because it supervises a binary somebody else
 installed. This Client is in the opposite position: it installs every program it supervises, into
 a directory it owns, from an artifact this project packs (clauses 21 and 24). It is the one end that can know an
-agent's layout, and `opamp-package-fetch` already carries per-agent knowledge (service name,
+agent's layout, and `opamp-fleetctl package fetch` already carries per-agent knowledge (service name,
 release source, default Configuration names). Writing that knowledge into every host's TOML by
 hand — one block per platform for an agent whose invocation differs by platform, one key per
 layout path for an agent that has to be relocated — is a transcription that goes stale when an
@@ -353,7 +353,7 @@ remote configuration and run only on what the operator placed on the host.
     ([ADR-0010](0010-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)) and Selectors do not match it.
 
 19. **A kind binds itself to one artifact's shape.** The derived paths are those of the artifact
-    `opamp-package-fetch` builds. A tree packed differently does not fit, and the answer is to
+    `opamp-fleetctl package fetch` builds. A tree packed differently does not fit, and the answer is to
     repack it with the tool, not to reopen a key.
 
 20. **Every wrapped agent has an artifact document, pinned by two tests.** The shape a kind runs
@@ -1097,7 +1097,7 @@ Windows through a job object.
   `a_collector_supervisor_passes_each_config_entry_as_a_config_flag`,
   `sigterm_stops_the_managed_process_and_the_client_cleanly` (`crates/fleet-agent/tests/supervisor.rs`).
 - Artifact documents (clause 20): each wrapped kind's ADR names the two tests that pin its
-  document, one in the kind's module and one in `crates/fleet-tools/src/bin/opamp-package-fetch.rs`. Each names its
+  document, one in the kind's module and one in `crates/fleet-tools/src/fetch.rs`. Each names its
   document.
 - Preflight (clause 57): `a_package_that_cannot_run_here_is_refused_without_stopping_what_runs`
   (`crates/fleet-agent/tests/supervisor_process.rs`) and

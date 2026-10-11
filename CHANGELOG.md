@@ -17,6 +17,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Added
 
+- **The fleet's certificates without `openssl`, and a warning before one ends**
+  ([ADR-0025](docs/adr/0025-one-operator-program-that-makes-the-fleets-certificates.md)).
+  `opamp-fleetctl pki init` makes the server CA, the client CA and the bootstrap CA, the Server's
+  certificate and a bootstrap certificate valid for 10 days, split into a directory for the Server
+  host and one that stays offline, with `server.toml` and `supervisor.toml` fragments naming them.
+  `opamp-fleetctl pki server-cert` and `pki bootstrap-cert` make the next server or Gateway
+  certificate and the next bootstrap certificate from the offline CAs; `opamp-fleetctl pki status
+  --offline-dir <dir>` and the Server's `pki status --config <server.toml>` list when each
+  certificate ends, with an exit code for monitoring. The running Server warns,
+  logs and records `pki.expiring` 30 days before its own certificate or a CA it depends on ends,
+  and `pki.expired` once one has. `scripts/dev-pki.sh` no longer needs `openssl`; its development
+  Client enrols with the bootstrap certificate, and `scripts/seed_test_configs.sh --enrol`
+  approves it. **What to do:** nothing for an existing fleet, whose certificates keep working. A
+  development set made before is replaced by deleting `.dev-pki/` and running the script again.
+
 - **Admitted Agents are rate-limited per host**
   ([ADR-0012](docs/adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)). Every OpAMP message
   and every package download takes a token from the bucket of the host the certificate names — for
@@ -268,6 +283,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   ([ADR-0009](docs/adr/0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). A
   plaintext Gateway now drains for at most 35 seconds on shutdown, as a TLS one already did.
   **What to do:** nothing.
+
+- **The operator tools are one program, `opamp-fleetctl`, and every release publishes it for Linux
+  and macOS**
+  ([ADR-0025](docs/adr/0025-one-operator-program-that-makes-the-fleets-certificates.md)).
+  `opamp-fleetctl package` holds `fetch`, `pack`, `sha256`, `sign`, `keygen` and `public-key`,
+  with the options and output they had; `opamp-fleetctl pki` holds the certificate commands
+  above. A release now carries `opamp-fleetctl_<version>_<os>_<arch>.tar.gz` for `linux` and
+  `darwin` on `amd64` and `arm64`, covered by `SHA256SUMS`; it is downloaded, not uploaded to a
+  Server. **What to do:** every script that calls the old names breaks, with no alias:
+  `opamp-package-fetch …` becomes `opamp-fleetctl package fetch …`, and
+  `opamp-package-sign <command> …` becomes `opamp-fleetctl package <command> …`. Keys and
+  signatures made before keep working. An upload loop over a release's assets selects `supervisor_<version>_*.tar.gz`,
+  not `*_<version>_*.tar.gz`, or it puts an `opamp-fleetctl` archive into the `supervisor`
+  Package.
 
 ### Fixed
 
@@ -1110,7 +1139,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `--version`, `--platform`, `--out-dir`, `--server` and `--no-upload` make it scriptable.
   Artifacts travel **as published** wherever upstream's container is one a Client can open, so
   the hash the fleet verifies is the one on the release page. See
-  [the tools page](docs/manual/tools.md#opamp-package-fetch).
+  [the tools page](docs/manual/tools.md#package-fetch).
   **What to do:** nothing; it is a new tool beside `opamp-package-sign`, which still builds an
   artifact out of any program you have.
 - **A `command` Supervisor can reload instead of restart**

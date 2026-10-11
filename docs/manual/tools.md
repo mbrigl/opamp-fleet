@@ -1,53 +1,55 @@
-# The operator command-line tools
+# The operator tool
 
 [← User Manual](README.md) · [The Server](server.md) · [The Client](client.md) ·
 [Rollout walkthrough](rollout.md)
 
-Two programs ship beside the Server and the Client, for the operator who has to get software
-*into* the fleet. Neither is part of the running system: nothing the Server or a Client does
-depends on them, and a fleet can be operated entirely through the REST API without them.
+One program, `opamp-fleetctl`, ships beside the Server and the Client for the operator who sets a
+fleet up and gets software *into* it. It is not part of the running system: nothing the Server or a
+Client does depends on it, and it belongs on the operator's own machine, not on the Server host —
+the keys it makes are the ones to keep off that host
+([ADR-0025](../adr/0025-one-operator-program-that-makes-the-fleets-certificates.md)).
 
-| Tool | Use it to |
+| Command | Use it to |
 |---|---|
-| **[`opamp-package-fetch`](#opamp-package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
-| **[`opamp-package-sign`](#opamp-package-sign)** | build, hash, and sign a package artifact out of *any* program you have |
+| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
+| **[`package pack`, `sha256`, `keygen`, `sign`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, and make the package signing key |
+| **[`pki init`, `server-cert`, `bootstrap-cert`, `status`](#pki)** | make the fleet's certificate authorities, the Server's or a Gateway's certificate and the bootstrap certificate, and say when they end |
 
-Reach for `opamp-package-fetch` first: for the agents it knows, it replaces every step of
-building an artifact by hand. `opamp-package-sign` is what serves everything else — your own
-agent, an internal build, a project the other tool has never heard of — and it is also where
-signing lives, which `opamp-package-fetch` deliberately does not do.
+Reach for `package fetch` first: for the agents it knows, it replaces every step of building an
+artifact by hand. The other `package` commands serve everything else — your own agent, an internal
+build, a project `fetch` has never heard of — and they are also where signing lives, which `fetch`
+deliberately does not do.
 
-## Running them
+## Getting it
 
-Both live in their own crate, `fleet-tools`, so neither is part of what runs on a managed host
-([ADR-0009](../adr/0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). From a source
-checkout:
-
-```console
-$ cargo run --bin opamp-package-fetch -- --agent otelcol-contrib --no-upload
-$ cargo run --bin opamp-package-sign -- pack --out promtail-3.0.0.tar.gz ./promtail
-```
-
-`--bin` resolves across the workspace, so naming the crate is optional; `-p fleet-tools` is
-there when you want to be explicit.
-
-**A release does not ship them.** The `.tar.gz` artifacts and the `.deb`/`.rpm`/`.msi` installers
-carry the Client and nothing else, because these tools run wherever an operator works rather than
-on a managed host. Build them once from a checkout and put them on your `PATH`:
+Every release publishes it for Linux and macOS, on amd64 and arm64, as
+`opamp-fleetctl_<version>_<os>_<arch>.tar.gz` beside the Client's assets and covered by the same
+`SHA256SUMS`; compare the archive's hash with its line there (`sha256sum`, or `shasum -a 256` on
+macOS). The archive holds the one program, executable:
 
 ```console
-$ cargo build --release --bin opamp-package-fetch --bin opamp-package-sign
-$ ./target/release/opamp-package-fetch
+$ tar xzf opamp-fleetctl_<version>_linux_amd64.tar.gz
+$ ./opamp-fleetctl --version
 ```
 
-Everything below writes its **status to stderr** and its **result to stdout**, so a hash or a
+These archives are downloaded, never uploaded to a Server: they are not packages of the fleet, and
+no Client installs one. There is no Windows build; on Windows, build it from a checkout:
+
+```console
+$ cargo build --release --bin opamp-fleetctl
+$ ./target/release/opamp-fleetctl --help
+```
+
+`cargo run --bin opamp-fleetctl -- <command>` runs it from a checkout without installing it.
+
+Every command writes its **status to stderr** and its **result to stdout**, so a hash, a key or a
 signature composes into a shell variable while the running commentary stays on the terminal:
 
 ```console
-$ sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
+$ sha=$(opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail)
 ```
 
-## `opamp-package-fetch`
+## `package fetch`
 
 ### What it does
 
@@ -78,7 +80,7 @@ Four things it does on every run:
 Run it with no arguments and it asks for what it cannot know:
 
 ```console
-$ opamp-package-fetch
+$ opamp-fleetctl package fetch
 Which agent:
   otelcol          linux, darwin, windows — as the release publishes
 > otelcol-contrib  linux, darwin, windows — as the release publishes
@@ -118,7 +120,7 @@ ever be offered.
 Every prompt has a flag; give all of them and nothing is asked:
 
 ```console
-$ opamp-package-fetch --agent otelcol-contrib --version 0.158.0 \
+$ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
       --platform linux/amd64 --platform windows/amd64 \
       --out-dir ./artifacts --server https://127.0.0.1:4321
 ```
@@ -217,7 +219,7 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 ### What it does not do
 
 - **It does not sign.** Signing needs a key, and where that key lives is a decision a tool should
-  not make silently — use [`opamp-package-sign sign`](#opamp-package-sign) and record the
+  not make silently — use [`package sign`](#packing-and-signing) and record the
   signature on the deployment that offers the bytes
   ([step 5](rollout.md#5-put-it-in-a-deployment-and-sign-it-there)).
 - **It does not aim, and it does not roll out.** A Package reaches a host only once a Deployment
@@ -240,18 +242,19 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 - **Only amd64 and arm64 (and 386 where published)** are named, matching what Agents report as
   `os.type` and `host.arch`.
 
-## `opamp-package-sign`
+## Packing and signing
 
-For a program the other tool does not know: it builds the container, and it owns signing.
+For a program `package fetch` does not know: these commands build the container, and they own
+signing.
 
 ```console
-$ opamp-package-sign keygen --out fleet-signing.pk8   # prints the public key (hex)
-$ sha=$(opamp-package-sign pack --out promtail-3.0.0.tar.gz ./promtail)
-$ sig=$(opamp-package-sign sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
+$ opamp-fleetctl package keygen --out fleet-signing.pk8   # prints the public key (hex)
+$ sha=$(opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail)
+$ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
       promtail-3.0.0.tar.gz)
 ```
 
-| Command | What it prints | Use it for |
+| `package` command | What it prints | Use it for |
 |---|---|---|
 | `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`; the private key goes in the file, ideally not on the Server host |
 | `pack <program> --out <file>` | the artifact's SHA-256 (hex) | building a one-file artifact; `--format tar.gz\|7z`, `--program-name <name>`, `--archive-key <key>` |
@@ -268,3 +271,19 @@ verification_key` is set, and only when the artifact's signature verifies agains
 offers no entry its Deployment has not signed, and refuses to roll out a Deployment with an
 unsigned entry ([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Give
 every Client the same public key, and sign every entry of every Deployment.
+
+## `pki`
+
+The fleet's certificates, made without `openssl` or any other tool
+([ADR-0025](../adr/0025-one-operator-program-that-makes-the-fleets-certificates.md)).
+[Setting up a fleet](setup.md) walks through them in order; in short:
+
+| `pki` command | What it does |
+|---|---|
+| `init --server-dir <dir> --offline-dir <dir> --name <dns\|ip>…` | makes the three CAs, the Server's certificate and the bootstrap certificate, split into what the Server host needs and what stays offline, with a configuration fragment for each side |
+| `server-cert --offline-dir <dir> --name <dns\|ip>… --out <dir>` | makes another server certificate from the offline server CA, for the Server or a Gateway |
+| `bootstrap-cert --offline-dir <dir> --out <dir>` | makes another bootstrap certificate from the offline bootstrap CA and prints its serial |
+| `status --offline-dir <dir>` | says when the certificates in the offline directory end; exits `0`, `1` when one is ending, `2` when one has ended |
+
+The Server makes none of these. Its own `server pki status --config <server.toml>` says when the
+certificates of the Server host end, by the same rule.

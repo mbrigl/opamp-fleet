@@ -53,7 +53,7 @@ flate2 = "1"
 # `ring` compiles C and assembly in its build script, so a C compiler is required either way
 # (ADR-0019).
 # `compress` adds the *writer*, which is behind that one feature in its entirety: it is what lets
-# `opamp-package-sign pack` build the artifact an operator has otherwise no supported way to
+# `opamp-fleetctl package pack` build the artifact an operator has otherwise no supported way to
 # produce. Only `crates/fleet-tools` and the Client's own tests ask for it (ADR-0009); the
 # Client daemon never encodes, and does not enable it.
 sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256"] }

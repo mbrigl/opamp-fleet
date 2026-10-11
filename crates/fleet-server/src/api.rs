@@ -1084,7 +1084,7 @@ struct PackageEntryView {
     /// The artifact's SHA-256, hex — **the exact value the Agent verifies what it downloaded
     /// against** (ADR-0024). Reading it is how an operator answers "did this host take my bytes"
     /// without trusting a status field: it is the same string the Agent reports back in its
-    /// `PackageStatuses`, and the same one `opamp-package-sign sha256` prints locally.
+    /// `PackageStatuses`, and the same one `opamp-fleetctl package sha256` prints locally.
     content_hash: String,
     /// The per-package hash this entry is offered under, hex. An Agent echoes it once it is in
     /// sync, and the Server stops re-offering while the two agree — so a rollout that seems not to
@@ -1888,7 +1888,8 @@ struct DeploymentSpec {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct SignatureSpec {
-    /// The signature over the artifact's bytes, hex-encoded — what `opamp-package-sign` prints.
+    /// The signature over the artifact's bytes, hex-encoded — what `opamp-fleetctl package sign`
+    /// prints.
     signature: String,
 }
 
@@ -2125,7 +2126,7 @@ async fn delete_deployment_package(
 ///
 /// The signature lives here rather than on the artifact because what an operator signs off on is a
 /// release to a set of machines. The same Package in two Deployments is therefore signed in each.
-/// Generate it with `opamp-package-sign`.
+/// Generate it with `opamp-fleetctl package sign`.
 #[utoipa::path(
     put,
     path = "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
@@ -2154,8 +2155,10 @@ async fn put_deployment_signature(
         Err(e) => {
             return error(
                 StatusCode::BAD_REQUEST,
-                format!("the signature must be hex, as `opamp-package-sign` prints it: {e}"),
-            )
+                format!(
+                    "the signature must be hex, as `opamp-fleetctl package sign` prints it: {e}"
+                ),
+            );
         }
     };
     match state.put_deployment_signature(&name, &id, &platform, signature) {
