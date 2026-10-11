@@ -35,7 +35,7 @@ const SERIES_SHOWN: usize = 3;
 /// The member cap a tree package is held to (ADR-0026). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
 #[cfg_attr(
-    not(test),
+    any(not(test), not(unix)),
     expect(
         dead_code,
         reason = "only an agent whose upstream publishes no installable archive is repacked"
@@ -856,7 +856,7 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 /// link names is not where it sits, which is the one thing a path check cannot judge. A link
 /// pointing at nothing is dropped.
 #[cfg_attr(
-    not(test),
+    any(not(test), not(unix)),
     expect(
         dead_code,
         reason = "only an agent whose upstream publishes no installable archive is repacked"
@@ -933,7 +933,7 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 /// Deduplicating by real path instead would leave one of the two names empty — and which one, on
 /// directory-read order, which is nobody's guarantee.
 #[cfg_attr(
-    not(test),
+    any(not(test), not(unix)),
     expect(
         dead_code,
         reason = "only an agent whose upstream publishes no installable archive is repacked"
@@ -976,7 +976,7 @@ fn collect_members(
 /// The mode to store, which off Unix is a decision rather than a reading: a tar written on Windows
 /// has no mode to carry, and a tree whose programs arrive unexecutable is a tree that will not run.
 #[cfg_attr(
-    not(test),
+    any(not(test), not(unix)),
     expect(
         dead_code,
         reason = "only an agent whose upstream publishes no installable archive is repacked"
