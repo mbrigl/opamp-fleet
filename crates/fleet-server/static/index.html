@@ -170,6 +170,12 @@
         font-family: var(--mono);
       }
       .filters input::placeholder { color: var(--muted); font-family: var(--mono); }
+      /* A choice from a fixed list looks like the text fields beside it. */
+      select {
+        padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 8px;
+        background: var(--bg); color: var(--text); font-size: 13px; font-family: inherit;
+      }
+      .filters select { background: var(--panel); }
 
       .table-wrap { overflow-x: auto; }
       /* Fixed layout: the table is exactly as wide as its container and never wider — content
@@ -480,6 +486,17 @@
       <div id="panel-enrolments" class="tab-panel">
       <div class="card filters" style="align-items: center; gap: 12px;">
         <span id="enrolment-window" class="pill gray">window closed</span>
+        <span id="enrolment-window-controls" style="display: none; gap: 8px; align-items: center; white-space: nowrap;">
+          <select id="enrolment-window-secs" title="How long the window stays open from now">
+            <option value="900">15 minutes</option>
+            <option value="3600">1 hour</option>
+            <option value="14400">4 hours</option>
+          </select>
+          <button id="enrolment-window-open" class="btn btn-primary"
+                  title="Open the enrolment window for the chosen time; an open window ends then instead">Open window</button>
+          <button id="enrolment-window-close" class="btn btn-ghost" style="display: none"
+                  title="Close the window now: every enrolling connection ends and every waiting request expires">Close window</button>
+        </span>
         <span class="sub">A host enrols with the fleet's bootstrap certificate while the enrolment window is open, and waits here until an operator approves it. Before approving, compare the <b>key fingerprint</b> with the <code>key_fingerprint</code> the Client logged on that host: only a match is the host you mean.</span>
         <span id="enrolment-result" class="sub"></span>
         <span id="enrolments-error" class="err"></span>
@@ -1817,8 +1834,12 @@
         } else {
           badge.className = "pill gray";
           badge.textContent = "window closed";
-          badge.title = "no host can ask for a certificate; open the window through POST /api/v1/enrolment/window";
+          badge.title = "no host can ask for a certificate until an operator opens the window";
         }
+        // The window can be opened only on a Server that knows its state and has enrolment.
+        $("enrolment-window-controls").style.display = failed || win === null ? "none" : "inline-flex";
+        $("enrolment-window-open").textContent = win && win.open ? "Set end" : "Open window";
+        $("enrolment-window-close").style.display = win && win.open ? "" : "none";
         $("enrolments-error").textContent = failed || "";
         $("enrolments-empty").style.display = enrolments.length || failed ? "none" : "block";
         // Rebuilt only when the queue changed: an operator selecting a fingerprint to compare it
@@ -1853,6 +1874,31 @@
         } catch { return; }
         renderEnrolments(win);
       }
+
+      $("enrolment-window-open").addEventListener("click", async () => {
+        $("enrolments-error").textContent = "";
+        $("enrolment-result").textContent = "";
+        const res = await fetch("/api/v1/enrolment/window", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ open_for_secs: Number($("enrolment-window-secs").value) }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) $("enrolments-error").textContent = body.error || `HTTP ${res.status}`;
+        await refreshEnrolments();
+      });
+
+      $("enrolment-window-close").addEventListener("click", async () => {
+        if (!confirm("Close the enrolment window now? Every waiting request expires.")) return;
+        $("enrolments-error").textContent = "";
+        $("enrolment-result").textContent = "";
+        const res = await fetch("/api/v1/enrolment/window", { method: "DELETE" });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          $("enrolments-error").textContent = body.error || `HTTP ${res.status}`;
+        }
+        await refreshEnrolments();
+      });
 
       $("enrolments").addEventListener("click", async (e) => {
         const btn = e.target.closest(".enrolment-act");

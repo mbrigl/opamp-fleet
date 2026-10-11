@@ -996,7 +996,7 @@ async fn set_labels(
 
 /// The bundled UI is a client of the REST API and nothing more (ADR-0023 clause 13), so its
 /// Enrolments tab depends on the names the enrolment routes share with it: the routes it calls and
-/// the fields it shows, the requested key's fingerprint above all — what ADR-0020 clause 22 lists
+/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0020 clause 22 lists
 /// so an operator can match a request to the Client's log. The page asks for them, and the OpenAPI
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no
@@ -1023,6 +1023,7 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         ".bootstrap_fingerprint",
         ".arrived_ms",
         ".until_ms",
+        "open_for_secs:",
     ] {
         assert!(
             html.contains(needle),
