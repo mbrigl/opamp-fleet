@@ -387,7 +387,7 @@ fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
 }
 
-/// Verifies: ADR-0026, G-5
+/// Verifies: ADR-0023, ADR-0026, G-5
 #[tokio::test]
 async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
@@ -407,6 +407,31 @@ async fn the_openapi_document_describes_the_contract() {
     let document: serde_json::Value = response.json().await.expect("json");
     let paths = document["paths"].as_object().expect("paths");
     assert!(paths.contains_key("/api/v1/agents"));
+    // OpenAPI 3.1 requires a description on every response, and a generator may refuse a
+    // document without one; utoipa writes none for a response that does not state it (ADR-0023).
+    let silent: Vec<String> = paths
+        .iter()
+        .flat_map(|(path, operations)| {
+            operations
+                .as_object()
+                .into_iter()
+                .flatten()
+                .flat_map(move |(method, operation)| {
+                    operation["responses"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .filter(|(_, response)| {
+                            response["description"].as_str().unwrap_or("").is_empty()
+                        })
+                        .map(move |(status, _)| format!("{method} {path} {status}"))
+                })
+        })
+        .collect();
+    assert!(
+        silent.is_empty(),
+        "responses without a description: {silent:?}"
+    );
     // Deployments are part of the contract from the moment they exist (ADR-0026) — a portal
     // generates against this document, and a route it cannot see is a route it cannot call.
     for route in [

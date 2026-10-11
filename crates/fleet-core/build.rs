@@ -127,7 +127,7 @@ fn release_tag_on_head(repo: &Repository) -> Result<Option<String>, String> {
         let reference = reference.map_err(|e| format!("cannot read a version tag: {e}"))?;
         // Peeling covers both lightweight and annotated tags.
         if reference.peel_to_commit().map(|c| c.id()) == Ok(head) {
-            if let Some(name) = reference.name() {
+            if let Ok(name) = reference.name() {
                 return Ok(Some(name.trim_start_matches("refs/tags/").to_string()));
             }
         }
