@@ -69,7 +69,7 @@ pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// shutdown tells them at once, and the same deadline bounds them (ADR-0012 clause 13).
 #[derive(Clone, Debug)]
 pub struct Handle {
-    server: axum_server::Handle,
+    server: axum_server::Handle<SocketAddr>,
     /// `None` while serving; once shutting down, the deadline — `None` for a drain without one.
     shutdown: Arc<tokio::sync::watch::Sender<Option<Option<Instant>>>>,
 }
@@ -290,7 +290,9 @@ impl Listener {
                 ));
             }
         }
-        let server = axum_server::from_tcp(self.listener).handle(self.handle.server.clone());
+        // The runtime polls the listener; a blocking one would stall the worker it accepts on.
+        self.listener.set_nonblocking(true)?;
+        let server = axum_server::from_tcp(self.listener)?.handle(self.handle.server.clone());
         let slots = Slots::new(self.max_connections, self.pace);
         let sessions = Sessions {
             shutdown: self.handle.shutdown.subscribe(),
@@ -338,7 +340,10 @@ impl Listener {
 /// The header-read bound, with the timer it needs first: without the timer hyper discards the
 /// default, and with the timeout set but no timer it panics. HTTP/2 has no header phase to time,
 /// so it is bounded by its streams and its pings instead (ADR-0012).
-fn bounded<A>(mut server: Server<A>, header_read_timeout: Duration) -> Server<A> {
+fn bounded<A>(
+    mut server: Server<SocketAddr, A>,
+    header_read_timeout: Duration,
+) -> Server<SocketAddr, A> {
     let builder = server.http_builder();
     builder
         .http1()

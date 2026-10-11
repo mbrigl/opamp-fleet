@@ -1924,7 +1924,10 @@ type Refusal = (StatusCode, String);
     get,
     path = "/api/v1/deployments",
     tag = "deployments",
-    responses((status = 200, body = [DeploymentView]))
+    responses(
+        (status = 200, description = "Every Deployment, in name order", body = [DeploymentView]),
+        (status = 404, description = "Package delivery is not configured", body = ErrorBody)
+    )
 )]
 async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
     match deployments(&state) {
@@ -1952,7 +1955,10 @@ async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
     path = "/api/v1/deployments/{name}",
     tag = "deployments",
     params(("name" = String, Path, description = "the Deployment's name")),
-    responses((status = 200, body = DeploymentView), (status = 404))
+    responses(
+        (status = 200, description = "The Deployment", body = DeploymentView),
+        (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody)
+    )
 )]
 async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
     let store = match deployments(&state) {
@@ -1981,7 +1987,11 @@ async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<Str
     tag = "deployments",
     params(("name" = String, Path, description = "the Deployment's name")),
     request_body = DeploymentSpec,
-    responses((status = 200, body = DeploymentView), (status = 400), (status = 404))
+    responses(
+        (status = 200, description = "The stored Deployment — distributed to nobody until rolled out", body = DeploymentView),
+        (status = 400, description = "Invalid name, or a Selector that names no pair", body = ErrorBody),
+        (status = 404, description = "Package delivery is not configured", body = ErrorBody)
+    )
 )]
 async fn put_deployment(
     State(state): State<Arc<AppState>>,
@@ -2007,8 +2017,8 @@ async fn put_deployment(
     tag = "deployments",
     params(("name" = String, Path, description = "the Deployment's name")),
     responses(
-        (status = 204),
-        (status = 404),
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "An Agent's assignment still names this Deployment")
     )
 )]
@@ -2034,7 +2044,11 @@ async fn delete_deployment(
     tag = "deployments",
     params(("name" = String, Path, description = "the Deployment's name")),
     request_body = DeploymentSpec,
-    responses((status = 200, body = DeploymentView), (status = 400), (status = 404))
+    responses(
+        (status = 200, description = "The re-aimed Deployment", body = DeploymentView),
+        (status = 400, description = "A Selector that names no pair", body = ErrorBody),
+        (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody)
+    )
 )]
 async fn put_deployment_selector(
     State(state): State<Arc<AppState>>,
@@ -2067,7 +2081,12 @@ async fn put_deployment_selector(
         ("version" = String, Path, description = "the Package's version"),
         ("replace" = Option<bool>, Query, description = "swap the Package held for this Agent type")
     ),
-    responses((status = 200, body = DeploymentView), (status = 404), (status = 409))
+    responses(
+        (status = 200, description = "The Deployment, with the Package", body = DeploymentView),
+        (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
+        (status = 404, description = "No such Deployment or Package, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "The Deployment already holds a Package for this Agent type", body = ErrorBody)
+    )
 )]
 async fn put_deployment_package(
     State(state): State<Arc<AppState>>,
@@ -2106,7 +2125,11 @@ async fn put_deployment_package(
         ("agent_type" = String, Path, description = "the Package's Agent type"),
         ("version" = String, Path, description = "the Package's version")
     ),
-    responses((status = 200, body = DeploymentView), (status = 404))
+    responses(
+        (status = 200, description = "The Deployment, without the Package and its signatures", body = DeploymentView),
+        (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
+        (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody)
+    )
 )]
 async fn delete_deployment_package(
     State(state): State<Arc<AppState>>,
@@ -2139,7 +2162,11 @@ async fn delete_deployment_package(
         ("arch" = String, Path, description = "the artifact's architecture")
     ),
     request_body = SignatureSpec,
-    responses((status = 200, body = DeploymentView), (status = 400), (status = 404))
+    responses(
+        (status = 200, description = "The Deployment, with the signature", body = DeploymentView),
+        (status = 400, description = "Invalid identity or platform, or a signature that is empty or not hex", body = ErrorBody),
+        (status = 404, description = "No such Deployment, the Package is not in it, or package delivery is not configured", body = ErrorBody)
+    )
 )]
 async fn put_deployment_signature(
     State(state): State<Arc<AppState>>,
@@ -2179,7 +2206,11 @@ async fn put_deployment_signature(
         ("os" = String, Path, description = "the artifact's operating system"),
         ("arch" = String, Path, description = "the artifact's architecture")
     ),
-    responses((status = 200, body = DeploymentView), (status = 404))
+    responses(
+        (status = 200, description = "The Deployment, without the signature", body = DeploymentView),
+        (status = 400, description = "Invalid identity or platform", body = ErrorBody),
+        (status = 404, description = "No such Deployment or signature, or package delivery is not configured", body = ErrorBody)
+    )
 )]
 async fn delete_deployment_signature(
     State(state): State<Arc<AppState>>,
@@ -2306,7 +2337,7 @@ fn window_view(until_ms: Option<u64>) -> Response {
     path = "/api/v1/enrolment/window",
     tag = "enrolment",
     responses(
-        (status = 200, body = EnrolmentWindow),
+        (status = 200, description = "Whether the window is open, and until when", body = EnrolmentWindow),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody)
     )
 )]
@@ -2325,7 +2356,7 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
     tag = "enrolment",
     request_body = OpenWindow,
     responses(
-        (status = 200, body = EnrolmentWindow),
+        (status = 200, description = "The window, open until its new end", body = EnrolmentWindow),
         (status = 400, description = "open_for_secs is out of range", body = ErrorBody),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody)
     )
@@ -2381,7 +2412,7 @@ async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response 
     path = "/api/v1/enrolments",
     tag = "enrolment",
     responses(
-        (status = 200, body = Vec<PendingEnrolment>),
+        (status = 200, description = "The waiting enrolment requests, oldest first", body = Vec<PendingEnrolment>),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody)
     )
 )]
@@ -2595,7 +2626,7 @@ fn revocation_off() -> Response {
     path = "/api/v1/certificates",
     tag = "revocation",
     responses(
-        (status = 200, body = Vec<CertificateView>),
+        (status = 200, description = "Every unexpired certificate the client CA signed, oldest first", body = Vec<CertificateView>),
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
@@ -2636,7 +2667,7 @@ async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
     path = "/api/v1/hosts",
     tag = "revocation",
     responses(
-        (status = 200, body = Vec<HostView>),
+        (status = 200, description = "Every host the client CA issued to, by name", body = Vec<HostView>),
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
@@ -2703,7 +2734,7 @@ async fn set_gateway(
     path = "/api/v1/revocations",
     tag = "revocation",
     responses(
-        (status = 200, body = Vec<RevocationView>),
+        (status = 200, description = "The revocation list, oldest first", body = Vec<RevocationView>),
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
@@ -2728,7 +2759,7 @@ async fn list_revocations(State(state): State<Arc<AppState>>) -> Response {
     tag = "revocation",
     request_body = RevokeRequest,
     responses(
-        (status = 201, body = RevocationView),
+        (status = 201, description = "Revoked; the new entry of the list", body = RevocationView),
         (status = 400, description = "No certificate named, a field this route does not know, an authority this Server does not have, a serial that is not hex, or a credential named, which the Agent plane does not have", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Revocation is not configured", body = ErrorBody),
