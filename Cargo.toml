@@ -22,7 +22,7 @@ axum = "0.8"
 prost = "0.14"
 prost-build = "0.14"
 # Pure-Rust protobuf compilation — no system protoc anywhere in the build chain (ADR-0010).
-protox = "0.9"
+protox = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
