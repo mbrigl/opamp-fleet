@@ -299,14 +299,17 @@ $ supervisor service uninstall                                   # never deletes
 - Stopping the service sends the OpAMP `agent_disconnect` goodbye (`SIGTERM` on Unix, an SCM stop
   control on Windows); after a crash the manager restarts the service, after an explicit stop it
   stays down.
-- **Self-update** ([ADR-0017](docs/adr/0017-the-client-updates-itself-from-a-signed-package.md)): the Client is always its own
+- **Self-update** ([ADR-0017](docs/adr/0017-the-client-updates-itself-under-its-own-agent-type.md)): the Client is always its own
   Agent, so the Server can see which version each host runs. Letting the Server *replace* that
-  version is opt-in per Client and names the package it will take — anything else is refused,
-  because a package aimed at the whole fleet would otherwise be written over the Client itself:
+  version is a consent that stands by default, takes effect once a verification key is set, and
+  takes only the package named after the Client's own Agent type, `supervisor` — anything else is
+  refused, because a package aimed at the whole fleet would otherwise be written over the Client
+  itself:
 
   ```toml
-  [self_update]
-  package = "supervisor"           # only this package is ever installed over this binary
+  [packages]
+  self_update = true               # the default; false keeps this Client's update manual
+  verification_key = "<hex-encoded Ed25519 public key>"
   ```
 
   A new version is staged beside the running one under `versions/`, run once to prove it is this

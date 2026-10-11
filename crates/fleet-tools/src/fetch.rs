@@ -242,7 +242,7 @@ struct Plan {
     /// The artifact's file name in `--out-dir`.
     out_name: String,
     /// What a `[[supervisor]]` block has to say to install it — or, for this fleet's own Client,
-    /// what `[self_update]` has to say, since nothing supervises that one. Printed at the end,
+    /// what `[packages] self_update` has to say, since nothing supervises that one. Printed at the end,
     /// because it is the next thing an operator needs.
     ///
     /// For a **wrapped** agent it is the `type` alone (ADR-0016): the Client's kind knows the
@@ -701,9 +701,10 @@ fn supervisor_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
             action: Action::AsPublished,
             out_name: name.clone(),
             // Not a `[[supervisor]]` block: a Client installs this one over itself, and what
-            // admits that is the consent in its own `supervisor.toml` (ADR-0017) — which
-            // names this very package by default, so most hosts need no line at all.
-            block_hint: format!("[self_update] package = {package:?}  (the default)"),
+            // admits that is the consent in its own `supervisor.toml` (ADR-0017), which takes
+            // only the package named after its Agent type and stands by default, so most hosts
+            // need no line at all.
+            block_hint: "[packages] self_update = true  (the default)".to_string(),
         });
     }
     plans.sort_by(|a, b| (&a.os, &a.arch).cmp(&(&b.os, &b.arch)));
@@ -1492,7 +1493,7 @@ mod tests {
                 ),
             }
             assert!(
-                plan.block_hint.contains("[self_update]"),
+                plan.block_hint.contains("[packages] self_update"),
                 "a Client takes this one over itself, so the hint is its consent and not a                  [[supervisor]] block: {:?}",
                 plan.block_hint
             );

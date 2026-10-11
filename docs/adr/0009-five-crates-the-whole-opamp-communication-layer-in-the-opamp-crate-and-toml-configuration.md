@@ -154,7 +154,7 @@ binaries from strict TOML files.
    settings (ADR-0013). It runs the CSR flow and the CA, and it decides admission (ADR-0019). Its
    `AgentState` keeps the Client's decisions over one protocol state machine. Its flows after a
    reply run in one order: connection settings, certificate, packages, the self-update restart, the
-   Supervisor set ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)). Connection settings come before
+   Supervisor set ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)). Connection settings come before
    the certificate because an offer may carry the certificate a request asked for, and a request
    queued before it is taken in would ride the next connection and be signed again.
 

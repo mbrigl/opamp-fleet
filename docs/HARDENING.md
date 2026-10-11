@@ -194,13 +194,14 @@ Server only while every Supervisor whose configuration language can run commands
 account — a Telegraf `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command`
 kind's program reads — is in `remote_config_disabled`; otherwise the Server can configure such a
 Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. A signed Client
-build can still replace the program that reads them where `[self_update]` consents (ADR-0017).
+build can still replace the program that reads them where `[packages] self_update` consents
+(ADR-0017).
 
 It **cannot**: write outside a Supervisor's `config/` (entry names are sanitized); name a program
 outside a Supervisor's `program/`, by absolute, rooted or escaping path, or a wrapped kind's program
 at all; start a kind that is not compiled in; change any key of `supervisor.toml` but the
 `[[supervisor]]` array — not the endpoint, `state_dir`, `[tls]`, the verification key,
-`allowed_sources` or `[self_update]`; apply a set with one bad block; purge outside the Supervisors'
+`allowed_sources` or `self_update`; apply a set with one bad block; purge outside the Supervisors'
 root; install anything unsigned, from a source not allowed, or with an archive member that climbs
 out; serve a host from its download route an artifact that is not offered to an Agent the host
 speaks for, or serve a host behind a Gateway an artifact the Gateway did not relay to one of

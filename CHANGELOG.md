@@ -247,7 +247,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   Server's certificate.
 - **Nothing is installed without a signature**
   ([ADR-0024](docs/adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md),
-  [ADR-0017](docs/adr/0017-the-client-updates-itself-from-a-signed-package.md),
+  [ADR-0017](docs/adr/0017-the-client-updates-itself-under-its-own-agent-type.md),
   [ADR-0024](docs/adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). A Client without
   `[packages] verification_key` takes no packages and no self-update. The Server offers no entry
   its Deployment has not signed, and refuses (`409`) to roll out a Deployment with an unsigned
@@ -303,6 +303,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   signatures made before keep working. An upload loop over a release's assets selects `supervisor_<version>_*.tar.gz`,
   not `*_<version>_*.tar.gz`, or it puts an `opamp-fleetctl` archive into the `supervisor`
   Package.
+- **Breaking: the self-update consent is `[packages] self_update`, and `[self_update]` fails
+  startup** — the consent sits beside the `verification_key` that decides whether it takes effect,
+  is `true` by default and `false` withdraws it. The package it takes is always the Client's own
+  Agent type, `supervisor`; `[self_update] package` and `service install --self-update-package`
+  are gone, and `--interactive` no longer asks about the self-update
+  ([ADR-0017](docs/adr/0017-the-client-updates-itself-under-its-own-agent-type.md)).
+  **What to do:** on every host, before this release reaches it, replace the
+  `[self_update]` section of `supervisor.toml`: `enabled = false` becomes `self_update = false`
+  under `[packages]`, and anything else is deleted. A host whose file still has the section does not
+  start, and one that takes this release by self-update rolls back to the previous version. A
+  reduced build can no longer be told apart by package name; withdraw the consent on its hosts.
 - **The development `server.toml` serves the Agent plane on every interface** —
   `scripts/dev-pki.sh` now writes `listen = "0.0.0.0:4320"`, so a Client on another machine
   reaches a development Server. **What to do:** add the line at the top of an existing
@@ -495,7 +506,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 ### Fixed
 
 - **A Client that updates itself into a configuration it cannot read now rolls back.** The
-  self-update's probation ([ADR-0017](docs/adr/0017-the-client-updates-itself-from-a-signed-package.md)) counts a failed start
+  self-update's probation ([ADR-0017](docs/adr/0017-the-client-updates-itself-under-its-own-agent-type.md)) counts a failed start
   and returns the host to the previous version after three attempts — but it never saw this one: a
   run resolved its configuration *before* it resolved the update in flight, so a new version that
   refuses the file on this host exited before the attempt was counted. The service manager then
@@ -544,7 +555,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 - **The Client says what it is at startup, and what its TLS will use.** Two lines before any work:
   the running version, the configuration file, the state directory, the endpoint and the number of
   Supervisors — the version appeared in no log line until now, so a file a self-update left behind
-  ([ADR-0017](docs/adr/0017-the-client-updates-itself-from-a-signed-package.md),
+  ([ADR-0017](docs/adr/0017-the-client-updates-itself-under-its-own-agent-type.md),
   [ADR-0018](docs/adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)) could not be attributed to
   the version that wrote it — and then the trust and the client certificate actually in force,
   which is a Server-issued one no `supervisor.toml` mentions when there is one
@@ -762,7 +773,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 - **The Client now consents to its own updates unless you say otherwise** — a behaviour change on
   hosts that are already installed
-  ([ADR-0017](docs/adr/0017-the-client-updates-itself-from-a-signed-package.md), superseding
+  ([ADR-0017](docs/adr/0017-the-client-updates-itself-under-its-own-agent-type.md), superseding
   [ADR-0018](docs/adr/0018-the-client-supervisor-installed-service-releases-and-installers.md) point 4). Until
   now an absent `[self_update]` section meant *no consent*, so a Client installed the documented way
   declared no package capability at all and the Server could never replace its binary — which made

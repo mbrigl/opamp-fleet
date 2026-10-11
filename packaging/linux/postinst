@@ -75,6 +75,6 @@ identity:
   key_file = "<its key>"
 
 The configuration lets the Server update this Client itself, from signed packages only
-— the fleet then patches its own agent like any other program. Write `enabled = false` under
-[self_update] in supervisor.toml to keep that one update manual.
+— the fleet then patches its own agent like any other program. Write `self_update = false` under
+[packages] in supervisor.toml to keep that one update manual.
 EOF

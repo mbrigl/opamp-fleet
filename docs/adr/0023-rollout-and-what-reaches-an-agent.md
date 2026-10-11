@@ -135,7 +135,7 @@ claims to have).
     ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)).
 
 15. **The Client applies the same rule to an offer it receives.** For the package that carries the
-    Client itself ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)), *already installed* means the
+    Client itself ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)), *already installed* means the
     version this process runs is the offered one — not that a recorded package hash matches. A record
     whose hash equals the offer does not end the offer on a host that is not running it.
 
@@ -153,7 +153,7 @@ claims to have).
 18. **Rollback is not a rollout.** No act moves an Agent to an older version than it runs. An
     operator who wants an Agent back on its predecessor has the Agent's retention window
     ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) and, for the Client itself, the pointer move
-    of [ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md); a bad version is otherwise taken back by
+    of [ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md); a bad version is otherwise taken back by
     publishing the old content as a new, greater version. A deliberate Server-driven downgrade is
     left undecided: it is a separate act with its own authorisation question, and it must never be
     the same press as a rollout.

@@ -213,7 +213,7 @@ forces on the Agent:
   boundary (the specification's *Updater*). For a Managed Process that boundary already exists:
   the Supervisor owns its process's stop, spawn and apply-grace health gate
   ([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). The Client's own binary is the other case
-  ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)).
+  ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)).
 - **Verification protects the host; the source set bounds what is exposed.** An artifact URL may
   point at the Server's download route or at a mirror or release page, so what stands between the
   bytes and an executed program is the content hash and an Ed25519 signature made with a key the
@@ -372,7 +372,7 @@ starts, and keep the superseded version for a configurable window.
     saying the Server decides. Type fit is also the second, independent guard on the Client's own
     binary: the Server does not offer a package of another type to the Client's Agent, whatever it
     is called, and the Client still refuses an offer outside its `[self_update]` consent
-    ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)) — one side refuses to send, the other to
+    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)) — one side refuses to send, the other to
     install.
 
 12. **The store opens loudly or not at all.** At startup every package's metadata is read and every
@@ -408,7 +408,7 @@ starts, and keep the superseded version for a configurable window.
 16. **Two names are derived, and they answer different questions.** The **wire name** is the Agent
     type alone: the `PackagesAvailable` map key, the key an Agent reports its `PackageStatuses`
     under, and the value the Client's `[self_update] package` is compared against
-    ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)). It must be stable across versions. The
+    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)). It must be stable across versions. The
     **display name** is `<agent_type> <version>` — the UI and the log. Using one name in both places
     would break the Client's self-update guard on every release or make the fleet view unreadable.
 
@@ -779,7 +779,7 @@ this object is called a Deployment.
     `AcceptsPackages` and `ReportsPackageStatuses` (every Managed Process is one this Client
     installed, [ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Without it, no Agent of
     this Client declares `AcceptsPackages` — neither a Supervisor nor the Client's own Agent
-    ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)) — and the Client says so at startup, once,
+    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)) — and the Client says so at startup, once,
     naming `[packages] verification_key` as what to set. A package offered to such an Agent
     regardless is ignored: nothing is downloaded, and an Agent that declared no package capability
     reports no package status. A verified artifact travels to the Supervisor as the Port command
@@ -860,7 +860,7 @@ this object is called a Deployment.
     signature still covers the artifact exactly as published, archive and all — and holds for that
     type and version alone. Where a Deployment
     keeps the signature is clause 28. The same download and
-    verification serve the Client's own update ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)).
+    verification serve the Client's own update ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)).
 
 55. **The Agent opens the artifact; nothing between its author and the host repacks it.** The hash
     an Agent verifies is therefore the SHA-256 the artifact was published with — integrity runs in
@@ -948,7 +948,7 @@ this object is called a Deployment.
     restart command is a fresh chance and resets the count; a run that outlasted the floor resets
     it too. This holds for a failed package, a rolled-back predecessor that will not start either,
     and a Configuration alike. Three is the self-update's give-up
-    ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)), so the two update paths behave alike.
+    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)), so the two update paths behave alike.
 
 64. **The superseded version is kept for a window, then deleted.** After a successful apply the
     predecessor stays, and a marker beside it (`<predecessor>.until`, Unix seconds) records
@@ -964,7 +964,7 @@ this object is called a Deployment.
     the Supervisor's Agent type is refused before anything is downloaded, and so is one whose
     version precedes the installed one by Semantic Versioning's precedence. Versions that do not
     compare are not refused on that ground; the signature still binds them. The Client's own
-    update keeps its own rules ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)).
+    update keeps its own rules ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)).
 
 66. **The Client opens `.zip` as a third container beside `.tar.gz` and `.7z`.** It is detected by
     its leading bytes (clause 55), held to exactly the member and tree rules of clauses 57 to 59,

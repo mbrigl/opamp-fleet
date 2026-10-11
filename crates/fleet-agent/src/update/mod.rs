@@ -47,7 +47,7 @@ pub enum SelfInstall {
     AlreadyRunning,
 }
 
-/// The self-update state of one run: the armed [`SelfUpdater`], if `[self_update]` is configured,
+/// The self-update state of one run: the armed [`SelfUpdater`], if `[packages] self_update` consents,
 /// and the two facts that decide what it does next.
 #[derive(Default)]
 pub struct SelfUpdate {
@@ -90,7 +90,7 @@ impl SelfUpdate {
         version: &str,
         hash: &[u8],
     ) -> Result<SelfInstall, String> {
-        // Unreachable while the capability is only declared with `[self_update]`, but a refusal
+        // Unreachable while the capability is only declared with the consent of `[packages] self_update`, but a refusal
         // that says so beats an install that should not have been offered.
         let updater = self
             .updater

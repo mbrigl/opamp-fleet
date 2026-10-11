@@ -103,11 +103,11 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
             .with_attributes(kind_attributes(config.agent_attributes(None)))
             .with_namespace(config.service_namespace.clone()),
     );
-    // Consenting to be updated names the package it will take — anything else is refused rather
-    // than written over this binary (ADR-0017). The consent stands unless the file
-    // withdraws it, so this is the ordinary path rather than the opted-into one.
-    // And only from a signed package: without a verification key the consent is kept, but nothing
-    // is declared (ADR-0017) — the startup notice names the key.
+    // Consenting to be updated takes one package, the one named after this Client's Agent type —
+    // anything else is refused rather than written over this binary (ADR-0017). The consent stands
+    // unless `[packages] self_update = false` withdraws it, so this is the ordinary path rather
+    // than the opted-into one. And only from a signed package: without a verification key the
+    // consent is kept, but nothing is declared — the startup notice names the key.
     if let (Some(package), Some(_)) = (config.self_update_package(), config.package_key()) {
         self_state.accept_packages_named(package.to_string());
     }
@@ -952,7 +952,7 @@ mod tests {
         // green: the startup check this feeds warns about an unconfigured verification key, and a
         // Client that installs nothing has nothing for that key to protect.
         let alone: ClientConfig = toml::from_str(
-            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n[self_update]\nenabled = false\n",
+            "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n[packages]\nself_update = false\n",
         )
         .expect("parse");
         let engine = build_engine(&alone, &shutdown).expect("build");

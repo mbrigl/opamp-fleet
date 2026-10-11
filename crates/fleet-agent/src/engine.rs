@@ -110,7 +110,7 @@ pub struct Engine {
     /// Packages awaiting the transport's download and verification (ADR-0024), each tagged with
     /// the owning Agent's index so the verified artifact routes back to the right Supervisor.
     pending_package_downloads: Vec<(usize, PackageDownload)>,
-    /// How the Client updates *itself* (ADR-0017). Unarmed when `[self_update]` is absent, in
+    /// How the Client updates *itself* (ADR-0017). Unarmed when `[packages] self_update = false`, in
     /// which case the self-Agent accepts no packages anyway.
     self_update: SelfUpdate,
     /// The sampling targets, shared with the own-telemetry sampler (ADR-0015), which runs beside

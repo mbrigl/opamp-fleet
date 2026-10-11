@@ -75,8 +75,8 @@ pub struct Handled {
 /// extracts is the same in every variant build, which is what lets one published package Set
 /// serve them all. Derive this from the product and the fleet carries N products where it has one.
 ///
-/// The package that carries this Client is named after the type, so `[self_update] package`
-/// defaults to this constant.
+/// The package that carries this Client is named after the type, and the self-update takes no other
+/// name (ADR-0017).
 pub const CLIENT_AGENT_TYPE: &str = "supervisor";
 
 pub struct AgentState {
@@ -418,7 +418,7 @@ impl AgentState {
     }
 
     /// Whether this Agent takes Server-offered packages (ADR-0024) — the self-Agent unless
-    /// `[self_update]` withdraws the consent (ADR-0017), and every Supervisor, since every Managed
+    /// `[packages] self_update = false` withdraws the consent (ADR-0017), and every Supervisor, since every Managed
     /// Process is one this Client installs (ADR-0016). Read without side effects, so a startup
     /// check can ask it before anything is polled.
     pub fn accepts_packages(&self) -> bool {
@@ -1996,7 +1996,7 @@ mod tests {
     /// Client and take the host out of reach.
     /// Verifies: ADR-0017
     #[test]
-    fn the_self_agent_refuses_a_package_it_was_not_configured_to_take() {
+    fn the_self_agent_refuses_a_package_not_named_after_its_agent_type() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
 
         let dir = tempfile::tempdir().expect("tempdir");

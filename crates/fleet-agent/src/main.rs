@@ -183,15 +183,7 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         // The same file, from an answer given rather than asked for (ADR-0018): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with
         // it — standing unless this install was told to withdraw it (ADR-0017).
-        let self_update = if args.no_self_update {
-            None
-        } else {
-            Some(
-                args.self_update_package
-                    .as_deref()
-                    .unwrap_or(fleet_agent::supervisor::agent::CLIENT_AGENT_TYPE),
-            )
-        };
+        let self_update = !args.no_self_update;
         config_init::run_with_endpoint(&config_path, endpoint, self_update)?;
     } else if !config_path.exists() {
         // Not an error — automation must not break — but never silent: without this file the

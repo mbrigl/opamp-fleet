@@ -16,7 +16,7 @@ identifying attribute tells the Server which build it is talking to, both CLIs p
 Client's install layout names its version directories after it
 ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)), and the self-update compares an offered
 version against what a staged binary reports
-([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)).
+([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)).
 
 Forces:
 
@@ -112,7 +112,7 @@ compared nowhere.
    pre-release or metadata that is not dot-separated, non-empty identifiers of `[0-9A-Za-z-]` — the
    gate that keeps a version from naming a path outside the install layout. Beside it: `identity`
    (clause 10), `same_release`, and `precedence`, SemVer ordering with build metadata ignored, which
-   the self-update's downgrade refusal ([ADR-0017](0017-the-client-updates-itself-from-a-signed-package.md)) and the
+   the self-update's downgrade refusal ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)) and the
    rollout ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)) order by. It lives in
    `fleet-core` because the Client writes these strings and the Server displays them, and it is
    this project's grammar, not OpAMP's.
