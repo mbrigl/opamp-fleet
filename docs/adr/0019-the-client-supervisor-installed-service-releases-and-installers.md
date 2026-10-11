@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `.github/workflows/release.yml`, `packaging/`, the program, Agent type and configuration-file names of the Client, `service install --endpoint`, and every path, name or account an installed Client uses
+- **Applies to:** `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `.github/workflows/release.yml`, `packaging/`, the program, Agent type and configuration-file names of the Client, `service install --endpoint`, `service config`, and every path, name or account an installed Client uses
 
 ## Context
 
@@ -104,8 +104,8 @@ deliver the same binary and run its own `service install`.
 ### The installed service
 
 1. **One CLI, thin, over a `service` module.** The subcommands are `run` — the foreground daemon,
-   and the default when no subcommand is given — and `service install | uninstall | start | stop |
-   status`. The global flags are `--config` (default `supervisor.toml`) and `--state-dir`; every
+   and the default when no subcommand is given — and `service install | config | uninstall | start |
+   stop | status`. The global flags are `--config` (default `supervisor.toml`) and `--state-dir`; every
    service verb takes `--user`. There is no environment-variable configuration: the Client is
    file-configured ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)) and a registered
    service carries the configuration's *path*, never its content. clap's `version` is wired to
@@ -288,15 +288,23 @@ deliver the same binary and run its own `service install`.
     wins; because the flag has a default value, the two cases are told apart by clap's value
     source, not by comparing with the default string.
 
-15. **Interactivity is an opt-in flag on `install`.** `service install --interactive` runs the
-    questionnaire; without it `install` never asks anything, because it is the scripted command.
-    `--interactive` with a stdin that is not a terminal is an **error**, not a fallback — a
-    provisioning run must fail with a message rather than hang.
+15. **Interactivity is an opt-in flag on `install`, and `service config` is the questionnaire
+    alone.** `service install --interactive` runs the questionnaire; without it `install` never
+    asks anything, because it is the scripted command. `service config` runs the same
+    questionnaire against an installed Client and registers nothing: it finds the file as
+    `install` does — `--config`, else `<data root>/supervisor.toml` from `--user`, `--root` and
+    `--data-root` — and its state directory the way `install` derives it. The file must load
+    before the questionnaire asks: one that does not is corrected by hand. Either with a stdin that
+    is not a terminal is an **error**, not a fallback — a provisioning run must fail with a message
+    rather than hang.
 
-16. **A configuration file that exists is never overwritten** — by `--interactive` or by any
-    installer-supplied answer. The questionnaire is skipped, `install` proceeds with that file and
-    names it. A re-install can never eat the answers typed into the first, or the edits made to
-    the file since.
+16. **A configuration file that exists is never overwritten, and the questionnaire edits it in
+    place.** No installer-supplied answer and no `install` without `--interactive` touches it:
+    `install` proceeds with that file and names it. The questionnaire — `--interactive` and
+    `service config` alike — offers the value the file holds as the default of every question and
+    changes only the keys it asks for; every other key, every comment, the `[[supervisor]]` blocks
+    and the self-update consent stay as written. A re-install can never eat the answers typed into
+    the first, or the edits made to the file since.
 
 17. **The questionnaire asks only what has no useful default on a fresh host, and offers no
     answer the Client would refuse.**
@@ -310,17 +318,28 @@ deliver the same binary and run its own `service install`.
       `[tls] ca_file`. It is asked for every `wss://` or `https://` endpoint, without a question
       before it: the Server always presents a certificate of the fleet's own CA
       ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
-    - **The bootstrap certificate and its private key**, written as `[tls] cert_file` and
-      `key_file`, with which the Client enrols and waits until an operator approves its request.
-      A certificate already issued by the Server's client CA goes in the same two keys, by
-      editing the file. The identity is required: there is no answer without one, and a path
-      that names no readable file, here or for the CA, is asked for again. It is the one proof the
-      Server admits a peer by ([ADR-0020](0020-admission-by-a-client-certificate-alone.md)).
-    - **The answered files are copied beside the written file**, as `server-ca.pem`,
-      `bootstrap.pem` and `bootstrap-key.pem`, owner-only on Unix, and the file names the copies.
-      The configuration then depends on nothing outside its own directory. A copy left by an
-      earlier install is replaced. The copies are handed over to the service account with the file
-      (clause 13).
+    - **The bootstrap certificate and its private key, only while the Client is not enrolled** —
+      while its state directory holds no certificate the Server issued. They are neither copied
+      nor written into the file: the questionnaire enrols with them directly against the Server,
+      after the file is written. It connects with the pair where it lies, sends the CSR
+      ([ADR-0020](0020-admission-by-a-client-certificate-alone.md) clause 21), prints the
+      request's key fingerprint and waits until an operator approves it, then stores the issued
+      certificate in the state directory, where the Client looks for it first. An interrupted wait
+      leaves the written file and registers nothing; running the questionnaire again asks again
+      and resumes the request in flight, printing its fingerprint. A rejected request stays
+      rejected for its key, and the wait goes on until it is interrupted: removing the pending key
+      and request from the state directory starts a fresh one.
+      Where the file already names `[tls] cert_file` and `key_file`, those are the defaults. On an
+      enrolled Client neither is asked: the Client renews what it was issued. A certificate
+      already issued by the Server's client CA goes in `[tls] cert_file` and `key_file`, by
+      editing the file. The pair is required while it is asked: there is no answer without one,
+      and a path that names no readable file, here or for the CA, is asked for again. The
+      certificate is the one proof the Server admits a peer by
+      ([ADR-0020](0020-admission-by-a-client-certificate-alone.md)).
+    - **The answered CA is copied beside the written file**, as `server-ca.pem`, owner-only on
+      Unix, and the file names the copy. The configuration then depends on nothing outside its own
+      directory for its trust. A copy left by an earlier answer is replaced. The copy is handed
+      over to the service account with the file (clause 13).
     - **The package verification key**, the Ed25519 public key written as
       `[packages] verification_key` ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). An empty
       answer is accepted, and the install then says that the Client installs no package, its own
@@ -347,15 +366,14 @@ deliver the same binary and run its own `service install`.
 
 18. **The written file is treated as holding a secret:** mode `0600` on Unix; on Windows it
     inherits the data root's ACL, administrator-owned at system scope. It holds no credential. It
-    names where the client identity's private key lies — beside it, where the questionnaire copied
-    it (clause 17), mode `0600` as well — and it may hold `[packages] archive_key`,
+    may name where a client identity's private key lies, and it may hold `[packages] archive_key`,
     the fleet's archive decryption secret, which an operator adds by editing the file the
     installer created.
 
 19. **The configuration is validated before the service is registered, by the rules the Client
-    applies at startup.** The order is write → load through `ClientConfig::load` → stage the
-    layout → register, so a broken configuration fails at install and not at the service's first
-    start. The load is the one the Client runs at startup: a `ws://` or `http://` endpoint off the
+    applies at startup.** The order is write → load through `ClientConfig::load` → enrol, when
+    the questionnaire took a bootstrap pair (clause 17) → stage the layout → register, so a broken
+    configuration fails at install and not at the service's first start. The load is the one the Client runs at startup: a `ws://` or `http://` endpoint off the
     loopback fails the install, naming the setting. A missing client identity is what the Client
     refuses at startup; the install names it in a warning and registers the service all the same,
     because a packaged install has an endpoint and no client identity to write, and no installer
@@ -929,7 +947,10 @@ packaging the Server, which an operator deploys rather than the fleet.
   journal on Linux and macOS, is bounded by days and not bytes, and keeps a week of whatever the
   Client logs on disk, so nothing secret may be logged.
 - Negative / trade-offs: the questionnaire asks for a certificate and its key and a verification
-  key, and an operator must have them in hand before the first install. A
+  key, and an operator must have them in hand before the first install; on a host not yet enrolled
+  it also needs the Server reachable, its enrolment window open and an operator approving the
+  request while the command waits. A host that cannot reach the Server at install time is
+  installed without `--interactive` and completed by editing the file. A
   scripted install that passes `--endpoint` alone no longer registers a service: it writes the
   file, fails validation, and is completed by editing that file and re-running `install`, or by
   provisioning a complete file first.
@@ -997,8 +1018,10 @@ packaging the Server, which an operator deploys rather than the fleet.
   `a_missing_account_is_refused_with_the_way_out`,
   `the_handover_walks_the_tree_and_skips_what_is_missing`.
 - `crates/fleet-agent/src/config_init.rs`: `an_existing_file_is_never_overwritten`,
-  `run_keeps_an_existing_file_without_asking`,
   `an_endpoint_given_never_overwrites_an_existing_file`,
+  `an_edit_changes_the_asked_keys_and_keeps_the_rest`,
+  `the_defaults_are_what_the_file_holds`,
+  `the_bootstrap_pair_is_asked_only_before_enrolment`,
   `interactive_without_a_terminal_fails_instead_of_blocking`,
   `the_file_is_not_readable_by_the_rest_of_the_machine`,
   `a_private_ca_is_only_asked_about_where_tls_applies`,
@@ -1006,9 +1029,10 @@ packaging the Server, which an operator deploys rather than the fleet.
   `a_bad_endpoint_is_refused_before_anything_is_written` (clauses 16–18);
   `the_suggested_endpoint_is_tls_on_the_loopback`,
   `a_plaintext_endpoint_is_accepted_only_on_a_loopback_literal`, which refuses `localhost`
-  (clause 17); `a_complete_answer_writes_a_file_the_client_starts_with`, which renders an identity
-  as `[tls] cert_file` and `key_file` and the verification key as answered, and passes
-  `ClientConfig::check_admission` (clauses 17, 19);
+  (clause 17); `a_complete_answer_writes_a_file_the_client_starts_with`, which renders the
+  answers without a client identity and the verification key as answered, and passes
+  `ClientConfig::check_admission` once the state directory holds an issued certificate
+  (clauses 17, 19); `the_answered_ca_is_copied_beside_the_configuration` (clause 17);
   `installer_answers_alone_fail_validation_and_stay_on_disk` (clauses 17, 19);
   `a_rendered_file_has_no_auth_section`, which renders complete answers and asserts
   that the file holds no `[auth]` (clause 17).
@@ -1075,11 +1099,17 @@ packaging the Server, which an operator deploys rather than the fleet.
   `a_plaintext_endpoint_is_accepted_only_on_a_loopback_literal`, which refuses a plaintext endpoint
   off the loopback and one naming `localhost`, names the setting, and writes nothing, in
   [`config_init.rs`](../../crates/fleet-agent/src/config_init.rs).
+- [`tests/enrolment_e2e.rs`](../../crates/fleet-agent/tests/enrolment_e2e.rs)
+  `the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_nothing`, which enrols
+  through the questionnaire's enrolment against the real Server, approves the request, and asserts
+  that the issued certificate is in the state directory and nothing was written beside the
+  configuration (clause 17); [`cli.rs`](../../crates/fleet-agent/src/cli.rs)
+  `config_takes_the_install_roots` (clause 15).
 
 **Not mechanically decidable:** that the layout starts under an enforcing SELinux policy — no CI
 runner enforces it, so the manual checklist in [`README.md`](../../README.md) carries that step.
 The questionnaire's prompts (clause 17) read a terminal, which `cargo test` does not have: that no
-answer skips the client identity, that no question asks for a credential, that a CA, certificate or
+answer skips the bootstrap pair on a Client not yet enrolled, that no question asks for a credential, that a CA, certificate or
 key path naming no readable file and a refused endpoint are asked for again, and that an empty
 verification key is named, are review questions on `ask` in `config_init.rs`.
 `service install` (clauses 19, 20) validates only on the way to registering a service, so the

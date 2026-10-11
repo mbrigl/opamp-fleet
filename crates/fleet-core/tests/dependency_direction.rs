@@ -101,6 +101,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("bin::stub_agent", Root),
             ("bin::stub_crasher", Root),
             ("supervisor", Root),
+            ("service::enrol", Root),
             ("service::runtime", Root),
             ("config", Core),
             ("engine", Core),

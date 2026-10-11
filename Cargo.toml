@@ -163,7 +163,7 @@ clap = { version = "4", features = ["derive"] }
 # Cross-platform service lifecycle — systemd, launchd, and the Windows SCM behind one API
 # (ADR-0019). Pulls no TLS/crypto backends, so the rustls/ring-only constraint (ADR-0012) holds.
 service-manager = "0.11"
-# The interactive first configuration `service install --interactive` writes (ADR-0019 clause
+# The questionnaire of `service install --interactive` and `service config` (ADR-0019 clause
 # 21): validated answers, defaults and a yes/no confirmation, the same on three operating systems.
 # No feature is asked for — the questionnaire asks for no secret, so no prompt hides its input —
 # and it pulls no TLS/crypto backend, so ADR-0012 holds.

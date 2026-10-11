@@ -15,6 +15,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ## [0.5.1]
 
+### Added
+
+- **`service config` asks the questionnaire of `install --interactive` again on an installed
+  Client** — each question offers what `supervisor.toml` holds, only the asked keys change, and a
+  host that holds no certificate yet is enrolled with the Server on the spot; nothing is
+  registered. It takes the `--user`, `--root` and `--data-root` the Client was installed with
+  ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)).
+  **What to do:** nothing; restart the service after it to apply the change.
+
 ### Changed
 
 - **Breaking: the self-update consent is `[packages] self_update`, and `[self_update]` fails
@@ -36,14 +45,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   writes `[telemetry_offer]` commented out, so a development fleet without the observability stack
   running does not report into nothing. **What to do:** uncomment the section once the stack in
   `observability/` runs; an existing `.dev-pki/server.toml` keeps what it has.
-- **`service install --interactive` asks for the Server's CA and the bootstrap certificate by
-  name, and copies them beside `supervisor.toml`** — the question whether the Server's certificate
-  comes from a private CA is gone: the CA is asked for on every `wss://` or `https://` endpoint.
-  The CA, the bootstrap certificate and its key are copied into the configuration's directory as
-  `server-ca.pem`, `bootstrap.pem` and `bootstrap-key.pem`, owner-only, and the file names the
-  copies ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)).
-  **What to do:** nothing; the originals can be removed after the install. A file written before
-  keeps the paths it has.
+- **`service install --interactive` enrols the host itself, and edits an existing
+  `supervisor.toml` instead of keeping it** — the CA is asked for on every `wss://` or `https://`
+  endpoint and copied beside the file as `server-ca.pem`. The bootstrap certificate and its key are
+  asked for only while the host holds no issued certificate, are neither copied nor written into
+  the file, and are used at once: the install sends the enrolment request, logs its key
+  fingerprint and waits for an operator's approval before it registers the service. On a
+  configured host every question offers what the file holds, and only the asked keys change
+  ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)).
+  **What to do:** open the enrolment window before running `--interactive` on a new host, and
+  approve the request it waits for. A file that names a bootstrap pair keeps it, and a service
+  started on it enrols as before.
 - **A bootstrap certificate lives 10 days by default, not 30** — `opamp-fleetctl pki init` and
   `pki bootstrap-cert` make it shorter-lived, since it carries a host only to its first certificate
   and every new host shares it

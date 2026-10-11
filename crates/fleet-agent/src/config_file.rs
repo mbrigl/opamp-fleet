@@ -72,11 +72,21 @@ impl ClientConfig {
         if self.client_identity().is_none() {
             return Err(
                 "[tls] cert_file and key_file are required — the Server admits no Agent without \
-                 a client certificate; a bootstrap certificate enrols this host"
+                 a client certificate; enrol this host with `supervisor service config`, or name \
+                 a bootstrap certificate there"
                     .to_string(),
             );
         }
         Ok(())
+    }
+
+    /// Whether the state directory holds a certificate the Server issued, with its key — what
+    /// makes this Client a member of the fleet rather than a host still to enrol (ADR-0020). The
+    /// questionnaire asks for a bootstrap pair only while this is `false` (ADR-0019 clause 17).
+    #[must_use]
+    pub fn is_enrolled(&self) -> bool {
+        self.state_dir.join(crate::tls::ISSUED_CERT_FILE).exists()
+            && self.state_dir.join(crate::tls::ISSUED_KEY_FILE).exists()
     }
 
     /// The client certificate and key this Client presents on both transports (ADR-0020), or
@@ -87,10 +97,11 @@ impl ClientConfig {
     /// wrote, and deleting the stored pair reverts to it. That is also what retires a bootstrap
     /// certificate — it keeps standing in `supervisor.toml`, unused, once a real one has been issued.
     pub fn client_identity(&self) -> Option<(PathBuf, PathBuf)> {
-        let cert = self.state_dir.join(crate::tls::ISSUED_CERT_FILE);
-        let key = self.state_dir.join(crate::tls::ISSUED_KEY_FILE);
-        if cert.exists() && key.exists() {
-            return Some((cert, key));
+        if self.is_enrolled() {
+            return Some((
+                self.state_dir.join(crate::tls::ISSUED_CERT_FILE),
+                self.state_dir.join(crate::tls::ISSUED_KEY_FILE),
+            ));
         }
         let tls = self.tls.as_ref()?;
         Some((tls.cert_file.clone()?, tls.key_file.clone()?))
