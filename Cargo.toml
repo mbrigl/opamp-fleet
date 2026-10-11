@@ -139,7 +139,7 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 # a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
 webpki-roots = "1"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
-axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 # The hyper timer the HTTP/1 header-read timeout needs to exist at all (ADR-0012): hyper defaults
 # that timeout to 30 seconds but resolves it to *nothing* while no `Timer` is installed, and
 # neither axum nor axum-server installs one. `tokio` is the only feature asked for — it is what
