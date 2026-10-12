@@ -131,10 +131,12 @@ pub async fn serve_guarded(
     let handle = axum_server::Handle::new();
     tokio::spawn(
         server::listen::plane(agent_listener, DefaultAcceptor::new(), handle.clone())
+            .expect("serve the Agent plane")
             .serve(agents.into_make_service()),
     );
     tokio::spawn(
         server::listen::plane(operator_listener, DefaultAcceptor::new(), handle)
+            .expect("serve the Operator plane")
             .serve(operators.into_make_service()),
     );
     (addr, rest_addr)

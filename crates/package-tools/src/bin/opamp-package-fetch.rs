@@ -2387,8 +2387,6 @@ fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use clap::ValueEnum as _;
-
     /// The agent menu names the systems each agent can be fetched for, and the one that needs it
     /// most is Icinga 2: its Linux artifact exists only on a host of the distribution it is built
     /// for, which is not something to discover three questions later. Every variant answers —

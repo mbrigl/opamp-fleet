@@ -7,7 +7,7 @@
 //!
 //! hyper defaults its HTTP/1 `header_read_timeout` to 30 seconds, but the default is inert while no
 //! `Timer` is installed — `Time::check` warns *"timeout `header_read_timeout` has default, but no
-//! timer set"* and resolves it to `None`. Neither `axum::serve` (0.8) nor `axum_server` (0.7)
+//! timer set"* and resolves it to `None`. Neither `axum::serve` (0.8) nor `axum_server` (0.8)
 //! installs one, so both planes ran without that bound. Configuring the timeout *without* a timer
 //! is worse than not configuring it: hyper panics. Both go together, and they go here.
 //!
@@ -16,7 +16,8 @@
 //! Operator plane accepts a package upload with the body limit switched off (ADR-0008): a request
 //! timeout would break exactly those three and leave the slow peer untouched.
 
-use std::net::TcpListener;
+use std::io;
+use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
 use axum_server::{Handle, Server};
@@ -48,8 +49,13 @@ pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
 /// `acceptor` is what distinguishes the four cases: [`axum_server::accept::DefaultAcceptor`] for a
 /// plain listener, [`crate::tls::PeerCertAcceptor`] for the Agent plane over TLS, and a plain
 /// [`axum_server::tls_rustls::RustlsAcceptor`] for the Operator plane over TLS. `handle` is shared
-/// by both planes, so one signal drains both.
-pub fn plane<A>(listener: TcpListener, acceptor: A, handle: Handle) -> Server<A> {
+/// by both planes, so one signal drains both. It fails only if the listener cannot be handed to the
+/// runtime.
+pub fn plane<A>(
+    listener: TcpListener,
+    acceptor: A,
+    handle: Handle<SocketAddr>,
+) -> io::Result<Server<SocketAddr, A>> {
     plane_with_header_read_timeout(listener, acceptor, handle, HEADER_READ_TIMEOUT)
 }
 
@@ -58,10 +64,12 @@ pub fn plane<A>(listener: TcpListener, acceptor: A, handle: Handle) -> Server<A>
 pub fn plane_with_header_read_timeout<A>(
     listener: TcpListener,
     acceptor: A,
-    handle: Handle,
+    handle: Handle<SocketAddr>,
     header_read_timeout: Duration,
-) -> Server<A> {
-    let mut server = axum_server::from_tcp(listener)
+) -> io::Result<Server<SocketAddr, A>> {
+    // Tokio refuses a blocking socket, and `axum_server` leaves the mode to whoever bound it.
+    listener.set_nonblocking(true)?;
+    let mut server = axum_server::from_tcp(listener)?
         .handle(handle)
         .acceptor(acceptor);
     server
@@ -71,13 +79,13 @@ pub fn plane_with_header_read_timeout<A>(
         // discarded without one.
         .timer(TokioTimer::new())
         .header_read_timeout(header_read_timeout);
-    server
+    Ok(server)
 }
 
 /// Asks both planes to stop and gives their connections [`SHUTDOWN_DRAIN`] to end.
 ///
 /// A free function rather than a call at the signal site, so the two planes cannot end up with
 /// different ideas of what shutting down means.
-pub fn shut_down(handle: &Handle) {
+pub fn shut_down(handle: &Handle<SocketAddr>) {
     handle.graceful_shutdown(Some(SHUTDOWN_DRAIN));
 }

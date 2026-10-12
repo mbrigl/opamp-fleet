@@ -258,12 +258,14 @@ async fn main() {
                     server::tls::PeerCertAcceptor::new(rustls_config.clone()),
                     handle.clone(),
                 )
+                .expect("serve the Agent plane")
                 .serve(agents.into_make_service()),
                 listen::plane(
                     operator_listener,
                     server::tls::rustls_acceptor(rustls_config),
                     handle,
                 )
+                .expect("serve the Operator plane")
                 .serve(operators.into_make_service()),
             );
             agents.expect("serve the Agent plane");
@@ -274,8 +276,10 @@ async fn main() {
             info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI");
             let (agents, operators) = tokio::join!(
                 listen::plane(agent_listener, DefaultAcceptor::new(), handle.clone())
+                    .expect("serve the Agent plane")
                     .serve(agents.into_make_service()),
                 listen::plane(operator_listener, DefaultAcceptor::new(), handle)
+                    .expect("serve the Operator plane")
                     .serve(operators.into_make_service()),
             );
             agents.expect("serve the Agent plane");
