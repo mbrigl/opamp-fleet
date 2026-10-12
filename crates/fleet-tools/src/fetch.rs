@@ -58,6 +58,11 @@ pub struct Args {
     /// Operator plane serves TLS 1.3 only (ADR-0012).
     #[arg(long, value_name = "URL")]
     server: Option<String>,
+    /// The CA certificate (PEM) the Server's certificate chains to, such as the `server-ca.pem`
+    /// `pki init` writes. It replaces the system's roots for the calls to the Server alone; the
+    /// downloads from upstream keep them. Omitted, the Server is checked against the system's roots.
+    #[arg(long, value_name = "FILE", conflicts_with = "no_upload")]
+    cacert: Option<PathBuf>,
     /// Write the artifacts and stop — no upload, and no question about one.
     #[arg(long, conflicts_with = "server")]
     no_upload: bool,
@@ -398,6 +403,9 @@ enum Action {
 /// # Errors
 /// Returns the message to print when a download, a check or an upload fails.
 pub async fn run(args: Args) -> Result<(), String> {
+    // Built before anything is downloaded: a CA path with a typo is cheaper to hear about now than
+    // after hundreds of megabytes.
+    let server_client = server_http(args.cacert.as_deref())?;
     let agent = match args.agent {
         Some(agent) => agent,
         None => choose_agent()?,
@@ -447,9 +455,17 @@ pub async fn run(args: Args) -> Result<(), String> {
     let server = upload_target(&args)?;
     if let Some(server) = &server {
         for (plan, artifact) in &produced {
-            upload(server, source.service_name, &version, plan, artifact).await?;
+            upload(
+                &server_client,
+                server,
+                source.service_name,
+                &version,
+                plan,
+                artifact,
+            )
+            .await?;
         }
-        upload_default_configurations(server, agent).await?;
+        upload_default_configurations(&server_client, server, agent).await?;
     }
 
     eprintln!("\nDone. {}", agent.install_hint());
@@ -2086,6 +2102,7 @@ fn mode_of(meta: &std::fs::Metadata) -> u32 {
 /// (ADR-0024). Nothing is distributed by either call: a Set reaches an Agent only through a
 /// rollout act (ADR-0023), which stays the operator's.
 async fn upload(
+    client: &reqwest::Client,
     server: &str,
     service_name: &str,
     version: &str,
@@ -2094,15 +2111,15 @@ async fn upload(
 ) -> Result<(), String> {
     let set = format!("{server}/api/v1/packages/{service_name}/{version}");
     eprintln!("  creating the Set at {set} …");
-    put_json(&set, "{}".to_string()).await?;
+    put_json(client, &set, "{}".to_string()).await?;
 
     let entry = format!("{set}/entries/{}/{}", plan.os, plan.arch);
     eprintln!("  uploading {} …", artifact.display());
     let bytes =
         std::fs::read(artifact).map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
-    let response = match http()?.put(&entry).body(bytes).send().await {
+    let response = match client.put(&entry).body(bytes).send().await {
         Ok(response) => response,
-        Err(e) => return Err(refusal_behind(&entry, &e).await),
+        Err(e) => return Err(refusal_behind(client, &entry, &e).await),
     };
     expect_ok(response, &entry).await?;
     eprintln!(
@@ -2127,10 +2144,14 @@ async fn upload(
 /// Agent until an operator reads it and presses the rollout. That matters here, because these
 /// bodies are starting points with example values in them — a parent host to correct, a plugin
 /// path to confirm.
-async fn upload_default_configurations(server: &str, agent: AgentKind) -> Result<(), String> {
+async fn upload_default_configurations(
+    client: &reqwest::Client,
+    server: &str,
+    agent: AgentKind,
+) -> Result<(), String> {
     for config in agent.default_configurations() {
         let url = format!("{server}/api/v1/configurations/{}", config.name);
-        if configuration_exists(&url).await? {
+        if configuration_exists(client, &url).await? {
             eprintln!("  {} is already on the Server — left as it is", config.name);
             continue;
         }
@@ -2150,7 +2171,7 @@ async fn upload_default_configurations(server: &str, agent: AgentKind) -> Result
             "service_name": config.service_name,
         });
         eprintln!("  storing the default configuration {} …", config.name);
-        put_json(&url, spec.to_string()).await?;
+        put_json(client, &url, spec.to_string()).await?;
         eprintln!(
             "  saved — read it over and press its rollout when it should reach hosts, since it \
              carries example values"
@@ -2162,8 +2183,8 @@ async fn upload_default_configurations(server: &str, agent: AgentKind) -> Result
 /// Whether the Server already holds a Configuration of this name. `404` is the answer that means
 /// "no"; anything else that is not a success is an answer this tool must not read past — a Server
 /// that refuses the question would otherwise have a default written over the top of what it holds.
-async fn configuration_exists(url: &str) -> Result<bool, String> {
-    let response = http()?
+async fn configuration_exists(client: &reqwest::Client, url: &str) -> Result<bool, String> {
+    let response = client
         .get(url)
         .send()
         .await
@@ -2174,8 +2195,8 @@ async fn configuration_exists(url: &str) -> Result<bool, String> {
     expect_ok(response, url).await.map(|()| true)
 }
 
-async fn put_json(url: &str, body: String) -> Result<(), String> {
-    let response = http()?
+async fn put_json(client: &reqwest::Client, url: &str, body: String) -> Result<(), String> {
+    let response = client
         .put(url)
         .header("Content-Type", "application/json")
         .body(body)
@@ -2200,12 +2221,8 @@ async fn put_json(url: &str, body: String) -> Result<(), String> {
 /// (`400`), so the probe can never store anything — and a `400` is the answer that carries no news:
 /// it means the checks passed and the Server got as far as the body, leaving the transport error as
 /// the real story.
-async fn refusal_behind(entry: &str, error: &reqwest::Error) -> String {
-    let sent = match http() {
-        Ok(client) => client.put(entry).body(Vec::new()).send().await,
-        Err(e) => return e,
-    };
-    if let Ok(response) = sent {
+async fn refusal_behind(client: &reqwest::Client, entry: &str, error: &reqwest::Error) -> String {
+    if let Ok(response) = client.put(entry).body(Vec::new()).send().await {
         let status = response.status();
         if status != reqwest::StatusCode::BAD_REQUEST {
             let body = response.text().await.unwrap_or_default();
@@ -2240,6 +2257,29 @@ async fn expect_ok(response: reqwest::Response, url: &str) -> Result<(), String>
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
 fn http() -> Result<reqwest::Client, String> {
+    client_builder()
+        .build()
+        .map_err(|e| format!("cannot build an HTTP client: {e}"))
+}
+
+/// The client for the Server's Operator plane: the one every download uses, trusting `--cacert`
+/// in place of the system's roots when it is given — the Client's own trust, so the two read a CA
+/// file alike.
+fn server_http(cacert: Option<&Path>) -> Result<reqwest::Client, String> {
+    let ca_pem = cacert
+        .map(|path| std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display())))
+        .transpose()?;
+    opamp::client::connection::ClientTls {
+        ca_pem,
+        identity: None,
+    }
+    .trust(client_builder())
+    .map_err(|e| format!("--cacert: {e}"))?
+    .build()
+    .map_err(|e| format!("cannot build an HTTP client: {e}"))
+}
+
+fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         // TLS 1.3 alone, as every connection of this project (ADR-0012).
         .tls_version_min(reqwest::tls::Version::TLS_1_3)
@@ -2257,8 +2297,6 @@ fn http() -> Result<reqwest::Client, String> {
         // would kill a working download on principle, so only the connect phase is bounded.
         .connect_timeout(std::time::Duration::from_secs(30))
         .user_agent("opamp-fleetctl")
-        .build()
-        .map_err(|e| format!("cannot build an HTTP client: {e}"))
 }
 
 async fn get(url: &str) -> Result<reqwest::Response, String> {
@@ -3161,7 +3199,8 @@ SHA256: cccc
             block_hint: String::new(),
         };
 
-        let error = upload(&server, "otelcol", "0.0.1", &plan, &artifact)
+        let client = http().expect("client");
+        let error = upload(&client, &server, "otelcol", "0.0.1", &plan, &artifact)
             .await
             .expect_err("an upload nothing accepted is not a success");
         assert!(
@@ -3284,7 +3323,7 @@ SHA256: cccc
             }
         });
 
-        upload_default_configurations(&server, AgentKind::Icinga2)
+        upload_default_configurations(&http().expect("client"), &server, AgentKind::Icinga2)
             .await
             .expect("the Server accepted the one it was missing");
 
@@ -3300,5 +3339,107 @@ SHA256: cccc
                 .any(|r| r.starts_with("PUT") && r.contains("/api/v1/configurations/icinga2-conf")),
             "the one the Server already holds is left alone: {seen:?}"
         );
+    }
+
+    /// `--cacert` is what lets the tool upload to a fleet whose Server certificate a self-made CA
+    /// signed: with it the Server is trusted, and without it the same Server is refused for the
+    /// reason the operator would otherwise meet — a certificate no system root vouches for.
+    ///
+    /// Verifies: ADR-0012
+    #[tokio::test]
+    async fn a_server_signed_by_the_named_ca_is_trusted_and_only_then() {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use std::io::Write;
+        use std::sync::Arc;
+
+        opamp::tls::install_ring_provider();
+
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).expect("ca");
+        let issuer = Issuer::new(ca_params, ca_key);
+        let key = KeyPair::generate().expect("key");
+        let leaf = CertificateParams::new(vec!["127.0.0.1".to_string()])
+            .expect("params")
+            .signed_by(&key, &issuer)
+            .expect("leaf");
+
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(leaf.der().to_vec())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .expect("server config"),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let server = format!("https://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let Ok(connection) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+                    continue;
+                };
+                let mut tls = rustls::StreamOwned::new(connection, stream);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match tls.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let length: usize = String::from_utf8_lossy(&head)
+                    .to_ascii_lowercase()
+                    .split("content-length:")
+                    .nth(1)
+                    .and_then(|rest| rest.split("\r\n").next())
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0u8; length];
+                let _ = tls.read_exact(&mut body);
+                let _ = tls.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                );
+                let _ = tls.flush();
+            }
+        });
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cacert = dir.path().join("ca.pem");
+        std::fs::write(&cacert, ca.pem()).expect("write");
+        let url = format!("{server}/api/v1/packages/otelcol/0.0.1");
+
+        let trusting = server_http(Some(&cacert)).expect("the CA reads");
+        put_json(&trusting, &url, "{}".to_string())
+            .await
+            .expect("a Server the named CA signed is reached");
+
+        let error = put_json(&server_http(None).expect("client"), &url, "{}".to_string())
+            .await
+            .expect_err("without --cacert the same Server is not trusted");
+        assert!(error.contains("UnknownIssuer"), "{error}");
+    }
+
+    /// A `--cacert` that names no certificate is refused when it is read, before any download,
+    /// rather than surfacing as an untrusted Server at the very end.
+    #[test]
+    fn a_cacert_without_a_certificate_is_refused_up_front() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "").expect("write");
+        let error = server_http(Some(&empty)).expect_err("an empty file is no CA");
+        assert!(error.contains("no certificates"), "{error}");
+
+        let missing = dir.path().join("missing.pem");
+        let error = server_http(Some(&missing)).expect_err("a missing file is no CA");
+        assert!(error.contains("cannot read"), "{error}");
     }
 }

@@ -219,6 +219,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   artifact is, per platform — source, assets, integrity, repack, the delivered tree, and what the
   Client derives from it. Each is pinned by two tests, one on the packing side and one in the kind,
   so an upstream release that moves a path turns a test red instead of a rollout.
+- **`opamp-fleetctl package fetch --cacert <file>`** uploads to a Server whose certificate a
+  fleet's own CA signed — for a fleet made with `pki init`, its `server-ca.pem`. Without it, such a
+  Server was refused with `invalid peer certificate: UnknownIssuer`, since only the system's roots
+  were trusted. The CA replaces those roots for the calls to the Server alone; downloads from
+  upstream keep them.
 
 ### Changed
 
