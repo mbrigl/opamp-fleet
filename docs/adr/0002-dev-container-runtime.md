@@ -1,60 +1,65 @@
-# ADR-0002: Debian Dev Container without host Docker access
+# ADR-0002: The Dev Container keeps the host daemon out of reach and its Features locked
 
 - **Status:** 🟢 accepted
-- **Date:** 2026-06-22
-- **Deciders:** Maintainer
-- **Note:** Records a decision already embodied in
-  [`.devcontainer/devcontainer.json`](../../.devcontainer/devcontainer.json). Documented retroactively
-  so the template follows its own method; accepted by the maintainer on 2026-06-22.
+- **Date:** 2026-09-05
+- **Deciders:** NUC maintainer
+- **Applies to:** `.devcontainer/`, `.vscode/settings.json`, and everything the container pulls in
 
 ## Context
 
-The template must provide a reproducible, ready-to-use environment without committing to any language
-toolchain (it has to stay language-agnostic). Coding agents frequently want Docker access, and the
-obvious way to grant it — the `docker-outside-of-docker` Feature — bind-mounts the **host** Docker
-socket into the container. That mount means any code or coding agent running in the container can drive
-the host daemon — effectively host-level access and a large blast radius (recorded in
-[`SECURITY.md`](../../SECURITY.md)). Examining the actual requirement, the only thing we need is to
-**manage the host's containers from VS Code**. That is a host-side capability and does not require
-exposing the socket to the container at all.
+The template ships a Dev Container so that the first run is reproducible without committing to a
+language toolchain. Agents often want Docker access, and the obvious way — the
+`docker-outside-of-docker` Feature — bind-mounts the **host** Docker socket, handing host-level
+control to anything inside. Managing host containers from VS Code does not need the socket.
+
+The container also pulls in third-party code that runs next to the agent credentials it mounts:
+**Features**, executed at build time. A Feature tag is mutable and can be repointed, so a tag alone
+does not say what a commit builds.
 
 ## Decision
 
-We will base the Dev Container on `mcr.microsoft.com/devcontainers/base:debian` with **no Docker
-Feature**, so no host Docker socket is mounted and the container has **no access to the host daemon**.
-Host containers are managed from a VS Code extension pinned to the **host (UI) side** via
-`remote.extensionKind` in [`.vscode/settings.json`](../../.vscode/settings.json), which talks to the
-host engine directly even when the folder is reopened in the container. The base image ships no
-language toolchain; each project adds its own and fills in the **Build, Test & Run** section of
-[`README.md`](../../README.md).
+We will keep the host container engine out of the Dev Container's reach — **no host Docker socket
+is mounted and no Feature that would mount one is added**, in every variant — and pin Features by
+major version tag with `.devcontainer/devcontainer-lock.json` committed, so the same commit yields
+the same Features. Host containers are managed from an extension pinned to the host side via
+`remote.extensionKind` in [`.vscode/settings.json`](../../.vscode/settings.json).
+
+**Out of scope:** which base image, Features, and extensions a project picks, and whether it pins
+extensions; its toolchain; whether work may happen outside the container; hardening the container,
+which is not a security boundary; and how the lock is refreshed.
 
 ## Alternatives considered
 
-- **`docker-outside-of-docker` (mount the host socket)** — convenient, but exposes the host daemon to
-  everything in the container; an unacceptable blast radius for autonomous agents.
-- **docker-in-docker** — a nested, privileged daemon; isolated from the host but therefore *cannot*
-  manage the host's containers (the actual goal), and adds privileged-container risk.
-- **Rootless Podman/Docker inside the container** — isolated and unprivileged, but again a *separate*
-  engine that does not manage host containers.
-- **Bundling a language toolchain in the base** — premature for a template meant to fit any stack.
-- **No container tooling at all** — loses the host-container management use-case entirely.
+- **`docker-outside-of-docker`, docker-in-docker, rootless engine inside** — host-socket exposure,
+  privileged nesting, and an engine that cannot manage host containers anyway.
+- **Ignore the Feature lock** — a repointed tag reaches the credentials before anyone sees a diff.
+- **Digests directly in `devcontainer.json`** — buries hashes in the hand-edited file and loses the
+  readable tag.
 
 ## Sources / Prior art
 
-- Dev Container Features and specification — <https://containers.dev/features>.
-- VS Code Dev Containers — forcing an extension to run locally/remotely via `remote.extensionKind`:
-  <https://code.visualstudio.com/docs/devcontainers/containers>.
-- Docker daemon attack surface (why mounting the socket grants host-level control):
+- Dev Container specification — <https://containers.dev/implementors/json_reference/> and
+  <https://containers.dev/features>.
+- `remote.extensionKind` — <https://code.visualstudio.com/docs/devcontainers/containers>.
+- Docker daemon attack surface —
   <https://docs.docker.com/engine/security/#docker-daemon-attack-surface>.
 
 ## Consequences
 
-- Positive: small image, fast start, no daemon to manage; the container cannot control the host
-  engine; VS Code still manages host containers through the host-side extension.
-- Negative / trade-offs: coding agents inside the container cannot build or run containers; no
-  toolchain works out of the box until a project adds one; the host-management path depends on
-  installing the extension on the host and on the `remote.extensionKind` pin.
-- Follow-ups: each project records its own toolchain choice (a new ADR if it constrains future
-  choices) and completes the **Build, Test & Run** commands. If in-container container builds become
-  genuinely necessary, add an **isolated** (rootless) engine through a new ADR rather than mounting the
-  host socket.
+- Positive: the security posture is the same in every variant; the same commit gives the same
+  Features, and a changed digest shows up in review.
+- Negative / trade-offs: Feature updates stop arriving on their own and a stale lock is invisible.
+- Follow-ups: whether an automated update path for Features should be wired up.
+
+## Enforcement
+
+[`scripts/check-devcontainer.sh`](../../scripts/check-devcontainer.sh) (job `devcontainer` in
+[`checks.yml`](../../.github/workflows/checks.yml)) reads the files this decision names and
+fails when [`devcontainer.json`](../../.devcontainer/devcontainer.json) mounts a host socket or
+adds a Feature that would, when a Feature carries no major version tag, when the lock is missing
+or names other Features than the definition, or when
+[`.vscode/settings.json`](../../.vscode/settings.json) no longer pins the container-management
+extension to the host side. Its self-test cites this ADR
+([ADR-0003](0003-decisions-verified-by-tests.md)). Not checked: a variant definition under a
+subdirectory of `.devcontainer/`, whether the lock's digests are the ones the tags currently
+resolve to, and the container itself — no CI job builds it.

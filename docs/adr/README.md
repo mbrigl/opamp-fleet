@@ -1,66 +1,120 @@
 # Architecture Decision Records
 
-This directory contains all Architecture Decision Records (ADRs) for this project.
-Accepted ADRs are **binding** for humans and coding agents alike (see [`AGENTS.md`](../../AGENTS.md)
-in the repository root). ADRs derive from the specification in [`docs/SPECIFICATION.md`](../SPECIFICATION.md).
+This directory contains all Architecture Decision Records (ADRs) for this project. Accepted ADRs are
+**binding** for humans and coding agents alike (see [`AGENTS.md`](../../AGENTS.md) in the repository
+root). ADRs derive from the specification in [`docs/SPECIFICATION.md`](../SPECIFICATION.md).
 
-## Process
+## Mechanics
 
-1. Copy [`template.md`](template.md) to `NNNN-short-title.md` (next free number).
-2. Fill in context, decision, alternatives, and consequences. Set status `proposed`.
-3. A human reviewer accepts or rejects the ADR. **Only humans change the status.**
-4. Add the ADR to the index below, with its status shown via the colored bullet from the legend.
-5. A decision is changed by a *new* ADR that supersedes the old one — never by editing an
-   accepted ADR.
-6. **Once this template is in use, ADRs are immutable and their numbers are permanent.** Never
-   renumber, delete, or merge ADRs — other ADRs, commits (`Implements ADR-NNNN`), and code may
-   reference a number. Superseded ADRs stay as historical record (status `superseded by ADR-NNNN`);
-   filter active ones via the Status column. To curb sprawl, supersede — do not consolidate. (The
-   template itself may still consolidate its own seed ADRs before any project builds on them, since
-   nothing external references those numbers yet.)
-7. **Never reference an ADR number that does not exist yet.** Every `ADR-NNNN` reference must point
-   to a file that is already present in this directory. Anticipated follow-up decisions are
-   described by topic (e.g., "a follow-up ADR on session storage") in the Consequences section —
-   the concrete number is cited only once that ADR file exists.
+The rules live in [`AGENTS.md` §3](../../AGENTS.md#3-adr-rules): when an ADR is written, how it
+is developed, who flips its status, that an accepted one is immutable and changed only by
+supersession. This section carries only the mechanics of the record;
+[`scripts/check-docs.sh`](../../scripts/check-docs.sh) names in its header which of them it
+verifies.
+
+- **File.** Copy [`template.md`](template.md) to `NNNN-short-title.md` with the next free number.
+  The `# ADR-NNNN` heading matches the filename, and the numbers run `0001..N` without gaps.
+- **Index.** The tables below change in the same pull request as the ADR it describes, for
+  additions, supersessions, and status flips alike. The status is shown via the legend's bullet
+  and the ADR's `Applies to` header is mirrored verbatim in its own column. The index routes a
+  reader from a change to the decisions that bind it, so a row says what its ADR governs without
+  the file being opened. Two tables keep what a session reads apart from what it looks up: an
+  accepted or proposed ADR sits under **Binding**, a superseded or rejected one under
+  **Superseded and rejected**, and a status flip moves the row.
+- **Numbers are permanent.** Never renumber, delete, or merge ADRs: other ADRs, commits
+  (`Implements ADR-NNNN`), and code may reference a number. A superseded ADR keeps its file and
+  its body. Its `Status` line flips to `⚪ superseded by ADR-NNNN` in the pull request that lands
+  the superseding ADR, whose `Supersedes` field names it back.
+- **Sprawl is curbed by supersession, never by editing.** One ADR may supersede several whose
+  decisions have grown into one. Its `Supersedes` field names each, and each flips its status in
+  the same pull request, so the set an agent reads for a change shrinks while every number and
+  every body stays.
+- **Cite only what exists.** Every `ADR-NNNN` reference names a file already in this directory.
+  An anticipated follow-up is described by topic ("a follow-up ADR on session storage"), never by
+  a number. In Markdown, cite an ADR as a link to its own file.
 
 ## Index
 
+An ADR whose `Deciders` line names the **NUC maintainer** is inherited from the template. It
+binds a derived project once its own maintainer adds their name to `Deciders` and flips the
+`Status` line to `🟢 accepted` ([`AGENTS.md` §3](../../AGENTS.md#3-adr-rules)). Change an
+inherited decision by superseding it, never by editing. Once the template setup is done, check
+12 of [`scripts/check-docs.sh`](../../scripts/check-docs.sh) fails on an inherited ADR still
+proposed.
+
 **Status legend:** 🟢 accepted · 🟡 proposed · 🔴 rejected · ⚪ superseded
 
-| ADR | Title | Status |
-|-----|-------|--------|
-| [0001](0001-agent-governance-model.md) | Specification + ADRs governed through a single `AGENTS.md` | 🟢 accepted |
-| [0002](0002-dev-container-runtime.md) | Debian Dev Container without host Docker access | 🟢 accepted |
-| [0003](0003-client-modes-and-connection-multiplexing.md) | One Client binary with two composable modes, multiplexing Agents over a connection pool | 🟢 accepted |
-| [0004](0004-protocol-baseline-and-conformance-tracking.md) | Pin the protocol to a Baseline version and track conformance in a dedicated document | 🟢 accepted |
-| [0005](0005-workspace-and-server-runtime.md) | Three-crate Cargo workspace; tokio runtime; axum serves OpAMP, REST API, and the bundled UI on one port | 🟢 accepted |
-| [0006](0006-proto-vendoring-and-codegen.md) | Vendor the Baseline's protobuf schema and compile it with prost via protox (no system protoc) | 🟢 accepted |
-| [0007](0007-dual-transport-and-tls.md) | Both OpAMP transports on both ends — plain HTTP(S) polling and WebSocket on one endpoint, TLS via rustls | 🟢 accepted |
-| [0008](0008-toml-configuration.md) | TOML configuration files for the Server and the Client | 🟢 accepted |
-| [0009](0009-version-baking-comparison-and-display.md) | The version — strict SemVer baked in at compile time, `-dev` for non-release builds, commit-hash build metadata that is provenance, and one helper every surface reads | 🟢 accepted |
-| [0010](0010-client-os-service.md) | The Client as a multi-instance native OS service, installed and run through its own CLI | 🟢 accepted |
-| [0011](0011-supervisor-mode-core-and-plugins.md) | Supervisor Mode — a hexagonal supervision core, compiled-in plugins that own their process kind, n Agents over one connection | 🟢 accepted |
-| [0012](0012-selector-targeted-configurations-and-rest-api.md) | Selector-targeted Configurations and the OpenAPI-described REST API | 🟢 accepted |
-| [0013](0013-agent-admission-on-the-opamp-endpoint.md) | Agent admission on the OpAMP endpoint — optional proofs, each enforced once configured, proving fleet membership | 🟢 accepted |
-| [0014](0014-server-driven-connection-settings.md) | Server-driven OpAMP connection settings — credential rotation, offered heartbeat, movable endpoint | 🟢 accepted |
-| [0015](0015-package-delivery-for-managed-processes.md) | Package delivery for Managed Processes — verified download, Supervisor-applied, health-gated, rolled back | 🟢 accepted |
-| [0016](0016-what-a-package-is-and-how-it-is-aimed.md) | What a package is, and how the Server — not the host — aims it at Agents | 🟢 accepted |
-| [0017](0017-package-artifacts.md) | A package's artifacts — an uploaded archive or a URL the Agents fetch, unpacked by the Agent, `.tar.gz` or encrypted `.7z` | 🟢 accepted |
-| [0018](0018-client-self-update.md) | The Client updates itself — its own Agent, a staged version, a restart it does not issue, and a consent that names its package | 🟢 accepted |
-| [0019](0019-supervisor-directory-programs-and-supervisor-set.md) | One directory per Supervisor — the program it runs, the paths that name it, and where its blocks come from | 🟢 accepted |
-| [0020](0020-what-lives-in-which-crate.md) | What lives in which crate — the Client is a library with a thin binary on top, so a test can reach what it tests | 🟢 accepted |
-| [0021](0021-release-pipeline-and-artifacts.md) | A release is a `version/*` tag, built for five targets and published as named artifacts an operator and the fleet can install | 🟢 accepted |
-| [0022](0022-the-fleets-own-agent-is-called-supervisor.md) | The fleet's own agent is called `supervisor` — the type, the package, the release and the program | 🟢 accepted |
-| [0023](0023-what-describes-an-agent.md) | What describes an Agent — `service.name` carries the type, `service.instance.name` the operator's name | 🟢 accepted |
-| [0024](0024-agents-report-their-own-telemetry.md) | An Agent reports its own telemetry over OTLP/HTTP, through the OpenTelemetry SDK, to the destinations the Server offers | 🟢 accepted |
-| [0025](0025-gateway-mode.md) | Gateway Mode — a lazily grown pool, sticky by `instance_uid`, and a hop that invents nothing | 🟢 accepted |
-| [0026](0026-the-servers-agent-records.md) | The Server's Agent records — an Agent that stops reporting goes stale, and an operator can forget one | 🟢 accepted |
-| [0027](0027-interoperability-against-opamp-go.md) | Conformance proved against `opamp-go` — a second reading of the specification | 🟢 accepted |
-| [0028](0028-a-rollout-is-an-explicit-act.md) | A rollout is an explicit act — saving never distributes, and the operator releases per Agent or for all matching Agents | 🟢 accepted |
-| [0029](0029-the-product-names-the-installation.md) | The product names the installation — one build-time name, one layout, one account | 🟢 accepted |
-| [0030](0030-glpi-agent-supervision-and-packages.md) | The GLPI Agent through the fleet — supervised as the Supervisor's own child, machine-installed or from self-contained packages on both platforms | 🟢 accepted |
-| [0031](0031-agent-plane-and-operator-plane.md) | The Agent plane and the Operator plane — their own listeners, and Basic authentication on the Operator plane | 🟢 accepted |
-| [0032](0032-icinga-2-through-the-fleet.md) | Icinga 2 through the fleet — a Supervisor kind of its own, the Icinga master as the only CA, and one repacked tree verified at its source | 🟢 accepted |
-| [0033](0033-the-dev-container-is-pinned-to-the-distribution-it-builds-for.md) | The Dev Container is pinned to the distribution it builds for — its glibc is the artifact's reach | 🟢 accepted |
-| [0034](0034-what-reaches-an-agent.md) | What reaches an Agent — fit, aim, and the version it is already running | 🟢 accepted |
-| [0035](0035-kind-knows-its-own-agent.md) | A kind knows its own agent — a block names a decision, never a layout, and Telegraf gets a kind of its own | 🟢 accepted |
+### Binding
+
+The decisions in force: accepted, and proposed ones that bind the work implementing them. These
+are the tables a session reads.
+
+Grouped by the module a decision chiefly governs: the OpAMP layer both ends share, the Agent, and the
+Server with the operator tools. A decision that spans several sits with the module that carries
+most of it, and its `Applies to` names the rest.
+
+#### Template
+
+Inherited from the template: the document set, the procedures, and the way of working.
+
+| ADR | Title | Applies to | Status |
+|-----|-------|------------|--------|
+| [0001](0001-agent-governance-model.md) | The document set: one specification, one ADR record, one `AGENTS.md`, one overview, one glossary, one conventions file | every document that carries rules for humans or agents, the architecture overview, the glossary, and the conventions | 🟢 accepted |
+| [0002](0002-dev-container-runtime.md) | The Dev Container keeps the host daemon out of reach and its Features locked | `.devcontainer/`, `.vscode/settings.json`, and everything the container pulls in | 🟢 accepted |
+| [0003](0003-decisions-verified-by-tests.md) | Every accepted decision and every success criterion is verified by a test that cites it | every accepted ADR, the Goals and Quality Goals of `docs/SPECIFICATION.md`, and the tests that verify them | 🟢 accepted |
+| [0004](0004-feature-layer.md) | Work larger than one session is planned on the issue tracker: a feature spec cut into tracer-bullet tickets | every change larger than one agent session, the issue templates, the pull request template, and the `Last design revision` line of `docs/ARCHITECTURE.md` | 🟢 accepted |
+| [0005](0005-procedures-as-skills.md) | The procedures of the rule file are Agent Skills under `.agents/skills/`, each carrying a how and no rule of its own | `.agents/skills/`, the pointers under `.claude/skills/`, and every document that describes how a procedure of `AGENTS.md` is carried out | 🟢 accepted |
+| [0006](0006-architecture-style.md) | Application code is structured as ports and adapters, with every dependency pointing at the core | every module of the system's code, the golden path, and the structural test that decides the dependency direction | 🟢 accepted |
+| [0007](0007-action-references.md) | GitHub Actions are referenced by their major version tag and kept current by Dependabot | every `uses:` reference in `.github/workflows/`, and `.github/dependabot.yml` | 🟢 accepted |
+| [0008](0008-template-releases.md) | The template is released as SemVer tags on `main`, and every repository names the release it carries | the tags of the template repository, the **Template** section of `README.md`, and the pull request that lands a release | 🟢 accepted |
+
+#### OpAMP
+
+The `opamp` crate and what both ends share: the crates, the pinned protocol, versions, the
+transports and TLS, and the connection settings both ends exchange.
+
+| ADR | Title | Applies to | Status |
+|-----|-------|------------|--------|
+| [0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) | Five crates in one Cargo workspace on tokio and axum without its WebSocket — the whole OpAMP communication layer in the publishable `opamp` crate reading WebSocket frames itself, an internal shared crate by measurement — and TOML configuration | Cargo.toml, `crates/opamp/` (its manifest and `[features]`, `build.rs`, `src/`, `LICENSE`, `NOTICE` and `README.md`), crates/fleet-core/, every OpAMP connection and listener of `crates/fleet-server/` and `crates/fleet-agent/` (the Server's two planes, the Client's upstream connection and its verification probe, the Gateway's downstream endpoint and upstream pool, the Supervisor Endpoint), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, the Client's `Session` in `crates/fleet-agent/src/transport/`, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, server.toml and supervisor.toml, the per-feature lint in `.github/workflows/ci.yml` and `README.md`, and every new crate, module placement or dependency | 🟢 accepted |
+| [0010](0010-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md) | The protocol is pinned to a released Baseline, compiled from a vendored schema, and checked against opamp-go on the endpoint as it ships | docs/CONFORMANCE.md, crates/opamp/build.rs, crates/opamp/proto/, the Protocol Baseline check in scripts/check-docs.sh, interop/, crates/fleet-agent/tests/interop_opamp_go.rs, .github/workflows/interop.yml, and every change that adds or alters protocol behaviour | 🟢 accepted |
+| [0011](0011-versions-resolved-in-the-internal-crate.md) | `Cargo.toml` decides the product's version, the internal crate's build stamps it with git's provenance, and the commit is compared nowhere | `Cargo.toml` `[workspace.package] version`, `crates/fleet-core/build.rs`, `crates/fleet-core/src/version.rs`, the `version` job of `.github/workflows/release.yml`, and every surface that states, compares or displays a version | 🟢 accepted |
+| [0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) | Both OpAMP transports on both ends over TLS 1.3 alone, plaintext on the loopback alone, a Server on two listeners split by audience with bounded connections, bodies and messages, and admitted Agents rate-limited per host | the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the package URL probe in `crates/fleet-server/src/api.rs`, the `rustls` features in `Cargo.toml`, the `listen`, `max_connections`, `[rest]` and `[tls]` keys of `server.toml`, the message limit in `crates/fleet-server/src/agent_rate.rs`, `on_message` and `on_unreadable` of the Server's handler, the enrolment refusals in `Fleet::enrol` and the download guard `admit_download` in `crates/fleet-server/src/transport.rs`, every `Unavailable` reply in `crates/fleet-server/src/fleet.rs`, the `[agent_rate_limit]` section of `server.toml` and its parsing and startup warning in `crates/fleet-server/src/config.rs`, and the `agent_rate.throttled` audit event | 🟢 accepted |
+| [0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md) | The Server offers connection settings in the Baseline's classes under one hash, no credential and a plaintext endpoint only on the loopback, the Client proves over TLS 1.3 only what it can, applies no offered header and acknowledges the whole offer, and a Server's capabilities bind what the Client reports | the `[connection_offer]` section of `server.toml`, the offer composition and capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb`, and every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs` | 🟢 accepted |
+
+#### Agent
+
+The Client (`crates/fleet-agent/`): its modes and the Gateway, what an Agent reports, its own
+telemetry, Supervisor Mode and its kinds, the self-update, and the installed service.
+
+| ADR | Title | Applies to | Status |
+|-----|-------|------------|--------|
+| [0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) | One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits by client certificate over mutual TLS 1.3, refuses what the Server revoked, and passes on a package only to the host it was offered to, and a Supervisor Endpoint that admits only the process its Supervisor started | crates/fleet-agent/src/gateway/, crates/fleet-agent/src/supervisor/endpoint.rs, the [gateway] configuration section, every place either end keeps per-Agent state, the token threaded through `SupervisorContext` and `Runner` in crates/fleet-agent/src/supervisor/, the environment every Managed Process is started with, and the `opampextension` configuration the documentation shows | 🟢 accepted |
+| [0015](0015-what-an-agent-reports-about-itself.md) | An Agent reports its type, its operator's name and its host as the conventions define them, and its own telemetry over OTLP/HTTP to the destinations the Server names, in TLS 1.3 and in plaintext only to the loopback | AgentDescription building in crates/fleet-agent/src/supervisor/agent.rs, the Agent type resolution in crates/fleet-agent/src/supervisor/mod.rs, [attributes] and service_namespace in supervisor.toml, the fleet view's name and network columns; crates/fleet-agent/src/telemetry.rs, the telemetry half of crates/fleet-agent/src/connection.rs, the operation spans in the Client's transport, engine, reconfigure, packages, update (crates/fleet-agent/src/update/) and Supervisor modules, the Server's `[telemetry_offer]` (crates/fleet-server/src/config.rs, crates/fleet-server/src/fleet.rs), and the OpenTelemetry crates in Cargo.toml | 🟢 accepted |
+| [0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) | Supervisor Mode is a hexagonal core whose compiled-in kinds are the authority on their own agents, each Supervisor owns one directory and runs only a program installed there, and the Server manages the set and each Supervisor's configuration only as far as the package signature and the host allow | crates/fleet-agent/src/supervisor/ (core, ports, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and the delivered-block check (`check_delivered_block`) each kind states, the Client's own Agent in `build_engine`, the capability set and the handling of a received or stored remote configuration of the Client's own Agent and of a Supervisor's Agent in agent.rs), crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` and `remote_config_disabled` keys), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[[supervisor]]` blocks and the `[supervisors]` section of supervisor.toml (among them `delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`), the `[features]` table of crates/fleet-agent/Cargo.toml, the artifact documents under docs/artifacts/ each wrapped kind adds | 🟢 accepted |
+| [0017](0017-the-client-updates-itself-under-its-own-agent-type.md) | The Client updates itself only from a signed package — as its own Agent, under its own Agent type, by a consent that stands, through a staged version and a restart it does not issue | crates/fleet-agent/src/update/ (mod.rs and installer.rs), the Client's own Agent in crates/fleet-agent/src/supervisor/, the `self_update` key of `[packages]` and its parsing in crates/fleet-agent/src/config.rs, the refusal of a `[self_update]` section, the self-update flags of `service install`, the questionnaire's handling of the consent in crates/fleet-agent/src/config_init.rs, the MSI `SELFUPDATE` property, and the startup notice on a missing `[packages] verification_key` | 🟢 accepted |
+| [0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) | The Client is the program `supervisor`, installs itself as a native service named after a build-time product name from a versioned layout it can rewrite with a first configuration that authenticates and encrypts, and ships as `.tar.gz` archives and native installers that run that install | `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `.github/workflows/release.yml`, `packaging/`, the program, Agent type and configuration-file names of the Client, `service install --endpoint`, `service config`, and every path, name or account an installed Client uses | 🟢 accepted |
+
+#### Server
+
+The Server (`crates/fleet-server/`): admission, revocation, the audit record, Configurations and the
+REST API, the fleet record, rollouts, packages and deployments, and the operator program
+(`crates/fleet-tools/`, `opamp-fleetctl`) that makes the fleet's certificates.
+
+| ADR | Title | Applies to | Status |
+|-----|-------|------------|--------|
+| [0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) | Admission by a client certificate alone — required in the handshake, every enrolment approved by an operator, the Operator plane guarded beyond the loopback, server.toml holding no credential that authenticates on its own, and a CSR naming an instance_uid signed only when it names its sender's — and a revocation list that follows renewal, reaches the Gateways and ends every session whose certificate is revoked or expires | Admission on `/v1/opamp` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential in `crates/fleet-server/src/credentials.rs`, enrolment in `crates/fleet-server/src/enrolment.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the Operator plane's guard and the `/api/v1/enrolment/window` and `/api/v1/enrolments` routes in `crates/fleet-server/src/api.rs`, the admission of the package download route, the Client's identity and enrolment in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the host a certificate is issued to and the renewal proof in `crates/fleet-core/src/renewal.rs`, `crates/fleet-server/src/revocation.rs` and `fleet.rs`, the `/api/v1/hosts` routes, the identity the Client presents on a download in `crates/fleet-agent/src/packages.rs`, the reading of a CSR in `crates/fleet-server/src/ca.rs`, the CSR handling on a member connection in `crates/fleet-server/src/fleet.rs` and on an enrolment connection in `crates/fleet-server/src/transport.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`; admission on `/v1/opamp` and on the download route in `crates/fleet-server/src/transport.rs`, the WebSocket session loop there, the certificate register and revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the `/api/v1/revocations` and `/api/v1/certificates` routes in `crates/fleet-server/src/api.rs`, the Gateways' `/v1/gateway/revocations` route on the Agent plane, and the files they persist under `config_dir` | 🟢 accepted |
+| [0020](0020-an-append-only-audit-record-chained-by-hash.md) | The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash | the audit port in `crates/fleet-server/src/audit.rs`, its writer in `crates/fleet-server/src/audit_log.rs` and its filesystem adapter, every place in `crates/fleet-server/src/` that admits or refuses a peer, issues or revokes a certificate, takes an operator's act or records a package outcome, the `[audit]` section of `server.toml`, and the `audit/` directory under `config_dir` | 🟢 accepted |
+| [0021](0021-configurations-and-the-rest-api.md) | Configurations are named, Selector-targeted resources of an OpenAPI-described REST API | crates/fleet-server/src/configs.rs, crates/fleet-server/src/api.rs, the Configuration routes and the OpenAPI document under /api/v1, config_dir in server.toml, role handling in crates/fleet-agent/src/storage.rs and the Supervisor plugins | 🟢 accepted |
+| [0022](0022-the-fleet-record.md) | The Server keeps a persisted record per Agent, derives its status, forgets it only on request, and labels it | crates/fleet-server/src/fleet.rs, crates/fleet-server/src/agent_store.rs, crates/fleet-server/src/labels.rs, the /api/v1/agents routes, stale_after_secs in server.toml, the agents/ and labels/ directories under config_dir | 🟢 accepted |
+| [0023](0023-rollout-and-what-reaches-an-agent.md) | A rollout is an explicit act per Agent that pins what it releases, and a package reaches an Agent only when it fits, is aimed at it, and moves it forward from what it runs | the assignments and rollout acts in `crates/fleet-server/src/fleet.rs`, the saved and retained revisions in `crates/fleet-server/src/configs.rs`, the matching and offer functions of `crates/fleet-server/src/packages.rs`, the rollout routes of `crates/fleet-server/src/api.rs`, the persisted Agent record, the rollout column of the bundled UI, the Client's check of an offer for its own package | 🟢 accepted |
+| [0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md) | A Package is one release of an Agent type at a version, a Deployment that signs it is the only thing rolled out, a host or a Gateway fetches only what its Agents are offered, and a Supervisor installs only a signed package from an allowed source and rolls back only to a predecessor | `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, deployment and download routes of `crates/fleet-server/src/api.rs` with the download handler `download_package`, `packages_dir` and the package limits in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, what a host speaks for in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fleet.rs`, the `download.refused` audit entry, the startup notice of `crates/fleet-server/src/main.rs` when `[client_ca]` is absent, the platform table in `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI, `docs/SPECIFICATION.md` and its Non-Goal "Authorization and multi-tenancy", the Gateway's package cache and its download route in `crates/fleet-agent/src/gateway/` (`cache.rs`, the route in `mod.rs`, the offers `registry.rs` records), the cache directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs` and the Client's waiting on `Retry-After` there, `crates/fleet-agent/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` and their parsing in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, the `package sign` command of `opamp-fleetctl`, and the deterministic repack of `opamp-fleetctl package fetch` | 🟢 accepted |
+| [0025](0025-one-operator-program-that-makes-the-fleets-certificates.md) | The operator tools are one program, `opamp-fleetctl`, published with every release for Linux and macOS, that makes the fleet's certificate authorities, the Server's certificate and the bootstrap certificate, and the Server says before any of them ends | the `pki` commands of `opamp-fleetctl` in `crates/fleet-tools/` and the module that carries them, the Server's `pki status` command in `crates/fleet-server/src/main.rs` and the module that carries it, the ending rule in `crates/fleet-core/`, the expiry warnings of the running Server, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), and every document that tells an operator how to make or inspect a certificate; `crates/fleet-tools/` (the program it builds, its command tree and the names of its commands), the operator-tool build and its archives in `.github/workflows/release.yml`, the release notes, and every document or script that names an operator command | 🟢 accepted |
+
+### Superseded and rejected
+
+The record of what was decided against or replaced: read one when a change touches what it
+governed, to learn why the current decision stands. A row moves here in the pull request that
+flips its status.
+
+| ADR | Title | Applies to | Status |
+|-----|-------|------------|--------|
