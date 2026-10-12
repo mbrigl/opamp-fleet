@@ -23,9 +23,9 @@
 //!   opamp-fleetctl package fetch                          # asks for everything
 //!   opamp-fleetctl package fetch --agent glpi-agent --version 1.19 --platform linux/amd64 --no-upload
 
+use crate::package::sha256_file;
 use clap::ValueEnum;
 use dialoguer::{Confirm, Input, MultiSelect, Select};
-use sha2::{Digest, Sha256};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
@@ -2318,15 +2318,6 @@ async fn get_json(url: &str) -> Result<serde_json::Value, String> {
         }
     })?;
     serde_json::from_slice(&bytes).map_err(|e| format!("{url} did not answer JSON: {e}"))
-}
-
-fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
-    let mut file =
-        std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    Ok(hasher.finalize().to_vec())
 }
 
 #[cfg(test)]

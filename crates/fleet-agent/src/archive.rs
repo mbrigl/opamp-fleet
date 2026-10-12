@@ -704,7 +704,7 @@ fn extract_zip_within(
         if entry.is_dir() {
             continue;
         }
-        let name = file_name_of(Path::new(entry.name()));
+        let name = file_name_of(Path::new(&*entry.name().map_err(zip_error)?));
         if name == member {
             refuse_encrypted(&entry)?;
             found = Some(index);
@@ -756,7 +756,7 @@ fn extract_tree_zip_within(
     let mut summary = TreeSummary::default();
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index).map_err(zip_error)?;
-        let member = safe_member_path(Path::new(entry.name()))?;
+        let member = safe_member_path(Path::new(&*entry.name().map_err(zip_error)?))?;
         let is_dir = entry.is_dir();
         write_member(
             &member,
@@ -787,14 +787,15 @@ fn list_zip(
         // before the extraction that follows decodes a byte of it.
         accrue_within(&mut declared, entry.size(), limit)?;
         refuse_encrypted(&entry)?;
+        let name = entry.name().map_err(zip_error)?;
         // Zip has no entry type of its own; a link shows up as a Unix mode a unix-side packer
         // stored in the external attributes — the same convention the `.7z` check reads.
         if let Some(mode) = entry.unix_mode() {
             if mode & S_IFMT == S_IFLNK {
-                return Err(link_refused(entry.name()));
+                return Err(link_refused(&name));
             }
         }
-        push_member(&mut members, Path::new(entry.name()))?;
+        push_member(&mut members, Path::new(&*name))?;
     }
     Ok(members)
 }
@@ -807,7 +808,7 @@ fn refuse_encrypted(entry: &zip::read::ZipFile<'_, File>) -> Result<(), String> 
         return Err(format!(
             "the archive holds an encrypted member ({:?}) — an encrypted artifact is a .7z with \
              [packages] archive_key, not a zip",
-            entry.name()
+            String::from_utf8_lossy(entry.name_raw())
         ));
     }
     Ok(())
@@ -1755,6 +1756,10 @@ mod tests {
         );
         let err = extract_tree_zip(&encrypted, program, &dest).expect_err("must be refused");
         assert!(err.contains("encrypted"), "{err}");
+        assert!(
+            err.contains(r#"member ("app/bin/agent")"#),
+            "names the member as it is called: {err}"
+        );
         assert!(
             err.contains(".7z"),
             "points at the format that does this: {err}"

@@ -20,18 +20,27 @@ jobs:
   # semantics) that a Linux-only lint never compiles. Keep them honest: clippy and tests on the
   # real platforms. Actual service registration still needs the manual smoke checklist
   # (README.md → "Running as an OS service") — CI runners cannot exercise systemd/launchd/SCM.
-  client-platform-check:
-    name: client checks (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
+  #
+  # Both are required status checks (README.md → "Repository settings"). A ruleset names a check
+  # by the job's rendered name, so these two are plain jobs without a 'name:' or a matrix: the
+  # check is then called by the job id, which scripts/check-docs.sh compares with the README.
+  # fleet-tools too: the release packs every Client archive with `opamp-fleetctl`, Windows
+  # included, and publishes it for macOS (ADR-0025).
+  client-windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
-      # fleet-tools too: the release packs every Client archive with `opamp-fleetctl`, Windows
-      # included, and publishes it for macOS (ADR-0025).
+      - name: Clippy
+        run: cargo clippy -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test -p fleet-agent --locked
+
+  client-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
       - name: Test

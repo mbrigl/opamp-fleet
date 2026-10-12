@@ -58,7 +58,10 @@
 #      gate somebody believes in and does not have, and both files already say in their header
 #      that a check added to one is added to the other in the same change (AGENTS.md, section 5).
 #      A job of the workflow that runs no script under scripts/ fails too: its commands run in
-#      CI and never in the local gate.
+#      CI and never in the local gate. The README may also name a job of
+#      .github/workflows/ci.yml, which runs what the local gate cannot (other platforms); that
+#      job has to exist and carry neither a 'name:' nor a matrix, or its check reports under a
+#      rendered name the ruleset never sees.
 #  10. Project Layout integrity: every path listed in the 'Project Layout' block of README.md
 #      exists, a trailing '/' meaning a directory. The block is written by hand and nothing else
 #      tells a reader that one of its lines has gone stale. The reverse direction is deliberately
@@ -668,9 +671,11 @@ check_adr_link_targets() {
 # workflow, and the README list is what a maintainer configures the ruleset from — a check that
 # runs in only one of the three is a gate somebody believes in and does not have. Both files say
 # in their own header that a check added to one is added to the other in the same change; this is
-# that sentence, verified.
+# that sentence, verified. The README may name a job of the CI workflow besides: a gate on
+# another platform, which the local runner cannot run and so is not compared with it.
 check_check_lists() {
   local rel_wf=".github/workflows/checks.yml" rel_all="scripts/check-all.sh"
+  local rel_ci=".github/workflows/ci.yml"
   local wf="$ROOT/$rel_wf" all="$ROOT/$rel_all" readme="$ROOT/README.md"
   local f
   for f in "$wf" "$all" "$readme"; do
@@ -749,9 +754,31 @@ check_check_lists() {
     return
   fi
 
+  # The CI workflow: its job ids, and those whose check carries another name — a job with a
+  # 'name:' of its own, or a matrix, which appends its values to the name.
+  local ci_jobs=() ci_renamed=() ci_job=""
+  if [[ -f "$ROOT/$rel_ci" ]]; then
+    in_jobs=0
+    while IFS= read -r line; do
+      [[ "$line" == "jobs:"* ]] && { in_jobs=1; continue; }
+      ((in_jobs)) || continue
+      if [[ "$line" =~ ^\ \ ([a-z][a-z0-9-]*):[[:space:]]*$ ]]; then
+        ci_job="${BASH_REMATCH[1]}"
+        ci_jobs+=("$ci_job")
+        continue
+      fi
+      [[ -n "$ci_job" && "$line" =~ ^\ \ \ \ (name|strategy): ]] && ci_renamed+=("$ci_job")
+    done < "$ROOT/$rel_ci"
+  fi
+
   for name in "${readme_names[@]}"; do
-    _contains "$name" "${wf_jobs[@]}" \
-      || add_error "README.md: required check '$name' is not a job in $rel_wf — a ruleset would wait for a check that never reports"
+    _contains "$name" "${wf_jobs[@]}" && continue
+    if ((${#ci_jobs[@]})) && _contains "$name" "${ci_jobs[@]}"; then
+      ((${#ci_renamed[@]})) && _contains "$name" "${ci_renamed[@]}" \
+        && add_error "README.md: required check '$name' is a job in $rel_ci with a 'name:' or a matrix — its check reports under another name, and a ruleset would wait for one that never reports"
+      continue
+    fi
+    add_error "README.md: required check '$name' is not a job in $rel_wf or $rel_ci — a ruleset would wait for a check that never reports"
   done
   for job in "${wf_jobs[@]}"; do
     _contains "$job" "${readme_names[@]}" \

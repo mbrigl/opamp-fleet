@@ -438,10 +438,12 @@ configured once by a maintainer and worth re-checking after a repository move or
 
 - a **ruleset on `main`** that requires pull requests, requires the
   <!-- required-checks begin — compared with the workflow's jobs by scripts/check-docs.sh -->
-  `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, `shell`, and `rust`
+  `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, `shell`, `rust`,
+  `client-windows`, and `client-macos`
   <!-- required-checks end -->
-  jobs of the **Checks** workflow as required status checks (rulesets list checks by their job
-  name), and blocks force pushes and branch deletion;
+  jobs as required status checks — every job of the **Checks** workflow, and the Client's
+  Windows and macOS jobs of the **CI** workflow (rulesets list checks by their job name) — and
+  blocks force pushes and branch deletion;
 - enable **require a review from Code Owners** on that ruleset, so the two artifacts only a human
   decides, [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) and everything under
   [`docs/adr/`](docs/adr/) ([`AGENTS.md` §3](AGENTS.md#3-adr-rules)), cannot be merged without the

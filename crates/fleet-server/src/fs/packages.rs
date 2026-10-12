@@ -3,6 +3,7 @@
 //! `packages_dir`, holding `package.json` and one `<os>-<arch>.bin` per uploaded entry.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -228,8 +229,18 @@ fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
     let mut file =
         std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
-    let size = std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut size = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        hasher.update(&buf[..n]);
+        size += n as u64;
+    }
     Ok((size, hasher.finalize().to_vec()))
 }
 
