@@ -62,7 +62,7 @@ sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256
 # `deflate` is taken, which decompresses on the `flate2`/`miniz_oxide` chain already present;
 # reading stays pure Rust (ADR-0010, ADR-0012). Read-only and unencrypted: the Client never
 # writes a zip, and a confidential artifact is a `.7z` (ADR-0024).
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Reading the tar inside a `.tar.gz` package artifact (ADR-0024). Pure Rust and no system library,
 # which is what ADR-0010 and ADR-0012 keep this build free of; the Client extracts one member and
 # never writes a path the archive chose.
