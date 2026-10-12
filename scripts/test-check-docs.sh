@@ -443,6 +443,39 @@ d="$(repo build-job-inline)"
 build_job "$d" "make test"
 expect fail "a toolchain job with its commands inline and nothing in the local runner" "$d" "job 'build' runs no script under scripts/"
 
+# ci_job <dir> <job> [matrix] — a job of the CI workflow, listed among the required checks; with
+# 'matrix', the job runs a matrix and its check is named after the values.
+ci_job() {
+  local dir="$1" job="$2" matrix="${3:-}"
+  {
+    echo "jobs:"
+    echo "  $job:"
+    if [[ "$matrix" == "matrix" ]]; then
+      echo "    strategy:"
+      echo "      matrix:"
+      echo "        os: [windows-latest]"
+    fi
+    echo "    runs-on: windows-latest"
+    echo "    steps:"
+    echo "      - run: cargo test"
+  } > "$dir/.github/workflows/ci.yml"
+  # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+  sed -i "s|^\`docs\`\$|\`docs\`, \`$job\`|" "$dir/README.md"
+}
+
+d="$(repo ci-job)"
+ci_job "$d" client-windows
+expect pass "a required check that is a plain job of the CI workflow" "$d"
+
+d="$(repo ci-job-matrix)"
+ci_job "$d" client-windows matrix
+expect fail "a required check that is a matrix job of the CI workflow" "$d" "its check reports under another name"
+
+d="$(repo required-unknown)"
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+sed -i 's|^`docs`$|`docs`, `nowhere`|' "$d/README.md"
+expect fail "a required check that is a job of no workflow" "$d" "is not a job in"
+
 d="$(repo layout-stale)"
 sed -i 's|^docs/adr/ |docs/gone/ |' "$d/README.md"
 expect fail "a Project Layout entry that no longer exists" "$d" "is not a directory of this repository"

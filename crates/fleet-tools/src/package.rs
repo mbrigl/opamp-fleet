@@ -320,12 +320,22 @@ fn pack_7z(
 }
 
 /// Streams a file through SHA-256 — an artifact is a program, too big to read into memory whole.
-fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+
     let mut file =
         std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        hasher.update(&buf[..n]);
+    }
     Ok(hasher.finalize().to_vec())
 }
 
