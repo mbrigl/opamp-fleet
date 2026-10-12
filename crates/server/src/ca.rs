@@ -1,4 +1,4 @@
-//! The Server as a local certificate authority (ADR-0035).
+//! The Server as a local certificate authority (ADR-0013).
 //!
 //! The Baseline's CSR flow lets an Agent keep its private key and ask for a certificate over the
 //! connection it already has: it sends a PEM certificate signing request, and the Server "creates a
@@ -47,7 +47,7 @@ impl ClientCa {
     /// The subject comes from the request: it is descriptive, and this Server does not require it
     /// to match anything the Agent reports. Binding a certificate to an `instance_uid` would mean
     /// it dies the moment the Server re-keys that Agent through `AgentIdentification` — an outage
-    /// of the Server's own making (ADR-0035).
+    /// of the Server's own making (ADR-0013).
     ///
     /// What the request may *not* dictate is the shape of the certificate. `rcgen` carries the
     /// CSR's `basicConstraints`, `keyUsage`, `extendedKeyUsage`, and SANs into the signed output,

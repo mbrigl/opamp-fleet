@@ -19,7 +19,7 @@ const CONFIG_PB_FILE: &str = "remote-config.pb";
 const CONFIG_DIR: &str = "config";
 const PACKAGE_FILE: &str = "installed-package.json";
 
-/// The role each delivered entry carries (ADR-0016) — `<name> <role>` per line, written into the
+/// The role each delivered entry carries (ADR-0012) — `<name> <role>` per line, written into the
 /// config directory beside the entries themselves.
 ///
 /// It lives in that directory because that is where a plugin looks, and it is written only when
@@ -99,7 +99,7 @@ impl Storage {
     /// removed first — the composed entry set changes over time (ADR-0012), and a stale file
     /// would otherwise still be handed to the Managed Process.
     ///
-    /// Every entry is written, whatever its role. An entry that carries one (ADR-0016) is content
+    /// Every entry is written, whatever its role. An entry that carries one (ADR-0012) is content
     /// the process reads *by path* rather than being configured with, so it lands in the same
     /// directory under the same name — that is what makes a `${file:...}` reference resolve — and
     /// its name is recorded in [`SUPPLEMENTARY_FILE`] for the plugin to leave out of what it
@@ -168,7 +168,7 @@ impl Storage {
 /// order — the Collector's own merge semantics are order-dependent.
 ///
 /// Everything written by [`Storage::store_remote_config`] except the entries that carry a role
-/// (ADR-0016) and the bookkeeping that names them. Those files are deliberately still *there*:
+/// (ADR-0012) and the bookkeeping that names them. Those files are deliberately still *there*:
 /// supplementary content is read by path, so leaving it out of this list is the whole of what the
 /// role changes.
 ///
@@ -212,7 +212,7 @@ fn read_supplementary(config_dir: &std::path::Path) -> Vec<String> {
     entry_roles(config_dir).into_keys().collect()
 }
 
-/// What role each delivered entry carries, by entry file name (ADR-0016).
+/// What role each delivered entry carries, by entry file name (ADR-0012).
 ///
 /// A line an older Client wrote carries no role, only a name; it reads back as an empty value —
 /// "this entry carries *a* role", which is all that version ever recorded and all that the
@@ -236,7 +236,7 @@ pub fn entry_roles(config_dir: &std::path::Path) -> BTreeMap<String, String> {
 /// Create `dir` (and its parents) and, on Unix, narrow it to `0700`.
 ///
 /// The state directory holds the Agent's identity and the Server-pushed configuration, and a
-/// config-map entry read by path (`${file:...}`) can be a certificate or a key (ADR-0016). At the
+/// config-map entry read by path (`${file:...}`) can be a certificate or a key (ADR-0012). At the
 /// umask default the directory is world-listable, so on a multi-user host another local user could
 /// read that material; owner-only closes it. The Managed Process runs as this same user, so it still
 /// reads its own config. On Windows the `%ProgramData%` ACL is what protects it (ADR-0010).
@@ -331,7 +331,7 @@ mod tests {
     }
 
     /// The state directory holds the identity and the Server-pushed configuration — which can carry
-    /// secret material by path (ADR-0016) — so the directories are owner-only and the secret-bearing
+    /// secret material by path (ADR-0012) — so the directories are owner-only and the secret-bearing
     /// files are `0600`, whatever the process umask.
     #[cfg(unix)]
     #[test]
@@ -472,7 +472,7 @@ mod tests {
         }
     }
 
-    /// ADR-0016: a roled entry is written like any other — it has to be on disk for a
+    /// ADR-0012: a roled entry is written like any other — it has to be on disk for a
     /// `${file:...}` reference to resolve — but it is not among the files the process is
     /// configured with.
     #[test]
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(entry_names(&config_dir), vec!["base"]);
     }
 
-    /// Any other value is handled like `supplementary` and never guessed at (ADR-0016).
+    /// Any other value is handled like `supplementary` and never guessed at (ADR-0012).
     #[test]
     fn an_unknown_role_is_treated_like_supplementary() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -585,7 +585,7 @@ mod tests {
         assert_eq!(entry_names(&config_dir), vec!["base"]);
     }
 
-    /// A Client that stored entries before ADR-0016 has no bookkeeping file; everything it wrote
+    /// A Client that stored entries before ADR-0012 has no bookkeeping file; everything it wrote
     /// is configuration, which is exactly what it was.
     #[test]
     fn entries_without_bookkeeping_are_all_configuration() {
