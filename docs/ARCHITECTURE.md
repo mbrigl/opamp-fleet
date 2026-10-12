@@ -26,7 +26,7 @@ than anywhere else, and none beats one that has stopped being true.
    │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients    │   register, audit record
    │                                                             └─▶ packages_dir: artifacts
    ├── Supervisor Endpoint (loopback) ◀── a Collector's opampextension
-   ├── Managed Processes: Collector, GLPI Agent, Icinga 2, any command
+   ├── Managed Processes: Collector, Telegraf, GLPI Agent, Icinga 2, any command
    ├── package sources: the Server's origin, or a mirror in allowed_sources
    ├── own-telemetry destinations: OTLP/HTTP, as the Server offers them
    └── service manager: systemd, launchd or the Windows SCM

@@ -1,5 +1,6 @@
-//! The kind whose whole block is `type` and `name` (ADR-0016), driven through
-//! `Plugin::start` the way the core drives it: [`glpi`](ADR-0027).
+//! The two kinds whose whole block is `type` and `name` (ADR-0016), driven through
+//! `Plugin::start` the way the core drives them: [`glpi`](ADR-0027) and
+//! [`telegraf`](ADR-0028).
 //!
 //! The unit tests in each module check what the kind *builds* — the program's name per platform,
 //! the arguments, the refusals. What no unit test can show is that a two-line block is actually
@@ -7,7 +8,7 @@
 //! probe reaches it, that a delivered Configuration lands where the kind points its agent, and
 //! that the directories the agent writes into exist by the time it runs. That is what an operator
 //! finds out on the first host, and it is what this file asserts.
-#![cfg(feature = "glpi")]
+#![cfg(any(feature = "glpi", feature = "telegraf"))]
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -160,6 +161,31 @@ async fn stop(mut harness: Harness) {
     harness.shutdown_tx.send(true).expect("shutdown");
     // Drain, so the adapter's task ends before the temp directory is removed under it.
     while harness.events.recv().await.is_some() {}
+}
+
+/// Telegraf's whole block: `type` and `name`. The program is a single file found by its own name,
+/// the version comes from the kind's own `--version`, and the Configuration the fleet delivers is
+/// the one the kind points `--config` at.
+/// Verifies: G-7, ADR-0028
+#[cfg(feature = "telegraf")]
+#[tokio::test]
+async fn a_two_line_telegraf_block_runs_reports_and_applies() {
+    let mut harness = start(
+        &fleet_agent::supervisor::telegraf::TelegrafPlugin,
+        "telegraf",
+        None,
+    );
+    assert_eq!(
+        wait_for_running_version(&mut harness).await,
+        "9.9.9",
+        "the kind asked the program for its version without the block naming how"
+    );
+
+    // The entry the fleet delivers, under the name `opamp-fleetctl package fetch` uploads — which
+    // is the file name `--config` was built with.
+    std::fs::write(harness.config_dir().join("telegraf-conf"), "[agent]\n").expect("the entry");
+    assert_eq!(apply_config(&mut harness).await, Ok(()));
+    stop(harness).await;
 }
 
 /// The GLPI Agent's whole block, likewise — and on both platforms, with the program found at the

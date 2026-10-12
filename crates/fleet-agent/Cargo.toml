@@ -20,9 +20,10 @@ path = "src/main.rs"
 # ADR-0016 clause 2: each wrapped Supervisor kind is a feature named after its `type`, all of them
 # in the published build. `collector` and `command` are the core's own and always compiled in.
 [features]
-default = ["icinga2", "glpi"]
+default = ["icinga2", "glpi", "telegraf"]
 icinga2 = []
 glpi = []
+telegraf = []
 
 [dependencies]
 clap.workspace = true

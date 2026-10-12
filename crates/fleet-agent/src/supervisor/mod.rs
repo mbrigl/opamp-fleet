@@ -17,6 +17,8 @@ pub mod icinga2;
 pub mod ports;
 pub mod process;
 pub mod restart;
+#[cfg(feature = "telegraf")]
+pub mod telegraf;
 
 use std::collections::BTreeMap;
 
@@ -50,6 +52,8 @@ fn registry() -> Vec<Box<dyn Plugin>> {
         Box::new(icinga2::Icinga2Plugin),
         #[cfg(feature = "glpi")]
         Box::new(glpi::GlpiPlugin),
+        #[cfg(feature = "telegraf")]
+        Box::new(telegraf::TelegrafPlugin),
     ]
 }
 
@@ -818,9 +822,10 @@ mod tests {
     }
 
     /// The wrapped kinds, each with whether this build's features carry it (ADR-0016 clause 2).
-    const WRAPPED: [(&str, bool); 2] = [
+    const WRAPPED: [(&str, bool); 3] = [
         ("icinga2", cfg!(feature = "icinga2")),
         ("glpi", cfg!(feature = "glpi")),
+        ("telegraf", cfg!(feature = "telegraf")),
     ];
 
     /// A build's kinds are the core's two and the wrapped ones its features name — no more, so a

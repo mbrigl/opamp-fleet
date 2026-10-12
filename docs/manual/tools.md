@@ -11,7 +11,7 @@ the keys it makes are the ones to keep off that host
 
 | Command | Use it to |
 |---|---|
-| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, the GLPI Agent, Icinga 2, or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
+| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, the GLPI Agent, Telegraf, Icinga 2, or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
 | **[`package pack`, `sha256`, `keygen`, `sign`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, and make the package signing key |
 | **[`pki init`, `server-cert`, `bootstrap-cert`, `status`](#pki)** | make the fleet's certificate authorities, the Server's or a Gateway's certificate and the bootstrap certificate, and say when they end |
 
@@ -53,7 +53,7 @@ $ sha=$(opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail)
 
 ### What it does
 
-For five agent types it knows where the release lives, what the assets are called, and which
+For six agent types it knows where the release lives, what the assets are called, and which
 checksum file goes with them:
 
 | `--agent` | Where it fetches from | What arrives |
@@ -61,6 +61,7 @@ checksum file goes with them:
 | `otelcol` | `open-telemetry/opentelemetry-collector-releases` | the core Collector's `.tar.gz`, as published |
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
 | `glpi-agent` | `glpi-project/glpi-agent` | Windows: the portable `.zip`, as published · Linux: a `.tar.gz` repacked from the AppImage |
+| `telegraf` | `dl.influxdata.com` (versions from `influxdata/telegraf`) | the `.tar.gz`, or the `.zip` on Windows, as published |
 | `icinga2` | `packages.icinga.com` | Windows: a `.tar.gz` repacked from the MSI's payload, verified by its Authenticode signature (ADR-0026) since no digest is published. Linux: a `.tar.gz` repacked from the vendor's `icinga2-bin` and `icinga2-common` packages plus the check plugins, with the libraries they need bundled. Must run **on** the distribution it builds for, whose glibc becomes the artifact's reach; `--distro <codename>` states which one that is, and omitted it is this host's own — see [the Icinga 2 recipe](icinga2.md) |
 | `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0017](../adr/0017-the-client-updates-itself-under-its-own-agent-type.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
 
@@ -87,6 +88,7 @@ Which agent:
   otelcol          linux, darwin, windows — as the release publishes
 > otelcol-contrib  linux, darwin, windows — as the release publishes
   glpi-agent       linux/amd64 windows/amd64
+  telegraf         linux/amd64+arm64+386 darwin/amd64+arm64 windows/amd64+arm64
   icinga2          linux/amd64 (Debian 12+/Ubuntu 22.04+/RHEL 9+) windows/amd64
   supervisor       linux/amd64+arm64 darwin/arm64+amd64 windows/amd64
 Reading the last releases of open-telemetry/opentelemetry-collector-releases …
@@ -142,14 +144,14 @@ ever be offered.
 Every prompt has a flag; give all of them and nothing is asked:
 
 ```console
-$ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
+$ opamp-fleetctl package fetch --agent telegraf --version 1.39.3 \
       --platform linux/amd64 --platform windows/amd64 \
       --out-dir ./artifacts --server https://127.0.0.1:4321
 ```
 
 | Option | Meaning |
 |---|---|
-| `--agent <name>` | `otelcol`, `otelcol-contrib`, `glpi-agent`, `icinga2`, or `supervisor` (this fleet's own Client). |
+| `--agent <name>` | `otelcol`, `otelcol-contrib`, `glpi-agent`, `telegraf`, `icinga2`, or `supervisor` (this fleet's own Client). |
 | `--version <v>` | The version **as upstream numbers it** — `0.158.0`, `1.19` — never the tag (`v0.158.0`). Omitted, the last five are offered. |
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
@@ -166,10 +168,10 @@ you need:
 
 ```
 Done. What a Supervisor needs to install these:
-  linux/amd64  ./artifacts/otelcol-contrib_0.158.0_linux_amd64.tar.gz
-      command = "otelcol-contrib"
-  windows/amd64  ./artifacts/otelcol-contrib_0.158.0_windows_amd64.tar.gz
-      command = "otelcol-contrib.exe"
+  linux/amd64  ./artifacts/telegraf-1.39.3_linux_amd64.tar.gz
+      command = "telegraf"
+  windows/amd64  ./artifacts/telegraf-1.39.3_windows_amd64.zip
+      command = "telegraf.exe"
 ```
 
 For `--agent supervisor` there is no block to print — nothing supervises a Client — so the hint is
@@ -199,6 +201,7 @@ released binary:
 | `otelcol` | `otelcol-conf` | Selector `service.name = otelcol` |
 | `otelcol-contrib` | `otelcol-contrib-conf` | Selector `service.name = otelcol-contrib` |
 | `glpi-agent` | `glpi-agent-conf` | Agent type `glpi-agent` |
+| `telegraf` | `telegraf-conf` | Agent type `telegraf` |
 | `icinga2` | `icinga2-conf`, `icinga2-zones` | Agent type `icinga2` |
 | `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks ([ADR-0016](../adr/0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) |
 
@@ -214,14 +217,14 @@ Two rules keep this from surprising anyone:
 
 ```console
   stored as the linux/amd64 entry — not distributed: press the rollout when it should reach hosts
-  storing the default configuration otelcol-contrib-conf …
+  storing the default configuration telegraf-conf …
   saved — read it over and press its rollout when it should reach hosts, since it carries example values
 ```
 
 and on the next upload of the same agent:
 
 ```console
-  otelcol-contrib-conf is already on the Server — left as it is
+  telegraf-conf is already on the Server — left as it is
 ```
 
 What is *not* uploaded, for Icinga 2, is the per-host pair: the enrolment ticket and the parent's
@@ -258,7 +261,8 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 
 ### Prerequisites and limits
 
-- **Network egress** to `api.github.com` and to the release asset host.
+- **Network egress** to `api.github.com`, to the release asset host, and — for Telegraf — to
+  `dl.influxdata.com`.
 - **The upload speaks TLS to the Operator plane**, so the Server's URL is `https://`; type it so
   at the prompt, which suggests `http://`. The tool has no CA option and trusts the Server's
   certificate through this machine's own trust store, so a Server whose certificate comes from a

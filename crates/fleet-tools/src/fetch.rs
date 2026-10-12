@@ -1,11 +1,11 @@
 //! `opamp-fleetctl package fetch` — turns an agent release into package artifacts this fleet can
-//! install, and optionally uploads them (ADR-0024, ADR-0026, ADR-0027, ADR-0025).
+//! install, and optionally uploads them (ADR-0024, ADR-0026, ADR-0027, ADR-0028, ADR-0025).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
 //! them, and whether the container is one a Client can open at all. This tool holds that knowledge
 //! for the agent types the manual documents — `otelcol`, `otelcol-contrib`, `glpi-agent`,
-//! `icinga2`, and `supervisor`, this fleet's own Client (ADR-0018) — and asks the
+//! `telegraf`, `icinga2`, and `supervisor`, this fleet's own Client (ADR-0018) — and asks the
 //! operator only what it cannot know: which one, which version, which platforms, and where to send
 //! the result.
 //!
@@ -83,6 +83,9 @@ enum AgentKind {
     /// The GLPI inventory agent.
     #[value(name = "glpi-agent")]
     GlpiAgent,
+    /// Telegraf.
+    #[value(name = "telegraf")]
+    Telegraf,
     /// Icinga 2, repacked from the vendor's distribution packages (ADR-0026).
     #[value(name = "icinga2")]
     Icinga2,
@@ -96,7 +99,8 @@ struct Source {
     /// The Agent type a Supervisor reports and a package Set is built for (ADR-0024) — also this
     /// tool's default package name.
     service_name: &'static str,
-    /// The GitHub repository whose tags name the versions.
+    /// The GitHub repository whose tags name the versions. Telegraf's binaries do not live there,
+    /// but its versions do.
     repo: &'static str,
 }
 
@@ -115,6 +119,10 @@ impl AgentKind {
                 service_name: "glpi-agent",
                 repo: "glpi-project/glpi-agent",
             },
+            AgentKind::Telegraf => Source {
+                service_name: "telegraf",
+                repo: "influxdata/telegraf",
+            },
             AgentKind::Icinga2 => Source {
                 service_name: "icinga2",
                 repo: "Icinga/icinga2",
@@ -131,9 +139,9 @@ impl AgentKind {
 
     /// The version a tag names, or `None` when the tag is not a release of *this* agent.
     ///
-    /// Each project spells its tags its own way, and one of them carries tags that are not releases
+    /// Each project spells its tags its own way, and two of them carry tags that are not releases
     /// at all: the Collector repository tags its builder and supervisor alongside
-    /// (`cmd/builder/v0.158.0`). A pattern
+    /// (`cmd/builder/v0.158.0`), and Telegraf keeps release candidates (`v1.21.0-rc1`). A pattern
     /// per source is what keeps those out of the list an operator picks from.
     fn version_of_tag(self, tag: &str) -> Option<String> {
         let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
@@ -153,7 +161,10 @@ impl AgentKind {
     /// project's release workflow creates them under (ADR-0011), and nothing at all for GLPI.
     fn tag_prefix(self) -> &'static str {
         match self {
-            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Icinga2 => "v",
+            AgentKind::Otelcol
+            | AgentKind::OtelcolContrib
+            | AgentKind::Telegraf
+            | AgentKind::Icinga2 => "v",
             AgentKind::Supervisor => "version/",
             AgentKind::GlpiAgent => "",
         }
@@ -186,6 +197,11 @@ impl AgentKind {
             AgentKind::GlpiAgent => {
                 group_platforms([("linux", "amd64"), ("windows", "amd64")].into_iter())
             }
+            AgentKind::Telegraf => group_platforms(
+                TELEGRAF_PLATFORMS
+                    .iter()
+                    .map(|(os, arch, _, _)| (*os, *arch)),
+            ),
             // This column answers one question for every agent alike — does it run on the hosts I
             // have — so Icinga 2 states its *reach*, and the reach is this host's (ADR-0026): the
             // tree bundles the libraries found here, so the artifact this run can produce is the
@@ -202,10 +218,11 @@ impl AgentKind {
 
     /// Whether the release's assets have to be listed to plan the fetch. Icinga 2's GitHub
     /// releases carry none of what is repacked — its packages come from the vendor's own
-    /// repositories (ADR-0026) — so listing them would be a wasted request against a rate-limited
-    /// API.
+    /// repositories (ADR-0026) — and Telegraf's carry no assets at all — its binaries are on a CDN,
+    /// at a URL built from the version — so listing them would be a wasted request against a
+    /// rate-limited API.
     fn needs_assets(self) -> bool {
-        !matches!(self, AgentKind::Icinga2)
+        !matches!(self, AgentKind::Telegraf | AgentKind::Icinga2)
     }
 
     /// The line that introduces the per-platform hints printed when the fetch is done.
@@ -249,6 +266,12 @@ impl AgentKind {
                 selector: &[],
                 service_name: "glpi-agent",
                 body: include_str!("../../../config/examples/glpi-agent-conf.cfg"),
+            }],
+            AgentKind::Telegraf => &[DefaultConfiguration {
+                name: "telegraf-conf",
+                selector: &[],
+                service_name: "telegraf",
+                body: include_str!("../../../config/examples/telegraf-conf.toml"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
             // deliberately does not own (ADR-0016 admits only `[[supervisor]]` blocks), and none
@@ -324,7 +347,7 @@ struct Plan {
 /// the same way, and the Collector changed its mind at 0.158.0.
 enum ChecksumSource {
     /// Files holding `<hash>  <name>` lines, `sha256sum` style — the artifact's line is looked up
-    /// by name. GLPI's combined file, the Collector's pre-0.158 files.
+    /// by name. GLPI's combined file, Telegraf's `.DIGESTS`, the Collector's pre-0.158 files.
     ///
     /// Several, because a release may split them: 0.157.0 keeps its Windows assets in a file of
     /// their own. Which file holds a given artifact is answered by looking, not by a rule about
@@ -783,6 +806,7 @@ async fn plans(
             };
             icinga2_plans(version, distro.as_deref()).await
         }
+        AgentKind::Telegraf => Ok(telegraf_plans(version)),
     }
 }
 
@@ -1220,6 +1244,53 @@ fn glpi_plans(version: &str, assets: &[(String, String)]) -> Vec<Plan> {
         });
     }
     plans
+}
+
+/// Telegraf's platforms, which cannot be read from anywhere: its GitHub releases carry no assets,
+/// and the CDN that holds the binaries serves no directory listing. The list is therefore this
+/// tool's own — kept to the platforms this fleet has a name for — and a URL that has gone away is
+/// reported as the 404 it is rather than hidden.
+///
+/// Each entry is (fleet os, fleet arch, upstream os, upstream arch). It sits at file scope because
+/// the agent menu names these same platforms ([`AgentKind::platforms`]), and a second copy of the
+/// list is a second thing to keep current.
+const TELEGRAF_PLATFORMS: [(&str, &str, &str, &str); 7] = [
+    ("linux", "amd64", "linux", "amd64"),
+    ("linux", "arm64", "linux", "arm64"),
+    ("linux", "386", "linux", "i386"),
+    ("darwin", "amd64", "darwin", "amd64"),
+    ("darwin", "arm64", "darwin", "arm64"),
+    ("windows", "amd64", "windows", "amd64"),
+    ("windows", "arm64", "windows", "arm64"),
+];
+
+/// What Telegraf offers, built from that list — the release itself is never asked.
+fn telegraf_plans(version: &str) -> Vec<Plan> {
+    TELEGRAF_PLATFORMS
+        .iter()
+        .map(|(os, arch, up_os, up_arch)| {
+            let ext = if *os == "windows" { "zip" } else { "tar.gz" };
+            let name = format!("telegraf-{version}_{up_os}_{up_arch}.{ext}");
+            let url = format!("https://dl.influxdata.com/telegraf/releases/{name}");
+            // The archive wraps everything in a version-named directory, and the program sits at
+            // `usr/bin/telegraf` on Unix but at the root on Windows. Neither matters for a
+            // single-file package: the Client finds the member by its *file name*, so the upstream
+            // archive installs as it is.
+            Plan {
+                os: (*os).to_string(),
+                arch: (*arch).to_string(),
+                sources: vec![Download {
+                    checksum: ChecksumSource::Sums {
+                        urls: vec![format!("{url}.DIGESTS")],
+                    },
+                    url,
+                }],
+                action: Action::AsPublished,
+                out_name: name,
+                block_hint: "type = \"telegraf\"  (docs/artifacts/telegraf.md)".to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Upstream's platform words in this fleet's vocabulary (ADR-0024), or `None` for one this fleet
@@ -2263,7 +2334,9 @@ mod tests {
     /// The agent menu names the systems each agent can be fetched for, and the one that needs it
     /// most is Icinga 2: its Linux artifact exists only on a host of the distribution it is built
     /// for, which is not something to discover three questions later. Every variant answers —
-    /// adding one without a line here is the omission this catches.
+    /// adding one without a line here is the omission this catches — and Telegraf's answer is the
+    /// table `telegraf_plans` builds from, so the menu cannot claim a platform the tool then fails
+    /// to fetch.
     #[test]
     fn the_agent_menu_states_the_systems_each_agent_is_published_for() {
         for agent in super::AgentKind::value_variants() {
@@ -2273,6 +2346,27 @@ mod tests {
                 "{agent:?} names no system: {platforms:?}"
             );
         }
+
+        // Read back what the grouping wrote: every platform `telegraf_plans` fetches is named,
+        // and none that it does not.
+        let telegraf = super::AgentKind::Telegraf.platforms(None);
+        let named: Vec<(String, String)> = telegraf
+            .split(' ')
+            .flat_map(|group| {
+                let (os, arches) = group.split_once('/').expect("os/arch group");
+                arches
+                    .split('+')
+                    .map(move |arch| (os.to_string(), arch.to_string()))
+            })
+            .collect();
+        let fetched: Vec<(String, String)> = super::TELEGRAF_PLATFORMS
+            .iter()
+            .map(|(os, arch, _, _)| (os.to_string(), arch.to_string()))
+            .collect();
+        assert_eq!(
+            named, fetched,
+            "the menu and the fetch disagree: {telegraf:?}"
+        );
     }
 
     /// Icinga 2's line is the reach of the artifact *this host* can build, so it is asserted per
@@ -2403,7 +2497,13 @@ Failed
             .map(|agent| agent.source().service_name)
             .collect();
         assert!(offered.contains(&"icinga2"), "offered: {offered:?}");
-        for expected in ["otelcol", "otelcol-contrib", "glpi-agent", "icinga2"] {
+        for expected in [
+            "otelcol",
+            "otelcol-contrib",
+            "glpi-agent",
+            "telegraf",
+            "icinga2",
+        ] {
             assert!(offered.contains(&expected), "{expected} is not offered");
         }
     }
@@ -2582,7 +2682,8 @@ SHA256: cccc
     use super::*;
 
     /// The tag patterns are what keep a version list from offering things that are not releases of
-    /// the agent being fetched — the Collector repository tags its builder alongside.
+    /// the agent being fetched — the Collector repository tags its builder alongside, and Telegraf
+    /// keeps its release candidates.
     #[test]
     fn a_tag_is_a_version_only_when_it_is_this_agents_release() {
         assert_eq!(
@@ -2596,6 +2697,11 @@ SHA256: cccc
         ] {
             assert_eq!(AgentKind::Otelcol.version_of_tag(other), None, "{other}");
         }
+        assert_eq!(
+            AgentKind::Telegraf.version_of_tag("v1.39.3"),
+            Some("1.39.3".to_string())
+        );
+        assert_eq!(AgentKind::Telegraf.version_of_tag("v1.21.0-rc1"), None);
 
         // GLPI numbers releases with two parts and sometimes three, and never a leading `v`.
         assert_eq!(
@@ -2880,6 +2986,33 @@ SHA256: cccc
             assert!(matches!(plans[1].action, Action::RepackAppImage { .. }));
             assert_eq!(plans[1].out_name, "glpi-agent_1.19_linux_amd64.tar.gz");
         }
+    }
+
+    /// Telegraf's Windows archive is a zip and its Unix ones are tarballs, and upstream spells
+    /// 32-bit `i386` where this fleet says `386`.
+    ///
+    /// The packing half of `docs/artifacts/telegraf.md`; its client half is in
+    /// `crates/fleet-agent/src/supervisor/telegraf.rs`.
+    /// Verifies: ADR-0028
+    #[test]
+    fn telegraf_urls_carry_upstreams_spelling_and_the_platform_this_fleet_names() {
+        let plans = telegraf_plans("1.39.3");
+        let find = |os: &str, arch: &str| {
+            plans
+                .iter()
+                .find(|p| p.os == os && p.arch == arch)
+                .unwrap_or_else(|| panic!("no {os}/{arch}"))
+        };
+        let url = |os: &str, arch: &str| find(os, arch).sources[0].url.clone();
+        assert!(url("linux", "amd64").ends_with("telegraf-1.39.3_linux_amd64.tar.gz"));
+        assert!(url("windows", "amd64").ends_with("_windows_amd64.zip"));
+        assert!(url("linux", "386").ends_with("_linux_i386.tar.gz"));
+        // The block is the kind and nothing else now (ADR-0028): the program's name per platform
+        // is the Client's to know, and `docs/artifacts/telegraf.md` is where the two sides meet.
+        assert_eq!(
+            find("windows", "amd64").block_hint,
+            "type = \"telegraf\"  (docs/artifacts/telegraf.md)"
+        );
     }
 
     /// A directory reached through a link is packed **under the linked name too**, with its

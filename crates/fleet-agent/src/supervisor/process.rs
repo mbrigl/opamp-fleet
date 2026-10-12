@@ -1120,7 +1120,7 @@ enum Reloaded {
 /// applies by restarting, so one block serves every platform.
 #[cfg(unix)]
 #[cfg_attr(
-    not(feature = "icinga2"),
+    not(any(feature = "icinga2", feature = "telegraf")),
     expect(
         dead_code,
         reason = "only the wrapped kinds that reload by signal call it"
@@ -1132,7 +1132,7 @@ pub(crate) fn sighup() -> Option<i32> {
 
 #[cfg(not(unix))]
 #[cfg_attr(
-    not(feature = "icinga2"),
+    not(any(feature = "icinga2", feature = "telegraf")),
     expect(
         dead_code,
         reason = "only the wrapped kinds that reload by signal call it"

@@ -163,9 +163,9 @@ state_dir = "client-state"
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the
 # Client presents itself as a single Agent, as above.
 #
-# There are four kinds of Supervisor, and they fall into two groups. `collector` and `command`
-# know nothing about the agent they run, so their blocks say everything. `icinga2` and `glpi` are
-# **wrappers**: each knows its agent, so its block says which host runs it and
+# There are five kinds of Supervisor, and they fall into two groups. `collector` and `command`
+# know nothing about the agent they run, so their blocks say everything. `icinga2`, `glpi` and
+# `telegraf` are **wrappers**: each knows its agent, so its block says which host runs it and
 # little else — a wrapped block is two lines, four for an Icinga node that enrols. A key that a
 # wrapper supplies is refused by name rather than silently overridden, and the message says what
 # supplies the value now.
@@ -322,7 +322,7 @@ state_dir = "client-state"
 # There is no reload_signal key either. Whether a program re-reads its configuration on a signal
 # is the program's own convention, and a wrong one is invisible: a signal the process ignores
 # looks exactly like an apply that worked. An agent under this kind applies by restarting; an
-# agent whose in-place reload is worth having is an agent worth a kind of its own — see 4.
+# agent whose in-place reload is worth having is an agent worth a kind of its own — see 4 and 6.
 #
 # To tag ONE Agent among several on this host, use a Server label (PUT /api/v1/agents/<uid>/
 # labels): keyed by that Agent's uid, matched by the same Selectors, and effective at once. The
@@ -372,3 +372,16 @@ state_dir = "client-state"
 # [[supervisor]]
 # type = "glpi"
 # name = "glpi"
+
+# 6. Telegraf, under a kind of its own. Two lines: everything else about Telegraf — the program's
+# name per platform, --config against the Configuration named `telegraf-conf`, how it states its
+# version, and the SIGHUP it re-reads its configuration on — is Telegraf's property, so the kind
+# holds it. That last one is why the kind exists: as a block key the signal was refused on Windows
+# at parse time, so one Supervisor set could not serve a mixed fleet. The kind sends the signal
+# where signals exist and restarts where they do not.
+#
+# Upload the .tar.gz InfluxData publishes exactly as published; the member whose file name matches
+# is what gets installed. See docs/artifacts/telegraf.md.
+# [[supervisor]]
+# type = "telegraf"
+# name = "telegraf"

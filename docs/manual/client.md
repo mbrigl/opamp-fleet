@@ -1136,22 +1136,23 @@ Each `[[supervisor]]` block runs one Supervisor managing one local process, and 
 Server as its own Agent. Without any block the Client presents itself as a single Agent and manages
 nothing.
 
-Four plugin types ship today, in two groups.
+Five plugin types ship today, in two groups.
 
 **Two know nothing about the agent they run**, so their blocks say everything: `collector` for an
 OpenTelemetry Collector, and `command` for any other process — a **Foreign Agent** that speaks no
 OpAMP.
 
-**Two are wrappers**, each knowing one agent's program, its layout on each platform and its
+**Three are wrappers**, each knowing one agent's program, its layout on each platform and its
 invocation, so its block says which host runs it and little else
 ([ADR-0016](../adr/0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)): `icinga2` for a daemon that takes its
 directories as `-D` constants rather than flags, validates a configuration before applying it, and
 needs a certificate from a master before it can do anything
-([ADR-0026](../adr/0026-icinga-2.md)); and `glpi` for the GLPI
-inventory agent, whose Linux and Windows invocations share almost nothing.
+([ADR-0026](../adr/0026-icinga-2.md)); `glpi` for the GLPI
+inventory agent, whose Linux and Windows invocations share almost nothing; and `telegraf`, whose
+reload signal could not be written in a block a mixed fleet could use.
 
-A new kind of process means a new plugin, not a change to the core — which is what the last one
-demonstrates.
+A new kind of process means a new plugin, not a change to the core — which is what the last three
+demonstrate.
 
 ### The Server can manage the set
 
@@ -1237,7 +1238,7 @@ system already configures. Name them in `[supervisors]`:
 
 ```toml
 [supervisors]
-remote_config_disabled = ["icinga2"]   # Supervisor names, by their block's `name`
+remote_config_disabled = ["icinga2", "telegraf"]   # Supervisor names, by their block's `name`
 ```
 
 The key is read from this file only. The Server never writes `[supervisors]`, so a Supervisor set
@@ -1254,16 +1255,16 @@ set unless `server_manages_set = false`
   It still restarts on command and still takes signed packages. A configuration that arrives anyway
   is not stored, not written, not applied and not answered; the Client logs one warning per hash.
 - **What it runs on.** The files you place in `<supervisor_dir>/<name>/config/`, under the names its
-  kind reads: any unroled file for `collector`,
+  kind reads: any unroled file for `collector`, `telegraf-conf` for `telegraf`,
   `glpi-agent-conf` for `glpi`, the `role = "main"` entry or `icinga2-conf` for `icinga2`, and
   for `command` whatever its `args` name. Roles go into `.supplementary`, one `<file> <role>` per
   line. Nothing else writes into that directory while the switch is on. Without such a file a
-  `collector` or `icinga2` waits and says so.
+  `collector` or `icinga2` waits and says so, and `telegraf` exits and is reported.
 - **The block stays yours.** A delivered block for a listed Supervisor must repeat its running
   block exactly, every key included, whatever `delivered_args` and `delivered_env` allow. A
   delivered block that adds a listed Supervisor carries only `type`, `name` and the key naming its
   program where the kind does not name its own: `binary` for `collector`, `command` for `command`,
-  nothing more for `glpi` and `icinga2`. Otherwise the whole set is refused before
+  nothing more for `telegraf`, `glpi` and `icinga2`. Otherwise the whole set is refused before
   anything stops. Any other key would be remote configuration by another route: a Collector reads
   a whole configuration from `--config=yaml:…` or an environment variable, and an `icinga2` block
   names the parent it enrols with and the certificate it pins.
@@ -1289,7 +1290,7 @@ false` as well to close that. A change to the list takes effect when the Client 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `type` | — | `"collector"`, `"command"`, `"icinga2"`, or `"glpi"` — one section each below. Required. |
+| `type` | — | `"collector"`, `"command"`, `"icinga2"`, `"glpi"`, or `"telegraf"` — one section each below. Required. |
 | `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
 | `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
@@ -1301,7 +1302,7 @@ false` as well to close that. A change to the list takes effect when the Client 
 #### Wrapped and unwrapped kinds
 
 `collector` and `command` know nothing about the agent they run, so their blocks say everything.
-`icinga2` and `glpi` are **wrappers**: each knows its agent's program, its layout and
+`icinga2`, `glpi` and `telegraf` are **wrappers**: each knows its agent's program, its layout and
 its invocation, so its block says which host runs it and little else — two lines, or four for an
 Icinga node that enrols.
 
@@ -1444,7 +1445,7 @@ There is no `reload_signal` key either. Whether a program re-reads its configura
 the program's own convention, and a wrong value here is the one that stays invisible — a signal the
 process ignores looks exactly like an apply that worked. An agent under this kind therefore applies
 a configuration **by restarting**; an agent whose in-place reload is worth having is an agent worth
-a kind of its own, which `icinga2` below is.
+a kind of its own, which `telegraf` and `icinga2` below are.
 
 The Supervisor writes the received configuration entries the same way a Collector's does, but it
 cannot know what to do with them — a Foreign Agent reads its own configuration file. So you point it
@@ -1518,6 +1519,23 @@ goes beside the tree rather than inside `program/`, which a package swap replace
 
 The recipe is [Delivering and supervising the GLPI Agent](glpi-agent.md); the artifact is
 [`docs/artifacts/glpi-agent.md`](../artifacts/glpi-agent.md).
+
+### `type = "telegraf"`
+
+For Telegraf. Also two lines:
+
+```toml
+[[supervisor]]
+type = "telegraf"
+name = "telegraf"
+```
+
+The kind knows the program's name per platform, points `--config` at the Configuration named
+`telegraf-conf`, asks `--version`, and applies a configuration with **`SIGHUP`** where signals exist
+and a restart where they do not. That last part is why the kind exists: as a block key the signal
+was refused on Windows at parse time, so one Supervisor set could not serve a mixed fleet.
+
+The artifact is [`docs/artifacts/telegraf.md`](../artifacts/telegraf.md).
 
 ## How a block names its program
 
