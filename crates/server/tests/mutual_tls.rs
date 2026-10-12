@@ -108,8 +108,10 @@ async fn serve(
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Agent plane");
     let addr = listener.local_addr().expect("addr");
     let agents = server::agent_app(state.clone(), admission);
+    listener.set_nonblocking(true).expect("non-blocking");
     tokio::spawn(async move {
         axum_server::from_tcp(listener)
+            .expect("serve the Agent plane")
             .acceptor(agent_acceptor)
             .serve(agents.into_make_service())
             .await
@@ -121,8 +123,12 @@ async fn serve(
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
     let operator_addr = operator_listener.local_addr().expect("addr");
     let operators = server::operator_app(state, None);
+    operator_listener
+        .set_nonblocking(true)
+        .expect("non-blocking");
     tokio::spawn(async move {
         axum_server::from_tcp(operator_listener)
+            .expect("serve the Operator plane")
             .acceptor(operator_acceptor)
             .serve(operators.into_make_service())
             .await

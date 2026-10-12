@@ -129,13 +129,13 @@ async-trait = "0.1"
 
 # Process CPU and memory for a pid on Linux, macOS, and Windows — the one gap the SDK leaves, and
 # three platform APIs not worth hand-rolling (ADR-0036). Pure Rust over libc.
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 # The built-in root store, for the one case the transports' own defaults cannot cover: a Client
 # presenting a client certificate (ADR-0035) to a Server with a publicly trusted one, which needs
 # a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
 webpki-roots = "1"
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
-axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 # The hyper timer the HTTP/1 header-read timeout needs to exist at all (ADR-0073): hyper defaults
 # that timeout to 30 seconds but resolves it to *nothing* while no `Timer` is installed, and
 # neither axum nor axum-server installs one. `tokio` is the only feature asked for — it is what
@@ -144,12 +144,12 @@ axum-server = { version = "0.7", default-features = false, features = ["tls-rust
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 # Code-first OpenAPI for the REST API (ADR-0012): the document is derived from the registered
 # routes and schemas at compile time, so contract and behaviour cannot drift.
-utoipa = "5"
-utoipa-axum = "0.2"
+utoipa = "6"
+utoipa-axum = "0.3"
 # Reads the repository in build.rs to compute the baked-in version (ADR-0009). Build-dependency
 # only — nothing of it ships in a binary. Default features off: no HTTPS/SSH transports, the
 # build script only opens the local checkout.
-git2 = { version = "0.20", default-features = false }
+git2 = { version = "0.21", default-features = false }
 # The Client's subcommand CLI (ADR-0010). No `env` feature: the Client is file-configured
 # (ADR-0008), never configured through environment variables.
 clap = { version = "4", features = ["derive"] }

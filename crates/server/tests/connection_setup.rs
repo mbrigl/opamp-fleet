@@ -39,6 +39,7 @@ async fn spawn() -> (std::net::SocketAddr, tempfile::TempDir) {
             Handle::new(),
             HEADER_READ_TIMEOUT,
         )
+        .expect("serve the Agent plane")
         .serve(app.into_make_service()),
     );
     (addr, dir)
