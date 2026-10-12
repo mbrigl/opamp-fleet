@@ -11,7 +11,7 @@ the keys it makes are the ones to keep off that host
 
 | Command | Use it to |
 |---|---|
-| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
+| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, Icinga 2, or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
 | **[`package pack`, `sha256`, `keygen`, `sign`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, and make the package signing key |
 | **[`pki init`, `server-cert`, `bootstrap-cert`, `status`](#pki)** | make the fleet's certificate authorities, the Server's or a Gateway's certificate and the bootstrap certificate, and say when they end |
 
@@ -53,7 +53,7 @@ $ sha=$(opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail)
 
 ### What it does
 
-For three agent types it knows where the release lives, what the assets are called, and which
+For four agent types it knows where the release lives, what the assets are called, and which
 checksum file goes with them:
 
 | `--agent` | Where it fetches from | What arrives |
@@ -61,6 +61,7 @@ checksum file goes with them:
 | `otelcol` | `open-telemetry/opentelemetry-collector-releases` | the core Collector's `.tar.gz`, as published |
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
 | `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0017](../adr/0017-the-client-updates-itself-under-its-own-agent-type.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
+| `icinga2` | `packages.icinga.com` | Windows: a `.tar.gz` repacked from the MSI's payload, verified by its Authenticode signature (ADR-0026) since no digest is published. Linux: a `.tar.gz` repacked from the vendor's `icinga2-bin` and `icinga2-common` packages plus the check plugins, with the libraries they need bundled. Must run **on** the distribution it builds for, whose glibc becomes the artifact's reach; `--distro <codename>` states which one that is, and omitted it is this host's own — see [the Icinga 2 recipe](icinga2.md) |
 
 Four things it does on every run:
 
@@ -84,6 +85,7 @@ $ opamp-fleetctl package fetch
 Which agent:
   otelcol          linux, darwin, windows — as the release publishes
 > otelcol-contrib  linux, darwin, windows — as the release publishes
+  icinga2          linux/amd64 (Debian 12+/Ubuntu 22.04+/RHEL 9+) windows/amd64
   supervisor       linux/amd64+arm64 darwin/arm64+amd64 windows/amd64
 Reading the last releases of open-telemetry/opentelemetry-collector-releases …
 Which version› 0.158.0
@@ -97,14 +99,31 @@ Server base URL› https://127.0.0.1:4321
 
 The systems beside each agent are what it is published for — enough to see before the choice that
 an agent offers nothing for the hosts you run. They are a hint, not the offer: the platform
-question below shows what *that release* actually has. One needs a word:
+question below shows what *that release* actually has. Two need a word:
 
 - The **Collectors** add platforms between releases, so only their operating systems are named
   here; the architectures come from the release itself a step later.
+- **Icinga 2** is the one line that is not the same on every machine: it names distributions with
+  versions, across families, and it reads them off **this host**. Its Linux artifact is built *on*
+  the distribution it is built for — the tree bundles the libraries found there — so the only
+  artifact a run can produce is that host's, and its reach is that build's glibc floor. glibc is
+  backward compatible, so the floor is the whole criterion and the family is none of it
+  ([ADR-0026](../adr/0026-icinga-2.md)). The
+  transcript above was taken in a `bookworm` container, whose vendor packages declare
+  `libc6 >= 2.34`; run it in `bullseye` and the same line reads `Debian 11+/Ubuntu 20.04+/RHEL 9+`,
+  in `trixie` `Debian 13+/Ubuntu 24.04+/RHEL 10+`. **Which container you start this in is therefore
+  the decision that sets the reach** — build in the oldest one you must serve — and the tool prints
+  the floor it really got, from the vendor's own index, before anything is uploaded. On a host
+  Icinga publishes no packages for, the line offers `windows/amd64` alone and says which hosts
+  would build the other. The recipe is [the Icinga 2 walkthrough](icinga2.md#1-build-the-artifact),
+  with one caveat for Red Hat hosts under
+  [its limits](icinga2.md#limits-worth-knowing-before-you-start); the Windows artifact comes from
+  the MSI and needs no such host.
 
 The version list is the **three most recent release series**, newest first — a series being a
 `major.minor` line, of which only its newest patch is offered. That is the difference between a
-list you can go back through and one you cannot. An
+list you can go back through and one you cannot: Icinga 2 published five 2.16 patches, and offering
+tags would have filled the whole list with that one line while hiding 2.15 and 2.14 entirely. An
 older patch of a series already on the list is not a choice anyone makes, so it is not offered.
 Release candidates and the tags a repository keeps for other things
 (the Collector repository tags its builder alongside) are filtered out.
@@ -127,7 +146,7 @@ $ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
 
 | Option | Meaning |
 |---|---|
-| `--agent <name>` | `otelcol`, `otelcol-contrib`, or `supervisor` (this fleet's own Client). |
+| `--agent <name>` | `otelcol`, `otelcol-contrib`, `icinga2`, or `supervisor` (this fleet's own Client). |
 | `--version <v>` | The version **as upstream numbers it** — `0.158.0`, `1.19` — never the tag (`v0.158.0`). Omitted, the last five are offered. |
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
@@ -176,6 +195,7 @@ released binary:
 |---|---|---|
 | `otelcol` | `otelcol-conf` | Selector `service.name = otelcol` |
 | `otelcol-contrib` | `otelcol-contrib-conf` | Selector `service.name = otelcol-contrib` |
+| `icinga2` | `icinga2-conf`, `icinga2-zones` | Agent type `icinga2` |
 | `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks ([ADR-0016](../adr/0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) |
 
 Two rules keep this from surprising anyone:
@@ -185,7 +205,8 @@ Two rules keep this from surprising anyone:
   upload of a newer version safe.
 - **Nothing is distributed.** Saving only saves
   ([ADR-0023](../adr/0023-rollout-and-what-reaches-an-agent.md)), so the default reaches
-  no host until you roll it out. Read it first: these bodies carry example values.
+  no host until you roll it out. Read it first: these bodies carry example values — Icinga's
+  parent is `master.example.com`.
 
 ```console
   stored as the linux/amd64 entry — not distributed: press the rollout when it should reach hosts
@@ -198,6 +219,10 @@ and on the next upload of the same agent:
 ```console
   otelcol-contrib-conf is already on the Server — left as it is
 ```
+
+What is *not* uploaded, for Icinga 2, is the per-host pair: the enrolment ticket and the parent's
+certificate. Both differ per host, one is a secret, and neither has a default worth shipping —
+[the Icinga 2 recipe](icinga2.md) says where they come from.
 
 ### When an upload is refused
 
