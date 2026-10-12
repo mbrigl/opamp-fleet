@@ -160,6 +160,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)).
   **What to do:** nothing; restart the service after it to apply the change.
 
+- **`opamp-fleetctl package fetch --cacert <file>`** uploads to a Server whose certificate a
+  fleet's own CA signed — for a fleet made with `pki init`, its `server-ca.pem`. Without it, such a
+  Server was refused with `invalid peer certificate: UnknownIssuer`, since only the system's roots
+  were trusted. The CA replaces those roots for the calls to the Server alone; downloads from
+  upstream keep them.
+
 ### Changed
 
 - **The development observability stack runs on the host, from `observability/`,** apart from

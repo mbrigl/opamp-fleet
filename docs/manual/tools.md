@@ -122,7 +122,7 @@ Every prompt has a flag; give all of them and nothing is asked:
 ```console
 $ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
       --platform linux/amd64 --platform windows/amd64 \
-      --out-dir ./artifacts --server https://127.0.0.1:4321
+      --out-dir ./artifacts --server https://127.0.0.1:4321 --cacert offline/server-ca.pem
 ```
 
 | Option | Meaning |
@@ -132,6 +132,7 @@ $ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
 | `--platform <os/arch>` | Repeatable. `linux/amd64`, `windows/amd64`, `darwin/arm64`, … A platform the release does not publish is refused with the list of those it does. |
 | `--out-dir <path>` | Where artifacts are written. Created if missing. Defaults to the working directory. |
 | `--server <url>` | The Operator plane's `https://` URL. Create the Package and upload each artifact as its platform's entry. It stops there: putting the Package in a deployment is an operator act, and the tool prints the call that does it. Cannot be combined with `--no-upload`. |
+| `--cacert <file>` | The CA certificate (PEM) the Server's certificate chains to — for a fleet made with [`pki init`](#pki), the `server-ca.pem` in its offline directory. It replaces the system's roots for the calls to the Server alone; the downloads from upstream are still checked against the system's roots. Without it, a Server certificate no system root vouches for ends the upload with `invalid peer certificate: UnknownIssuer`. Cannot be combined with `--no-upload`. |
 | `--no-upload` | Write the artifacts and stop, without the upload question. |
 
 `--version` names the *release to fetch*, not this tool's own version — `--version 1.19`, not a
