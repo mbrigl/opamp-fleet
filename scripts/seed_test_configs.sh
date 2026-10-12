@@ -7,10 +7,11 @@
 #
 #   otelcol-contrib-conf  →  selector service.name = otelcol-contrib  (opampextension, self-reporting)
 #   otelcol-conf          →  selector service.name = otelcol          (core otelcol, observed externally)
+#   glpi-agent-conf       →  type glpi-agent                          (command Supervisor, restart on apply)
 #
 # A Configuration's name is the file name its entry gets in the Supervisor's config directory,
-# so each block must read exactly that path.
-# Names carry no extension: they follow the
+# so each block must read exactly that path —
+# "--conf-file=${config_dir}/glpi-agent-conf". Names carry no extension: they follow the
 # ADR-0018 grammar (lowercase letters, digits and '-'), which admits no dot.
 #
 # Two modes:
@@ -118,6 +119,7 @@ seed() {
 
 seed otelcol-contrib-conf "$examples/otelcol-contrib-conf.yaml" '{"service.name": "otelcol-contrib"}'
 seed otelcol-conf "$examples/otelcol-conf.yaml" '{"service.name": "otelcol"}'
+seed glpi-agent-conf "$examples/glpi-agent-conf.cfg" '{}' glpi-agent
 # Icinga 2 reads one root file and includes the rest by name (ADR-0026), so both entries are seeded.
 # Its ticket is per host and a secret, so it is deliberately not seeded here — see docs/manual/icinga2.md.
 seed icinga2-conf "$examples/icinga2-conf.conf" '{}' icinga2

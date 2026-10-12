@@ -163,9 +163,9 @@ state_dir = "client-state"
 # Server as its own Agent, all sharing this Client's one connection. Without any block, the
 # Client presents itself as a single Agent, as above.
 #
-# There are three kinds of Supervisor, and they fall into two groups. `collector` and `command`
-# know nothing about the agent they run, so their blocks say everything. `icinga2` is a
-# **wrapper**: it knows its agent, so its block says which host runs it and
+# There are four kinds of Supervisor, and they fall into two groups. `collector` and `command`
+# know nothing about the agent they run, so their blocks say everything. `icinga2` and `glpi` are
+# **wrappers**: each knows its agent, so its block says which host runs it and
 # little else — a wrapped block is two lines, four for an Icinga node that enrols. A key that a
 # wrapper supplies is refused by name rather than silently overridden, and the message says what
 # supplies the value now.
@@ -199,7 +199,7 @@ state_dir = "client-state"
 #
 # An absolute path is refused at startup: the Client manages only programs it installs. To bring
 # an agent the machine already carries under management, repack it and upload it as a Set — the
-# Icinga 2 page walks through exactly that. Anything in between — ./x, bin/x —
+# Icinga 2 and GLPI Agent pages walk through exactly that. Anything in between — ./x, bin/x —
 # fails at startup rather than being guessed at, and a bare name is NOT searched for in $PATH; it
 # names a file in that one directory.
 #
@@ -358,3 +358,17 @@ state_dir = "client-state"
 #                                       # named but missing, enrolment waits for the file; not
 #                                       # named, the request trusts what the parent presents on
 #                                       # first sight, which is logged as such
+#
+# 5. The GLPI Agent, under a kind of its own — and the same two lines on Linux and on Windows,
+# which is the point. Its two platform invocations differ in nearly everything (the program's name
+# and place in the tree, four Perl -I paths on Windows, the script named by path rather than by
+# --script), and none of those differences is anybody's decision: they follow from the artifact
+# this project itself packs. The kind also holds --daemon --no-fork, which are supervision
+# requirements rather than preferences, and points --vardir outside program/, which a package swap
+# replaces whole.
+#
+# The recipe, the enrolment-free setup and what the agent needs before it reports anything are in
+# docs/manual/glpi-agent.md; the artifact itself in docs/artifacts/glpi-agent.md.
+# [[supervisor]]
+# type = "glpi"
+# name = "glpi"
