@@ -7,30 +7,34 @@
 # vulnerability.
 version: 2
 updates:
-  # The Cargo workspace: opamp, server, and client share one lockfile at the root.
+  # The Cargo workspace (opamp, server and client share one lockfile at the root) and the fuzz
+  # targets' own lockfile (fuzz/), in one entry: a group spans both directories, so a crate both
+  # lock is bumped in one PR instead of one per directory.
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories:
+      - "/"
+      - "/fuzz"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     groups:
-      # One PR per week for the routine patch/minor bumps, so the noise stays low; a major bump
-      # still gets its own PR to be reviewed on its own.
+      # One PR per week for the routine patch/minor bumps.
       cargo-patch-minor:
+        applies-to: version-updates
         update-types:
           - "minor"
           - "patch"
-
-  # The fuzz targets' own lockfile (fuzz/), kept as current as the workspace's.
-  - package-ecosystem: "cargo"
-    directory: "/fuzz"
-    schedule:
-      interval: "weekly"
-    groups:
-      fuzz-patch-minor:
+      # The breaking bumps — for a 0.x crate that includes 0.21 → 0.23 — together in a second PR,
+      # reviewed apart from the routine one but not one PR per crate.
+      cargo-major:
+        applies-to: version-updates
         update-types:
-          - "minor"
-          - "patch"
+          - "major"
+      # Fixes for advisories, whenever they come, in one PR rather than one per advisory.
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # The Actions the CI and release workflows pin (checkout, rust-cache, install-action, …).
   - package-ecosystem: "github-actions"
