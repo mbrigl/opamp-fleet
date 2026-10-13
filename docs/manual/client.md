@@ -305,7 +305,7 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 | `--root <dir>` | `service install`, `service config` | The layout root: `versions/` and the `current` pointer. Given alone it also takes the data — `supervisor.toml` and `state/` — so everything lands under the one directory you named, whose file labeling is then yours to manage. Without it the defaults apply per platform and scope, and on Linux system installs they are two directories: `/opt/opamp-fleet` for the layout, `/var/lib/opamp-fleet` for the data, because SELinux never lets systemd start a binary labeled for `/var/lib`. macOS uses `/Library/Application Support/opamp-fleet`, Windows `%ProgramData%\opamp-fleet`, and user scope the user's own data directory — one directory each. No path is ever fixed. See [On-disk layout](#on-disk-layout). |
 | `--data-root <dir>` | `service install`, `service config` | The data root — `supervisor.toml` and `state/` — when it is to differ from the layout root. A packaged install, the MSI included, passes neither flag and takes the platform defaults. |
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess, write or edit the configuration file, and enrol a host that holds no certificate yet, before registering the service. See below. |
-| `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file untouched. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: those are files the operator puts on the host and names in the file. |
+| `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file untouched. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: it takes them from [beside the program](#files-beside-the-program), or they are files the operator names in the file. |
 | `--run-as <account>` | `service install` | Run the service as this account instead of root/`LocalSystem`, and hand its files over to it. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
 
 ### Running it under its own account
@@ -351,6 +351,39 @@ Two consequences to weigh before using it:
 
 Re-running `install` with a different `--run-as` re-registers and re-owns the same directories;
 without the flag it registers exactly as before — root/`LocalSystem`, no handover.
+
+### Files beside the program
+
+`service install` looks in the directory of the program it runs from for the fleet's files, under
+the names the operator tools give them:
+
+| File | What the install does with it |
+|---|---|
+| `server-ca.pem` | offers it as the CA certificate of the Server; without `--interactive`, copies it beside `supervisor.toml` and names it in `[tls] ca_file` |
+| `bootstrap.pem` and `bootstrap-key.pem` | offers them as the bootstrap pair; without `--interactive`, enrols with them and waits for an operator's approval. Both or neither: one alone is named in a warning and ignored |
+| `package-signing-key.pub` | offers its content as the package verification key; without `--interactive`, writes it as `[packages] verification_key`. A file that holds no 64-digit hex key is named in a warning and ignored |
+
+So a host is set up by copying the program and these four files into one directory and running,
+from there:
+
+```console
+$ cd /root/fleet-files && sudo ./opamp-fleet service install --endpoint wss://fleet.example.com:4320/v1/opamp
+took the package verification key 3b6a27bc… from beside the program
+copied /var/lib/opamp-fleet/server-ca.pem
+wrote /var/lib/opamp-fleet/supervisor.toml for wss://fleet.example.com:4320/v1/opamp
+enrolling with /root/fleet-files/bootstrap.pem and /root/fleet-files/bootstrap-key.pem from beside the program
+enrolling with wss://fleet.example.com:4320/v1/opamp: an operator approves this host's request by the key fingerprint logged below (Ctrl-C stops waiting)
+INFO certificate request generated; an enrolling host waits for an operator's approval key_fingerprint=3f9a…
+enrolled: the issued certificate is in /var/lib/opamp-fleet/state
+installed opamp-fleet
+```
+
+A value the configuration file already holds wins over a file beside the program, and an existing
+configuration is never overwritten. The CA and the verification key are taken only for a `wss://`
+or `https://` endpoint, and the bootstrap pair only while the host holds no certificate the Server
+issued. An install run from a directory that holds a bootstrap pair waits for the approval; Ctrl-C
+stops it and registers nothing. The files stay where they are: remove the bootstrap pair once the
+host is enrolled. `service config` runs the installed copy of the program and does not look.
 
 ### The questionnaire: `--interactive` and `service config`
 

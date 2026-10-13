@@ -268,8 +268,13 @@ serial, subject and end, never the key. Lost, it is not fetched again but issued
 may go to every host of that customer. The UI's **Enrolments** tab issues the same pair from a
 form and saves it as `bootstrap.pem` and `bootstrap-key.pem`.
 
-Copy the three files to the host, to the `--host-path` you gave (`/etc/opamp/` above), with the key
-readable by root only. `supervisor.toml.fragment` holds the `[tls]` section that names them.
+Copy the three files to the host, with the key readable by root only, together with
+`package-signing-key.pub` from the offline directory. The simplest place is the directory you run
+the Client's program from: the install looks there first, offers what it finds as its answers, and
+takes it without a question when it is not interactive
+([Files beside the program](client.md#files-beside-the-program)). Anywhere else, such as the
+`--host-path` you gave (`/etc/opamp/` above), you name them yourself; `supervisor.toml.fragment`
+holds the `[tls]` section that names them there.
 
 **Install the Client** from the release's `.deb`, `.rpm` or `.msi`. The package registers the
 service and leaves it stopped (see [Installing from a native package](client.md#installing-from-a-native-package)).
@@ -292,6 +297,10 @@ INFO certificate request generated; an enrolling host waits for an operator's ap
 enrolled: the issued certificate is in /var/lib/opamp-fleet/state
 installed opamp-fleet
 ```
+
+With the files beside the program, each of the three path questions offers the file there, and
+Enter takes it. Without a terminal, `service install --endpoint <URL>` run from that directory takes
+the CA and the verification key, enrols with the bootstrap pair and waits for the same approval.
 
 Approve the fingerprint it logs, as step 5 describes, and the install carries on. The bootstrap
 pair is used only for this request: it is not copied, and `/etc/opamp/bootstrap*.pem` can be

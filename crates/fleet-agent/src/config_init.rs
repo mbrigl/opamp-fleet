@@ -28,8 +28,102 @@ use crate::config::ClientConfig;
 /// `%ProgramData%` policy per platform.
 pub const FILE_NAME: &str = "supervisor.toml";
 
-/// The name the questionnaire copies the answered Server CA to, beside [`FILE_NAME`] (ADR-0018).
+/// The name the questionnaire copies the answered Server CA to, beside [`FILE_NAME`] (ADR-0018),
+/// and the name the install looks for beside its program (ADR-0034).
 pub const SERVER_CA_FILE: &str = "server-ca.pem";
+
+/// The bootstrap certificate the install looks for beside its program (ADR-0034).
+pub const BOOTSTRAP_CERT_FILE: &str = "bootstrap.pem";
+
+/// The bootstrap certificate's private key the install looks for beside its program (ADR-0034).
+pub const BOOTSTRAP_KEY_FILE: &str = "bootstrap-key.pem";
+
+/// The package verification key, in hex, the install looks for beside its program (ADR-0034).
+pub const VERIFICATION_KEY_FILE: &str = "package-signing-key.pub";
+
+/// The fleet's files that lie beside the program the install runs from (ADR-0034 clause 1): the
+/// questionnaire's defaults, and what a non-interactive install takes without a question.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Beside {
+    /// `server-ca.pem`.
+    pub ca_file: Option<PathBuf>,
+    /// `bootstrap.pem` and `bootstrap-key.pem`, only as a pair.
+    pub bootstrap: Option<Bootstrap>,
+    /// The content of `package-signing-key.pub`, when it is a key.
+    pub verification_key: Option<String>,
+    /// What was there and not taken, each said once by the install.
+    pub warnings: Vec<String>,
+}
+
+impl Beside {
+    /// What lies beside the running executable. Nothing when its directory cannot be told.
+    #[must_use]
+    pub fn the_program() -> Self {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            .map(|dir| Self::in_dir(&dir))
+            .unwrap_or_default()
+    }
+
+    /// What lies in `dir` under the fleet's file names.
+    #[must_use]
+    pub fn in_dir(dir: &Path) -> Self {
+        let file = |name: &str| Some(dir.join(name)).filter(|path| path.is_file());
+        let mut warnings = Vec::new();
+        let bootstrap = match (file(BOOTSTRAP_CERT_FILE), file(BOOTSTRAP_KEY_FILE)) {
+            (Some(cert), Some(key)) => Some(Bootstrap { cert, key }),
+            (Some(alone), None) | (None, Some(alone)) => {
+                warnings.push(format!(
+                    "{} lies beside the program without the other half of the bootstrap pair \
+                     ({BOOTSTRAP_CERT_FILE} and {BOOTSTRAP_KEY_FILE}); not used",
+                    alone.display()
+                ));
+                None
+            }
+            (None, None) => None,
+        };
+        let verification_key = file(VERIFICATION_KEY_FILE).and_then(|path| {
+            let key = std::fs::read_to_string(&path)
+                .map(|text| text.trim().to_string())
+                .unwrap_or_default();
+            if key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+                Some(key)
+            } else {
+                warnings.push(format!(
+                    "{} holds no hex Ed25519 public key; not used",
+                    path.display()
+                ));
+                None
+            }
+        });
+        Beside {
+            ca_file: file(SERVER_CA_FILE),
+            bootstrap,
+            verification_key,
+            warnings,
+        }
+    }
+
+    /// The bootstrap pair a non-interactive install enrols with (ADR-0034 clause 4): the pair
+    /// beside the program, when `config` reaches its Server over TLS and its state directory
+    /// holds no issued certificate.
+    #[must_use]
+    pub fn unasked_enrolment(&self, config: &ClientConfig) -> Option<Bootstrap> {
+        if is_tls_endpoint(&config.endpoint) && !config.is_enrolled() {
+            self.bootstrap.clone()
+        } else {
+            None
+        }
+    }
+
+    /// Prints what lies beside the program and is not taken.
+    fn report(&self) {
+        for warning in &self.warnings {
+            println!("warning: {warning}");
+        }
+    }
+}
 
 /// What the questionnaire writes into the file. Everything else in `supervisor.toml` has a default
 /// that is right on a fresh host, and is written as a comment rather than as a value (ADR-0018).
@@ -80,7 +174,8 @@ pub struct Written {
 /// Ask, write, and report — the whole of `--interactive` and `service config` (ADR-0018).
 ///
 /// `current` is what the file at `path` holds, or the defaults where there is none yet, and offers
-/// each question its default. A new file is rendered whole; an existing one is edited in place,
+/// each question its default; where it holds nothing, what lies `beside` the program does
+/// (ADR-0034 clause 2). A new file is rendered whole; an existing one is edited in place,
 /// the asked keys changed and everything else — comments, `[[supervisor]]` blocks, the
 /// self-update consent — kept as written. `enrolled` says whether the state directory already
 /// holds an issued certificate, in which case no bootstrap pair is asked for.
@@ -91,7 +186,12 @@ pub struct Written {
 /// # Errors
 /// Returns an error when stdin is not a terminal, when a prompt fails, or when a file cannot be
 /// copied, created or replaced.
-pub fn run(path: &Path, current: &ClientConfig, enrolled: bool) -> Result<Written, String> {
+pub fn run(
+    path: &Path,
+    current: &ClientConfig,
+    enrolled: bool,
+    beside: &Beside,
+) -> Result<Written, String> {
     if !std::io::stdin().is_terminal() {
         return Err(format!(
             "the questionnaire needs a terminal on stdin, and there is none. Write {} by hand \
@@ -112,7 +212,8 @@ pub fn run(path: &Path, current: &ClientConfig, enrolled: bool) -> Result<Writte
             path.display()
         );
     }
-    let (answers, bootstrap) = ask(current, enrolled)?;
+    beside.report();
+    let (answers, bootstrap) = ask(current, enrolled, beside)?;
     let (answers, copies) = copy_ca_beside(answers, path)?;
     for copy in &copies {
         println!("copied {}", copy.display());
@@ -284,30 +385,49 @@ fn table<'a>(
 /// they need is the same file, rendered by the same [`render`] and created by the same
 /// [`write_new`], so the never-overwrite rule and the `0600` mode are not restated here.
 ///
-/// Only the endpoint and the self-update consent are taken. The client identity comes from an
-/// enrolment an operator approves, so it has no non-interactive twin: a file written from these
-/// answers alone fails the install's validation and stays on disk to be completed (ADR-0018).
+/// The endpoint and the self-update consent are taken, and for a `wss://` / `https://` endpoint
+/// the Server CA and the verification key that lie `beside` the program, the CA copied beside the
+/// file as the questionnaire's answer would be (ADR-0034 clause 3). The client identity comes from
+/// an enrolment an operator approves, which the install runs with a bootstrap pair beside the
+/// program (ADR-0034 clause 4); a file written without one fails the install's validation and
+/// stays on disk to be completed (ADR-0018).
 ///
 /// # Errors
 /// Returns an error if the endpoint is not one the loader would accept, or if the file cannot be
 /// created.
-pub fn run_with_endpoint(path: &Path, endpoint: &str, self_update: bool) -> Result<(), String> {
+pub fn run_with_endpoint(
+    path: &Path,
+    endpoint: &str,
+    self_update: bool,
+    beside: &Beside,
+) -> Result<Vec<PathBuf>, String> {
+    beside.report();
     if keeping_existing(path) {
-        return Ok(());
+        return Ok(Vec::new());
     }
     // Before the file is created, not after: an install that wrote an unusable file and then failed
     // to load it would leave the operator correcting a file they never typed.
     validate_endpoint(endpoint)?;
+    let endpoint = endpoint.trim().to_string();
+    // Trust and package keys belong to a Server reached over TLS; a loopback `ws://` has neither.
+    let tls = is_tls_endpoint(&endpoint);
     let answers = Answers {
-        endpoint: endpoint.trim().to_string(),
         name: ClientConfig::default().name,
-        ca_file: None,
-        verification_key: None,
+        ca_file: beside.ca_file.clone().filter(|_| tls),
+        verification_key: beside.verification_key.clone().filter(|_| tls),
         self_update,
+        endpoint,
     };
+    if let Some(key) = &answers.verification_key {
+        println!("took the package verification key {key} from beside the program");
+    }
+    let (answers, copies) = copy_ca_beside(answers, path)?;
+    for copy in &copies {
+        println!("copied {}", copy.display());
+    }
     write_new(path, &render(&answers))?;
     println!("wrote {} for {}", path.display(), answers.endpoint);
-    Ok(())
+    Ok(copies)
 }
 
 /// Whether a configuration is already there — in which case an installer's answer keeps it.
@@ -331,8 +451,12 @@ fn keeping_existing(path: &Path) -> bool {
 ///
 /// # Errors
 /// Returns an error if a prompt cannot be read.
-pub fn ask(current: &ClientConfig, enrolled: bool) -> Result<(Answers, Option<Bootstrap>), String> {
-    let defaults = Defaults::of(current);
+pub fn ask(
+    current: &ClientConfig,
+    enrolled: bool,
+    beside: &Beside,
+) -> Result<(Answers, Option<Bootstrap>), String> {
+    let defaults = Defaults::of(current, beside);
 
     let endpoint: String = Input::new()
         .with_prompt("Server OpAMP endpoint")
@@ -435,9 +559,10 @@ fn ask_path(prompt: &str, default: Option<String>) -> Result<PathBuf, String> {
     Ok(PathBuf::from(answer.trim()))
 }
 
-/// The default of each question: what the configuration holds (ADR-0018 clause 16). On a fresh
-/// host `current` is the loader's defaults, so the endpoint and name are suggested and the files
-/// and the key are not.
+/// The default of each question: what the configuration holds (ADR-0018 clause 16), else what
+/// lies beside the program (ADR-0034 clause 2). On a fresh host `current` is the loader's
+/// defaults, so the endpoint and name are suggested, and the files and the key are where the
+/// program found them.
 #[derive(Debug, PartialEq, Eq)]
 struct Defaults {
     endpoint: String,
@@ -449,19 +574,24 @@ struct Defaults {
 }
 
 impl Defaults {
-    fn of(current: &ClientConfig) -> Self {
+    fn of(current: &ClientConfig, beside: &Beside) -> Self {
         let tls = current.tls.as_ref();
         let path = |p: Option<&PathBuf>| p.map(|p| p.to_string_lossy().into_owned());
+        let pair = beside.bootstrap.as_ref();
         Defaults {
             endpoint: current.endpoint.clone(),
             name: current.name.clone(),
-            ca_file: path(tls.and_then(|t| t.ca_file.as_ref())),
-            cert_file: path(tls.and_then(|t| t.cert_file.as_ref())),
-            key_file: path(tls.and_then(|t| t.key_file.as_ref())),
+            ca_file: path(tls.and_then(|t| t.ca_file.as_ref()))
+                .or_else(|| path(beside.ca_file.as_ref())),
+            cert_file: path(tls.and_then(|t| t.cert_file.as_ref()))
+                .or_else(|| path(pair.map(|b| &b.cert))),
+            key_file: path(tls.and_then(|t| t.key_file.as_ref()))
+                .or_else(|| path(pair.map(|b| &b.key))),
             verification_key: current
                 .packages
                 .as_ref()
-                .and_then(|p| p.verification_key.clone()),
+                .and_then(|p| p.verification_key.clone())
+                .or_else(|| beside.verification_key.clone()),
         }
     }
 }
@@ -572,7 +702,8 @@ pub fn write_new(path: &Path, contents: &str) -> Result<(), String> {
 }
 
 /// Whether TLS applies to this endpoint, and the Server's CA is therefore asked for.
-fn is_tls_endpoint(endpoint: &str) -> bool {
+#[must_use]
+pub fn is_tls_endpoint(endpoint: &str) -> bool {
     let endpoint = endpoint.trim();
     endpoint.starts_with("wss://") || endpoint.starts_with("https://")
 }
@@ -663,7 +794,13 @@ mod tests {
     fn installer_answers_alone_fail_validation_and_stay_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
-        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", false).expect("write");
+        run_with_endpoint(
+            &path,
+            "wss://fleet.example.com/v1/opamp",
+            false,
+            &Beside::default(),
+        )
+        .expect("write");
         let loaded = ClientConfig::load(&path).expect("it parses");
         let err = loaded.check_admission().expect_err("no identity");
         assert!(err.contains("cert_file and key_file"), "{err}");
@@ -681,12 +818,19 @@ mod tests {
             "http://localhost:4320/v1/opamp",
         ] {
             let path = dir.path().join(format!("{}.toml", refused.len()));
-            let err = run_with_endpoint(&path, refused, false).expect_err(refused);
+            let err =
+                run_with_endpoint(&path, refused, false, &Beside::default()).expect_err(refused);
             assert!(err.starts_with("endpoint"), "the setting is named: {err}");
             assert!(!path.exists(), "nothing written for {refused}");
         }
         let path = dir.path().join("loopback.toml");
-        run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", false).expect("loopback literal");
+        run_with_endpoint(
+            &path,
+            "ws://127.0.0.1:4320/v1/opamp",
+            false,
+            &Beside::default(),
+        )
+        .expect("loopback literal");
     }
 
     /// The point of the whole exercise: what the questionnaire writes must load, and must load as
@@ -747,7 +891,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
 
-        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", true).expect("write");
+        run_with_endpoint(
+            &path,
+            "wss://fleet.example.com/v1/opamp",
+            true,
+            &Beside::default(),
+        )
+        .expect("write");
 
         let loaded = ClientConfig::load(&path).expect("the written file loads");
         assert_eq!(loaded.endpoint, "wss://fleet.example.com/v1/opamp");
@@ -764,7 +914,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
 
-        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", false).expect("write");
+        run_with_endpoint(
+            &path,
+            "wss://fleet.example.com/v1/opamp",
+            false,
+            &Beside::default(),
+        )
+        .expect("write");
 
         let text = std::fs::read_to_string(&path).expect("read back");
         assert!(
@@ -783,7 +939,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
 
-        let err = run_with_endpoint(&path, "fleet.example.com", false).expect_err("no scheme");
+        let err = run_with_endpoint(&path, "fleet.example.com", false, &Beside::default())
+            .expect_err("no scheme");
         assert!(!err.is_empty());
         assert!(!path.exists(), "nothing may be left behind");
     }
@@ -797,8 +954,13 @@ mod tests {
         let path = dir.path().join(FILE_NAME);
         write_new(&path, "endpoint = \"wss://kept/v1/opamp\"\n").expect("first write");
 
-        run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", false)
-            .expect("kept, not an error");
+        run_with_endpoint(
+            &path,
+            "wss://fleet.example.com/v1/opamp",
+            false,
+            &Beside::default(),
+        )
+        .expect("kept, not an error");
 
         let loaded = ClientConfig::load(&path).expect("load");
         assert_eq!(loaded.endpoint, "wss://kept/v1/opamp");
@@ -932,8 +1094,8 @@ mod tests {
     fn interactive_without_a_terminal_fails_instead_of_blocking() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
-        let err =
-            run(&path, &ClientConfig::default(), false).expect_err("no terminal, no questionnaire");
+        let err = run(&path, &ClientConfig::default(), false, &Beside::default())
+            .expect_err("no terminal, no questionnaire");
         assert!(err.contains("needs a terminal"), "{err}");
         assert!(!path.exists(), "nothing was written");
     }
@@ -957,6 +1119,162 @@ mod tests {
                 "a file naming the private key is the owner's alone"
             );
         }
+    }
+
+    const KEY_HEX: &str = "7752550dc567225658fcb0a91322f52497b26c2a65cfc4cff14145fcf8857d4b";
+
+    /// A directory holding what the operator copies beside the program.
+    fn fleet_files(dir: &Path) {
+        for (name, content) in [
+            (SERVER_CA_FILE, "ca"),
+            (BOOTSTRAP_CERT_FILE, "cert"),
+            (BOOTSTRAP_KEY_FILE, "key"),
+            (VERIFICATION_KEY_FILE, &format!("{KEY_HEX}\n")[..]),
+        ] {
+            std::fs::write(dir.join(name), content).expect("write");
+        }
+    }
+
+    /// The fleet's files are found by their exact names; half a bootstrap pair and a public key
+    /// file that holds no key are said and not taken (ADR-0034 clause 1).
+    /// Verifies: ADR-0034
+    #[test]
+    fn the_fleets_files_are_found_beside_the_program_by_their_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(Beside::in_dir(dir.path()), Beside::default());
+        fleet_files(dir.path());
+        let beside = Beside::in_dir(dir.path());
+        assert_eq!(beside.ca_file, Some(dir.path().join(SERVER_CA_FILE)));
+        assert_eq!(
+            beside.bootstrap,
+            Some(Bootstrap {
+                cert: dir.path().join(BOOTSTRAP_CERT_FILE),
+                key: dir.path().join(BOOTSTRAP_KEY_FILE),
+            })
+        );
+        assert_eq!(beside.verification_key.as_deref(), Some(KEY_HEX));
+        assert!(beside.warnings.is_empty(), "{:?}", beside.warnings);
+
+        std::fs::remove_file(dir.path().join(BOOTSTRAP_KEY_FILE)).expect("remove");
+        std::fs::write(dir.path().join(VERIFICATION_KEY_FILE), "not a key").expect("write");
+        let beside = Beside::in_dir(dir.path());
+        assert_eq!(beside.bootstrap, None, "half a pair is no pair");
+        assert_eq!(beside.verification_key, None);
+        assert_eq!(beside.warnings.len(), 2, "{:?}", beside.warnings);
+    }
+
+    /// Each default is what the file holds, else what lies beside the program (ADR-0034
+    /// clause 2).
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_default_is_what_the_file_holds_else_what_lies_beside_the_program() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fleet_files(dir.path());
+        let beside = Beside::in_dir(dir.path());
+        let text = |name: &str| Some(dir.path().join(name).to_string_lossy().into_owned());
+
+        let fresh = Defaults::of(&ClientConfig::default(), &beside);
+        assert_eq!(fresh.ca_file, text(SERVER_CA_FILE));
+        assert_eq!(fresh.cert_file, text(BOOTSTRAP_CERT_FILE));
+        assert_eq!(fresh.key_file, text(BOOTSTRAP_KEY_FILE));
+        assert_eq!(fresh.verification_key.as_deref(), Some(KEY_HEX));
+
+        let held = ClientConfig {
+            tls: Some(crate::config::TlsConfig {
+                ca_file: Some(PathBuf::from("/held/ca.pem")),
+                cert_file: None,
+                key_file: None,
+            }),
+            ..ClientConfig::default()
+        };
+        let edited = Defaults::of(&held, &beside);
+        assert_eq!(
+            edited.ca_file.as_deref(),
+            Some("/held/ca.pem"),
+            "the file wins"
+        );
+        assert_eq!(edited.cert_file, text(BOOTSTRAP_CERT_FILE));
+    }
+
+    /// `--endpoint` writes the CA and the verification key it finds beside the program, the CA as
+    /// a copy beside the file; a loopback `ws://` takes neither, and a file that exists is kept
+    /// (ADR-0034 clause 3).
+    /// Verifies: ADR-0034
+    #[test]
+    fn an_endpoint_install_takes_the_ca_and_the_key_beside_the_program() {
+        let program = tempfile::tempdir().expect("tempdir");
+        fleet_files(program.path());
+        let beside = Beside::in_dir(program.path());
+        let data = tempfile::tempdir().expect("tempdir");
+        let path = data.path().join(FILE_NAME);
+
+        let copies = run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", true, &beside)
+            .expect("write");
+        let copy = data.path().join(SERVER_CA_FILE);
+        assert_eq!(copies, vec![copy.clone()]);
+        let loaded = ClientConfig::load(&path).expect("loads");
+        assert_eq!(
+            loaded.tls.expect("tls").ca_file.as_deref(),
+            Some(copy.as_path())
+        );
+        assert_eq!(
+            loaded.packages.and_then(|p| p.verification_key).as_deref(),
+            Some(KEY_HEX)
+        );
+        assert!(
+            !data.path().join(BOOTSTRAP_CERT_FILE).exists(),
+            "the bootstrap pair is not copied"
+        );
+
+        let before = std::fs::read(&path).expect("read");
+        assert!(
+            run_with_endpoint(&path, "wss://other.example.com/v1/opamp", true, &beside)
+                .expect("kept")
+                .is_empty()
+        );
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+
+        let loopback = tempfile::tempdir().expect("tempdir");
+        let path = loopback.path().join(FILE_NAME);
+        let copies =
+            run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", true, &beside).expect("write");
+        assert!(copies.is_empty());
+        let loaded = ClientConfig::load(&path).expect("loads");
+        assert!(loaded.tls.and_then(|t| t.ca_file).is_none());
+        assert!(loaded.packages.and_then(|p| p.verification_key).is_none());
+    }
+
+    /// Unasked, the pair beside the program enrols a Client over TLS that holds no issued
+    /// certificate, and only such a one (ADR-0034 clause 4).
+    /// Verifies: ADR-0034
+    #[test]
+    fn an_unasked_install_enrols_with_the_pair_beside_the_program_until_enrolled() {
+        let program = tempfile::tempdir().expect("tempdir");
+        fleet_files(program.path());
+        let beside = Beside::in_dir(program.path());
+        let state = tempfile::tempdir().expect("tempdir");
+        let config = ClientConfig {
+            endpoint: "wss://fleet.example.com/v1/opamp".to_string(),
+            state_dir: state.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        assert_eq!(beside.unasked_enrolment(&config), beside.bootstrap);
+        assert!(beside.unasked_enrolment(&config).is_some());
+
+        let loopback = ClientConfig {
+            endpoint: "ws://127.0.0.1:4320/v1/opamp".to_string(),
+            ..config.clone()
+        };
+        assert_eq!(beside.unasked_enrolment(&loopback), None);
+
+        for name in [crate::tls::ISSUED_CERT_FILE, crate::tls::ISSUED_KEY_FILE] {
+            std::fs::write(state.path().join(name), "issued").expect("write");
+        }
+        assert_eq!(beside.unasked_enrolment(&config), None, "enrolled already");
+        assert_eq!(
+            Beside::default().unasked_enrolment(&ClientConfig::default()),
+            None
+        );
     }
 
     /// The answered CA lands beside the configuration under a fixed name, owner-only, and the
@@ -1126,7 +1444,7 @@ mod tests {
     /// Verifies: ADR-0018
     #[test]
     fn the_defaults_are_what_the_file_holds() {
-        let fresh = Defaults::of(&ClientConfig::default());
+        let fresh = Defaults::of(&ClientConfig::default(), &Beside::default());
         assert_eq!(fresh.endpoint, ClientConfig::default().endpoint);
         assert_eq!(
             (
@@ -1150,7 +1468,7 @@ mod tests {
         )
         .expect("config");
         assert_eq!(
-            Defaults::of(&held),
+            Defaults::of(&held, &Beside::default()),
             Defaults {
                 endpoint: "wss://fleet.example/v1/opamp".to_string(),
                 name: "web-01".to_string(),
