@@ -549,7 +549,7 @@
                 <th style="width: 150px">Issued</th>
                 <th style="width: 150px">Valid until</th>
                 <th style="width: 90px">State</th>
-                <th style="width: 1%"></th>
+                <th style="width: 190px"></th>
               </tr>
             </thead>
             <tbody id="boots"></tbody>
@@ -2123,8 +2123,8 @@
             <td>${esc(when(b.issued_ms))}</td>
             <td>${esc(when(b.not_after_ms))}</td>
             <td>${b.revoked ? `<span class="pill red">revoked</span>` : `<span class="pill green">valid</span>`}</td>
-            <td style="white-space: nowrap">${saves(b)}${b.revoked ? "" : `
-              <button class="btn btn-ghost btn-sm boot-revoke" data-serial="${esc(b.serial)}" title="Revoke this certificate: no host can enrol with it any more">Revoke</button>`}</td>
+            <td><div style="display: flex; flex-direction: column; align-items: flex-start; gap: 4px">${saves(b)}${b.revoked ? "" : `
+              <button class="btn btn-ghost btn-sm boot-revoke" data-serial="${esc(b.serial)}" title="Revoke this certificate: no host can enrol with it any more">Revoke</button>`}</div></td>
           </tr>`).join("");
       }
 
