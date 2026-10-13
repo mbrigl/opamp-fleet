@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Creates the certificates a development Server and Client need, since both refuse to run without
-# them (ADR-0013, ADR-0021), with the operator tool's `opamp-fleetctl pki init` (ADR-0028,
-# ADR-0028) — no openssl.
+# them (ADR-0013, ADR-0021), with the operator tool's `opamp-fleetctl pki init`
+# (ADR-0028) — no openssl.
 # Everything lands in one directory, gitignored, and is for a development machine only: the keys
 # are unencrypted and the CAs are throwaway.
 #

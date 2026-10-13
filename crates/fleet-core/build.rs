@@ -1,5 +1,5 @@
 // The version this build reports (ADR-0012), baked in as
-// `OPAMP_BUILD_VERSION` and read back through `fleet_core::version::current`.
+// `OPAMP_PRODUCT_RELEASE` and read back through `fleet_core::version::current`.
 //
 // It lives in the crate both binaries already depend on because ADR-0012 asks for a *single* helper
 // that every surface reads, and `cargo:rustc-env` reaches only the crate whose script emitted it: a
@@ -11,9 +11,9 @@ use git2::Repository;
 const TAG_PREFIX: &str = "version/";
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=OPAMP_FLEET_VERSION");
+    println!("cargo:rerun-if-env-changed=OPAMP_PRODUCT_VERSION");
     match resolve_version() {
-        Ok(version) => println!("cargo:rustc-env=OPAMP_BUILD_VERSION={version}"),
+        Ok(version) => println!("cargo:rustc-env=OPAMP_PRODUCT_RELEASE={version}"),
         Err(e) => {
             eprintln!("cannot resolve the build version: {e}");
             std::process::exit(1);
@@ -22,7 +22,7 @@ fn main() {
 }
 
 // The **base** is `[workspace.package] version` from `Cargo.toml`, which Cargo hands this script as
-// `CARGO_PKG_VERSION`; `OPAMP_FLEET_VERSION` overrides it for builds that want to state a version
+// `CARGO_PKG_VERSION`; `OPAMP_PRODUCT_VERSION` overrides it for builds that want to state a version
 // explicitly. Git decides only what is *around* that number:
 //
 // - a `version/<base>` tag pointing at HEAD — a **release** build: the base as it stands;
@@ -56,12 +56,12 @@ fn resolve_version() -> Result<String, String> {
     }
 
     // The number itself, from the file that decides it (ADR-0012) or from the override.
-    let (base, source) = match std::env::var("OPAMP_FLEET_VERSION") {
+    let (base, source) = match std::env::var("OPAMP_PRODUCT_VERSION") {
         Ok(raw) => (
             parse_components(&raw).ok_or_else(|| {
-                format!("OPAMP_FLEET_VERSION {raw:?} is not a strict MAJOR.MINOR.PATCH version")
+                format!("OPAMP_PRODUCT_VERSION {raw:?} is not a strict MAJOR.MINOR.PATCH version")
             })?,
-            "OPAMP_FLEET_VERSION",
+            "OPAMP_PRODUCT_VERSION",
         ),
         Err(_) => {
             let raw = std::env::var("CARGO_PKG_VERSION")
@@ -83,7 +83,7 @@ fn resolve_version() -> Result<String, String> {
     let Some(repo) = repo else {
         return Err(format!(
             "not inside a git repository, so this build cannot tell whether {base} (from {source}) \
-             is released; set OPAMP_FLEET_VERSION=MAJOR.MINOR.PATCH to state it"
+             is released; set OPAMP_PRODUCT_VERSION=MAJOR.MINOR.PATCH to state it"
         ));
     };
     let hash = short_hash(&repo)?;

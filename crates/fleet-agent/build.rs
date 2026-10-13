@@ -1,4 +1,4 @@
-// The product's name, fixed at build time (ADR-0019).
+// The product's name and title, fixed at build time (ADR-0019 clause 2).
 //
 // `PRODUCT_NAME` names the installation: the directory under the platform's base, the service, the
 // `.deb`/`.rpm` package, the `/usr/libexec` payload directory and the `PATH` symlink. A second
@@ -16,7 +16,7 @@
 // a service manager at all.
 
 const DEFAULT_PRODUCT_NAME: &str = "opamp-fleet";
-const DEFAULT_PRODUCT_DISPLAY_NAME: &str = "OpAMP Fleet Agent";
+const DEFAULT_PRODUCT_TITLE: &str = "OpAMP Fleet Agent";
 
 /// Legal under the grammar below, but invalid directory names on Windows — and the product is a
 /// directory everywhere.
@@ -26,28 +26,28 @@ const WINDOWS_RESERVED: [&str; 22] = [
 ];
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=OPAMP_FLEET_PRODUCT_NAME");
-    println!("cargo:rerun-if-env-changed=OPAMP_FLEET_PRODUCT_DISPLAY_NAME");
+    println!("cargo:rerun-if-env-changed=OPAMP_PRODUCT_NAME");
+    println!("cargo:rerun-if-env-changed=OPAMP_PRODUCT_TITLE");
 
-    let name = std::env::var("OPAMP_FLEET_PRODUCT_NAME")
-        .unwrap_or_else(|_| DEFAULT_PRODUCT_NAME.to_string());
+    let name =
+        std::env::var("OPAMP_PRODUCT_NAME").unwrap_or_else(|_| DEFAULT_PRODUCT_NAME.to_string());
     if let Err(e) = check_product_name(&name) {
-        eprintln!("OPAMP_FLEET_PRODUCT_NAME={name:?} is not a usable product name: {e}");
+        eprintln!("OPAMP_PRODUCT_NAME={name:?} is not a usable product name: {e}");
         std::process::exit(1);
     }
 
     // Deliberately unvalidated beyond being non-empty: it is prose, and the three places it
     // appears — Add/Remove Programs, the SCM's display column, the installer dialog's title —
     // accept prose. A name that is only whitespace is a typo, not prose.
-    let display = std::env::var("OPAMP_FLEET_PRODUCT_DISPLAY_NAME")
-        .unwrap_or_else(|_| DEFAULT_PRODUCT_DISPLAY_NAME.to_string());
+    let display =
+        std::env::var("OPAMP_PRODUCT_TITLE").unwrap_or_else(|_| DEFAULT_PRODUCT_TITLE.to_string());
     if display.trim().is_empty() {
-        eprintln!("OPAMP_FLEET_PRODUCT_DISPLAY_NAME is empty");
+        eprintln!("OPAMP_PRODUCT_TITLE is empty");
         std::process::exit(1);
     }
 
-    println!("cargo:rustc-env=OPAMP_FLEET_PRODUCT_NAME={name}");
-    println!("cargo:rustc-env=OPAMP_FLEET_PRODUCT_DISPLAY_NAME={display}");
+    println!("cargo:rustc-env=OPAMP_PRODUCT_NAME={name}");
+    println!("cargo:rustc-env=OPAMP_PRODUCT_TITLE={display}");
 }
 
 fn check_product_name(raw: &str) -> Result<(), String> {

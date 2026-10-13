@@ -206,7 +206,7 @@ fn a_local_path_becomes_a_file_url_git_accepts() {
 const NEWER_VERSION: &str = "9.9.9";
 
 /// A Client binary that is a *newer version* than the one this test runs, built once per test
-/// binary with the override the build script documents (`OPAMP_FLEET_VERSION`, ADR-0012), and its
+/// binary with the override the build script documents (`OPAMP_PRODUCT_VERSION`, ADR-0012), and its
 /// version as an operator would type it.
 ///
 /// A second build, rather than offering the running binary back to itself, because the fleet
@@ -217,7 +217,7 @@ const NEWER_VERSION: &str = "9.9.9";
 ///
 /// It is built from a **tagless clone** of this repository rather than from the checkout itself,
 /// and that is the whole reason a clone appears in a test: `build.rs` refuses a build whose
-/// `OPAMP_FLEET_VERSION` disagrees with a `version/*` tag on HEAD (ADR-0012's drift rule), so this
+/// `OPAMP_PRODUCT_VERSION` disagrees with a `version/*` tag on HEAD (ADR-0012's drift rule), so this
 /// helper broke on precisely the commits a release is cut from. The clone carries no tags, so the
 /// override is the only version statement there is and the build is an ordinary `-dev` one.
 ///
@@ -318,7 +318,7 @@ fn newer_client() -> &'static (PathBuf, String) {
         build
             .current_dir(&checkout)
             .args(["build", "-p", "fleet-agent", "--bin", "supervisor"])
-            .env("OPAMP_FLEET_VERSION", NEWER_VERSION)
+            .env("OPAMP_PRODUCT_VERSION", NEWER_VERSION)
             .env("CARGO_TARGET_DIR", &target)
             // Nothing here is debugged; the binary only has to run and to say what it is.
             .env("CARGO_PROFILE_DEV_DEBUG", "0");
@@ -475,7 +475,7 @@ fn config_toml(addr: std::net::SocketAddr, state_dir: &Path) -> String {
 /// The whole loop: the Server offers the Client a version of itself, the Client stages it beside
 /// the running one, proves it with `self-check`, moves `current`, and asks to be restarted — and
 /// whatever comes up afterwards owes the Server a terminal status, which must be `Installed`.
-/// Verifies: ADR-0018, G-10, G-11
+/// Verifies: ADR-0018, ADR-0012, G-10, G-11
 #[tokio::test]
 async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let _serial = one_at_a_time().await;
@@ -584,7 +584,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
 /// a service manager that does not reap the process group the Collector was orphaned and the next
 /// Client spawned a duplicate. Here every managed process that ran before a restart is dead
 /// afterwards. Linux-only: it reads `/proc/<pid>` to tell a process apart from its successor.
-/// Verifies: ADR-0018
+/// Verifies: ADR-0018, ADR-0012
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn managed_processes_stop_cleanly_on_the_self_update_restart() {

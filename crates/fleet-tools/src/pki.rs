@@ -1,5 +1,4 @@
-//! `opamp-fleetctl pki` — the fleet's certificates, made on the operator's machine (ADR-0028,
-//! ADR-0028).
+//! `opamp-fleetctl pki` — the fleet's certificates, made on the operator's machine (ADR-0028).
 //!
 //! `init` makes the three certificate authorities — the server CA, the client CA and the bootstrap
 //! CA — the Server's certificate, and the bootstrap certificate a new host enrols with;

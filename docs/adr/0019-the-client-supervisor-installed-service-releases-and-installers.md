@@ -115,13 +115,13 @@ deliver the same binary and run its own `service install`.
    (`start`, `stop`, `state`) that the self-update depends on. Errors are `Result<_, String>`.
 
 2. **`PRODUCT_NAME` is a build-time constant.** Default **`opamp-fleet`**, overridable with
-   `OPAMP_FLEET_PRODUCT_NAME` for a variant build. `crates/fleet-agent/build.rs` validates it against
+   `OPAMP_PRODUCT_NAME` for a variant build. `crates/fleet-agent/build.rs` validates it against
    the intersection of the systemd-unit, launchd-label, SCM-name and directory-name grammars —
    lowercase `[a-z0-9-]`, 1–32 characters, no leading or trailing `-`, never a Windows reserved
    device name (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`) — and **fails the build**
    on a name that breaks it, so an illegal name cannot reach a service manager. The display name,
-   default **`OpAMP Fleet Agent`**, is a second variable, `OPAMP_FLEET_PRODUCT_DISPLAY_NAME`, only
-   required to be non-blank: it is prose, cannot be derived from the slug by any rule that would
+   default **`OpAMP Fleet Agent`**, is the constant `PRODUCT_TITLE`, overridable with
+   `OPAMP_PRODUCT_TITLE` and only required to be non-blank: it is prose, cannot be derived from the slug by any rule that would
    read correctly for the next variant, and appears only where prose belongs — the Add/Remove
    Programs entry, the SCM's display column and the installer dialog's title. It is not the Agent
    type, so the fleet view never prints one word in both columns
@@ -813,6 +813,12 @@ packaging the Server, which an operator deploys rather than the fleet.
   the installer could have refused while they were at the keyboard.
 - **Rename the dpkg/rpm identity or `UpgradeCode` with the program.** Costs every host a second
   product beside the first.
+- **Name the build variables for this project (`OPAMP_FLEET_PRODUCT_NAME`, …)** — a build of
+  `acme-agent` would set a variable that names a product the build is not.
+- **No prefix (`PRODUCT_NAME`, `PRODUCT_TITLE`)** — common in other toolchains: Xcode exports
+  `PRODUCT_NAME` to every build phase, and a stray slug would pass the grammar of clause 2 and
+  silently rename the service and move the install path. `OPAMP_` names the protocol, not the
+  product, so it holds in every variant.
 
 ## Sources / Prior art
 
@@ -910,6 +916,8 @@ packaging the Server, which an operator deploys rather than the fleet.
 - [OpAMP specification, `AgentDescription`](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md),
   [opamp-spec issue #131](https://github.com/open-telemetry/opamp-spec/issues/131) and the
   [resource semantic conventions, `service.name`](https://opentelemetry.io/docs/specs/semconv/resource/#service).
+- Xcode Build Settings Reference, `PRODUCT_NAME` — exported to the environment of every Run Script
+  build phase. Recalled, not re-verified.
 
 ## Consequences
 
@@ -997,7 +1005,7 @@ packaging the Server, which an operator deploys rather than the fleet.
 ## Enforcement
 
 - `crates/fleet-agent/build.rs` fails the build on a `PRODUCT_NAME` outside the grammar or a blank
-  display name; `crates/fleet-agent/src/product.rs` `product_name_satisfies_the_grammar`,
+  display name, and `product.rs` reads `OPAMP_PRODUCT_NAME` and `OPAMP_PRODUCT_TITLE` through `env!`; `crates/fleet-agent/src/product.rs` `product_name_satisfies_the_grammar`,
   `display_name_is_prose`.
 - `crates/fleet-agent/src/service/manager.rs`: `every_backend_renders_the_same_name`,
   `the_service_is_named_after_the_product_not_the_program`, `the_service_name_carries_no_suffix`,

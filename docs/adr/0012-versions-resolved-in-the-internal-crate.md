@@ -53,7 +53,7 @@ compared nowhere.
    build script as `CARGO_PKG_VERSION`. Bumping it is an ordinary reviewed commit. The
    grammar is strict semantic versioning: exactly three non-negative integers without leading
    zeros, no pre-release, no build metadata; a value that breaks it fails the build. The
-   environment variable `OPAMP_FLEET_VERSION` overrides the base, held to the same grammar.
+   environment variable `OPAMP_PRODUCT_VERSION` overrides the base, held to the same grammar.
 
 2. **Git says only what is around the number.**
 
@@ -75,9 +75,9 @@ compared nowhere.
 
 4. **The resolution runs in `crates/fleet-core/build.rs`, through `git2`, with no `git` binary.** The
    script discovers the repository upward from the manifest directory, reads HEAD and the
-   `refs/tags/version/*` references, and emits `cargo:rustc-env=OPAMP_BUILD_VERSION=<full string>`
+   `refs/tags/version/*` references, and emits `cargo:rustc-env=OPAMP_PRODUCT_RELEASE=<full string>`
    with `rerun-if-changed` on the repository's `HEAD`, `refs` and `packed-refs` and
-   `rerun-if-env-changed=OPAMP_FLEET_VERSION`. `git2` (libgit2, vendored and statically built) is a
+   `rerun-if-env-changed=OPAMP_PRODUCT_VERSION`. `git2` (libgit2, vendored and statically built) is a
    **build**-dependency of `fleet-core` only: nothing of it reaches a shipped binary, nothing parses CLI
    output, and the result does not vary with the host's git version or locale.
 
@@ -189,6 +189,14 @@ release-candidate flow is wanted.
 - **The Client reports only the base** — throws away the answer to "which build is on that host".
 - **Leave `service_version` holding the full string and add a base field beside it** — leaves a
   field called `service_version` holding something nobody would call a version.
+- **Name the variables for this project (`OPAMP_FLEET_VERSION`, `OPAMP_BUILD_VERSION`)** — a
+  variant build (ADR-0019 clause 2) would set a variable that names a product it is not, and a
+  *build* version beside a *fleet* version does not say which is the input and which the result.
+  `OPAMP_PRODUCT_VERSION` and `OPAMP_PRODUCT_RELEASE` read as one pair.
+- **No prefix (`PRODUCT_VERSION`)** — common in other toolchains, so an ambient value would set the
+  version. `OPAMP_` is the prefix the build already uses for `OPAMP_BASELINE`
+  ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md))
+  and names the protocol, not the product, so it holds in every variant.
 
 ## Sources / Prior art
 
@@ -235,6 +243,11 @@ release-candidate flow is wanted.
 
 ## Enforcement
 
+- `crates/fleet-core/src/version.rs` reads `OPAMP_PRODUCT_RELEASE` through `env!`, so a build
+  script that emits another name fails the compilation, and the self-update end-to-end tests in
+  `crates/fleet-agent/tests/self_update_e2e.rs` build their newer Client with
+  `OPAMP_PRODUCT_VERSION` and fail when the override is not read, because that Client then reports
+  no upgrade.
 - `crates/fleet-core/build.rs` fails the build on a malformed `Cargo.toml` version or override, on a
   `version/*` tag on HEAD that names another version, and outside a git repository.
 - `crates/fleet-core/src/version.rs` tests: `the_baked_version_has_the_prescribed_shape`,

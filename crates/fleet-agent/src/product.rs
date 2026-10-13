@@ -1,4 +1,4 @@
-//! The product's name and display name, fixed at build time (ADR-0019).
+//! The product's name and title, fixed at build time (ADR-0019 clause 2).
 //!
 //! Three names sit side by side in this program, each naming a different thing, and conflating any
 //! two of them couples things that must be free to move apart:
@@ -21,14 +21,14 @@
 /// Lowercase `[a-z0-9-]`, 1–32 characters, never a Windows reserved device name — the intersection
 /// of the systemd-unit, launchd-label, SCM service-name and directory-name grammars, which is the
 /// same grammar ADR-0019 set for instance names and for the reason.
-pub const PRODUCT_NAME: &str = env!("OPAMP_FLEET_PRODUCT_NAME");
+pub const PRODUCT_NAME: &str = env!("OPAMP_PRODUCT_NAME");
 
 /// The product's display name: prose, for the three places prose belongs — the Add/Remove Programs
 /// entry, the SCM's display column, and the installer dialog's title.
 ///
 /// It is deliberately not derived from [`PRODUCT_NAME`]: no rule that turns `opamp-fleet` into
 /// `OpAMP Fleet Agent` would still read correctly for the next variant.
-pub const PRODUCT_DISPLAY_NAME: &str = env!("OPAMP_FLEET_PRODUCT_DISPLAY_NAME");
+pub const PRODUCT_TITLE: &str = env!("OPAMP_PRODUCT_TITLE");
 
 #[cfg(test)]
 mod tests {
@@ -49,6 +49,6 @@ mod tests {
     /// Verifies: ADR-0019
     #[test]
     fn display_name_is_prose() {
-        assert!(!PRODUCT_DISPLAY_NAME.trim().is_empty());
+        assert!(!PRODUCT_TITLE.trim().is_empty());
     }
 }
