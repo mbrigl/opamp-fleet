@@ -13,7 +13,91 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.5.1]
+## [0.5.2]
+
+### Added
+
+- **`opamp-fleetctl package fetch --cacert <file>`** uploads to a Server whose certificate a
+  fleet's own CA signed — for a fleet made with `pki init`, its `server-ca.pem`. Without it, such a
+  Server was refused with `invalid peer certificate: UnknownIssuer`, since only the system's roots
+  were trusted. The CA replaces those roots for the calls to the Server alone; downloads from
+  upstream keep them.
+- **A whole Package signed in one go**
+  ([ADR-0029](docs/adr/0029-a-signing-file-carries-what-a-signature-covers-to-the-key-and-the-signatures-back.md)).
+  The Packages tab lists each entry with its size and full SHA-256 and downloads the Package's
+  **Signing info** (`opamp-fleet-signing-v1`); `opamp-fleetctl package sign --signing-info <file>`
+  signs every entry from its hash, without the artifacts; the Deployments tab imports the signed
+  file into the Deployment's signatures. The tool checks the hashes against nothing: compare them
+  with upstream's checksums or `package sha256` over the files before signing.
+- **Bootstrap certificates issued and revoked from the Enrolments tab**
+  ([ADR-0032](docs/adr/0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)).
+  The tab issues a bootstrap certificate for a customer (O) and site (OU) and lists the valid ones
+  with a **Revoke** press; the row of each certificate issued in the open page offers its pair as
+  `bootstrap.pem` and `bootstrap-key.pem` until the page is reloaded or closed. Each
+  waiting request names the bootstrap certificate it carries by customer, site, serial and end;
+  `GET /api/v1/enrolments` carries the serial as `bootstrap_serial`.
+
+### Changed
+
+- **The Client's install takes the fleet's files it finds beside its program**
+  ([ADR-0034](docs/adr/0034-the-client-install-takes-the-fleet-files-it-finds-beside-its-program.md)).
+  `service install` looks in its program's directory for `server-ca.pem`, `bootstrap.pem`,
+  `bootstrap-key.pem` and `package-signing-key.pub`. `--interactive` offers them as the answers;
+  `--endpoint` copies the CA and writes the verification key, and an install without
+  `--interactive` enrols with a bootstrap pair it finds and waits for the operator's approval.
+  **What to do:** nothing; to use it, copy the four files beside the program before installing.
+  An installer run from a directory that holds a bootstrap pair now waits for an approval.
+- **`pki init` makes the package signing key too.** Next to the server CA it writes
+  `package-signing-key.pk8` and its public half, `package-signing-key.pub`, into `--offline-dir`,
+  and `supervisor.toml.fragment` names that public half as `[packages] verification_key`, so a
+  Client set up from the fragment takes signed packages from the start. `package keygen` remains
+  for a fleet set up otherwise or to replace the key. **What to do:** nothing; a fleet that has a
+  key keeps it.
+- **Breaking: every certificate is named by its product and its role, with your organization**
+  ([ADR-0033](docs/adr/0033-every-certificate-is-named-by-product-and-role-and-carries-the-operators-organization.md)).
+  `opamp-fleetctl pki init` and `pki bootstrap-ca` take `--product` (default `OpAMP Fleet`) in
+  place of `--fleet`, and `--organization` and `--organizational-unit` for an O and an OU: the CAs
+  are `<product> Server CA`, `Client CA` and `Bootstrap CA`, the server certificate
+  `<product> Server Certificate` with its names in the SAN alone. `pki server-cert` carries the
+  server CA's O and OU, and its own flags replace either. The Server names the certificates it
+  signs from their CA, ` CA` turned into ` Certificate`: a host certificate carries that common
+  name and nothing of its request, a bootstrap certificate that and the O and OU asked for. It
+  refuses to start on a client CA or bootstrap CA whose certificates' name would exceed 64
+  characters. `scripts/dev-pki.sh` names its set `OpAMP Fleet Dev`, `O=Development`. **What to
+  do:** replace `--fleet` with `--product` in scripts. Existing CAs keep working; their
+  certificates are named from them, `opamp-fleet client CA` giving `opamp-fleet client
+  Certificate`.
+- **Breaking: the Server issues bootstrap certificates, and the bootstrap CA lives a year**
+  ([ADR-0032](docs/adr/0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)).
+  With `[enrolment] bootstrap_ca_key_file` set, `POST /api/v1/bootstrap-certificates` issues a
+  bootstrap certificate with the organization and unit an operator names — the customer and the
+  site, say — and a common name the Server sets, for 10 days or up to 90, and hands out its private key in that answer
+  only; `GET /api/v1/bootstrap-certificates` lists the valid ones, each revocable by its serial,
+  and every issuance is recorded as `enrolment.bootstrap_issued`. The approver sees the subject on
+  every enrolment request it carries. `opamp-fleetctl pki init` now puts the bootstrap CA and its
+  key into `--server-dir`, makes no bootstrap certificate, and gives the bootstrap CA 365 days
+  (`--bootstrap-ca-days`) while `--ca-days` sets the server CA's and the client CA's;
+  `pki bootstrap-cert` and `init --bootstrap-days` are gone, and `pki bootstrap-ca` makes a new
+  bootstrap CA to replace the Server's. `pki status --offline-dir` lists the server CA alone.
+  `scripts/seed_test_configs.sh --enrol` now asks the Server for the development Client's
+  bootstrap pair before it opens the window, so start the Client while it waits. **What to do:**
+  nothing for enrolment to keep working. To issue from the Server, copy the bootstrap CA's key
+  from the offline directory to the Server host and name it in `[enrolment]
+  bootstrap_ca_key_file`; replace a script that calls `pki bootstrap-cert` with the route.
+- **A Deployment is made and signed in one form.** The Deployments tab lists every binary of each
+  Package it holds, with platform, size and full SHA-256, and gives each unsigned one a signature
+  field. A new Deployment takes its Packages and signatures with **OK**. **Import signing file**
+  matches each signature to the binary with its platform and SHA-256 and skips one whose hash
+  differs; the free-text signature fields are gone.
+- **Breaking: the build's product variables are named for the product**
+  ([ADR-0031](docs/adr/0031-the-builds-product-variables-are-named-for-the-product.md)).
+  `OPAMP_FLEET_PRODUCT_NAME` is now `OPAMP_PRODUCT_NAME`, `OPAMP_FLEET_PRODUCT_DISPLAY_NAME` is
+  `OPAMP_PRODUCT_TITLE` and `OPAMP_FLEET_VERSION` is `OPAMP_PRODUCT_VERSION`; the version the build
+  resolves is emitted as `OPAMP_PRODUCT_RELEASE`. The old names are no longer read: a build that
+  still sets one gets the default product name, title or version without a word. **What to do:**
+  rename the variables in every script or pipeline that builds a variant or states a version.
+
+## [0.5.1] - 2026-10-12
 
 ### Added
 
@@ -219,89 +303,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   artifact is, per platform — source, assets, integrity, repack, the delivered tree, and what the
   Client derives from it. Each is pinned by two tests, one on the packing side and one in the kind,
   so an upstream release that moves a path turns a test red instead of a rollout.
-- **`opamp-fleetctl package fetch --cacert <file>`** uploads to a Server whose certificate a
-  fleet's own CA signed — for a fleet made with `pki init`, its `server-ca.pem`. Without it, such a
-  Server was refused with `invalid peer certificate: UnknownIssuer`, since only the system's roots
-  were trusted. The CA replaces those roots for the calls to the Server alone; downloads from
-  upstream keep them.
-- **A whole Package signed in one go**
-  ([ADR-0029](docs/adr/0029-a-signing-file-carries-what-a-signature-covers-to-the-key-and-the-signatures-back.md)).
-  The Packages tab lists each entry with its size and full SHA-256 and downloads the Package's
-  **Signing info** (`opamp-fleet-signing-v1`); `opamp-fleetctl package sign --signing-info <file>`
-  signs every entry from its hash, without the artifacts; the Deployments tab imports the signed
-  file into the Deployment's signatures. The tool checks the hashes against nothing: compare them
-  with upstream's checksums or `package sha256` over the files before signing.
-- **Bootstrap certificates issued and revoked from the Enrolments tab**
-  ([ADR-0032](docs/adr/0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)).
-  The tab issues a bootstrap certificate for a customer (O) and site (OU) and lists the valid ones
-  with a **Revoke** press; the row of each certificate issued in the open page offers its pair as
-  `bootstrap.pem` and `bootstrap-key.pem` until the page is reloaded or closed. Each
-  waiting request names the bootstrap certificate it carries by customer, site, serial and end;
-  `GET /api/v1/enrolments` carries the serial as `bootstrap_serial`.
 
 ### Changed
 
-- **The Client's install takes the fleet's files it finds beside its program**
-  ([ADR-0034](docs/adr/0034-the-client-install-takes-the-fleet-files-it-finds-beside-its-program.md)).
-  `service install` looks in its program's directory for `server-ca.pem`, `bootstrap.pem`,
-  `bootstrap-key.pem` and `package-signing-key.pub`. `--interactive` offers them as the answers;
-  `--endpoint` copies the CA and writes the verification key, and an install without
-  `--interactive` enrols with a bootstrap pair it finds and waits for the operator's approval.
-  **What to do:** nothing; to use it, copy the four files beside the program before installing.
-  An installer run from a directory that holds a bootstrap pair now waits for an approval.
-
-- **`pki init` makes the package signing key too.** Next to the server CA it writes
-  `package-signing-key.pk8` and its public half, `package-signing-key.pub`, into `--offline-dir`,
-  and `supervisor.toml.fragment` names that public half as `[packages] verification_key`, so a
-  Client set up from the fragment takes signed packages from the start. `package keygen` remains
-  for a fleet set up otherwise or to replace the key. **What to do:** nothing; a fleet that has a
-  key keeps it.
-
-- **Breaking: every certificate is named by its product and its role, with your organization**
-  ([ADR-0033](docs/adr/0033-every-certificate-is-named-by-product-and-role-and-carries-the-operators-organization.md)).
-  `opamp-fleetctl pki init` and `pki bootstrap-ca` take `--product` (default `OpAMP Fleet`) in
-  place of `--fleet`, and `--organization` and `--organizational-unit` for an O and an OU: the CAs
-  are `<product> Server CA`, `Client CA` and `Bootstrap CA`, the server certificate
-  `<product> Server Certificate` with its names in the SAN alone. `pki server-cert` carries the
-  server CA's O and OU, and its own flags replace either. The Server names the certificates it
-  signs from their CA, ` CA` turned into ` Certificate`: a host certificate carries that common
-  name and nothing of its request, a bootstrap certificate that and the O and OU asked for. It
-  refuses to start on a client CA or bootstrap CA whose certificates' name would exceed 64
-  characters. `scripts/dev-pki.sh` names its set `OpAMP Fleet Dev`, `O=Development`. **What to
-  do:** replace `--fleet` with `--product` in scripts. Existing CAs keep working; their
-  certificates are named from them, `opamp-fleet client CA` giving `opamp-fleet client
-  Certificate`.
-
-- **Breaking: the Server issues bootstrap certificates, and the bootstrap CA lives a year**
-  ([ADR-0032](docs/adr/0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)).
-  With `[enrolment] bootstrap_ca_key_file` set, `POST /api/v1/bootstrap-certificates` issues a
-  bootstrap certificate with the organization and unit an operator names — the customer and the
-  site, say — and a common name the Server sets, for 10 days or up to 90, and hands out its private key in that answer
-  only; `GET /api/v1/bootstrap-certificates` lists the valid ones, each revocable by its serial,
-  and every issuance is recorded as `enrolment.bootstrap_issued`. The approver sees the subject on
-  every enrolment request it carries. `opamp-fleetctl pki init` now puts the bootstrap CA and its
-  key into `--server-dir`, makes no bootstrap certificate, and gives the bootstrap CA 365 days
-  (`--bootstrap-ca-days`) while `--ca-days` sets the server CA's and the client CA's;
-  `pki bootstrap-cert` and `init --bootstrap-days` are gone, and `pki bootstrap-ca` makes a new
-  bootstrap CA to replace the Server's. `pki status --offline-dir` lists the server CA alone.
-  `scripts/seed_test_configs.sh --enrol` now asks the Server for the development Client's
-  bootstrap pair before it opens the window, so start the Client while it waits. **What to do:**
-  nothing for enrolment to keep working. To issue from the Server, copy the bootstrap CA's key
-  from the offline directory to the Server host and name it in `[enrolment]
-  bootstrap_ca_key_file`; replace a script that calls `pki bootstrap-cert` with the route.
-
-- **A Deployment is made and signed in one form.** The Deployments tab lists every binary of each
-  Package it holds, with platform, size and full SHA-256, and gives each unsigned one a signature
-  field. A new Deployment takes its Packages and signatures with **OK**. **Import signing file**
-  matches each signature to the binary with its platform and SHA-256 and skips one whose hash
-  differs; the free-text signature fields are gone.
-- **Breaking: the build's product variables are named for the product**
-  ([ADR-0031](docs/adr/0031-the-builds-product-variables-are-named-for-the-product.md)).
-  `OPAMP_FLEET_PRODUCT_NAME` is now `OPAMP_PRODUCT_NAME`, `OPAMP_FLEET_PRODUCT_DISPLAY_NAME` is
-  `OPAMP_PRODUCT_TITLE` and `OPAMP_FLEET_VERSION` is `OPAMP_PRODUCT_VERSION`; the version the build
-  resolves is emitted as `OPAMP_PRODUCT_RELEASE`. The old names are no longer read: a build that
-  still sets one gets the default product name, title or version without a word. **What to do:**
-  rename the variables in every script or pipeline that builds a variant or states a version.
 - **The development observability stack runs on the host, from `observability/`,** apart from
   the Dev Container, and keeps the fleet's own telemetry in ClickHouse and Apache Doris side by
   side. `config/server.toml` and the `server.toml` that `scripts/dev-pki.sh` writes carry the
