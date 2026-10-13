@@ -1,6 +1,6 @@
 # ADR-0009: An ADR may supersede named clauses of another, which stays accepted for the rest
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-12
 - **Deciders:** Markus Brigl
 - **Applies to:** the supersession mechanics of `docs/adr/README.md` and `docs/adr/template.md`, the `Supersedes` field and `Status` line of every ADR, and the supersession check of `scripts/check-docs.sh`
