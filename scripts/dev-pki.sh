@@ -6,19 +6,20 @@
 # Everything lands in one directory, gitignored, and is for a development machine only: the keys
 # are unencrypted and the CAs are throwaway.
 #
-#   server/        what the Server host needs: its certificate, the client CA with its key, the
-#                  bootstrap CA's certificate, and server.toml.fragment naming them
-#   offline/       what stays with the operator: the server CA and the bootstrap CA with their
-#                  keys, and the bootstrap pair every new host is given, named by
-#                  supervisor.toml.fragment
+#   server/        what the Server host needs: its certificate, the client CA and the bootstrap CA
+#                  with their keys, and server.toml.fragment naming them
+#   offline/       what stays with the operator: the server CA with its key, and
+#                  supervisor.toml.fragment naming where the Client keeps the bootstrap pair the
+#                  Server issues
 #   server.toml / supervisor.toml
 #                  a Server and a Client configuration that use the set, every other key at its
 #                  default but one: server.toml serves the Agent plane on every interface, so
 #                  Clients on other machines reach it; it carries the offer of the fleet's own
 #                  telemetry to the observability stack in observability/ commented out
 #
-# The development Client holds the bootstrap certificate and enrols like any other host: start the
-# Server and the Client, then approve its request with `scripts/seed_test_configs.sh --enrol`.
+# The development Client enrols like any other host, with a bootstrap pair the Server issues
+# (ADR-0032): start the Server, run `scripts/seed_test_configs.sh --enrol`, which writes the pair
+# into offline/ and approves the request, and start the Client while it waits.
 # Trust the server CA, offline/server-ca.pem, in curl and in the browser.
 #
 # Usage:
@@ -65,6 +66,6 @@ cat <<EOF
 Created in $OUT, with a server.toml and a supervisor.toml that use the set:
 
   cargo run -p fleet-server -- --config $OUT/server.toml
-  cargo run -p fleet-agent -- --config $OUT/supervisor.toml
-  scripts/seed_test_configs.sh --enrol     # approves the Client's enrolment
+  scripts/seed_test_configs.sh --enrol     # issues the bootstrap pair, approves the enrolment
+  cargo run -p fleet-agent -- --config $OUT/supervisor.toml   # while --enrol waits
 EOF

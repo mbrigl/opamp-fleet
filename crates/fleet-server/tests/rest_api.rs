@@ -1087,7 +1087,7 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no
 /// frontend toolchain to run it in.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0021, ADR-0032
 #[tokio::test]
 async fn the_ui_and_the_enrolment_api_share_their_names() {
     let server = spawn().await;
@@ -1107,6 +1107,17 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         ".key_fingerprint",
         ".bootstrap_subject",
         ".bootstrap_fingerprint",
+        ".bootstrap_serial",
+        "\"/api/v1/bootstrap-certificates\"",
+        "\"/api/v1/revocations\"",
+        "authority: \"bootstrap\"",
+        "organizational_unit",
+        "validity_days:",
+        ".certificate_pem",
+        ".private_key_pem",
+        ".issued_ms",
+        ".not_after_ms",
+        ".revoked",
         ".arrived_ms",
         ".until_ms",
         "open_for_secs:",
@@ -1137,9 +1148,24 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
                 "key_fingerprint",
                 "bootstrap_subject",
                 "bootstrap_fingerprint",
+                "bootstrap_serial",
             ][..],
         ),
         ("EnrolmentWindow", &["open", "until_ms"][..]),
+        (
+            "BootstrapView",
+            &["serial", "subject", "issued_ms", "not_after_ms", "revoked"][..],
+        ),
+        (
+            "IssuedBootstrap",
+            &[
+                "serial",
+                "subject",
+                "not_after_ms",
+                "certificate_pem",
+                "private_key_pem",
+            ][..],
+        ),
     ] {
         for field in fields {
             assert!(

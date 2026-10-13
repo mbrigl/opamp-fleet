@@ -231,8 +231,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   signs every entry from its hash, without the artifacts; the Deployments tab imports the signed
   file into the Deployment's signatures. The tool checks the hashes against nothing: compare them
   with upstream's checksums or `package sha256` over the files before signing.
+- **Bootstrap certificates issued and revoked from the Enrolments tab**
+  ([ADR-0032](docs/adr/0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)).
+  The tab issues a bootstrap certificate for a customer (O) and site (OU) and lists the valid ones
+  with a **Revoke** press; the row of each certificate issued in the open page offers its pair as
+  `bootstrap.pem` and `bootstrap-key.pem` until the page is reloaded or closed. Each
+  waiting request names the bootstrap certificate it carries by customer, site, serial and end;
+  `GET /api/v1/enrolments` carries the serial as `bootstrap_serial`.
 
 ### Changed
+
+- **Breaking: the Server issues bootstrap certificates, and the bootstrap CA lives a year**
+  ([ADR-0032](docs/adr/0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)).
+  With `[enrolment] bootstrap_ca_key_file` set, `POST /api/v1/bootstrap-certificates` issues a
+  bootstrap certificate with the organization and unit an operator names — the customer and the
+  site, say — and a common name the Server sets, for 10 days or up to 90, and hands out its private key in that answer
+  only; `GET /api/v1/bootstrap-certificates` lists the valid ones, each revocable by its serial,
+  and every issuance is recorded as `enrolment.bootstrap_issued`. The approver sees the subject on
+  every enrolment request it carries. `opamp-fleetctl pki init` now puts the bootstrap CA and its
+  key into `--server-dir`, makes no bootstrap certificate, and gives the bootstrap CA 365 days
+  (`--bootstrap-ca-days`) while `--ca-days` sets the server CA's and the client CA's;
+  `pki bootstrap-cert` and `init --bootstrap-days` are gone, and `pki bootstrap-ca` makes a new
+  bootstrap CA to replace the Server's. `pki status --offline-dir` lists the server CA alone.
+  `scripts/seed_test_configs.sh --enrol` now asks the Server for the development Client's
+  bootstrap pair before it opens the window, so start the Client while it waits. **What to do:**
+  nothing for enrolment to keep working. To issue from the Server, copy the bootstrap CA's key
+  from the offline directory to the Server host and name it in `[enrolment]
+  bootstrap_ca_key_file`; replace a script that calls `pki bootstrap-cert` with the route.
 
 - **A Deployment is made and signed in one form.** The Deployments tab lists every binary of each
   Package it holds, with platform, size and full SHA-256, and gives each unsigned one a signature

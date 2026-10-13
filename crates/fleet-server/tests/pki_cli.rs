@@ -133,13 +133,14 @@ fn status_reads_the_server_hosts_certificates_and_the_server_makes_none() {
             "g",
         ],
         &["pki", "bootstrap-cert", "--offline-dir", "o", "--out", "b"],
+        &["pki", "bootstrap-ca", "--out", "b"],
         &["pki", "status", "--offline-dir", "o"],
     ] {
         let refused = server(made, dir.path());
         assert_eq!(refused.status.code(), Some(2), "{made:?} was not refused");
         let usage = text(&refused.stderr);
         assert!(usage.contains("server pki status --config"), "{usage}");
-        for gone in ["init", "server-cert", "bootstrap-cert", "--offline-dir"] {
+        for gone in ["init", "server-cert", "bootstrap-c", "--offline-dir"] {
             assert!(!usage.contains(gone), "the usage names {gone}: {usage}");
         }
     }

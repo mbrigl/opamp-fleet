@@ -69,7 +69,7 @@ mod tests {
             .collect()
     }
 
-    // Verifies: ADR-0025
+    // Verifies: ADR-0025, ADR-0032
     #[test]
     fn the_program_has_two_trees_holding_the_operator_commands() {
         let cli = Cli::command();
@@ -82,7 +82,11 @@ mod tests {
         );
         assert_eq!(
             subcommands(tree("pki")),
-            ["init", "server-cert", "bootstrap-cert", "status"]
+            ["init", "server-cert", "bootstrap-ca", "status"]
+        );
+        assert!(
+            Cli::try_parse_from(["opamp-fleetctl", "pki", "bootstrap-cert", "--out", "b"]).is_err(),
+            "the Server issues bootstrap certificates (ADR-0032)"
         );
     }
 

@@ -430,6 +430,9 @@ pub struct AppState {
     /// The enrolment window and its queue (ADR-0019); `None` while `[enrolment]` is not set, and no
     /// host enrols.
     enrolment: Option<Arc<Enrolment>>,
+    /// The bootstrap certificates the Server issued (ADR-0032); `None` while `[enrolment]` is not
+    /// set.
+    bootstrap: Option<Arc<crate::bootstrap::BootstrapCertificates>>,
     /// What the client CA signed and what is revoked (ADR-0019); `None` only where a test serves
     /// without it.
     revocations: Option<Arc<Revocations>>,
@@ -510,6 +513,7 @@ impl AppState {
             packages: None,
             client_ca: None,
             enrolment: None,
+            bootstrap: None,
             revocations: None,
             audit: None,
             agent_rate: None,
@@ -658,6 +662,21 @@ impl AppState {
     pub fn with_enrolment(mut self, enrolment: Option<Arc<Enrolment>>) -> Self {
         self.enrolment = enrolment;
         self
+    }
+
+    /// Arms the issuing of bootstrap certificates and their record (ADR-0032).
+    #[must_use]
+    pub fn with_bootstrap(
+        mut self,
+        bootstrap: Option<Arc<crate::bootstrap::BootstrapCertificates>>,
+    ) -> Self {
+        self.bootstrap = bootstrap;
+        self
+    }
+
+    /// The bootstrap certificates the Server issued, while `[enrolment]` is set.
+    pub fn bootstrap(&self) -> Option<&Arc<crate::bootstrap::BootstrapCertificates>> {
+        self.bootstrap.as_ref()
     }
 
     /// Arms the register and the revocation list (ADR-0019).

@@ -8,6 +8,7 @@ pub mod agent_store;
 pub mod api;
 pub mod audit;
 pub mod audit_log;
+pub mod bootstrap;
 pub mod ca;
 pub mod clock;
 pub mod config;
@@ -82,6 +83,21 @@ impl PackageOffering {
         let backend = FsDeploymentBackend::open(store.dir().join(packages::DEPLOYMENTS_DIR))?;
         let deployments = DeploymentStore::open(Box::new(backend))?;
         Ok(Self::with_deployments(store, deployments, download_base))
+    }
+}
+
+/// The default wiring of the bootstrap record to its filesystem adapter (ADR-0006, ADR-0032).
+impl bootstrap::BootstrapCertificates {
+    /// Opens the record on `dir`, one file per certificate, forgetting what has ended.
+    ///
+    /// # Errors
+    /// Returns an error when the directory cannot be opened or a file in it cannot be read.
+    pub fn on_disk(
+        signer: Option<Box<dyn bootstrap::BootstrapSigner>>,
+        dir: std::path::PathBuf,
+        clock: Arc<dyn fleet::Clock>,
+    ) -> Result<Self, String> {
+        Self::open(signer, Box::new(fs::FsBootstrapStore::open(dir)?), clock)
     }
 }
 

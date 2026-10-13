@@ -332,6 +332,7 @@ impl Served {
             &tls,
             Some(&fleet_server::config::EnrolmentConfig {
                 bootstrap_ca_file: pki.join("bootstrap-ca.pem"),
+                bootstrap_ca_key_file: None,
             }),
         )
         .expect("server material");

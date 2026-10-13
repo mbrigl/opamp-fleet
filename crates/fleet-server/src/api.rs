@@ -233,6 +233,10 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .routes(routes!(list_enrolments))
         .routes(routes!(approve_enrolment))
         .routes(routes!(reject_enrolment))
+        .routes(routes!(
+            list_bootstrap_certificates,
+            issue_bootstrap_certificate
+        ))
         .routes(routes!(list_certificates))
         .routes(routes!(list_revocations, revoke))
         .routes(routes!(lift_revocation))
@@ -2314,6 +2318,184 @@ struct PendingEnrolment {
     /// The bootstrap certificate the connection carried.
     bootstrap_subject: String,
     bootstrap_fingerprint: String,
+    /// Its serial, lowercase hex: the `serial` of `GET /api/v1/bootstrap-certificates` when this
+    /// Server issued it.
+    bootstrap_serial: String,
+}
+
+/// What an operator asks a bootstrap certificate for (ADR-0032 clauses 1 to 3).
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct IssueBootstrapRequest {
+    #[serde(default)]
+    subject: Option<BootstrapSubject>,
+    /// 1 to 90; 10 when absent. Cut to the bootstrap CA's end.
+    #[serde(default)]
+    validity_days: Option<u32>,
+}
+
+/// The subject of a bootstrap certificate: these attributes only, each optional and 1 to 64
+/// characters without a control character; the Server sets the common name. It labels the
+/// certificate and authorizes nothing (ADR-0032 clause 2).
+#[derive(Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct BootstrapSubject {
+    /// O — the customer, typically.
+    organization: Option<String>,
+    /// OU — the site, typically.
+    organizational_unit: Option<String>,
+}
+
+/// An issued bootstrap certificate with its private key — the one time the key is handed out
+/// (ADR-0032 clause 1).
+#[derive(Serialize, ToSchema)]
+struct IssuedBootstrap {
+    /// What a revocation names, with the authority `bootstrap`.
+    serial: String,
+    subject: String,
+    not_before_ms: u64,
+    not_after_ms: u64,
+    certificate_pem: String,
+    private_key_pem: String,
+}
+
+/// A bootstrap certificate on record (ADR-0032 clause 4).
+#[derive(Serialize, ToSchema)]
+struct BootstrapView {
+    serial: String,
+    subject: String,
+    /// The SHA-256 fingerprint of its public key, hex.
+    key_fingerprint: String,
+    issued_ms: u64,
+    not_after_ms: u64,
+    revoked: bool,
+}
+
+/// The valid bootstrap certificates this Server issued, oldest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/bootstrap-certificates",
+    tag = "enrolment",
+    responses(
+        (status = 200, description = "The valid bootstrap certificates, oldest first", body = Vec<BootstrapView>),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+    )
+)]
+async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Response {
+    let Some(bootstrap) = state.bootstrap() else {
+        return enrolment_off();
+    };
+    let revoked = |id: &crate::revocation::CertId| {
+        state
+            .revocations()
+            .is_some_and(|revocations| revocations.is_certificate_revoked(id))
+    };
+    let list: Vec<BootstrapView> = bootstrap
+        .list()
+        .into_iter()
+        .map(|entry| BootstrapView {
+            revoked: revoked(&entry.id),
+            serial: entry.serial,
+            subject: entry.subject,
+            key_fingerprint: entry.key_fingerprint,
+            issued_ms: entry.issued_ms,
+            not_after_ms: entry.not_after_ms,
+        })
+        .collect();
+    Json(list).into_response()
+}
+
+/// Issues a bootstrap certificate with the subject an operator names. The private key is in this
+/// answer and nowhere else: the Server keeps the certificate's facts, never its key. A host with
+/// it may only ask to enrol, inside an open window, and an operator approves (ADR-0032).
+#[utoipa::path(
+    post,
+    path = "/api/v1/bootstrap-certificates",
+    tag = "enrolment",
+    request_body = IssueBootstrapRequest,
+    responses(
+        (status = 201, description = "Issued; the certificate and its private key, this once", body = IssuedBootstrap),
+        (status = 400, description = "A subject attribute this route does not know, a value out of bounds, or validity_days outside 1 to 90", body = ErrorBody),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody),
+        (status = 409, description = "No bootstrap_ca_key_file is configured, the bootstrap CA has ended, or the record is full", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was handed out", body = ErrorBody)
+    )
+)]
+async fn issue_bootstrap_certificate(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    use crate::bootstrap::IssueError;
+    let Some(bootstrap) = state.bootstrap() else {
+        return enrolment_off();
+    };
+    let request = match serde_json::from_value::<IssueBootstrapRequest>(body) {
+        Ok(request) => {
+            let subject = request.subject.unwrap_or_default();
+            crate::bootstrap::IssueRequest {
+                subject: crate::bootstrap::Subject {
+                    organization: subject.organization,
+                    organizational_unit: subject.organizational_unit,
+                },
+                validity_days: request.validity_days,
+            }
+        }
+        Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    match bootstrap.issue(&request) {
+        Ok(pair) => {
+            // The key leaves only once the issuance is on the record (ADR-0020): a refused record
+            // leaves a listed, revocable entry and no key in anyone's hands.
+            if let Some(audit) = state.audit() {
+                let recorded = audit.record(
+                    crate::audit::Entry::new("enrolment.bootstrap_issued", "issued")
+                        .with("serial", pair.serial.clone())
+                        .with("subject", pair.subject.clone())
+                        .with("not_after_ms", pair.not_after_ms),
+                );
+                if recorded.is_err() {
+                    return error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "the audit record cannot be written now; nothing was handed out",
+                    );
+                }
+            }
+            info!(serial = %pair.serial, subject = %pair.subject, "bootstrap certificate issued");
+            (
+                StatusCode::CREATED,
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(IssuedBootstrap {
+                    serial: pair.serial,
+                    subject: pair.subject,
+                    not_before_ms: pair.not_before_ms,
+                    not_after_ms: pair.not_after_ms,
+                    certificate_pem: pair.certificate_pem,
+                    private_key_pem: pair.private_key_pem,
+                }),
+            )
+                .into_response()
+        }
+        Err(IssueError::NoKey) => error(
+            StatusCode::CONFLICT,
+            "this Server does not hold the bootstrap CA's key — set [enrolment] \
+             bootstrap_ca_key_file",
+        ),
+        Err(IssueError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(IssueError::Full) => error(
+            StatusCode::CONFLICT,
+            format!(
+                "{} valid bootstrap certificates are on record already",
+                crate::bootstrap::MAX_VALID
+            ),
+        ),
+        Err(IssueError::CaEnded) => error(
+            StatusCode::CONFLICT,
+            "the bootstrap CA has ended — replace it with `opamp-fleetctl pki bootstrap-ca`",
+        ),
+        Err(IssueError::Failed(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 fn enrolment_off() -> Response {
@@ -2431,6 +2613,7 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
             key_fingerprint: p.key_fingerprint,
             bootstrap_subject: p.requester.bootstrap_subject,
             bootstrap_fingerprint: p.requester.bootstrap_fingerprint,
+            bootstrap_serial: p.requester.bootstrap_serial,
         })
         .collect();
     Json(pending).into_response()
