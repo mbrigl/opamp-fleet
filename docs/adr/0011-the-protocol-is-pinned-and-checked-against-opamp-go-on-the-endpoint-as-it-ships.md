@@ -1,4 +1,4 @@
-# ADR-0010: The protocol is pinned to a released Baseline, compiled from a vendored schema, and checked against opamp-go on the endpoint as it ships
+# ADR-0011: The protocol is pinned to a released Baseline, compiled from a vendored schema, and checked against opamp-go on the endpoint as it ships
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-07
@@ -40,8 +40,8 @@ The oracle as it stands meets three further facts:
 - **Plaintext runs alone check the endpoint as a test builds it, not as it ships.** They run on
   the loopback with an open admission, as the rest of the suite does. The shipped Server refuses
   plaintext beyond the loopback and admits by a client certificate in a TLS 1.3 handshake alone
-  ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
-  [ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), and the Client presents one on both
+  ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
+  [ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), and the Client presents one on both
   transports. Whether `opamp-go` can speak to that endpoint, and ours to an `opamp-go` Server that
   requires the same, is what every deployment depends on.
 - **Not everything the scenario list names is observable on both ends.** `opamp-go`'s plain-HTTP

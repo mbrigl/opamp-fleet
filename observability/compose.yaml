@@ -13,7 +13,7 @@
 # compared on the same data. Neither depends on the other; a Doris that is down costs the
 # ClickHouse half nothing, because each exporter queues on its own.
 #
-# Nothing shipped depends on it. It exists so own telemetry (ADR-0015) can be looked at while
+# Nothing shipped depends on it. It exists so own telemetry (ADR-0016) can be looked at while
 # working on the Client and the Server, and it runs on the *host*, apart from the Dev Container:
 # start it when you want it, from this directory or with `-f observability/compose.yaml`. The Dev
 # Container reaches the Collector through the host (README.md → "Reaching it from the Dev

@@ -1,4 +1,4 @@
-//! The release workflow, read as data (ADR-0025 clauses 17 to 19): which rows build and publish the
+//! The release workflow, read as data (ADR-0028 clauses 17 to 19): which rows build and publish the
 //! operator tool, how its archives are named, packed and checked, and that what selects the
 //! Client's archives never picks up one of the operator tool's. Read as text, step by step — the
 //! workflow is the contract, and parsing its YAML would add a dependency to state what a line says.
@@ -52,7 +52,7 @@ fn glob(pattern: &str, name: &str) -> bool {
     }
 }
 
-// Verifies: ADR-0025
+// Verifies: ADR-0028
 #[test]
 fn the_operator_tool_is_built_for_four_targets_and_its_version_asserted_where_it_runs() {
     let workflow = workflow();
@@ -110,7 +110,7 @@ fn the_operator_tool_is_built_for_four_targets_and_its_version_asserted_where_it
     );
 }
 
-// Verifies: ADR-0025
+// Verifies: ADR-0028
 #[test]
 fn each_archive_is_named_like_the_clients_packed_by_the_tool_and_checksummed() {
     let workflow = workflow();
@@ -172,7 +172,7 @@ fn each_archive_is_named_like_the_clients_packed_by_the_tool_and_checksummed() {
     }
 }
 
-// Verifies: ADR-0025
+// Verifies: ADR-0028
 #[test]
 fn the_notes_upload_loop_selects_the_clients_archives_alone() {
     let workflow = workflow();
@@ -202,7 +202,7 @@ fn the_notes_upload_loop_selects_the_clients_archives_alone() {
     }
 }
 
-// Verifies: ADR-0025
+// Verifies: ADR-0028
 #[test]
 fn the_crate_declares_one_binary_and_no_library() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));

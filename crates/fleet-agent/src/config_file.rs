@@ -1,4 +1,4 @@
-//! `supervisor.toml` on disk (ADR-0009): reading the file, the directories it names made absolute
+//! `supervisor.toml` on disk (ADR-0010): reading the file, the directories it names made absolute
 //! against the working directory, and the identity the state directory holds. What the file must
 //! say is [`config`](crate::config)'s; this is only where it comes from.
 
@@ -28,7 +28,7 @@ impl ClientConfig {
         config.source = Some(redact_secrets(&text));
         config.path = Some(path.to_path_buf());
         // **Every directory this Client derives is made absolute here**, and this is the one place
-        // it can be done once. A Managed Process starts in its own directory (ADR-0016), so a path
+        // it can be done once. A Managed Process starts in its own directory (ADR-0017), so a path
         // the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}` it
         // substitutes — is resolved by that process against a directory the Client has left.
         // `state_dir` defaults to the relative `client-state`, so leaving these relative would make
@@ -37,7 +37,7 @@ impl ClientConfig {
         config.state_dir_as_written = config.state_dir.clone();
         config.state_dir = absolute(&config.state_dir);
         config.supervisor_dir = config.supervisor_dir.as_deref().map(absolute);
-        // Each allowed download source is held to ADR-0024's rules now, not at the first offer.
+        // Each allowed download source is held to ADR-0026's rules now, not at the first offer.
         if let Some(packages) = &config.packages {
             for entry in &packages.allowed_sources {
                 crate::packages::parse_source(entry)
@@ -47,7 +47,7 @@ impl ClientConfig {
         config.checked(path)
     }
 
-    /// The state directory a service installed from this file runs with (ADR-0018): the one the
+    /// The state directory a service installed from this file runs with (ADR-0019): the one the
     /// file names when it names an absolute one, and `<data root>/state` otherwise.
     ///
     /// Decided on the value as written, because [`state_dir`](Self::state_dir) is already resolved
@@ -61,7 +61,7 @@ impl ClientConfig {
         }
     }
 
-    /// What this Client must hold before it connects (ADR-0019, ADR-0018): a client certificate —
+    /// What this Client must hold before it connects (ADR-0021, ADR-0019): a client certificate —
     /// the one the Server issued, or the one `[tls]` names, a bootstrap certificate included. It is
     /// the one proof the Server admits a peer by, so without it the Client refuses to start, naming
     /// what is missing.
@@ -81,19 +81,19 @@ impl ClientConfig {
     }
 
     /// Whether the state directory holds a certificate the Server issued, with its key — what
-    /// makes this Client a member of the fleet rather than a host still to enrol (ADR-0019). The
-    /// questionnaire asks for a bootstrap pair only while this is `false` (ADR-0018 clause 17).
+    /// makes this Client a member of the fleet rather than a host still to enrol (ADR-0021). The
+    /// questionnaire asks for a bootstrap pair only while this is `false` (ADR-0019 clause 17).
     #[must_use]
     pub fn is_enrolled(&self) -> bool {
         self.state_dir.join(crate::tls::ISSUED_CERT_FILE).exists()
             && self.state_dir.join(crate::tls::ISSUED_KEY_FILE).exists()
     }
 
-    /// The client certificate and key this Client presents on both transports (ADR-0019), or
+    /// The client certificate and key this Client presents on both transports (ADR-0021), or
     /// `None` when it has no identity to present.
     ///
     /// A pair the Server issued outranks the configured one, the same precedence persisted
-    /// connection settings have over `supervisor.toml` (ADR-0013): the file stays what the operator
+    /// connection settings have over `supervisor.toml` (ADR-0014): the file stays what the operator
     /// wrote, and deleting the stored pair reverts to it. That is also what retires a bootstrap
     /// certificate — it keeps standing in `supervisor.toml`, unused, once a real one has been issued.
     pub fn client_identity(&self) -> Option<(PathBuf, PathBuf)> {
@@ -109,10 +109,10 @@ impl ClientConfig {
 }
 
 /// Refuses to carry on when the file this Client looks for is absent and a `client.toml` sits
-/// beside where it would be (ADR-0018 clause 29).
+/// beside where it would be (ADR-0019 clause 29).
 ///
 /// Everywhere else a missing configuration is not an error: a Client comes up on defaults, says so,
-/// and manages nothing until one exists (ADR-0018). That is exactly the wrong answer here, and the
+/// and manages nothing until one exists (ADR-0019). That is exactly the wrong answer here, and the
 /// dangerous one: an upgraded host would go on running, connect to the development endpoint, report
 /// none of its Agents, and nothing about it would look like a failure. So this one case fails
 /// closed, naming both paths and the single command that fixes it.
@@ -140,7 +140,7 @@ fn legacy_name_beside(path: &Path) -> Result<(), String> {
 ///
 /// Lexical rather than `canonicalize`: that needs the file to exist, and these directories are
 /// named before they are created. It also follows symbolic links, which would be wrong here — the
-/// versioned install layout (ADR-0018) points at its current version *with* a link, and resolving
+/// versioned install layout (ADR-0019) points at its current version *with* a link, and resolving
 /// it would freeze a path that stops being true at the next update.
 pub(crate) fn absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -161,7 +161,7 @@ mod tests {
     /// The client identity is all a Client needs to start: a file naming one passes with no
     /// `[auth]`, and a file without one is refused, naming `[tls] cert_file` and `key_file` — the
     /// Server would refuse it in the handshake anyway.
-    /// Verifies: ADR-0019, ADR-0018, Q-1
+    /// Verifies: ADR-0021, ADR-0019, Q-1
     #[test]
     fn admission_needs_a_client_identity_and_nothing_else() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -201,7 +201,7 @@ mod tests {
     /// An installed service keeps its state in `<data root>/state` unless the file names an
     /// absolute directory — whatever the working directory of the shell that installs. `load`
     /// resolves a relative `state_dir` against that directory; the install must not take it.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn an_installed_service_keeps_its_state_under_the_data_root_unless_named_absolutely() {
         let dir = tempfile::tempdir().expect("tempdir");

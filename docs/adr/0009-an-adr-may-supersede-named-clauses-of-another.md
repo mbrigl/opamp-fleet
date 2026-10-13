@@ -1,4 +1,4 @@
-# ADR-0030: An ADR may supersede named clauses of another, which stays accepted for the rest
+# ADR-0009: An ADR may supersede named clauses of another, which stays accepted for the rest
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-12
@@ -14,13 +14,13 @@ leaves the binding index, and the successor has to carry everything of it that s
 
 That form fits a decision that has been replaced. It does not fit a decision whose detail has
 moved while the rest stands. The trigger is a rename: the build-time environment variables that
-[ADR-0011](0011-versions-resolved-in-the-internal-crate.md) (clauses 1 and 4) and
-[ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) (clause 2)
+[ADR-0012](0012-versions-resolved-in-the-internal-crate.md) (clauses 1 and 4) and
+[ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) (clause 2)
 name are to change their names. A whole supersession would make the successor restate about 1,400
 lines of two accepted ADRs to change four identifiers, and the review of that successor would be a
 review of both decisions again — the opposite of proportionality
 ([`AGENTS.md` §1](../../AGENTS.md#1-principles)). The record has numbered clauses for exactly this
-reason: ADR-0018 already cites its own clauses by number, and so does the code (`ADR-0018 clause 8`
+reason: ADR-0019 already cites its own clauses by number, and so does the code (`ADR-0019 clause 8`
 in `crates/fleet-agent/src/service/manager.rs`).
 
 No ADR has been superseded yet, so nothing depends on the current form being the only one.
@@ -94,7 +94,7 @@ not an ADR and changes by rule 7 of [`AGENTS.md` §3](../../AGENTS.md#3-adr-rule
 `Supersedes` entry names clauses but the old ADR's `Status` line carries no matching
 `superseded by` suffix, when a suffix names an ADR whose `Supersedes` field does not name the old
 one, or when a partially superseded ADR is `⚪`. Its self-test,
-[`scripts/test-check-docs.sh`](../../scripts/test-check-docs.sh), carries a case for each, with a `Verifies: ADR-0030` marker.
+[`scripts/test-check-docs.sh`](../../scripts/test-check-docs.sh), carries a case for each, with a `Verifies: ADR-0009` marker.
 
 **Not mechanically decidable:** that a successor restates exactly the clauses it names and nothing
 else of the old decision is review.

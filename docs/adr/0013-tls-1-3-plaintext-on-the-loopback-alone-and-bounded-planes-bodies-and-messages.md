@@ -1,4 +1,4 @@
-# ADR-0012: Both OpAMP transports on both ends over TLS 1.3 alone, plaintext on the loopback alone, a Server on two listeners split by audience with bounded connections, bodies and messages, and admitted Agents rate-limited per host
+# ADR-0013: Both OpAMP transports on both ends over TLS 1.3 alone, plaintext on the loopback alone, a Server on two listeners split by audience with bounded connections, bodies and messages, and admitted Agents rate-limited per host
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-04
@@ -20,7 +20,7 @@ third-party clients, and a Client speaking one cannot exercise both faces of its
 - **WebSocket** — one persistent connection, either side sends at will, each message a varint
   header plus the protobuf body. It is the transport that gives the control loop its "within
   seconds" property and the one Gateway multiplexing is stated for
-  ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
+  ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
 - **Detection** — one path (`/v1/opamp`, default port 4320); the Baseline itself describes the
   `Content-Type` header as how the Server tells the two apart.
 
@@ -37,7 +37,7 @@ configuration's.
 
 The Server has two audiences with nothing in common but the process. Agents connect from the whole
 estate, hold long-lived WebSocket sessions, speak protobuf, and prove fleet membership
-([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). Operators and portals connect from a few
+([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). Operators and portals connect from a few
 places, speak JSON over short requests, and act with authority over every Agent — reading the
 fleet, rewriting Configurations, uploading and rolling out packages. One address for both means one
 exposure, one TLS policy, and one answer to "who may connect" for two questions with different
@@ -45,7 +45,7 @@ answers; it also forces client-certificate checks into route code, since a brows
 
 One route crosses that line: the package download. Its path is under `/api/v1`, but its audience is
 Agents. The `download_url` in a package offer is by default a path the Client resolves against its
-own OpAMP endpoint, host and port ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). The
+own OpAMP endpoint, host and port ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). The
 downloading Client presents no credential. It reaches the route through the Agent plane's TLS
 handshake, so it presents its client certificate there as it does for `/v1/opamp`. The content
 hash and signature protect the artifact.
@@ -77,21 +77,21 @@ instrument — a large upload over a slow link and a long-lived session are both
 floor on the pace is not: a body that has started arriving must keep arriving.
 
 Admission on the Agent plane ends at the handshake
-([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). From there on, nothing above bounds
+([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). From there on, nothing above bounds
 how many messages an admitted peer sends:
 
 - the connection cap (clause 16) bounds sockets;
 - the message size limit (clause 3) bounds each message;
 - the pace floor (clause 14) bounds how slowly a message may arrive;
-- the throttle of ADR-0019 clause 24 counts failed admissions per peer address, and a member never
+- the throttle of ADR-0021 clause 24 counts failed admissions per peer address, and a member never
   fails.
 
 None of them bounds how often. One WebSocket session can send a full report as fast as the Server
 decodes it. Each report takes the fleet lock, may write the Agent's record to disk
-([ADR-0022](0022-the-fleet-record.md)), may compose an offer, and may ask for a certificate to be
+([ADR-0024](0024-the-fleet-record.md)), may compose an offer, and may ask for a certificate to be
 signed. A plain-HTTP poller can do the same with one request per message. The package download
 route is the Agent plane's other member route, and it costs more: under
-[ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md), each request scans
+[ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md), each request scans
 the fleet under its lock to find an Agent the artifact is offered to.
 
 The specification holds that no vulnerability can be ruled out (Strategy *Security before
@@ -102,14 +102,14 @@ input be bounded, and an admitted peer's message is still input from the network
 Forces that shape the rate limit:
 
 - **The host is the unit admission knows.** A certificate names the host it was issued to as
-  `urn:opamp-fleet:host:<id>` (ADR-0019 clause 7). `instance_uid` is self-asserted (ADR-0019
+  `urn:opamp-fleet:host:<id>` (ADR-0021 clause 7). `instance_uid` is self-asserted (ADR-0021
   clause 14), so a limit keyed on it alone binds nothing: a peer chooses a new uid for each
   message. A certificate an operator provisioned outside the CSR flow names no host until it is
   first renewed. It is still one certificate, told apart by its issuer and serial (`CertId` in
   [`revocation.rs`](../../crates/fleet-server/src/revocation.rs)).
 - **A Gateway carries other hosts' Agents.** Behind a marked Gateway every Agent arrives under the
-  Gateway's certificate (ADR-0019 clause 13,
-  [ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)
+  Gateway's certificate (ADR-0021 clause 13,
+  [ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)
   clause 11). A per-host limit there would put a whole site under one host's budget. A per-uid
   limit alone bounds nothing, because a downstream peer can cycle uids. The Gateway's
   `max_carried_agents` does not stop that either: it bounds one downstream connection, and a
@@ -127,8 +127,8 @@ Forces that shape the rate limit:
   - This Server answers `Unavailable` with `retry_info` of 30 s (`RETRY_AFTER` in
     [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)) in four places besides the rate limit: at
     the Agent-record ceiling, when the enrolment queue is full, when no enrolment window is open
-    (ADR-0019 clause 21), and when the audit record holds back a CSR
-    ([ADR-0020](0020-an-append-only-audit-record-chained-by-hash.md) clause 6).
+    (ADR-0021 clause 21), and when the audit record holds back a CSR
+    ([ADR-0022](0022-an-append-only-audit-record-chained-by-hash.md) clause 6).
 - **The Client honours `Unavailable` on both transports.**
   [`opamp::client::protocol`](../../crates/opamp/src/client/protocol.rs) turns it into a wait,
   `retry_info` or 30 s without one.
@@ -142,14 +142,14 @@ Forces that shape the rate limit:
 - **A reply reaches an Agent only when it carries that Agent's `instance_uid`.** This project's
   own Client routes every reply by that field and drops one without it, on every connection
   (`Engine::handle` in [`engine.rs`](../../crates/fleet-agent/src/engine.rs)). A Gateway drops one
-  too (ADR-0014 clause 13, [`pool.rs`](../../crates/fleet-agent/src/gateway/pool.rs)). An
+  too (ADR-0015 clause 13, [`pool.rs`](../../crates/fleet-agent/src/gateway/pool.rs)). An
   `Unavailable` reply built without an `instance_uid` reaches no Agent, and the Client never waits
   as told.
-- **A host speaks for at most 256 Agents** (ADR-0019 clause 7), and after a reconnect the Client
+- **A host speaks for at most 256 Agents** (ADR-0021 clause 7), and after a reconnect the Client
   sends one full report for each of them. At the Baseline's 30 s heartbeat or poll, 256 Agents
   send about 8.5 messages a second.
-- **Refusals already have a bounded record.** ADR-0020 clause 5 writes at most ten refusals of one
-  event per peer address and second, and counts the rest. ADR-0020 clause 6 counts every decision
+- **Refusals already have a bounded record.** ADR-0022 clause 5 writes at most ten refusals of one
+  event per peer address and second, and counts the rest. ADR-0022 clause 6 counts every decision
   whose entry could not be queued in the next entry's `unrecorded_before`.
 
 ## Decision
@@ -175,20 +175,20 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
    changes without polling latency. `poll_interval_secs` (default 30) governs polling;
    `heartbeat_interval_secs` (default 30, `0` disables heartbeats and undeclares
    `ReportsHeartbeat`) governs WebSocket. A Server-offered heartbeat replaces both
-   ([ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)).
+   ([ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md)).
 
 3. **Gzip and a message size limit on both transports.** The Server accepts gzip request bodies
    (a Baseline MUST) and enforces `max_message_size_bytes` (default 64 MiB, `0` refused at startup)
    in both directions and on both transports, applied after decompression: `413` on plain HTTP, a
    `1009` close on WebSocket, and an oversized reply is discarded rather than sent. The shared
    helpers that implement this live in `crates/opamp`
-   ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)).
+   ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)).
 
 4. **Reconnection belongs to the Client's transport layer.** A lost connection is retried with
    exponential backoff from one second, capped at one minute, with jitter (the Baseline asks for
    jitter so a restarted Server is not hit by the whole fleet on the same instants); after a
    reconnect the Client sends a full status report. The Server keys no state on the connection
-   ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
+   ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
 
 5. **TLS is TLS 1.3 alone, on rustls with the `ring` provider, everywhere; no OpenSSL, no system
    TLS library.** `reqwest` requires the `tls12` feature of `rustls`, so the floor is held where
@@ -196,7 +196,7 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
    `ring` provider with the three TLS 1.3 suites and nothing else: `TLS13_AES_256_GCM_SHA384`,
    `TLS13_AES_128_GCM_SHA256` and `TLS13_CHACHA20_POLY1305_SHA256`. Every rustls configuration of
    both ends is built from it with the protocol versions pinned to TLS 1.3
-   ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). Each binary
+   ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). Each binary
    installs it process-wide at startup, and every `reqwest` client is built with a minimum of TLS
    1.3. This covers every connection: OpAMP, the REST API, downloads, mirrors, own telemetry and
    the Server's outbound probe. Without `[tls] ca_file` a Client trusts the built-in webpki roots on
@@ -212,14 +212,14 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
 
    | Plane | Key | Default | TLS | Serves |
    |---|---|---|---|---|
-   | Agent | `listen` | `127.0.0.1:4320` | always | `/v1/opamp`, the package download route, and the Gateways' revocation list ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 43) |
+   | Agent | `listen` | `127.0.0.1:4320` | always | `/v1/opamp`, the package download route, and the Gateways' revocation list ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 43) |
    | Operator | `[rest] listen` | `127.0.0.1:4321` | always | `/api/v1/…`, `/api/v1/openapi.json`, `/api/v1/docs` with its vendored Redoc bundle, and the bundled UI at `/` |
 
    The Agent plane listens on LOOPBACK by default. Serving the estate is one deliberate line in
    `server.toml`, together with the TLS material it needs. `[rest]` is a table so that the plane's
-   own settings (its authentication, [ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md), and its
+   own settings (its authentication, [ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md), and its
    connection cap) live inside it; unknown keys are refused as everywhere
-   ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). The router is split accordingly:
+   ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). The router is split accordingly:
    `server::agent_app(state, admission)` and `server::operator_app(state, auth)`.
 
 7. **The Operator plane is loopback by default.** Its reachability is its first protection; a
@@ -234,7 +234,7 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
    never an obligation. The download is reached through the same TLS handshake as `/v1/opamp`, so
    the Client presents its client certificate to its own Server's origin and to no other host.
    What the handshake requires of that certificate is the admission decision's
-   ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). The route is
+   ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). The route is
    served on that one listener only — the Operator plane answers it `404` — and the OpenAPI
    document, generated from the Operator plane's routes, does not carry it; the manual documents it
    as the Agent plane's.
@@ -243,7 +243,7 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
    serve both planes, each with ALPN `h2` and
    `http/1.1`. A Server without `[tls]` is refused at startup with a message naming the section.
    `[tls] client_ca_file` applies to the Agent plane alone, and what it requires is
-   [ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)'s. There are no
+   [ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)'s. There are no
    per-listener certificates.
 
 10. **Two listeners always; addresses that cannot both be bound fail at startup.** There is no
@@ -253,7 +253,7 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
 
 11. **Every plane's server is built in one place, with an HTTP/1 header-read timeout of 30
     seconds.** `listen::plane` serves both planes on `opamp::server::listen`
-    ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)), which serves plain
+    ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)), which serves plain
     and TLS through `axum_server`, installs `hyper_util::rt::TokioTimer` on the HTTP/1 builder, and
     sets `header_read_timeout` to `HEADER_READ_TIMEOUT` (30 s — hyper's own default, and what axum
     applies once it installs the timer itself). The timeout is a parameter of the serving function
@@ -267,7 +267,7 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
 13. **Shutdown is one bounded drain for both planes.** One `axum_server::Handle` is shared by both
     listeners; an interrupt calls `graceful_shutdown` with `SHUTDOWN_DRAIN` (10 s), whatever has not
     ended by then is cut, and the Agent-record flush of
-    [ADR-0022](0022-the-fleet-record.md) runs afterwards.
+    [ADR-0024](0024-the-fleet-record.md) runs afterwards.
 
 14. **No request timeout, but a floor on the pace of every body and every message; no
     `tower-http`, no `server.toml` key for these bounds.** The long routes stay long: nothing has a
@@ -316,9 +316,9 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
     | Key | Default | Rule |
     |---|---|---|
     | `messages_per_sec` | `10` | Tokens added to a host's or an Agent's bucket per second, continuously. `0` is refused at startup with a message naming the key. |
-    | `burst` | `300` | That bucket's capacity, enough for one full report from each of the 256 Agents a host may speak for (ADR-0019 clause 7) after a reconnect. A new bucket starts full. `0` is refused at startup with a message naming the key. |
+    | `burst` | `300` | That bucket's capacity, enough for one full report from each of the 256 Agents a host may speak for (ADR-0021 clause 7) after a reconnect. A new bucket starts full. `0` is refused at startup with a message naming the key. |
     | `gateway_messages_per_sec` | `500` | Tokens added per second to the aggregate bucket of a host marked as a Gateway. `0` is refused at startup with a message naming the key. |
-    | `gateway_burst` | `10000` | The aggregate bucket's capacity: one full report from each Agent at the default `max_carried_agents` (ADR-0014 clause 4). `0` is refused at startup with a message naming the key. |
+    | `gateway_burst` | `10000` | The aggregate bucket's capacity: one full report from each Agent at the default `max_carried_agents` (ADR-0015 clause 4). `0` is refused at startup with a message naming the key. |
 
 20. **The Server warns when the limit is below what the fleet's heartbeat needs.**
     `messages_per_sec` times the offered `[connection_offer] heartbeat_interval_secs` is the number
@@ -348,10 +348,10 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
     - **A member's certificate that names no host** (one an operator provisioned that has not been
       renewed yet): its issuer and serial.
     - **A bootstrap certificate on an enrolment connection:** the peer address, an IPv6 one by its
-      /64 (`throttle::peer_key`). A bootstrap certificate may be one for the whole fleet (ADR-0019
+      /64 (`throttle::peer_key`). A bootstrap certificate may be one for the whole fleet (ADR-0021
       clause 10), so its issuer and serial would put every enrolling host in one bucket. The
       enrolment window, the bound on the queue and the operator's approval already bound what
-      enrolment costs (ADR-0019 clauses 20, 21).
+      enrolment costs (ADR-0021 clauses 20, 21).
     - **A host marked as a Gateway** (`Revocations::is_gateway`), in two buckets, and a message must
       take a token from both:
       - the bucket of the Agent the message names, keyed by the host and the message's
@@ -364,7 +364,7 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
       is read per message, so marking or unmarking a Gateway takes effect at the next message.
 
     A connection with no certificate exists only behind `Admission::open`, which no Server
-    configuration serves (ADR-0019 clause 6). It is counted by its peer address.
+    configuration serves (ADR-0021 clause 6). It is counted by its peer address.
 
 23. **What a message past the limit gets.** A message that finds no whole token in a bucket it must
     pass is not processed. No record is created or updated, `last_seen_ms` does not move, no CSR is
@@ -378,7 +378,7 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
 
     On plain HTTP the reply is the protobuf body of a `200`, never a `429` or a `503`. The Baseline
     gives `Retry-After` to reconnect attempts, and this keeps the OpAMP answer apart from the
-    failed-admission throttle of ADR-0019 clause 24.
+    failed-admission throttle of ADR-0021 clause 24.
 
     The Server does not close the connection. A WebSocket Client that honours the Baseline closes it
     itself and comes back after 30 s; messages that arrive before it does are counted and answered
@@ -387,9 +387,9 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
 
 24. **What a download past the limit gets.** The download route is plain HTTP and not OpAMP, so it
     has no `ServerErrorResponse`. A request past the limit is answered `429` with `Retry-After: 30`,
-    and the artifact is not read. This `429` differs from the one ADR-0019 clause 24 sends:
+    and the artifact is not read. This `429` differs from the one ADR-0021 clause 24 sends:
 
-    | | ADR-0019 clause 24 | This clause |
+    | | ADR-0021 clause 24 | This clause |
     |---|---|---|
     | When it is sent | Before the certificate is judged | After the certificate is admitted |
     | Who gets it | A peer address in back-off for failed admissions | A member over its rate |
@@ -402,7 +402,7 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
 25. **Every `Unavailable` reply carries the `instance_uid` of the message it answers.** The Client
     and a Gateway route replies by that field alone and drop a reply without it. The throttled
     reply of clause 23 therefore names the Agent that sent the message, and only that Agent. The
-    other `Unavailable` replies carry it too, within ADR-0019 and ADR-0020. Those replies are:
+    other `Unavailable` replies carry it too, within ADR-0021 and ADR-0022. Those replies are:
     - the Agent-record ceiling in `fleet.rs`;
     - a CSR held back for its audit record;
     - the full enrolment queue and the closed enrolment window in `Fleet::enrol`.
@@ -424,7 +424,7 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
     use as the table holds.
 
 27. **The audit records every throttled message and download as a refusal.** Each one is passed to
-    the audit record (ADR-0020) as event `agent_rate.throttled` with outcome `throttled`. The entry
+    the audit record (ADR-0022) as event `agent_rate.throttled` with outcome `throttled`. The entry
     carries:
     - the peer address;
     - `host`, or `serial` and the CA role where the certificate names no host;
@@ -432,23 +432,23 @@ token bucket per host, per Agent within an aggregate bucket for a host marked as
     - `bucket`: `agent`, `host` or `gateway`, naming the bucket that was empty;
     - `route`: `opamp` with the `transport`, or `download`.
 
-    The entries are aggregated under ADR-0020 clause 5, by event and peer address. A host that
+    The entries are aggregated under ADR-0022 clause 5, by event and peer address. A host that
     floods costs at most ten entries and one `agent_rate.throttled.aggregated` count per address and
     second. The refusal never waits for its entry. A refusal that finds the audit channel full is
-    counted in the next entry's `unrecorded_before` (ADR-0020 clause 6). A message or download the
+    counted in the next entry's `unrecorded_before` (ADR-0022 clause 6). A message or download the
     limit lets through is recorded by nothing new.
 
 **Out of scope:** authentication on either plane and what a client certificate must prove,
 including whether the Agent plane's handshake requires it
-([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md));
+([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md));
 connection settings and the heartbeat offer
-([ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)); the rate of
+([ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md)); the rate of
 admission attempts; which hosts a Client downloads from
-([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); where its own telemetry goes
-([ADR-0015](0015-what-an-agent-reports-about-itself.md)); response
+([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); where its own telemetry goes
+([ADR-0016](0016-what-an-agent-reports-about-itself.md)); response
 compression on plain HTTP; a connection cap on the Client's own listeners — the Gateway
 endpoint and the Supervisor Endpoint — which carry the bounds of `opamp`'s listener and no cap; a
-rate limit on the Operator plane, guarded by ADR-0019 clauses 2 and 24; a rate limit of the
+rate limit on the Operator plane, guarded by ADR-0021 clauses 2 and 24; a rate limit of the
 Gateway's downstream endpoint, which applies none of its own and forwards the Server's
 `Unavailable` unchanged; limits per message kind, or limits that weigh a message by its cost; the
 rate of WebSocket upgrades and TLS handshakes; and whether the Client's downloader honours
@@ -504,7 +504,7 @@ rate of WebSocket upgrades and TLS handshakes; and whether the Client's download
   default is a knob nobody turns.
 - **The bound as a shared layer in `crates/opamp`** — it is one framework's builder knob in one
   binary; the Client's outbound transports have no counterpart
-  ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)).
+  ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)).
 - **The weaker posture: TLS 1.2 and 1.3, optional TLS, plaintext on any address, an Agent plane on
   `0.0.0.0:4320` and `ws://` as the Client's default** — a Server that starts with no
   configuration and a fleet that connects without certificates are convenient. Rejected: security
@@ -523,7 +523,7 @@ rate of WebSocket upgrades and TLS handshakes; and whether the Client's download
 - **A rate-limit bucket per peer address.** Hosts behind one NAT, or every Agent behind a Gateway,
   would share one budget, and one busy neighbour would throttle the rest. The certificate names the
   host exactly, and admission has already proved it.
-- **A bucket per `instance_uid` for every peer.** The uid is self-asserted (ADR-0019 clause 14), so
+- **A bucket per `instance_uid` for every peer.** The uid is self-asserted (ADR-0021 clause 14), so
   a peer that wants more messages names a fresh uid for each one, and the limit binds nothing.
 - **Behind a Gateway, per-uid buckets alone.** A downstream peer that cycles uids gets a fresh,
   full bucket each time. `max_carried_agents` does not bound that, because each plain-HTTP
@@ -702,7 +702,7 @@ rate of WebSocket upgrades and TLS handshakes; and whether the Client's download
   heartbeat send about 8.5 messages a second against 10. A shorter offered heartbeat on a host near
   256 Agents needs a higher `messages_per_sec`, and the startup warning says so.
 - Negative / trade-offs: a downstream peer behind a Gateway that names a neighbour's `instance_uid`
-  drains that Agent's bucket, and the neighbour is throttled. This is no worse than what ADR-0014
+  drains that Agent's bucket, and the neighbour is throttled. This is no worse than what ADR-0015
   already accepts behind a Gateway, where such a peer takes over the neighbour's route. A peer that
   cycles uids is bounded by the Gateway's aggregate, which every Agent behind that Gateway shares.
 - Negative / trade-offs: an over-limit download fails that download attempt on the Client, which
@@ -714,7 +714,7 @@ rate of WebSocket upgrades and TLS handshakes; and whether the Client's download
   answers one host or Gateway over its rate while the Server has time to spare. The Agent sees no
   difference, and the protocol has no other retryable answer.
 - Negative / trade-offs: an aggregate audit entry names the peer address, not the host, because
-  ADR-0020 aggregates by address. Behind a NAT or a Gateway only the first ten entries of each
+  ADR-0022 aggregates by address. Behind a NAT or a Gateway only the first ten entries of each
   second name the host or the Agent.
 - Follow-ups: per-listener TLS material if a deployment needs a public certificate for operators
   and a private one for Agents; a connection cap on the Client's Gateway endpoint; measuring the
@@ -762,7 +762,7 @@ rate of WebSocket upgrades and TLS handshakes; and whether the Client's download
   [`crates/fleet-server/tests/packages.rs`](../../crates/fleet-server/tests/packages.rs) —
   `an_upload_that_stops_is_answered_408_and_leaves_nothing_staged`, on the Operator plane.
 
-These tests carry `Verifies: ADR-0012`:
+These tests carry `Verifies: ADR-0013`:
 
 - [`crates/opamp/src/tls.rs`](../../crates/opamp/src/tls.rs) —
   `the_provider_offers_tls_1_3_suites_alone` (clause 5);
@@ -789,7 +789,7 @@ These tests carry `Verifies: ADR-0012`:
 - [`crates/fleet-server/tests/packages.rs`](../../crates/fleet-server/tests/packages.rs) —
   `a_plaintext_source_off_the_loopback_is_refused` (clause 18).
 
-Tests of the rate limit, each marked `Verifies: ADR-0012`:
+Tests of the rate limit, each marked `Verifies: ADR-0013`:
 
 - `crates/fleet-server/src/agent_rate.rs`:
   - `a_bucket_starts_full_and_refills_at_the_configured_rate` (clause 19);
@@ -820,7 +820,7 @@ Tests of the rate limit, each marked `Verifies: ADR-0012`:
 - `crates/fleet-server/tests/packages.rs`:
   `a_download_past_the_limit_is_answered_429_after_thirty_seconds`. A member over its rate gets
   `429` with `Retry-After: 30`, its next download is admitted once the bucket refills, and the
-  refusal counts no failure toward the throttle of ADR-0019 clause 24 (clauses 21, 24).
+  refusal counts no failure toward the throttle of ADR-0021 clause 24 (clauses 21, 24).
 - `crates/fleet-server/tests/mutual_tls.rs`:
   - `two_certificates_of_one_host_share_a_bucket_and_two_hosts_do_not` and
     `a_bootstrap_certificate_shared_by_two_addresses_is_two_buckets` (clause 22);

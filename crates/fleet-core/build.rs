@@ -1,7 +1,7 @@
-// The version this build reports (ADR-0011, named by ADR-0031), baked in as
+// The version this build reports (ADR-0012), baked in as
 // `OPAMP_PRODUCT_RELEASE` and read back through `fleet_core::version::current`.
 //
-// It lives in the crate both binaries already depend on because ADR-0011 asks for a *single* helper
+// It lives in the crate both binaries already depend on because ADR-0012 asks for a *single* helper
 // that every surface reads, and `cargo:rustc-env` reaches only the crate whose script emitted it: a
 // second copy in either binary would be a second implementation of the same rule, free to drift
 // from this one.
@@ -55,7 +55,7 @@ fn resolve_version() -> Result<String, String> {
         );
     }
 
-    // The number itself, from the file that decides it (ADR-0011) or from the override.
+    // The number itself, from the file that decides it (ADR-0012) or from the override.
     let (base, source) = match std::env::var("OPAMP_PRODUCT_VERSION") {
         Ok(raw) => (
             parse_components(&raw).ok_or_else(|| {
@@ -140,7 +140,7 @@ fn parse_tag(tag: &str) -> Option<String> {
     parse_components(tag.strip_prefix(TAG_PREFIX)?)
 }
 
-/// Strict SemVer core grammar (ADR-0011): exactly three non-negative integers without leading
+/// Strict SemVer core grammar (ADR-0012): exactly three non-negative integers without leading
 /// zeros, separated by `.` or `/` (mixed permitted), normalised to dots. No pre-release, no
 /// build metadata, no whitespace.
 fn parse_components(raw: &str) -> Option<String> {

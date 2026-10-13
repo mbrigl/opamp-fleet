@@ -1,4 +1,4 @@
-//! Regression test for ADR-0018's graceful shutdown: a service manager stops the Client with
+//! Regression test for ADR-0019's graceful shutdown: a service manager stops the Client with
 //! `SIGTERM` (systemd, launchd) — the process must exit cleanly (code 0, goodbye path) instead of
 //! dying on the default signal disposition.
 
@@ -9,7 +9,7 @@ mod common;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Verifies: ADR-0018
+/// Verifies: ADR-0019
 #[test]
 fn sigterm_shuts_the_client_down_cleanly() {
     let dir = tempfile::tempdir().expect("create a tempdir");

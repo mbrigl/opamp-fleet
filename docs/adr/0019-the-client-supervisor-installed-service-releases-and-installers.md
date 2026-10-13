@@ -1,6 +1,6 @@
-# ADR-0018: The Client is the program `supervisor`, installs itself as a native service named after a build-time product name from a versioned layout it can rewrite with a first configuration that authenticates and encrypts, and ships as `.tar.gz` archives and native installers that run that install
+# ADR-0019: The Client is the program `supervisor`, installs itself as a native service named after a build-time product name from a versioned layout it can rewrite with a first configuration that authenticates and encrypts, and ships as `.tar.gz` archives and native installers that run that install
 
-- **Status:** 🟢 accepted · clause 2 superseded by [ADR-0031](0031-the-builds-product-variables-are-named-for-the-product.md) · clauses 17, 19 and 42 superseded by [ADR-0034](0034-the-client-install-takes-the-fleet-files-it-finds-beside-its-program.md)
+- **Status:** 🟢 accepted · clauses 17, 19 and 42 superseded by [ADR-0020](0020-the-client-install-takes-the-fleet-files-it-finds-beside-its-program.md)
 - **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/`, `crates/fleet-agent/src/config_init.rs`, `crates/fleet-agent/src/logging.rs`, `crates/fleet-agent/src/product.rs`, `crates/fleet-agent/build.rs`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `.github/workflows/release.yml`, `packaging/`, the program, Agent type and configuration-file names of the Client, `service install --endpoint`, `service config`, and every path, name or account an installed Client uses
@@ -8,7 +8,7 @@
 ## Context
 
 The Agent plane admits a peer by its client certificate alone
-([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), as the specification asks (Strategy
+([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), as the specification asks (Strategy
 "Security before convenience", Q-1, the Gateway Mode paragraph and G-15). There is no fleet
 credential, so no installer asks for one, writes one or names one in the steps it prints, and a
 first configuration is complete with the endpoint, the CA where the Server's certificate needs one,
@@ -18,7 +18,7 @@ The specification puts security before convenience (Strategy "Security before co
 "Secure by default"): the first configuration the installer writes must authenticate and must not
 send plaintext beyond the loopback. Plaintext is accepted on the loopback alone, a host name is
 never the loopback, and a Client without a client certificate is refused at startup. Since
-[ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) the Client authenticates with one proof,
+[ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) the Client authenticates with one proof,
 the client certificate it presents in the TLS handshake.
 
 The specification commits the Client to install as a native operating-system service that updates
@@ -37,7 +37,7 @@ Forces:
   would force a re-registration on every update, and Windows locks a running `.exe`. A stable
   pointer into side-by-side version directories makes an update a pointer switch.
 - **The layout is rewritten at runtime by the daemon itself** — the self-update stages versions and
-  swings the pointer while the service runs ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)). So the
+  swings the pointer while the service runs ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)). So the
   layout must stand where the platform lets the service execute it *and* where the service's own
   account may write it. On Fedora, RHEL and openSUSE Leap 16 / SLES 16 the SELinux targeted policy
   is enforcing by default, and systemd (`init_t`) may not execute a file labelled `var_lib_t`: a
@@ -50,7 +50,7 @@ Forces:
   without that file. It must at once be a systemd unit name, a launchd label, an SCM service name
   and a directory name on every platform.
 - **Nothing ships the configuration.** A release artifact is the bare binary, and the Client loads
-  defaults when its file is absent ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)) — so a service
+  defaults when its file is absent ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)) — so a service
   installed without one starts, dials the development default, and manages nothing, silently.
   `install` is also the command an Ansible play, an MDM profile or an MSI invokes: a prompt there
   does not fail, it hangs. And a first configuration names a client identity: a certificate and
@@ -60,7 +60,7 @@ Forces:
 
 An operator needs something to install, and a fleet needs something to hand its Server. They are
 different questions. The fleet needs one artifact per platform that the Client itself can open and
-install as a self-update ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)). A host needs what its
+install as a self-update ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)). A host needs what its
 platform expects — `apt` and `dnf` with an inventory, an upgrade path and a clean removal; on
 Windows an `.msi`, the only thing Intune, Group Policy and SCCM deploy.
 `opentelemetry-collector-releases` and Elastic Agent both publish native packages *beside* their
@@ -82,7 +82,7 @@ Three forces constrain both:
 
 And one force on the name. The Baseline reserves `service.name` for the Agent *type* and recommends
 a reverse FQDN — a recommendation this project does not enforce
-([ADR-0015](0015-what-an-agent-reports-about-itself.md)), and which opamp-spec issue 131 records as
+([ADR-0016](0016-what-an-agent-reports-about-itself.md)), and which opamp-spec issue 131 records as
 an overload of that key. Among Collectors, Foreign Agents and the process that supervises them, the
 useful type for the last is the role it plays. What the fleet offers the thing is named after what
 the thing is, and so is the thing itself. Artifact names are a public contract: operators script
@@ -107,25 +107,25 @@ deliver the same binary and run its own `service install`.
    and the default when no subcommand is given — and `service install | config | uninstall | start |
    stop | status`. The global flags are `--config` (default `supervisor.toml`) and `--state-dir`; every
    service verb takes `--user`. There is no environment-variable configuration: the Client is
-   file-configured ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)) and a registered
+   file-configured ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)) and a registered
    service carries the configuration's *path*, never its content. clap's `version` is wired to
-   `opamp::version::current()` ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md) clause 5). The daemon code lives in
+   `opamp::version::current()` ([ADR-0012](0012-versions-resolved-in-the-internal-crate.md) clause 5). The daemon code lives in
    `crates/fleet-agent/src/service/` (`runtime`, `layout`, `manager`, `run_as`, and the Windows-only
    `windows`, `windows_config`, `windows_rights`), behind the narrow `ServiceControl` seam
    (`start`, `stop`, `state`) that the self-update depends on. Errors are `Result<_, String>`.
 
 2. **`PRODUCT_NAME` is a build-time constant.** Default **`opamp-fleet`**, overridable with
-   `OPAMP_FLEET_PRODUCT_NAME` for a variant build. `crates/fleet-agent/build.rs` validates it against
+   `OPAMP_PRODUCT_NAME` for a variant build. `crates/fleet-agent/build.rs` validates it against
    the intersection of the systemd-unit, launchd-label, SCM-name and directory-name grammars —
    lowercase `[a-z0-9-]`, 1–32 characters, no leading or trailing `-`, never a Windows reserved
    device name (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`) — and **fails the build**
    on a name that breaks it, so an illegal name cannot reach a service manager. The display name,
-   default **`OpAMP Fleet Agent`**, is a second variable, `OPAMP_FLEET_PRODUCT_DISPLAY_NAME`, only
-   required to be non-blank: it is prose, cannot be derived from the slug by any rule that would
+   default **`OpAMP Fleet Agent`**, is the constant `PRODUCT_TITLE`, overridable with
+   `OPAMP_PRODUCT_TITLE` and only required to be non-blank: it is prose, cannot be derived from the slug by any rule that would
    read correctly for the next variant, and appears only where prose belongs — the Add/Remove
    Programs entry, the SCM's display column and the installer dialog's title. It is not the Agent
    type, so the fleet view never prints one word in both columns
-   ([ADR-0015](0015-what-an-agent-reports-about-itself.md)).
+   ([ADR-0016](0016-what-an-agent-reports-about-itself.md)).
 
 3. **The service is `PRODUCT_NAME`, with no suffix, on every platform.** The label is a single
    token — no qualifier, no organization — so `service-manager` renders the same string for
@@ -153,8 +153,8 @@ deliver the same binary and run its own `service install`.
    instruction to remove the other installation. An installation is an isolation boundary —
    separate Server, client identity, lifecycle and rollback. Scaling the number of *managed* Agents is
    the multiplexing inside one installation
-   ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)); two variants on one host are told apart by
-   `service.instance.name` ([ADR-0015](0015-what-an-agent-reports-about-itself.md)).
+   ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)); two variants on one host are told apart by
+   `service.instance.name` ([ADR-0016](0016-what-an-agent-reports-about-itself.md)).
 
 6. **There is no instance flag.** `--instance` is not a flag at all — not hidden, not accepted and
    ignored — so a command line carrying it fails to parse, and no registered service carries it.
@@ -215,7 +215,7 @@ deliver the same binary and run its own `service install`.
    ```
 
    The directory name is the bare base and the commit short-hash of
-   [ADR-0011](0011-versions-resolved-in-the-internal-crate.md)'s version, never the pre-release: the release `1.2.3` and a
+   [ADR-0012](0012-versions-resolved-in-the-internal-crate.md)'s version, never the pre-release: the release `1.2.3` and a
    development build heading for it are told apart by their commit, and the manifest's full string
    answers release-or-dev. The service's program is `<layout root>/current/supervisor`, so a
    version switch never re-registers anything. On Unix the pointer is switched atomically — a
@@ -317,12 +317,12 @@ deliver the same binary and run its own `service install`.
     - **The CA certificate of the Server**, the CA that signed the Server's certificate, written as
       `[tls] ca_file`. It is asked for every `wss://` or `https://` endpoint, without a question
       before it: the Server always presents a certificate of the fleet's own CA
-      ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
+      ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
     - **The bootstrap certificate and its private key, only while the Client is not enrolled** —
       while its state directory holds no certificate the Server issued. They are neither copied
       nor written into the file: the questionnaire enrols with them directly against the Server,
       after the file is written. It connects with the pair where it lies, sends the CSR
-      ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 21), prints the
+      ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 21), prints the
       request's key fingerprint and waits until an operator approves it, then stores the issued
       certificate in the state directory, where the Client looks for it first. An interrupted wait
       leaves the written file and registers nothing; running the questionnaire again asks again
@@ -335,32 +335,32 @@ deliver the same binary and run its own `service install`.
       editing the file. The pair is required while it is asked: there is no answer without one,
       and a path that names no readable file, here or for the CA, is asked for again. The
       certificate is the one proof the Server admits a peer by
-      ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
+      ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
     - **The answered CA is copied beside the written file**, as `server-ca.pem`, owner-only on
       Unix, and the file names the copy. The configuration then depends on nothing outside its own
       directory for its trust. A copy left by an earlier answer is replaced. The copy is handed
       over to the service account with the file (clause 13).
     - **The package verification key**, the Ed25519 public key written as
-      `[packages] verification_key` ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). An empty
+      `[packages] verification_key` ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). An empty
       answer is accepted, and the install then says that the Client installs no package, its own
       update included, until a key is configured.
 
     It asks nothing about the self-update: the file carries `[packages] self_update = true`, and the
     verification key decides whether that takes effect
-    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)). Everything else is
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)). Everything else is
     written as commented defaults, so the file stays a starting point for hand-editing. The
     non-interactive answers an installer can give — `--endpoint` (clause 42) and `--no-self-update`
-    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)) — conflict with
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)) — conflict with
     `--interactive`, go through the same renderer, the same endpoint rule and the same
     never-overwrite write, and never include a client identity. A file written from them alone
     therefore fails clause 19 and stays on disk for the operator to complete.
 
     **No question asks for a credential, and no written file has an `[auth]` section.** The Agent
     plane admits by the client certificate alone
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), so there is nothing to ask. A
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), so there is nothing to ask. A
     Client whose `supervisor.toml` still has an `[auth]` section ignores it and sends nothing
     from it, with one startup notice naming the section
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)); `install` keeps such a file
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)); `install` keeps such a file
     (clause 16), and the section is never a reason to fail the install or to warn beyond that
     notice.
 
@@ -406,7 +406,7 @@ deliver the same binary and run its own `service install`.
     The bound is on age and file count, not bytes: the Client is quiet and backs off when it cannot
     reach the Server. The section never arrives over the wire — a Server able to redirect or silence
     a Client's log could hide its own effects
-    ([ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)).
+    ([ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md)).
 
 24. **The file never costs the Client its run.** `tracing` takes one subscriber per process,
     installed before the command line is parsed, so the file layer is installed from the start with
@@ -422,11 +422,11 @@ deliver the same binary and run its own `service install`.
     host, because every Client in a fleet is the same kind of thing.
 
 26. **The package that carries the Client is `supervisor` too.** The self-update takes only the
-    package named after the Agent type ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md) clause 2), and a Server offers a
-    package under the Agent type it is built for ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) — so
+    package named after the Agent type ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md) clause 2), and a Server offers a
+    package under the Agent type it is built for ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) — so
     the release a fleet uploads for its Clients is a package for Agent type `supervisor`, and no
     per-host setting is needed. A Configuration carrying the Client's `[[supervisor]]` blocks
-    ([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) is typed `supervisor` as well.
+    ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) is typed `supervisor` as well.
 
 27. **The program is `supervisor`.** `supervisor.exe` on Windows: the binary Cargo builds
     (`[[bin]] name = "supervisor"` in the package `fleet-agent`), the file in every version directory
@@ -444,7 +444,7 @@ deliver the same binary and run its own `service install`.
 
 28. **The instance name is a separate attribute, and its default is `Supervisor Agent`.** The
     top-level `name` is the operator's name for *this* Client, reported as `service.instance.name`
-    ([ADR-0015](0015-what-an-agent-reports-about-itself.md)). Its default is a display name — spaces
+    ([ADR-0016](0016-what-an-agent-reports-about-itself.md)). Its default is a display name — spaces
     and capitals — and deliberately not `supervisor`: a default equal to the type would print the
     same word in both columns of the fleet view. Nothing resolves a path or a service from this key.
 
@@ -459,7 +459,7 @@ deliver the same binary and run its own `service install`.
 ### The release
 
 30. **A release is one workflow run that builds five targets from one version.** The version and its
-    `version/*` tag are decided as [ADR-0011](0011-versions-resolved-in-the-internal-crate.md) states. A first job decides the
+    `version/*` tag are decided as [ADR-0012](0012-versions-resolved-in-the-internal-crate.md) states. A first job decides the
     number, builds the Client and asks it `--version`; every artifact is named from that one answer,
     and each target's build asserts its own binary reports the same full version (except the
     cross-compiled macOS x86_64 build, which the runner cannot execute). Every job checks out with
@@ -481,21 +481,21 @@ deliver the same binary and run its own `service install`.
 
 31. **Every archive is a `.tar.gz` written by `opamp-fleetctl package pack --format tar.gz`,** the
     operator tool the same run builds and publishes
-    ([ADR-0025](0025-one-operator-program-that-makes-the-fleets-certificates.md)). The packer
+    ([ADR-0028](0028-one-operator-program-that-makes-the-fleets-certificates.md)). The packer
     names the single member after the program, with its executable mode, so **the Client's release archive is a
     valid package artifact unmodified**: the operator uploads the file they downloaded, and the
     SHA-256 the packer prints is both the published checksum and the hash an Agent verifies
-    ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). `.tar.gz` because it is the container every
+    ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). `.tar.gz` because it is the container every
     other agent's package ships as and the one that carries the executable bit and unpacks the same
     way on every platform. `.7z` remains a package container the Client opens and the packer writes,
-    including encrypted ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); a release has no use for
+    including encrypted ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); a release has no use for
     encryption.
 
 32. **Every asset of the Client is named `supervisor_<version>_<os>_<arch>.<ext>`,** and the
-    operator tool's by the same grammar under its own name (ADR-0025). Four fields separated by `_`:
+    operator tool's by the same grammar under its own name (ADR-0028). Four fields separated by `_`:
     the package name, the base version `MAJOR.MINOR.PATCH` without build metadata, and the platform
     in the vocabulary an Agent reports as `os.type` and `host.arch`
-    ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). **All artifacts of a target share the stem** and differ
+    ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). **All artifacts of a target share the stem** and differ
     in extension alone:
 
     | | artifact |
@@ -525,11 +525,11 @@ deliver the same binary and run its own `service install`.
 
 34. **What is published.** A GitHub release named after the version holds the Client's five
     archives, the two `.deb`, the two `.rpm`, the `.msi`, the four archives of the operator tool
-    (ADR-0025) and one `SHA256SUMS` covering every asset. The notes say which file is for which
+    (ADR-0028) and one `SHA256SUMS` covering every asset. The notes say which file is for which
     purpose, give the per-platform install commands and the procedure that uploads the Client's
     archives, selected by their `supervisor_` stem, as one package for Agent type `supervisor`, and state the full baked
     version string as provenance — the upload uses the release number, since versions are compared
-    without build metadata ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md)). Nothing is signed. A change to the asset
+    without build metadata ([ADR-0012](0012-versions-resolved-in-the-internal-crate.md)). Nothing is signed. A change to the asset
     names or containers breaks operators' scripts and is named in `CHANGELOG.md` and the release
     notes of the release that carries it.
 
@@ -537,7 +537,7 @@ deliver the same binary and run its own `service install`.
 
 35. **Three classes of asset, and only one is a package artifact.** The Client's archive is opened
     by the Client on a self-update and parsed by the fleet view; the operator tool's archives
-    ([ADR-0025](0025-one-operator-program-that-makes-the-fleets-certificates.md)) are
+    ([ADR-0028](0028-one-operator-program-that-makes-the-fleets-certificates.md)) are
     downloaded to an operator's machine and are no package of the fleet; the `.deb`, `.rpm` and `.msi` are opened by
     `dpkg`, `rpm` and Windows Installer and by nothing in the fleet path. The installers are
     **additive operator artifacts**: they never replace the archive, which is the only format the
@@ -582,7 +582,7 @@ deliver the same binary and run its own `service install`.
     the default. The alternative it prints for writing the file by hand names the endpoint together
     with `[tls] cert_file` and `key_file`, the identity the operator adds before the start, and
     names no credential and no `[auth]` section, because the Client reads none
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
 
 38. **The CLI on `PATH` is a symlink through `current`, and a package removal takes the layout.**
     `/usr/bin/<PRODUCT_NAME>` → `/opt/<PRODUCT_NAME>/current/supervisor`, so the operator's first
@@ -618,7 +618,7 @@ deliver the same binary and run its own `service install`.
     |---|---|---|
     | `INSTALLFOLDER` | `InstallDirDlg`, via `WIXUI_INSTALLDIR` | where the payload goes; default `C:\Program Files\<PRODUCT_NAME>` |
     | `ENDPOINT` | `EndpointDlg`, an `Edit` control | `service install --endpoint`; empty means none |
-    | `SELFUPDATE` | `EndpointDlg`, a checkbox, default `1` | the consent of [ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md) clause 3 |
+    | `SELFUPDATE` | `EndpointDlg`, a checkbox, default `1` | the consent of [ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md) clause 3 |
 
     `INSTALLFOLDER` is **one directory the operator configures**, holding only the delivered payload.
     The layout and the state directory go to `%ProgramData%\<PRODUCT_NAME>` and no root reaches the
@@ -644,7 +644,7 @@ deliver the same binary and run its own `service install`.
     operator puts on the host, and `EndpointDlg` says that they are added to `supervisor.toml`
     afterwards, or through `service install --interactive` from an elevated prompt. It mentions no
     credential, because the Client reads none
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
 
 40. **The endpoint dialog is prefilled with the development Server, interactively only.** A
     `SetProperty` in the UI sequence, conditioned on `ENDPOINT` unset and the product not installed,
@@ -655,7 +655,7 @@ deliver the same binary and run its own `service install`.
     always serves TLS, so a development Server answers no plaintext request, and `localhost` is a
     host name, which is never the loopback — only the IP literals `127.0.0.1` and `::1` are — so the
     Client would refuse the value at startup. The scheme selects the transport
-    ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)), so the click-through install
+    ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)), so the click-through install
     runs WebSocket, as an unconfigured Client would. Like every value an installer writes, the
     prefill passes the rule the Client applies at startup (clause 42).
 
@@ -673,7 +673,7 @@ deliver the same binary and run its own `service install`.
     `[package.metadata.generate-rpm]`, reading the workspace's version, licence and description;
     `cargo-deb` derives `Depends` from what the binary links (`$auto`). The RPM `Release` is `1` and
     stays `1`, and no epoch or `~` mangling is needed, because a version is released once and is
-    always `MAJOR.MINOR.PATCH` ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md)). The maintainer scripts live in
+    always `MAJOR.MINOR.PATCH` ([ADR-0012](0012-versions-resolved-in-the-internal-crate.md)). The maintainer scripts live in
     `packaging/linux/`, the WiX sources in `packaging/windows/`.
 
 42. **`service install --endpoint <URL>` writes the first configuration without a terminal.** It
@@ -682,9 +682,9 @@ deliver the same binary and run its own `service install`.
     the rule the Client applies to its endpoint at startup before anything is written: a `ws://` or
     `http://` endpoint whose host is not `127.0.0.1` or `::1` is refused, naming the setting, and
     `localhost` is no exception. It conflicts with `--interactive`; it
-    carries the self-update answer ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md) clause 3). It
+    carries the self-update answer ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md) clause 3). It
     has no siblings for the CA file or the client identity, and it takes no credential, since
-    there is none ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). The installers
+    there is none ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). The installers
     do not write TOML themselves; one flag on the command that owns the file is the smaller thing.
     **The same rule binds every default an installer supplies:** no installer writes, prefills or
     prints a value the Client would refuse at startup, and none writes a setting that stands in for
@@ -692,12 +692,12 @@ deliver the same binary and run its own `service install`.
     refuses at startup, never one it runs on unauthenticated.
 
 **Out of scope:** staging, verifying, rolling back and pruning versions in this layout, and the
-self-update consent ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)); whether
+self-update consent ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)); whether
 variant builds are ever published, and where their `UpgradeCode`s are recorded; how an operator
 discovers what is installed on a host; creating the `--run-as` account in the packages; a confined
 SELinux policy module; configuration reload on `SIGHUP`; `Type=notify` integration; the startup
 rules themselves and the Server's enrolment window and approval, which the installer only applies
-and names ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)); signing (an Authenticode
+and names ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)); signing (an Authenticode
 certificate for the MSI, a GPG key for the RPM, the archives); hosting apt and yum repositories;
 preseeding the endpoint on Linux; a macOS `.pkg`, which needs a Developer ID and notarization;
 packaging the Server, which an operator deploys rather than the fleet.
@@ -754,7 +754,7 @@ packaging the Server, which an operator deploys rather than the fleet.
   **Treat `localhost` as loopback** — a name resolves through whatever the host's resolver says,
   so only the IP literal guarantees the traffic stays on the host.
 - **Keep asking for the fleet credential, as optional, for a Server that still requires it** — the
-  Agent plane no longer reads one ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)),
+  Agent plane no longer reads one ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)),
   and the upgrade order is the Server first, so a question kept for older Servers would teach a
   setting nothing reads.
 - **Remove a leftover `[auth]` section at install, or refuse the file** — `install` never rewrites
@@ -764,7 +764,7 @@ packaging the Server, which an operator deploys rather than the fleet.
 - **The Windows Event Log** — an event source registered at install time, a message resource, and a
   code path only one platform exercises. **A file only on Windows** — makes "where are the logs"
   platform-dependent and leaves containers without one. **Rely on the OTLP own-logs bridge**
-  ([ADR-0015](0015-what-an-agent-reports-about-itself.md)) — needs a reachable Server, so it cannot explain the failures
+  ([ADR-0016](0016-what-an-agent-reports-about-itself.md)) — needs a reachable Server, so it cannot explain the failures
   that prevent one. **Size-based rotation** — `tracing-appender` does not offer it. **`keep = 0` as
   unlimited** — the setting that fills a disk. **Remotely configurable logging** — the Client's own
   configuration stays on the machine. **The log in the version directory** — a self-update would
@@ -813,6 +813,12 @@ packaging the Server, which an operator deploys rather than the fleet.
   the installer could have refused while they were at the keyboard.
 - **Rename the dpkg/rpm identity or `UpgradeCode` with the program.** Costs every host a second
   product beside the first.
+- **Name the build variables for this project (`OPAMP_FLEET_PRODUCT_NAME`, …)** — a build of
+  `acme-agent` would set a variable that names a product the build is not.
+- **No prefix (`PRODUCT_NAME`, `PRODUCT_TITLE`)** — common in other toolchains: Xcode exports
+  `PRODUCT_NAME` to every build phase, and a stray slug would pass the grammar of clause 2 and
+  silently rename the service and move the install path. `OPAMP_` names the protocol, not the
+  product, so it holds in every variant.
 
 ## Sources / Prior art
 
@@ -910,6 +916,8 @@ packaging the Server, which an operator deploys rather than the fleet.
 - [OpAMP specification, `AgentDescription`](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md),
   [opamp-spec issue #131](https://github.com/open-telemetry/opamp-spec/issues/131) and the
   [resource semantic conventions, `service.name`](https://opentelemetry.io/docs/specs/semconv/resource/#service).
+- Xcode Build Settings Reference, `PRODUCT_NAME` — exported to the environment of every Run Script
+  build phase. Recalled, not re-verified.
 
 ## Consequences
 
@@ -997,7 +1005,7 @@ packaging the Server, which an operator deploys rather than the fleet.
 ## Enforcement
 
 - `crates/fleet-agent/build.rs` fails the build on a `PRODUCT_NAME` outside the grammar or a blank
-  display name; `crates/fleet-agent/src/product.rs` `product_name_satisfies_the_grammar`,
+  display name, and `product.rs` reads `OPAMP_PRODUCT_NAME` and `OPAMP_PRODUCT_TITLE` through `env!`; `crates/fleet-agent/src/product.rs` `product_name_satisfies_the_grammar`,
   `display_name_is_prose`.
 - `crates/fleet-agent/src/service/manager.rs`: `every_backend_renders_the_same_name`,
   `the_service_is_named_after_the_product_not_the_program`, `the_service_name_carries_no_suffix`,
@@ -1040,7 +1048,7 @@ packaging the Server, which an operator deploys rather than the fleet.
   which asserts that `ClientConfig::check_admission` passes a file with a client identity and no
   `[auth]` and refuses one without an identity, naming `[tls] cert_file` and `key_file` (clauses
   19, 20). `crates/fleet-agent/src/config.rs`, shared with
-  [ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md):
+  [ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md):
   `a_leftover_auth_section_is_ignored_with_a_notice`, which loads a file with an `[auth]`
   section, asserts that it loads, that nothing is sent from it, and that the notice names `[auth]`
   (clause 17).

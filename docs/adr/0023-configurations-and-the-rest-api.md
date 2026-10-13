@@ -1,4 +1,4 @@
-# ADR-0021: Configurations are named, Selector-targeted resources of an OpenAPI-described REST API
+# ADR-0023: Configurations are named, Selector-targeted resources of an OpenAPI-described REST API
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-12
@@ -25,7 +25,7 @@ pulled in with `${file:ruleset.yaml}`, a certificate — and those must be on di
 configuration without being handed to the Collector as `--config`.
 
 The Agent type is a reported attribute (`service.name`,
-[ADR-0015](0015-what-an-agent-reports-about-itself.md) clause 1). Expressed only as a Selector
+[ADR-0016](0016-what-an-agent-reports-about-itself.md) clause 1). Expressed only as a Selector
 pair, limiting a Configuration to a type is easy to forget: an empty Selector matches every Agent,
 every Agent this Client presents accepts remote configuration, and a Collector YAML saved without
 the pair is composed into the map of every Foreign Agent and the Client's own Agent alike — a
@@ -50,7 +50,7 @@ described by an OpenAPI document generated code-first with `utoipa`, the Server'
    is absent from the stored JSON and from responses.
 
 2. **The name follows the instance-name grammar of
-   [ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) clause 2** — 1–32 characters of lowercase
+   [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 2** — 1–32 characters of lowercase
    letters, digits, and `-`, not starting or ending with `-`, not a Windows device name — because
    it becomes a file name on the Server, a config-map key on the wire, and an entry file on every
    Client.
@@ -58,7 +58,7 @@ described by an OpenAPI document generated code-first with `utoipa`, the Server'
 3. **A Selector is equality, AND, over what the Agent presents.** It is a string-to-string map; an
    Agent matches when every pair equals a string-valued attribute it reported, identifying
    attributes looked up first, then non-identifying ones, then the Server's labels
-   ([ADR-0022](0022-the-fleet-record.md) clause 17). **The empty Selector matches every Agent**,
+   ([ADR-0024](0024-the-fleet-record.md) clause 17). **The empty Selector matches every Agent**,
    and an Agent that has not described itself yet matches only the empty Selector. An
    array-valued attribute (`host.ip`) is displayed but never matched. There are no set-based
    operators (`in`, `exists`); they would extend the same field compatibly.
@@ -86,7 +86,7 @@ described by an OpenAPI document generated code-first with `utoipa`, the Server'
 
 7. **Nothing released, nothing offered.** An Agent's map is composed from the Configurations an
    operator's rollout act released to it, never from matching alone
-   ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)); matching computes the candidates.
+   ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)); matching computes the candidates.
    An Agent with nothing released to it is offered nothing and keeps running what it runs.
 
 8. **The role travels verbatim; the Server owns no vocabulary.** The `role` of a Configuration goes
@@ -111,16 +111,16 @@ described by an OpenAPI document generated code-first with `utoipa`, the Server'
     `server.toml` defaulting to `fleet-configs`, written through a temp file and an atomic rename,
     loaded at startup; `DELETE` removes the file. A file that does not parse fails startup naming
     it. What the file holds besides the saved fields — the revisions a rollout pins — is
-    [ADR-0023](0023-rollout-and-what-reaches-an-agent.md)'s. No database: a handful of small
+    [ADR-0025](0025-rollout-and-what-reaches-an-agent.md)'s. No database: a handful of small
     files needs none.
 
 11. **The REST API is versioned by path and described by a generated document.** Every route lives
     under `/api/v1`. The OpenAPI document is generated code-first with `utoipa` and `utoipa-axum`:
     handlers and schemas are annotated where they live and routes registered once, so document and
     behaviour cannot drift. It is served at `/api/v1/openapi.json`. The API is served on the
-    Operator plane ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)), behind its
-    authentication ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), beside the rendered docs
-    page ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)).
+    Operator plane ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)), behind its
+    authentication ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), beside the rendered docs
+    page ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)).
 
 12. **The Configuration routes.** `GET /api/v1/configurations` lists them in name order;
     `GET /api/v1/configurations/{name}` returns one (`404` if absent);
@@ -129,15 +129,15 @@ described by an OpenAPI document generated code-first with `utoipa`, the Server'
     invalid name or an empty body, `500` when it cannot be persisted);
     `DELETE /api/v1/configurations/{name}` answers `204` or `404`. The fleet routes
     (`GET /api/v1/agents`, an Agent's restart, labels, forget) sit beside them
-    ([ADR-0022](0022-the-fleet-record.md)), as do the rollout routes
-    ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)).
+    ([ADR-0024](0024-the-fleet-record.md)), as do the rollout routes
+    ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)).
 
 13. **The bundled UI is a client of the same routes and nothing more.** It shows the type as an
     input of its own beside the Selector, suggesting the types the fleet reports, and each
     Configuration's chip shows its type, Selector, and role.
 
 **Out of scope:** when and to whom a Configuration is released, and what deleting one does to the
-Agents it was released to ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)); the meaning
+Agents it was released to ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)); the meaning
 of a kind's own role values (each kind's own ADR); set-based Selector operators;
 configuration history and audit.
 

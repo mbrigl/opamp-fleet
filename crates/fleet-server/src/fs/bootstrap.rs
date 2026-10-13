@@ -1,4 +1,4 @@
-//! The bootstrap certificates the Server issued, on the filesystem (ADR-0032): the default
+//! The bootstrap certificates the Server issued, on the filesystem (ADR-0028): the default
 //! adapter behind [`BootstrapStore`](crate::bootstrap::BootstrapStore).
 
 use std::path::PathBuf;

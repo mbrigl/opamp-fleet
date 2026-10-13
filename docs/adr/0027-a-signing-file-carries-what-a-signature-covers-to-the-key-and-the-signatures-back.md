@@ -1,4 +1,4 @@
-# ADR-0029: A signing file carries what a signature covers from the UI to the key and the signatures back, and `package sign` signs the hashes in it without the artifacts
+# ADR-0027: A signing file carries what a signature covers from the UI to the key and the signatures back, and `package sign` signs the hashes in it without the artifacts
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-12
@@ -9,7 +9,7 @@
 
 A Deployment offers an entry only once it holds the operator's Ed25519 signature for it, and a
 rollout is refused while any entry lacks one
-([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md), clauses
+([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md), clauses
 28 and 54). The signature covers a statement, not the artifact's bytes:
 `opamp-fleet-package-v1`, the Agent type, the version and the artifact's SHA-256 in lowercase hex,
 one per line (`fleet_core::package::statement`). Today `opamp-fleetctl package sign` makes it from
@@ -20,7 +20,7 @@ That is where it hurts. A Package of this fleet's own Client carries five platfo
 for one Deployment is five `sign` calls and twenty form fields. And the artifact has to be on the
 machine that holds the key, although `package fetch` uploads it straight from upstream and the
 Server never gives it back on the Operator plane — the download route is the Agent plane's and
-needs a client certificate. The key is best kept off the Server host (ADR-0024), so the one
+needs a client certificate. The key is best kept off the Server host (ADR-0026), so the one
 machine that should sign is the one least likely to hold hundreds of megabytes of artifacts.
 
 Everything a signature covers is already known to the Server: the Package's Agent type and
@@ -58,7 +58,7 @@ the UI imports into a Deployment's signatures.
    at it. `agent_type`, `version`, `os` and `arch` are the names the REST API uses for the same
    values. `sha256` is the entry's `content_hash`, 64 lowercase hex characters. `signature` is
    absent in the downloaded file and 128 hex characters once signed. The platform is **not** part
-   of what is signed (ADR-0024 clause 54); it is in the file so the import knows which
+   of what is signed (ADR-0026 clause 54); it is in the file so the import knows which
    `(os, arch)` signature route each signature belongs to.
 
 2. **The download.** The Packages tab offers the file for the selected Package, built in the
@@ -83,11 +83,11 @@ the UI imports into a Deployment's signatures.
    the existing `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}`,
    one call per entry, and reports per entry what the Server answered. No new route, and no
    check of the signature on the Server: it holds no verification key, and every Client verifies
-   each signature before it opens the artifact (ADR-0024 clause 54).
+   each signature before it opens the artifact (ADR-0026 clause 54).
 
 **Out of scope:** an import or signing route on the Server, a Server-side verification key,
 `sign` writing signatures to a Server itself, a signing file spanning several Packages, and an
-external signer (HSM, `openssl`) reading the file — the statement is documented in ADR-0024 for
+external signer (HSM, `openssl`) reading the file — the statement is documented in ADR-0026 for
 whoever wants to build one.
 
 ## Alternatives considered
@@ -99,8 +99,8 @@ whoever wants to build one.
   case this decision exists to make easy. The check stays a documented duty, and this alternative
   is the natural tightening should that duty prove to be skipped.
 - **`sign` fetches upstream's checksums itself** for the agents `package fetch` knows. Convenient,
-  but it covers only artifacts that travel as published; a repacked artifact (the GLPI Agent's
-  Linux tree, Icinga 2, ADR-0026, ADR-0027) has no upstream checksum to find, so the tool would
+  but it covers only artifacts that travel as published; a repacked artifact
+  has no upstream checksum to find, so the tool would
   need both paths and the rule which applies.
 - **The statement itself as the file**, one text file per entry. Any Ed25519 signer could sign it
   without this tool, but five platforms are five files, the `(os, arch)` an import needs is lost,
@@ -118,7 +118,7 @@ whoever wants to build one.
 
 ## Sources / Prior art
 
-- [ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md), clauses
+- [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md), clauses
   28 (the signature lives on the Deployment per Package and platform) and 54 (what a signature
   covers, and that the Client verifies it), and `fleet_core::package::statement`.
 - [RFC 8032](https://www.rfc-editor.org/rfc/rfc8032), section 5.1.6: Ed25519 signing is deterministic,
@@ -137,7 +137,7 @@ whoever wants to build one.
 - Negative / trade-offs: **what the operator signs is what the Server said.** A compromised Server,
   or a file altered between download and signing, can put the hash of an artifact the operator
   never saw in front of the key; an operator who skips the comparison then signs it, and every
-  Client accepts it. ADR-0024's guarantee — nothing reaches a host the operator's key did not sign,
+  Client accepts it. ADR-0026's guarantee — nothing reaches a host the operator's key did not sign,
   whatever the Server claims — still holds to the letter, but its strength now rests on the
   operator's check rather than on the operator holding the bytes. Q-1 holds for a fleet whose
   operator signs from the artifacts, which stays available and documented as the stronger path;
@@ -154,10 +154,10 @@ whoever wants to build one.
   `fleet_core::package::statement` with the public key, as the Client does; they refuse a file
   whose `format` is not `opamp-fleet-signing-v1`, whose hash is not 64 lowercase hex characters, or
   that names a platform twice, and assert that nothing was signed then. These tests carry
-  `Verifies: ADR-0029`.
+  `Verifies: ADR-0027`.
 - A Server test reads the bundled UI and asserts that the download writes
   `opamp-fleet-signing-v1` and the fields the API serves, and that the import calls the signature
-  route; the OpenAPI document must still carry those fields. It carries `Verifies: ADR-0029`.
+  route; the OpenAPI document must still carry those fields. It carries `Verifies: ADR-0027`.
 - **Not mechanically decidable:** that the operator compares the hashes before signing (point 4).
   The manual states it and the tool prints what it signs; no test can decide whether a human
   looked.

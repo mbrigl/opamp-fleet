@@ -1,4 +1,4 @@
-//! The OpAMP Fleet Server (ADR-0009, ADR-0012): the control plane that tells Agents which
+//! The OpAMP Fleet Server (ADR-0010, ADR-0013): the control plane that tells Agents which
 //! configuration they should run and records what they report back.
 //!
 //! A library crate so integration tests can assemble the exact router the binary serves.
@@ -40,7 +40,7 @@ use fs::{FsAgentStore, FsConfigBackend, FsDeploymentBackend, FsLabelStore, FsPac
 /// and [`LabelStore`](labels::LabelStore) — and never the filesystem behind them.
 impl AppState {
     /// Builds the state on the default storage adapters — one JSON file per Agent under
-    /// `<config_dir>/agents/` and per labelled Agent under `<config_dir>/labels/` (ADR-0022) — restoring every persisted Configuration and Agent
+    /// `<config_dir>/agents/` and per labelled Agent under `<config_dir>/labels/` (ADR-0024) — restoring every persisted Configuration and Agent
     /// record. A store that cannot be opened (or holds an unparsable file) fails startup loudly.
     ///
     /// # Errors
@@ -60,7 +60,7 @@ impl AppState {
 
 /// The default wiring of the package store to its filesystem adapter (ADR-0006).
 impl packages::PackageStore {
-    /// Opens the store on `dir`, loading every persisted Package (ADR-0024).
+    /// Opens the store on `dir`, loading every persisted Package (ADR-0026).
     ///
     /// # Errors
     /// Returns an error when the directory cannot be opened, or a Package in it cannot be read,
@@ -73,7 +73,7 @@ impl packages::PackageStore {
 /// The default wiring of the package offering to the Deployments' filesystem adapter (ADR-0006).
 impl PackageOffering {
     /// Opening the package store arms the **Deployments** too, from `deployments/` beneath it
-    /// (ADR-0024): a Deployment is meaningless without the artifacts it signs, so the two share a
+    /// (ADR-0026): a Deployment is meaningless without the artifacts it signs, so the two share a
     /// directory and a configuration key rather than acquiring one of their own. See
     /// [`with_deployments`](PackageOffering::with_deployments) for `download_base`.
     ///
@@ -86,7 +86,7 @@ impl PackageOffering {
     }
 }
 
-/// The default wiring of the bootstrap record to its filesystem adapter (ADR-0006, ADR-0032).
+/// The default wiring of the bootstrap record to its filesystem adapter (ADR-0006, ADR-0028).
 impl bootstrap::BootstrapCertificates {
     /// Opens the record on `dir`, one file per certificate, forgetting what has ended.
     ///
@@ -101,9 +101,9 @@ impl bootstrap::BootstrapCertificates {
     }
 }
 
-/// The **Agent plane** (ADR-0012): the OpAMP endpoint, guarded by Admission (ADR-0019), and the
+/// The **Agent plane** (ADR-0013): the OpAMP endpoint, guarded by Admission (ADR-0021), and the
 /// package download route beside it — behind the same handshake, and reached only with a
-/// certificate of the fleet (ADR-0019 clause 23).
+/// certificate of the fleet (ADR-0021 clause 23).
 ///
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
@@ -118,9 +118,9 @@ pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Route
     ))
 }
 
-/// The **Operator plane** (ADR-0012): the REST API, its OpenAPI document and docs page, and the
+/// The **Operator plane** (ADR-0013): the REST API, its OpenAPI document and docs page, and the
 /// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
-/// (ADR-0019). Without it the plane is open, which is what its loopback default is for.
+/// (ADR-0021). Without it the plane is open, which is what its loopback default is for.
 pub fn operator_app(state: Arc<AppState>, auth: Option<api::OperatorAuth>) -> Router {
     api::router(state, auth)
 }

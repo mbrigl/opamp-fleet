@@ -1,5 +1,5 @@
-//! `server pki status` as an operator runs it (ADR-0025): what it prints and how it exits, that the
-//! Server binary makes no certificate (ADR-0025), and the running Server's warning about a
+//! `server pki status` as an operator runs it (ADR-0028): what it prints and how it exits, that the
+//! Server binary makes no certificate (ADR-0028), and the running Server's warning about a
 //! certificate it depends on that is ending.
 #![cfg(unix)]
 
@@ -53,7 +53,7 @@ fn ca(
 }
 
 /// The Server host's files of a fleet, made here rather than by the operator tool the Server does
-/// not depend on (ADR-0025): a server certificate for `localhost`, a client CA that ends in
+/// not depend on (ADR-0028): a server certificate for `localhost`, a client CA that ends in
 /// `client_ca_left` days, and a bootstrap CA. Answers `server.toml`'s `[tls]`, `[client_ca]` and
 /// `[enrolment]` sections naming them.
 fn server_host_files(dir: &Path, client_ca_left: i64) -> String {
@@ -85,7 +85,7 @@ fn server_host_files(dir: &Path, client_ca_left: i64) -> String {
     )
 }
 
-// Verifies: ADR-0025
+// Verifies: ADR-0028
 #[test]
 fn status_reads_the_server_hosts_certificates_and_the_server_makes_none() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -110,7 +110,7 @@ fn status_reads_the_server_hosts_certificates_and_the_server_makes_none() {
     assert_eq!(ending.status.code(), Some(1), "{}", text(&ending.stdout));
     assert!(text(&ending.stdout).contains("ENDS SOON"));
 
-    // The commands that make certificates are the operator tool's (ADR-0025), not the Server's.
+    // The commands that make certificates are the operator tool's (ADR-0028), not the Server's.
     for made in [
         &[
             "pki",
@@ -147,7 +147,7 @@ fn status_reads_the_server_hosts_certificates_and_the_server_makes_none() {
     assert!(!dir.path().join("s").exists(), "nothing was written");
 }
 
-// Verifies: ADR-0025
+// Verifies: ADR-0028
 #[test]
 fn the_server_warns_at_startup_about_a_ca_that_is_ending_and_serves_on() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -1,10 +1,10 @@
-//! Bootstrap certificates the Server issues (ADR-0032).
+//! Bootstrap certificates the Server issues (ADR-0028).
 //!
 //! An operator asks for one with a subject of their choosing — a customer, a site, a batch — and
 //! is handed the certificate and its private key once. The Server keeps the certificate's facts,
 //! never its key, so it can list what is valid and an operator can revoke one by its serial
-//! (ADR-0019 clause 34). A bootstrap certificate opens nothing on its own: it needs an open
-//! enrolment window and an operator's approval (ADR-0019 clauses 20, 21).
+//! (ADR-0021 clause 34). A bootstrap certificate opens nothing on its own: it needs an open
+//! enrolment window and an operator's approval (ADR-0021 clauses 20, 21).
 //!
 //! The signing is the [`BootstrapSigner`] port, the bootstrap CA in [`crate::ca`] its adapter; the
 //! record is the [`BootstrapStore`] port, a directory under `config_dir` its adapter.
@@ -17,13 +17,13 @@ use serde::{Deserialize, Serialize};
 use crate::fleet::Clock;
 use crate::revocation::CertId;
 
-/// A bootstrap certificate's life when the request names none (ADR-0032 clause 3).
+/// A bootstrap certificate's life when the request names none (ADR-0028 clause 23).
 pub const DEFAULT_VALIDITY_DAYS: u32 = 10;
 
-/// The longest life a request may ask for (ADR-0032 clause 3).
+/// The longest life a request may ask for (ADR-0028 clause 23).
 pub const MAX_VALIDITY_DAYS: u32 = 90;
 
-/// The valid bootstrap certificates the record holds at most (ADR-0032 clause 4).
+/// The valid bootstrap certificates the record holds at most (ADR-0028 clause 24).
 pub const MAX_VALID: usize = 10_000;
 
 /// The longest value of a subject attribute: RFC 5280's upper bound for the names that have one.
@@ -31,7 +31,7 @@ pub const MAX_VALUE_CHARS: usize = 64;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// The subject an operator names (ADR-0032 clause 2): the organization and its unit, each
+/// The subject an operator names (ADR-0028 clause 22): the organization and its unit, each
 /// optional. The Server sets the common name.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -116,7 +116,7 @@ pub struct Pair {
 /// The port that signs a bootstrap certificate: the bootstrap CA with its key.
 pub trait BootstrapSigner: Send + Sync {
     /// The common name a bootstrap certificate carries, derived from the bootstrap CA's
-    /// (ADR-0033 clause 6).
+    /// (ADR-0028 clause 28).
     fn leaf_common_name(&self) -> String;
 
     /// When the bootstrap CA ends, in milliseconds since the epoch.
@@ -139,7 +139,7 @@ pub trait BootstrapSigner: Send + Sync {
     ) -> Result<Pair, String>;
 }
 
-/// What the record keeps of a bootstrap certificate — never its key (ADR-0032 clause 4).
+/// What the record keeps of a bootstrap certificate — never its key (ADR-0028 clause 24).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Entry {
     pub id: CertId,
@@ -237,7 +237,7 @@ impl BootstrapCertificates {
         self.signer.is_some()
     }
 
-    /// Issues one bootstrap certificate and records it before answering (ADR-0032 clauses 1 to 4).
+    /// Issues one bootstrap certificate and records it before answering (ADR-0028 clauses 21 to 24).
     ///
     /// # Errors
     /// See [`IssueError`].
@@ -264,7 +264,7 @@ impl BootstrapCertificates {
         if signer.ca_not_after_ms() <= now {
             return Err(IssueError::CaEnded);
         }
-        // Never past the CA (ADR-0032 clause 3).
+        // Never past the CA (ADR-0028 clause 23).
         let not_after = (now + u64::from(days) * DAY_MS).min(signer.ca_not_after_ms());
         let pair = signer
             .sign(&attributes, now, not_after)
@@ -300,7 +300,7 @@ impl BootstrapCertificates {
         list
     }
 
-    /// Forgets every certificate that has ended (ADR-0032 clause 4).
+    /// Forgets every certificate that has ended (ADR-0028 clause 24).
     fn prune(&self, entries: &mut BTreeMap<String, Entry>) -> Result<(), String> {
         let now = self.clock.now_ms();
         let ended: Vec<String> = entries
@@ -405,7 +405,7 @@ mod tests {
         serde_json::from_value(json).expect("request")
     }
 
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-0028
     #[test]
     fn a_subject_takes_only_the_organization_and_its_unit_within_bounds() {
         for unknown in ["common_name", "country", "email"] {
@@ -442,7 +442,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-0028
     #[test]
     fn a_certificate_lives_ten_days_by_default_at_most_ninety_and_never_past_its_ca() {
         let (record, _, _) = fixture(u64::MAX);
@@ -464,7 +464,7 @@ mod tests {
     }
 
     /// A CA that has ended signs nothing: its certificate would be dead on arrival.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-0028
     #[test]
     fn an_ended_ca_issues_nothing() {
         let (record, _, _) = fixture(1_000);
@@ -476,7 +476,7 @@ mod tests {
 
     /// After the bootstrap CA is replaced, what the old one issued no longer passes the
     /// handshake, so it is no longer listed.
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-0028
     #[test]
     fn what_a_replaced_ca_issued_is_forgotten() {
         let (record, clock, store) = fixture(u64::MAX);
@@ -497,7 +497,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-0028
     #[test]
     fn the_record_lists_what_is_valid_and_forgets_what_ended() {
         let (record, clock, store) = fixture(u64::MAX);
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(store.0.lock().unwrap().len(), 1, "the ended one is removed");
     }
 
-    /// Verifies: ADR-0032
+    /// Verifies: ADR-0028
     #[test]
     fn without_the_key_nothing_is_issued() {
         let store = Arc::new(MemoryStore::default());

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # Creates the certificates a development Server and Client need, since both refuse to run without
-# them (ADR-0012, ADR-0019), with the operator tool's `opamp-fleetctl pki init` (ADR-0025,
-# ADR-0032) — no openssl. Every certificate of the set says it is a development one:
-# `OpAMP Fleet Dev … CA`, `O=Development` (ADR-0033 clause 8).
+# them (ADR-0013, ADR-0021), with the operator tool's `opamp-fleetctl pki init`
+# (ADR-0028) — no openssl. Every certificate of the set says it is a development one:
+# `OpAMP Fleet Dev … CA`, `O=Development` (ADR-0028 clause 30).
 # Everything lands in one directory, gitignored, and is for a development machine only: the keys
 # are unencrypted and the CAs are throwaway.
 #
@@ -20,7 +20,7 @@
 #                  telemetry to the observability stack in observability/ commented out
 #
 # The development Client enrols like any other host, with a bootstrap pair the Server issues
-# (ADR-0032): start the Server, run `scripts/seed_test_configs.sh --enrol`, which writes the pair
+# (ADR-0028): start the Server, run `scripts/seed_test_configs.sh --enrol`, which writes the pair
 # into offline/ and approves the request, and start the Client while it waits.
 # Trust the server CA, offline/server-ca.pem, in curl and in the browser.
 #

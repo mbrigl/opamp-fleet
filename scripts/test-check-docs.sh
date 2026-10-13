@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0005 ADR-0008 ADR-0030
+# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0005 ADR-0008 ADR-0009
 #
 # Each case builds a throwaway git repository under a temporary directory — a rule file with
 # numbered sections, a README with a Project Layout block, the required-checks markers, and the
@@ -406,7 +406,7 @@ consolidation "$d" no wrap
 expect fail "a wrapped Supersedes field, the name on the second line not flipped" "$d" "0002-decision.md: 0003-decision.md supersedes it"
 
 # partial <dir> <status of ADR 1> <Supersedes entry suffix> — ADR 2 supersedes ADR 1, whole or by
-# clause (ADR-0030); ADR 1 carries the given status line, ADR 2 the given text after its link.
+# clause (ADR-0009); ADR 1 carries the given status line, ADR 2 the given text after its link.
 partial() {
   local dir="$1" status="$2" suffix="$3"
   adr "$dir" 1 "$status"
@@ -431,7 +431,7 @@ partial() {
   } > "$dir/docs/adr/README.md"
 }
 
-# --- cases: clause supersession (check 8). Verifies: ADR-0030 -------------------------------
+# --- cases: clause supersession (check 8). Verifies: ADR-0009 -------------------------------
 
 d="$(repo partial)"
 partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md)" " clause 2"

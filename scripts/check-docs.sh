@@ -51,7 +51,7 @@
 #      each other. Both are written in the same pull request but in two files
 #      (docs/adr/README.md), and check 1 cannot see a missing half: it only mirrors the index
 #      against whatever status the file carries. Every name of a Supersedes field counts, on
-#      whichever line it sits. An entry that names clauses supersedes only those (ADR-0030): its
+#      whichever line it sits. An entry that names clauses supersedes only those (ADR-0009): its
 #      ADR keeps an active status and carries a 'clause N superseded by ADR-NNNN' suffix, while
 #      an entry without clauses needs the ⚪ flip.
 #   9. Check-list agreement: the jobs in .github/workflows/checks.yml, the invocations in
@@ -366,7 +366,7 @@ check_adr_headers() {
 # superseding_numbers <status line> — the four-digit numbers every 'superseded by ADR-NNNN' on a
 # status line names, one per line, empty when it names none: the whole-supersession flip
 # ('⚪ superseded by ADR-NNNN') and every clause suffix ('🟢 accepted · clause 2 superseded by
-# ADR-NNNN', ADR-0030) alike. The citation may be plain or a Markdown link, so the bracket is
+# ADR-NNNN', ADR-0009) alike. The citation may be plain or a Markdown link, so the bracket is
 # optional (docs/adr/README.md asks for the link form).
 superseding_numbers() {
   grep -oE 'superseded by \[?ADR-[0-9]{4}' <<<"$1" | grep -oE '[0-9]{4}$'
@@ -392,7 +392,7 @@ supersedes_field() { header_field "$1" Supersedes; }
 
 # supersedes_entries <adr file> — one line per ADR the '**Supersedes:**' field names, starting
 # with its number: 'NNNN' for a whole supersession, 'NNNN clause' when the entry names clauses
-# (ADR-0030). An entry runs from its ADR's name to the next one, wrapped lines included.
+# (ADR-0009). An entry runs from its ADR's name to the next one, wrapped lines included.
 supersedes_entries() {
   supersedes_field "$1" | tr '\n' ' ' | sed -E 's/\[?ADR-([0-9]{4})/\n\1 /g' | tail -n +2 \
     | while read -r nr rest || [[ -n "$nr" ]]; do
@@ -408,7 +408,7 @@ check_adr_supersessions() {
     line="$(grep -m1 -F '**Status:**' "$f")"
 
     # Forward: every ADR this one claims to supersede — one, several whose decisions it
-    # consolidates, or named clauses of one (ADR-0030) — must carry the matching status line: ⚪
+    # consolidates, or named clauses of one (ADR-0009) — must carry the matching status line: ⚪
     # for a whole supersession, an active status with a clause suffix for a partial one.
     while read -r target kind; do
       [[ -n "$target" ]] || continue
@@ -951,7 +951,7 @@ check_template_release() {
 }
 
 # The Protocol Baseline — the pinned upstream opamp-spec version all protocol code is written
-# against (ADR-0010) — must stay a deliberate choice. scripts/check-protocol-baseline.sh holds the
+# against (ADR-0011) — must stay a deliberate choice. scripts/check-protocol-baseline.sh holds the
 # check, so its own self-test can drive it against fixtures; here its lines become this report's.
 check_protocol_baseline() {
   local helper="$ROOT/scripts/check-protocol-baseline.sh" output rc line said=0

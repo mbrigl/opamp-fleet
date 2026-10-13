@@ -1,5 +1,5 @@
 // Command opamp-go-harness puts opamp-go, the OpAMP reference implementation, at the far end of a
-// connection with this project's Server or Client (ADR-0010). It decides nothing: the Rust test
+// connection with this project's Server or Client (ADR-0011). It decides nothing: the Rust test
 // in crates/fleet-agent/tests/interop_opamp_go.rs drives the scenarios and asserts on both ends.
 //
 // The harness reports what opamp-go sees as one JSON object per line on stdout, and takes

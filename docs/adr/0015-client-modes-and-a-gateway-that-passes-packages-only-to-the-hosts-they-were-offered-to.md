@@ -1,4 +1,4 @@
-# ADR-0014: One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits by client certificate over mutual TLS 1.3, refuses what the Server revoked, and passes on a package only to the host it was offered to, and a Supervisor Endpoint that admits only the process its Supervisor started
+# ADR-0015: One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits by client certificate over mutual TLS 1.3, refuses what the Server revoked, and passes on a package only to the host it was offered to, and a Supervisor Endpoint that admits only the process its Supervisor started
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-06
@@ -7,7 +7,7 @@
 
 ## Context
 
-[ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md) has a Gateway pass on the uploaded artifacts it holds for the
+[ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) has a Gateway pass on the uploaded artifacts it holds for the
 Agents behind it only to a host whose Agent it relayed the Server's offer of that artifact to, and
 answer every other download request `404`. What a downstream peer is admitted to and what it may
 receive from the Gateway are one question about the downstream hop, so the bound belongs in the
@@ -43,7 +43,7 @@ convenience"; G-17, "the Server accepts only authenticated Agent identities").
 Gateway: the Server sees the Gateway's certificate, and the downstream one stays on the downstream
 hop. A fleet-wide credential did not identify an Agent behind a Gateway either, and every host held
 it, so its removal takes no identity away. A Gateway's certificate already speaks for any Agent
-once an operator marks its host as a Gateway ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7).
+once an operator marks its host as a Gateway ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7).
 
 **A Gateway must not invent messages.** The specification forbids resolving a protocol gap by
 inventing semantics of this project's own. When something fails on one side of a hop, the tempting
@@ -55,7 +55,7 @@ downstream Client is alive.
 startup; ten connections for a gateway in front of three Agents is worse than three.
 
 **The Supervisor Endpoint is open to every local process unless it asks for a proof.** Every
-Supervisor serves it on `127.0.0.1` (clause 2, [ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)
+Supervisor serves it on `127.0.0.1` (clause 2, [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)
 clause 5), where a Collector's `opampextension` reports its description, health and effective
 configuration. An endpoint that authenticates nothing lets any process on the host connect and
 report in the Collector's name, and the fleet's view of that Agent becomes forgeable from the
@@ -85,7 +85,7 @@ Supervisor Endpoint that does not present it as `Authorization: Bearer <token>`.
    it is in.
 
 2. **Every Supervisor exposes a Supervisor Endpoint, unconditionally.** It binds `127.0.0.1` on the
-   block's `endpoint_port` ([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) before the Managed
+   block's `endpoint_port` ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) before the Managed
    Process starts, so a taken port fails startup. It is WebSocket-only, declares `AcceptsStatus` and
    `AcceptsEffectiveConfig`, and folds what the process reports into the owning Agent, whose
    `instance_uid` stays the Supervisor's. For a Managed Process that speaks no OpAMP nothing ever
@@ -108,10 +108,10 @@ Supervisor Endpoint that does not present it as `Authorization: Bearer <token>`.
    connection cannot carry the Server's pushes to the Agents behind the Gateway.
 
 5. **The downstream endpoint serves both transports.** A downstream Client picks its transport by
-   the scheme of its endpoint ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)), so the
+   the scheme of its endpoint ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)), so the
    Gateway serves a WebSocket upgrade and a plain-HTTP POST on `/v1/opamp`, with the Baseline's
    message size limit, protobuf media type and gzip rules enforced per hop through the shared
-   `opamp::endpoint` helpers ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) clause 17).
+   `opamp::endpoint` helpers ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) clause 17).
 
 6. **axum serves it, as an ordinary dependency of the Client crate behind no Cargo feature.** The
    mode lives in `crates/fleet-agent/src/gateway/` (`mod.rs` the endpoint, `pool.rs` the upstream pool,
@@ -139,7 +139,7 @@ Supervisor Endpoint that does not present it as `Authorization: Bearer <token>`.
     `agent_disconnect` it sends is forwarded like any other message. If it just goes away, its routes
     are released and the Gateway forwards nothing. Such an Agent stays connected in the fleet view
     with a `last_seen_ms` that stops advancing, and reads as stale once its staleness budget runs out
-    when it declared `ReportsHeartbeat` ([ADR-0022](0022-the-fleet-record.md)).
+    when it declared `ReportsHeartbeat` ([ADR-0024](0024-the-fleet-record.md)).
 
 11. **The downstream handshake and the Server's revocation list are a downstream Agent's
     admission; the Gateway holds no policy of its own, and its own hop is its own.** Mutual TLS is
@@ -150,14 +150,14 @@ Supervisor Endpoint that does not present it as `Authorization: Bearer <token>`.
     admission refusal the Gateway makes beyond the handshake, and it is the Server's. Beyond
     admission the Gateway refuses one thing: it passes on an uploaded artifact from its package
     cache only to a host whose Agent it relayed the Server's offer of that artifact to, and answers
-    every other download request `404` ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 45). What a host may
-    receive is the Server's own bound (ADR-0024 clause 37), applied to what the Server sent through
+    every other download request `404` ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 45). What a host may
+    receive is the Server's own bound (ADR-0026 clause 37), applied to what the Server sent through
     this Gateway. Three parts of that refusal are the Gateway's own: it binds an `instance_uid` to
     the host of the first report for it, it answers `404` for an artifact too large for its cache
-    or whose fetch failed, and it answers `503` while a fetch runs (ADR-0024 clauses 42, 45, 47).
+    or whose fetch failed, and it answers `503` while a fetch runs (ADR-0026 clauses 42, 45, 47).
     The client CA and the list are the Server's, so the Gateway applies the Server's admission
     policy and holds no admission policy of its own
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clauses 7, 13). Upstream the Gateway presents
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clauses 7, 13). Upstream the Gateway presents
     the Client's own identity, so every downstream Agent arrives as a member, under the Gateway's
     certificate. The Gateway forwards no `Authorization`: one a downstream peer sends is ignored,
     never refused, and nothing is sent upstream in its place. The downstream hop speaks TLS 1.3
@@ -173,7 +173,7 @@ Supervisor Endpoint that does not present it as `Authorization: Bearer <token>`.
     does not carry is dropped with a log line, never broadcast.
 
 14. **The Gateway refuses what the Server revoked, and admits nobody while it cannot know.** The
-    Gateway fetches the revoked certificates of the fleet's client CA from its Server ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
+    Gateway fetches the revoked certificates of the fleet's client CA from its Server ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
     clause 43) over its own upstream origin, with its own certificate and no `Authorization`, every
     `REVOCATION_REFRESH` (30 s), conditionally on the list it holds. It keeps the list in memory
     only. A downstream peer whose certificate is on the list is answered `401` after the handshake
@@ -226,7 +226,7 @@ Supervisor Endpoint token on disk.
   duplicates it and forces every change of it to reach every gateway. The Gateway applies two
   things of the Server's: the client CA the Server issues from and the revocation list.
 - **A per-Agent proof that travels end to end through the Gateway.** No proof of that kind exists
-  on the Agent plane ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). A fleet-wide
+  on the Agent plane ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). A fleet-wide
   credential forwarded in a header proved membership, which the downstream handshake already
   proves, and identified no Agent.
 - **Keeping the upstream pool partitioned by downstream peer.** Nothing peer-specific travels
@@ -322,7 +322,7 @@ Supervisor Endpoint token on disk.
 - Positive: another local account can no longer report in a Managed Process's name.
 - Negative / trade-offs: behind a Gateway the Server judges no proof of a downstream Agent; the
   Gateway's handshake and the list are the whole admission. A compromised Gateway speaks for any
-  Agent, which the admission decision already accepts for a marked Gateway ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7). A
+  Agent, which the admission decision already accepts for a marked Gateway ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7). A
   Gateway whose `client_ca_file` names anything but the fleet's client CA admits what the Server
   never issued, and the Server cannot see that file; the manual and review hold it. An unmarked
   Gateway is refused the list and so admits nobody, which keeps that reliance to the hosts an
@@ -347,7 +347,7 @@ Supervisor Endpoint token on disk.
   may receive is the Server's bound applied to the offers the Server sent through the Gateway, and
   the `404` reads as the Server's for an artifact it does not hold. The binding of an
   `instance_uid` to the host of its first report, and the answers for an artifact too large, not
-  fetched or still being fetched, are the Gateway's own decisions (ADR-0024 clauses 42, 45, 47).
+  fetched or still being fetched, are the Gateway's own decisions (ADR-0026 clauses 42, 45, 47).
 - Negative / trade-offs: every Collector configuration that reports through the Supervisor Endpoint
   must name the header; one that does not stops reporting its own state. A process running as root,
   or as the Client's own account, can still read the token from the child's environment.
@@ -378,7 +378,7 @@ Supervisor Endpoint token on disk.
 - `crates/fleet-agent/src/supervisor/endpoint.rs`: `extension_reports_are_folded_into_process_events` and
   `shutdown_stops_the_endpoint` (clause 2); `crates/fleet-agent/src/config.rs`:
   `the_gateway_agent_cap_defaults_and_rejects_zero` (clause 4).
-- Each marked `Verifies: ADR-0014`: `crates/fleet-agent/src/config.rs`
+- Each marked `Verifies: ADR-0015`: `crates/fleet-agent/src/config.rs`
   `a_gateway_without_mutual_tls_is_refused_at_load` — no `[gateway.tls]`, and a section without
   `client_ca_file` (clause 4);
   [`crates/fleet-agent/tests/gateway_tls.rs`](../../crates/fleet-agent/tests/gateway_tls.rs)
@@ -394,7 +394,7 @@ Supervisor Endpoint token on disk.
   `an_unmarked_gateway_admits_nobody` and `a_gateway_whose_list_goes_stale_admits_nobody`, run
   against a Server that reads no `Authorization`; `crates/fleet-agent/src/gateway/revocations.rs`
   `the_verdict_follows_the_list_and_its_age`.
-- Through the real Gateway and Server, each marked `Verifies: ADR-0014`:
+- Through the real Gateway and Server, each marked `Verifies: ADR-0015`:
   [`crates/fleet-agent/tests/gateway_tls.rs`](../../crates/fleet-agent/tests/gateway_tls.rs)
   `downstream_peers_with_different_certificates_share_one_upstream_connection` — two peers, an
   `upstream_connections` of `1`, both Agents reach the Server (clauses 7, 11);
@@ -404,7 +404,7 @@ Supervisor Endpoint token on disk.
   `the_revocation_list_is_fetched_without_authorization`, even with an `[auth]` section left in
   `supervisor.toml` (clause 14).
 
-- The download bound of clause 11, marked `Verifies: ADR-0014` beside ADR-0024:
+- The download bound of clause 11, marked `Verifies: ADR-0015` beside ADR-0026:
   [`crates/fleet-agent/tests/gateway_package_cache.rs`](../../crates/fleet-agent/tests/gateway_package_cache.rs)
   `another_host_and_a_certificate_naming_no_host_are_answered_as_for_an_artifact_not_held` and
   `a_revoked_certificate_is_refused_on_the_download_route`.

@@ -1,4 +1,4 @@
-# ADR-0020: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash
+# ADR-0022: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-06
@@ -8,14 +8,14 @@
 ## Context
 
 The Agent plane admits by client certificate alone
-([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), so there is no fleet credential to
+([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), so there is no fleet credential to
 offer, rotate or revoke and none for the record to cover, and the audit-availability gate of
 clause 6 holds back certificate issuance.
 
 Every security measure of the Server decides something about a peer: admission and its refusal
-([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), the throttle, an enrolment request
+([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), the throttle, an enrolment request
 and its approval, a certificate issued or renewed, a revocation and the sessions it ended
-([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), a rollout ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) and a
+([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)), a rollout ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) and a
 package outcome an Agent reports. Without a record of their own these leave log lines at best,
 mixed with everything else, kept as long as whatever collects the log keeps it, and changeable by
 whoever can write the log. None of them is demonstrable afterwards: an investigation cannot say who

@@ -1,4 +1,4 @@
-# ADR-0024: A Package is one release of an Agent type at a version, a Deployment that signs it is the only thing rolled out, a host or a Gateway fetches only what its Agents are offered, and a Supervisor installs only a signed package from an allowed source and rolls back only to a predecessor
+# ADR-0026: A Package is one release of an Agent type at a version, a Deployment that signs it is the only thing rolled out, a host or a Gateway fetches only what its Agents are offered, and a Supervisor installs only a signed package from an allowed source and rolls back only to a predecessor
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-10
@@ -24,12 +24,12 @@ verifies, installs and reports each package through `Downloading → Installing 
 InstallFailed`. The path runs from what the Server holds and how an artifact gets there, through
 how an operator aims, signs and releases it and who may fetch it, to the Agent that downloads,
 verifies, unpacks, swaps, health-gates and rolls it back. When content reaches an Agent and the
-version test it must pass are [ADR-0023](0023-rollout-and-what-reaches-an-agent.md)'s.
+version test it must pass are [ADR-0025](0025-rollout-and-what-reaches-an-agent.md)'s.
 
 The store, and which of the held artifacts can be meant for a given Agent at all:
 
 - **A release is one version across several artifacts.** The release pipeline
-  ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)) publishes five platform builds
+  ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)) publishes five platform builds
   of one version, and upstream projects publish more. The store needs an object that *is* that
   release, or "which version is this at" has one answer per platform and a half-finished upload
   looks like a rollout in progress.
@@ -54,13 +54,13 @@ The store, and which of the held artifacts can be meant for a given Agent at all
   entry's headers may carry a bearer token, and a plaintext request hands it to every network
   between the Agent and the source.
 - **The Agent type is a fact the Server can read.** Every Agent this Client presents reports its
-  type as `service.name` ([ADR-0015](0015-what-an-agent-reports-about-itself.md)), which the
+  type as `service.name` ([ADR-0016](0016-what-an-agent-reports-about-itself.md)), which the
   Baseline defines as "a reverse FQDN that uniquely identifies the Agent type".
 
 What identifies a Package — its name on the wire, its hash, its layout and routes — and how a
-Package is aimed, signed and released: [ADR-0023](0023-rollout-and-what-reaches-an-agent.md)
-clause 9 requires an aim, its resource-level act ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 5) needs an object to name, and
-[ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 19 asks for counts. Four observations shape it:
+Package is aimed, signed and released: [ADR-0025](0025-rollout-and-what-reaches-an-agent.md)
+clause 9 requires an aim, its resource-level act ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 5) needs an object to name, and
+[ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 19 asks for counts. Four observations shape it:
 
 - **A name beside the Agent type is a second identity for one thing.** The type decides fit; a
   free-form name would decide nothing but would group, and the only thing it could add — two
@@ -74,9 +74,9 @@ clause 9 requires an aim, its resource-level act ([ADR-0023](0023-rollout-and-wh
   match one Agent, "which artifact does this host get" becomes a computation across all of them —
   a specificity ranking with ties to refuse — which no operator can read off any one object.
 - **A Selector cannot say "not".** Every Selector is equality over the effective description
-  ([ADR-0021](0021-configurations-and-the-rest-api.md)); "everyone except the canary hosts" is not
+  ([ADR-0023](0023-configurations-and-the-rest-api.md)); "everyone except the canary hosts" is not
   writable. Disjoint targets must come from membership — which is what Server-set labels
-  ([ADR-0022](0022-the-fleet-record.md)) and provisioned attributes already are.
+  ([ADR-0024](0024-the-fleet-record.md)) and provisioned attributes already are.
 
 What an operator signs off on is a release to a set of machines, not a pile of bytes; and a rollout
 should name "what this channel runs", not *n* artifacts nothing holds together. The package store
@@ -86,15 +86,15 @@ The download route serves an uploaded artifact's bytes on the Agent plane
 (clause 13,
 clause 20). It sits behind the
 same TLS handshake as `/v1/opamp`
-([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
+([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)
 clause 8) and requires a certificate from the client CA
-([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23). Admission decides fleet
+([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23). Admission decides fleet
 membership. None of these says which member may fetch which artifact. Today
 `download_package` serves any artifact in the store to any member that names it: type, version and
 Platform are all in the path and the query, and both are easy to guess.
 
 Membership is fleet-wide, but releases are not. A rollout releases a pinned Package to one Agent
-at a time ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clauses 2, 3, 5), and a
+at a time ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clauses 2, 3, 5), and a
 Deployment aims at a partition of the fleet by a host property such as `channel`, `region` or
 `tenant` (clause 25). With
 the route open, a host in one partition can fetch another partition's builds. It can fetch a
@@ -119,13 +119,13 @@ Forces on the download route and the Gateway:
 - **The host is the one bound the Server has.** A certificate proves fleet membership and the
   host it was issued to, not an Agent. An `instance_uid` belongs to the host whose certificate
   first reported it. A host marked as a Gateway speaks for any Agent
-  ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7). Admission is a fleet-wide
-  trust boundary, and within it the host is the only bound between Agents ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 14). Any test of
+  ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7). Admission is a fleet-wide
+  trust boundary, and within it the host is the only bound between Agents ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 14). Any test of
   "may fetch" can be no finer than the host.
 - **What reaches an Agent is already decided, per Agent.** Its package offer is composed from its
   assignment alone. The offer is the assigned Package's entry for the Platform the Agent reports,
   signed by the Deployment that released it
-  ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 3,
+  ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 3,
   clause 28). Type fit is a
   mandatory precondition of every offer
   (clause 9). The download
@@ -136,8 +136,8 @@ Forces on the download route and the Gateway:
   after the rollout is still offered the old type's Package.
 - **Configurations already reach only their own Agent.** A composed config map travels in the
   `ServerToAgent` addressed to one `instance_uid`. It is composed from what was released to that
-  Agent ([ADR-0021](0021-configurations-and-the-rest-api.md) clauses 6, 7,
-  [ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 3). It answers only reports the host
+  Agent ([ADR-0023](0023-configurations-and-the-rest-api.md) clauses 6, 7,
+  [ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 3). It answers only reports the host
   may make for that `instance_uid`. No route on the Agent plane serves configurations.
 - **Without a cache in the Gateway, downloads behind it do not reach the Server.** A Client resolves a path
   `download_url` against its own OpAMP endpoint (`resolve_url` in
@@ -147,7 +147,7 @@ Forces on the download route and the Gateway:
   not the Client's own origin, so `Sources::permit` refuses it unless it is listed in `[packages]
   allowed_sources`. If it is listed, the Client fetches it with its anonymous client, which
   presents no certificate, and the Server's handshake refuses it
-  ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23). A Client behind a
+  ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23). A Client behind a
   Gateway that serves no download route therefore receives only referenced artifacts, and the only
   downloads a Gateway's certificate makes are those of the Gateway host's own Agents.
 - **A partition is only as strong as the hosts it partitions.** A Selector matches the effective
@@ -157,7 +157,7 @@ Forces on the download route and the Gateway:
   (`labels::effective_description`). A compromised host can therefore report another partition's
   key and value, such as the Client's own `[attributes]` table would, under a fresh
   `instance_uid`. That Agent waits in the fleet view
-  ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 6). The next bulk rollout of that
+  ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 6). The next bulk rollout of that
   partition's Deployment assigns it, and the host can then fetch what was released to it. This
   holds for a partition set by a Server label as well, because a reported attribute with the
   label's key satisfies the same Selector. What this decision bounds is fetching what was released
@@ -172,14 +172,14 @@ Forces on the download route and the Gateway:
   the Gateway was placed to spare, and asks the Server's store and its fleet lock n times.
 - **Relaying each request costs what the cache saves.** A Gateway that relays the route fetches
   with its own certificate, because it terminates the downstream handshake and presents its own
-  upstream ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)
+  upstream ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)
   clause 11); no downstream certificate ever reaches the Server. Every relayed request costs one
   token of the Gateway's aggregate bucket (clause 40,
-  [ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) clause 22), so a rollout to more
+  [ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) clause 22), so a rollout to more
   Agents than that bucket's burst throttles itself by its own size, and every byte still crosses
   the link once per Agent.
 - **The Gateway already sees every offer it carries.** Each `ServerToAgent` for an Agent behind it
-  passes through its registry on the way down ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clause 13), with the offer's
+  passes through its registry on the way down ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clause 13), with the offer's
   `download_url` and `content_hash`. The registry knows which downstream connection carries the
   Agent, and so the certificate that connection presented. The Gateway forwards the message
   unchanged; reading it changes nothing on the wire.
@@ -190,7 +190,7 @@ Forces on the download route and the Gateway:
   that clause 37 closes at the Server.
 - **A downstream host is named the way the Server names it.** A host behind a Gateway enrols with
   the Server directly or is provisioned by an operator
-  ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 25). A certificate the Server
+  ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 25). A certificate the Server
   issued carries `urn:opamp-fleet:host:<id>`, and an operator who provisions by hand names the host
   with that SAN URI (clause 37). The Gateway reads it from its own handshake. The host register is
   the Server's, and the Gateway does not hold it.
@@ -212,14 +212,14 @@ forces on the Agent:
 - **A running process cannot reliably replace its own binary**, so the work crosses a process
   boundary (the specification's *Updater*). For a Managed Process that boundary already exists:
   the Supervisor owns its process's stop, spawn and apply-grace health gate
-  ([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). The Client's own binary is the other case
-  ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)).
+  ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). The Client's own binary is the other case
+  ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)).
 - **Verification protects the host; the source set bounds what is exposed.** An artifact URL may
   point at the Server's download route or at a mirror or release page, so what stands between the
   bytes and an executed program is the content hash and an Ed25519 signature made with a key the
   operator holds (the Baseline's *Code Signing* section leaves the method to the Agent). The
   `ring` provider the build already carries
-  ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)) verifies Ed25519. A hash alone
+  ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)) verifies Ed25519. A hash alone
   proves only that the bytes are the ones the offer named, and whoever can make the offer names
   the hash too. The transport still decides what a download exposes: the offer's `headers` are an
   operator's token, the Client's certificate is its fleet identity, and an unbounded set of
@@ -276,15 +276,15 @@ starts, and keep the superseded version for a configurable window.
    to an old one. There is no untyped package and no moment in which one exists. The store keeps
    every version openly as its own package until an operator deletes it — there is no hidden
    "previous" artifact and no automatic pruning, and the store is not where rollback happens
-   ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 18). The type is compared
-   **raw** (clause 9); the version orders as [ADR-0011](0011-versions-resolved-in-the-internal-crate.md) clause 9 orders versions.
+   ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 18). The type is compared
+   **raw** (clause 9); the version orders as [ADR-0012](0012-versions-resolved-in-the-internal-crate.md) clause 9 orders versions.
 
 3. **A package holds one entry per Platform, so a duplicate is unrepresentable.** Entries are a map
    keyed by the canonical `(os, arch)` pair. Writing an entry for a Platform the package already
    holds replaces it; deleting the last one leaves an empty package, kept, because a package being
    assembled is a normal state and deleting the package is its own act. One entry suffices; five
    platforms are five entries under one identity. When an entry may be written at all is
-   [ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 8's rule.
+   [ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 8's rule.
 
 4. **An entry is an uploaded artifact or a reference to one.**
    - **Uploaded:** the body of an entry upload is the artifact. The Server streams it to a staging
@@ -339,7 +339,7 @@ starts, and keep the superseded version for a configurable window.
    - the Client reports `host.arch` as `amd64`/`arm64` and `os.type` as `darwin`, mapping Rust's
      constants, so a Supervisor and a Collector's `opampextension` report the same string;
    - the release artifacts carry the same two tokens in their file names (the file-name format is
-     [ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)'s), so the upload of a release
+     [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)'s), so the upload of a release
      is a loop over the Client's archives with `os` and `arch` read straight out of each name.
 
 8. **A request that names bytes names their Platform; one that names the package does not.** The
@@ -358,7 +358,7 @@ starts, and keep the superseded version for a configurable window.
 
    An Agent that reports no type, or no `os.type` or `host.arch`, fits nothing. A per-Agent rollout
    act refused on fit says which of the three it was. A label can never supply or override these
-   attributes ([ADR-0022](0022-the-fleet-record.md)), so a slip there cannot hand a host an artifact
+   attributes ([ADR-0024](0024-the-fleet-record.md)), so a slip there cannot hand a host an artifact
    built for another machine.
 
 10. **The Platform does not travel on the wire.** All Agents of one type are offered the package
@@ -372,7 +372,7 @@ starts, and keep the superseded version for a configurable window.
     saying the Server decides. Type fit is also the second, independent guard on the Client's own
     binary: the Server does not offer a package of another type to the Client's Agent, whatever it
     is called, and the Client still refuses an offer outside its `[self_update]` consent
-    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)) — one side refuses to send, the other to
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)) — one side refuses to send, the other to
     install.
 
 12. **The store opens loudly or not at all.** At startup every package's metadata is read and every
@@ -383,7 +383,7 @@ starts, and keep the superseded version for a configurable window.
     silently drops a package looks like one that was never given it.
 
 13. **Uploaded artifacts are served on the Agent plane.** The download route is the one `/api/v1`
-    route on the Agent-plane listener ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)),
+    route on the Agent-plane listener ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)),
     not on the operator plane and not in the OpenAPI document; it streams the file and never holds
     it in memory. The offered `download_url` is a path the Client resolves against its own OpAMP
     endpoint, or `advertised_url` plus that path where downloads must go through another host.
@@ -408,7 +408,7 @@ starts, and keep the superseded version for a configurable window.
 16. **Two names are derived, and they answer different questions.** The **wire name** is the Agent
     type alone: the `PackagesAvailable` map key, the key an Agent reports its `PackageStatuses`
     under, and the value the Client's `[self_update] package` is compared against
-    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)). It must be stable across versions. The
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)). It must be stable across versions. The
     **display name** is `<agent_type> <version>` — the UI and the log. Using one name in both places
     would break the Client's self-update guard on every release or make the fleet view unreadable.
 
@@ -439,13 +439,13 @@ starts, and keep the superseded version for a configurable window.
     no Selector route and no rollout route; the OpenAPI document follows.
 
 21. **The version test reads the claim under the Agent type**, because that is the key an Agent
-    reports its status under; [ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clauses 10–13
+    reports its status under; [ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clauses 10–13
     are otherwise unchanged.
 
 22. **A Deployment is a name, a Selector, Packages and signatures.** The name — the one human-chosen
     label in the model — follows the grammar a Configuration's name follows: 1–32 lowercase letters,
     digits and `-`, not starting or ending with `-`, no Windows device name. The Selector is
-    [ADR-0021](0021-configurations-and-the-rest-api.md)'s equality pairs over the effective
+    [ADR-0023](0023-configurations-and-the-rest-api.md)'s equality pairs over the effective
     description, labels included. A Deployment is persisted as
     `<packages_dir>/deployments/<name>.json`, owner-only; a file that does not parse or whose name
     disagrees with its content fails startup naming it. `PUT /api/v1/deployments/{name}` creates it
@@ -496,7 +496,7 @@ starts, and keep the superseded version for a configurable window.
     The same Package in two Deployments is signed in each.
 
 29. **Rollout acts name a Deployment.** `POST /api/v1/deployments/{name}/rollout` releases to every
-    Agent it claims and would move ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clauses 9–13), skipping Agents another Deployment also
+    Agent it claims and would move ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clauses 9–13), skipping Agents another Deployment also
     claims, and answers `assigned_agents`; a Deployment holding no Package is refused (`409`). **A
     Deployment that lacks a signature for any entry of any Package it holds is refused (`409`)**,
     with a message naming each such Package by its display name and the platforms it is unsigned
@@ -578,25 +578,25 @@ this object is called a Deployment.
 
 36. **An offer stands until the assignment changes, not until it was last sent.** The hash gate
     suppresses re-sending an offer whose `all_packages_hash` the Agent has echoed
-    ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 3). It does not withdraw the
+    ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 3). It does not withdraw the
     offer, so an Agent retrying after a failed install can fetch again. Neither connection state nor
-    the version test ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 17) enters the
+    the version test ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 17) enters the
     test. Matching does not enter it either: a version that waits for an operator's press is no
     one's offer, and it cannot be fetched until the press releases it.
 
 37. **What a certificate speaks for.** The host a member certificate names
-    (`urn:opamp-fleet:host:<id>`, [ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
+    (`urn:opamp-fleet:host:<id>`, [ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
     clause 7) speaks for the `instance_uid`s bound to it in the host register. A host marked as a
     Gateway speaks for any Agent: the register binds no `instance_uid` to it, and the Server keeps
     no record of which Agents a Gateway carries. A Gateway's certificate therefore may fetch what is
     offered to any Agent. A certificate that names no host speaks for no Agent and fetches nothing.
     A Client whose Server signs CSRs holds a host certificate after its first connection
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 9). An operator who
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 9). An operator who
     provisions certificates by hand names the host with that SAN URI. A Server started without
     `[client_ca]` logs one notice at startup: uploaded artifacts reach only hosts whose certificate
     names a host (`urn:opamp-fleet:host:<id>`). A request that presents no certificate at all exists
     only behind `Admission::open`, which serves tests and loopback development and which no Server
-    configuration serves ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 6). Such
+    configuration serves ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 6). Such
     a request is not tested for an offer, just as it is not tested at admission.
 
 38. **Every other request for an artifact is answered `404`, as for one that does not exist.** The
@@ -606,7 +606,7 @@ this object is called a Deployment.
     - a malformed identity or Platform token is still `400`, which concerns syntax and reveals
       nothing about the store;
     - admission refusals (no member certificate, a bootstrap certificate, a revoked certificate)
-      are still `401` ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23).
+      are still `401` ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23).
 
 39. **The handler decides, after it has parsed the request.** `download_package` parses the
     identity (`PackageId::new`) and the Platform (`query.platform()`) as it does now, so one parser
@@ -616,20 +616,20 @@ this object is called a Deployment.
     the fleet `Fleet::offers_artifact(host, id, platform)`, which reads the host register
     (`Revocations::speaks_for`) and the Agent records under the fleet lock. Only after that does it
     look for the file. `admit_download` keeps only admission
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23) and records
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23) and records
     `download.admitted` as now. A request that fails the offered test is also recorded as
     `download.refused`, outcome `refused`, with check `not offered`, the host, the certificate's
     serial and the requested type, version and Platform. That entry goes through the refusal
-    aggregation of [ADR-0020](0020-an-append-only-audit-record-chained-by-hash.md) clause 5. It does
+    aggregation of [ADR-0022](0022-an-append-only-audit-record-chained-by-hash.md) clause 5. It does
     not count toward the admission throttle
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 24): the handshake
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 24): the handshake
     succeeded, so the refusal is not a guess at a credential, and counting it would throttle every
     member behind the same address.
 
 40. **Each download request is counted against the requesting host's rate.** It costs one token
-    from that host's bucket of [ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md). A
+    from that host's bucket of [ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md). A
     download names no `instance_uid`, so for a host marked as a Gateway the token comes from the
-    Gateway's aggregate bucket ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) clause 22). That bucket bounds how often a Gateway's request
+    Gateway's aggregate bucket ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) clause 22). That bucket bounds how often a Gateway's request
     can scan the fleet's records under the fleet lock.
 
 41. **Configurations: no change.** An Agent already receives only its own composed map, over
@@ -646,7 +646,7 @@ this object is called a Deployment.
     (clause 53). Clause 37 lets a
     marked Gateway fetch what is offered to any Agent, and each request costs one token of its
     aggregate bucket (clause 40). The message itself is forwarded unchanged and without waiting for
-    the fetch ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). At most four fetches run at a time; further ones wait for a free slot. A
+    the fetch ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). At most four fetches run at a time; further ones wait for a free slot. A
     `429` or `503` from the Server with `Retry-After` defers the fetch within the bound of clause 49,
     and a deferred fetch gives its slot back while it waits and takes one again before it asks
     anew. Once its first 60 seconds have passed, a fetch is cut at the first chunk that finds it
@@ -666,7 +666,7 @@ this object is called a Deployment.
     all: the downstream Client's own origin is the Gateway, so `Sources::permit` refuses the Server's
     URL unless `[packages] allowed_sources` lists it, and if it is listed the Client presents no
     certificate there and the Server's handshake refuses it
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23).
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 23).
 
 44. **The Gateway stores and serves only bytes that match the offer's hash.** An artifact is the
     offered path, query included, together with the offer's `content_hash`. The fetch streams the
@@ -682,13 +682,13 @@ this object is called a Deployment.
     the handshake and the revocation verdict of its `/v1/opamp`: a certificate from
     `client_ca_file` is required, a revoked one is answered `401` and every request is answered
     `503` while the Gateway holds no current list
-    ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clauses 11, 14).
+    ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clauses 11, 14).
     - **Binding.** An `instance_uid` is bound to the host (`urn:opamp-fleet:host:<id>`) of the
       certificate of the first downstream connection that reports for it since the Gateway
       started, as the Server binds an `instance_uid` to the host that first reports it
-      ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7). A report over a
+      ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7). A report over a
       certificate that names no host binds nothing. A host holds at most `max_carried_agents`
-      bindings ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clause 4); past that its report for a new `instance_uid` binds nothing,
+      bindings ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clause 4); past that its report for a new `instance_uid` binds nothing,
       and that is logged. The Gateway holds at most 1 000 000 bindings in all; past that a new
       binding takes the place of the least recently reported binding whose `instance_uid` has
       neither a downstream route nor a current offer, and when there is none, it binds nothing,
@@ -717,10 +717,10 @@ this object is called a Deployment.
     The bound on what a host receives is clause 37's, applied to what the Server sent through the
     Gateway. The binding, the `404` for an artifact too large or not fetched, and the `503` while a
     fetch runs are the Gateway's own. Together they are the one refusal beyond admission that
-    [ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clause 11 allows a Gateway.
+    [ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clause 11 allows a Gateway.
 
 46. **The Gateway logs what it refuses; it keeps no audit record.** The audit record is the
-    Server's ([ADR-0020](0020-an-append-only-audit-record-chained-by-hash.md)). A downstream
+    Server's ([ADR-0022](0022-an-append-only-audit-record-chained-by-hash.md)). A downstream
     request answered `404` because no offer of that artifact was recorded for the requesting host
     is logged at `info` with the host (or that the certificate names none), the certificate's
     serial and the requested path without its query. An offer not recorded because its
@@ -758,9 +758,9 @@ this object is called a Deployment.
 49. **A Client waits as its own Server origin asks before it reports a download failed.** A `429`
     or `503` with a `Retry-After` in seconds, answered by the Client's own Server origin — the
     Gateway behind one, otherwise the Server, whose rate limit answers `429` with `Retry-After: 30`
-    ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) clause 24, whose follow-up this
+    ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) clause 24, whose follow-up this
     is) and whose admission throttle answers `429` with the seconds of back-off left
-    ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 24) — is waited out and the
+    ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 24) — is waited out and the
     download sent again. Each wait is the `Retry-After`, at least 1 second and at most 60 seconds.
     The asking stops 30 minutes after the first request of the download, counting the requests as
     well as the waits: a wait that would end past that point is not begun. Past it, or for a
@@ -777,9 +777,9 @@ this object is called a Deployment.
 50. **The Supervisor is the updater, and only a Client holding a verification key takes
     packages.** With `[packages] verification_key` set, every Supervisor-backed Agent declares
     `AcceptsPackages` and `ReportsPackageStatuses` (every Managed Process is one this Client
-    installed, [ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Without it, no Agent of
+    installed, [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Without it, no Agent of
     this Client declares `AcceptsPackages` — neither a Supervisor nor the Client's own Agent
-    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)) — and the Client says so at startup, once,
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)) — and the Client says so at startup, once,
     naming `[packages] verification_key` as what to set. A package offered to such an Agent
     regardless is ignored: nothing is downloaded, and an Agent that declared no package capability
     reports no package status. A verified artifact travels to the Supervisor as the Port command
@@ -840,8 +840,8 @@ this object is called a Deployment.
       debug print, and the logged source URL drops its query, fragment and credentials.
     - The Client presents its client certificate only to the Server's own origin, whose download
       route is reached through the Agent plane's TLS handshake and stays outside the credential check
-      ([ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
-      [ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). To any other
+      ([ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md),
+      [ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). To any other
       host, and on a hop that leaves the Server's origin, it presents none: an identity belongs to
       the Server, not to whoever hosts an artifact.
 
@@ -860,7 +860,7 @@ this object is called a Deployment.
     signature still covers the artifact exactly as published, archive and all — and holds for that
     type and version alone. Where a Deployment
     keeps the signature is clause 28. The same download and
-    verification serve the Client's own update ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)).
+    verification serve the Client's own update ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)).
 
 55. **The Agent opens the artifact; nothing between its author and the host repacks it.** The hash
     an Agent verifies is therefore the SHA-256 the artifact was published with — integrity runs in
@@ -874,7 +874,7 @@ this object is called a Deployment.
     opens an encrypted `.7z` (AES-256); the Server never learns it, so a confidential artifact is
     readable only on the host that runs it. It is one secret for the fleet — a single archive serves
     every Agent — and must never be the `[auth]` credential, which the Server rotates on its own
-    ([ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)) and would leave every archive
+    ([ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md)) and would leave every archive
     unopenable. It is masked in the configuration the Client reports. An encrypted archive without
     the key, or with the wrong one, fails naming the key. A `.zip` is never encrypted: an encrypted
     zip member refuses the archive and names `.7z` as the way.
@@ -892,7 +892,7 @@ this object is called a Deployment.
     relative path *inside* the package, e.g. `bin/fluent-bit`; absent, the package is one file. It
     is validated at startup — non-empty, relative, no `.` or `..` — and it says *where inside*,
     never *whether*: the program's bare file name stays the consent
-    ([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Being written in the
+    ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Being written in the
     configuration, the spawn path `program/tree/<program_path>` is known before any package exists.
     - `program_path` matches a member by its **trailing path components**, so `bin/fluent-bit`
       finds `fluent-bit-3.1.0/bin/fluent-bit` and stays right at the next release. No match fails
@@ -925,11 +925,11 @@ this object is called a Deployment.
     The artifact is unpacked to the staged name first, beside what runs; a raw artifact is moved
     there rather than copied when it can be. A kind that declares a preflight proves the staged
     program runs before anything is stopped
-    ([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clause 57). Then the Managed
+    ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clause 57). Then the Managed
     Process is stopped, the live name renamed to the predecessor, the staged name renamed to the
     live one — so the live name is always the old package or the new one, never a mixture — and
     the process is spawned and must survive `apply_grace_secs`
-    ([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Surviving is `Installed`, after which the
+    ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)). Surviving is `Installed`, after which the
     program is asked for its version again. A spawn failing with `ETXTBSY` right after the swap is
     retried briefly rather than rolled back. When there is nothing to run yet (no Configuration),
     the package is installed and reported `Installed`; the configuration that arrives starts it.
@@ -948,7 +948,7 @@ this object is called a Deployment.
     restart command is a fresh chance and resets the count; a run that outlasted the floor resets
     it too. This holds for a failed package, a rolled-back predecessor that will not start either,
     and a Configuration alike. Three is the self-update's give-up
-    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)), so the two update paths behave alike.
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)), so the two update paths behave alike.
 
 64. **The superseded version is kept for a window, then deleted.** After a successful apply the
     predecessor stays, and a marker beside it (`<predecessor>.until`, Unix seconds) records
@@ -964,7 +964,7 @@ this object is called a Deployment.
     the Supervisor's Agent type is refused before anything is downloaded, and so is one whose
     version precedes the installed one by Semantic Versioning's precedence. Versions that do not
     compare are not refused on that ground; the signature still binds them. The Client's own
-    update keeps its own rules ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)).
+    update keeps its own rules ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)).
 
 66. **The Client opens `.zip` as a third container beside `.tar.gz` and `.7z`.** It is detected by
     its leading bytes (clause 55), held to exactly the member and tree rules of clauses 57 to 59,
@@ -986,7 +986,7 @@ this object is called a Deployment.
     the same bytes and the same hash, and no accidental rollout.
 
 **Out of scope:** which package reaches which Agent and when
-([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)); verifying upstream sigstore/cosign
+([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)); verifying upstream sigstore/cosign
 signatures; a retention policy for superseded Packages; Deployments carrying Configurations;
 inequality in Selectors; refusing an overlapping Selector at write time; whether
 `[self_update] package` should be renamed, since its value is an Agent type; addons, and
@@ -995,7 +995,7 @@ referenced entry (`source`) is fetched from the operator's host under `[packages
 allowed_sources`, with whatever headers the offer carries (clauses 4 and 53), the Server is not in
 that download path, who can fetch from that host is decided there, and a Gateway does not cache
 such an artifact (clause 43); a bound finer than the host
-([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 14); roles, permissions and
+([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 14); roles, permissions and
 tenancy on the Operator plane; keeping the Gateway's cache and the offers it serves across a
 restart of the Gateway, and the Gateway's own Supervisors fetching through the cache; resuming an
 interrupted download with range requests; distributing the archive key, the verification key or
@@ -1019,7 +1019,7 @@ allowed origin; a reproducible tree mode for `opamp-fleetctl package pack`.
   object, and is indistinguishable from a half-finished upload. Two packages express that case
   explicitly.
 - **Encode the platform in the version** (`3.0.0+linux-amd64`). Needs no schema, and contradicts
-  [ADR-0011](0011-versions-resolved-in-the-internal-crate.md): build metadata is provenance and is not compared.
+  [ADR-0012](0012-versions-resolved-in-the-internal-crate.md): build metadata is provenance and is not compared.
 - **Canonicalise onto what Rust reports** (`x86_64`, `aarch64`). The smaller change; rejected
   because it makes this project's canonical spelling one that neither the conventions, nor the
   Collector, nor the release artifact uses — a private vocabulary maintained by a table, forever.
@@ -1091,18 +1091,18 @@ allowed origin; a reproducible tree mode for `opamp-fleetctl package pack`.
 - **Allow whatever is a candidate for the host's Agents** (what matching would release now). This
   would let a host fetch a build the operator saved but did not release. That breaks the rule that
   a release happens only by an operator's act
-  ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 1).
+  ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 1).
 - **Limit a Gateway to the Agents currently carried on its connections.** The Server would have to
   track which connection or host carries each Agent, which it does not do today: the register
   binds nothing to a Gateway, and `owner` is a WebSocket connection id. That tracking would buy
   nothing, because a Gateway's certificate may report under any `instance_uid`
-  ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 14) and so can receive any
+  ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 14) and so can receive any
   Agent's offer over OpAMP anyway.
 - **Treat a certificate that names no host as membership alone**, able to fetch anything offered.
   This would keep downloads unchanged for hand-provisioned certificates without the SAN URI. But it
   removes the bound for exactly the certificates the register cannot track.
 - **Bind certificates that name no host by their issuer and serial**, as
-  [ADR-0012](0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) keys its buckets, so that a hand-provisioned certificate speaks for the Agents that
+  [ADR-0013](0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md) keys its buckets, so that a hand-provisioned certificate speaks for the Agents that
   reported with it. This would keep G-10 working without changes for a fleet whose Server signs no
   CSRs. It was not chosen. It means a second binding register next to the host register, and its
   entries would have to be carried across certificate replacements that the Server never sees,
@@ -1134,7 +1134,7 @@ allowed origin; a reproducible tree mode for `opamp-fleetctl package pack`.
   another host's `instance_uid` between that host's report and the Server's reply would be bound
   instead. The first report is what the Server binds on as well.
 - **Rewrite the offer's `download_url` to name the Gateway.** That would make an absolute URL
-  cacheable too, but the Gateway forwards messages unchanged ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)), and a Gateway that edits
+  cacheable too, but the Gateway forwards messages unchanged ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)), and a Gateway that edits
   what the Server offers is one more place an offer can be made to say something the Server did
   not.
 - **Serve whatever the Gateway holds to any admitted downstream peer.** Admission behind a Gateway
@@ -1150,7 +1150,7 @@ allowed origin; a reproducible tree mode for `opamp-fleetctl package pack`.
   become an upstream fetch, which the cache exists to prevent. An operator who rolls out such an
   artifact behind a Gateway raises `package_cache_bytes`; the refusal is logged.
 - **Count downstream download requests in a bucket per downstream host.** It would add a rate the
-  Gateway does not apply on `/v1/opamp` either ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clause 11). A downstream request reaches
+  Gateway does not apply on `/v1/opamp` either ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clause 11). A downstream request reaches
   the Server at most as the one shared fetch, so the Server's bucket for the Gateway already bounds
   what downstream requests cost upstream.
 - **Cache referenced artifacts as well.** The Gateway would need the offered headers, which are an
@@ -1436,7 +1436,7 @@ allowed origin; a reproducible tree mode for `opamp-fleetctl package pack`.
   Gateway logs each offer it does not record. The remedy for such a lockout is a restart of the
   Gateway, after which the real host's next report binds it. Within one Gateway this is the bound
   the Server's host register gives directly connected hosts
-  ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7).
+  ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 7).
 - Negative / trade-offs: a fetch that failed is not tried again until the artifact newly appears in
   an Agent's offer, so a transient error upstream can leave the Agents behind the Gateway without
   it until the next rollout. A `429` or `503` with `Retry-After` is not such a failure.

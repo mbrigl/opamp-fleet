@@ -1,4 +1,4 @@
-# ADR-0022: The Server keeps a persisted record per Agent, derives its status, forgets it only on request, and labels it
+# ADR-0024: The Server keeps a persisted record per Agent, derives its status, forgets it only on request, and labels it
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-08-11
@@ -27,7 +27,7 @@ Gateway it is the Gateway's. A plain-HTTP Agent has no socket to close. Silence 
 only from an Agent that promised to report periodically, which is what `ReportsHeartbeat` is.
 
 **What "forget" can mean.** A credential here is fleet-wide and identifies membership, never an
-Agent ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)); nothing the Server holds can stop one
+Agent ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)); nothing the Server holds can stop one
 Agent from connecting again. And a re-offered configuration is not free: the Collector plugin
 restarts its Managed Process when a configuration arrives, so dropping the gates of a live Agent
 bounces its process.
@@ -49,7 +49,7 @@ Selectors match but never restate what an Agent reports.
    (`sequence_num`, capabilities, description, health, effective configuration, remote-config,
    connection-settings, and package statuses, available components), the transport of the last
    report, `last_seen_ms`, a queued restart (`restart_pending`), the assignments rollout acts
-   wrote ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)), a mirror of its labels, and
+   wrote ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)), a mirror of its labels, and
    the runtime facts `connected` and the owning connection. `GET /api/v1/agents` returns every
    record as an `AgentView`.
 
@@ -105,7 +105,7 @@ Selectors match but never restate what an Agent reports.
    it: `connected: true, stale: true` is precisely the gatewayed Agent that stopped talking.
 
 9. **The budget is three heartbeat intervals.** When the Server offers a heartbeat interval
-   (`[connection_offer] heartbeat_interval_secs`, [ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)),
+   (`[connection_offer] heartbeat_interval_secs`, [ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md)),
    the budget is three times it; otherwise `stale_after_secs` in `server.toml`, default **90** —
    three times the Baseline's default heartbeat of 30 seconds — and never zero. One missed
    heartbeat is a lost packet; a view that flickers on every hiccup is one nobody trusts.
@@ -151,8 +151,8 @@ Selectors match but never restate what an Agent reports.
 17. **Labels join what a Selector matches, everywhere one is matched.** Matching runs against an
     **effective description**: what the Agent reported, plus each label whose key it does not
     report, as a non-identifying attribute. Configurations
-    ([ADR-0021](0021-configurations-and-the-rest-api.md) clause 3) and Deployments
-    ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) see the same set, so a label cannot mean one
+    ([ADR-0023](0023-configurations-and-the-rest-api.md) clause 3) and Deployments
+    ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) see the same set, so a label cannot mean one
     thing for one and another for the other.
 
 18. **A label can never restate a reported attribute.** A key the Agent already reports is refused
@@ -173,7 +173,7 @@ Selectors match but never restate what an Agent reports.
 
 21. **A label change moves what is proposed, never what is offered.** Setting labels changes which
     Configurations and Deployments are candidates for the Agent; nothing reaches it until a rollout
-    act ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)).
+    act ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)).
 
 22. **The bundled UI puts each remedy beside its diagnosis.** A stale Agent shows a *Stale* pill
     beside its connection pill. The forget action is offered on every row, not pre-filtered by the

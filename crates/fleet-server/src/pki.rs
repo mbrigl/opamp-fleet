@@ -1,9 +1,9 @@
-//! When the Server's certificates end (ADR-0025).
+//! When the Server's certificates end (ADR-0028).
 //!
 //! `server pki status` says when each certificate the Server host depends on ends, and the running
 //! Server reads the same ends and warns before one of them does. The Server makes no certificate
 //! authority, no server certificate and no bootstrap certificate: those are made by the operator
-//! tool's `pki` commands, on the operator's machine (ADR-0025). When a certificate counts as ending
+//! tool's `pki` commands, on the operator's machine (ADR-0028). When a certificate counts as ending
 //! is [`fleet_core::ending`], so both programs judge alike.
 
 use std::path::{Path, PathBuf};
@@ -64,7 +64,7 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
     })
 }
 
-/// The certificates a running Server depends on (ADR-0025 clause 11): its own, the client CA as
+/// The certificates a running Server depends on (ADR-0028 clause 11): its own, the client CA as
 /// both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each file once.
 #[must_use]
 pub fn depended_on(config: &ServerConfig) -> Vec<PathBuf> {
@@ -84,7 +84,7 @@ pub fn depended_on(config: &ServerConfig) -> Vec<PathBuf> {
     files
 }
 
-/// `server pki status` (ADR-0025 clause 12): every certificate the configuration depends on, with
+/// `server pki status` (ADR-0028 clause 12): every certificate the configuration depends on, with
 /// its end.
 ///
 /// # Errors
@@ -103,7 +103,7 @@ pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> i32 {
     fleet_core::ending::exit_code(endings.iter().map(|ending| ending.standing(now)))
 }
 
-/// The running Server's look at what it depends on (ADR-0025 clause 11): a certificate that is
+/// The running Server's look at what it depends on (ADR-0028 clause 11): a certificate that is
 /// ending is a warning and `pki.expiring`, one that has ended an error and `pki.expired`.
 /// Nothing stops: the hosts decide for themselves.
 pub fn warn_endings(
@@ -186,7 +186,7 @@ mod tests {
         }
     }
 
-    // Verifies: ADR-0025
+    // Verifies: ADR-0028
     #[test]
     fn the_server_records_what_is_ending_and_what_has_ended() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -220,7 +220,7 @@ mod tests {
         );
     }
 
-    // Verifies: ADR-0025
+    // Verifies: ADR-0028
     #[test]
     fn status_exits_by_the_worst_end() {
         let now = OffsetDateTime::now_utc();

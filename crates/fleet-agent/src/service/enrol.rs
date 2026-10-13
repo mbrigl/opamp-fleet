@@ -1,7 +1,7 @@
-//! The questionnaire's enrolment (ADR-0018 clause 17): a host not yet enrolled is carried to its
+//! The questionnaire's enrolment (ADR-0019 clause 17): a host not yet enrolled is carried to its
 //! first certificate before its service is registered, with the bootstrap pair where it lies.
 //!
-//! Nothing here is a second enrolment. It is the Client's own upstream connection (ADR-0019) —
+//! Nothing here is a second enrolment. It is the Client's own upstream connection (ADR-0021) —
 //! the same CSR, the same pending key, the same acceptance of the offered certificate into the
 //! state directory — run with the Client's own Agent alone and ended the moment that certificate
 //! is stored. The instance identity it creates in the state directory is the one the service then
@@ -61,7 +61,7 @@ pub fn run(config: &ClientConfig, bootstrap: &Bootstrap) -> Result<(), String> {
 }
 
 /// Connect with `bootstrap` as the client identity and keep the connection until the Server's
-/// certificate is in the state directory (ADR-0019 clauses 21, 22).
+/// certificate is in the state directory (ADR-0021 clauses 21, 22).
 ///
 /// The request's key fingerprint is logged as the request is generated, and printed here for a
 /// request an earlier, interrupted run left in flight — what the operator matches in the

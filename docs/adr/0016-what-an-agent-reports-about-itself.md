@@ -1,4 +1,4 @@
-# ADR-0015: An Agent reports its type, its operator's name and its host as the conventions define them, and its own telemetry over OTLP/HTTP to the destinations the Server names, in TLS 1.3 and in plaintext only to the loopback
+# ADR-0016: An Agent reports its type, its operator's name and its host as the conventions define them, and its own telemetry over OTLP/HTTP to the destinations the Server names, in TLS 1.3 and in plaintext only to the loopback
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-03
@@ -52,7 +52,7 @@ can report own \<signal\> to the destination specified by the Server via
 **"Own" cannot mean a Managed Process's internals.** Upstream's `opampsupervisor` answers the offer
 by configuring the Collector's *internal* telemetry. That road is closed here: a Supervisor passes a
 Configuration through without touching it
-([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), and the specification's non-goals forbid an
+([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), and the specification's non-goals forbid an
 abstraction over a Managed Process's configuration language. What this Client can honestly report
 is what it observes from outside: its own process, and the processes it spawned and holds the pids
 of.
@@ -69,7 +69,7 @@ feature flag.
 
 **OTLP has a reference implementation, and it is the standard's own.** This project vendors the
 OpAMP schema because it owns that wire contract
-([ADR-0010](0010-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)). OTLP is not its protocol: its wire format,
+([ADR-0011](0011-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)). OTLP is not its protocol: its wire format,
 semantic conventions and versioning are maintained upstream, and `opentelemetry-otlp` is where that
 maintenance lands.
 
@@ -82,7 +82,7 @@ configuration this Client puts in force, so the rule reaches it. The private add
 [RFC 4193](https://www.rfc-editor.org/rfc/rfc4193)'s `fc00::/7` — is not routable across the
 public internet, but a stream sent into it crosses every switch, VLAN and tenant between the host
 and the Collector. A name is not an address: `localhost` resolves wherever the host's resolver says.
-[ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) draws the same line for
+[ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) draws the same line for
 the OpAMP connection, at the literals `127.0.0.1` and `::1`, and builds every rustls configuration
 for TLS 1.3 alone.
 
@@ -94,12 +94,12 @@ these fields, `opampsupervisor`, reads them otherwise: it builds its own-telemet
 received message alone, drops a signal whose endpoint is absent or empty, and logs *"Disabling own
 telemetry pipeline in the config"* when nothing is left — but only enters that path when the message
 names at least one of the three. `opamp-go` is this project's behavioural oracle
-([ADR-0010](0010-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)); here the literal reading would leave both
+([ADR-0011](0011-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md)); here the literal reading would leave both
 ends unable to drive each other.
 
 How an offer is applied, acknowledged and persisted — the telemetry destinations as a class of offer
 of their own, without a verifying connection or a reconnect — is
-[ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)'s. This ADR decides what own
+[ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md)'s. This ADR decides what own
 telemetry is, what an offer of it means, and what the Client admits.
 
 ## Decision
@@ -119,15 +119,15 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
    | Source | When |
    |---|---|
    | What the Managed Process reports | the fold of clause 8 — `dist.name` for a Collector with the extension |
-   | The kind's own type | a wrapped kind states it (`icinga2`, `telegraf`, `glpi-agent`); a block of such a kind carrying `service_name` fails at startup naming the derived value ([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) |
+   | The kind's own type | a wrapped kind states it (`icinga2`, `telegraf`, `glpi-agent`); a block of such a kind carrying `service_name` fails at startup naming the derived value ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) |
    | The block key `service_name` | `collector` and `command`; must not be empty, and is not bound by the instance-name grammar, so a reverse FQDN is accepted |
    | The program's file name | the fallback: `otelcol`, `promtail` |
 
    The fallback is read from the configuration, never parsed out of a program's output. The
    Baseline's reverse-FQDN shape is a recommendation and is not enforced. The Client's own Agent
-   reports the constant `supervisor` ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)),
+   reports the constant `supervisor` ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)),
    never its configured name. A Selector or a Configuration's type
-   ([ADR-0021](0021-configurations-and-the-rest-api.md) clause 4) on `service.name` aims at a type.
+   ([ADR-0023](0023-configurations-and-the-rest-api.md) clause 4) on `service.name` aims at a type.
 
 2. **`service.instance.name` is the operator's name for the Agent**, non-identifying: the
    `[[supervisor]]` block's `name`, or the top-level `name` for the Client's own Agent. It is
@@ -136,19 +136,19 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
 
 3. **The block `name` keeps its local meaning.** It is the Supervisor's directory name and the
    uniqueness key across blocks, bound by the instance-name grammar of
-   [ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) clause 2: lowercase, digits, `-`, no dots. A type
+   [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 2: lowercase, digits, `-`, no dots. A type
    may be a reverse FQDN; an instance name is a path component on three operating systems. That
    is why the two cannot share a key.
 
 4. **The identifying attributes** are `service.name`; `service.namespace`, only when the top-level
    `service_namespace` key in `supervisor.toml` is set, since only an operator knows the
    deployment; `service.version` — for the Client's own Agent its baked version
-   ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md)), for a Supervisor-backed Agent only what the Managed Process
+   ([ADR-0012](0012-versions-resolved-in-the-internal-crate.md)), for a Supervisor-backed Agent only what the Managed Process
    reports, never invented from the Client's; and `service.instance.id`, the Instance UID.
 
 5. **Where the Agent runs is reported best effort, and absent rather than blank.** Beside
    `service.instance.name`, the non-identifying attributes are `os.type` and `host.arch` in the
-   conventions' vocabulary ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), `os.name`, `os.version`,
+   conventions' vocabulary ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), `os.name`, `os.version`,
    `os.build_id`, `os.description`, `host.name`, `host.id`, `host.cpu.model.name`, `host.ip`, and
    `host.mac`. What the platform cannot answer is left out: a placeholder would be something false
    a Selector could match. Nothing is taken from the connection.
@@ -185,10 +185,10 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
    Agent this Client presents, each only where nothing is reported under the same key — what the
    code or the Managed Process reports always wins, so an attribute can never restate the type or
    the instance name. Tagging one Agent among several is a Server label's job
-   ([ADR-0022](0022-the-fleet-record.md) clause 16): a `[[supervisor]]` block carrying an
+   ([ADR-0024](0024-the-fleet-record.md) clause 16): a `[[supervisor]]` block carrying an
    `attributes` table fails at startup with a message naming the Server label. The Client's own
    Agent also reports the kinds it was compiled with
-   ([ADR-0016](0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)).
+   ([ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)).
 
 10. **The fleet view shows the instance name first and the type beneath it.** `AgentView` carries
     `service_name` (the type) and `service_instance_name`; the bundled UI's name column falls back
@@ -208,7 +208,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
    `reqwest-client` replaces the default blocking client; `grpc-tonic` stays off because the schema
    permits no gRPC destination. `tracing-opentelemetry` joins them at the version built against them
    — `0.34` against `opentelemetry` `0.33` — and that pairing is a decision, not a range to widen. No
-   OTLP schema is vendored ([ADR-0010](0010-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md) covers OpAMP only).
+   OTLP schema is vendored ([ADR-0011](0011-the-protocol-is-pinned-and-checked-against-opamp-go-on-the-endpoint-as-it-ships.md) covers OpAMP only).
 
 12. **Names come from the standard where it has them.** Metric and attribute names are taken from
    `opentelemetry-semantic-conventions` (with `semconv_experimental`, since the process metrics are
@@ -233,7 +233,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
 15. **Logs are the Client's `tracing` output, bridged.** `opentelemetry-appender-tracing`'s
    `OpenTelemetryTracingBridge` turns events into OTLP log records at the level the log filter
    already selects. Stderr and the service-mode log file
-   ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)) keep everything they print; this adds a
+   ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)) keep everything they print; this adds a
    destination. A record written inside an instrumented operation carries that operation's `TraceId`
    and `SpanId`, which is what makes a log-to-trace join answerable at the receiving end.
 
@@ -278,7 +278,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
 
 20. **A self-update stays one trace across its restart.** The trace id and the span id of the
     `self.update` span go into the update marker
-    ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)) as hex, and the process that comes up after the
+    ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)) as hex, and the process that comes up after the
     restart opens `commit` or `roll_back` as a child of that span, its parent marked remote. A marker
     without ids, or with ids that do not parse, makes the post-restart span open its own trace; a
     trace is never a reason to fail an update. `self.update` itself records no status — the process
@@ -308,7 +308,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
     Server sees. It follows no redirect, so a destination cannot move an export to another host or
     to plaintext. It speaks TLS 1.3 alone, with TLS 1.3 as its minimum and the
     three TLS 1.3 suites of the ring provider, as every rustls configuration of this project does
-    ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) clause 4). A
+    ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) clause 4). A
     destination that speaks only TLS 1.2 or older fails the handshake, and that export fails. The
     client carries a 5 s timeout — half the reporting interval — because neither the periodic reader
     nor a client handed to `opentelemetry-otlp` bounds an export, and a destination that stops
@@ -318,7 +318,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
     capability is reporting "to the destination specified by the Server". With no destination
     offered, nothing is built and nothing is sent. The offer's lifecycle — applied in place,
     acknowledged on the same offer, persisted and put back in force at startup — is
-    [ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)'s.
+    [ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md)'s.
 
 26. **The three capabilities are declared unconditionally.** They state an ability — "I can report
     to a destination you name" — and the offer arms it. Declaring them only once a destination is in
@@ -329,7 +329,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
     truth about own telemetry: a signal it does not name is stopped and leaves the persisted state,
     not carried over. An offer naming none of the three — OpAMP settings only, a certificate, a
     heartbeat change — leaves all three as they are; that keeps the classes of offer of
-    [ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md) independent.
+    [ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md) independent.
 
 28. **An empty `destination_endpoint` withdraws that signal.** It is admitted, not refused: the
     exporter is shut down, the destination leaves the persisted state, nothing is reported against
@@ -354,7 +354,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
 
 31. **A refused destination is reported, never warned about or downgraded.** Its exporter is not
     built, and the refusal reaches the Server in the offer's `connection_settings_status`
-    ([ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md) clause 7) with the reason; the
+    ([ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md) clause 7) with the reason; the
     cleartext message names the setting and the two loopback literals that would be accepted. A
     refusal, not a warning, is the specification's answer to every plaintext connection off the
     loopback (Q-1), and this one is a continuous stream of identifying attributes and log records.
@@ -362,7 +362,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
 32. **`certificate`, `tls` and `proxy` behave as they do on the OpAMP settings.** An offered
     `certificate` is honoured: its `cert` is presented by the exporter, paired with the key this
     Client generated for its CSR — the client-certificate machinery of
-    [ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md), reused as-is. A `private_key` in the offer is
+    [ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md), reused as-is. A `private_key` in the offer is
     refused by name, because this Client's private key never leaves its host and is never accepted
     from the Server; a `cert` with no key on disk to pair with is refused by name too. `ca_cert` is
     not added to the trust store, as the Baseline advises. `tls` and `proxy` are refused and reported
@@ -379,7 +379,7 @@ TLS 1.3 to every other destination, and invent nothing OTLP already defines.
     "never offered" from "withdrawn", and must not tear down a fleet another Server pointed at a
     Collector. Each Agent is offered a destination only for the signals it declares. How the
     destinations ride in the one hashed `ConnectionSettingsOffers` and when the Server declares
-    `OffersConnectionSettings` is [ADR-0013](0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)'s.
+    `OffersConnectionSettings` is [ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md)'s.
 
 34. **The departure from the Baseline is recorded, not argued upstream.** Clauses 27, 28 and 33
     depart from the schema's "not set means unchanged" and from the `destination_endpoint` MUST.
@@ -393,7 +393,7 @@ provider metadata services; reporting kinds through `AvailableComponents`; boots
 by starting a Collector once with a generated extension-only configuration; a Collector's *internal* telemetry (an operator configures the Collector for it);
 the Server storing or forwarding telemetry — the specification keeps this project out of the
 telemetry-backend business; `AcceptsOtherConnectionSettings`; trace context across a Gateway hop
-([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)); a sampling hint from the Server; a local switch
+([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)); a sampling hint from the Server; a local switch
 on the Agent that drops the three capability bits.
 
 ## Alternatives considered
@@ -404,7 +404,7 @@ on the Agent that drops the three capability bits.
 - **No human instance name at all.** The most conformant reading, but a UID is not a name a person
   can use, and several Supervisors share one `host.name`.
 - **`host.name` as the instance name.** A property of the machine, while Supervisor Mode runs *n*
-  Agents on one machine ([ADR-0014](0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
+  Agents on one machine ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
 - **The instance name outside `AgentDescription`**, as Bindplane does. Needs a channel this
   project does not have, and makes the name invisible to Selectors, which pin one Agent by it.
 - **Derive the type from `<program> --version` output.** A name has no grammar the way a SemVer
@@ -462,7 +462,7 @@ on the Agent that drops the three capability bits.
 - **Admit `localhost` by name.** It is loopback by convention
   ([RFC 6761](https://www.rfc-editor.org/rfc/rfc6761)), but what it resolves to is the host
   resolver's answer, not the URL's, and the OpAMP connection refuses it for the same reason
-  ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) clause 8).
+  ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) clause 8).
 - **Resolve names and admit those that resolve to the loopback.** The answer would depend on what
   DNS said when the offer arrived, and the name can be re-pointed afterwards without any offer
   changing.

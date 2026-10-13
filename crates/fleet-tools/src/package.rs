@@ -1,16 +1,16 @@
 //! `opamp-fleetctl package` — fetching, building, hashing and signing OpAMP Fleet packages
-//! (ADR-0024, ADR-0025).
+//! (ADR-0026, ADR-0028).
 //!
 //! Package signatures are **raw Ed25519** over a statement of what the artifact is — its Agent
-//! type, its version and its SHA-256 (`fleet_core::package::statement`, ADR-0024) — verified by
+//! type, its version and its SHA-256 (`fleet_core::package::statement`, ADR-0026) — verified by
 //! the Client with the `ring` provider. A signature therefore holds only for the type and version
 //! it was made for. This tool produces exactly that format — a
 //! `keygen`/`sign` counterpart to the Client's verify. `pack` is the same idea one step earlier:
 //! it writes container formats [`fleet_agent::archive`] can open, with the member named the way the
 //! Supervisor will look for it, and its tests open what it wrote with that same module.
 //!
-//! It is part of the operator tool, which lives in its own crate for that reason (ADR-0009,
-//! ADR-0025): nothing the Server or Client runtime does depends on it, and a managed host never
+//! It is part of the operator tool, which lives in its own crate for that reason (ADR-0010,
+//! ADR-0028): nothing the Server or Client runtime does depends on it, and a managed host never
 //! runs it. `fetch` is [`crate::fetch`]; the rest is here.
 //!
 //! Typical use — build an artifact, sign it, upload it:
@@ -34,7 +34,7 @@ use clap::{Subcommand, ValueEnum};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
 
-/// The commands of `opamp-fleetctl package` (ADR-0025 clause 15).
+/// The commands of `opamp-fleetctl package` (ADR-0028 clause 15).
 #[derive(Subcommand)]
 pub enum Command {
     /// Fetch a release of a known agent, verify it against upstream's checksum, and optionally
@@ -49,7 +49,7 @@ pub enum Command {
     },
     /// Sign an artifact and print the signature (hex) — the value of a Deployment's signature for
     /// that entry. Or, with --signing-info, sign every entry of a Package's signing file from the
-    /// UI and write the signatures into it (ADR-0029).
+    /// UI and write the signatures into it (ADR-0027).
     Sign {
         /// The PKCS#8 private key from `keygen`.
         #[arg(long)]
@@ -87,7 +87,7 @@ pub enum Command {
     /// the names already agree; `--program-name` is for when they do not.
     ///
     /// Two of the three containers the Client can open are produced. There is deliberately no
-    /// `zip`: the Client reads one (ADR-0024 clause 66) so that a build published as a zip travels as
+    /// `zip`: the Client reads one (ADR-0026 clause 66) so that a build published as a zip travels as
     /// published, which is the opposite of a reason to *write* one here — a zip carries no Unix
     /// modes, and packing an artifact into it would be choosing the one container that cannot say
     /// the program is executable.
@@ -118,7 +118,7 @@ pub enum Command {
     },
 }
 
-/// The package container formats a Client can open (ADR-0024).
+/// The package container formats a Client can open (ADR-0026).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     /// A gzip-compressed tar — what `opentelemetry-collector-releases` and most projects publish.
@@ -336,7 +336,7 @@ fn pack_7z(
     //
     // Only off Windows, which is 7-Zip's own rule: bit 15 means `FILE_ATTRIBUTE_INTEGRITY_STREAM`
     // there, and the Windows build neither writes nor expects the Unix extension. It costs the
-    // release nothing — each artifact is packed on a runner of its own platform (ADR-0018), so the
+    // release nothing — each artifact is packed on a runner of its own platform (ADR-0019), so the
     // Linux and macOS ones carry the mode and `client.exe`, which has no use for it, does not.
     #[cfg(unix)]
     {
@@ -372,7 +372,7 @@ pub(crate) fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
     Ok(hasher.finalize().to_vec())
 }
 
-/// A new package signing key (ADR-0024): the private key as PKCS#8 DER, and its public half in
+/// A new package signing key (ADR-0026): the private key as PKCS#8 DER, and its public half in
 /// hex, the form `[packages] verification_key` takes. `keygen` and `pki init` make it alike.
 ///
 /// # Errors
@@ -476,7 +476,7 @@ mod tests {
         );
     }
 
-    /// Encryption is the whole reason ADR-0024 admits `.7z`: the artifact stays unreadable
+    /// Encryption is the whole reason ADR-0026 admits `.7z`: the artifact stays unreadable
     /// wherever it is stored, and the key never reaches the Server.
     #[test]
     fn a_packed_7z_opens_with_the_archive_key_and_not_without_it() {
@@ -502,8 +502,8 @@ mod tests {
     }
 
     /// An operator who unpacks a published artifact by hand must get a file that runs — the release
-    /// ships `.tar.gz` (ADR-0018), and `.7z` stays the container an artifact may be encrypted in
-    /// (ADR-0024). Both therefore carry an executable mode of their own — the tar in its header,
+    /// ships `.tar.gz` (ADR-0019), and `.7z` stays the container an artifact may be encrypted in
+    /// (ADR-0026). Both therefore carry an executable mode of their own — the tar in its header,
     /// the 7z in 7-Zip's Unix-attribute convention — rather than relying on the Client, which sets
     /// the mode itself but only on the path where *it* installs the package.
     #[test]
@@ -620,7 +620,7 @@ mod tests {
         assert!(pack(&source, &artifact, Format::TarGz, None, Some("s3cret")).is_err());
     }
 
-    /// A package delivers exactly one program (ADR-0024), so a directory is refused where the
+    /// A package delivers exactly one program (ADR-0026), so a directory is refused where the
     /// operator can still see why — not on every host at rollout time.
     #[test]
     fn packing_something_that_is_not_a_file_is_refused() {

@@ -1,4 +1,4 @@
-# ADR-0023: A rollout is an explicit act per Agent that pins what it releases, and a package reaches an Agent only when it fits, is aimed at it, and moves it forward from what it runs
+# ADR-0025: A rollout is an explicit act per Agent that pins what it releases, and a package reaches an Agent only when it fits, is aimed at it, and moves it forward from what it runs
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-10
@@ -21,7 +21,7 @@ standing property of the *resource* cannot hold for one Agent and not another, a
 distributing to Agents that appear later.
 
 *Which.* A package fits an Agent by type and platform
-([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 9) and is aimed at it by the operator. Fit and aim
+([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 9) and is aimed at it by the operator. Fit and aim
 alone would count Agents that already run the version, propose it to Agents that need nothing, and
 let the act aim backwards under the same label as a forward one — the shape in which a compromised
 Server pushes a known-vulnerable build, and one the Client's own install already refuses, because
@@ -51,7 +51,7 @@ claims to have).
    enrolment likewise change only what is proposed; no WebSocket loop wakes for any of them.
 
 2. **The assignment is per Agent, persisted, and pins a snapshot.** In each Agent's record
-   ([ADR-0022](0022-the-fleet-record.md)) the Server stores what has been rolled out to it: per
+   ([ADR-0024](0024-the-fleet-record.md)) the Server stores what has been rolled out to it: per
    Configuration name, the content hash of the revision released to it; for packages, the concrete
    package released. Operator intent survives a Server restart like a queued restart does. The
    Configuration store retains every revision an assignment still references and collects the
@@ -101,12 +101,12 @@ claims to have).
    streamed. A package assigned to nobody is freely editable.
 
 9. **A package becomes a candidate when it fits, is aimed at the Agent, and moves it forward.**
-   Fit is [ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 9's, mandatory and first. The version test
+   Fit is [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 9's, mandatory and first. The version test
    (clauses 10–13) runs *with* the fit: a package it holds back is nobody's candidate and appears in
    no count and no proposal.
 
 10. **What the Agent runs decides, in both directions.** Where the Agent reports a `service.version`
-    among its identifying attributes that parses as a version ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md)
+    among its identifying attributes that parses as a version ([ADR-0012](0012-versions-resolved-in-the-internal-crate.md)
     clause 9), the package's version must be **strictly greater** than it by SemVer precedence,
     build metadata ignored. Equal does not match: a package the Agent already runs would reach it
     with nothing.
@@ -132,10 +132,10 @@ claims to have).
     self-reports an orderable version — the Client and any OpAMP-aware Managed Process — a package
     numbered below it can never reach it. An operator numbering a package by hand takes the
     program's own number; `opamp-fleetctl package fetch` already names a release that way
-    ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)).
+    ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)).
 
 15. **The Client applies the same rule to an offer it receives.** For the package that carries the
-    Client itself ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)), *already installed* means the
+    Client itself ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)), *already installed* means the
     version this process runs is the offered one — not that a recorded package hash matches. A record
     whose hash equals the offer does not end the offer on a host that is not running it.
 
@@ -152,8 +152,8 @@ claims to have).
 
 18. **Rollback is not a rollout.** No act moves an Agent to an older version than it runs. An
     operator who wants an Agent back on its predecessor has the Agent's retention window
-    ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) and, for the Client itself, the pointer move
-    of [ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md); a bad version is otherwise taken back by
+    ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) and, for the Client itself, the pointer move
+    of [ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md); a bad version is otherwise taken back by
     publishing the old content as a new, greater version. A deliberate Server-driven downgrade is
     left undecided: it is a separate act with its own authorisation question, and it must never be
     the same press as a rollout.
@@ -172,8 +172,8 @@ claims to have).
     the bytes or the text.
 
 **Out of scope:** how a package is aimed and which object its resource-level act names
-([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); what a package and its entries are
-([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); an opt-in convergence policy for Agents that appear later;
+([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); what a package and its entries are
+([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); an opt-in convergence policy for Agents that appear later;
 a batched or paused progressive walk; an audit trail of who rolled out what (the operator plane has
 no per-operator identity); an operator override to re-install a version the test holds back; a
 Server-driven downgrade.

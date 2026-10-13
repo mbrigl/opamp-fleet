@@ -1,8 +1,8 @@
 //! Entry point: load `server.toml`, bind the two listeners (plain or TLS) — the Agent plane and
-//! the Operator plane (ADR-0012) — and serve both until interrupted.
+//! the Operator plane (ADR-0013) — and serve both until interrupted.
 //!
 //! Both planes are served the same way whether or not TLS is configured, so that what bounds a
-//! connection before it becomes a request holds on all four surfaces (ADR-0012). Only the acceptor
+//! connection before it becomes a request holds on all four surfaces (ADR-0013). Only the acceptor
 //! differs.
 
 use std::net::SocketAddr;
@@ -25,7 +25,7 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
-/// `server audit-verify <dir>` (ADR-0020 clause 3): walks the audit record's files in order and
+/// `server audit-verify <dir>` (ADR-0022 clause 3): walks the audit record's files in order and
 /// names the first entry whose `prev` does not match the entry before it.
 fn audit_verify(dir: Option<String>) -> ! {
     let Some(dir) = dir else { usage() };
@@ -64,9 +64,9 @@ fn audit_verify(dir: Option<String>) -> ! {
     }
 }
 
-/// `server pki status --config <server.toml>` (ADR-0025 clause 12): when each certificate the
+/// `server pki status --config <server.toml>` (ADR-0028 clause 12): when each certificate the
 /// Server host depends on ends. The commands that make certificates are the operator tool's
-/// (ADR-0025); the Server binary makes none.
+/// (ADR-0028); the Server binary makes none.
 fn pki(mut args: impl Iterator<Item = String>) -> ! {
     use fleet_server::pki;
     let (Some("status"), Some("--config"), Some(path), None) = (
@@ -108,7 +108,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
 type Hasher = fn(&str) -> Result<String, String>;
 
 /// The hash `server hash-credential` makes for a scheme: Basic, for an operator's password in
-/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0019 clause 26).
+/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0021 clause 26).
 fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     match scheme {
         Some("--basic") => Some(fleet_server::credentials::hash_basic),
@@ -116,7 +116,7 @@ fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     }
 }
 
-/// `server hash-credential --basic` (ADR-0019 clause 26): reads the password from standard input —
+/// `server hash-credential --basic` (ADR-0021 clause 26): reads the password from standard input —
 /// without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
 fn hash_credential(scheme: Option<String>) -> ! {
     let Some(hash) = hasher(scheme.as_deref()) else {
@@ -210,7 +210,7 @@ fn parse_args() -> PathBuf {
                 None => usage(),
             },
             "--version" => {
-                // The baked version, not `CARGO_PKG_VERSION` (ADR-0011): the number in the file is
+                // The baked version, not `CARGO_PKG_VERSION` (ADR-0012): the number in the file is
                 // the release this build is *heading for*, and only `fleet_core::version::current` knows
                 // whether this is it.
                 println!("server {}", fleet_core::version::current());
@@ -249,7 +249,7 @@ async fn main() {
         )
         .init();
 
-    // One TLS provider for the whole process (ADR-0012): ring, never a system library.
+    // One TLS provider for the whole process (ADR-0013): ring, never a system library.
     opamp::tls::install_ring_provider();
 
     let config_path = parse_args();
@@ -262,7 +262,7 @@ async fn main() {
     };
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
-    // to know which CA issued what (ADR-0012, ADR-0019).
+    // to know which CA issued what (ADR-0013, ADR-0021).
     let planes = match config
         .tls
         .as_ref()
@@ -281,7 +281,7 @@ async fn main() {
     };
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
     let enrolment = config.enrolment.as_ref().map(|_| {
-        // ADR-0019: closed until an operator opens it.
+        // ADR-0021: closed until an operator opens it.
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
         Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone()))
     });
@@ -292,7 +292,7 @@ async fn main() {
         .as_ref()
         .map(fleet_server::fleet::ConnectionOffer::from_config);
     if connection_offer.is_some() {
-        // ADR-0013.
+        // ADR-0014.
         info!("offering connection settings to the fleet");
     }
     let client_ca = match config
@@ -303,7 +303,7 @@ async fn main() {
     {
         Ok(ca) => {
             if let Some(ca) = &ca {
-                // ADR-0019.
+                // ADR-0021.
                 info!(
                     validity_days = ca.validity_days(),
                     "signing client certificates for Agents that ask"
@@ -316,7 +316,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // The bootstrap CA's key, when the Server issues bootstrap certificates (ADR-0032).
+    // The bootstrap CA's key, when the Server issues bootstrap certificates (ADR-0028).
     let bootstrap = match config.enrolment.as_ref().map(|enrolment| {
         fleet_server::ca::BootstrapCa::from_config(enrolment, config.client_ca.as_ref()).and_then(
             |signer| {
@@ -341,7 +341,7 @@ async fn main() {
         }
     };
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
-        // ADR-0024 clause 37.
+        // ADR-0026 clause 37.
         info!("{notice}");
     }
     let telemetry_offer = config
@@ -350,13 +350,13 @@ async fn main() {
         .map(fleet_server::fleet::TelemetryOffer::from_config)
         .unwrap_or_default();
     if config.telemetry_offer.is_some() {
-        // ADR-0015.
+        // ADR-0016.
         info!("offering the fleet somewhere to send its own telemetry");
     }
     let packages = fleet_server::packages::PackageStore::open(config.packages_dir.clone())
         .and_then(|store| {
             if !store.is_empty() {
-                // ADR-0024.
+                // ADR-0026.
                 info!("offering software packages to the fleet");
             }
             fleet_server::fleet::PackageOffering::new(
@@ -371,7 +371,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // What the client CA signed and what is revoked (ADR-0019), kept beside the fleet's records.
+    // What the client CA signed and what is revoked (ADR-0021), kept beside the fleet's records.
     let revocations = match fleet_server::fs::FsLedgerStore::open(
         config.config_dir.join("revocation"),
     )
@@ -388,7 +388,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // The audit record (ADR-0020), opened before anything is decided.
+    // The audit record (ADR-0022), opened before anything is decided.
     let audit = match fleet_server::fs::FsAuditStore::open(config.config_dir.join("audit"))
         .and_then(|store| {
             fleet_server::audit_log::AuditLog::start(
@@ -407,7 +407,7 @@ async fn main() {
         enrolment.set_audit(audit.clone());
     }
     // Before a certificate the Server depends on ends, say so: at startup and once a day
-    // (ADR-0025 clause 11). Nothing stops; the hosts decide for themselves.
+    // (ADR-0028 clause 11). Nothing stops; the hosts decide for themselves.
     let watched = fleet_server::pki::depended_on(&config);
     fleet_server::pki::warn_endings(
         &watched,
@@ -430,7 +430,7 @@ async fn main() {
         }
     });
     if let Some(warning) = config.rate_limit_warning() {
-        // ADR-0012 clause 20.
+        // ADR-0013 clause 20.
         warn!("{warning}");
     }
     let agent_rate = Arc::new(fleet_server::agent_rate::AgentRate::new(
@@ -461,10 +461,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // The certificate is the whole of admission (ADR-0019): the configuration was refused at load
+    // The certificate is the whole of admission (ADR-0021): the configuration was refused at load
     // without the client CA.
     info!("the OpAMP endpoint admits by client certificate");
-    // Two planes, two listeners (ADR-0012): Agents reach the OpAMP endpoint and the package
+    // Two planes, two listeners (ADR-0013): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI.
     let (agent_tls, operator_tls, issuers, _) = planes;
     let agents = fleet_server::agent_app(
@@ -496,8 +496,8 @@ async fn main() {
         }
     };
     if operator_auth.is_some() {
-        // ADR-0019. Both planes serve TLS, so the password never crosses a network in clear
-        // (ADR-0012).
+        // ADR-0021. Both planes serve TLS, so the password never crosses a network in clear
+        // (ADR-0013).
         info!("the REST API and the UI require authentication");
     }
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
@@ -505,7 +505,7 @@ async fn main() {
     let agent_listener = bind(config.listen, "the Agent plane");
     let operator_listener = bind(config.rest.listen, "the Operator plane");
     // One signal, both planes: the interrupt is watched once, and the handle both servers hold
-    // drains them together within a bounded window (ADR-0012).
+    // drains them together within a bounded window (ADR-0013).
     let handle = Handle::new();
     let signalled = shutdown_signal();
     tokio::spawn({
@@ -537,7 +537,7 @@ async fn main() {
     );
     agents.expect("serve the Agent plane");
     operators.expect("serve the Operator plane");
-    // The graceful-shutdown flush (ADR-0022): every record's current timestamp and sequence
+    // The graceful-shutdown flush (ADR-0024): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
 }
@@ -568,7 +568,7 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     }
 }
 
-/// What a Server that signs no CSRs says once at startup (ADR-0024 clause 37): its hosts hold the
+/// What a Server that signs no CSRs says once at startup (ADR-0026 clause 37): its hosts hold the
 /// certificates an operator provisioned, and only one that names its host is served an uploaded
 /// artifact.
 fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
@@ -587,7 +587,7 @@ mod tests {
 
     /// `hash-credential` makes an operator's Basic entry and nothing else: the Agent plane has no
     /// credential to hash.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0021
     #[test]
     fn hash_credential_hashes_a_basic_password_alone() {
         let basic = hasher(Some("--basic")).expect("--basic is a scheme");
@@ -600,7 +600,7 @@ mod tests {
 
     /// Without `[client_ca]` the Server says at startup that an uploaded artifact needs a
     /// certificate naming a host, and how one is named; with it, it says nothing.
-    /// Verifies: ADR-0024
+    /// Verifies: ADR-0026
     #[test]
     fn a_server_without_client_ca_says_uploaded_artifacts_need_a_host() {
         let notice = uploaded_artifacts_notice(false).expect("a notice");

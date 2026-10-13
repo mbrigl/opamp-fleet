@@ -1,4 +1,4 @@
-# ADR-0017: The Client updates itself only from a signed package — as its own Agent, under its own Agent type, by a consent that stands, through a staged version and a restart it does not issue
+# ADR-0018: The Client updates itself only from a signed package — as its own Agent, under its own Agent type, by a consent that stands, through a staged version and a restart it does not issue
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-11
@@ -15,9 +15,9 @@ The specification asks the Server to update *"an agent's binary — the Collecto
 Client's own**"*, and the Client to *"replace its own binary in place — a self-update that survives
 the service restart and is rolled back on failure"*. Most of the machinery exists: the versioned
 side-by-side layout with its `current` pointer, per-version `manifest.toml` and restart-on-failure
-registration ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)), the verified download and the
-archive handling of package delivery ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), and the
-per-Agent offer ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)). Four problems are specific
+registration ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)), the verified download and the
+archive handling of package delivery ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), and the
+per-Agent offer ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)). Four problems are specific
 to replacing the program that does the replacing.
 
 - **Something on the wire has to represent the Client.** A Supervisor Agent cannot carry the
@@ -42,7 +42,7 @@ splits it over two questions, yet the second answer has no effect without the fi
 no key updates nothing, and with a key a "yes" is what the default already says. **Only one
 package name can carry this Client**, the Agent type its own Agent reports, because a Server offers
 a package under the Agent type it is built for
-([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Any other
+([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Any other
 name points at another program's package or at none, so a configurable name is a way to
 misconfigure the narrowing and nothing else. **It belongs beside what it depends on.** The key that
 decides whether it takes effect sits in `[packages]`; a consent in a section of its own makes a
@@ -61,8 +61,8 @@ restart.
 
 1. **The Client is always its own Agent.** It exists *alongside* the Supervisor Agents, not only
    when there are none, with its own `instance_uid`, health and `service.version` (the baked version,
-   [ADR-0011](0011-versions-resolved-in-the-internal-crate.md)) and the Agent type `supervisor`
-   ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) clause 25). A Client that
+   [ADR-0012](0012-versions-resolved-in-the-internal-crate.md)) and the Agent type `supervisor`
+   ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 25). A Client that
    supervises something is visible in its own fleet, and nobody has to ask which Client version a
    host runs.
 
@@ -81,7 +81,7 @@ restart.
    constant the Client's own Agent reports as `service.name`. The name a Server offers this
    Client's package under is therefore the name the Client reports, and the same in every variant
    build, whatever its product name: one package Set serves them all
-   ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) clause 9).
+   ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 9).
 
    An absent key is consent, and so is an absent `[packages]`. While the consent stands and
    `verification_key` is set, the Client's own Agent declares `AcceptsPackages` and
@@ -101,7 +101,7 @@ restart.
 3. **Every install path can withdraw the consent, none asks for a name, and the answer is written
    into the configuration.** `service install --no-self-update` withdraws it on the non-interactive
    `--endpoint` path
-   ([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) clause 42).
+   ([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 42).
    **The interactive questionnaire asks nothing about it**: it writes the consent, and the
    verification key it asks for just before decides whether the consent takes effect (clause 2).
    An empty key is accepted, and the install says that the Client installs no package, its own
@@ -117,7 +117,7 @@ restart.
    signature covers the artifact's bytes and carries no ordering, so an old release stays validly
    signed forever and is how a compromised Server would push a known-vulnerable build back. An offer
    of the release already running is not a failure and installs nothing
-   ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md) clause 15). A Client that does not run
+   ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clause 15). A Client that does not run
    from a versioned layout (a `cargo run` build, a loose binary) refuses with a message naming
    `supervisor service install`.
 
@@ -126,7 +126,7 @@ restart.
    Ed25519 signature must verify against `[packages] verification_key`**. An artifact offered
    without a signature, or whose signature does not verify, fails the install with `InstallFailed`
    naming the reason, and nothing is staged. The verified artifact is unpacked as
-   ([ADR-0024](0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) into
+   ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)) into
    `<layout root>/versions/supervisor-<MAJOR.MINOR.PATCH>-<hash>/`, the binary is made executable and
    `manifest.toml` records the version and the binary's SHA-256 — the same layout
    `service install` produces. The running binary is never touched.
@@ -135,7 +135,7 @@ restart.
    `supervisor self-check`, which only this program answers, with
    `supervisor self-check ok version=<version>`. It must exit successfully, print that line, and
    report the offered release — compared without build metadata but with the pre-release, so a
-   `-dev` build is never accepted as the release it heads for ([ADR-0011](0011-versions-resolved-in-the-internal-crate.md)). A
+   `-dev` build is never accepted as the release it heads for ([ADR-0012](0012-versions-resolved-in-the-internal-crate.md)). A
    binary that cannot exec — wrong architecture, truncated artifact, missing loader — is the one
    failure no post-restart mechanism can catch, and a program that runs but answers differently is
    not this Client. A failed probe fails the install with the previous version still current and
@@ -144,7 +144,7 @@ restart.
 7. **A marker is written before the pointer moves.** `update-marker.json` in the state directory —
    outside `versions/`, so it survives the switch — records the previous version directory, the new
    one, the offered version, the offered package hash, an attempt counter and the install's trace
-   ([ADR-0015](0015-what-an-agent-reports-about-itself.md)). Then `current` is repointed. A crash between the two leaves a
+   ([ADR-0016](0016-what-an-agent-reports-about-itself.md)). Then `current` is repointed. A crash between the two leaves a
    marker naming a switch that did not happen, which the next start resolves.
 
 8. **The restart is the service manager's, triggered by a deliberate exit.** Once `current` points at
@@ -162,7 +162,7 @@ restart.
    On Windows all three are required: the `sc.exe` backend of `service-manager` registers no recovery
    actions, the SCM ignores a clean non-zero stop unless the non-crash flag is set, and a status of
    `Win32(0)` is a clean stop whatever happened. The registration that sets them is
-   [ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)'s. **Crashing on purpose is never the
+   [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)'s. **Crashing on purpose is never the
    mechanism**: it throws away the graceful shutdown and the `agent_disconnect`, and makes every
    self-update look like a fault.
 
@@ -192,7 +192,7 @@ restart.
 
 **Out of scope:** rolling back on post-update health rather than on "did it come back"; a
 Server-driven downgrade, which the Client refuses (clause 4) and the Server never offers
-([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)); a privileged updater helper for a
+([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)); a privileged updater helper for a
 low-privileged service account; closing the non-atomic Windows pointer switch, which would need a
 different Windows layout.
 
@@ -221,7 +221,7 @@ different Windows layout.
   legitimately carry this Client is its Agent type; any other names another program's package or
   none, so the freedom could only misconfigure the narrowing.
 - **The name from the product name.** Every variant build would need a package Set of its own,
-  where today one serves them all; ADR-0018 clause 9 keeps the product name off the Agent type for
+  where today one serves them all; ADR-0019 clause 9 keeps the product name off the Agent type for
   that reason.
 - **The name from the running file's name.** Renaming or linking the binary would redirect the
   self-update to another package.
@@ -290,7 +290,7 @@ different Windows layout.
   can offer only what the holder of the signing key has signed.
 - Negative / trade-offs: an operator who never chose is in the larger position. The package name,
   the signature and the explicit act that releases a package
-  ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)) bound it, but a compromised Server reaches
+  ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)) bound it, but a compromised Server reaches
   further than with the consent off: it can roll a consenting host forward to any signed release.
 - Negative / trade-offs: a host with the consent but no verification key does not update itself
   until the key is set; the startup notice is the only sign of it on the host, and the Server sees

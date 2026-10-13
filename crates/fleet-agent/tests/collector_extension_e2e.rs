@@ -84,7 +84,7 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
 
-// Verifies: G-16, ADR-0014
+// Verifies: G-16, ADR-0015
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_agent() {
     opamp::tls::install_ring_provider();

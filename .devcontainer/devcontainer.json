@@ -1,10 +1,7 @@
 {
   "name": "OpAMP Fleet DevContainer",
 
-  // Pinned to a Debian *release*, not the floating `:debian` tag: this container is the build host
-  // for the Icinga 2 artifact, so its glibc is that artifact's reach (ADR-0026) and a tag
-  // that moves would move the reach with it. bookworm ⇒ `libc6 >= 2.34` ⇒ Debian 12+, Ubuntu 22.04+,
-  // RHEL 9+. Changing this line is a decision about which hosts the fleet can serve — see ADR-0026.
+  // Pinned to a Debian *release*, not the floating `:debian` tag.
   "image": "mcr.microsoft.com/devcontainers/base:debian12",
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
@@ -44,14 +41,14 @@
     // credential helper. Git writes still require explicit human approval (see AGENTS.md §6).
     "ghcr.io/devcontainers/features/github-cli:1": {},
     // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
-    // toolchain (ADR-0009). The build chain needs no system protoc (ADR-0010 uses the
+    // toolchain (ADR-0010). The build chain needs no system protoc (ADR-0011 uses the
     // pure-Rust protox), so no extra system packages are required here.
     "ghcr.io/devcontainers/features/rust:1": {}
   },
 
   // System packages the base image does not carry, installed once when the container is created.
   //
-  // The first six are *developer tooling* — nothing shipped depends on them, which is why they
+  // Both are *developer tooling* — nothing shipped depends on them, which is why they
   // need no ADR (AGENTS.md §3.6) — and each earns its place:
   //
   //   socat     forwards the host's OpenTelemetry Collector onto this container's loopback, see
@@ -60,28 +57,12 @@
   //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
   //             ordinary local run, so a Windows-only compile error reaches CI instead of the
   //             author. See README → "Build, Test & Run".
-  //   msitools  `msiextract`, which unpacks the Icinga 2 Windows MSI payload (ADR-0026).
-  //   osslsigncode  verifies that payload's Authenticode signature and who signed it, since
-  //             Windows artifacts publish no digest to check against (ADR-0026).
-  //   rpm2cpio  the RPM half of the same repack. That path is not built; the tools are here
-  //   cpio      because inspecting the payload is how the decision whether to build it gets made.
-  //
-  // The Boost and protobuf libraries after them are a different kind of entry: they are not used by
-  // anything in this repository, they are what `opamp-package-fetch` *copies into* the Icinga 2
-  // artifact. The repack bundles the closure `ldd` resolves on this host (ADR-0026), so a library
-  // missing here is a library missing from the tree — which the tool refuses to pack rather than
-  // ship, by design. They are the exact set `icinga2-bin` needs beyond what the base image already
-  // has. Two things about them:
-  //
-  //   * The `1.74.0` / `32` in the names are bookworm's versions and move with the image pin above.
-  //   * `libboost-regex1.74.0` pulls `libicu72` in, so ICU rides along in the artifact. Icinga 2
-  //     2.14.6 did not link `boost_regex` at all; 2.16.5 does.
-  "postCreateCommand": "git config core.hooksPath .githooks && sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends socat llvm msitools osslsigncode rpm2cpio cpio libboost-coroutine1.74.0 libboost-filesystem1.74.0 libboost-iostreams1.74.0 libboost-program-options1.74.0 libboost-regex1.74.0 libboost-thread1.74.0 libprotobuf-lite32",
+  "postCreateCommand": "git config core.hooksPath .githooks && sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends socat llvm",
 
   // Runs inside the container on every start. The development observability stack runs on the host,
   // apart from this container (observability/compose.yaml); this puts its Collector on the
   // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
-  // plaintext to a loopback IP literal alone (ADR-0015). See observability/README.md.
+  // plaintext to a loopback IP literal alone (ADR-0016). See observability/README.md.
   "postStartCommand": ".devcontainer/forward-otlp.sh",
 
   "customizations": {
@@ -98,7 +79,7 @@
     }
   },
 
-  // The Server's two planes (ADR-0012), published the way each one is meant to be reached.
+  // The Server's two planes (ADR-0013), published the way each one is meant to be reached.
   //
   // The Agent plane (4320, OpAMP + package downloads) is where the fleet connects, so `appPort`
   // publishes it through Docker itself (`-p 0.0.0.0:4320:4320`) and the Server is reachable from

@@ -1,21 +1,21 @@
-# ADR-0034: The Client's install takes the fleet's files it finds beside its program
+# ADR-0020: The Client's install takes the fleet's files it finds beside its program
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-13
 - **Deciders:** Markus Brigl
 - **Applies to:** `service install` and `service config` of the Client in `crates/fleet-agent/src/main.rs`, the questionnaire and the installer's answers in `crates/fleet-agent/src/config_init.rs`, the enrolment in `crates/fleet-agent/src/service/enrol.rs`, and every document that tells an operator how to install a Client
-- **Supersedes:** [ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) clauses 17, 19 and 42
+- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 17, 19 and 42
 
 ## Context
 
 A host joins the fleet with four things from the operator's offline directory: the server CA
 (`server-ca.pem`), the bootstrap pair the Server issued (`bootstrap.pem`, `bootstrap-key.pem`,
-[ADR-0032](0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)), and
-the package verification key (`package-signing-key.pub`, ADR-0032 clause 8). An operator copies
+[ADR-0028](0028-one-operator-program-that-makes-the-fleets-certificates.md)), and
+the package verification key (`package-signing-key.pub`, ADR-0028 clause 3). An operator copies
 them to the host together with the Client's program, typically into one directory, and runs the
 install from there.
 
-[ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) clause 17 has
+[ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 17 has
 the questionnaire ask for each of them as a path, with no default on a fresh host, and clause 42
 gives a non-interactive install no way to name them at all: a file written from `--endpoint` has no
 CA and no client identity, and stays incomplete until someone runs the questionnaire.
@@ -27,9 +27,9 @@ The forces:
   whose answer is "here, next to the program" is typing that tells the Client nothing.
 - **A host set up by a script has no terminal.** An install that needs the questionnaire for its
   identity cannot be automated; one that finds the files can.
-- **The bootstrap pair is used once and is not written into the file** (ADR-0018 clause 17): the
+- **The bootstrap pair is used once and is not written into the file** (ADR-0019 clause 17): the
   enrolment presents it and stores what the Server issues. That holds wherever the pair comes from.
-- **Enrolment waits for an operator** (ADR-0019 clause 21). An install that enrols blocks until the
+- **Enrolment waits for an operator** (ADR-0021 clause 21). An install that enrols blocks until the
   request is approved or the wait is interrupted; an install that does not enrol leaves a service
   that refuses to start.
 
@@ -50,7 +50,7 @@ bootstrap pair it finds.
    and not used. `package-signing-key.pub` counts when its content, trimmed, is 64 hexadecimal
    digits; any other content is named in a warning and not used.
 
-2. **Restates ADR-0018 clause 17. The questionnaire asks only what has no useful default on a
+2. **Restates ADR-0019 clause 17. The questionnaire asks only what has no useful default on a
    fresh host, and offers no answer the Client would refuse.** It asks for the Server `endpoint`,
    suggesting `wss://127.0.0.1:4320/v1/opamp`; a `ws://` or `http://` endpoint is refused unless its
    host is a loopback IP literal — `127.0.0.1` or `::1`; a host name is never loopback, `localhost`
@@ -68,7 +68,7 @@ bootstrap pair it finds.
    (clause 1), else none. The bootstrap pair is neither copied nor written into the file: the
    questionnaire enrols with it directly against the Server, after the file is written. It connects
    with the pair where it lies, sends the CSR
-   ([ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
+   ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
    clause 21), prints the request's key fingerprint and waits until an operator approves it, then
    stores the issued certificate in the state directory, where the Client looks for it first. An
    interrupted wait leaves the written file and registers nothing; running the install again
@@ -81,21 +81,21 @@ bootstrap pair it finds.
 
    **The answered CA is copied beside the written file**, as `server-ca.pem`, owner-only on Unix,
    and the file names the copy. A copy left by an earlier answer is replaced. The copy is handed
-   over to the service account with the file (ADR-0018 clause 13). The questionnaire asks nothing
+   over to the service account with the file (ADR-0019 clause 13). The questionnaire asks nothing
    about the self-update: the file carries `[packages] self_update = true`, and the verification
    key decides whether that takes effect
-   ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)). Everything else is
+   ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)). Everything else is
    written as commented defaults. No question asks for a credential, and no written file has an
-   `[auth]` section; a leftover `[auth]` section is kept and ignored, as ADR-0018 clause 17 stated.
+   `[auth]` section; a leftover `[auth]` section is kept and ignored, as ADR-0019 clause 17 stated.
 
-3. **Restates ADR-0018 clause 42. `service install --endpoint <URL>` writes the first
+3. **Restates ADR-0019 clause 42. `service install --endpoint <URL>` writes the first
    configuration without a terminal, with what lies beside the program.** It writes the file
    `--interactive` writes, through the same renderer, with the endpoint given rather than asked:
    the same shape, mode `0600`, never overwriting an existing file, validated by the rule the
    Client applies to its endpoint at startup before anything is written — a `ws://` or `http://`
    endpoint whose host is not `127.0.0.1` or `::1` is refused, naming the setting, and `localhost`
    is no exception. It conflicts with `--interactive` and carries the self-update answer
-   ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md) clause 3). For a
+   ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md) clause 3). For a
    `wss://` or `https://` endpoint, a `server-ca.pem` beside the program is copied and written as
    `[tls] ca_file` as the questionnaire's answer would be, and a `package-signing-key.pub` beside it
    is written as `[packages] verification_key`. Each file it takes is printed. It has no flag for
@@ -112,7 +112,7 @@ bootstrap pair it finds.
    An installer that runs the program from a directory holding a bootstrap pair therefore waits for
    an approval; one that runs it from where no pair lies does not.
 
-5. **Restates ADR-0018 clause 19. The configuration is validated before the service is
+5. **Restates ADR-0019 clause 19. The configuration is validated before the service is
    registered, by the rules the Client applies at startup.** The order is write → load through
    `ClientConfig::load` → enrol, when the questionnaire took a bootstrap pair (clause 2) or one lies
    beside the program (clause 4) → stage the layout → register, so a broken configuration fails at
@@ -151,10 +151,10 @@ bootstrap pair it finds.
 
 ## Sources / Prior art
 
-- [ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md) clauses 13,
+- [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 13,
   16, 17, 19 and 42;
-  [ADR-0019](0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
-  clauses 21 and 22; [ADR-0032](0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)
+  [ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
+  clauses 21 and 22; [ADR-0028](0028-one-operator-program-that-makes-the-fleets-certificates.md)
   clause 8.
 - `std::env::current_exe`: the path of the running executable as the operating system reports
   it; on Linux it resolves symbolic links. <https://doc.rust-lang.org/std/env/fn.current_exe.html>
@@ -177,7 +177,7 @@ bootstrap pair it finds.
 
 ## Enforcement
 
-Tests that will carry `Verifies: ADR-0034`:
+Tests that will carry `Verifies: ADR-0020`:
 
 - The files beside a given directory are found under their exact names; one file of the pair alone
   and a `package-signing-key.pub` that is not 64 hexadecimal digits are not taken (clause 1).

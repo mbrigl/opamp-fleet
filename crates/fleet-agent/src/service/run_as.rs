@@ -1,15 +1,15 @@
-//! The operator-named service account of ADR-0018: resolved before anything is written, and the
+//! The operator-named service account of ADR-0019: resolved before anything is written, and the
 //! ownership handover after the layout exists.
 //!
 //! `service install --run-as <account>` makes the system service run as that account, and the
 //! installation's files — the configuration, the state directory, and the executable layout, across
-//! both roots (ADR-0018 clause 8) — belong to it afterwards. The two halves live here; *what* the
+//! both roots (ADR-0019 clause 8) — belong to it afterwards. The two halves live here; *what* the
 //! service manager is told is [`manager`](super::manager)'s and
 //! [`windows_config`](super::windows_config)'s business.
 //!
-//! **Resolution comes first** because ADR-0018 wants an install that cannot succeed to fail
+//! **Resolution comes first** because ADR-0019 wants an install that cannot succeed to fail
 //! before it writes: an account that does not exist (Unix), or a Windows account form that would
-//! need a password nobody may pass (ADR-0018), is such an install. On Unix the account is
+//! need a password nobody may pass (ADR-0019), is such an install. On Unix the account is
 //! resolved through `id(1)` — POSIX, present on every Linux and macOS host, and the alternative
 //! is `getpwnam(3)` behind `unsafe` or a user-lookup dependency for two integers.
 //!
@@ -36,7 +36,7 @@ pub struct RunAs {
 
 impl RunAs {
     /// Validate `account` against the platform's rules and resolve what the handover needs.
-    /// `service` is the service's name, which is the product's (ADR-0018 clause 3) — on Windows the
+    /// `service` is the service's name, which is the product's (ADR-0019 clause 3) — on Windows the
     /// one virtual account that may be named is the service's own.
     ///
     /// # Errors
@@ -167,7 +167,7 @@ fn chown_tree(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
 }
 
 /// Give each of `paths` the owner of `like`, the configuration of an installed Client: what
-/// `service config` creates belongs to the account the service runs as (ADR-0018 clause 13), not
+/// `service config` creates belongs to the account the service runs as (ADR-0019 clause 13), not
 /// to the administrator who ran it. A missing path is skipped.
 ///
 /// Each path is re-owned as what it is (`lchown`) and nothing is walked: the state directory
@@ -208,7 +208,7 @@ pub fn match_owner(like: &Path, paths: &[&Path]) -> Result<(), String> {
 }
 
 /// The passwordless Windows account forms — the only ones `--run-as` accepts, because a password
-/// parameter must not exist (ADR-0018: it would stand in the process list and the installer log).
+/// parameter must not exist (ADR-0019: it would stand in the process list and the installer log).
 ///
 /// Compiled wherever it is used — the Windows install, and the tests of any platform: the rule is
 /// pure string logic, and testing it must not need a Windows host.
@@ -249,9 +249,9 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// ADR-0018: the accepted Windows forms are exactly the passwordless ones, and the refusal
+    /// ADR-0019: the accepted Windows forms are exactly the passwordless ones, and the refusal
     /// names them — an operator typing a plain account must learn the forms, not a Win32 error.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn windows_forms_are_the_passwordless_ones() {
         let svc = "supervisor";
@@ -276,9 +276,9 @@ mod tests {
         assert!(!plain.contains("ADR-"), "{plain}");
     }
 
-    /// The refusal for a missing Unix account is the actionable message ADR-0018 asks installs to
+    /// The refusal for a missing Unix account is the actionable message ADR-0019 asks installs to
     /// fail with — and it must promise that nothing was written, because resolution runs first.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[cfg(unix)]
     #[test]
     fn a_missing_account_is_refused_with_the_way_out() {
@@ -294,7 +294,7 @@ mod tests {
     /// The handover re-owns a tree including a symlink as a link — to the account's own ids here,
     /// because a test does not run as root, and a chown to the current owner is the one chown an
     /// unprivileged process is allowed.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[cfg(unix)]
     #[test]
     fn the_handover_walks_the_tree_and_skips_what_is_missing() {

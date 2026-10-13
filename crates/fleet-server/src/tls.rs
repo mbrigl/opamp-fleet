@@ -1,5 +1,5 @@
-//! The listeners' TLS material (ADR-0012, ADR-0019), read from the files `[tls]` and `[enrolment]`
-//! name and handed to `opamp`'s listener (ADR-0009).
+//! The listeners' TLS material (ADR-0013, ADR-0021), read from the files `[tls]` and `[enrolment]`
+//! name and handed to `opamp`'s listener (ADR-0010).
 //!
 //! What is the Server's here is which material and why. The Agent plane requires a client
 //! certificate in the handshake, verified against the client CA and, while `[enrolment]` is set,
@@ -21,7 +21,7 @@ pub struct PlaneTls {
     pub agent: ServerTls,
     pub operator: ServerTls,
     pub issuers: Issuers,
-    /// The CAs whose certificates can be revoked (ADR-0019 clause 34).
+    /// The CAs whose certificates can be revoked (ADR-0021 clause 34).
     pub authorities: Vec<Authority>,
 }
 
@@ -36,7 +36,7 @@ pub struct Issuers {
     bootstrap: Vec<Vec<u8>>,
 }
 
-/// What the certificate a connection carries makes it (ADR-0019).
+/// What the certificate a connection carries makes it (ADR-0021).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Peer {
     /// A certificate from the client CA: a member of the fleet.
@@ -211,8 +211,8 @@ mod tests {
 
     /// A bootstrap certificate issued through an intermediate is still no member: with a bootstrap
     /// CA configured, membership is a certificate issued directly by the client CA, and nothing
-    /// else (ADR-0019 clause 19).
-    /// Verifies: ADR-0019
+    /// else (ADR-0021 clause 19).
+    /// Verifies: ADR-0021
     #[test]
     fn a_certificate_not_issued_by_the_client_ca_only_enrols() {
         let (client_der, client_subject, client_key) = ca("client CA", None);

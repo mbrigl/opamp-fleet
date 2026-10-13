@@ -1,11 +1,11 @@
-//! The command-line surface (ADR-0018).
+//! The command-line surface (ADR-0019).
 //!
 //! A `clap` subcommand CLI that stays deliberately thin: it only parses arguments and hands off.
 //! A bare invocation with no subcommand defaults to `run`, so `supervisor --config <path>` keeps
-//! working unchanged. The Client is file-configured (ADR-0009) — there are no environment
+//! working unchanged. The Client is file-configured (ADR-0010) — there are no environment
 //! fallbacks; the flags only say where the file and the state directory are.
 //!
-//! There is no `--instance` (ADR-0018 clause 6). One build installs one service under the
+//! There is no `--instance` (ADR-0019 clause 6). One build installs one service under the
 //! product's name, so the service verbs have nothing to look up and take no name at all; a second
 //! installation is a second build. The *grammar* that flag used survives as
 //! [`parse_instance_name`], because `[[supervisor]]` block names still need it.
@@ -20,13 +20,13 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(
     name = "supervisor",
-    // The git-derived version baked in at build time (ADR-0011) — never clap's default, which
+    // The git-derived version baked in at build time (ADR-0012) — never clap's default, which
     // would silently report the static crate version.
     version = fleet_core::version::current(),
     about = "OpAMP Fleet Client — runs standalone or as a native OS service"
 )]
 pub struct Cli {
-    // ADR-0009: the file is the whole configuration; the flag only says where it is.
+    // ADR-0010: the file is the whole configuration; the flag only says where it is.
     /// Path to the TOML configuration file; defaults apply if it does not exist.
     #[arg(long, global = true, default_value = "supervisor.toml")]
     pub config: PathBuf,
@@ -40,7 +40,7 @@ pub struct Cli {
 }
 
 /// A parsed command line, plus the one thing the parsed struct cannot say: whether `--config`
-/// carries a path the operator named or the default that stands in for one (ADR-0018).
+/// carries a path the operator named or the default that stands in for one (ADR-0019).
 ///
 /// The distinction is load-bearing exactly once. `service install` bakes an absolute config path
 /// into the service unit, and when nobody named a path, the right one is not the default resolved
@@ -104,7 +104,7 @@ pub enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    // ADR-0017.
+    // ADR-0018.
     /// Prove that this executable is an OpAMP Fleet Client and say which version.
     ///
     /// Run as a child process on a freshly staged binary before the `current` pointer moves to
@@ -122,7 +122,7 @@ pub enum Command {
 pub struct RunArgs {
     /// Set by `service install` on every platform. On Windows it routes into the SCM dispatcher;
     /// everywhere it says the machine's service manager started this process and no terminal is
-    /// watching, which is what turns on the log file (ADR-0018).
+    /// watching, which is what turns on the log file (ADR-0019).
     #[arg(long, hide = true)]
     pub service: bool,
 }
@@ -130,11 +130,11 @@ pub struct RunArgs {
 /// Service-lifecycle actions (`service install|config|uninstall|start|stop|status`).
 #[derive(Debug, Subcommand)]
 pub enum ServiceAction {
-    // ADR-0018 decides the layout this lays out.
+    // ADR-0019 decides the layout this lays out.
     /// Register this instance as a system (or `--user`) service and lay out the versioned
     /// install.
     Install(InstallArgs),
-    // ADR-0018 clauses 15–17.
+    // ADR-0019 clauses 15–17.
     /// Ask the questionnaire of `install --interactive` again, offering what the configuration
     /// holds as the defaults, and enrol with the Server if this Client holds no certificate yet.
     ///
@@ -157,14 +157,14 @@ pub struct InstallArgs {
     #[command(flatten)]
     pub scope: ScopeArgs,
     /// The layout root, holding `versions/` and the `current` pointer. Defaults to
-    /// `<base>/<PRODUCT_NAME>` for the scope — no path is ever fixed (ADR-0018 clause 7).
+    /// `<base>/<PRODUCT_NAME>` for the scope — no path is ever fixed (ADR-0019 clause 7).
     ///
     /// Given **alone** it collapses layout and data into the one directory it names, exactly as
-    /// ADR-0018 defined it, and the labeling and permissions of that directory are then yours to
+    /// ADR-0019 defined it, and the labeling and permissions of that directory are then yours to
     /// manage.
     #[arg(long)]
     pub root: Option<PathBuf>,
-    // ADR-0018 clause 8.
+    // ADR-0019 clause 8.
     /// The data root, holding `supervisor.toml` and the state directory — everything a reinstall
     /// cannot recreate.
     ///
@@ -174,7 +174,7 @@ pub struct InstallArgs {
     /// that is given and the platform default otherwise.
     #[arg(long)]
     pub data_root: Option<PathBuf>,
-    // ADR-0018.
+    // ADR-0019.
     /// Ask for the settings a fresh host cannot guess, write the configuration file, and enrol
     /// this host with the Server if it holds no certificate yet, before registering the service.
     ///
@@ -184,7 +184,7 @@ pub struct InstallArgs {
     /// come.
     #[arg(long)]
     pub interactive: bool,
-    // ADR-0018.
+    // ADR-0019.
     /// Write the configuration file with this Server endpoint instead of asking for it.
     ///
     /// The non-interactive half of `--interactive`, for an install driven by a packaged installer:
@@ -196,11 +196,11 @@ pub struct InstallArgs {
     /// `service config`.
     #[arg(long, value_name = "URL", conflicts_with = "interactive")]
     pub endpoint: Option<String>,
-    // ADR-0017.
+    // ADR-0018.
     /// Withdraw the Client's consent to be updated by the Server, in the configuration this
     /// install writes.
     ///
-    /// The consent stands by default (ADR-0017): without this flag the written file says
+    /// The consent stands by default (ADR-0018): without this flag the written file says
     /// `[packages] self_update = true` and the fleet can replace this Client like any other
     /// program once a verification key is set. With it, the file says `self_update = false` and
     /// this Client becomes the one program on the host that has to be updated by hand. The other non-interactive half of `--interactive`, for the same
@@ -210,7 +210,7 @@ pub struct InstallArgs {
     /// untouched, as it is for every other answer here.
     #[arg(long, conflicts_with = "interactive")]
     pub no_self_update: bool,
-    // ADR-0018.
+    // ADR-0019.
     /// Run the service as this account instead of root/`LocalSystem`, and hand this
     /// installation's files — both roots — over to it.
     ///
@@ -218,13 +218,13 @@ pub struct InstallArgs {
     /// account must exist. On Windows only passwordless account forms are accepted — the
     /// service's own virtual account (`NT SERVICE\<service name>`), a gMSA (`name$`), or
     /// `NT AUTHORITY\LocalService`/`NetworkService`; a password is never taken here — it would
-    /// stand in the process list and in the installer log (ADR-0018).
+    /// stand in the process list and in the installer log (ADR-0019).
     #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub run_as: Option<String>,
 }
 
 /// Arguments for `service config`: where the installed configuration is, named as `install`
-/// named it (ADR-0018 clause 15).
+/// named it (ADR-0019 clause 15).
 #[derive(Debug, clap::Args)]
 pub struct ConfigArgs {
     /// System or `--user` scope.
@@ -240,7 +240,7 @@ pub struct ConfigArgs {
 
 impl ConfigArgs {
     /// The data root these flags name, if they name one: `--data-root`, else `--root`, the way
-    /// `install` resolves them (ADR-0018 clause 8).
+    /// `install` resolves them (ADR-0019 clause 8).
     #[must_use]
     pub fn data_root(&self) -> Option<&PathBuf> {
         self.data_root.as_ref().or(self.root.as_ref())
@@ -285,7 +285,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn bare_invocation_has_no_subcommand() {
         // No subcommand → the caller (main) defaults to `run`.
@@ -294,10 +294,10 @@ mod tests {
         assert_eq!(cli.config, PathBuf::from("supervisor.toml"));
     }
 
-    /// ADR-0018 clause 6: removed, not hidden and not accepted-and-ignored. A unit written by an
+    /// ADR-0019 clause 6: removed, not hidden and not accepted-and-ignored. A unit written by an
     /// older install would carry it, and this is what makes that fail loudly instead of running a
     /// Client whose paths silently mean something else.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn instance_is_not_a_flag_any_more() {
         assert!(
@@ -328,10 +328,10 @@ mod tests {
         assert_eq!(cli.config, PathBuf::from("x.toml"));
     }
 
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn the_installed_command_line_parses() {
-        // What `service install` writes into the unit (ADR-0018).
+        // What `service install` writes into the unit (ADR-0019).
         let cli = parse(&[
             "client",
             "run",
@@ -355,7 +355,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn service_verbs_parse_with_scope_and_root() {
         let cli = parse(&["client", "service", "install", "--user", "--root", "/opt/x"]);
@@ -378,9 +378,9 @@ mod tests {
         ));
     }
 
-    /// ADR-0018 clause 8: the two halves can be named apart, which is what the Linux system-scope
+    /// ADR-0019 clause 8: the two halves can be named apart, which is what the Linux system-scope
     /// split needs and what the manual tells an operator to do on a host that wants them apart.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn both_roots_can_be_named() {
         let args = install(&[
@@ -398,7 +398,7 @@ mod tests {
 
     /// `service config` finds the configuration with the flags `install` took, `--data-root`
     /// winning over `--root` exactly as there.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn config_takes_the_install_roots() {
         let config = |args: &[&str]| match parse(args).command {
@@ -427,9 +427,9 @@ mod tests {
         assert_eq!(both.data_root(), Some(&PathBuf::from("/var/lib/x")));
     }
 
-    /// ADR-0018: interactivity is something the operator asks for. Every invocation that existed
+    /// ADR-0019: interactivity is something the operator asks for. Every invocation that existed
     /// before this flag keeps meaning what it meant.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn install_is_not_interactive_unless_asked() {
         let quiet = parse(&["client", "service", "install"]);
@@ -452,11 +452,11 @@ mod tests {
         assert_eq!(args.endpoint, None);
     }
 
-    /// ADR-0017: the withdrawal travels on the same non-interactive path the endpoint does, and
+    /// ADR-0018: the withdrawal travels on the same non-interactive path the endpoint does, and
     /// the consent stands unless the install withdraws it. No flag names the package — it is the
     /// Client's own Agent type — and the withdrawal may not ride `--interactive`, which writes the
     /// consent and leaves its effect to the verification key.
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0018
     #[test]
     fn install_carries_the_self_update_answer_without_a_terminal() {
         let standing = install(&[
@@ -503,9 +503,9 @@ mod tests {
         }
     }
 
-    /// ADR-0018 clause 42: a packaged install passes the answer it collected. The endpoint is not
+    /// ADR-0019 clause 42: a packaged install passes the answer it collected. The endpoint is not
     /// validated here — the loader's own rule does that, once, in `config_init`.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn install_takes_an_endpoint_without_a_terminal() {
         let told = parse(&[
@@ -530,7 +530,7 @@ mod tests {
 
     /// The two ways of writing the first configuration cannot both be asked for: one blocks on a
     /// terminal and the other exists precisely because there is none.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn an_endpoint_and_interactive_are_refused_together() {
         let err = Cli::try_parse_from([
@@ -545,7 +545,7 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
-    /// ADR-0018: the account is named at install time and nowhere else. No password parameter
+    /// ADR-0019: the account is named at install time and nowhere else. No password parameter
     /// exists beside it — the accepted Windows forms are all passwordless.
     #[test]
     fn install_takes_a_run_as_account() {
@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(args.run_as, None, "absent flag means today's behaviour");
     }
 
-    /// ADR-0018: `--run-as` is system scope only — a `--user` service already runs as its user,
+    /// ADR-0019: `--run-as` is system scope only — a `--user` service already runs as its user,
     /// so naming an account beside it could only contradict it.
     #[test]
     fn run_as_and_user_scope_are_refused_together() {
@@ -585,7 +585,7 @@ mod tests {
     }
 
     /// The default value of `--config` must not be mistaken for a path someone chose: it decides
-    /// whether `install` writes into the install root or where the operator pointed (ADR-0018).
+    /// whether `install` writes into the install root or where the operator pointed (ADR-0019).
     #[test]
     fn a_named_config_is_told_apart_from_the_default() {
         let default = parse_from(["client", "service", "install"]).expect("parse");

@@ -1,4 +1,4 @@
-//! The REST API v1 as the integration contract (ADR-0021): Configuration CRUD, loud rejection of
+//! The REST API v1 as the integration contract (ADR-0023): Configuration CRUD, loud rejection of
 //! invalid input, and the OpenAPI document any portal generates a client from.
 
 mod support;
@@ -40,7 +40,7 @@ async fn configurations_crud_round_trips() {
     assert_eq!(stored["body"], "receivers: {}\n");
     assert!(
         stored.get("published").is_none() && stored.get("pending_changes").is_none(),
-        "ADR-0023: content has one state — saved; rollout is a fact about Agents: {stored}"
+        "ADR-0025: content has one state — saved; rollout is a fact about Agents: {stored}"
     );
 
     // Read back, singly and as the list.
@@ -84,7 +84,7 @@ async fn configurations_crud_round_trips() {
     assert_eq!(gone.status(), 404);
 }
 
-/// ADR-0021: `role` is optional on the way in and absent on the way out when unset, so every
+/// ADR-0023: `role` is optional on the way in and absent on the way out when unset, so every
 /// stored Configuration and every generated client keeps working unchanged.
 #[tokio::test]
 async fn a_configuration_carries_an_optional_role() {
@@ -142,7 +142,7 @@ async fn a_configuration_carries_an_optional_role() {
     assert_eq!(stored["role"], "some-agents-own-word");
 }
 
-/// ADR-0023 over the wire: saving proposes, the rollout act distributes — resource-wide or per
+/// ADR-0025 over the wire: saving proposes, the rollout act distributes — resource-wide or per
 /// Agent — and a later edit waits as `update` until the next act pins it.
 #[tokio::test]
 async fn a_configuration_waits_until_it_is_rolled_out() {
@@ -244,7 +244,7 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
     assert_eq!(missing.status(), 404);
 }
 
-/// ADR-0023 point 6: an Agent that appears after the rollout act waits — it surfaces as pending
+/// ADR-0025 point 6: an Agent that appears after the rollout act waits — it surfaces as pending
 /// and receives nothing until an act of its own. The bulk act must be repeated (or the per-Agent
 /// one pressed) for latecomers.
 #[tokio::test]
@@ -310,7 +310,7 @@ async fn an_agent_that_appears_later_waits() {
     assert_eq!(view["assigned_configurations"][0], "fleet");
 }
 
-/// ADR-0021 over the wire: a Configuration stating an Agent type reaches only Agents reporting
+/// ADR-0023 over the wire: a Configuration stating an Agent type reaches only Agents reporting
 /// that `service.name`, whatever its Selector says.
 #[tokio::test]
 async fn a_typed_configuration_reaches_only_agents_of_its_type() {
@@ -341,7 +341,7 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
         "the type is a fit, not an aim: the other type's Configuration is no candidate"
     );
 
-    // And the per-Agent act refuses the one that does not fit (ADR-0023).
+    // And the per-Agent act refuses the one that does not fit (ADR-0025).
     let refused = client
         .post(url(
             server.rest_addr,
@@ -387,7 +387,7 @@ fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
 }
 
-/// Verifies: ADR-0021, ADR-0024, G-5
+/// Verifies: ADR-0023, ADR-0026, G-5
 #[tokio::test]
 async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
@@ -408,7 +408,7 @@ async fn the_openapi_document_describes_the_contract() {
     let paths = document["paths"].as_object().expect("paths");
     assert!(paths.contains_key("/api/v1/agents"));
     // OpenAPI 3.1 requires a description on every response, and a generator may refuse a
-    // document without one; utoipa writes none for a response that does not state it (ADR-0021).
+    // document without one; utoipa writes none for a response that does not state it (ADR-0023).
     let silent: Vec<String> = paths
         .iter()
         .flat_map(|(path, operations)| {
@@ -432,7 +432,7 @@ async fn the_openapi_document_describes_the_contract() {
         silent.is_empty(),
         "responses without a description: {silent:?}"
     );
-    // Deployments are part of the contract from the moment they exist (ADR-0024) — a portal
+    // Deployments are part of the contract from the moment they exist (ADR-0026) — a portal
     // generates against this document, and a route it cannot see is a route it cannot call.
     for route in [
         "/api/v1/deployments",
@@ -443,7 +443,7 @@ async fn the_openapi_document_describes_the_contract() {
     ] {
         assert!(paths.contains_key(route), "{route} is described");
     }
-    // And the retired package paths are gone rather than lingering as a promise (ADR-0024).
+    // And the retired package paths are gone rather than lingering as a promise (ADR-0026).
     assert!(
         !paths
             .keys()
@@ -451,7 +451,7 @@ async fn the_openapi_document_describes_the_contract() {
         "no package route still carries a name segment: {:?}",
         paths.keys().collect::<Vec<_>>()
     );
-    // Forgetting an Agent is part of the contract a portal generates against (ADR-0022), and the
+    // Forgetting an Agent is part of the contract a portal generates against (ADR-0024), and the
     // description is where the "reaches no host" caveat has to be readable.
     let forget = &paths["/api/v1/agents/{instance_uid}"]["delete"];
     assert!(forget.is_object(), "DELETE on an Agent is described");
@@ -466,12 +466,12 @@ async fn the_openapi_document_describes_the_contract() {
     assert!(paths.contains_key("/api/v1/configurations/{name}"));
     assert!(
         paths.contains_key("/api/v1/configurations/{name}/rollout"),
-        "the rollout act is part of the contract (ADR-0023)"
+        "the rollout act is part of the contract (ADR-0025)"
     );
     assert!(paths.contains_key("/api/v1/agents/{instance_uid}/rollout"));
     assert!(
         !paths.contains_key("/api/v1/configurations/{name}/publication"),
-        "publication left the contract with ADR-0023"
+        "publication left the contract with ADR-0025"
     );
     // The resource schemas ride along, so a client can be generated without the source.
     assert!(document["components"]["schemas"]["ConfigurationView"].is_object());
@@ -550,7 +550,7 @@ async fn configurations_survive_a_server_restart() {
     assert_eq!(restored[0].saved.body, "receivers: {}\n");
 }
 
-/// ADR-0022. The gate, over the wire: an Agent that just reported is doing its job, and forgetting
+/// ADR-0024. The gate, over the wire: an Agent that just reported is doing its job, and forgetting
 /// it would have its configuration offered again — which restarts a Managed Process.
 #[tokio::test]
 async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
@@ -580,10 +580,10 @@ async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
     );
 }
 
-/// ADR-0022, points 11 and 11: forgetting drops the record and reaches no host, so a Client that is
+/// ADR-0024, points 11 and 11: forgetting drops the record and reaches no host, so a Client that is
 /// still running simply comes back — and the Server, which now knows nothing about it, asks for
 /// full state exactly as it does for any Agent it has never seen.
-// Verifies: ADR-0022
+// Verifies: ADR-0024
 #[tokio::test]
 async fn a_silent_agent_is_forgotten_and_returns_as_a_stranger() {
     // A zero budget makes the Agent silent the moment the clock ticks past its last report; the
@@ -650,7 +650,7 @@ async fn forgetting_what_is_not_there_is_reported() {
 /// page can fire them without a preflight. Fetch Metadata refuses the cross-site ones — a browser
 /// stamps `Sec-Fetch-Site` and cannot let a page forge it — while same-origin and non-browser
 /// callers pass. The guard runs before the handler, so it decides regardless of the target.
-/// Verifies: ADR-0019
+/// Verifies: ADR-0021
 #[tokio::test]
 async fn a_cross_site_state_changing_post_is_refused() {
     let server = spawn().await;
@@ -738,7 +738,7 @@ async fn report(
         .expect("decode")
 }
 
-/// ADR-0022, and the whole point of it: a rollout ring becomes a Server-side decision. The Agent
+/// ADR-0024, and the whole point of it: a rollout ring becomes a Server-side decision. The Agent
 /// reports nothing about `rollout`, so before the label the canary Configuration cannot reach it —
 /// and moving it into the ring is one API call rather than an edit and a restart on that host.
 #[tokio::test]
@@ -749,7 +749,7 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
     // A Configuration aimed at the canary ring. Nothing reports `rollout`, so it proposes itself to
-    // nobody — and even a match only proposes (ADR-0023).
+    // nobody — and even a match only proposes (ADR-0025).
     let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/canary"))
         .json(&serde_json::json!({ "selector": { "rollout": "canary" }, "body": "receivers: {}" }))
@@ -793,9 +793,9 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
         .is_empty());
 }
 
-/// The crux (ADR-0022 point 18): reported attributes decide which artifact fits a machine, so a
+/// The crux (ADR-0024 point 18): reported attributes decide which artifact fits a machine, so a
 /// label may not restate one. Refused where it is written, naming the key — not quietly ignored.
-// Verifies: ADR-0022
+// Verifies: ADR-0024
 #[tokio::test]
 async fn a_label_may_not_restate_what_the_agent_reports() {
     let server = spawn().await;
@@ -803,7 +803,7 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0024).
+    // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0026).
     let refused = set_labels(
         &client,
         server.rest_addr,
@@ -939,7 +939,7 @@ async fn the_view_carries_the_held_configuration_and_a_refusal_with_its_reason()
 }
 
 /// Labels are the operator's decision, not something the Server learned, so forgetting an Agent
-/// (ADR-0022) does not undo them: a host that comes back is in the ring it was put in.
+/// (ADR-0024) does not undo them: a host that comes back is in the ring it was put in.
 #[tokio::test]
 async fn forgetting_an_agent_keeps_its_labels() {
     let server = support::spawn_with_stale_after(std::time::Duration::ZERO).await;
@@ -1024,7 +1024,7 @@ async fn set_labels(
 /// writes the one format `opamp-fleetctl package sign --signing-info` reads, and the fields it
 /// reads must be the ones the API serves. A rename on either side breaks here rather than in an
 /// empty column or a signing file with a hole in it.
-/// Verifies: ADR-0021, ADR-0029
+/// Verifies: ADR-0023, ADR-0027
 #[tokio::test]
 async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
     let server = spawn().await;
@@ -1080,14 +1080,14 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
     }
 }
 
-/// The bundled UI is a client of the REST API and nothing more (ADR-0021 clause 13), so its
+/// The bundled UI is a client of the REST API and nothing more (ADR-0023 clause 13), so its
 /// Enrolments tab depends on the names the enrolment routes share with it: the routes it calls and
-/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0019 clause 22 lists
+/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0021 clause 22 lists
 /// so an operator can match a request to the Client's log. The page asks for them, and the OpenAPI
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no
 /// frontend toolchain to run it in.
-/// Verifies: ADR-0021, ADR-0032
+/// Verifies: ADR-0023, ADR-0028
 #[tokio::test]
 async fn the_ui_and_the_enrolment_api_share_their_names() {
     let server = spawn().await;
@@ -1188,7 +1188,7 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
 /// in the browser — so a cross-site page must not be able to fire it. Both enrolment decisions are
 /// body-less `POST`s behind the same Fetch Metadata guard as `restart`, which answers before the
 /// handler, whether or not enrolment is configured.
-/// Verifies: ADR-0019
+/// Verifies: ADR-0021
 #[tokio::test]
 async fn a_cross_site_enrolment_decision_is_refused() {
     let server = spawn().await;

@@ -4,7 +4,7 @@
 # and 127.0.0.1:4318 (OTLP/HTTP) inside the container are forwarded to the same ports on the host,
 # where observability/compose.yaml publishes the Collector.
 #
-# The detour is ADR-0015's: the Client sends own telemetry in plaintext to a loopback IP literal
+# The detour is ADR-0016's: the Client sends own telemetry in plaintext to a loopback IP literal
 # and nowhere else — not to host.docker.internal, not to a private address, not even to the name
 # `localhost`. So a server.toml offering `http://127.0.0.1:4318/v1/logs` reaches the Collector
 # from inside the container exactly as it does on the host. The hop to the host stays on this

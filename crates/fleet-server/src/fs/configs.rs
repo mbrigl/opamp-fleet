@@ -1,4 +1,4 @@
-//! Configurations on the filesystem (ADR-0021, ADR-0023): the default adapter behind
+//! Configurations on the filesystem (ADR-0023, ADR-0025): the default adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one JSON file per Configuration, written in
 //! one step.
 

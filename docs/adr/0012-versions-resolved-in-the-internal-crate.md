@@ -1,6 +1,6 @@
-# ADR-0011: `Cargo.toml` decides the product's version, the internal crate's build stamps it with git's provenance, and the commit is compared nowhere
+# ADR-0012: `Cargo.toml` decides the product's version, the internal crate's build stamps it with git's provenance, and the commit is compared nowhere
 
-- **Status:** 🟢 accepted · clauses 1 and 4 superseded by [ADR-0031](0031-the-builds-product-variables-are-named-for-the-product.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** `Cargo.toml` `[workspace.package] version`, `crates/fleet-core/build.rs`, `crates/fleet-core/src/version.rs`, the `version` job of `.github/workflows/release.yml`, and every surface that states, compares or displays a version
@@ -8,15 +8,15 @@
 ## Context
 
 The version resolution and its helper do not belong in the publishable `opamp` crate
-([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)),
+([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)),
 which carries the protocol and nothing of this project's own.
 
 The version a binary carries is load-bearing in several places at once: the OpAMP `service.version`
 identifying attribute tells the Server which build it is talking to, both CLIs print it, the
 Client's install layout names its version directories after it
-([ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)), and the self-update compares an offered
+([ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)), and the self-update compares an offered
 version against what a staged binary reports
-([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)).
+([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)).
 
 Forces:
 
@@ -49,11 +49,11 @@ tag from the file, and treat the build metadata as provenance that is recorded e
 compared nowhere.
 
 1. **`Cargo.toml` decides the number.** The base is `[workspace.package] version` — the product's
-   release number, which the `opamp` crate does not carry (ADR-0009) — and Cargo hands it to the
+   release number, which the `opamp` crate does not carry (ADR-0010) — and Cargo hands it to the
    build script as `CARGO_PKG_VERSION`. Bumping it is an ordinary reviewed commit. The
    grammar is strict semantic versioning: exactly three non-negative integers without leading
    zeros, no pre-release, no build metadata; a value that breaks it fails the build. The
-   environment variable `OPAMP_FLEET_VERSION` overrides the base, held to the same grammar.
+   environment variable `OPAMP_PRODUCT_VERSION` overrides the base, held to the same grammar.
 
 2. **Git says only what is around the number.**
 
@@ -75,9 +75,9 @@ compared nowhere.
 
 4. **The resolution runs in `crates/fleet-core/build.rs`, through `git2`, with no `git` binary.** The
    script discovers the repository upward from the manifest directory, reads HEAD and the
-   `refs/tags/version/*` references, and emits `cargo:rustc-env=OPAMP_BUILD_VERSION=<full string>`
+   `refs/tags/version/*` references, and emits `cargo:rustc-env=OPAMP_PRODUCT_RELEASE=<full string>`
    with `rerun-if-changed` on the repository's `HEAD`, `refs` and `packed-refs` and
-   `rerun-if-env-changed=OPAMP_FLEET_VERSION`. `git2` (libgit2, vendored and statically built) is a
+   `rerun-if-env-changed=OPAMP_PRODUCT_VERSION`. `git2` (libgit2, vendored and statically built) is a
    **build**-dependency of `fleet-core` only: nothing of it reaches a shipped binary, nothing parses CLI
    output, and the result does not vary with the host's git version or locale.
 
@@ -112,8 +112,8 @@ compared nowhere.
    pre-release or metadata that is not dot-separated, non-empty identifiers of `[0-9A-Za-z-]` — the
    gate that keeps a version from naming a path outside the install layout. Beside it: `identity`
    (clause 10), `same_release`, and `precedence`, SemVer ordering with build metadata ignored, which
-   the self-update's downgrade refusal ([ADR-0017](0017-the-client-updates-itself-under-its-own-agent-type.md)) and the
-   rollout ([ADR-0023](0023-rollout-and-what-reaches-an-agent.md)) order by. It lives in
+   the self-update's downgrade refusal ([ADR-0018](0018-the-client-updates-itself-under-its-own-agent-type.md)) and the
+   rollout ([ADR-0025](0025-rollout-and-what-reaches-an-agent.md)) order by. It lives in
    `fleet-core` because the Client writes these strings and the Server displays them, and it is
    this project's grammar, not OpAMP's.
 
@@ -142,7 +142,7 @@ compared nowhere.
     keep the full string too.
 
 **Out of scope:** what a release builds and publishes (targets, artifacts, installers —
-[ADR-0018](0018-the-client-supervisor-installed-service-releases-and-installers.md)); whether a Managed Process's
+[ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)); whether a Managed Process's
 package version, free-form and an upstream project's own numbering, is parsed beyond what ordering
 needs; release-candidate tags (`version/1.2.3-rc.1`), refused by the grammar until a
 release-candidate flow is wanted.
@@ -179,9 +179,9 @@ release-candidate flow is wanted.
 - **A second `build.rs` in `crates/fleet-server`, or an `include!`d shared fragment** — duplicates the tag
   grammar and the failure modes where they can drift. **A crate holding only build support** — a
   further crate for one function, where a shared crate already sits between the two ends
-  ([ADR-0009](0009-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). **The
+  ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). **The
   resolution in the `opamp` crate** — a crate fetched from a registry is never inside a git
-  checkout, so it would not build for anyone else (ADR-0009).
+  checkout, so it would not build for anyone else (ADR-0010).
 - **Keep comparing the full string and document `%2B`** — treats an unusable interface as a
   training problem.
 - **Compare the base only, dropping the pre-release too** — would let an offer of `0.1.1` be
@@ -189,6 +189,14 @@ release-candidate flow is wanted.
 - **The Client reports only the base** — throws away the answer to "which build is on that host".
 - **Leave `service_version` holding the full string and add a base field beside it** — leaves a
   field called `service_version` holding something nobody would call a version.
+- **Name the variables for this project (`OPAMP_FLEET_VERSION`, `OPAMP_BUILD_VERSION`)** — a
+  variant build (ADR-0019 clause 2) would set a variable that names a product it is not, and a
+  *build* version beside a *fleet* version does not say which is the input and which the result.
+  `OPAMP_PRODUCT_VERSION` and `OPAMP_PRODUCT_RELEASE` read as one pair.
+- **No prefix (`PRODUCT_VERSION`)** — common in other toolchains, so an ambient value would set the
+  version. `OPAMP_` is the prefix the build already uses for `OPAMP_BASELINE`
+  ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md))
+  and names the protocol, not the product, so it holds in every variant.
 
 ## Sources / Prior art
 
@@ -235,6 +243,11 @@ release-candidate flow is wanted.
 
 ## Enforcement
 
+- `crates/fleet-core/src/version.rs` reads `OPAMP_PRODUCT_RELEASE` through `env!`, so a build
+  script that emits another name fails the compilation, and the self-update end-to-end tests in
+  `crates/fleet-agent/tests/self_update_e2e.rs` build their newer Client with
+  `OPAMP_PRODUCT_VERSION` and fail when the override is not read, because that Client then reports
+  no upgrade.
 - `crates/fleet-core/build.rs` fails the build on a malformed `Cargo.toml` version or override, on a
   `version/*` tag on HEAD that names another version, and outside a git repository.
 - `crates/fleet-core/src/version.rs` tests: `the_baked_version_has_the_prescribed_shape`,

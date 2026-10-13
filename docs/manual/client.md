@@ -156,9 +156,7 @@ delivery to run an arbitrary binary on your host. And a delivered block **brings
 reaches past the package signature**: it may set environment variables and arguments only as the
 running block of the same name already has them, or as you allow below; never a variable that
 steers which code a program loads (`PATH`, `LD_*`, `DYLD_*`, `JAVA_TOOL_OPTIONS`, `PYTHONPATH` and
-the like) and never a value pointing into the Supervisor's own directories; and a file it names,
-such as Icinga's `ticket_file`, only inside its own `config/` directory, with the Icinga parent
-pinned by `trusted_cert_file`.
+the like) and never a value pointing into the Supervisor's own directories.
 
 ```toml
 [supervisors]
@@ -184,7 +182,7 @@ uninstall, start, stop, update, reload, and apply-configuration. A plugin select
 
 The vocabulary being closed is the point. A new kind of agent adds an implementation, not a new
 concept — so package delivery, health gating and rollback work for it without anyone extending them.
-Kinds exist for OpenTelemetry Collectors, for Icinga 2, and a generic one that runs a command; the
+Kinds exist for OpenTelemetry Collectors and a generic one that runs a command; the
 generic one covers most things without a plugin at all.
 
 Each supervised process gets one directory holding everything about it: its identity, its
@@ -1162,21 +1160,16 @@ Each `[[supervisor]]` block runs one Supervisor managing one local process, and 
 Server as its own Agent. Without any block the Client presents itself as a single Agent and manages
 nothing.
 
-Five plugin types ship today, in two groups.
+Two plugin types ship today.
 
-**Two know nothing about the agent they run**, so their blocks say everything: `collector` for an
+**Both know nothing about the agent they run**, so their blocks say everything: `collector` for an
 OpenTelemetry Collector, and `command` for any other process — a **Foreign Agent** that speaks no
 OpAMP.
 
-**Three are wrappers**, each knowing one agent's program, its layout on each platform and its
-invocation, so its block says which host runs it and little else: `icinga2` for a daemon that takes its
-directories as `-D` constants rather than flags, validates a configuration before applying it, and
-needs a certificate from a master before it can do anything; `glpi` for the GLPI
-inventory agent, whose Linux and Windows invocations share almost nothing; and `telegraf`, whose
-reload signal could not be written in a block a mixed fleet could use.
+**A wrapper**, when a build carries one, knows one agent's program, its layout on each platform and its
+invocation, so its block says which host runs it and little else.
 
-A new kind of process means a new plugin, not a change to the core — which is what the last three
-demonstrate.
+A new kind of process means a new plugin, not a change to the core.
 
 ### The Server can manage the set
 
@@ -1262,7 +1255,7 @@ system already configures. Name them in `[supervisors]`:
 
 ```toml
 [supervisors]
-remote_config_disabled = ["icinga2", "telegraf"]   # Supervisor names, by their block's `name`
+remote_config_disabled = ["otelcol"]   # Supervisor names, by their block's `name`
 ```
 
 The key is read from this file only. The Server never writes `[supervisors]`, so a Supervisor set
@@ -1279,19 +1272,17 @@ set unless `server_manages_set = false`
   It still restarts on command and still takes signed packages. A configuration that arrives anyway
   is not stored, not written, not applied and not answered; the Client logs one warning per hash.
 - **What it runs on.** The files you place in `<supervisor_dir>/<name>/config/`, under the names its
-  kind reads: any unroled file for `collector`, `telegraf-conf` for `telegraf`,
-  `glpi-agent-conf` for `glpi`, the `role = "main"` entry or `icinga2-conf` for `icinga2`, and
+  kind reads: any unroled file for `collector`, and
   for `command` whatever its `args` name. Roles go into `.supplementary`, one `<file> <role>` per
   line. Nothing else writes into that directory while the switch is on. Without such a file a
-  `collector` or `icinga2` waits and says so, and `telegraf` exits and is reported.
+  `collector` waits and says so.
 - **The block stays yours.** A delivered block for a listed Supervisor must repeat its running
   block exactly, every key included, whatever `delivered_args` and `delivered_env` allow. A
   delivered block that adds a listed Supervisor carries only `type`, `name` and the key naming its
   program where the kind does not name its own: `binary` for `collector`, `command` for `command`,
-  nothing more for `telegraf`, `glpi` and `icinga2`. Otherwise the whole set is refused before
+  and nothing more for a wrapped kind. Otherwise the whole set is refused before
   anything stops. Any other key would be remote configuration by another route: a Collector reads
-  a whole configuration from `--config=yaml:…` or an environment variable, and an `icinga2` block
-  names the parent it enrols with and the certificate it pins.
+  a whole configuration from `--config=yaml:…` or an environment variable.
 - **What happens to a configuration delivered earlier.** When a listed Supervisor starts, the
   Client deletes the `remote-config.pb` in its directory, and from `config/` each file that stored
   configuration wrote whose content is unchanged, `.supplementary` included. A file you edited
@@ -1314,7 +1305,7 @@ false` as well to close that. A change to the list takes effect when the Client 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `type` | — | `"collector"`, `"command"`, `"icinga2"`, `"glpi"`, or `"telegraf"` — one section each below. Required. |
+| `type` | — | `"collector"` or `"command"` — one section each below. Required. |
 | `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
 | `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
@@ -1326,23 +1317,22 @@ false` as well to close that. A change to the list takes effect when the Client 
 #### Wrapped and unwrapped kinds
 
 `collector` and `command` know nothing about the agent they run, so their blocks say everything.
-`icinga2`, `glpi` and `telegraf` are **wrappers**: each knows its agent's program, its layout and
-its invocation, so its block says which host runs it and little else — two lines, or four for an
-Icinga node that enrols.
+A **wrapper**, when a build carries one, knows its agent's program, its layout and
+its invocation, so its block says which host runs it and little else — two lines.
 
 A key a wrapper supplies is **refused by name** rather than silently overridden, and the message
 says what supplies the value now. The same check runs on a Supervisor set the Server offers, so a
 block that would not work is refused *before* any running process is touched.
 
 This Client reports the kinds it was compiled with as attributes of its own Agent — one key per
-kind, `supervisor.kind.icinga2 = "true"` — so a Supervisor set can be aimed with a Selector at the
+kind, `supervisor.kind.collector = "true"` — so a Supervisor set can be aimed with a Selector at the
 Clients that can actually run it.
 
-The published build carries every kind. Each wrapper is a Cargo feature named after its `type`, so
+The published build carries every kind. A wrapper, when the code base carries one, is a Cargo feature named after its `type`, so
 a build for hosts that run only some of them leaves the others out:
 
 ```sh
-cargo build --release -p fleet-agent --no-default-features --features glpi
+cargo build --release -p fleet-agent --no-default-features --features <type>
 ```
 
 `collector` and `command` are always there. A block naming a kind the build does not carry fails
@@ -1366,9 +1356,8 @@ apply_grace_secs = 3     # how long a restart must hold before an apply is ackno
 retain_previous_secs = 86400
 ```
 
-A **wrapped kind corrects them** where its agent's own behaviour demands it — Icinga 2 needs sixty
-seconds to drain its checks and close its cluster connections, which is a property of Icinga and
-not of any host. Only a block of an **unwrapped** kind may state its own, because there no kind
+A **wrapped kind**, when a build carries one, **corrects them** where its agent's own behaviour demands it.
+Only a block of an **unwrapped** kind may state its own, because there no kind
 exists to hold the value.
 
 #### Keys that were removed
@@ -1469,7 +1458,7 @@ There is no `reload_signal` key either. Whether a program re-reads its configura
 the program's own convention, and a wrong value here is the one that stays invisible — a signal the
 process ignores looks exactly like an apply that worked. An agent under this kind therefore applies
 a configuration **by restarting**; an agent whose in-place reload is worth having is an agent worth
-a kind of its own, which `telegraf` and `icinga2` below are.
+a kind of its own.
 
 The Supervisor writes the received configuration entries the same way a Collector's does, but it
 cannot know what to do with them — a Foreign Agent reads its own configuration file. So you point it
@@ -1490,77 +1479,6 @@ FLB_LOG_LEVEL = "info"
 Here `fluent-bit-conf` is the *name of the Configuration on the Server* — that is what the entry file
 is called.
 
-### `type = "icinga2"`
-
-For Icinga 2 in the Agent role, which needs more than a program and arguments: it must be told where
-its state, its template library and its account are on **every** invocation, it creates none of
-those directories itself, and it obtains a certificate from an Icinga master before it can do
-anything.
-
-It is the one wrapper that keeps any keys, and it keeps exactly the four that describe the
-**installation this host is joining**. Nothing here can compute them: the ticket was minted on the
-parent for one common name, and a node that differs from it does not enrol.
-
-| Key | Meaning |
-|---|---|
-| `parent_host` | The Icinga master or satellite, as `host` or `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no enrolment, no certificate, only local checks. |
-| `node_name` | This node's `NodeName`, its certificate's common name and its Endpoint name — Icinga requires the three to be the same string. Defaults to this **host's FQDN**, which is what an operator following Icinga's own instructions feeds `pki ticket --cn`; where no qualified name can be resolved, this Supervisor's name stands in. |
-| `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration aimed at one Agent. Absent means the signing request waits for `icinga2 ca sign` on the parent. |
-| `trusted_cert_file` | The parent's **own** certificate — not the CA that signed it — which the request compares against what the parent presents. Not named at all falls back to trust on first sight, which is logged as such; a named file that is not there makes enrolment wait for it, never fall back. |
-
-Everything else is the kind's, because it is a property of the artifact or of Icinga: the daemon's
-name and place in the tree, the Agent type it presents, its state, log, cache, spool and run
-directories beside the tree, the template library and check plugins inside it, the
-`LD_LIBRARY_PATH` that makes the tree's own libraries win, the account it runs under, the console
-severity, the certificate renewal thirty days before expiry, and the sixty-second stop Icinga needs
-to drain its checks. A block stating one of them is refused by name.
-
-**Which delivered Configuration is Icinga's root** is stated by the fleet rather than by this file:
-the root Configuration carries `role = "main"`, and where the fleet marks none, the conventional
-name `icinga2-conf` stands in. Two entries marked `main` are a reason not to start, naming both.
-
-The recipe with everything around it — building the artifact, the ticket, the configuration, and
-what the fleet view shows — is [Rolling out and managing Icinga 2](icinga2.md); the artifact itself
-is [`docs/artifacts/icinga2.md`](../artifacts/icinga2.md).
-
-### `type = "glpi"`
-
-For the GLPI inventory agent. The block is two lines on **both** platforms, which is the whole
-point: its Linux and Windows invocations differ in the program's name and place in the tree, in
-four Perl `-I` paths, and in whether the script is named by `--script` or by path — and not one of
-those differences is a decision anybody makes.
-
-```toml
-[[supervisor]]
-type = "glpi"
-name = "glpi"
-```
-
-The kind also holds `--daemon --no-fork`, which are supervision requirements rather than
-preferences: without the first the agent runs its tasks once and exits into a restart loop, without
-the second it detaches and leaves the Supervisor holding a pid that ends immediately. Its state
-goes beside the tree rather than inside `program/`, which a package swap replaces whole.
-
-The recipe is [Delivering and supervising the GLPI Agent](glpi-agent.md); the artifact is
-[`docs/artifacts/glpi-agent.md`](../artifacts/glpi-agent.md).
-
-### `type = "telegraf"`
-
-For Telegraf. Also two lines:
-
-```toml
-[[supervisor]]
-type = "telegraf"
-name = "telegraf"
-```
-
-The kind knows the program's name per platform, points `--config` at the Configuration named
-`telegraf-conf`, asks `--version`, and applies a configuration with **`SIGHUP`** where signals exist
-and a restart where they do not. That last part is why the kind exists: as a block key the signal
-was refused on Windows at parse time, so one Supervisor set could not serve a mixed fleet.
-
-The artifact is [`docs/artifacts/telegraf.md`](../artifacts/telegraf.md).
-
 ## How a block names its program
 
 `binary` and `command` take a **bare file name** — `otelcol-contrib`, not a path. It names a file in
@@ -1571,8 +1489,7 @@ Server replace what is in it. Every Agent therefore consents to package updates,
 Anything with a path separator in it — `/usr/local/bin/otelcol`, `./x`, `bin/x` — is a startup error
 naming the rule, rather than a guess. A program the machine's package manager installed is not
 something this Client supervises; to bring one under management, repack it as a package and deliver
-it from the Server. The [Icinga 2](icinga2.md) and [GLPI Agent](glpi-agent.md) recipes show what that
-looks like for a real agent.
+it from the Server.
 
 One thing to know about a bare name: it is **not** searched for in `$PATH`. It names a file in that
 one directory, and the first copy arrives by package like every later one.
@@ -1586,7 +1503,7 @@ path written there drifts the moment `supervisor_dir` moves or the Supervisor is
 silently, because the process then starts happily on a file nobody writes to. Two placeholders
 close that, in a Supervisor's operator-written strings — a `command`'s `args` and
 `[supervisor.env]`, and a `collector`'s `args` and `[supervisor.env]`. A wrapped kind builds its own
-paths and needs no placeholder, except in the four Icinga keys, which take them too:
+paths and needs no placeholder:
 
 | Placeholder | Expands to |
 |---|---|
@@ -1701,8 +1618,7 @@ the count is logged rather than passed over in silence.
 Two more things worth knowing. **A `.tar.gz` carries file modes and is the right format for a
 tree** on Unix; a `.7z` and a `.zip` are opened too, but both store Windows attributes rather than
 Unix modes, so only the program is made executable and a helper binary beside it would not be —
-which costs nothing for a tree that runs on Windows, and is why the GLPI Agent's portable Windows
-build ships as the `.zip` upstream published (see the [GLPI Agent recipe](glpi-agent.md)).
+which costs nothing for a tree that runs on Windows.
 
 ## Updating the Client itself
 

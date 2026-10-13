@@ -103,7 +103,6 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("main", Root),
             ("bin::stub_agent", Root),
             ("bin::stub_crasher", Root),
-            ("bin::stub_icinga2", Root),
             ("supervisor", Root),
             ("service::enrol", Root),
             ("service::runtime", Root),
@@ -144,10 +143,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("supervisor::collector", Adapter),
             ("supervisor::command", Adapter),
             ("supervisor::endpoint", Adapter),
-            ("supervisor::glpi", Adapter),
-            ("supervisor::icinga2", Adapter),
             ("supervisor::process", Adapter),
-            ("supervisor::telegraf", Adapter),
             ("telemetry", Adapter),
             ("tls", Adapter),
             ("transport", Adapter),
@@ -157,7 +153,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     (
         "fleet-tools",
         &[
-            // One command-line program and no library (ADR-0025): nothing here is core, and a
+            // One command-line program and no library (ADR-0028): nothing here is core, and a
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),
@@ -175,10 +171,10 @@ const CORE_CRATES: &[&str] = &[
 ];
 
 /// What the core may name of a technology, by path prefix. `tokio::sync` is channels, which need
-/// no runtime and do no I/O — and ADR-0016 makes a Port a message pair over them; `tokio::select`
+/// no runtime and do no I/O — and ADR-0017 makes a Port a message pair over them; `tokio::select`
 /// and `tokio::pin` are how the core waits on several of them, control flow over futures that
 /// starts no task and touches nothing outside the process. `toml::Table` and
-/// `toml::Value` are the configuration's values (ADR-0009 clause 23), which ADR-0016 hands a
+/// `toml::Value` are the configuration's values (ADR-0010 clause 23), which ADR-0017 hands a
 /// Plugin as its block; reading and parsing the file stays at the edge. An address is a value, and
 /// `env::consts` is fixed at compile time.
 const CORE_PREFIXES: &[&[&str]] = &[
