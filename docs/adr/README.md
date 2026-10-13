@@ -25,6 +25,12 @@ verifies.
   (`Implements ADR-NNNN`), and code may reference a number. A superseded ADR keeps its file and
   its body. Its `Status` line flips to `⚪ superseded by ADR-NNNN` in the pull request that lands
   the superseding ADR, whose `Supersedes` field names it back.
+- **A supersession may name clauses** ([ADR-0030](0030-an-adr-may-supersede-named-clauses-of-another.md)).
+  A `Supersedes` entry that names numbered clauses of the Decision — `ADR-NNNN clause 2`,
+  `… clauses 1 and 4` — replaces only those. The old ADR keeps its status, its row in the binding
+  table and its `Date`, and its `Status` line gains `· clause 2 superseded by ADR-NNNN`, one
+  suffix per successor, in the pull request that proposes the successor. The successor restates
+  the clauses it names and nothing else. An entry without clauses is a whole supersession.
 - **Sprawl is curbed by supersession, never by editing.** One ADR may supersede several whose
   decisions have grown into one. Its `Supersedes` field names each, and each flips its status in
   the same pull request, so the set an agent reads for a change shrinks while every number and
@@ -67,6 +73,7 @@ Inherited from the template: the document set, the procedures, and the way of wo
 | [0006](0006-architecture-style.md) | Application code is structured as ports and adapters, with every dependency pointing at the core | every module of the system's code, the golden path, and the structural test that decides the dependency direction | 🟢 accepted |
 | [0007](0007-action-references.md) | GitHub Actions are referenced by their major version tag and kept current by Dependabot | every `uses:` reference in `.github/workflows/`, and `.github/dependabot.yml` | 🟢 accepted |
 | [0008](0008-template-releases.md) | The template is released as SemVer tags on `main`, and every repository names the release it carries | the tags of the template repository, the **Template** section of `README.md`, and the pull request that lands a release | 🟢 accepted |
+| [0030](0030-an-adr-may-supersede-named-clauses-of-another.md) | An ADR may supersede named clauses of another, which stays accepted for the rest | the supersession mechanics of `docs/adr/README.md` and `docs/adr/template.md`, the `Supersedes` field and `Status` line of every ADR, and the supersession check of `scripts/check-docs.sh` | 🟢 accepted |
 
 #### OpAMP
 

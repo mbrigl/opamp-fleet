@@ -16,7 +16,9 @@ otherwise the kind of change (every commit, every public interface), in one line
 character: the index mirrors it verbatim, and that is how a reader finds the ADRs that bind a
 change ([mechanics](README.md#mechanics)). `Supersedes` only when this ADR replaces one existing
 ADR or several whose decisions have grown into one, each linked; their status lines flip in the
-same pull request ([mechanics](README.md#mechanics)). For a decision recorded only because a
+same pull request ([mechanics](README.md#mechanics)). An entry followed by `clause N` replaces only
+those clauses; the old ADR then stays active and its status line gains the suffix
+`· clause N superseded by ADR-NNNN` instead of the flip. For a decision recorded only because a
 reader would take it for a mistake, cheap to reverse and constraining nothing
 ([`AGENTS.md` §3](../../AGENTS.md#3-adr-rules), rule 2), a sentence each under Context and Decision
 and `None — cheap to reverse` under Alternatives, Sources, and Consequences is the whole record;
