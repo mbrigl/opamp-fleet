@@ -182,6 +182,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Changed
 
+- **The Client's install takes the fleet's files it finds beside its program**
+  ([ADR-0020](docs/adr/0020-the-client-install-takes-the-fleet-files-it-finds-beside-its-program.md)).
+  `service install` looks in its program's directory for `server-ca.pem`, `bootstrap.pem`,
+  `bootstrap-key.pem` and `package-signing-key.pub`. `--interactive` offers them as the answers;
+  `--endpoint` copies the CA and writes the verification key, and an install without
+  `--interactive` enrols with a bootstrap pair it finds and waits for the operator's approval.
+  **What to do:** nothing; to use it, copy the four files beside the program before installing.
+  An installer run from a directory that holds a bootstrap pair now waits for an approval.
+
 - **`pki init` makes the package signing key too.** Next to the server CA it writes
   `package-signing-key.pk8` and its public half, `package-signing-key.pub`, into `--offline-dir`,
   and `supervisor.toml.fragment` names that public half as `[packages] verification_key`, so a
