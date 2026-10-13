@@ -82,7 +82,11 @@ mod tests {
         );
         assert_eq!(
             subcommands(tree("pki")),
-            ["init", "server-cert", "bootstrap-cert", "status"]
+            ["init", "server-cert", "bootstrap-ca", "status"]
+        );
+        assert!(
+            Cli::try_parse_from(["opamp-fleetctl", "pki", "bootstrap-cert", "--out", "b"]).is_err(),
+            "the Server issues bootstrap certificates (ADR-0028)"
         );
     }
 

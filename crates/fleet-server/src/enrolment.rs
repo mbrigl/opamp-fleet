@@ -43,6 +43,8 @@ pub struct Request {
 pub struct Requester {
     pub bootstrap_subject: String,
     pub bootstrap_fingerprint: String,
+    /// The bootstrap certificate's serial, as `GET /api/v1/bootstrap-certificates` lists it.
+    pub bootstrap_serial: String,
     pub peer: Option<IpAddr>,
 }
 
@@ -372,6 +374,7 @@ mod tests {
         Requester {
             bootstrap_subject: "CN=bootstrap".to_string(),
             bootstrap_fingerprint: "bf".to_string(),
+            bootstrap_serial: "b5".to_string(),
             peer: None,
         }
     }

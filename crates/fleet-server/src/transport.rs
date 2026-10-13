@@ -843,6 +843,7 @@ impl Handler for Fleet {
             Some(Peer::Enrolling {
                 subject,
                 fingerprint,
+                serial,
             }),
             Some(enrolment),
         ) = (request.extensions.get::<Peer>(), self.0.enrolment())
@@ -851,6 +852,7 @@ impl Handler for Fleet {
                 requester: Requester {
                     bootstrap_subject: subject.clone(),
                     bootstrap_fingerprint: fingerprint.clone(),
+                    bootstrap_serial: serial.clone(),
                     peer: request.peer.map(|peer| peer.ip()),
                 },
                 request: Arc::new(Mutex::new(None)),

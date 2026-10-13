@@ -896,8 +896,9 @@ transports, to its Server's own origin and to no other host.
 
 #### Enrolment: the first certificate
 
-A fresh host is given a bootstrap certificate and its key. The bootstrap certificate comes from the
-CA the Server names in `[enrolment] bootstrap_ca_file`. The [questionnaire](#the-questionnaire---interactive-and-service-config)
+A fresh host is given a bootstrap certificate and its key. The Server issues the pair on an
+operator's request (see [the Server](server.md#bootstrap-certificates-issued-by-the-server)), from
+the CA it names in `[enrolment] bootstrap_ca_file`. The [questionnaire](#the-questionnaire---interactive-and-service-config)
 enrols with the pair where it lies before the service is registered, and copies neither file; a
 file written by hand names the pair as `cert_file` and `key_file`, and the service enrols when it
 starts. Enrolment runs the same either way:

@@ -4,6 +4,7 @@
 
 mod agents;
 mod audit;
+mod bootstrap;
 mod configs;
 mod deployments;
 mod labels;
@@ -12,6 +13,7 @@ mod revocation;
 
 pub use agents::FsAgentStore;
 pub use audit::{files_in as audit_files, FsAuditStore};
+pub use bootstrap::FsBootstrapStore;
 pub use configs::FsConfigBackend;
 pub use deployments::FsDeploymentBackend;
 pub use labels::FsLabelStore;

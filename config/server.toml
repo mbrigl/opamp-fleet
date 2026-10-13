@@ -155,8 +155,13 @@ client_ca_file = "client-ca.pem"
 # The Client logs its request's key fingerprint, which is the id listed, so an approval can be
 # matched to a host. Needs [client_ca], which signs the approved request. Without [enrolment] no
 # host enrols, and an operator issues every certificate.
+# With bootstrap_ca_key_file the Server also issues the bootstrap certificates, each with a subject
+# the operator names (a customer, a site), and hands out the key in that one answer:
+#   POST /api/v1/bootstrap-certificates  {"subject": {"organization": "…"}, "validity_days": 10}
+#   GET  /api/v1/bootstrap-certificates  lists the valid ones, each revocable by its serial
 # [enrolment]
 # bootstrap_ca_file = "bootstrap-ca.pem"
+# bootstrap_ca_key_file = "bootstrap-ca-key.pem"
 
 # Repeated admission failures from one peer address: past max_failures 401s within
 # window_secs, the address is answered 429 with Retry-After for backoff_secs, before anything else

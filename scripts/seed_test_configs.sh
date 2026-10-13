@@ -27,9 +27,12 @@
 #       (POST /api/v1/configurations/<name>/rollout, or the fleet view).
 #   scripts/seed_test_configs.sh --enrol [server-url]
 #       For the development set of scripts/dev-pki.sh, whose Client enrols like any other host
-#       (ADR-0028): opens the enrolment window for ten minutes, waits up to a minute for requests,
-#       and approves every one it finds, printing each key fingerprint. Development only — on a
-#       real fleet an operator compares each fingerprint with the host's log before approving.
+#       (ADR-0028): asks the Server for a fresh bootstrap pair and writes it where the
+#       development supervisor.toml names it ($SEED_BOOTSTRAP_DIR, default .dev-pki/offline/),
+#       opens the enrolment window for ten minutes, waits up to two minutes for
+#       requests — start the Client then — and approves every one it finds, printing each key
+#       fingerprint. Development only — on a real fleet an operator compares each fingerprint with
+#       the host's log before approving.
 # The first two modes replace an existing Configuration of the same name.
 #
 # Note on the contrib Collector: once its opampextension self-reports, the reported
@@ -70,15 +73,28 @@ if [ -f "$cacert" ]; then
 fi
 
 if [ "$mode" = enrol ]; then
+    bootstrap_dir="${SEED_BOOTSTRAP_DIR:-$(dirname "$0")/../.dev-pki/offline}"
+    # A fresh pair every time, so a pair that has ended since the last run is never reused. The
+    # Server issues it and hands out its key this once (ADR-0028).
+    issued=$(curl -fsS "${curl_tls[@]}" -X POST -H 'Content-Type: application/json' \
+        -d '{"subject": {"organization": "Development"}}' \
+        "$server/api/v1/bootstrap-certificates")
+    (
+        umask 077
+        jq -r .private_key_pem <<<"$issued" >"$bootstrap_dir/bootstrap-key.pem"
+    )
+    jq -r .certificate_pem <<<"$issued" >"$bootstrap_dir/bootstrap.pem"
+    echo "wrote the bootstrap pair, serial $(jq -r .serial <<<"$issued"), to $bootstrap_dir"
     curl -fsS "${curl_tls[@]}" -X POST -H 'Content-Type: application/json' \
         -d '{"open_for_secs": 600}' "$server/api/v1/enrolment/window" >/dev/null
-    for _ in $(seq 60); do
+    echo "the enrolment window is open; start the Client now"
+    for _ in $(seq 120); do
         ids=$(curl -fsS "${curl_tls[@]}" "$server/api/v1/enrolments" | jq -r '.[].id')
         [ -n "$ids" ] && break
         sleep 1
     done
     if [ -z "$ids" ]; then
-        echo "no enrolment request arrived within a minute; is the Client running?" >&2
+        echo "no enrolment request arrived within two minutes; is the Client running?" >&2
         exit 1
     fi
     for id in $ids; do

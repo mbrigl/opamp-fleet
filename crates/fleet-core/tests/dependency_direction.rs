@@ -51,6 +51,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
         &[
             ("", Root),
             ("ending", Core),
+            ("naming", Core),
             ("package", Core),
             ("platform", Core),
             ("renewal", Core),
@@ -65,6 +66,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("agent_rate", Core),
             ("agent_store", Core),
             ("audit", Core),
+            ("bootstrap", Core),
             ("configs", Core),
             ("deployments", Core),
             ("enrolment", Core),
@@ -82,6 +84,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("fs", Adapter),
             ("fs::agents", Adapter),
             ("fs::audit", Adapter),
+            ("fs::bootstrap", Adapter),
             ("fs::configs", Adapter),
             ("fs::deployments", Adapter),
             ("fs::labels", Adapter),

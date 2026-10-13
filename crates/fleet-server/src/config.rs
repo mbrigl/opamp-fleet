@@ -209,6 +209,11 @@ pub struct EnrolmentConfig {
     /// PEM certificate of the CA that issues bootstrap certificates. A certificate from it can
     /// only enrol: it needs an open enrolment window and an operator's approval.
     pub bootstrap_ca_file: PathBuf,
+    /// PEM PKCS#8 key of that CA. With it the Server issues bootstrap certificates on an
+    /// operator's request; without it enrolment works with bootstrap certificates made elsewhere
+    /// (ADR-0021 clause 19).
+    #[serde(default)]
+    pub bootstrap_ca_key_file: Option<PathBuf>,
 }
 
 /// The `[admission_throttle]` section (ADR-0021 clause 24).

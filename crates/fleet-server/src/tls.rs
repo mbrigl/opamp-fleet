@@ -14,7 +14,7 @@ use opamp::tls::Identity;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::config::{EnrolmentConfig, TlsConfig};
-use crate::revocation::{name_hash, Authority};
+use crate::revocation::{name_hash, Authority, CertId};
 
 /// The material each plane serves with, and who issued what the Agent plane admits.
 pub struct PlaneTls {
@@ -46,6 +46,8 @@ pub enum Peer {
         subject: String,
         /// SHA-256 of the certificate, hex.
         fingerprint: String,
+        /// The serial as the bootstrap record keys it (`ca::facts`).
+        serial: String,
     },
 }
 
@@ -59,6 +61,7 @@ impl Issuers {
             return Peer::Enrolling {
                 subject: String::new(),
                 fingerprint: hex::encode(Sha256::digest(certificate)),
+                serial: String::new(),
             };
         };
         let issuer = parsed.issuer().as_raw();
@@ -73,6 +76,7 @@ impl Issuers {
         Peer::Enrolling {
             subject: parsed.subject().to_string(),
             fingerprint: hex::encode(Sha256::digest(certificate)),
+            serial: CertId::new(issuer, &hex::encode(parsed.raw_serial())).serial,
         }
     }
 }

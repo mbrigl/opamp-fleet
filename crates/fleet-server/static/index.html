@@ -500,7 +500,7 @@
           <button id="enrolment-window-close" class="btn btn-ghost" style="display: none"
                   title="Close the window now: every enrolling connection ends and every waiting request expires">Close window</button>
         </span>
-        <span class="sub">A host enrols with the fleet's bootstrap certificate while the enrolment window is open, and waits here until an operator approves it. Before approving, compare the <b>key fingerprint</b> with the <code>key_fingerprint</code> the Client logged on that host: only a match is the host you mean.</span>
+        <span class="sub">A host enrols with a bootstrap certificate while the enrolment window is open, and waits here until an operator approves it. The <b>bootstrap certificate</b> column names the customer and site it was issued to. Before approving, compare the <b>key fingerprint</b> with the <code>key_fingerprint</code> the Client logged on that host: only a match is the host you mean.</span>
         <span id="enrolment-result" class="sub"></span>
         <span id="enrolments-error" class="err"></span>
       </div>
@@ -521,6 +521,43 @@
         </table>
         <div id="enrolments-empty" class="empty">No host is waiting.</div>
       </div>
+
+      <!-- Bootstrap certificates (ADR-0028): issued by this Server with the customer (O) and site
+           (OU) an operator names. The private key is in the issuing answer only, so the UI holds it
+           in memory until the operator has saved it and never stores it. -->
+      <section id="boot-section" class="card config" style="display: none">
+        <h2>Bootstrap certificates — one per customer, site or batch; each opens nothing without an open window and an approval</h2>
+        <div class="config-fields">
+          <input id="boot-org" class="quarter" placeholder="customer (O)" maxlength="64" autocomplete="off"
+                 title="The organization the certificate is issued to, typically the customer. Optional; 1 to 64 characters. It labels the certificate and authorizes nothing." />
+          <input id="boot-unit" class="quarter" placeholder="site (OU)" maxlength="64" autocomplete="off"
+                 title="The organizational unit, typically the site. Optional; 1 to 64 characters." />
+          <input id="boot-days" class="narrow" type="number" min="1" max="90" value="10"
+                 title="How many days the certificate is valid: 1 to 90, cut to the bootstrap CA's end." />
+          <button id="boot-issue" class="btn btn-primary"
+                  title="Issue a bootstrap certificate with a fresh key. Its row offers the pair for saving while this page stays open; the Server does not keep the key.">Issue</button>
+        </div>
+        <div id="boot-keys-note" class="err" style="display: none; margin-bottom: 6px">This page holds the private keys of the certificates issued in it until it is reloaded or closed: the Server does not keep them. Save both files from the row; a lost key is replaced by issuing again.</div>
+        <span id="boot-result" class="sub"></span>
+        <span id="boot-error" class="err"></span>
+        <div class="table-wrap" style="margin-top: 10px">
+          <table>
+            <thead>
+              <tr>
+                <th>Subject</th>
+                <th style="width: 22%">Serial</th>
+                <th style="width: 150px">Issued</th>
+                <th style="width: 150px">Valid until</th>
+                <th style="width: 90px">State</th>
+                <th style="width: 190px"></th>
+              </tr>
+            </thead>
+            <tbody id="boots"></tbody>
+          </table>
+          <div id="boots-empty" class="empty">This Server has issued no bootstrap certificate that is still on record.</div>
+          <span id="boots-error" class="err"></span>
+        </div>
+      </section>
       </div>
 
       <div id="panel-agents" class="tab-panel">
@@ -2008,7 +2045,22 @@
       // queue that could never fill.
       let enrolments = [];
       let enrolmentsShown = null;
+      // The bootstrap certificates on record (ADR-0028 clause 24). A request names the one it carries
+      // by serial, since the record keeps the key's fingerprint and the request the certificate's.
+      let boots = [];
+      let bootsShown = null;
+      // The pairs issued in this page, by serial: held in memory only, until the page is reloaded or
+      // closed, the certificate revoked or ended — the Server keeps no key (ADR-0028 clause 21).
+      const issuedPairs = new Map();
       const when = (ms) => new Date(ms).toLocaleString();
+      function bootstrapCell(e) {
+        const fingerprint = `<br /><span class="fingerprint sub" title="the bootstrap certificate's fingerprint">${esc(e.bootstrap_fingerprint)}</span>`;
+        const b = boots.find((b) => b.serial === e.bootstrap_serial);
+        if (!b) {
+          return `${esc(e.bootstrap_subject)}<br /><span class="sub" title="not on this Server's record: made elsewhere, or under a bootstrap CA since replaced">serial ${esc(e.bootstrap_serial)} · not issued here</span>${fingerprint}`;
+        }
+        return `${esc(b.subject)}<br /><span class="sub">serial ${esc(b.serial)} · issued ${esc(when(b.issued_ms))} · valid until ${esc(when(b.not_after_ms))}</span>${fingerprint}`;
+      }
       function renderEnrolments(win, failed) {
         $("enrolment-count").textContent = enrolments.length;
         const badge = $("enrolment-window");
@@ -2037,7 +2089,7 @@
         $("enrolments-empty").style.display = enrolments.length || failed ? "none" : "block";
         // Rebuilt only when the queue changed: an operator selecting a fingerprint to compare it
         // with the Client's log must not lose the selection to a refresh.
-        const shown = JSON.stringify(enrolments);
+        const shown = JSON.stringify([enrolments, boots]);
         if (shown === enrolmentsShown) return;
         enrolmentsShown = shown;
         $("enrolments").innerHTML = enrolments.map((e) => `
@@ -2046,7 +2098,7 @@
             <td>${esc(e.peer || "—")}</td>
             <td>${esc(e.subject)}</td>
             <td><span class="fingerprint">${esc(e.key_fingerprint)}</span></td>
-            <td>${esc(e.bootstrap_subject)}<br /><span class="fingerprint sub" title="the bootstrap certificate's fingerprint">${esc(e.bootstrap_fingerprint)}</span></td>
+            <td>${bootstrapCell(e)}</td>
             <td>
               <button class="btn btn-ok btn-sm enrolment-act" data-act="approve" data-id="${esc(e.id)}" title="Sign this host's certificate — after comparing the key fingerprint with the Client's log">Approve</button>
               <button class="btn btn-ghost btn-sm enrolment-act" data-act="reject" data-id="${esc(e.id)}" title="Refuse this request; the host's connection is closed">Reject</button>
@@ -2054,13 +2106,53 @@
           </tr>`).join("");
       }
 
+      function renderBoots(failed) {
+        $("boots-error").textContent = failed || "";
+        $("boots-empty").style.display = boots.length || failed ? "none" : "block";
+        $("boot-keys-note").style.display = issuedPairs.size ? "" : "none";
+        const shown = JSON.stringify([boots, [...issuedPairs.keys()]]);
+        if (shown === bootsShown) return;
+        bootsShown = shown;
+        const saves = (b) => issuedPairs.has(b.serial) && !b.revoked ? `
+              <button class="btn btn-ghost btn-sm boot-save" data-serial="${esc(b.serial)}" data-part="certificate" title="Save the certificate as bootstrap.pem — the cert_file a host's supervisor.toml names">Save bootstrap.pem</button>
+              <button class="btn btn-ghost btn-sm boot-save" data-serial="${esc(b.serial)}" data-part="key" title="Save the private key as bootstrap-key.pem — the key_file a host's supervisor.toml names. Offered only while this page stays open.">Save bootstrap-key.pem</button>` : "";
+        $("boots").innerHTML = boots.map((b) => `
+          <tr>
+            <td>${esc(b.subject)}</td>
+            <td><span class="fingerprint">${esc(b.serial)}</span></td>
+            <td>${esc(when(b.issued_ms))}</td>
+            <td>${esc(when(b.not_after_ms))}</td>
+            <td>${b.revoked ? `<span class="pill red">revoked</span>` : `<span class="pill green">valid</span>`}</td>
+            <td><div style="display: flex; flex-direction: column; align-items: flex-start; gap: 4px">${saves(b)}${b.revoked ? "" : `
+              <button class="btn btn-ghost btn-sm boot-revoke" data-serial="${esc(b.serial)}" title="Revoke this certificate: no host can enrol with it any more">Revoke</button>`}</div></td>
+          </tr>`).join("");
+      }
+
       async function refreshEnrolments() {
         let win;
         try {
           const res = await fetch("/api/v1/enrolment/window");
-          if (res.status === 404) { enrolments = []; renderEnrolments(null); return; }
+          if (res.status === 404) {
+            enrolments = [];
+            boots = [];
+            $("boot-section").style.display = "none";
+            renderEnrolments(null);
+            return;
+          }
           if (!res.ok) { renderEnrolments(undefined, `the enrolment window could not be read: HTTP ${res.status}`); return; }
           win = await res.json();
+          $("boot-section").style.display = "";
+          const certs = await fetch("/api/v1/bootstrap-certificates");
+          if (certs.ok) {
+            boots = await certs.json();
+            // A key whose certificate has ended or been revoked has nothing left to save. Absence from
+            // the list proves neither: a refresh that began before the issue does not list it yet.
+            for (const [serial, pair] of issuedPairs) {
+              if (pair.not_after_ms <= Date.now() || boots.some((b) => b.serial === serial && b.revoked)) issuedPairs.delete(serial);
+            }
+            renderBoots();
+          }
+          else renderBoots(`the bootstrap certificates could not be read: HTTP ${certs.status}`);
           const list = await fetch("/api/v1/enrolments");
           if (!list.ok) { renderEnrolments(win, `the pending requests could not be read: HTTP ${list.status}`); return; }
           enrolments = await list.json();
@@ -2110,6 +2202,69 @@
         const body = await res.json().catch(() => ({}));
         if (!res.ok) $("enrolments-error").textContent = body.error || `HTTP ${res.status}`;
         else $("enrolment-result").textContent = `${fingerprint.slice(0, 16)}…: ${approve ? "approved" : "rejected"}`;
+        await refreshEnrolments();
+      });
+
+      $("boot-issue").addEventListener("click", async () => {
+        $("boot-error").textContent = "";
+        $("boot-result").textContent = "";
+        const subject = {};
+        const organization = $("boot-org").value.trim();
+        const unit = $("boot-unit").value.trim();
+        if (organization) subject.organization = organization;
+        if (unit) subject.organizational_unit = unit;
+        // Disabled while the request runs, so a double click issues one certificate.
+        $("boot-issue").disabled = true;
+        const res = await fetch("/api/v1/bootstrap-certificates", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ subject, validity_days: Number($("boot-days").value) }),
+        }).catch(() => null);
+        const body = res ? await res.json().catch(() => ({})) : {};
+        $("boot-issue").disabled = false;
+        if (!res || !res.ok) {
+          $("boot-error").textContent = body.error || (res ? `HTTP ${res.status}` : "the Server could not be reached");
+          return;
+        }
+        issuedPairs.set(body.serial, { certificate_pem: body.certificate_pem, private_key_pem: body.private_key_pem, not_after_ms: body.not_after_ms });
+        $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save its pair from its row.`;
+        await refreshEnrolments();
+      });
+
+      function saveText(text, name) {
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(new Blob([text], { type: "application/x-pem-file" }));
+        link.download = name;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 0);
+      }
+      // Leaving the page drops every key it holds, so it asks first.
+      window.addEventListener("beforeunload", (e) => { if (issuedPairs.size) e.preventDefault(); });
+
+      $("boots").addEventListener("click", async (e) => {
+        const save = e.target.closest(".boot-save");
+        if (save) {
+          const pair = issuedPairs.get(save.dataset.serial);
+          if (!pair) return;
+          if (save.dataset.part === "key") saveText(pair.private_key_pem, "bootstrap-key.pem");
+          else saveText(pair.certificate_pem, "bootstrap.pem");
+          return;
+        }
+        const btn = e.target.closest(".boot-revoke");
+        if (!btn) return;
+        e.preventDefault();
+        const serial = btn.dataset.serial;
+        if (!confirm(`Revoke the bootstrap certificate with serial\n\n${serial}?\n\nNo host can enrol with it any more.`)) return;
+        $("boot-error").textContent = "";
+        $("boot-result").textContent = "";
+        const res = await fetch("/api/v1/revocations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ certificate: { authority: "bootstrap", serial } }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) $("boot-error").textContent = body.error || `HTTP ${res.status}`;
+        else $("boot-result").textContent = `${serial.slice(0, 16)}…: revoked`;
         await refreshEnrolments();
       });
 

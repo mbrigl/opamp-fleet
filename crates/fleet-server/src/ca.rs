@@ -28,6 +28,9 @@ pub struct ClientCa {
     issuer: Issuer<'static, KeyPair>,
     /// The CA's own certificate, DER: what a renewal proof's certificate must be signed by.
     ca_der: Vec<u8>,
+    /// The common name every certificate it signs carries, derived from the CA's (ADR-0028
+    /// clause 28).
+    leaf_name: String,
     validity_days: u32,
     /// A life shorter than a day, in place of `validity_days` — what a test of renewal waits out.
     validity: Option<time::Duration>,
@@ -35,8 +38,9 @@ pub struct ClientCa {
 
 impl ClientCa {
     /// Loads the CA from `[client_ca]`. Either file being unreadable, or a key that is not PKCS#8,
-    /// fails startup rather than the first enrolment (ADR-0010). Whether the key belongs to the
-    /// certificate is not checked here.
+    /// fails startup rather than the first enrolment (ADR-0010), and so does a CA whose name
+    /// gives its certificates a common name longer than 64 characters (ADR-0028 clause 28).
+    /// Whether the key belongs to the certificate is not checked here.
     pub fn from_config(config: &ClientCaConfig) -> Result<Self, String> {
         let cert_pem = std::fs::read_to_string(&config.cert_file)
             .map_err(|e| format!("cannot read {}: {e}", config.cert_file.display()))?;
@@ -51,9 +55,11 @@ impl ClientCa {
             .first()
             .map(|der| der.as_ref().to_vec())
             .ok_or_else(|| format!("{} holds no certificate", config.cert_file.display()))?;
+        let leaf_name = leaf_name(&config.cert_file, &ca_der)?;
         Ok(ClientCa {
             issuer,
             ca_der,
+            leaf_name,
             validity_days: config.validity_days,
             validity: None,
         })
@@ -61,12 +67,13 @@ impl ClientCa {
 
     /// Signs an Agent's CSR and returns the issued certificate as PEM.
     ///
-    /// The subject comes from the request: it is descriptive, and this Server does not require it
-    /// to match anything the Agent reports. Binding a certificate to an `instance_uid` would mean
-    /// it dies the moment the Server re-keys that Agent through `AgentIdentification` — an outage
-    /// of the Server's own making (ADR-0021).
+    /// The subject is the Server's, not the request's: the common name derived from the CA's and
+    /// nothing else (ADR-0021 clause 7), so no self-asserted text reaches a signed certificate.
+    /// Nor is it bound to anything the Agent reports. Binding a certificate to an `instance_uid`
+    /// would mean it dies the moment the Server re-keys that Agent through `AgentIdentification` —
+    /// an outage of the Server's own making (ADR-0021).
     ///
-    /// What the request may *not* dictate is the shape of the certificate. `rcgen` carries the
+    /// What the request may *not* dictate either is the shape of the certificate. `rcgen` carries the
     /// CSR's `basicConstraints`, `keyUsage`, `extendedKeyUsage`, and SANs into the signed output,
     /// so a request asking for `CA:TRUE` would otherwise be handed a certificate that chains to the
     /// fleet CA and can mint more — a privilege this Server never means to grant. Enrolment issues
@@ -97,6 +104,12 @@ impl ClientCa {
             Some(validity) => time::OffsetDateTime::now_utc() + validity,
             None => not_after(self.validity_days)?,
         };
+        // Never trust the request for the certificate's name: its role, as the CA names it.
+        request.params.distinguished_name = rcgen::DistinguishedName::new();
+        request
+            .params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, self.leaf_name.as_str());
         // Never trust the request for the certificate's powers: force a client-auth leaf.
         request.params.is_ca = IsCa::ExplicitNoCa;
         request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -427,6 +440,183 @@ impl crate::fleet::CertificateSigner for ClientCa {
     }
 }
 
+/// The bootstrap CA with its key, which signs the bootstrap certificates an operator asks for
+/// (ADR-0028). Loaded once at startup from `[enrolment]`.
+pub struct BootstrapCa {
+    issuer: Issuer<'static, KeyPair>,
+    /// The common name every bootstrap certificate carries (ADR-0028 clause 28).
+    leaf_name: String,
+    not_after_ms: u64,
+    key_fingerprint: String,
+}
+
+impl BootstrapCa {
+    /// Loads the CA from `[enrolment]`, or `None` without `bootstrap_ca_key_file`.
+    ///
+    /// # Errors
+    /// Refuses a file that cannot be read, a key that is not PKCS#8, a key that does not belong
+    /// to `bootstrap_ca_file`, a key that is the client CA's (ADR-0021 clause 19), and a CA whose
+    /// name gives its certificates a common name longer than 64 characters (ADR-0028 clause 28).
+    pub fn from_config(
+        enrolment: &crate::config::EnrolmentConfig,
+        client_ca: Option<&ClientCaConfig>,
+    ) -> Result<Option<Self>, String> {
+        use rcgen::PublicKeyData as _;
+        let Some(key_file) = &enrolment.bootstrap_ca_key_file else {
+            return Ok(None);
+        };
+        let read = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))
+        };
+        let cert_pem = read(&enrolment.bootstrap_ca_file)?;
+        let key = KeyPair::from_pem(&read(key_file)?)
+            .map_err(|e| format!("cannot read {}: {e}", key_file.display()))?;
+        let der = first_certificate(&enrolment.bootstrap_ca_file, &cert_pem)?;
+        let (_, cert) = X509Certificate::from_der(&der)
+            .map_err(|e| format!("cannot read {}: {e}", enrolment.bootstrap_ca_file.display()))?;
+        if cert.public_key().raw != key.subject_public_key_info().as_slice() {
+            return Err(format!(
+                "[enrolment] bootstrap_ca_key_file {} is not the key of bootstrap_ca_file {}",
+                key_file.display(),
+                enrolment.bootstrap_ca_file.display()
+            ));
+        }
+        if let Some(client_ca) = client_ca {
+            let client_key = KeyPair::from_pem(&read(&client_ca.key_file)?)
+                .map_err(|e| format!("cannot read {}: {e}", client_ca.key_file.display()))?;
+            if client_key.subject_public_key_info() == key.subject_public_key_info() {
+                return Err(format!(
+                    "[enrolment] bootstrap_ca_key_file {} is the client CA's key — the bootstrap \
+                     CA must be a CA of its own",
+                    key_file.display()
+                ));
+            }
+        }
+        let leaf_name = leaf_name(&enrolment.bootstrap_ca_file, &der)?;
+        let key_fingerprint = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&cert.public_key().subject_public_key.data))
+        };
+        let not_after_ms = u64::try_from(cert.validity().not_after.timestamp())
+            .unwrap_or(0)
+            .saturating_mul(1000);
+        let issuer = Issuer::from_ca_cert_pem(&cert_pem, key).map_err(|e| {
+            format!(
+                "cannot use {} as a CA: {e}",
+                enrolment.bootstrap_ca_file.display()
+            )
+        })?;
+        Ok(Some(BootstrapCa {
+            issuer,
+            leaf_name,
+            not_after_ms,
+            key_fingerprint,
+        }))
+    }
+}
+
+impl crate::bootstrap::BootstrapSigner for BootstrapCa {
+    fn leaf_common_name(&self) -> String {
+        self.leaf_name.clone()
+    }
+
+    fn ca_not_after_ms(&self) -> u64 {
+        self.not_after_ms
+    }
+
+    fn ca_key_fingerprint(&self) -> String {
+        self.key_fingerprint.clone()
+    }
+
+    fn sign(
+        &self,
+        subject: &[(crate::bootstrap::Attribute, String)],
+        now_ms: u64,
+        not_after_ms: u64,
+    ) -> Result<crate::bootstrap::Pair, String> {
+        use crate::bootstrap::{Attribute, Pair};
+        let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
+        let mut params = rcgen::CertificateParams::default();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        for (attribute, value) in subject {
+            let kind = match attribute {
+                Attribute::Organization => rcgen::DnType::OrganizationName,
+                Attribute::OrganizationalUnit => rcgen::DnType::OrganizationalUnitName,
+                Attribute::CommonName => rcgen::DnType::CommonName,
+            };
+            params.distinguished_name.push(kind, value.as_str());
+        }
+        // A client-authentication leaf and nothing more (ADR-0028 clause 21).
+        params.is_ca = IsCa::ExplicitNoCa;
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params.serial_number = Some(random_serial()?);
+        params.not_before = at_ms(now_ms)? - CLOCK_SKEW;
+        params.not_after = at_ms(not_after_ms)?;
+        let certificate = params
+            .signed_by(&key, &self.issuer)
+            .map_err(|e| format!("cannot sign the bootstrap certificate: {e}"))?;
+        let (_, parsed) = X509Certificate::from_der(certificate.der())
+            .map_err(|e| format!("the bootstrap certificate does not parse: {e}"))?;
+        let facts = facts(certificate.der())?;
+        Ok(Pair {
+            serial: facts.id.serial.clone(),
+            id: facts.id,
+            subject: facts.subject,
+            key_fingerprint: facts.key_fingerprint,
+            not_before_ms: u64::try_from(parsed.validity().not_before.timestamp())
+                .unwrap_or(0)
+                .saturating_mul(1000),
+            not_after_ms: facts.not_after_ms,
+            certificate_pem: certificate.pem(),
+            private_key_pem: key.serialize_pem(),
+        })
+    }
+}
+
+/// The common name a CA's certificates carry (ADR-0028 clause 28), from the CA's own common name,
+/// or its whole subject when it has none.
+///
+/// # Errors
+/// Refuses a CA that does not parse, and one whose derived name exceeds 64 characters.
+fn leaf_name(path: &std::path::Path, ca_der: &[u8]) -> Result<String, String> {
+    use fleet_core::naming;
+    let (_, cert) = X509Certificate::from_der(ca_der)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let ca_name = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map_or_else(|| cert.subject().to_string(), str::to_string);
+    let name = naming::leaf_common_name(&ca_name);
+    if name.chars().count() > naming::MAX_COMMON_NAME {
+        return Err(format!(
+            "{}: the certificates of a CA named {ca_name:?} would be named {name:?}, longer than \
+             {} characters",
+            path.display(),
+            naming::MAX_COMMON_NAME
+        ));
+    }
+    Ok(name)
+}
+
+/// The first certificate of a PEM file, DER.
+fn first_certificate(path: &std::path::Path, pem: &str) -> Result<Vec<u8>, String> {
+    opamp::tls::certificates(pem.as_bytes())
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        .first()
+        .map(|der| der.as_ref().to_vec())
+        .ok_or_else(|| format!("{} holds no certificate", path.display()))
+}
+
+/// Milliseconds since the epoch, in the time type rcgen speaks.
+fn at_ms(ms: u64) -> Result<time::OffsetDateTime, String> {
+    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+        .map_err(|e| format!("{ms} ms is out of range: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,14 +646,98 @@ mod tests {
     fn client_ca(validity_days: u32) -> ClientCa {
         let (cert_pem, key_pem) = ca();
         let key = KeyPair::from_pem(&key_pem).expect("ca key");
+        let ca_der = opamp::tls::certificates(cert_pem.as_bytes()).expect("ca")[0]
+            .as_ref()
+            .to_vec();
         ClientCa {
             issuer: Issuer::from_ca_cert_pem(&cert_pem, key).expect("issuer"),
             validity_days,
             validity: None,
-            ca_der: opamp::tls::certificates(cert_pem.as_bytes()).expect("ca")[0]
-                .as_ref()
-                .to_vec(),
+            leaf_name: leaf_name(std::path::Path::new("client-ca.pem"), &ca_der).expect("name"),
+            ca_der,
         }
+    }
+
+    /// A CA named `common_name`, as PEM certificate and key.
+    fn named_ca(common_name: &str) -> (String, String) {
+        let key = KeyPair::generate().expect("ca key");
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationName, "Acme AG");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, common_name);
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        let cert = params.self_signed(&key).expect("self-signed ca");
+        (cert.pem(), key.serialize_pem())
+    }
+
+    fn client_ca_config(dir: &std::path::Path, cert_pem: &str, key_pem: &str) -> ClientCaConfig {
+        std::fs::write(dir.join("client-ca.pem"), cert_pem).expect("write");
+        std::fs::write(dir.join("client-ca-key.pem"), key_pem).expect("write");
+        ClientCaConfig {
+            cert_file: dir.join("client-ca.pem"),
+            key_file: dir.join("client-ca-key.pem"),
+            validity_days: 30,
+        }
+    }
+
+    /// A host certificate's subject is the Server's: the common name derived from the client CA's
+    /// and nothing of the request's (ADR-0021 clause 7 and ADR-0028 clause 28).
+    /// Verifies: ADR-0028
+    #[test]
+    fn a_host_certificate_is_named_by_its_ca_not_by_its_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (cert_pem, key_pem) = named_ca("Acme Fleet Client CA");
+        let ca = ClientCa::from_config(&client_ca_config(dir.path(), &cert_pem, &key_pem))
+            .expect("loads");
+        let issued = ca.sign(&hostile_csr(), "host-1").expect("issued").pem;
+        let der = opamp::tls::certificates(issued.as_bytes()).expect("pem");
+        let (_, cert) = X509Certificate::from_der(der[0].as_ref()).expect("parse");
+        assert_eq!(
+            cert.subject().to_string(),
+            "CN=Acme Fleet Client Certificate"
+        );
+    }
+
+    /// A CA whose certificates' name would exceed 64 characters stops the Server at startup
+    /// (ADR-0028 clause 28).
+    /// Verifies: ADR-0028
+    #[test]
+    fn a_ca_whose_certificates_name_is_too_long_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (cert_pem, key_pem) = named_ca(&format!("{} CA", "x".repeat(53)));
+        let Err(err) = ClientCa::from_config(&client_ca_config(dir.path(), &cert_pem, &key_pem))
+        else {
+            panic!("a client CA whose certificates' name is 65 characters was accepted");
+        };
+        assert!(err.contains("longer than 64"), "{err}");
+        let Err(err) =
+            BootstrapCa::from_config(&enrolment_with(dir.path(), &cert_pem, &key_pem), None)
+        else {
+            panic!("a bootstrap CA whose certificates' name is 65 characters was accepted");
+        };
+        assert!(err.contains("longer than 64"), "{err}");
+        let (cert_pem, key_pem) = named_ca(&format!("{} CA", "x".repeat(52)));
+        assert!(ClientCa::from_config(&client_ca_config(dir.path(), &cert_pem, &key_pem)).is_ok());
+    }
+
+    /// The bootstrap CA names its certificates as the client CA does (ADR-0028 clause 28).
+    /// Verifies: ADR-0028
+    #[test]
+    fn a_bootstrap_certificate_is_named_by_its_ca() {
+        use crate::bootstrap::BootstrapSigner as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (cert_pem, key_pem) = named_ca("Acme Fleet Bootstrap CA");
+        let signer =
+            BootstrapCa::from_config(&enrolment_with(dir.path(), &cert_pem, &key_pem), None)
+                .expect("loads")
+                .expect("a key");
+        assert_eq!(
+            signer.leaf_common_name(),
+            "Acme Fleet Bootstrap Certificate"
+        );
     }
 
     /// A request that asks for the powers of a CA — `basicConstraints: CA`, a name of its own, and
@@ -790,5 +1064,109 @@ mod tests {
         let other = client_ca(30);
         let foreign = other.sign(&old_csr, "host-7").expect("sign");
         assert!(ca.renewal_proof(&renewing(&foreign.pem, &old_key)).is_err());
+    }
+
+    /// Writes a CA's files and the `[enrolment]` naming them.
+    fn enrolment_with(
+        dir: &std::path::Path,
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> crate::config::EnrolmentConfig {
+        std::fs::write(dir.join("bootstrap-ca.pem"), cert_pem).expect("write");
+        std::fs::write(dir.join("bootstrap-ca-key.pem"), key_pem).expect("write");
+        crate::config::EnrolmentConfig {
+            bootstrap_ca_file: dir.join("bootstrap-ca.pem"),
+            bootstrap_ca_key_file: Some(dir.join("bootstrap-ca-key.pem")),
+        }
+    }
+
+    /// The Server refuses a bootstrap CA key that is not the certificate's, or that is the client
+    /// CA's; without a key it issues nothing (ADR-0021 clause 19).
+    /// Verifies: ADR-0028
+    #[test]
+    fn a_bootstrap_ca_key_must_be_its_own_and_its_certificates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (cert_pem, key_pem) = ca();
+        let (_, other_key) = ca();
+        let mismatched = enrolment_with(dir.path(), &cert_pem, &other_key);
+        let Err(err) = BootstrapCa::from_config(&mismatched, None) else {
+            panic!("a key of another certificate was accepted");
+        };
+        assert!(err.contains("is not the key of"), "{err}");
+
+        let enrolment = enrolment_with(dir.path(), &cert_pem, &key_pem);
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let (client_cert, _) = ca();
+        std::fs::write(client_dir.path().join("ca.pem"), client_cert).expect("write");
+        std::fs::write(client_dir.path().join("ca-key.pem"), &key_pem).expect("write");
+        let client_ca: ClientCaConfig = toml::from_str(&format!(
+            "cert_file = {:?}\nkey_file = {:?}\n",
+            client_dir.path().join("ca.pem").display().to_string(),
+            client_dir.path().join("ca-key.pem").display().to_string(),
+        ))
+        .expect("client ca config");
+        let Err(err) = BootstrapCa::from_config(&enrolment, Some(&client_ca)) else {
+            panic!("the client CA's key was accepted as the bootstrap CA's");
+        };
+        assert!(err.contains("client CA's key"), "{err}");
+
+        assert!(BootstrapCa::from_config(&enrolment, None)
+            .expect("loads")
+            .is_some());
+        let without_key = crate::config::EnrolmentConfig {
+            bootstrap_ca_key_file: None,
+            ..enrolment
+        };
+        assert!(BootstrapCa::from_config(&without_key, None)
+            .expect("loads")
+            .is_none());
+    }
+
+    /// What the bootstrap CA signs is a client-authentication leaf of the subject asked for, with
+    /// a key of its own (ADR-0028 clause 21).
+    /// Verifies: ADR-0028
+    #[test]
+    fn a_bootstrap_certificate_is_a_client_leaf_of_the_named_subject() {
+        use crate::bootstrap::{Attribute, BootstrapSigner as _};
+        use rcgen::PublicKeyData as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (cert_pem, key_pem) = ca();
+        let signer =
+            BootstrapCa::from_config(&enrolment_with(dir.path(), &cert_pem, &key_pem), None)
+                .expect("loads")
+                .expect("a key");
+        let now = 1_800_000_000_000;
+        let pair = signer
+            .sign(
+                &[
+                    (Attribute::Organization, "Kunde GmbH".to_string()),
+                    (Attribute::CommonName, "fleet bootstrap".to_string()),
+                ],
+                now,
+                now + 86_400_000,
+            )
+            .expect("signed");
+        let der = opamp::tls::certificates(pair.certificate_pem.as_bytes()).expect("pem");
+        let (_, cert) = X509Certificate::from_der(der[0].as_ref()).expect("parse");
+        assert_eq!(
+            cert.subject().to_string(),
+            "O=Kunde GmbH, CN=fleet bootstrap"
+        );
+        assert!(!cert.is_ca());
+        let eku = cert
+            .extended_key_usage()
+            .expect("eku")
+            .expect("present")
+            .value;
+        assert!(eku.client_auth && !eku.server_auth);
+        assert_eq!(
+            cert.validity().not_after.timestamp() * 1000,
+            (now + 86_400_000) as i64
+        );
+        let key = KeyPair::from_pem(&pair.private_key_pem).expect("key");
+        assert_eq!(
+            cert.public_key().raw,
+            key.subject_public_key_info().as_slice()
+        );
     }
 }

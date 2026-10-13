@@ -316,6 +316,30 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // The bootstrap CA's key, when the Server issues bootstrap certificates (ADR-0028).
+    let bootstrap = match config.enrolment.as_ref().map(|enrolment| {
+        fleet_server::ca::BootstrapCa::from_config(enrolment, config.client_ca.as_ref()).and_then(
+            |signer| {
+                if signer.is_some() {
+                    info!("issuing bootstrap certificates on an operator's request");
+                }
+                fleet_server::bootstrap::BootstrapCertificates::on_disk(
+                    signer.map(|ca| {
+                        Box::new(ca) as Box<dyn fleet_server::bootstrap::BootstrapSigner>
+                    }),
+                    config.config_dir.join("bootstrap-certificates"),
+                    clock.clone(),
+                )
+            },
+        )
+    }) {
+        None => None,
+        Some(Ok(record)) => Some(Arc::new(record)),
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
         // ADR-0026 clause 37.
         info!("{notice}");
@@ -421,6 +445,7 @@ async fn main() {
                 .with_connection_offer(connection_offer)
                 .with_client_ca(client_ca)
                 .with_enrolment(enrolment.clone())
+                .with_bootstrap(bootstrap)
                 .with_revocations(Some(revocations.clone()))
                 .with_audit(Some(audit.clone()))
                 .with_telemetry_offer(telemetry_offer)

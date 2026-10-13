@@ -172,8 +172,55 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   signs every entry from its hash, without the artifacts; the Deployments tab imports the signed
   file into the Deployment's signatures. The tool checks the hashes against nothing: compare them
   with upstream's checksums or `package sha256` over the files before signing.
+- **Bootstrap certificates issued and revoked from the Enrolments tab**
+  ([ADR-0028](docs/adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
+  The tab issues a bootstrap certificate for a customer (O) and site (OU) and lists the valid ones
+  with a **Revoke** press; the row of each certificate issued in the open page offers its pair as
+  `bootstrap.pem` and `bootstrap-key.pem` until the page is reloaded or closed. Each
+  waiting request names the bootstrap certificate it carries by customer, site, serial and end;
+  `GET /api/v1/enrolments` carries the serial as `bootstrap_serial`.
 
 ### Changed
+
+- **`pki init` makes the package signing key too.** Next to the server CA it writes
+  `package-signing-key.pk8` and its public half, `package-signing-key.pub`, into `--offline-dir`,
+  and `supervisor.toml.fragment` names that public half as `[packages] verification_key`, so a
+  Client set up from the fragment takes signed packages from the start. `package keygen` remains
+  for a fleet set up otherwise or to replace the key. **What to do:** nothing; a fleet that has a
+  key keeps it.
+
+- **Breaking: every certificate is named by its product and its role, with your organization**
+  ([ADR-0028](docs/adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
+  `opamp-fleetctl pki init` and `pki bootstrap-ca` take `--product` (default `OpAMP Fleet`) in
+  place of `--fleet`, and `--organization` and `--organizational-unit` for an O and an OU: the CAs
+  are `<product> Server CA`, `Client CA` and `Bootstrap CA`, the server certificate
+  `<product> Server Certificate` with its names in the SAN alone. `pki server-cert` carries the
+  server CA's O and OU, and its own flags replace either. The Server names the certificates it
+  signs from their CA, ` CA` turned into ` Certificate`: a host certificate carries that common
+  name and nothing of its request, a bootstrap certificate that and the O and OU asked for. It
+  refuses to start on a client CA or bootstrap CA whose certificates' name would exceed 64
+  characters. `scripts/dev-pki.sh` names its set `OpAMP Fleet Dev`, `O=Development`. **What to
+  do:** replace `--fleet` with `--product` in scripts. Existing CAs keep working; their
+  certificates are named from them, `opamp-fleet client CA` giving `opamp-fleet client
+  Certificate`.
+
+- **Breaking: the Server issues bootstrap certificates, and the bootstrap CA lives a year**
+  ([ADR-0028](docs/adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
+  With `[enrolment] bootstrap_ca_key_file` set, `POST /api/v1/bootstrap-certificates` issues a
+  bootstrap certificate with the organization and unit an operator names — the customer and the
+  site, say — and a common name the Server sets, for 10 days or up to 90, and hands out its private key in that answer
+  only; `GET /api/v1/bootstrap-certificates` lists the valid ones, each revocable by its serial,
+  and every issuance is recorded as `enrolment.bootstrap_issued`. The approver sees the subject on
+  every enrolment request it carries. `opamp-fleetctl pki init` now puts the bootstrap CA and its
+  key into `--server-dir`, makes no bootstrap certificate, and gives the bootstrap CA 365 days
+  (`--bootstrap-ca-days`) while `--ca-days` sets the server CA's and the client CA's;
+  `pki bootstrap-cert` and `init --bootstrap-days` are gone, and `pki bootstrap-ca` makes a new
+  bootstrap CA to replace the Server's. `pki status --offline-dir` lists the server CA alone.
+  `scripts/seed_test_configs.sh --enrol` now asks the Server for the development Client's
+  bootstrap pair before it opens the window, so start the Client while it waits. **What to do:**
+  nothing for enrolment to keep working. To issue from the Server, copy the bootstrap CA's key
+  from the offline directory to the Server host and name it in `[enrolment]
+  bootstrap_ca_key_file`; replace a script that calls `pki bootstrap-cert` with the route.
 
 - **A Deployment is made and signed in one form.** The Deployments tab lists every binary of each
   Package it holds, with platform, size and full SHA-256, and gives each unsigned one a signature

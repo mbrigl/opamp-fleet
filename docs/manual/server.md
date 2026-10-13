@@ -214,7 +214,13 @@ the approved request.
 ```toml
 [enrolment]
 bootstrap_ca_file = "bootstrap-ca.pem"
+bootstrap_ca_key_file = "bootstrap-ca-key.pem"   # optional: the Server issues bootstrap certificates
 ```
+
+`bootstrap_ca_key_file` is the CA's key, PKCS#8 PEM. With it the Server issues bootstrap
+certificates on request ([Bootstrap certificates](#bootstrap-certificates-issued-by-the-server));
+without it, hosts enrol with bootstrap certificates made elsewhere from the same CA. A key that is
+not the CA's, or that is the client CA's, is refused at startup.
 
 ### `[admission_throttle]`
 
@@ -280,8 +286,9 @@ makes an enrolment connection. No configuration admits a peer without a certific
 and the download route read no `Authorization` header: one a Client sends is ignored, never
 refused, and no refusal carries a `WWW-Authenticate` challenge.
 
-A certificate proves **fleet membership, not identity**. The Server does not match its subject
-against an Agent's `instance_uid`: the Server itself may re-key an Agent at any time
+A certificate proves **fleet membership, not identity**. Its subject is the Server's, the client
+CA's name with ` CA` turned into ` Certificate`, whatever the request asks for, and the Server does
+not match it against an Agent's `instance_uid`: the Server itself may re-key an Agent at any time
 (`AgentIdentification`), and a certificate that a re-key invalidates is an outage of your own making.
 
 ### Issuing certificates: the CSR flow
@@ -363,12 +370,59 @@ hand. It is armed by `[enrolment]`, and it needs `[client_ca]`, which signs the 
 ```toml
 [enrolment]
 bootstrap_ca_file = "bootstrap-ca.pem"
+bootstrap_ca_key_file = "bootstrap-ca-key.pem"
 ```
 
 The **bootstrap CA** is a CA of its own, never the client CA; a bootstrap CA that shares a
-certificate with `client_ca_file` is refused at startup. A bootstrap certificate opens nothing by
-itself. It needs an open enrolment window and an operator's approval, so one bootstrap certificate may serve the whole fleet. Keep its validity short.
+certificate or a key with the client CA is refused at startup. A bootstrap certificate opens nothing
+by itself. It needs an open enrolment window and an operator's approval, so one bootstrap
+certificate may serve many hosts. Keep its validity short.
 Without `[enrolment]` no bootstrap certificate passes the handshake.
+
+### Bootstrap certificates, issued by the Server
+
+With `bootstrap_ca_key_file` set, ask the Server for a bootstrap certificate and name whom it is
+for. The subject takes `organization` and `organizational_unit`, typically the customer and the
+site, each optional and 1 to 64 characters. The Server sets the common name: the bootstrap CA's
+name with ` CA` turned into ` Certificate`. `validity_days` runs from 1 to 90,
+10 by default, and never past the bootstrap CA's end:
+
+```console
+$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
+       -d '{"subject": {"organization": "Example Customer", "organizational_unit": "Vienna"}, "validity_days": 14}' \
+       https://127.0.0.1:4321/api/v1/bootstrap-certificates
+{"serial":"6723…","subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
+ "not_before_ms":…,"not_after_ms":…,"certificate_pem":"-----BEGIN CERTIFICATE-----…",
+ "private_key_pem":"-----BEGIN PRIVATE KEY-----…"}
+```
+
+**The private key is in this answer and nowhere else.** The Server makes the key, signs the
+certificate, keeps the serial, subject, key fingerprint and end, and forgets the key. A lost key is
+not fetched again; issue another certificate. The answer carries `Cache-Control: no-store`.
+
+The subject labels the certificate and authorizes nothing. It shows on every enrolment request
+the certificate carries, as `bootstrap_subject` with its `bootstrap_serial`, so the approver sees
+whose request it is. Every issuance is recorded in the audit as `enrolment.bootstrap_issued`.
+
+The UI's **Enrolments** tab does the same: it issues a certificate for the customer and site you
+type and lists the valid ones with a **Revoke** press. The row of each certificate issued in the
+open page offers **Save bootstrap.pem** and **Save bootstrap-key.pem**. The page holds those keys
+only until it is reloaded or closed, and asks before either: save both files first. A
+certificate issued earlier or elsewhere offers no pair.
+
+```console
+$ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/bootstrap-certificates
+[{"serial":"6723…","subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
+  "key_fingerprint":"…","issued_ms":…,"not_after_ms":…,"revoked":false}]
+```
+
+The list holds every valid bootstrap certificate the Server issued, oldest first; an ended one is
+dropped, and so is every one of a bootstrap CA since replaced. Revoke one by its serial with the authority `bootstrap`
+([Revocation](#revocation-withdrawing-a-certificate)). The Server holds at most 10 000 valid ones,
+and answers a request beyond that `409`. It answers `409` too while it holds no
+`bootstrap_ca_key_file` or once the bootstrap CA has ended, `503` while the audit record cannot be
+written, since no key is handed out unrecorded, and `400` for a subject attribute it does not know, a value out of bounds,
+or `validity_days` outside 1 to 90.
 
 **The window is closed by default.** Open it for as long as you are enrolling hosts, from 1 to
 86400 seconds:
@@ -406,15 +460,18 @@ so the request is listed moments after the host connects:
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/enrolments
 [{"id":"3f9a…","arrived_ms":1789996400000,"peer":"10.0.4.17","subject":"CN=host-01",
-  "key_fingerprint":"3f9a…","bootstrap_subject":"CN=fleet bootstrap","bootstrap_fingerprint":"…"}]
+  "key_fingerprint":"3f9a…",
+  "bootstrap_subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
+  "bootstrap_fingerprint":"…","bootstrap_serial":"6723…"}]
 $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/approve
 $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/reject
 ```
 
-The UI's **Enrolments** tab shows the same queue: each request with its full key fingerprint, and
+The UI's **Enrolments** tab shows the same queue: each request with its full key fingerprint, the
+bootstrap certificate it carries — customer, site, serial and end when the Server issued it — and
 an **Approve** and a **Reject** press on its row. Approving asks once more, quoting the fingerprint
-to compare with the Client's log. The tab also says whether the window is open; opening and closing
-it stays with the API calls above.
+to compare with the Client's log. The tab also says whether the window is open, and opens and
+closes it.
 
 Approving signs the request with `[client_ca]` and offers the certificate on that host's
 connection. The host stores it as `client-cert.pem` in its state directory and reconnects with it
@@ -441,7 +498,8 @@ when it renewed. Its `key_fingerprint` is the one the request was listed and app
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/certificates
-[{"authority":"client","issuer":"CN=fleet client CA","serial":"5c0f…","subject":"CN=host-01",
+[{"authority":"client","issuer":"CN=OpAMP Fleet Client CA","serial":"5c0f…",
+  "subject":"CN=OpAMP Fleet Client Certificate",
   "key_fingerprint":"…","not_after_ms":1797772400000,"instance_uid":"0192…",
   "issued_ms":1789996400000,"predecessor":{"authority":"client","serial":"41ab…"},
   "host":"0192…"}]
@@ -450,9 +508,9 @@ $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/certificates
 Revoke a certificate by the CA that issued it — `client` for the client CA, `bootstrap` for the
 bootstrap CA of `[enrolment]` — and its serial. A revocation reaches every renewal of that
 certificate too, so revoking the one a host enrolled with is enough even after it renewed, and it
-stays in force until the last of those renewals has expired. `opamp-fleetctl pki status` prints the
-serial of a certificate in the offline directory, and `pki init` and `pki bootstrap-cert` print the
-bootstrap certificate's as they make it; colons, case and leading zeros do not matter. A renewal
+stays in force until the last of those renewals has expired. `GET /api/v1/bootstrap-certificates`
+lists the serial of every bootstrap certificate the Server issued; colons, case and leading zeros
+do not matter. A renewal
 descends from the certificate its renewal proof names, through a Gateway too; a client that sends
 no proof renews from the certificate its connection presented — behind a Gateway the Gateway's, so
 revoking the Gateway revokes those renewals as well, and those Agents enrol again. A revoked
@@ -968,6 +1026,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `GET /api/v1/enrolments` | The pending enrolment requests, oldest first, each with its `id` — the fingerprint the enrolling Client logs. |
 | `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. |
 | `POST /api/v1/enrolments/{id}/reject` | Refuse that request and close its connection. `404` for an unknown or expired id. |
+| `GET` / `POST /api/v1/bootstrap-certificates` | List the valid bootstrap certificates the Server issued, or issue one — see [Bootstrap certificates](#bootstrap-certificates-issued-by-the-server). `POST` body: `{"subject": {…}, "validity_days": n}`; the answer carries the private key, this once. `409` without `[enrolment] bootstrap_ca_key_file`. |
 
 The package routes answer `404` while package delivery is not configured on this Server.
 

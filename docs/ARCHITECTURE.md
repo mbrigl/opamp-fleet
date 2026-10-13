@@ -73,7 +73,7 @@ Five crates in one workspace ([ADR-0010](adr/0010-five-crates-the-whole-opamp-co
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
   version, the platform aliases, the statement a package signature covers, the renewal proof a
-  CSR carries, and when a certificate counts as ending.
+  CSR carries, when a certificate counts as ending, and what a certificate is called.
 - **`fleet-server`** — the Server: the fleet, its Configurations, labels, packages and
   Deployments, the Agent plane and the Operator plane.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
@@ -92,11 +92,13 @@ core module names an adapter or a technology, and when a module has no role.
 - **Server stores** — each store is a port in the core module it serves (`AgentStore` in
   `agent_store`, `LabelStore` in `labels`, `ConfigBackend` under the `ConfigStore` in `configs`,
   `DeploymentBackend` under the `DeploymentStore` in `deployments`, `PackageBackend` under the
-  `PackageStore` in `packages`), with its filesystem adapter in `fs`. The package port speaks in
+  `PackageStore` in `packages`, `BootstrapStore` under the `BootstrapCertificates` in
+  `bootstrap`), with its filesystem adapter in `fs`. The package port speaks in
   paths, because ADR-0026 makes an artifact a file that is staged, re-hashed and streamed. The
   core's constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
-  `PackageOffering::with_deployments` — and `lib.rs` wires the filesystem adapters in
-  `AppState::new`, `PackageStore::open` and `PackageOffering::new`.
+  `PackageOffering::with_deployments`, `BootstrapCertificates::open` — and `lib.rs` wires the
+  filesystem adapters in `AppState::new`, `PackageStore::open`, `PackageOffering::new` and
+  `BootstrapCertificates::on_disk`.
 - **Server listeners** — `tls` reads the `[tls]` and `[enrolment]` files into the material each
   plane serves with — the Agent plane requiring a client certificate in the handshake, the
   Operator plane asking for none — and tells a member's certificate from a bootstrap one by its
@@ -185,7 +187,11 @@ new one does not stay up. The Client's own package goes through `update` instead
 directory beside the running one, a self-check, the `current` pointer moved, and a restart on
 probation that commits or rolls back.
 
-**A host joins and stays.** A fresh host presents a bootstrap certificate while an operator has
+**A host joins and stays.** The Server issues bootstrap certificates on an operator's request:
+`bootstrap` checks the subject and the life, records what was issued, and asks its
+`BootstrapSigner` port — the bootstrap CA with its key in `ca` — to make the key and sign
+([ADR-0028](adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
+A fresh host presents a bootstrap certificate while an operator has
 the enrolment window open; its CSR waits until an operator approves it, and the certificate it
 gets names a new host. The questionnaire of `service install --interactive` and `service config`
 does this before the service is registered: `service::enrol` runs the Client's own Agent over the

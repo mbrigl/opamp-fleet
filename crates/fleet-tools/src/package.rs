@@ -152,18 +152,14 @@ pub fn run(command: Command) -> Result<(), String> {
             .map_err(|e| format!("cannot start the runtime: {e}"))?
             .block_on(crate::fetch::run(args)),
         Command::Keygen { out } => {
-            let rng = ring::rand::SystemRandom::new();
-            let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
-                .map_err(|_| "cannot generate a key".to_string())?;
-            let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
-                .map_err(|_| "the generated key is unusable".to_string())?;
-            write_private_key(&out, pkcs8.as_ref())?;
+            let (pkcs8, public_key) = signing_key()?;
+            write_private_key(&out, &pkcs8)?;
             eprintln!(
                 "wrote the private key to {} (keep it secret)",
                 out.display()
             );
             eprintln!("public key (hex) — set this as the Client's [packages] verification_key:");
-            println!("{}", hex::encode(keypair.public_key().as_ref()));
+            println!("{public_key}");
             Ok(())
         }
         Command::Sign {
@@ -374,6 +370,23 @@ pub(crate) fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
         hasher.update(&buf[..n]);
     }
     Ok(hasher.finalize().to_vec())
+}
+
+/// A new package signing key (ADR-0026): the private key as PKCS#8 DER, and its public half in
+/// hex, the form `[packages] verification_key` takes. `keygen` and `pki init` make it alike.
+///
+/// # Errors
+/// Returns the message to print when no key can be made.
+pub(crate) fn signing_key() -> Result<(Vec<u8>, String), String> {
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 =
+        Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| "cannot generate a key".to_string())?;
+    let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|_| "the generated key is unusable".to_string())?;
+    Ok((
+        pkcs8.as_ref().to_vec(),
+        hex::encode(keypair.public_key().as_ref()),
+    ))
 }
 
 fn load_key(path: &PathBuf) -> Result<Ed25519KeyPair, String> {

@@ -185,19 +185,20 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 
 7. **A certificate proves membership and its host, not an Agent's identity.** The Server does not
    require the subject to match `instance_uid`, `service.instance.name`, or anything else an Agent
-   reports; the subject is descriptive (the Client requests its `service.instance.name`) and
-   authorizes nothing. The request may not dictate the certificate's powers either: the Server
-   signs a client-authentication leaf only — `CA:FALSE`, `digitalSignature`, `clientAuth` — drops
-   every requested SAN, and puts in one of its own, the URI `urn:opamp-fleet:host:<id>`. The host
-   is minted when an operator approves an enrolment and carried on by every renewal (clause 27); a
-   certificate an operator provisioned without one is given a host derived from its issuer and
-   serial when it is first renewed. An `instance_uid` is spoken for by the host whose certificate
-   first reported it: a connection presenting another host's certificate that reports for it is
-   re-keyed through `AgentIdentification` to an identity of its own, and a CSR in that message may
-   not claim the old one. A re-key an Agent asks for keeps its host. A host holds at most three
-   valid certificates at a time and speaks for at most 256 `instance_uid`s. A Gateway carries other
-   hosts' Agents, so an operator marks it as one — `PUT /api/v1/hosts/{host}/gateway` — and its
-   certificate then speaks for any Agent; behind it, membership alone applies. `GET
+   reports. The request may dictate neither the certificate's subject nor its powers: the Server
+   sets the subject to the common name ADR-0028 clause 28 derives and nothing else, signs a
+   client-authentication leaf only — `CA:FALSE`, `digitalSignature`, `clientAuth` — drops every
+   requested SAN, and puts in one of its own, the URI `urn:opamp-fleet:host:<id>`. The CSR's
+   subject is still listed with a pending enrolment (clause 22) and still searched for claims
+   (clause 29). The host is minted when an operator approves an enrolment and carried on by every
+   renewal (clause 27); a certificate an operator provisioned without one is given a host derived
+   from its issuer and serial when it is first renewed. An `instance_uid` is spoken for by the host
+   whose certificate first reported it: a connection presenting another host's certificate that
+   reports for it is re-keyed through `AgentIdentification` to an identity of its own, and a CSR in
+   that message may not claim the old one. A re-key an Agent asks for keeps its host. A host holds
+   at most three valid certificates at a time and speaks for at most 256 `instance_uid`s. A Gateway
+   carries other hosts' Agents, so an operator marks it as one — `PUT /api/v1/hosts/{host}/gateway`
+   — and its certificate then speaks for any Agent; behind it, membership alone applies. `GET
    /api/v1/hosts` lists each host, whether it is a Gateway, what it speaks for and how many valid
    certificates it holds.
 
@@ -226,9 +227,10 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 
 10. **A bootstrap certificate carries a host to its first CSR, and an operator approves it.** It is
     issued by the bootstrap CA, never by the client CA, and the Server tells it apart from an issued
-    one by that issuer. It may be one certificate for the whole fleet, because it opens nothing on
-    its own: it needs an open enrolment window (clause 20) and an operator's approval (clause 21).
-    A short validity limits its reach; distributing it is the operator's.
+    one by that issuer. The Server issues it (ADR-0028 clause 21). Any number may be valid at once,
+    one per customer, site or batch as the operator chooses, because none opens anything on its
+    own: it needs an open enrolment window (clause 20) and an operator's approval (clause 21). A
+    short validity limits its reach. Handing it to a host is the operator's job.
 
 11. **Renewal starts at two thirds of the validity, and the old certificate stays until the new one
     is proved.** The Client asks again once its certificate is two thirds through its life and
@@ -287,13 +289,18 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     Agent's host. Every authenticated operator can do everything the plane offers.
 
 19. **Enrolment has a CA of its own.** `[enrolment] bootstrap_ca_file` in `server.toml` names the
-    CA that issues bootstrap certificates. The handshake accepts a certificate from the client CA or
-    the bootstrap CA (clause 5). While `[enrolment]` is set, a connection is a member's only when
-    its certificate was issued directly by a CA in `client_ca_file`; any other — from the bootstrap
-    CA, or from an intermediate below either CA — is an enrolment connection, so no chain lifts a
-    bootstrap certificate into the fleet. A bootstrap CA that shares a certificate with `client_ca_file`, or an
-    `[enrolment]` without `[client_ca]`, is refused at startup. Without `[enrolment]` no bootstrap
-    certificate passes the handshake, and a host gets its first certificate from an operator.
+    CA that issues bootstrap certificates, and `[enrolment] bootstrap_ca_key_file` names its key,
+    PKCS#8 PEM. The handshake accepts a certificate from the client CA or the bootstrap CA
+    (clause 5). While `[enrolment]` is set, a connection is a member's only when its certificate
+    was issued directly by a CA in `client_ca_file`. Any other, from the bootstrap CA or from an
+    intermediate below either CA, is an enrolment connection, so no chain lifts a bootstrap
+    certificate into the fleet. The Server refuses to start on a bootstrap CA that shares a
+    certificate with `client_ca_file`, a bootstrap CA key that is the client CA's key or does not
+    match `bootstrap_ca_file`, or an `[enrolment]` without `[client_ca]`. Without
+    `bootstrap_ca_key_file` enrolment works with bootstrap certificates made elsewhere, and
+    `POST /api/v1/bootstrap-certificates` is answered `409`, naming the missing key. Without
+    `[enrolment]` no bootstrap certificate passes the handshake, and a host gets its first
+    certificate from an operator.
 
 20. **An operator opens an enrolment window for a bounded time, and it is closed by default.**
     `POST /api/v1/enrolment/window` with `{"open_for_secs": n}` opens it, or moves its end to `n`
@@ -320,11 +327,14 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 
 22. **Pending requests are listed and decided through the REST API.** `GET /api/v1/enrolments`
     lists each pending request with its id, its arrival time, the peer address, the CSR's subject,
-    the SHA-256 fingerprint of its public key, and the bootstrap certificate's subject and
-    fingerprint. `POST /api/v1/enrolments/{id}/approve` and `POST /api/v1/enrolments/{id}/reject`
-    decide one request; an unknown or expired id is answered `404`. Both are body-less `POST` acts
-    under clause 16. The Client logs its request's public-key fingerprint, so an operator can match
-    a pending request to a host. Renewal by an Agent that holds a certificate from the client CA
+    the SHA-256 fingerprint of its public key, and the bootstrap certificate's subject, fingerprint
+    and serial as `bootstrap_serial`, in the lowercase hex without leading zeros that
+    `GET /api/v1/bootstrap-certificates` lists. The Server derives both serials with one function,
+    so a request carrying a certificate it issued names that entry.
+    `POST /api/v1/enrolments/{id}/approve` and `POST /api/v1/enrolments/{id}/reject` decide one
+    request; an unknown or expired id is answered `404`. Both are body-less `POST` acts under
+    clause 16. The Client logs its request's public-key fingerprint, so an operator can match a
+    pending request to a host. Renewal by an Agent that holds a certificate from the client CA
     stays automatic (clause 9) and never enters the queue.
 
 23. **The package download is reached with a client certificate.** Its route on the Agent plane
@@ -858,6 +868,13 @@ force; a revocation view in the bundled UI; an audit record of revocations.
   and the list is unchanged.
 - [`crates/fleet-agent/tests/gateway_revocation_e2e.rs`](../../crates/fleet-agent/tests/gateway_revocation_e2e.rs)
   test: `a_certificate_the_server_revokes_is_refused_behind_the_gateway` (clauses 42, 43).
+- The Server refuses to start on a bootstrap CA key that does not match `bootstrap_ca_file` or
+  that is the client CA's key; without `bootstrap_ca_key_file` it starts, admits a bootstrap
+  certificate made elsewhere, and answers `POST /api/v1/bootstrap-certificates` with `409`
+  (clause 19).
+- A request carrying a bootstrap certificate the Server issued is listed with the
+  `bootstrap_serial` that `GET /api/v1/bootstrap-certificates` lists for it, and
+  `PendingEnrolment` in the OpenAPI document carries the field (clause 22).
 
 **Not mechanically decidable:** clause 14 decides what is *not* built beyond the host — no test
 can show the absence of a per-Agent authorization the design rejects; clause 12 is a dependency
