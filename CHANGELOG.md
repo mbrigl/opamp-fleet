@@ -13,7 +13,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.5.2]
+## [0.5.3]
+
+### Removed
+
+- **The Supervisor kinds `icinga2`, `glpi` and `telegraf`** are no longer in the Client, and
+  `opamp-fleetctl package fetch` no longer offers `--agent icinga2`, `glpi-agent` or `telegraf`.
+  A `[[supervisor]]` block of one of these types is an unknown type now: the Client refuses to
+  start on it, and a Supervisor set the Server delivers with one is refused. **What to do:** before
+  upgrading, remove those blocks from `supervisor.toml` and from every Supervisor set on the Server.
+  An agent that has to stay under management runs under a `command` block instead.
+
+## [0.5.2] - 2026-10-13
 
 ### Added
 
