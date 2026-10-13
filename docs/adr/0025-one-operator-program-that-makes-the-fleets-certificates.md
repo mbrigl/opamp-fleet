@@ -1,6 +1,6 @@
 # ADR-0025: The operator tools are one program, `opamp-fleetctl`, published with every release for Linux and macOS, that makes the fleet's certificate authorities, the Server's certificate and the bootstrap certificate, and the Server says before any of them ends
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clauses 1, 3, 8, 9, 12, 13 and 15 superseded by [ADR-0032](0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)
 - **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** the `pki` commands of `opamp-fleetctl` in `crates/fleet-tools/` and the module that carries them, the Server's `pki status` command in `crates/fleet-server/src/main.rs` and the module that carries it, the ending rule in `crates/fleet-core/`, the expiry warnings of the running Server, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), and every document that tells an operator how to make or inspect a certificate; `crates/fleet-tools/` (the program it builds, its command tree and the names of its commands), the operator-tool build and its archives in `.github/workflows/release.yml`, the release notes, and every document or script that names an operator command
