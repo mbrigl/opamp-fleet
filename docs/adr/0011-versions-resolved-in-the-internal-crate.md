@@ -1,6 +1,6 @@
 # ADR-0011: `Cargo.toml` decides the product's version, the internal crate's build stamps it with git's provenance, and the commit is compared nowhere
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clauses 1 and 4 superseded by [ADR-0031](0031-the-builds-product-variables-are-named-for-the-product.md)
 - **Date:** 2026-10-03
 - **Deciders:** Markus Brigl
 - **Applies to:** `Cargo.toml` `[workspace.package] version`, `crates/fleet-core/build.rs`, `crates/fleet-core/src/version.rs`, the `version` job of `.github/workflows/release.yml`, and every surface that states, compares or displays a version
