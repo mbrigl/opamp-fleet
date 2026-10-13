@@ -241,6 +241,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Changed
 
+- **`pki init` makes the package signing key too.** Next to the server CA it writes
+  `package-signing-key.pk8` and its public half, `package-signing-key.pub`, into `--offline-dir`,
+  and `supervisor.toml.fragment` names that public half as `[packages] verification_key`, so a
+  Client set up from the fragment takes signed packages from the start. `package keygen` remains
+  for a fleet set up otherwise or to replace the key. **What to do:** nothing; a fleet that has a
+  key keeps it.
+
 - **Breaking: every certificate is named by its product and its role, with your organization**
   ([ADR-0033](docs/adr/0033-every-certificate-is-named-by-product-and-role-and-carries-the-operators-organization.md)).
   `opamp-fleetctl pki init` and `pki bootstrap-ca` take `--product` (default `OpAMP Fleet`) in

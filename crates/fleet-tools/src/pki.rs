@@ -2,7 +2,7 @@
 //! ADR-0032, ADR-0033).
 //!
 //! `init` makes the three certificate authorities — the server CA, the client CA and the bootstrap
-//! CA — and the Server's certificate; `server-cert` makes another server certificate, for the
+//! CA — the Server's certificate and the package signing key; `server-cert` makes another server certificate, for the
 //! Server or a Gateway; `bootstrap-ca` makes a new bootstrap CA to replace the Server's; `status`
 //! says when the server CA in the offline directory ends. None of them makes a host certificate,
 //! which a host obtains through enrolment alone (ADR-0019), nor a bootstrap certificate, which
@@ -236,7 +236,7 @@ pub struct InitOptions {
 /// private key.
 struct File {
     name: &'static str,
-    contents: String,
+    contents: Vec<u8>,
     key: bool,
 }
 
@@ -263,8 +263,9 @@ struct Made {
     cut: bool,
 }
 
-/// `pki init` (ADR-0032 clause 8): the three CAs and the server certificate, split into what the
-/// Server host needs — the bootstrap CA's key among it — and what stays offline. Returns the lines
+/// `pki init` (ADR-0032 clause 8): the three CAs, the server certificate and the package signing
+/// key, split into what the Server host needs — the bootstrap CA's key among it — and what stays
+/// offline, the server CA's key and the package signing key. Returns the lines
 /// to print.
 ///
 /// # Errors
@@ -302,6 +303,8 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
         &Organization::default(),
         options.server_days,
     )?;
+    // The package signing key stays with the server CA's (ADR-0032 clause 8).
+    let (signing_key, verification_key) = crate::package::signing_key()?;
 
     let server_path = destination(&options.server_dir, options.server_path.as_deref())?;
     let host_path = destination(&options.offline_dir, options.host_path.as_deref())?;
@@ -317,12 +320,15 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
         quoted(&server_path, "bootstrap-ca.pem"),
         quoted(&server_path, "bootstrap-ca-key.pem"),
     );
-    // The bootstrap pair is the Server's to issue; the fragment names where a host keeps it.
+    // The bootstrap pair is the Server's to issue; the fragment names where a host keeps it, and
+    // the key a package it installs must be signed with.
     let supervisor_toml = format!(
-        "[tls]\nca_file = {}\ncert_file = {}\nkey_file = {}\n",
+        "[tls]\nca_file = {}\ncert_file = {}\nkey_file = {}\n\n\
+         [packages]\nverification_key = {}\n",
         quoted(&host_path, "server-ca.pem"),
         quoted(&host_path, "bootstrap.pem"),
         quoted(&host_path, "bootstrap-key.pem"),
+        toml::Value::String(verification_key.clone()),
     );
 
     let targets = [
@@ -343,6 +349,12 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
             files: vec![
                 cert("server-ca.pem", &server_ca_pem),
                 key("server-ca-key.pem", &server_ca_key),
+                File {
+                    name: "package-signing-key.pk8",
+                    contents: signing_key,
+                    key: true,
+                },
+                cert("package-signing-key.pub", &format!("{verification_key}\n")),
                 cert("supervisor.toml.fragment", &supervisor_toml),
             ],
         },
@@ -355,9 +367,10 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
             options.server_dir.display()
         ),
         format!(
-            "{}: keep offline — the server CA's key; give every new host server-ca.pem, and the \
-             bootstrap pair the Server issues (POST /api/v1/bootstrap-certificates) as \
-             bootstrap.pem and bootstrap-key.pem, as supervisor.toml.fragment names them",
+            "{}: keep offline — the server CA's key and the package signing key; give every new \
+             host server-ca.pem, and the bootstrap pair the Server issues (POST \
+             /api/v1/bootstrap-certificates) as bootstrap.pem and bootstrap-key.pem, as \
+             supervisor.toml.fragment names them with the package verification key",
             options.offline_dir.display()
         ),
     ];
@@ -775,7 +788,7 @@ fn is_dns_name(name: &str) -> bool {
 fn cert(name: &'static str, contents: &str) -> File {
     File {
         name,
-        contents: contents.to_string(),
+        contents: contents.as_bytes().to_vec(),
         key: false,
     }
 }
@@ -783,7 +796,7 @@ fn cert(name: &'static str, contents: &str) -> File {
 fn key(name: &'static str, contents: &str) -> File {
     File {
         name,
-        contents: contents.to_string(),
+        contents: contents.as_bytes().to_vec(),
         key: true,
     }
 }
@@ -872,7 +885,7 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Writes a new file; a key is `0600` from the moment it exists.
-fn write_file(path: &Path, contents: &str, key: bool) -> Result<(), String> {
+fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -886,7 +899,7 @@ fn write_file(path: &Path, contents: &str, key: bool) -> Result<(), String> {
     let mut file = options
         .open(path)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    file.write_all(contents.as_bytes())
+    file.write_all(contents)
         .and_then(|()| file.sync_all())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
@@ -969,6 +982,8 @@ mod tests {
         assert_eq!(
             files(&root.path().join("offline")),
             [
+                "package-signing-key.pk8",
+                "package-signing-key.pub",
                 "server-ca-key.pem",
                 "server-ca.pem",
                 "supervisor.toml.fragment"
@@ -994,6 +1009,43 @@ mod tests {
             .any(|l| l.starts_with("notice: both directories")));
     }
 
+    /// The package signing key lands offline, and what it signs passes the Client's check under
+    /// the `verification_key` the fragment names (ADR-0032 clause 8).
+    // Verifies: ADR-0032
+    #[test]
+    fn init_makes_the_package_signing_key_offline_and_names_its_public_half() {
+        use ring::signature::{Ed25519KeyPair, KeyPair as _, UnparsedPublicKey, ED25519};
+        let root = tempfile::tempdir().expect("tempdir");
+        init(&options(root.path())).expect("init");
+        let offline = root.path().join("offline");
+        let pkcs8 = std::fs::read(offline.join("package-signing-key.pk8")).expect("read");
+        let keypair = Ed25519KeyPair::from_pkcs8(&pkcs8).expect("a PKCS#8 Ed25519 key");
+        let public = hex::encode(keypair.public_key().as_ref());
+        assert_eq!(
+            std::fs::read_to_string(offline.join("package-signing-key.pub")).expect("read"),
+            format!("{public}\n")
+        );
+        let fragment: toml::Table =
+            std::fs::read_to_string(offline.join("supervisor.toml.fragment"))
+                .expect("read")
+                .parse()
+                .expect("toml");
+        let named = fragment["packages"]["verification_key"]
+            .as_str()
+            .expect("verification_key");
+        assert_eq!(named, public);
+        let signature = keypair.sign(b"an artifact");
+        UnparsedPublicKey::new(&ED25519, hex::decode(named).expect("hex"))
+            .verify(b"an artifact", signature.as_ref())
+            .expect("the Client's check accepts it");
+        assert!(
+            files(&root.path().join("server"))
+                .iter()
+                .all(|name| !name.starts_with("package-signing-key")),
+            "no package signing key on the Server host"
+        );
+    }
+
     // Verifies: ADR-0025
     #[cfg(unix)]
     #[test]
@@ -1011,7 +1063,7 @@ mod tests {
                     .permissions()
                     .mode()
                     & 0o777;
-                let expected = if name.ends_with("-key.pem") {
+                let expected = if name.ends_with("-key.pem") || name.ends_with(".pk8") {
                     0o600
                 } else {
                     0o644

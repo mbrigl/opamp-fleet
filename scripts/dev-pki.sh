@@ -9,9 +9,10 @@
 #
 #   server/        what the Server host needs: its certificate, the client CA and the bootstrap CA
 #                  with their keys, and server.toml.fragment naming them
-#   offline/       what stays with the operator: the server CA with its key, and
+#   offline/       what stays with the operator: the server CA with its key, the package signing
+#                  key (package-signing-key.pk8, its public half in package-signing-key.pub), and
 #                  supervisor.toml.fragment naming where the Client keeps the bootstrap pair the
-#                  Server issues
+#                  Server issues and the package verification key
 #   server.toml / supervisor.toml
 #                  a Server and a Client configuration that use the set, every other key at its
 #                  default but one: server.toml serves the Agent plane on every interface, so

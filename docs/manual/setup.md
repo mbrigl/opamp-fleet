@@ -88,7 +88,9 @@ managed host; the two `.fragment` files name them there. Left out, they name the
 | | `server.toml.fragment` | the Server's `server.toml`, merged in | no |
 | `--offline-dir` | `server-ca.pem` | every Client (`[tls] ca_file`), and your browser | no |
 | | `server-ca-key.pem` | nowhere: keep it offline, to sign the next server certificate | **yes** |
-| | `supervisor.toml.fragment` | every new Client's `supervisor.toml`, merged in; it names `bootstrap.pem` and `bootstrap-key.pem`, the pair the Server issues ([step 4](#4-configure-and-install-a-client)) | no |
+| | `package-signing-key.pk8` | nowhere: keep it offline, to sign every package ([step 3](#3-make-the-package-signing-key)) | **yes** |
+| | `package-signing-key.pub` | the public half in hex: every Client's `[packages] verification_key` | no |
+| | `supervisor.toml.fragment` | every new Client's `supervisor.toml`, merged in; it names `bootstrap.pem` and `bootstrap-key.pem`, the pair the Server issues ([step 4](#4-configure-and-install-a-client)), and the package verification key | no |
 
 The directories are created `0700` and every key `0600`. `pki init` refuses to write over a file
 that exists, and writes nothing at all then. Run on the Server host, it says so: move the offline
@@ -227,16 +229,24 @@ first.
 ## 3. Make the package signing key
 
 A Client installs software only when an operator's key has signed it, and that includes its own
-updates. Make that key once, with the operator tool's `package keygen`
+updates. `pki init` has made that key already: `package-signing-key.pk8` in the offline
+directory, and its public half in `package-signing-key.pub`, which `supervisor.toml.fragment`
+names as `[packages] verification_key`.
+
+```console
+$ cat offline/package-signing-key.pub
+3b6a27bc…        # the public key: every Client's [packages] verification_key
+```
+
+Keep `package-signing-key.pk8` with you, not on the Server. A Client without the public key runs
+and reports normally, but takes no package. For a fleet set up without `pki init`, or to replace
+the key, make one with the operator tool's `package keygen`
 ([The operator tool](tools.md#packing-and-signing)):
 
 ```console
 $ opamp-fleetctl package keygen --out fleet-signing.pk8
-3b6a27bc…        # the public key: every Client's [packages] verification_key
+3b6a27bc…
 ```
-
-Keep `fleet-signing.pk8` with you, not on the Server. A Client without the public key runs and
-reports normally, but takes no package. You can add the key later.
 
 ## 4. Configure and install a Client
 
