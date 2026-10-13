@@ -281,6 +281,11 @@ release to a set of machines. The same Package in two channels is signed in each
 platform the Package holds: the Server offers no unsigned entry, and the next step's rollout is
 refused while any entry lacks a signature.
 
+For a Package of several platforms, sign them in one go instead: download the Package's
+**Signing info**, sign it with `opamp-fleetctl package sign --signing-info`, and import it on the
+Deployment — the steps, and the comparison of hashes they depend on, are in
+[Signing a whole Package at once](tools.md#signing-a-whole-package-at-once).
+
 ## 6. Roll it out
 
 **The rollout act is what distributes** — nothing before this press changed any host:

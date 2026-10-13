@@ -224,9 +224,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   Server was refused with `invalid peer certificate: UnknownIssuer`, since only the system's roots
   were trusted. The CA replaces those roots for the calls to the Server alone; downloads from
   upstream keep them.
+- **A whole Package signed in one go**
+  ([ADR-0029](docs/adr/0029-a-signing-file-carries-what-a-signature-covers-to-the-key-and-the-signatures-back.md)).
+  The Packages tab lists each entry with its size and full SHA-256 and downloads the Package's
+  **Signing info** (`opamp-fleet-signing-v1`); `opamp-fleetctl package sign --signing-info <file>`
+  signs every entry from its hash, without the artifacts; the Deployments tab imports the signed
+  file into the Deployment's signatures. The tool checks the hashes against nothing: compare them
+  with upstream's checksums or `package sha256` over the files before signing.
 
 ### Changed
 
+- **A Deployment is made and signed in one form.** The Deployments tab lists every binary of each
+  Package it holds, with platform, size and full SHA-256, and gives each unsigned one a signature
+  field. A new Deployment takes its Packages and signatures with **OK**. **Import signing file**
+  matches each signature to the binary with its platform and SHA-256 and skips one whose hash
+  differs; the free-text signature fields are gone.
 - **The development observability stack runs on the host, from `observability/`,** apart from
   the Dev Container, and keeps the fleet's own telemetry in ClickHouse and Apache Doris side by
   side. `config/server.toml` and the `server.toml` that `scripts/dev-pki.sh` writes carry the

@@ -47,20 +47,31 @@ pub enum Command {
         #[arg(long, default_value = "package-signing-key.pk8")]
         out: PathBuf,
     },
-    /// Sign an artifact and print the signature (hex) — the value for the upload's `signature`.
+    /// Sign an artifact and print the signature (hex) — the value of a Deployment's signature for
+    /// that entry. Or, with --signing-info, sign every entry of a Package's signing file from the
+    /// UI and write the signatures into it (ADR-0029).
     Sign {
         /// The PKCS#8 private key from `keygen`.
         #[arg(long)]
         key: PathBuf,
         /// The Agent type the artifact is for — the Package's type on the Server. The signature
         /// holds for this type alone.
-        #[arg(long)]
-        agent_type: String,
+        #[arg(long, required_unless_present = "signing_info")]
+        agent_type: Option<String>,
         /// The Package's version. The signature holds for this version alone.
-        #[arg(long)]
-        version: String,
+        #[arg(long, required_unless_present = "signing_info")]
+        version: Option<String>,
         /// The package artifact to sign (the exact bytes uploaded to the Server).
-        artifact: PathBuf,
+        #[arg(required_unless_present = "signing_info")]
+        artifact: Option<PathBuf>,
+        /// A Package's signing file, as the UI's "Signing info" downloads it. Every entry is signed
+        /// from the hash the file states — **compare those hashes with upstream's checksums or
+        /// with `package sha256` over the files first**: the tool checks them against nothing.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["agent_type", "version", "artifact"])]
+        signing_info: Option<PathBuf>,
+        /// Where to write the signed file. Default: over the --signing-info file.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["agent_type", "version", "artifact"])]
+        out: Option<PathBuf>,
     },
     /// Print the public key (hex) of an existing private key.
     PublicKey {
@@ -157,10 +168,36 @@ pub fn run(command: Command) -> Result<(), String> {
         }
         Command::Sign {
             key,
+            signing_info: Some(path),
+            out,
+            ..
+        } => {
+            // Checked whole before the key is even loaded: a file with one bad entry signs nothing.
+            let mut file = crate::signing::read(&path)?;
+            let keypair = load_key(&key)?;
+            file.sign(&keypair);
+            let out = out.unwrap_or(path);
+            file.write(&out)?;
+            eprintln!(
+                "wrote the signatures to {} — import it on the Deployment. These hashes were \
+                 signed as the file states them; they are only as right as your comparison with \
+                 upstream's checksums or the files.",
+                out.display()
+            );
+            Ok(())
+        }
+        Command::Sign {
+            key,
             agent_type,
             version,
             artifact,
+            ..
         } => {
+            // clap makes the three required whenever --signing-info is absent.
+            let (Some(agent_type), Some(version), Some(artifact)) = (agent_type, version, artifact)
+            else {
+                return Err("sign needs --agent-type, --version and the artifact".to_string());
+            };
             let keypair = load_key(&key)?;
             let bytes = std::fs::read(&artifact)
                 .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
