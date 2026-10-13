@@ -70,8 +70,7 @@ a fleet, `opamp-fleetctl pki init` makes every certificate the Server and a new 
 `server.toml` that uses it; the [quick start](README.md#quick-start-a-closed-loop-on-one-machine)
 walks through it.
 
-There are **two listeners, split by audience**
-([ADR-0012](../adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)): the one
+There are **two listeners, split by audience**: the one
 the fleet talks to, and the one you talk to. Both serve TLS 1.3 and nothing older, with the same
 certificate.
 
@@ -263,8 +262,7 @@ endpoint = "wss://fleet.example:4320/v1/opamp"
 ## Mutual TLS: proving who is on the connection
 
 `[tls] client_ca_file` is required, and the Agent plane asks every peer for a client certificate
-**in the TLS handshake**
-([ADR-0019](../adr/0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)):
+**in the TLS handshake**:
 
 ```toml
 [tls]
@@ -742,8 +740,7 @@ than refused — the fleet may run a system nobody here anticipated.
 **Or reference an artifact hosted elsewhere**. The Server stores the address and your SHA-256,
 offers them verbatim, and never downloads the artifact — so the hash and the signature are the whole
 of the protection. The `url` is `https://`; `http://` is accepted only when its host is
-`127.0.0.1` or `[::1]`, and any other is refused `400` naming the rule
-([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+`127.0.0.1` or `[::1]`, and any other is refused `400` naming the rule.
 So neither the artifact nor the headers an Agent sends for it cross a network in plaintext:
 
 ```console
@@ -792,8 +789,7 @@ succeeds.
 
 **The signature belongs to the Deployment**, not to the artifact: what an operator signs off on is
 a release to a set of machines, so the same Package in two channels is signed in each. **The Server
-never offers an unsigned entry**
-([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). An entry its
+never offers an unsigned entry**. An entry its
 Deployment holds no signature for is no candidate, and the fleet view says the signature is
 missing. A rollout of a Deployment that lacks a signature for any entry is refused `409`, naming
 each Package and the platforms it is unsigned for, and nothing is released. The deployment view
@@ -862,8 +858,7 @@ in each:
 | a `deployment` and something pending | it is waiting for a rollout act | press it |
 | `package_conflict` | two channels claim it | narrow one Selector |
 
-**A rollout act never moves an Agent backwards.** Since
-[ADR-0023](../adr/0023-rollout-and-what-reaches-an-agent.md) the version an Agent reports
+**A rollout act never moves an Agent backwards.** The version an Agent reports
 installed is part of matching: a Package reaches it only if the Package's version is **greater**,
 compared as SemVer (major, minor, patch, then the pre-release rules). Equal is not greater — a
 Package an Agent already runs reaches it with nothing — and a reported version nothing can order
@@ -871,15 +866,13 @@ is refused rather than guessed at. The bulk act skips such Agents; the per-Agent
 and says which version the Agent reports.
 
 **An Agent that reports no version for the package is held against the version it reports
-*running*** — its `service.version`
-([ADR-0023](../adr/0023-rollout-and-what-reaches-an-agent.md)).
+*running*** — its `service.version`.
 That is what makes the rule reach a Client installed from a `.deb`, an `.rpm` or an MSI, which has
 installed no package and has none to report: no Client is offered the version it already runs, and
 none is moved backwards. A `service.version` nothing can order (`1.19`, `24.04.1`) simply says
 nothing, so an Agent whose program numbers itself its own way stays reachable.
 
-**Where an Agent reports both, what it *runs* decides**
-([ADR-0023](../adr/0023-rollout-and-what-reaches-an-agent.md) points 2 and 3). The Package must be greater
+**Where an Agent reports both, what it *runs* decides**. The Package must be greater
 than the `service.version` the Agent reports, and the package status is not read beside it —
 neither to admit a Package the running version refuses, nor to refuse one it admits. A statement
 about the present outranks a record of an install, which outlives the binary it describes. So a
@@ -938,8 +931,7 @@ it to this Server's own origin and to no other host. Guarding the Operator plane
 break a rollout. The content hash and the signature are what protect an installed binary.
 
 `keygen` prints the public key as hex — that value is the Client's `[packages] verification_key`.
-A Client without it takes no package at all, its own update included, and says so at startup
-([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Give every Client the
+A Client without it takes no package at all, its own update included, and says so at startup. Give every Client the
 key.
 
 ### A host fetches only what its Agents are offered
@@ -970,8 +962,7 @@ certificate names no host (provision it with `urn:opamp-fleet:host:<id>`, see
 [`[client_ca]`](#client_ca)), the Agent now reports another Agent type than the Package was built
 for, or a later rollout changed what it is offered.
 
-A Client behind a Gateway receives uploaded artifacts through the Gateway
-([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+A Client behind a Gateway receives uploaded artifacts through the Gateway.
 Its offer names the path on this route, which it resolves against its own endpoint, the Gateway.
 The Gateway fetches each such artifact from this Server once, with its own certificate, as soon
 as it relays an offer of it, and serves it on the same path only to the hosts whose Agents it
@@ -1119,8 +1110,7 @@ until someone forgets it.
 
 ## Authentication
 
-The Agent plane admits by **client certificate alone**
-([ADR-0019](../adr/0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)); see
+The Agent plane admits by **client certificate alone**; see
 [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection). It has no credential of its own, and
 `server.toml` has no `[auth]` section: one that is present is refused at startup, naming `[auth]`.
 `/v1/opamp` and the download route read no `Authorization` header and send no
@@ -1173,8 +1163,7 @@ way, in a table of its own. `0` for any of the three keys is refused at startup.
 
 ### How often a member may be heard
 
-A certificate admits a member; `[agent_rate_limit]` bounds how often it is heard after that
-([ADR-0012](../adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)):
+A certificate admits a member; `[agent_rate_limit]` bounds how often it is heard after that:
 
 ```toml
 [agent_rate_limit]
@@ -1285,7 +1274,7 @@ ignored. A Client sends no credential, so a Server that still demands one answer
 ## TLS
 
 `[tls]` is required, and it turns **both listeners** into HTTPS/WSS listeners with one certificate
-and key ([ADR-0012](../adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
+and key.
 There is no plaintext port beside either of them. Every connection speaks TLS 1.3 alone, with the
 three TLS 1.3 suites of the `ring` provider; a peer that speaks only TLS 1.2 cannot connect. Clients
 use `wss://` or `https://` endpoints, and Clients trusting a private CA set `ca_file` in their own
@@ -1346,8 +1335,7 @@ receiving end.
 
 Two limits worth knowing before you point this somewhere:
 
-- **A cleartext destination is refused anywhere but the loopback**
-  ([ADR-0015](../adr/0015-what-an-agent-reports-about-itself.md)).
+- **A cleartext destination is refused anywhere but the loopback**.
   `http://` is accepted only to the IP literals `127.0.0.1` and `::1`. The rest of `127.0.0.0/8`,
   the private ranges `10/8`, `172.16/12`, `192.168/16` and `fc00::/7`, link-local and carrier-grade
   NAT addresses are refused. The judgement is made on the parsed **address**: a host name over
@@ -1368,15 +1356,13 @@ switches only on success. An Agent that cannot connect with the offered settings
 has and reports the failure. An offer goes only to an Agent admitted with a certificate from the
 client CA; an enrolling host receives none but the certificate it asked for.
 
-The offer carries **no credential and no `headers`**
-([ADR-0013](../adr/0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)):
+The offer carries **no credential and no `headers`**:
 the Agent plane reads no `Authorization`, so an offered one would be a value nothing reads. A
 credential key in the section — `bearer_token_file`, `username`, `password_file`, `bearer_token`,
 `password` — is refused at startup, naming the key. A Client that is offered `headers` by another
 Server applies the rest of the offer and reports it `FAILED`, naming the header keys.
 
-**The offered `endpoint` is never plaintext off the host**
-([ADR-0013](../adr/0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)). It is
+**The offered `endpoint` is never plaintext off the host**. It is
 `wss://` or `https://`; `ws://` or `http://` only when its host is `127.0.0.1` or `::1`. Any other
 `endpoint` is refused at startup with a message naming `[connection_offer] endpoint`.
 

@@ -311,8 +311,7 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 ### Running it under its own account
 
 By default the system service runs as root (systemd, launchd) or `LocalSystem` (Windows).
-`--run-as` drops that
-([ADR-0018](../adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)):
+`--run-as` drops that:
 the service — and every Managed Process its Supervisors spawn — runs as the account you name, and
 the install hands its files over to it: the configuration file, the state directory, **and the
 executable layout**. The layout too because
@@ -433,8 +432,7 @@ It finds the file the way `install` does: `--config` when you name one, and othe
 the Client was installed with. The file has to load before anything is asked; one that does not
 parse is corrected by hand, and the error names it.
 
-What the questionnaire asks about is only what has no useful default on a fresh host
-([ADR-0018](../adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)):
+What the questionnaire asks about is only what has no useful default on a fresh host:
 
 - **the endpoint**, suggesting `wss://127.0.0.1:4320/v1/opamp`. A `ws://` or `http://` endpoint is
   refused unless its host is `127.0.0.1` or `::1`, and the question is asked again;
@@ -524,7 +522,7 @@ binary.
 
 On Windows the `.msi` asks for the installation folder, the endpoint, and the self-update consent.
 The endpoint field is prefilled with `wss://127.0.0.1:4320/v1/opamp` in the interactive install
-only ([ADR-0018](../adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)).
+only.
 The folder holds only the delivered program; `service install` puts the layout, `supervisor.toml`
 and the state under `%ProgramData%\opamp-fleet`. The same file installs unattended with the same
 answers, which is how Intune, Group Policy and SCCM deploy it:
@@ -920,8 +918,7 @@ Server's instruction.
 
 `cert_file` and `key_file` are this Client's own certificate, and they go together or not at all.
 The Server asks for a client certificate in every TLS handshake, so the Client refuses to start
-without one
-([ADR-0019](../adr/0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). The pair
+without one. The pair
 written here is the identity an operator provisions: a certificate the client CA issued, or the
 **bootstrap certificate** a fresh host enrols with. A certificate the Server issued outranks it:
 the Client stores that pair in its state directory as `client-cert.pem` and `client-key.pem` and
@@ -1003,8 +1000,7 @@ the Deployment that holds the package, never a key in this file.
 #### Where a download may come from
 
 A download goes to the Server's own origin — the scheme, host and port of this Client's OpAMP
-endpoint — or to a source `allowed_sources` lists
-([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). The Server's own origin
+endpoint — or to a source `allowed_sources` lists. The Server's own origin
 needs no entry, and an empty list allows it alone.
 
 - **An entry is an `https://` URL prefix.** `http://` is accepted only when the host is
@@ -1022,8 +1018,7 @@ needs no entry, and an empty list allows it alone.
   scheme, host and port stay the same.
 - **The client certificate goes only to the Server's own origin.** To a mirror, and on a hop that
   leaves the Server's origin, the Client presents none.
-- **A `429` or `503` with `Retry-After` from the Server's own origin is waited out**
-  ([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 49). That origin answers so when its rate limit is reached, or —
+- **A `429` or `503` with `Retry-After` from the Server's own origin is waited out**. That origin answers so when its rate limit is reached, or —
   for a Client behind a Gateway — while the Gateway is still fetching the artifact. Each wait is
   the `Retry-After`, at least 1 and at most 60 seconds, and the asking stops 30 minutes after the
   download's first request; the status stays `Downloading` meanwhile, and a shutdown ends it. Past that, or for such an answer from any
@@ -1037,8 +1032,7 @@ Every install path writes `self_update` into the file it creates: `service insta
 `false`; the `--interactive` questionnaire, which does not ask, and every other path write `true`.
 
 A `[self_update]` section, which earlier releases wrote, fails startup with a message naming
-`[packages] self_update` as its replacement
-([ADR-0017](../adr/0017-the-client-updates-itself-under-its-own-agent-type.md)). Replace it by hand
+`[packages] self_update` as its replacement. Replace it by hand
 before such a host takes this release: `enabled = false` becomes `self_update = false`, and
 `package` has no replacement.
 
@@ -1047,8 +1041,7 @@ before such a host takes this release: `enabled = false` becomes `self_update = 
 A Client can stand at a network boundary and carry other Clients' Agents upstream over a small pool
 of connections — for a segmented network the Server cannot reach into, or simply for a
 fleet too large to give every Agent its own connection. The Gateway admits Agents, so it serves
-them over mutual TLS 1.3 only, and `[gateway.tls]` with its `client_ca_file` is required
-([ADR-0014](../adr/0014-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)):
+them over mutual TLS 1.3 only, and `[gateway.tls]` with its `client_ca_file` is required:
 
 ```toml
 [gateway]
@@ -1082,8 +1075,7 @@ gateway for others.
 ### The package cache
 
 A Gateway delivers the packages the Server hosts to the Agents behind it, so that one artifact
-crosses the Gateway's upstream link once instead of once per Agent
-([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)):
+crosses the Gateway's upstream link once instead of once per Agent:
 
 - **What it fetches.** When the Gateway relays a package offer whose `download_url` is a path on
   the Server's download route — what the Server offers for an uploaded artifact while its
@@ -1177,11 +1169,9 @@ OpenTelemetry Collector, and `command` for any other process — a **Foreign Age
 OpAMP.
 
 **Three are wrappers**, each knowing one agent's program, its layout on each platform and its
-invocation, so its block says which host runs it and little else
-([ADR-0016](../adr/0016-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)): `icinga2` for a daemon that takes its
+invocation, so its block says which host runs it and little else: `icinga2` for a daemon that takes its
 directories as `-D` constants rather than flags, validates a configuration before applying it, and
-needs a certificate from a master before it can do anything
-([ADR-0026](../adr/0026-icinga-2.md)); `glpi` for the GLPI
+needs a certificate from a master before it can do anything; `glpi` for the GLPI
 inventory agent, whose Linux and Windows invocations share almost nothing; and `telegraf`, whose
 reload signal could not be written in a block a mixed fleet could use.
 
@@ -1505,7 +1495,7 @@ is called.
 For Icinga 2 in the Agent role, which needs more than a program and arguments: it must be told where
 its state, its template library and its account are on **every** invocation, it creates none of
 those directories itself, and it obtains a certificate from an Icinga master before it can do
-anything ([ADR-0026](../adr/0026-icinga-2.md)).
+anything.
 
 It is the one wrapper that keeps any keys, and it keeps exactly the four that describe the
 **installation this host is joining**. Nothing here can compute them: the ticket was minted on the
@@ -1515,7 +1505,7 @@ parent for one common name, and a node that differs from it does not enrol.
 |---|---|
 | `parent_host` | The Icinga master or satellite, as `host` or `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no enrolment, no certificate, only local checks. |
 | `node_name` | This node's `NodeName`, its certificate's common name and its Endpoint name — Icinga requires the three to be the same string. Defaults to this **host's FQDN**, which is what an operator following Icinga's own instructions feeds `pki ticket --cn`; where no qualified name can be resolved, this Supervisor's name stands in. |
-| `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration aimed at one Agent (ADR-0026). Absent means the signing request waits for `icinga2 ca sign` on the parent. |
+| `ticket_file` | The file holding this host's enrolment ticket, delivered as a `supplementary` Configuration aimed at one Agent. Absent means the signing request waits for `icinga2 ca sign` on the parent. |
 | `trusted_cert_file` | The parent's **own** certificate — not the CA that signed it — which the request compares against what the parent presents. Not named at all falls back to trust on first sight, which is logged as such; a named file that is not there makes enrolment wait for it, never fall back. |
 
 Everything else is the kind's, because it is a property of the artifact or of Icinga: the daemon's
@@ -1823,15 +1813,13 @@ polls every `poll_interval_secs`, which is the option for a host that cannot hol
 connection. Nothing else differs: both carry the same messages, and the Server accepts both at
 once.
 
-**TLS 1.3, and plaintext on the loopback alone**
-([ADR-0012](../adr/0012-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)). Every
+**TLS 1.3, and plaintext on the loopback alone**. Every
 connection the Client makes off the host is TLS 1.3, so a peer that speaks only TLS 1.2 cannot
 be reached. `ws://` and `http://` are accepted only when the endpoint's host is the IP literal
 `127.0.0.1` or `::1`. A host name is never the loopback, `localhost` included, and a private
 address is not either. Any other plaintext endpoint fails at startup with a message naming it.
 
-**One proof on every connection**
-([ADR-0019](../adr/0019-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). The Client presents its
+**One proof on every connection**. The Client presents its
 client certificate in the TLS handshake, on both transports, and the Server admits it on that
 alone. It sends no `Authorization` header. A `401` after the handshake means the Server refused
 the certificate — revoked, or a bootstrap certificate where an issued one is needed; it is logged
@@ -1842,8 +1830,7 @@ admissions; fix the certificate, and the back-off ends by itself.
 **Reconnecting.** A dropped connection is retried with capped exponential backoff, and the Client
 honours the Server's `UNAVAILABLE` retry hints.
 
-**Server-offered connection settings**
-([ADR-0013](../adr/0013-connection-settings-offered-without-a-credential-and-server-capabilities.md)). When
+**Server-offered connection settings**. When
 the Server offers a new heartbeat interval, endpoint, or certificate, the Client
 **verifies the offer by actually connecting with it**, persists it, and only then switches —
 across transports if the offered endpoint demands it. An offered `ws://` or `http://` endpoint
@@ -1860,8 +1847,7 @@ loaded, with one log line naming the header keys, and the file is rewritten with
 
 ## Its own telemetry
 
-The Client reports on itself over OpenTelemetry, but only where the Server tells it to
-([ADR-0015](../adr/0015-what-an-agent-reports-about-itself.md)). There is
+The Client reports on itself over OpenTelemetry, but only where the Server tells it to. There is
 nothing to configure in `supervisor.toml`: the Server offers a destination per signal in its
 `[telemetry_offer]` ([the Server](server.md#the-fleets-own-telemetry)), and without an offer the
 Client builds no exporter and sends nothing.

@@ -11,8 +11,9 @@
 # every direction; of the older checks, one case each pins the message a maintainer would meet
 # first — check 9 gets two more for the toolchain job a derived project adds, checks 12 and 13
 # (inherited ADRs decided and the template's identity replaced once the setup file is gone) have
-# a case for each of their conditions, and check 14 (the template release named) one for each
-# form the line may take.
+# a case for each of their conditions, check 14 (the template release named) one for each
+# form the line may take, and check 16 (the user manual cites no ADR) one for each form a
+# citation takes.
 #
 # Section references and ADR numbers inside fixtures are assembled, never written literally, so
 # that check-docs.sh does not read this script's own fixtures as references into this repository.
@@ -535,6 +536,23 @@ expect fail "a required check that is a job of no workflow" "$d" "is not a job i
 d="$(repo layout-stale)"
 sed -i 's|^docs/adr/ |docs/gone/ |' "$d/README.md"
 expect fail "a Project Layout entry that no longer exists" "$d" "is not a directory of this repository"
+
+# --- cases: the user manual cites no ADR (check 16) ---------------------------------------
+
+d="$(repo manual-plain)"
+mkdir -p "$d/docs/manual"
+printf '# Manual\n\nStart the Server, then the Client.\n' > "$d/docs/manual/README.md"
+expect pass "a manual that cites no ADR" "$d"
+
+d="$(repo manual-cites-number)"
+mkdir -p "$d/docs/manual"
+printf '# Manual\n\nThe Client verifies every package (%s).\n' "$(adr_id 1)" > "$d/docs/manual/README.md"
+expect fail "a manual that names an ADR" "$d" "docs/manual/README.md:3: cites an ADR"
+
+d="$(repo manual-links-record)"
+mkdir -p "$d/docs/manual"
+printf '# Manual\n\nSee [why](../adr/%s-decision.md).\n' "$(printf '%04d' 1)" > "$d/docs/manual/README.md"
+expect fail "a manual that links into the decision records" "$d" "docs/manual/README.md:3: cites an ADR"
 
 # --- summary -------------------------------------------------------------------------------
 

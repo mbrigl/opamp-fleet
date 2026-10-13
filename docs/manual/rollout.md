@@ -59,8 +59,7 @@ args = ["-config.file=${config_dir}/promtail-conf"]
 version_args = ["--version"]
 ```
 
-Without `[packages] verification_key` the Client takes no package at all, and says so at startup
-([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+Without `[packages] verification_key` the Client takes no package at all, and says so at startup.
 
 Two things this block gets right that are easy to get wrong:
 
@@ -177,8 +176,7 @@ $ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtai
 
 Put the public key in every Client's `[packages] verification_key`. Signing is not optional: a
 Client without the key takes no package, an offer without a signature is refused before anything is
-downloaded, and the Server offers no entry its Deployment has not signed
-([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Keep the private key
+downloaded, and the Server offers no entry its Deployment has not signed. Keep the private key
 off the Server host.
 
 The download route requires the Client's certificate, and the content hash and this signature are
@@ -412,7 +410,7 @@ only moves forward.
 | `InstallFailed`, "holds no member at …" | A tree package whose `program_path` names nothing in the archive. The error lists what it holds — check the path from its end, not from the archive root. |
 | `InstallFailed`, "matches N members" | `program_path` is ambiguous; write more of the path. |
 | `InstallFailed`, "climbs out" / "is an absolute path" / "not a file or a directory" | The archive carries a member this Client will not write — a `..` path, an absolute one, or a link. Nothing was unpacked and the running tree is untouched. |
-| An agent shows a package version it is not running | Its record outlived the binary it describes — a version switch that did not take effect, or an older Client reinstalled on top of the state. The fleet reads what the agent reports *running* beside the claim and offers that version again (ADR-0023); the Client drops such a record when it starts. |
+| An agent shows a package version it is not running | Its record outlived the binary it describes — a version switch that did not take effect, or an older Client reinstalled on top of the state. The fleet reads what the agent reports *running* beside the claim and offers that version again; the Client drops such a record when it starts. |
 | The agent stops starting right after a successful install | The artifact was some container the Client does not open — not gzip, 7z, or zip — so it was installed as if it *were* the program. Repack as `.tar.gz`. |
 | `InstallFailed`, "holds an encrypted member" | An encrypted `.zip`. Encryption is the `.7z` format's job, where `[packages] archive_key` opens it; repack, or publish the zip unencrypted. |
 | `InstallFailed`, wrong archive key | `[packages] archive_key` is missing or not the one the `.7z` was packed with. |
