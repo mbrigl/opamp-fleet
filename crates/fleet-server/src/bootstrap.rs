@@ -115,8 +115,9 @@ pub struct Pair {
 
 /// The port that signs a bootstrap certificate: the bootstrap CA with its key.
 pub trait BootstrapSigner: Send + Sync {
-    /// The bootstrap CA's common name; a bootstrap certificate's is this less ` CA`.
-    fn ca_common_name(&self) -> String;
+    /// The common name a bootstrap certificate carries, derived from the bootstrap CA's
+    /// (ADR-0033 clause 6).
+    fn leaf_common_name(&self) -> String;
 
     /// When the bootstrap CA ends, in milliseconds since the epoch.
     fn ca_not_after_ms(&self) -> u64;
@@ -250,10 +251,9 @@ impl BootstrapCertificates {
                 "validity_days must be 1 to {MAX_VALIDITY_DAYS}"
             )));
         }
-        let ca_name = signer.ca_common_name();
         let attributes = request
             .subject
-            .attributes(ca_name.strip_suffix(" CA").unwrap_or(&ca_name))
+            .attributes(&signer.leaf_common_name())
             .map_err(IssueError::Invalid)?;
         let mut entries = self.entries.lock().expect("bootstrap record lock");
         self.prune(&mut entries).map_err(IssueError::Failed)?;
@@ -353,8 +353,8 @@ mod tests {
         serial: AtomicU64,
     }
     impl BootstrapSigner for EchoSigner {
-        fn ca_common_name(&self) -> String {
-            "acme bootstrap CA".to_string()
+        fn leaf_common_name(&self) -> String {
+            fleet_core::naming::leaf_common_name("Acme Bootstrap CA")
         }
         fn ca_not_after_ms(&self) -> u64 {
             self.ca_end_ms
@@ -448,7 +448,10 @@ mod tests {
         let (record, _, _) = fixture(u64::MAX);
         let pair = record.issue(&IssueRequest::default()).expect("issued");
         assert_eq!(pair.not_after_ms, 1_000 + 10 * DAY_MS);
-        assert_eq!(pair.subject, "acme bootstrap", "the CA's name less ` CA`");
+        assert_eq!(
+            pair.subject, "Acme Bootstrap Certificate",
+            "the CA's name with ` CA` turned into ` Certificate`"
+        );
         for days in [0, 91] {
             let refused = record.issue(&request(serde_json::json!({"validity_days": days})));
             assert!(matches!(refused, Err(IssueError::Invalid(_))), "{days}");

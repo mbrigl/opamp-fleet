@@ -368,9 +368,9 @@ The fleet's certificates, made without `openssl` or any other tool
 
 | `pki` command | What it does |
 |---|---|
-| `init --server-dir <dir> --offline-dir <dir> --name <dns\|ip>…` | makes the three CAs and the Server's certificate, split into what the Server host needs — the bootstrap CA's key among it — and what stays offline, with a configuration fragment for each side |
-| `server-cert --offline-dir <dir> --name <dns\|ip>… --out <dir>` | makes another server certificate from the offline server CA, for the Server or a Gateway |
-| `bootstrap-ca --fleet <name> --out <dir>` | makes a new bootstrap CA, valid for a year, to replace the Server's `[enrolment]` files |
+| `init --server-dir <dir> --offline-dir <dir> --name <dns\|ip>…` | makes the three CAs and the Server's certificate, named for `--product` (default `OpAMP Fleet`) and, with `--organization` and `--organizational-unit`, for your organization, split into what the Server host needs — the bootstrap CA's key among it — and what stays offline, with a configuration fragment for each side |
+| `server-cert --offline-dir <dir> --name <dns\|ip>… --out <dir>` | makes another server certificate from the offline server CA, for the Server or a Gateway; it carries the CA's organization unless `--organization` or `--organizational-unit` replaces it |
+| `bootstrap-ca --product <name> --out <dir>` | makes a new bootstrap CA, valid for a year, to replace the Server's `[enrolment]` files |
 | `status --offline-dir <dir>` | says when the server CA in the offline directory ends; exits `0`, `1` when it is ending, `2` when it has ended |
 
 None of them makes a bootstrap certificate: the Server issues those, on

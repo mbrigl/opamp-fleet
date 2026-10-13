@@ -3165,7 +3165,7 @@ async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_ser
     let serial = issued["serial"].as_str().expect("serial").to_string();
     let subject = issued["subject"].as_str().expect("subject");
     assert!(
-        subject.contains("O=Kunde GmbH") && subject.contains("CN=acme bootstrap"),
+        subject == "O=Kunde GmbH, OU=Wien, CN=acme bootstrap Certificate",
         "{subject}"
     );
     let cert = issued["certificate_pem"].as_str().expect("cert");
@@ -3319,8 +3319,8 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
     assert_eq!(empty.status(), 201);
     let issued: serde_json::Value = empty.json().await.expect("json");
     assert_eq!(
-        issued["subject"], "CN=acme bootstrap",
-        "the Server sets the common name"
+        issued["subject"], "CN=acme bootstrap Certificate",
+        "the Server sets the common name from the CA's (ADR-0033 clause 6)"
     );
 }
 

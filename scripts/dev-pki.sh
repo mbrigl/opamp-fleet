@@ -2,7 +2,8 @@
 #
 # Creates the certificates a development Server and Client need, since both refuse to run without
 # them (ADR-0012, ADR-0019), with the operator tool's `opamp-fleetctl pki init` (ADR-0025,
-# ADR-0025) — no openssl.
+# ADR-0032) — no openssl. Every certificate of the set says it is a development one:
+# `OpAMP Fleet Dev … CA`, `O=Development` (ADR-0033 clause 8).
 # Everything lands in one directory, gitignored, and is for a development machine only: the keys
 # are unencrypted and the CAs are throwaway.
 #
@@ -41,7 +42,7 @@ OUT="$(cd "$OUT" && pwd)"  # the configurations name the set by absolute path
 
 (cd "$ROOT" && cargo run -q -p fleet-tools -- pki init \
   --server-dir "$OUT/server" --offline-dir "$OUT/offline" \
-  --fleet "opamp-fleet development" --name localhost)
+  --product "OpAMP Fleet Dev" --organization "Development" --name localhost)
 
 {
   echo '# The Agent plane on every interface, for Clients on other machines (see config/server.toml).'

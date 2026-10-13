@@ -1,5 +1,5 @@
 //! `opamp-fleetctl pki` — the fleet's certificates, made on the operator's machine (ADR-0025,
-//! ADR-0032).
+//! ADR-0032, ADR-0033).
 //!
 //! `init` makes the three certificate authorities — the server CA, the client CA and the bootstrap
 //! CA — and the Server's certificate; `server-cert` makes another server certificate, for the
@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use fleet_core::ending::Standing;
+use fleet_core::naming;
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, SanType, SerialNumber,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
 };
 use time::{Duration, OffsetDateTime};
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -27,8 +28,8 @@ pub const CA_DAYS: u32 = 3650;
 pub const BOOTSTRAP_CA_DAYS: u32 = 365;
 /// How long a server certificate lives unless told otherwise: within every browser's limit.
 pub const SERVER_DAYS: u32 = 397;
-/// The fleet's name in the CAs' subjects unless told otherwise.
-pub const DEFAULT_FLEET: &str = "opamp-fleet";
+/// The product the certificates are named for unless told otherwise (ADR-0033 clause 1).
+pub const DEFAULT_PRODUCT: &str = naming::DEFAULT_PRODUCT;
 
 /// How far a certificate's life starts before the moment it is signed, as the client CA's do.
 const CLOCK_SKEW: Duration = Duration::minutes(5);
@@ -57,10 +58,12 @@ pub enum Command {
         /// absolute path of --offline-dir.
         #[arg(long)]
         host_path: Option<PathBuf>,
-        /// The fleet's name in the CAs' subjects: letters, digits, space, '.' and '-', at most 40
-        /// characters.
-        #[arg(long, default_value = DEFAULT_FLEET)]
-        fleet: String,
+        /// The product the certificates are named for: letters, digits, space, '.' and '-', at
+        /// most 40 characters.
+        #[arg(long, default_value = DEFAULT_PRODUCT)]
+        product: String,
+        #[command(flatten)]
+        organization: Organization,
         /// How long the server CA and the client CA live.
         #[arg(long, default_value_t = CA_DAYS)]
         ca_days: u32,
@@ -82,15 +85,20 @@ pub enum Command {
         /// Receives server.pem and server-key.pem.
         #[arg(long)]
         out: PathBuf,
+        /// Each replaces the server CA's own, which the certificate carries otherwise.
+        #[command(flatten)]
+        organization: Organization,
         /// How long the certificate lives; never past the server CA.
         #[arg(long, default_value_t = SERVER_DAYS)]
         days: u32,
     },
     /// Make a new bootstrap CA to replace the Server's [enrolment] files.
     BootstrapCa {
-        /// The fleet's name in the CA's subject, as `init` was given it.
-        #[arg(long, default_value = DEFAULT_FLEET)]
-        fleet: String,
+        /// The product the CA is named for, as `init` was given it.
+        #[arg(long, default_value = DEFAULT_PRODUCT)]
+        product: String,
+        #[command(flatten)]
+        organization: Organization,
         /// Receives bootstrap-ca.pem and bootstrap-ca-key.pem.
         #[arg(long)]
         out: PathBuf,
@@ -107,6 +115,46 @@ pub enum Command {
     },
 }
 
+/// The organization a certificate names for audit (ADR-0033 clause 3).
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct Organization {
+    /// The organization (O) the certificates name: 1 to 64 characters.
+    #[arg(long)]
+    pub organization: Option<String>,
+    /// The organizational unit (OU) the certificates name: 1 to 64 characters.
+    #[arg(long)]
+    pub organizational_unit: Option<String>,
+}
+
+impl Organization {
+    /// Refuses a value outside its grammar.
+    fn check(&self) -> Result<(), String> {
+        for (flag, value) in [
+            ("--organization", &self.organization),
+            ("--organizational-unit", &self.organizational_unit),
+        ] {
+            if let Some(value) = value {
+                naming::check_organization(value).map_err(|e| format!("{flag} {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Each value of `self`, or else `other`'s.
+    fn or(&self, other: &Organization) -> Organization {
+        Organization {
+            organization: self
+                .organization
+                .clone()
+                .or_else(|| other.organization.clone()),
+            organizational_unit: self
+                .organizational_unit
+                .clone()
+                .or_else(|| other.organizational_unit.clone()),
+        }
+    }
+}
+
 /// Runs one `pki` command and answers the exit code.
 ///
 /// # Errors
@@ -120,7 +168,8 @@ pub fn run(command: Command) -> Result<u8, String> {
             names,
             server_path,
             host_path,
-            fleet,
+            product,
+            organization,
             ca_days,
             bootstrap_ca_days,
             server_days,
@@ -129,7 +178,8 @@ pub fn run(command: Command) -> Result<u8, String> {
             offline_dir,
             server_path,
             host_path,
-            fleet,
+            product,
+            organization,
             names,
             ca_days,
             bootstrap_ca_days,
@@ -139,9 +189,15 @@ pub fn run(command: Command) -> Result<u8, String> {
             offline_dir,
             names,
             out,
+            organization,
             days,
-        } => server_cert(&offline_dir, &names, days, &out)?,
-        Command::BootstrapCa { fleet, out, days } => bootstrap_ca(&fleet, days, &out)?,
+        } => server_cert(&offline_dir, &names, &organization, days, &out)?,
+        Command::BootstrapCa {
+            product,
+            organization,
+            out,
+            days,
+        } => bootstrap_ca(&product, &organization, days, &out)?,
         Command::Status { offline_dir } => {
             let endings = status(&offline_dir)?;
             let now = OffsetDateTime::now_utc();
@@ -165,7 +221,10 @@ pub struct InitOptions {
     pub server_path: Option<PathBuf>,
     /// Where a host's files will live; the fragment names them there.
     pub host_path: Option<PathBuf>,
-    pub fleet: String,
+    /// What the certificates are named for (ADR-0033 clause 1).
+    pub product: String,
+    /// What every CA and the server certificate name for audit (ADR-0033 clause 3).
+    pub organization: Organization,
     pub names: Vec<String>,
     /// The server CA's and the client CA's life.
     pub ca_days: u32,
@@ -187,11 +246,12 @@ struct Target {
     files: Vec<File>,
 }
 
-/// A CA ready to sign: what signs, and when it ends.
+/// A CA ready to sign: what signs, when it ends, and what its subject names.
 struct Authority {
     issuer: Issuer<'static, KeyPair>,
     end: OffsetDateTime,
     common_name: String,
+    organization: Organization,
 }
 
 /// A certificate a command signed.
@@ -210,7 +270,8 @@ struct Made {
 /// # Errors
 /// Returns the message to print when an option is invalid, a file exists, or writing fails.
 pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
-    check_fleet(&options.fleet)?;
+    check_product(&options.product)?;
+    options.organization.check()?;
     let names = names(&options.names)?;
     for days in [
         options.ca_days,
@@ -219,14 +280,28 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
     ] {
         check_days(days)?;
     }
-    let fleet = &options.fleet;
-    let (server_ca_pem, server_ca_key, server_ca) =
-        authority(&format!("{fleet} server CA"), options.ca_days)?;
-    let (client_ca_pem, client_ca_key, _) =
-        authority(&format!("{fleet} client CA"), options.ca_days)?;
-    let (bootstrap_ca_pem, bootstrap_ca_key, _) =
-        authority(&format!("{fleet} bootstrap CA"), options.bootstrap_ca_days)?;
-    let server = server_certificate(&server_ca, &names, options.server_days)?;
+    let (product, organization) = (&options.product, &options.organization);
+    let (server_ca_pem, server_ca_key, server_ca) = authority(
+        &format!("{product} Server CA"),
+        organization,
+        options.ca_days,
+    )?;
+    let (client_ca_pem, client_ca_key, _) = authority(
+        &format!("{product} Client CA"),
+        organization,
+        options.ca_days,
+    )?;
+    let (bootstrap_ca_pem, bootstrap_ca_key, _) = authority(
+        &format!("{product} Bootstrap CA"),
+        organization,
+        options.bootstrap_ca_days,
+    )?;
+    let server = server_certificate(
+        &server_ca,
+        &names,
+        &Organization::default(),
+        options.server_days,
+    )?;
 
     let server_path = destination(&options.server_dir, options.server_path.as_deref())?;
     let host_path = destination(&options.offline_dir, options.host_path.as_deref())?;
@@ -296,7 +371,8 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
 }
 
 /// `pki server-cert` (ADR-0025 clause 7): a server certificate from the offline server CA,
-/// for the Server or for a Gateway.
+/// for the Server or for a Gateway. It carries the CA's O and OU unless `organization` replaces
+/// either (ADR-0033 clause 4).
 ///
 /// # Errors
 /// Returns the message to print when an option is invalid, the CA cannot be read, a file exists,
@@ -304,13 +380,15 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
 pub fn server_cert(
     offline_dir: &Path,
     names: &[String],
+    organization: &Organization,
     days: u32,
     out: &Path,
 ) -> Result<Vec<String>, String> {
     let names = self::names(names)?;
+    organization.check()?;
     check_days(days)?;
     let ca = load_authority(offline_dir, "server-ca")?;
-    let made = server_certificate(&ca, &names, days)?;
+    let made = server_certificate(&ca, &names, organization, days)?;
     write_all(&[Target {
         dir: out.to_path_buf(),
         files: vec![
@@ -332,10 +410,17 @@ pub fn server_cert(
 ///
 /// # Errors
 /// Returns the message to print when an option is invalid, a file exists, or writing fails.
-pub fn bootstrap_ca(fleet: &str, days: u32, out: &Path) -> Result<Vec<String>, String> {
-    check_fleet(fleet)?;
+pub fn bootstrap_ca(
+    product: &str,
+    organization: &Organization,
+    days: u32,
+    out: &Path,
+) -> Result<Vec<String>, String> {
+    check_product(product)?;
+    organization.check()?;
     check_days(days)?;
-    let (cert_pem, key_pem, ca) = authority(&format!("{fleet} bootstrap CA"), days)?;
+    let (cert_pem, key_pem, ca) =
+        authority(&format!("{product} Bootstrap CA"), organization, days)?;
     write_all(&[Target {
         dir: out.to_path_buf(),
         files: vec![
@@ -460,15 +545,18 @@ fn random_serial() -> Result<SerialNumber, String> {
 // Making certificates
 // ---------------------------------------------------------------------------------------------
 
-/// A self-signed CA (ADR-0025 clause 5): `CA:TRUE` with a path length of 0, `keyCertSign` and
-/// `cRLSign`. Returns its certificate and key as PEM, and the authority that signs with it.
-fn authority(common_name: &str, days: u32) -> Result<(String, String, Authority), String> {
+/// A self-signed CA (ADR-0033 clauses 2 and 3): `CA:TRUE` with a path length of 0,
+/// `keyCertSign` and `cRLSign`, named O, OU and CN. Returns its certificate and key as PEM, and
+/// the authority that signs with it.
+fn authority(
+    common_name: &str,
+    organization: &Organization,
+    days: u32,
+) -> Result<(String, String, Authority), String> {
     let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
     let (not_before, not_after, _) = life(days, None)?;
     let mut params = CertificateParams::default();
-    params
-        .distinguished_name
-        .push(DnType::CommonName, common_name);
+    params.distinguished_name = subject(organization, common_name);
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.serial_number = Some(random_serial()?);
@@ -485,19 +573,37 @@ fn authority(common_name: &str, days: u32) -> Result<(String, String, Authority)
             issuer: Issuer::new(params, key),
             end: not_after,
             common_name: common_name.to_string(),
+            organization: organization.clone(),
         },
     ))
 }
 
-/// A server certificate (ADR-0025 clause 6): every name, and both loopback addresses.
-fn server_certificate(ca: &Authority, names: &[SanType], days: u32) -> Result<Made, String> {
+/// A subject of O, OU and CN in that order, as `UTF8String`s (ADR-0033 clause 3).
+fn subject(organization: &Organization, common_name: &str) -> DistinguishedName {
+    let mut name = DistinguishedName::new();
+    if let Some(value) = &organization.organization {
+        name.push(DnType::OrganizationName, value.as_str());
+    }
+    if let Some(value) = &organization.organizational_unit {
+        name.push(DnType::OrganizationalUnitName, value.as_str());
+    }
+    name.push(DnType::CommonName, common_name);
+    name
+}
+
+/// A server certificate (ADR-0033 clause 4): every name and both loopback addresses in its SAN,
+/// its role in its subject, and the CA's O and OU unless `organization` replaces either.
+fn server_certificate(
+    ca: &Authority,
+    names: &[SanType],
+    organization: &Organization,
+    days: u32,
+) -> Result<Made, String> {
     let mut params = CertificateParams::default();
-    let subject = match &names[0] {
-        SanType::DnsName(name) => name.to_string(),
-        SanType::IpAddress(ip) => ip.to_string(),
-        _ => unreachable!("names() yields DNS names and IP addresses"),
-    };
-    params.distinguished_name.push(DnType::CommonName, subject);
+    params.distinguished_name = subject(
+        &organization.or(&ca.organization),
+        &naming::leaf_common_name(&ca.common_name),
+    );
     params.subject_alt_names = names.to_vec();
     for loopback in [
         std::net::IpAddr::from([127, 0, 0, 1]),
@@ -572,7 +678,7 @@ fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
     let key = KeyPair::from_pem(&key_pem)
         .map_err(|e| format!("cannot read {}: {e}", key_file.display()))?;
     let ending = read_ending(&cert_file)?;
-    let common_name = {
+    let (common_name, organization) = {
         let der = opamp::tls::certificates(cert_pem.as_bytes())
             .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?
             .into_iter()
@@ -580,13 +686,19 @@ fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
             .ok_or_else(|| format!("{} holds no certificate", cert_file.display()))?;
         let (_, cert) = X509Certificate::from_der(der.as_ref())
             .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
-        let common_name = cert
-            .subject()
-            .iter_common_name()
-            .next()
-            .and_then(|cn| cn.as_str().ok())
-            .map(str::to_string);
-        common_name.ok_or_else(|| format!("{} names no common name", cert_file.display()))?
+        let first = |values: Vec<&x509_parser::x509::AttributeTypeAndValue<'_>>| {
+            values
+                .first()
+                .and_then(|value| value.as_str().ok())
+                .map(str::to_string)
+        };
+        let common_name = first(cert.subject().iter_common_name().collect())
+            .ok_or_else(|| format!("{} names no common name", cert_file.display()))?;
+        let organization = Organization {
+            organization: first(cert.subject().iter_organization().collect()),
+            organizational_unit: first(cert.subject().iter_organizational_unit().collect()),
+        };
+        (common_name, organization)
     };
     let issuer = Issuer::from_ca_cert_pem(&cert_pem, key)
         .map_err(|e| format!("cannot use {} as a CA: {e}", cert_file.display()))?;
@@ -594,6 +706,7 @@ fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
         issuer,
         end: ending.not_after,
         common_name,
+        organization,
     })
 }
 
@@ -601,15 +714,9 @@ fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
 // Checking what is asked for
 // ---------------------------------------------------------------------------------------------
 
-/// A fleet name (ADR-0025 clause 5): letters, digits, space, `.` and `-`, at most 40 characters.
-fn check_fleet(fleet: &str) -> Result<(), String> {
-    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-');
-    if fleet.trim().is_empty() || fleet.len() > 40 || !fleet.chars().all(allowed) {
-        return Err(format!(
-            "--fleet {fleet:?}: letters, digits, space, '.' and '-', at most 40 characters"
-        ));
-    }
-    Ok(())
+/// A product name (ADR-0033 clause 1).
+fn check_product(product: &str) -> Result<(), String> {
+    naming::check_product(product).map_err(|e| format!("--product {e}"))
 }
 
 /// A life of at least a day.
@@ -811,7 +918,8 @@ mod tests {
             offline_dir: root.join("offline"),
             server_path: None,
             host_path: None,
-            fleet: DEFAULT_FLEET.to_string(),
+            product: DEFAULT_PRODUCT.to_string(),
+            organization: Organization::default(),
             names: vec!["fleet.example.com".to_string(), "10.0.0.5".to_string()],
             ca_days: CA_DAYS,
             bootstrap_ca_days: BOOTSTRAP_CA_DAYS,
@@ -933,7 +1041,7 @@ mod tests {
         );
     }
 
-    // Verifies: ADR-0025
+    // Verifies: ADR-0025, ADR-0033
     #[test]
     fn the_cas_have_their_own_subjects_and_sign_no_ca() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -958,11 +1066,107 @@ mod tests {
         assert_eq!(
             subjects,
             [
-                "CN=opamp-fleet server CA",
-                "CN=opamp-fleet client CA",
-                "CN=opamp-fleet bootstrap CA"
+                "CN=OpAMP Fleet Server CA",
+                "CN=OpAMP Fleet Client CA",
+                "CN=OpAMP Fleet Bootstrap CA"
             ]
         );
+    }
+
+    fn acme() -> Organization {
+        Organization {
+            organization: Some("Acme AG".to_string()),
+            organizational_unit: Some("IT".to_string()),
+        }
+    }
+
+    /// Every CA and the server certificate are named by product and role, with the operator's
+    /// organization, in the order O, OU, CN (ADR-0033 clauses 2 to 4).
+    // Verifies: ADR-0033
+    #[test]
+    fn init_names_every_certificate_by_product_role_and_organization() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut o = options(root.path());
+        o.product = "Acme Fleet".to_string();
+        o.organization = acme();
+        init(&o).expect("init");
+        for (file, subject) in [
+            (
+                "offline/server-ca.pem",
+                "O=Acme AG, OU=IT, CN=Acme Fleet Server CA",
+            ),
+            (
+                "server/client-ca.pem",
+                "O=Acme AG, OU=IT, CN=Acme Fleet Client CA",
+            ),
+            (
+                "server/bootstrap-ca.pem",
+                "O=Acme AG, OU=IT, CN=Acme Fleet Bootstrap CA",
+            ),
+            (
+                "server/server.pem",
+                "O=Acme AG, OU=IT, CN=Acme Fleet Server Certificate",
+            ),
+        ] {
+            let ending = read_ending(&root.path().join(file)).expect("read");
+            assert_eq!(ending.subject, subject, "{file}");
+        }
+    }
+
+    /// `server-cert` carries the server CA's O and OU, and a flag replaces one alone (ADR-0033
+    /// clause 4).
+    // Verifies: ADR-0033
+    #[test]
+    fn server_cert_takes_the_cas_organization_and_a_flag_replaces_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut o = options(root.path());
+        o.organization = acme();
+        init(&o).expect("init");
+        let gateway_unit = Organization {
+            organization: None,
+            organizational_unit: Some("Gateways".to_string()),
+        };
+        for (out, organization, subject) in [
+            (
+                "same",
+                Organization::default(),
+                "O=Acme AG, OU=IT, CN=OpAMP Fleet Server Certificate",
+            ),
+            (
+                "unit",
+                gateway_unit,
+                "O=Acme AG, OU=Gateways, CN=OpAMP Fleet Server Certificate",
+            ),
+        ] {
+            server_cert(
+                &root.path().join("offline"),
+                &["gw.example.com".to_string()],
+                &organization,
+                90,
+                &root.path().join(out),
+            )
+            .expect("server-cert");
+            let ending = read_ending(&root.path().join(out).join("server.pem")).expect("read");
+            assert_eq!(ending.subject, subject, "{out}");
+        }
+    }
+
+    /// A product or an organization outside its grammar is refused, and nothing is written
+    /// (ADR-0033 clauses 1 and 3).
+    // Verifies: ADR-0033
+    #[test]
+    fn a_bad_product_or_organization_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut o = options(root.path());
+        o.product = " Acme".to_string();
+        assert!(init(&o).is_err(), "a leading space was accepted");
+        let mut o = options(root.path());
+        o.organization.organization = Some("a\nb".to_string());
+        assert!(init(&o).is_err(), "a control character was accepted");
+        let mut o = options(root.path());
+        o.organization.organizational_unit = Some("x".repeat(65));
+        assert!(init(&o).is_err(), "65 characters were accepted");
+        assert!(!root.path().join("server").exists(), "nothing was written");
     }
 
     // Verifies: ADR-0025
@@ -991,12 +1195,15 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["fleet.example.com", "10.0.0.5", "127.0.0.1", "::1"]);
-        assert_eq!(cert.subject().to_string(), "CN=fleet.example.com");
+        assert_eq!(
+            cert.subject().to_string(),
+            "CN=OpAMP Fleet Server Certificate"
+        );
     }
 
     // Verifies: ADR-0025
     #[test]
-    fn a_wildcard_an_empty_name_and_a_bad_fleet_are_refused() {
+    fn a_wildcard_an_empty_name_and_a_bad_product_are_refused() {
         let root = tempfile::tempdir().expect("tempdir");
         for name in ["*.example.com", "", "under_score.example"] {
             let mut o = options(root.path());
@@ -1007,8 +1214,8 @@ mod tests {
         o.names.clear();
         assert!(init(&o).is_err(), "no --name was accepted");
         let mut o = options(root.path());
-        o.fleet = "a/b".to_string();
-        assert!(init(&o).is_err(), "a fleet with '/' was accepted");
+        o.product = "a/b".to_string();
+        assert!(init(&o).is_err(), "a product with '/' was accepted");
         assert!(!root.path().join("server").exists(), "nothing was written");
     }
 
@@ -1025,6 +1232,7 @@ mod tests {
         let lines = server_cert(
             &root.path().join("offline"),
             &["fleet.example.com".to_string()],
+            &Organization::default(),
             SERVER_DAYS,
             &root.path().join("next"),
         )
@@ -1042,6 +1250,7 @@ mod tests {
         server_cert(
             &root.path().join("offline"),
             &["gw.example.com".to_string()],
+            &Organization::default(),
             90,
             &root.path().join("gw"),
         )
@@ -1056,15 +1265,15 @@ mod tests {
     }
 
     /// `bootstrap-ca` makes a CA of the bootstrap CA's subject and life, refusing to overwrite.
-    // Verifies: ADR-0032
+    // Verifies: ADR-0032, ADR-0033
     #[test]
     fn bootstrap_ca_makes_a_new_ca_for_the_server() {
         let root = tempfile::tempdir().expect("tempdir");
         let out = root.path().join("next");
-        bootstrap_ca(DEFAULT_FLEET, BOOTSTRAP_CA_DAYS, &out).expect("bootstrap-ca");
+        bootstrap_ca("Acme Fleet", &acme(), BOOTSTRAP_CA_DAYS, &out).expect("bootstrap-ca");
         assert_eq!(files(&out), ["bootstrap-ca-key.pem", "bootstrap-ca.pem"]);
         let ca = read_ending(&out.join("bootstrap-ca.pem")).expect("read");
-        assert_eq!(ca.subject, "CN=opamp-fleet bootstrap CA");
+        assert_eq!(ca.subject, "O=Acme AG, OU=IT, CN=Acme Fleet Bootstrap CA");
         assert_eq!((ca.not_after - ca.not_before).whole_days(), 365);
         // The Server starts on it and signs with it.
         let enrolment = fleet_server::config::EnrolmentConfig {
@@ -1075,10 +1284,12 @@ mod tests {
             .expect("the Server loads it")
             .is_some());
         assert!(
-            bootstrap_ca(DEFAULT_FLEET, 365, &out).is_err(),
+            bootstrap_ca(DEFAULT_PRODUCT, &Organization::default(), 365, &out).is_err(),
             "nothing is overwritten"
         );
-        assert!(bootstrap_ca("a/b", 365, &root.path().join("x")).is_err());
+        assert!(
+            bootstrap_ca("a/b", &Organization::default(), 365, &root.path().join("x")).is_err()
+        );
     }
 
     // Verifies: ADR-0025

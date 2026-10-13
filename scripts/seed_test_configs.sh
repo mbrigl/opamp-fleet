@@ -82,7 +82,7 @@ if [ "$mode" = enrol ]; then
     # A fresh pair every time, so a pair that has ended since the last run is never reused. The
     # Server issues it and hands out its key this once (ADR-0032).
     issued=$(curl -fsS "${curl_tls[@]}" -X POST -H 'Content-Type: application/json' \
-        -d '{"subject": {"organization": "development"}}' \
+        -d '{"subject": {"organization": "Development"}}' \
         "$server/api/v1/bootstrap-certificates")
     (
         umask 077

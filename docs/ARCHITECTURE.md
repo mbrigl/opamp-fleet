@@ -73,7 +73,7 @@ Five crates in one workspace ([ADR-0009](adr/0009-five-crates-the-whole-opamp-co
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
   version, the platform aliases, the statement a package signature covers, the renewal proof a
-  CSR carries, and when a certificate counts as ending.
+  CSR carries, when a certificate counts as ending, and what a certificate is called.
 - **`fleet-server`** — the Server: the fleet, its Configurations, labels, packages and
   Deployments, the Agent plane and the Operator plane.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.

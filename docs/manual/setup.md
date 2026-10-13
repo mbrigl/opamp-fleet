@@ -96,13 +96,15 @@ directory off that host before the fleet goes live.
 
 What it makes, so you need not:
 
-- **Three CAs with names of their own**, `opamp-fleet server CA`, `opamp-fleet client CA` and
-  `opamp-fleet bootstrap CA`, none able to sign a further CA. `--fleet` replaces `opamp-fleet` in
-  all three. The server CA and the client CA are valid for ten years; replacing either means
+- **Three CAs with names of their own**, `OpAMP Fleet Server CA`, `OpAMP Fleet Client CA` and
+  `OpAMP Fleet Bootstrap CA`, none able to sign a further CA. `--product` replaces `OpAMP Fleet`
+  in all three, and `--organization` and `--organizational-unit` add an O and an OU to every
+  certificate `init` makes, for whoever audits them. The server CA and the client CA are valid for ten years; replacing either means
   touching every host. The bootstrap CA is valid for one year; replacing it touches only the
   Server ([step 6](#6-living-with-the-certificates)).
-- **A server certificate** valid for 397 days, which keeps it within every browser's limit. It
-  carries every `--name`, and always `127.0.0.1` and `::1` as well, so your browser and `curl`
+- **A server certificate** valid for 397 days, which keeps it within every browser's limit. Its
+  subject says what it is, `OpAMP Fleet Server Certificate`; the names it is dialled by are in
+  its subject alternative names. It carries every `--name`, and always `127.0.0.1` and `::1` as well, so your browser and `curl`
   reach the Operator plane through an SSH tunnel (step 2). A wildcard or a name that is neither a
   DNS name nor an address is refused.
 - **Keys the Server can read:** ECDSA P-256 in PKCS#8, the one form the client CA's key must have.
@@ -308,8 +310,9 @@ A few things worth knowing about these keys:
 
 - **`ca_file` replaces the built-in trust.** With it set, the Client trusts the server CA and no
   other CA. Leave it out only when the Server's certificate comes from a public CA.
-- **`name` becomes the certificate's subject.** The certificate the Server issues carries it as its
-  common name, and the fleet view shows it.
+- **`name` is what the fleet view shows**, not what the certificate says. The certificate the
+  Server issues is named for its role, `OpAMP Fleet Client Certificate`, whatever the request
+  asks for; a host is told apart by its serial and its host id.
 - **A bootstrap pair in the file stays there after enrolment.** Once the host holds an issued
   certificate, it stores the certificate in its state directory as `client-cert.pem` and
   `client-key.pem` and uses that pair instead. The bootstrap pair is what it falls back to if you
@@ -394,7 +397,7 @@ revocation reaches every renewal of it:
 
 ```console
 $ curl --cacert server-ca.pem https://127.0.0.1:4321/api/v1/certificates
-[{"authority":"client","serial":"5c0f…","subject":"CN=host-01",…}]
+[{"authority":"client","serial":"5c0f…","subject":"CN=OpAMP Fleet Client Certificate",…}]
 $ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' \
        -d '{"certificate": {"authority": "client", "serial": "5c0f…"}}' \
        https://127.0.0.1:4321/api/v1/revocations
@@ -421,10 +424,11 @@ certificate: give it the Gateway's names and use the pair as its `[gateway.tls] 
 **The bootstrap CA is yours to replace once a year**, when the Server warns that it is ending:
 
 ```console
-$ opamp-fleetctl pki bootstrap-ca --fleet opamp-fleet --out next-bootstrap-ca
+$ opamp-fleetctl pki bootstrap-ca --product "OpAMP Fleet" --organization "Example Org" --out next-bootstrap-ca
 ```
 
-It writes `bootstrap-ca.pem` and `bootstrap-ca-key.pem`. Replace the Server's two files of
+Give it the `--product`, `--organization` and `--organizational-unit` you gave `pki init`. It
+writes `bootstrap-ca.pem` and `bootstrap-ca-key.pem`. Replace the Server's two files of
 `[enrolment]` with them and restart it. Enrolled hosts notice nothing: they hold certificates of
 the client CA. Bootstrap certificates of the old CA stop working, so have the Server issue new
 ones to the hosts you set up next.
@@ -440,9 +444,9 @@ something is, `2` when something has ended.
 
 ```console
 $ server pki status --config /etc/opamp-fleet-server/server.toml
-ok        396 days  2027-11-10  serial 0d3d…  CN=fleet.example.com  (/etc/opamp-fleet-server/tls/server.pem)
-ok        3649 days  2036-10-06  serial 4e1b…  CN=opamp-fleet client CA  (/etc/opamp-fleet-server/tls/client-ca.pem)
-ok        3649 days  2036-10-06  serial 2068…  CN=opamp-fleet bootstrap CA  (/etc/opamp-fleet-server/tls/bootstrap-ca.pem)
+ok        396 days  2027-11-10  serial 0d3d…  O=Example Org, CN=OpAMP Fleet Server Certificate  (/etc/opamp-fleet-server/tls/server.pem)
+ok        3649 days  2036-10-06  serial 4e1b…  O=Example Org, CN=OpAMP Fleet Client CA  (/etc/opamp-fleet-server/tls/client-ca.pem)
+ok        3649 days  2036-10-06  serial 2068…  O=Example Org, CN=OpAMP Fleet Bootstrap CA  (/etc/opamp-fleet-server/tls/bootstrap-ca.pem)
 ```
 
 **The server CA and the client CA outlast everything else**, so they live ten years. This

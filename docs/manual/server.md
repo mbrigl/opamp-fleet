@@ -286,8 +286,9 @@ makes an enrolment connection. No configuration admits a peer without a certific
 and the download route read no `Authorization` header: one a Client sends is ignored, never
 refused, and no refusal carries a `WWW-Authenticate` challenge.
 
-A certificate proves **fleet membership, not identity**. The Server does not match its subject
-against an Agent's `instance_uid`: the Server itself may re-key an Agent at any time
+A certificate proves **fleet membership, not identity**. Its subject is the Server's, the client
+CA's name with ` CA` turned into ` Certificate`, whatever the request asks for, and the Server does
+not match it against an Agent's `instance_uid`: the Server itself may re-key an Agent at any time
 (`AgentIdentification`), and a certificate that a re-key invalidates is an outage of your own making.
 
 ### Issuing certificates: the CSR flow
@@ -383,14 +384,14 @@ Without `[enrolment]` no bootstrap certificate passes the handshake.
 With `bootstrap_ca_key_file` set, ask the Server for a bootstrap certificate and name whom it is
 for. The subject takes `organization` and `organizational_unit`, typically the customer and the
 site, each optional and 1 to 64 characters. The Server sets the common name: the bootstrap CA's
-name without ` CA`. `validity_days` runs from 1 to 90,
+name with ` CA` turned into ` Certificate`. `validity_days` runs from 1 to 90,
 10 by default, and never past the bootstrap CA's end:
 
 ```console
 $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
        -d '{"subject": {"organization": "Example Customer", "organizational_unit": "Vienna"}, "validity_days": 14}' \
        https://127.0.0.1:4321/api/v1/bootstrap-certificates
-{"serial":"6723…","subject":"O=Example Customer, OU=Vienna, CN=fleet bootstrap",
+{"serial":"6723…","subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
  "not_before_ms":…,"not_after_ms":…,"certificate_pem":"-----BEGIN CERTIFICATE-----…",
  "private_key_pem":"-----BEGIN PRIVATE KEY-----…"}
 ```
@@ -411,7 +412,7 @@ certificate issued earlier or elsewhere offers no pair.
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/bootstrap-certificates
-[{"serial":"6723…","subject":"O=Example Customer, OU=Vienna, CN=fleet bootstrap",
+[{"serial":"6723…","subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
   "key_fingerprint":"…","issued_ms":…,"not_after_ms":…,"revoked":false}]
 ```
 
@@ -459,7 +460,8 @@ so the request is listed moments after the host connects:
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/enrolments
 [{"id":"3f9a…","arrived_ms":1789996400000,"peer":"10.0.4.17","subject":"CN=host-01",
-  "key_fingerprint":"3f9a…","bootstrap_subject":"O=Example Customer, OU=Vienna, CN=fleet bootstrap",
+  "key_fingerprint":"3f9a…",
+  "bootstrap_subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
   "bootstrap_fingerprint":"…","bootstrap_serial":"6723…"}]
 $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/approve
 $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/reject
@@ -496,7 +498,8 @@ when it renewed. Its `key_fingerprint` is the one the request was listed and app
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/certificates
-[{"authority":"client","issuer":"CN=fleet client CA","serial":"5c0f…","subject":"CN=host-01",
+[{"authority":"client","issuer":"CN=OpAMP Fleet Client CA","serial":"5c0f…",
+  "subject":"CN=OpAMP Fleet Client Certificate",
   "key_fingerprint":"…","not_after_ms":1797772400000,"instance_uid":"0192…",
   "issued_ms":1789996400000,"predecessor":{"authority":"client","serial":"41ab…"},
   "host":"0192…"}]

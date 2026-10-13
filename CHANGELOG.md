@@ -241,6 +241,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Changed
 
+- **Breaking: every certificate is named by its product and its role, with your organization**
+  ([ADR-0033](docs/adr/0033-every-certificate-is-named-by-product-and-role-and-carries-the-operators-organization.md)).
+  `opamp-fleetctl pki init` and `pki bootstrap-ca` take `--product` (default `OpAMP Fleet`) in
+  place of `--fleet`, and `--organization` and `--organizational-unit` for an O and an OU: the CAs
+  are `<product> Server CA`, `Client CA` and `Bootstrap CA`, the server certificate
+  `<product> Server Certificate` with its names in the SAN alone. `pki server-cert` carries the
+  server CA's O and OU, and its own flags replace either. The Server names the certificates it
+  signs from their CA, ` CA` turned into ` Certificate`: a host certificate carries that common
+  name and nothing of its request, a bootstrap certificate that and the O and OU asked for. It
+  refuses to start on a client CA or bootstrap CA whose certificates' name would exceed 64
+  characters. `scripts/dev-pki.sh` names its set `OpAMP Fleet Dev`, `O=Development`. **What to
+  do:** replace `--fleet` with `--product` in scripts. Existing CAs keep working; their
+  certificates are named from them, `opamp-fleet client CA` giving `opamp-fleet client
+  Certificate`.
+
 - **Breaking: the Server issues bootstrap certificates, and the bootstrap CA lives a year**
   ([ADR-0032](docs/adr/0032-the-server-issues-bootstrap-certificates-under-a-bootstrap-ca-of-one-year.md)).
   With `[enrolment] bootstrap_ca_key_file` set, `POST /api/v1/bootstrap-certificates` issues a
