@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0005 ADR-0008
+# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0005 ADR-0008 ADR-0030
 #
 # Each case builds a throwaway git repository under a temporary directory — a rule file with
 # numbered sections, a README with a Project Layout block, the required-checks markers, and the
@@ -403,6 +403,62 @@ expect pass "a Supersedes field wrapped onto a second line, both flipped" "$d"
 d="$(repo consolidation-wrapped-half)"
 consolidation "$d" no wrap
 expect fail "a wrapped Supersedes field, the name on the second line not flipped" "$d" "0002-decision.md: 0003-decision.md supersedes it"
+
+# partial <dir> <status of ADR 1> <Supersedes entry suffix> — ADR 2 supersedes ADR 1, whole or by
+# clause (ADR-0030); ADR 1 carries the given status line, ADR 2 the given text after its link.
+partial() {
+  local dir="$1" status="$2" suffix="$3"
+  adr "$dir" 1 "$status"
+  adr "$dir" 2 "🟡 proposed"
+  sed -i "s|^- \*\*Applies to:\*\*|- **Supersedes:** [$(adr_id 1)](0001-decision.md)$suffix\n- **Applies to:**|" \
+    "$dir/docs/adr/0002-decision.md"
+  {
+    echo "# Architecture Decision Records"
+    echo
+    echo "### Binding"
+    echo
+    echo "| ADR | Title | Applies to | Status |"
+    echo "|-----|-------|------------|--------|"
+    [[ "$status" == ⚪* ]] || index_row 1 "$status"
+    index_row 2 "🟡 proposed"
+    echo
+    echo "### Superseded and rejected"
+    echo
+    echo "| ADR | Title | Applies to | Status |"
+    echo "|-----|-------|------------|--------|"
+    [[ "$status" == ⚪* ]] && index_row 1 "$status"
+  } > "$dir/docs/adr/README.md"
+}
+
+# --- cases: clause supersession (check 8). Verifies: ADR-0030 -------------------------------
+
+d="$(repo partial)"
+partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md)" " clause 2"
+expect pass "named clauses superseded, the old ADR active with the suffix" "$d"
+
+d="$(repo partial-no-suffix)"
+partial "$d" "🟢 accepted" " clauses 1 and 3"
+expect fail "named clauses superseded, the old ADR without the suffix" "$d" "0001-decision.md: 0002-decision.md supersedes it"
+
+d="$(repo partial-flipped)"
+partial "$d" "⚪ superseded by [$(adr_id 2)](0002-decision.md)" " clause 2"
+expect fail "named clauses superseded, the old ADR flipped to superseded whole" "$d" "supersedes only named clauses of it"
+
+d="$(repo whole-suffix-only)"
+partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md)" ""
+expect fail "a whole supersession, the old ADR left active with a clause suffix" "$d" "supersedes it whole, but its status is 🟢"
+
+d="$(repo partial-unclaimed)"
+partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md)" " clause 2"
+sed -i '/^- \*\*Supersedes:\*\*/d' "$d/docs/adr/0002-decision.md"
+expect fail "a clause suffix whose successor does not claim it" "$d" "0002-decision.md: 0001-decision.md says it supersedes"
+
+d="$(repo partial-two)"
+partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md) · clause 4 superseded by [$(adr_id 3)](0003-decision.md)" " clause 2"
+adr "$d" 3 "🟡 proposed"
+sed -i "s|^- \*\*Applies to:\*\*|- **Supersedes:** [$(adr_id 1)](0001-decision.md) clause 4\n- **Applies to:**|" "$d/docs/adr/0003-decision.md"
+sed -i "/^| \[0002\]/a $(index_row 3 '🟡 proposed')" "$d/docs/adr/README.md"
+expect pass "two successors superseding different clauses of one ADR" "$d"
 
 d="$(repo section-ref)"
 echo "Cited in [\`AGENTS.md\` $(sect 9)](AGENTS.md#9-nowhere)." >> "$d/README.md"
