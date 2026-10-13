@@ -1,7 +1,7 @@
 # Development observability stack
 
 OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry (ADR-0024), stored
-in one place, and up already whenever the Dev Container is. This is a **development tool**: nothing
+in one place. It runs on the host, apart from the Dev Container, and is started when wanted. This is a **development tool**: nothing
 shipped depends on it, it holds no credentials worth having, and it retains 24 h of data on a local
 volume.
 
@@ -46,10 +46,17 @@ What it costs, stated plainly rather than discovered later:
 
 ## Start
 
-There is nothing to start. The Dev Container **is** this Compose project
-([`docker-compose.yml`](docker-compose.yml)): the workspace container VS Code attaches to is one of
-its four services and these three are the others, so they come up with the container and go down
-with it.
+A host-side action, always (ADR-0002 — the Dev Container has no Docker daemon). From the repository
+root on the host:
+
+```sh
+docker compose -f observability/compose.yaml up -d                  # all three
+docker compose -f observability/compose.yaml restart otel-collector # one service
+docker compose -f observability/compose.yaml down                   # all three, data kept
+```
+
+`down -v` throws the ClickHouse and Grafana volumes away with it. On rootless Podman the same file
+runs through `podman compose` or `podman-compose`.
 
 Grafana is on <http://localhost:3000> — anonymous access is enabled, so there is nothing to log in
 to (`admin` / `admin` if you want to edit and save). It opens on **Fleet Agents — Overview**.
@@ -58,33 +65,18 @@ The first start pulls the ClickHouse datasource plugin, so give Grafana a few se
 usual and make sure the machine has network access. Without it, Grafana starts with no datasource
 and every panel reports one.
 
-To leave the stack out of the next start, drop the names from `runServices` in
-[`devcontainer.json`](devcontainer.json) — from inside the container there is no daemon to start
-them by hand, so that list is the on/off switch.
+### Reaching it from the Dev Container
 
-### Reaching it
+The Dev Container is a single container with no Compose project around it, so the stack is not its
+neighbour. [`.devcontainer/forward-otlp.sh`](../.devcontainer/forward-otlp.sh) runs on every start of
+the container and forwards its loopback ports 4317 and 4318 to the host's, where the Collector is
+published — so `http://localhost:4318` inside the container is the same endpoint as on the host,
+which is what the refusal below requires. Nothing there needs the stack to be up: a connection made
+while it is down fails, and the next one after `up` works.
 
-- **The Collector is on the workspace container's loopback.** It shares that container's network
-  namespace, so `http://localhost:4318` inside the container is the same endpoint as on the host —
-  which is what the refusal below requires. Its ports are published by the `workspace` service for
-  the same reason; `otel-collector` is not a resolvable name from the other containers.
-- **Grafana and ClickHouse are ordinary neighbours**, reached by service name: `grafana:3000`,
-  `clickhouse:9000`. From the host's browser Grafana stays on <http://localhost:3000>.
-
-### Driving Compose by hand
-
-A host-side action, always (ADR-0002 — the container has no Docker daemon). From the repository root
-on the host:
-
-```sh
-docker compose -f .devcontainer/docker-compose.yml restart otel-collector   # one service
-docker compose -f .devcontainer/docker-compose.yml down                     # all four, data kept
-```
-
-`down -v` throws the ClickHouse and Grafana volumes away with it. Note that `up` here starts the
-`workspace` container too — the stack has no separate compose file to bring up on its own any more,
-and the Collector could not run without that container in any case, since it lives in its network
-namespace.
+On Docker Engine on Linux the container has no name for the host; set `OTLP_FORWARD_HOST` in the
+container's environment to the host's address (the bridge gateway, usually `172.17.0.1`). Podman
+and Docker Desktop need nothing.
 
 ## Pointing this Server's Agents at it
 
@@ -242,7 +234,7 @@ curl -i -X POST http://localhost:4318/v1/traces \
      -H 'Content-Type: application/json' --data '{"resourceSpans":[]}'
 
 # What is the Collector itself doing?
-docker compose -f .devcontainer/docker-compose.yml logs -f otel-collector
+docker compose -f observability/compose.yaml logs -f otel-collector
 
 # What made it into ClickHouse? One query, all three signals — which is the point of one store.
 curl -s 'http://localhost:8123/?user=otel&password=otel' --data-binary "

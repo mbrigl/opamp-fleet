@@ -211,10 +211,11 @@ max_package_size_bytes = 1073741824
 # Pick ONE of the three shapes below. They are alternatives, not a sequence — switching on two of
 # them leaves the file with a duplicated table header, which is an error rather than a merge.
 #
-# (1) Development — the stack in .devcontainer/ comes up with the Dev Container and publishes
-#     the Collector's OTLP/HTTP port on the host. Cleartext is accepted here because loopback is
-#     inside the private address space, which is why this reads http:// and why the ports are
-#     published rather than left on a compose network.
+# (1) Development — the stack in observability/, started on the host, publishes the Collector's
+#     OTLP/HTTP port there, and the Dev Container forwards its own loopback to it
+#     (.devcontainer/forward-otlp.sh). Cleartext is accepted here because loopback is inside the
+#     private address space, which is why this reads http:// and why the ports are published
+#     rather than left on a compose network.
 # [telemetry_offer]
 # metrics_endpoint = "http://localhost:4318/v1/metrics"
 # traces_endpoint = "http://localhost:4318/v1/traces"

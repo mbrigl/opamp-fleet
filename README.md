@@ -373,7 +373,8 @@ crates/               # Cargo workspace: opamp (shared) · server · client · p
 config/               # annotated example configuration files (server.toml, supervisor.toml)
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
-.devcontainer/        # Dev Container definition (base image + Features + observability stack)
+.devcontainer/        # Dev Container definition (base image + Features)
+observability/        # development observability stack (Collector, ClickHouse, Grafana), run on the host
 .vscode/              # shared editor settings
 .claude/CLAUDE.md     # pointer for Claude Code to read AGENTS.md
 .claude/settings.json # Claude Code permissions: prompt before git/gh writes
@@ -381,32 +382,36 @@ rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
 
 ## Dev Container
 
-The environment is defined by [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)
-and [`.devcontainer/docker-compose.yml`](.devcontainer/docker-compose.yml): a prebuilt base image
-with Dev Container Features and VS Code extensions layered on top — no Dockerfile. Customise it by
-adding Features, switching the base image, or adding extensions.
+The environment is defined by [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json):
+a single container from a prebuilt base image, with Dev Container Features and VS Code extensions
+layered on top — no Dockerfile, no Compose project. Customise it by adding Features, switching the
+base image, or adding extensions.
 
-### The observability stack comes with it
+### The observability stack runs beside it
 
-The workspace container is one service in a Compose project; the other three are the development
-observability stack — Collector, ClickHouse and Grafana — declared in the same file and documented
-in [`.devcontainer/OBSERVABILITY.md`](.devcontainer/OBSERVABILITY.md). They start and stop with the
-container, and from inside it:
+The development observability stack — Collector, ClickHouse and Grafana — is a Compose project of
+its own in [`observability/`](observability/README.md). It runs on the **host**, apart from the
+container, and is started when you want it:
 
-| Reach                | at                            |
-| -------------------- | ----------------------------- |
-| Collector (OTLP/HTTP)| `http://localhost:4318`       |
-| Grafana              | `http://grafana:3000`         |
-| ClickHouse           | `clickhouse:9000` / `:8123`   |
+```sh
+docker compose -f observability/compose.yaml up -d     # on the host, from the repository root
+```
 
-The Collector answers on `localhost` because it shares the workspace container's network namespace:
-the Client refuses a cleartext OTLP destination outside the private address space ([ADR-0024](docs/adr/0024-agents-report-their-own-telemetry.md)),
-so a `server.toml` naming `http://localhost:4318/v1/logs` has to mean the same thing inside the
-container as on the host. Grafana stays on <http://localhost:3000> from the host's browser.
+The container reaches the Collector through the host. The Client sends own telemetry in cleartext
+only inside the private address space, judged by address and never by name ([ADR-0024](docs/adr/0024-agents-report-their-own-telemetry.md)),
+so [`.devcontainer/forward-otlp.sh`](.devcontainer/forward-otlp.sh) puts the host's Collector on the
+container's loopback on every start: `http://localhost:4318` inside the container is the Collector
+on the host, so a `server.toml` naming `http://localhost:4318/v1/logs` means the same thing in both
+places. Grafana is on <http://localhost:3000> in the host's browser.
 
-To run without the stack — it wants roughly 2 GB — remove the services from `runServices` in
-[`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json); there is no daemon inside the
-container to start them by hand.
+### Podman
+
+The Dev Container runs on rootless Podman as it is: point the Dev Containers extension at it
+(`dev.containers.dockerPath`: `podman`), or keep `docker` and set `DOCKER_HOST` to Podman's socket.
+For a single-container Dev Container the Dev Containers CLI itself starts it with
+`--userns=keep-id`, so the repository stays writable for `vscode`, and with SELinux label
+separation off, so the bind mounts are readable. The observability stack runs under
+`podman compose` or `podman-compose` from the same file.
 
 ### Host container management
 
@@ -419,7 +424,7 @@ is reopened in the container.
 
 ## Coding Agents
 
-This Dev Container preinstalls the **Claude Code** and **Mistral Vibe** VS Code extensions (see
+This Dev Container preinstalls the **Claude Code** VS Code extension (see
 [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json)); other agents (OpenAI Codex,
 Cursor, OpenCode, GitHub Copilot) work too once you add them. Authenticate your agent inside the
 container (for Claude Code: `claude login`).
