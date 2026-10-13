@@ -100,6 +100,11 @@
 #      against fixtures; a helper that is missing or fails without saying why is an error here.
 #      It concerns this repository only, so it does not run against a fixture root passed by
 #      scripts/test-check-docs.sh.
+#  16. The user manual cites no ADR: no file under docs/manual/ names an 'ADR-NNNN' or links into
+#      docs/adr/. The manual is for the people who run the software and says what to do; a
+#      decision record is for those who change it, and a citation sends an operator to a page
+#      that does not answer their question. A repository without docs/manual/ has nothing to
+#      check.
 #
 # Checks 5 and 6 read every text file of the repository, not a list of documentation extensions:
 # docs/adr/README.md states that code may reference an ADR number, so a verifier restricted to
@@ -968,6 +973,18 @@ check_protocol_baseline() {
   fi
 }
 
+# Check 16 (see the header). Every line is read, code fences included: a citation in an example is
+# still one an operator follows.
+check_manual_cites_no_adr() {
+  local dir="$ROOT/docs/manual" file hit
+  [[ -d "$dir" ]] || return
+  while IFS= read -r file; do
+    while IFS= read -r hit; do
+      add_error "${file#"$ROOT"/}:${hit%%:*}: cites an ADR — the manual says what to do and why it matters to an operator; the decision record stays in docs/adr/"
+    done < <(grep -nE 'ADR-[0-9]{4}|(^|[(/])\.\./adr/|docs/adr/' "$file")
+  done < <(find "$dir" -type f -name '*.md' | sort)
+}
+
 collect_text_files
 check_adr_index
 check_adr_numbering
@@ -983,6 +1000,7 @@ check_skill_pointers
 check_inherited_adrs
 check_template_identity
 check_template_release
+check_manual_cites_no_adr
 ((OWN_REPOSITORY)) && check_protocol_baseline
 
 if ((${#warnings[@]} > 0)); then

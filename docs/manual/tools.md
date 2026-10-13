@@ -6,8 +6,7 @@
 One program, `opamp-fleetctl`, ships beside the Server and the Client for the operator who sets a
 fleet up and gets software *into* it. It is not part of the running system: nothing the Server or a
 Client does depends on it, and it belongs on the operator's own machine, not on the Server host —
-the keys it makes are the ones to keep off that host
-([ADR-0028](../adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
+the keys it makes are the ones to keep off that host.
 
 | Command | Use it to |
 |---|---|
@@ -60,7 +59,7 @@ checksum file goes with them:
 |---|---|---|
 | `otelcol` | `open-telemetry/opentelemetry-collector-releases` | the core Collector's `.tar.gz`, as published |
 | `otelcol-contrib` | the same repository | the Contrib Collector's `.tar.gz`, as published |
-| `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from ([ADR-0018](../adr/0018-the-client-updates-itself-under-its-own-agent-type.md)); the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
+| `supervisor` | `mbrigl/opamp-fleet` — this project's own releases | the `.tar.gz` this fleet's Client is released as, one per platform, as published. It is the package a Client updates *itself* from; the `.deb`, `.rpm` and `.msi` beside it are for installing a Client by hand and are passed over |
 
 Four things it does on every run:
 
@@ -68,7 +67,7 @@ Four things it does on every run:
   used for anything. A mismatch stops that platform and leaves the file for inspection.
 - **It leaves the artifact alone** wherever upstream's container is one a Client can open — so
   the hash the fleet verifies is the hash on the release page, and the line from the release to
-  the host is unbroken ([ADR-0026](../adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+  the host is unbroken.
 - **It uploads the agent's default configuration with the package** — but only the ones the
   Server does not already have, see [below](#the-default-configuration).
 - **It never distributes anything.** Uploading stores a Package and saves a Configuration; reaching a
@@ -152,8 +151,7 @@ Done. What a Supervisor needs to install these:
 ```
 
 For `--agent supervisor` there is no block to print — nothing supervises a Client — so the hint is
-the consent that lets it take the package over itself, which is also its default
-([ADR-0018](../adr/0018-the-client-updates-itself-under-its-own-agent-type.md)):
+the consent that lets it take the package over itself, which is also its default:
 
 ```
 Done. What a Client needs to take these:
@@ -177,15 +175,14 @@ released binary:
 |---|---|---|
 | `otelcol` | `otelcol-conf` | Selector `service.name = otelcol` |
 | `otelcol-contrib` | `otelcol-contrib-conf` | Selector `service.name = otelcol-contrib` |
-| `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks ([ADR-0017](../adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)) |
+| `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks |
 
 Two rules keep this from surprising anyone:
 
 - **An existing Configuration is never written over.** The name is asked for first, and one the
   Server already holds is left exactly as you left it, edits and all. That is what makes a second
   upload of a newer version safe.
-- **Nothing is distributed.** Saving only saves
-  ([ADR-0025](../adr/0025-rollout-and-what-reaches-an-agent.md)), so the default reaches
+- **Nothing is distributed.** Saving only saves, so the default reaches
   no host until you roll it out. Read it first: these bodies carry example values.
 
 ```console
@@ -206,7 +203,7 @@ The Server decides some uploads before it reads a byte of the artifact, and says
 
 | What it answers | What to do |
 |---|---|
-| `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed ([ADR-0025](../adr/0025-rollout-and-what-reaches-an-agent.md)). Fetch under a new version, or delete the Package first. |
+| `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed. Fetch under a new version, or delete the Package first. |
 | `507 … max_total_package_bytes` | The package store is at its ceiling. Delete a Package no channel holds, or raise the limit ([the Server's configuration reference](server.md#top-level)). |
 | `404 … not configured` | The Server has no package store: `packages_dir` is unset in `server.toml` ([Packages](server.md#packages-and-deployments-distributing-software)). |
 | `413 …` | The artifact is past `max_package_size_bytes`. |
@@ -259,7 +256,7 @@ $ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtai
 |---|---|---|
 | `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`; the private key goes in the file, ideally not on the Server host |
 | `pack <program> --out <file>` | the artifact's SHA-256 (hex) | building a one-file artifact; `--format tar.gz\|7z`, `--program-name <name>`, `--archive-key <key>` |
-| `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the Deployment's signature route, `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone (ADR-0026) |
+| `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the Deployment's signature route, `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone |
 | `public-key --key <file>` | the public key (hex) | recovering it from an existing private key |
 | `sign --key <file> --signing-info <file> [--out <file>]` | the signing file, with every entry signed | a Package's **Signing info** from the Packages tab, signed whole and imported on the Deployment — see [Signing a whole Package at once](#signing-a-whole-package-at-once) |
 | `sha256 <artifact>` | the SHA-256 (hex) | the `sha256` of a *referenced* entry, for an artifact the Server never holds |
@@ -271,7 +268,7 @@ from packing to a running agent.
 **Signing is required, fleet-wide.** A Client takes a package only while `[packages]
 verification_key` is set, and only when the artifact's signature verifies against it. The Server
 offers no entry its Deployment has not signed, and refuses to roll out a Deployment with an
-unsigned entry ([ADR-0026](../adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Give
+unsigned entry. Give
 every Client the same public key, and sign every entry of every Deployment.
 
 ### Signing a whole Package at once
@@ -326,8 +323,7 @@ type, the version and the hash, not the Deployment — so import it on each.
 
 ## `pki`
 
-The fleet's certificates, made without `openssl` or any other tool
-([ADR-0028](../adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
+The fleet's certificates, made without `openssl` or any other tool.
 [Setting up a fleet](setup.md) walks through them in order; in short:
 
 | `pki` command | What it does |
