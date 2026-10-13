@@ -32,7 +32,7 @@
 /// answer rather than looking for a repository that is not there when it runs.
 #[must_use]
 pub fn current() -> &'static str {
-    env!("OPAMP_BUILD_VERSION")
+    env!("OPAMP_PRODUCT_RELEASE")
 }
 
 /// A version string taken apart. Borrowed from the input — nothing here allocates.

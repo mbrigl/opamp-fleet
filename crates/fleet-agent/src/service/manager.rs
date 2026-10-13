@@ -18,7 +18,7 @@ use service_manager::{
 };
 
 use super::{ServiceControl, ServiceLevel, ServiceState};
-use crate::product::{PRODUCT_DISPLAY_NAME, PRODUCT_NAME};
+use crate::product::{PRODUCT_NAME, PRODUCT_TITLE};
 
 /// Restart after a failure, never after a clean stop (ADR-0018) — with a delay so a Client that
 /// fails at startup does not spin, and no retry limit so a host recovers however long it takes.
@@ -51,7 +51,7 @@ pub fn service_name() -> &'static str {
 /// label — neither has a second name to give.
 #[must_use]
 pub fn display_name() -> &'static str {
-    PRODUCT_DISPLAY_NAME
+    PRODUCT_TITLE
 }
 
 /// What the Windows services list shows in its **Description** column — a field of its own, beside
@@ -356,7 +356,7 @@ mod tests {
     /// Verifies: ADR-0018
     #[test]
     fn the_names_a_human_reads() {
-        assert_eq!(display_name(), PRODUCT_DISPLAY_NAME);
+        assert_eq!(display_name(), PRODUCT_TITLE);
         assert_ne!(display_name(), service_name());
     }
 

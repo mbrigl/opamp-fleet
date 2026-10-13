@@ -239,6 +239,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   field. A new Deployment takes its Packages and signatures with **OK**. **Import signing file**
   matches each signature to the binary with its platform and SHA-256 and skips one whose hash
   differs; the free-text signature fields are gone.
+- **Breaking: the build's product variables are named for the product**
+  ([ADR-0031](docs/adr/0031-the-builds-product-variables-are-named-for-the-product.md)).
+  `OPAMP_FLEET_PRODUCT_NAME` is now `OPAMP_PRODUCT_NAME`, `OPAMP_FLEET_PRODUCT_DISPLAY_NAME` is
+  `OPAMP_PRODUCT_TITLE` and `OPAMP_FLEET_VERSION` is `OPAMP_PRODUCT_VERSION`; the version the build
+  resolves is emitted as `OPAMP_PRODUCT_RELEASE`. The old names are no longer read: a build that
+  still sets one gets the default product name, title or version without a word. **What to do:**
+  rename the variables in every script or pipeline that builds a variant or states a version.
 - **The development observability stack runs on the host, from `observability/`,** apart from
   the Dev Container, and keeps the fleet's own telemetry in ClickHouse and Apache Doris side by
   side. `config/server.toml` and the `server.toml` that `scripts/dev-pki.sh` writes carry the

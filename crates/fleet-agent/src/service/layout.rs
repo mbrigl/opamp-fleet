@@ -171,7 +171,7 @@ pub fn version_dir_name(full_version: &str) -> String {
     let (base, metadata) = full_version.split_once('+').unwrap_or((full_version, ""));
     let core = base.split_once('-').map_or(base, |(core, _)| core);
     if metadata.is_empty() {
-        // An OPAMP_FLEET_VERSION-override build outside a repository has no commit to cite.
+        // An OPAMP_PRODUCT_VERSION-override build outside a repository has no commit to cite.
         format!("{COMPONENT}-{core}")
     } else {
         format!("{COMPONENT}-{core}-{metadata}")
