@@ -11,6 +11,8 @@ real deployment needs, and why.
 The quick start in the [manual's index](README.md#quick-start-a-closed-loop-on-one-machine) runs
 both ends on one machine with throwaway certificates. Use this page for anything that crosses a
 network.
+[A host's life](lifecycle.md) follows one host from installation through enrolment to its
+updates, once the fleet stands.
 
 - [The certificates, at a glance](#the-certificates-at-a-glance)
 - [1. Make the certificates](#1-make-the-certificates)
@@ -251,9 +253,17 @@ $ opamp-fleetctl package keygen --out fleet-signing.pk8
 ## 4. Configure and install a Client
 
 Each managed host needs three files: `server-ca.pem` from `--offline-dir`, and a bootstrap pair,
-`bootstrap.pem` and `bootstrap-key.pem`, which the Server issues. Ask for the pair through the
-tunnel, naming whom it is for; every field is optional, and so is `validity_days` (10 by default,
-at most 90):
+`bootstrap.pem` and `bootstrap-key.pem`, which the Server issues. Name whom the pair is for, the
+customer and the site; both are optional, and the approver sees them on every request the pair
+carries.
+
+**In the UI**, through the tunnel: open the **Enrolments** tab and fill in **Bootstrap
+certificates** with the customer (O), the site (OU) and the days it is valid (10 by default, at
+most 90). Press **Issue**, then **Save bootstrap.pem** and **Save bootstrap-key.pem** in the new
+certificate's row. The page holds the private key only while it stays open, and asks before it is
+reloaded or closed, so save both files first.
+
+**Over the API**, the same request:
 
 ```console
 $ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' \
@@ -265,8 +275,7 @@ $ (umask 077; jq -r .private_key_pem issued.json > bootstrap-key.pem) && rm issu
 
 The answer is the only place the private key ever appears: the Server keeps the certificate's
 serial, subject and end, never the key. Lost, it is not fetched again but issued anew. One pair
-may go to every host of that customer. The UI's **Enrolments** tab issues the same pair from a
-form and saves it as `bootstrap.pem` and `bootstrap-key.pem`.
+may go to every host of that customer.
 
 Copy the three files to the host, with the key readable by root only, together with
 `package-signing-key.pub` from the offline directory. The simplest place is the directory you run
@@ -345,7 +354,8 @@ questionnaire enrolled is ready; start it with `sudo systemctl start opamp-fleet
 
 ## 5. Enrol the Client
 
-**Open the window**, for as long as you need to set up hosts, up to 24 hours:
+**Open the window**, for as long as you need to set up hosts. In the **Enrolments** tab, choose
+15 minutes, 1 hour or 4 hours and press **Open window**; over the API, up to 24 hours:
 
 ```console
 $ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' \
@@ -363,8 +373,10 @@ INFO certificate request generated; an enrolling host waits for an operator's ap
 ```
 
 **Approve it.** Open the UI's **Enrolments** tab: it lists each waiting host with its full key
-fingerprint, its peer address and the name it asked for. Compare the fingerprint with the one the
-host logged, then press **Approve**. The same over the API:
+fingerprint, its peer address, the name it asked for, and the bootstrap certificate it carries:
+the customer, site, serial and end it was issued with, or *not issued here* for one the Server did
+not issue. Compare the fingerprint with the one the host logged, check that the bootstrap
+certificate is the one you gave that host, then press **Approve**. The same over the API:
 
 ```console
 $ curl --cacert server-ca.pem https://127.0.0.1:4321/api/v1/enrolments
@@ -379,8 +391,8 @@ The host receives its certificate within seconds, checks it by connecting with i
 appears on the **Agents** tab as connected. Its certificate is listed under
 `GET /api/v1/certificates`.
 
-**Close the window** when you are done. It also closes on its own when its time runs out, and on a
-Server restart:
+**Close the window** when you are done, with **Close window** in the tab or over the API. It also
+closes on its own when its time runs out, and on a Server restart:
 
 ```console
 $ curl --cacert server-ca.pem -X DELETE https://127.0.0.1:4321/api/v1/enrolment/window
@@ -422,9 +434,10 @@ $ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' \
        https://127.0.0.1:4321/api/v1/revocations
 ```
 
-A bootstrap certificate is revoked the same way, with `"authority": "bootstrap"` and its serial.
-`GET /api/v1/bootstrap-certificates` lists every valid one the Server issued, with its serial,
-subject and end, and whether it is revoked. See
+A bootstrap certificate is revoked the same way, with `"authority": "bootstrap"` and its serial, or
+with **Revoke** in its row on the **Enrolments** tab. `GET /api/v1/bootstrap-certificates` and that
+tab list every valid one the Server issued, with its serial, subject and end, and whether it is
+revoked. See
 [Revocation](server.md#revocation-withdrawing-a-certificate) for Gateways and for lifting a
 revocation.
 

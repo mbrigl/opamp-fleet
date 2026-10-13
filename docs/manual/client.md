@@ -1727,8 +1727,7 @@ verification_key = "<hex-encoded Ed25519 public key>"
 ```
 
 The consent takes effect only while `verification_key` is set, and the artifact must
-carry a signature that verifies against it
-([ADR-0017](../adr/0017-the-client-updates-itself-under-its-own-agent-type.md)). An offer without a
+carry a signature that verifies against it. An offer without a
 signature, or with one that does not verify, is reported `InstallFailed` and nothing is staged. An
 offer older than the running version is refused too: a signature carries no ordering, so an old
 release stays validly signed forever.
@@ -1737,9 +1736,7 @@ An offer under any other name is refused and reported, never applied. That is on
 guards, and it is the one on this side of the wire: the Server will not offer a package built for
 another Agent type either, and this Client's type is the constant `supervisor`, compiled into the
 binary and not configurable — which is why the Package that carries the Client is typed with it. The Agent type *is* the name a
-Package carries on the wire
-([ADR-0024](../adr/0024-packages-signed-deployments-offered-downloads-and-verified-delivery.md)), so the two cannot
-drift apart.
+Package carries on the wire, so the two cannot drift apart.
 Neither guard replaces the other — an operator who types a Collector artifact as `supervisor` gets
 past the Server, and this name is what is left.
 
@@ -1758,9 +1755,8 @@ restart.
 
 **What the Client says it has is the version it runs**, whether a package put it there or a `.deb`,
 an `.rpm`, an MSI or a hand did. It reports that under its Agent type, the name the consent takes, from its
-very first report, which is what lets the Server hold a Package against it: since
-[ADR-0023](../adr/0023-rollout-and-what-reaches-an-agent.md) a Package reaches an Agent only as
-an **upgrade**, so a Client is never offered the version it already runs, and never an older one.
+very first report, which is what lets the Server hold a Package against it: a Package reaches an
+Agent only as an **upgrade**, so a Client is never offered the version it already runs, and never an older one.
 The practical consequence: a Client installed by hand is not taken over by the fleet's package the
 moment one is published at the version it already is — it comes under package management with the
 next release that is actually newer.
@@ -1774,8 +1770,7 @@ package as the upgrade it now is, and the host is updated back to it. To hold a 
 Client, withdraw its consent with `self_update = false` under `[packages]`.
 
 **Where the artifact comes from.** Every release publishes one archive per platform, named
-`supervisor_<version>_<os>_<arch>.tar.gz`
-([ADR-0018](../adr/0018-the-client-supervisor-installed-service-releases-and-installers.md)) — and
+`supervisor_<version>_<os>_<arch>.tar.gz` — and
 that file *is* a package artifact: it holds the Client under the name the install layout gives
 it, so it is uploaded exactly as downloaded, and the SHA-256 the release published is the one the
 Agent verifies. Nothing repacks it. The files are named after the **Package** they become, not after the product inside them:
@@ -1787,7 +1782,17 @@ name.
 **The version in the path is the release number** — the one in the file name — and the
 platform is the entry's, spelled as the Agent reports it. The Package is typed `supervisor`, the
 Client's own Agent type, and it reaches a Client only through a Deployment that holds it and signs
-each entry:
+each entry.
+
+**In the UI:** on the **Packages** tab, press **＋ Create** and choose the first release archive:
+a file named `supervisor_<version>_<os>_<arch>.tar.gz` fills the agent type, the version and the
+platform by itself. Press **OK**, add each further platform's archive with **＋ Add entry**, then
+press **Signing info** and sign the downloaded file with
+`opamp-fleetctl package sign --signing-info` ([Signing a whole Package at
+once](tools.md#signing-a-whole-package-at-once)). On the **Deployments** tab, add the Package to
+the channel, **Import signing file**, press **OK**, and press the row's **Roll out**.
+
+**Over the API**, the same steps:
 
 ```console
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{}' \

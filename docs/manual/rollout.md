@@ -192,7 +192,9 @@ this step reaches any host, and nothing in the next one does either: a stored Pa
 nobody at all.
 
 The calls go to the Operator plane over TLS. `--cacert ca.pem` names the CA that signed the
-Server's certificate; off the loopback, add the operator credential with `-u`.
+Server's certificate; off the loopback, add the operator credential with `-u`. Steps 4 to 6 and 9
+can be done in the UI's **Packages** and **Deployments** tabs as well; [A host's
+life](lifecycle.md#releasing-an-update-in-the-ui) shows how.
 
 ```console
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{}' \
@@ -387,15 +389,12 @@ something that happens.
 
 The channel is untouched, and 3.0.0 stays in the store beside 3.1.0 — but **putting 3.0.0 back in the
 channel is not how you take 3.1.0 back**. A Package reaches an Agent only as an upgrade over the version
-that Agent reports installed
-([ADR-0023](../adr/0023-rollout-and-what-reaches-an-agent.md)), so once the channel reports
+that Agent reports installed, so once the channel reports
 3.1.0 the older one reaches nobody: the channel's act answers `{"assigned_agents": 0}` and the
 per-Agent act answers `409`. An Agent that reports no version for the package is measured by the
-version it reports *running* instead
-([ADR-0023](../adr/0023-rollout-and-what-reaches-an-agent.md)),
+version it reports *running* instead,
 so this holds on a host the fleet has never installed anything on — and where an Agent reports both,
-the version it reports *running* decides and the package status is not read beside it
-([ADR-0023](../adr/0023-rollout-and-what-reaches-an-agent.md) points 2 and 3), so a record left behind by an
+the version it reports *running* decides and the package status is not read beside it, so a record left behind by an
 install that did not take cannot strand the host.
 
 What takes a bad version back is the host: the version 3.1.0 superseded is kept for

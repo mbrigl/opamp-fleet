@@ -1,0 +1,210 @@
+# A host's life: installation, enrolment, updates
+
+[← User Manual](README.md) · [Setting up a fleet](setup.md) · [The Client](client.md) · [Rollout walkthrough](rollout.md)
+
+This page follows one managed host through its whole life, from the first file you copy to it to
+the updates it takes years later. It says what happens at each stage, who acts, and where, and links
+to the page that holds the detail. It assumes a running Server with enrolment configured; [Setting
+up a fleet](setup.md) gets you there.
+
+Everything here can be done in the Server's UI, and everything the UI does is a call to the REST
+API, so a script can do the same. The API calls are on the pages this one links to.
+
+- [At a glance](#at-a-glance)
+- [1. Issue a bootstrap certificate](#1-issue-a-bootstrap-certificate)
+- [2. Install the Client](#2-install-the-client)
+- [3. Enrol the host](#3-enrol-the-host)
+- [4. Certificates renew themselves](#4-certificates-renew-themselves)
+- [5. Updates](#5-updates)
+- [6. Taking a host out](#6-taking-a-host-out)
+
+## At a glance
+
+| Stage | Who acts | Where | What happens |
+|---|---|---|---|
+| 1. Bootstrap certificate | you, once per customer, site or batch | **Enrolments** tab | The Server issues a short-lived certificate that lets a new host ask to join, and nothing more. |
+| 2. Installation | you, on the host | the host | The Client is installed as a service and told the Server's address, the server CA and the bootstrap pair. |
+| 3. Enrolment | the host asks, you approve | **Enrolments** tab | The host makes its own key and asks for a certificate. You approve it, and the Server signs it. |
+| 4. Renewal | nobody | — | The host replaces its certificate on its own, long before it ends. |
+| 5. Updates | you release, the host installs | **Packages** and **Deployments** tabs | A signed Package reaches the hosts of a channel. Each host verifies it, installs it, and rolls back what will not run. |
+| 6. Removal | you | REST API | Revoking the host's certificate shuts it out at once. |
+
+## 1. Issue a bootstrap certificate
+
+A new host has no certificate of the fleet yet, so it cannot connect as a member. It gets a
+**bootstrap certificate** instead: one that lets it into the enrolment queue and nowhere else. The
+Server issues it on your request.
+
+In the UI, open the **Enrolments** tab and go to **Bootstrap certificates**:
+
+1. Fill in the **customer (O)** and the **site (OU)**. Both are optional. They are a label: the
+   approver sees them on every request this certificate carries, and they grant nothing.
+2. Set how many **days** it is valid: 10 by default, 90 at most. Choose the time it takes to set the
+   hosts up.
+3. Press **Issue**. The new certificate appears in the list with its serial and end.
+4. In its row, press **Save bootstrap.pem** and **Save bootstrap-key.pem**.
+
+**Save both files before you leave the page.** The Server does not keep the private key. The page
+holds it only while it stays open, and asks before it is reloaded or closed. A certificate issued
+earlier, or from a script, shows no save buttons. A lost key is not a problem: issue another
+certificate.
+
+One pair may go to every host of that customer or site. It opens nothing on its own: a host that
+holds it can ask for a certificate only while the enrolment window is open, and gets one only
+when you approve it. To withdraw a pair early, press **Revoke** in its row.
+
+Details: [Bootstrap certificates, issued by the Server](server.md#bootstrap-certificates-issued-by-the-server).
+
+## 2. Install the Client
+
+Each host needs three files, best kept in one directory such as `/etc/opamp/`:
+
+| File | From | Notes |
+|---|---|---|
+| `server-ca.pem` | the offline directory `pki init` made | The Client trusts this CA, and only it. |
+| `bootstrap.pem` | step 1 | |
+| `bootstrap-key.pem` | step 1 | Readable by root only. |
+
+Install the Client from the release's `.deb`, `.rpm` or `.msi`. The package registers the service
+and leaves it stopped. Then configure it in one of two ways:
+
+- **Interactively**, once you have [opened the enrolment window](#3-enrol-the-host):
+  `sudo opamp-fleet service install --interactive` asks for the Server's address, the host's name,
+  the three files and the package verification key, writes the configuration, and enrols the host
+  on the spot. It waits for your approval and shows the key fingerprint to approve. On Windows, run
+  it in an elevated shell.
+- **With a file**, which suits configuration management: write `supervisor.toml` naming the three
+  files, then start the service. It enrols when it starts.
+
+The bootstrap pair is used only for this first request. Once the host holds its own certificate,
+the bootstrap files can be removed.
+
+Details: [Configure and install a Client](setup.md#4-configure-and-install-a-client) and
+[Installing from a native package](client.md#installing-from-a-native-package).
+
+## 3. Enrol the host
+
+Enrolment turns a host with a bootstrap certificate into a member of the fleet. It needs an open
+window and your approval, and the host's private key never leaves the host.
+
+1. **Open the window.** In the **Enrolments** tab, choose how long (15 minutes, 1 hour or 4 hours)
+   and press **Open window**. Outside the window, the Server turns every bootstrap certificate away.
+2. **The host asks.** It connects with the bootstrap certificate, makes a key of its own, and sends
+   a certificate request. It logs the key's fingerprint:
+
+   ```console
+   $ journalctl -u opamp-fleet | grep key_fingerprint
+   INFO certificate request generated; an enrolling host waits for an operator's approval key_fingerprint=3f9a…
+   ```
+
+3. **The request waits in the queue.** The **Enrolments** tab lists it with its arrival time, the
+   address it came from, the key fingerprint, and the bootstrap certificate it carries: customer,
+   site, serial and end. A certificate the Server did not issue is marked *not issued here*.
+4. **Check two things, then approve.** The key fingerprint must match the one the host logged, and
+   the bootstrap certificate must be the one you gave that host. Press **Approve**. Press **Reject**
+   for a request you do not recognise.
+5. **The host becomes a member.** The Server signs its request with the client CA. The host stores
+   the certificate in its state directory, reconnects with it, and appears on the **Agents** tab
+   within seconds.
+6. **Close the window** with **Close window** when you are done. It also closes when its time runs
+   out, and when the Server restarts.
+
+A host behind a Gateway cannot enrol through it. Let it reach the Server directly once, then point
+it at the Gateway.
+
+Details: [Enrol the Client](setup.md#5-enrol-the-client) and
+[Enrolment: the first certificate](client.md#enrolment-the-first-certificate).
+
+## 4. Certificates renew themselves
+
+A host certificate lives 30 days by default. Two thirds of the way through its life, the Client
+makes a new key, asks for a new certificate with the one it holds, and switches once it has
+connected with the new one. No window and no approval is needed.
+
+A host that stays offline longer than its certificate lives cannot renew. It has to enrol again,
+as [Living with the certificates](setup.md#6-living-with-the-certificates) describes.
+
+## 5. Updates
+
+A Client updates two kinds of software in the same way: the agents it supervises, and itself.
+
+### How an update travels
+
+```text
+Package            Deployment                    Client, on each host
+(agent type,  ──▶  (channel, signature    ──▶    download ─▶ verify ─▶ install ─▶ health check
+ version,           per binary)                                                    └─▶ roll back
+ one binary         rollout act
+ per platform)
+```
+
+- A **Package** is what an agent type runs at a version, with one binary per platform. On its own,
+  it reaches nobody.
+- A **Deployment** is a channel: a Selector that names the hosts it aims at, such as
+  `channel = stable`, the Packages it offers, and your signature for each binary. A host belongs to
+  at most one Deployment.
+- The **rollout act** releases the Deployment to the hosts it claims. Nothing changes on any host
+  before it.
+- The **Client** takes a package only when its `[packages] verification_key` is set, and only when
+  the binary's hash and signature verify. It installs the binary, restarts the program, and checks
+  that it stays up. A version that does not stay up is rolled back to the one before.
+
+A Package reaches a host only as an **upgrade**: never the version it runs, never an older one. To
+take a bad version back, publish the old content as a new, greater version and roll that out.
+
+### Releasing an update in the UI
+
+1. **Packages** tab: press **＋ Create**, enter the agent type and the version, and give the first
+   platform's binary, as an uploaded file or as a source URL with its SHA-256. A file named
+   `<agent type>_<version>_<os>_<arch>.tar.gz` fills the fields by itself. Press **OK**, then add
+   each further platform with **＋ Add entry**.
+2. Still there, select the Package and press **Signing info**. Compare every SHA-256 in the file
+   with an independent source, then sign the file on the machine that holds the signing key:
+
+   ```console
+   $ opamp-fleetctl package sign --key fleet-signing.pk8 --signing-info promtail_3.1.0_signing.json
+   ```
+
+3. **Deployments** tab: select the channel, add the Package (it replaces the older version of that
+   agent type), choose the signed file and press **Import signing file**. Each binary can also be
+   signed on its own in its field. Press **OK**.
+4. Check the row's counts: how many hosts the channel claims, and how many the rollout would move.
+   Press **Roll out (n)**.
+5. **Agents** tab: each host shows its progress, `Downloading` with percent and speed, then
+   `Installing`, then `Installed` or `InstallFailed` with the reason.
+
+A host that joins the channel after the rollout is not updated by itself. Its row on the **Agents**
+tab shows the Package waiting, with a **roll out** control of its own.
+
+Try a release on a few hosts first: give them a channel of their own (`channel = canary`), roll out
+there, then give the stable channel the same version.
+
+Details: [Rollout walkthrough](rollout.md), [Signing a whole Package at
+once](tools.md#signing-a-whole-package-at-once) and [Package updates](client.md#package-updates).
+
+### The Client updates itself the same way
+
+The Client is always an Agent of its own, of the agent type `supervisor`. A Package of that type,
+made from the release archives `supervisor_<version>_<os>_<arch>.tar.gz` as they are published,
+updates the Client itself.
+
+On the host, the new version is staged beside the running one and checked before anything
+switches: it must start on this host and report the version offered. The Client then stops as
+on any service stop and lets the service manager start the new version, which commits itself once
+it reaches the Server. A version that will not stay up is rolled back to its predecessor after
+three attempts. Either way, the Server is
+told the outcome.
+
+Self-update needs the Client to run as an installed service. To hold a host on its version, set
+`self_update = false` under `[packages]`.
+
+Details: [Updating the Client itself](client.md#updating-the-client-itself).
+
+## 6. Taking a host out
+
+Revoke the host's certificate by its serial. The Server closes its sessions at once and refuses it
+from then on, including any renewal. The certificates are listed under `GET /api/v1/certificates`:
+revoke the one the host enrolled with, and the revocation reaches every renewal of it.
+
+Details: [Living with the certificates](setup.md#6-living-with-the-certificates) and
+[Revocation](server.md#revocation-withdrawing-a-certificate).

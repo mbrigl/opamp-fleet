@@ -7,6 +7,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 | Part | Read it to |
 |---|---|
 | **[Setting up a fleet](setup.md)** | go from nothing to a running fleet, in order: the three certificate authorities and the files they make, the Server's and the Client's configuration, enrolling a host, and living with the certificates afterwards |
+| **[A host's life](lifecycle.md)** | follow one managed host from start to finish, in the UI: issuing its bootstrap certificate, installing the Client, enrolling it, renewal, and the updates of its agents and of the Client itself |
 | **[Server](server.md)** | run the control plane: the two listeners, Configurations and Selectors, packages and deployments, the REST API, authentication, enrolment, TLS |
 | **[Client](client.md)** | run a managed host, end to end: how it is built, the OS service, the on-disk layout, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
