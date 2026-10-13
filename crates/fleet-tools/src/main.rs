@@ -9,6 +9,7 @@
 mod fetch;
 mod package;
 mod pki;
+mod signing;
 
 use std::process::ExitCode;
 
@@ -93,5 +94,25 @@ mod tests {
             .expect("--version ends parsing");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
         assert!(err.to_string().contains(fleet_core::version::current()));
+    }
+
+    /// `sign` has two forms and no mixture of them: the artifact form names the type, the version
+    /// and the file; the signing-file form names the file alone, since the type and version are in
+    /// it. A mixture would leave a reader guessing which statement got signed.
+    /// Verifies: ADR-0027
+    #[test]
+    fn sign_takes_an_artifact_or_a_signing_file_and_never_both() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["opamp-fleetctl", "package", "sign", "--key", "k.pk8"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all)
+        };
+        assert!(parse(&["--agent-type", "a", "--version", "1", "art"]).is_ok());
+        assert!(parse(&["--signing-info", "s.json"]).is_ok());
+        assert!(parse(&["--signing-info", "s.json", "--out", "o.json"]).is_ok());
+        assert!(parse(&["--signing-info", "s.json", "--version", "1"]).is_err());
+        assert!(parse(&["--signing-info", "s.json", "art"]).is_err());
+        assert!(parse(&["--agent-type", "a", "--version", "1", "art", "--out", "o"]).is_err());
+        assert!(parse(&[]).is_err());
     }
 }

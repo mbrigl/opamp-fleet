@@ -78,8 +78,8 @@ Five crates in one workspace ([ADR-0010](adr/0010-five-crates-the-whole-opamp-co
   Deployments, the Agent plane and the Operator plane.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
-  fetch, pack, hash and sign package artifacts, its `pki` commands make the fleet's certificates
-  (ADR-0028).
+  fetch, pack, hash and sign package artifacts — or sign a Package's signing file from the UI
+  (ADR-0027) — its `pki` commands make the fleet's certificates (ADR-0028).
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0006](adr/0006-architecture-style.md)): a **core** that holds the domain and owns its

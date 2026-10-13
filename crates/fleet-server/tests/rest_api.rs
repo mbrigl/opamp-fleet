@@ -1019,6 +1019,67 @@ async fn set_labels(
         .expect("put labels")
 }
 
+/// The Packages tab shows each entry's SHA-256 and offers what a signature covers as a signing
+/// file, and the Deployments tab imports a signed one through the signature route — so the page
+/// writes the one format `opamp-fleetctl package sign --signing-info` reads, and the fields it
+/// reads must be the ones the API serves. A rename on either side breaks here rather than in an
+/// empty column or a signing file with a hole in it.
+/// Verifies: ADR-0023, ADR-0027
+#[tokio::test]
+async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let html = client
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    for needle in [
+        "e.content_hash",
+        "p.agent_type",
+        "p.version",
+        "e.os",
+        "e.arch",
+        "\"opamp-fleet-signing-v1\"",
+        "format: SIGNING_FORMAT",
+        "/signatures/${encodeURIComponent(type)}",
+        "depSigPath(d.name, info.agent_type, info.version, e.os, e.arch)",
+        "e.sha256 !== entry.content_hash",
+        "{ signature: e.signature }",
+    ] {
+        assert!(
+            html.contains(needle),
+            "the UI no longer contains {needle:?}"
+        );
+    }
+
+    let document: serde_json::Value = client
+        .get(url(server.rest_addr, "/api/v1/openapi.json"))
+        .send()
+        .await
+        .expect("get the document")
+        .json()
+        .await
+        .expect("json");
+    let schemas = &document["components"]["schemas"];
+    for (schema, field) in [
+        ("PackageSetView", "agent_type"),
+        ("PackageSetView", "version"),
+        ("PackageEntryView", "os"),
+        ("PackageEntryView", "arch"),
+        ("PackageEntryView", "content_hash"),
+        ("SignatureSpec", "signature"),
+    ] {
+        assert!(
+            schemas[schema]["properties"][field].is_object(),
+            "{schema} no longer carries {field}"
+        );
+    }
+}
+
 /// The bundled UI is a client of the REST API and nothing more (ADR-0023 clause 13), so its
 /// Enrolments tab depends on the names the enrolment routes share with it: the routes it calls and
 /// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0021 clause 22 lists

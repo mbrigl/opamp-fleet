@@ -261,6 +261,7 @@ $ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtai
 | `pack <program> --out <file>` | the artifact's SHA-256 (hex) | building a one-file artifact; `--format tar.gz\|7z`, `--program-name <name>`, `--archive-key <key>` |
 | `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the Deployment's signature route, `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone (ADR-0026) |
 | `public-key --key <file>` | the public key (hex) | recovering it from an existing private key |
+| `sign --key <file> --signing-info <file> [--out <file>]` | the signing file, with every entry signed | a Package's **Signing info** from the Packages tab, signed whole and imported on the Deployment — see [Signing a whole Package at once](#signing-a-whole-package-at-once) |
 | `sha256 <artifact>` | the SHA-256 (hex) | the `sha256` of a *referenced* entry, for an artifact the Server never holds |
 
 The options of `pack`, and why a `.tar.gz` packed twice gives the same bytes, are in
@@ -272,6 +273,56 @@ verification_key` is set, and only when the artifact's signature verifies agains
 offers no entry its Deployment has not signed, and refuses to roll out a Deployment with an
 unsigned entry ([ADR-0026](../adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Give
 every Client the same public key, and sign every entry of every Deployment.
+
+### Signing a whole Package at once
+
+A Package of five platforms is five signatures. The Deployment lists every binary of the Package
+with its own signature field; instead of signing each artifact and typing each signature there,
+carry them in one file:
+
+1. In the **Packages** tab, select the Package and press **Signing info**. It downloads
+   `<agent type>_<version>_signing.json`:
+
+   ```json
+   {
+     "format": "opamp-fleet-signing-v1",
+     "agent_type": "supervisor",
+     "version": "1.2.3",
+     "entries": [
+       { "os": "linux", "arch": "amd64", "sha256": "127f9a48…" },
+       { "os": "windows", "arch": "amd64", "sha256": "90cbb340…" }
+     ]
+   }
+   ```
+
+2. **Compare every `sha256` with an independent source before you sign.** For an artifact
+   `package fetch` uploaded as published, that is the checksums file of the upstream release; for
+   any artifact, it is `opamp-fleetctl package sha256` over the file you hold. The tool signs the
+   hashes as the file states them and checks them against nothing — a hash you did not compare is
+   one you are taking the Server's word for, and a Client accepts whatever your key signed.
+
+3. On the machine that holds the key:
+
+   ```console
+   $ opamp-fleetctl package sign --key fleet-signing.pk8 --signing-info supervisor_1.2.3_signing.json
+     signing supervisor@1.2.3 linux/amd64  127f9a48…
+     signing supervisor@1.2.3 windows/amd64  90cbb340…
+   ```
+
+   Every entry gains its `signature`, written back into the file (or to `--out <file>`). The file
+   is checked whole first: another `format`, a hash that is not 64 lowercase hex characters, a
+   platform named twice or a field the format does not define signs nothing. Signing a file
+   again with the same key gives the same signatures.
+
+4. In the **Deployments** tab, select the Deployment, choose the signed file and press **Import
+   signing file**. Each signature goes to the binary of the Package with its platform and SHA-256;
+   one whose hash is not that binary's is skipped. On a saved Deployment each is recorded at once;
+   on a new one it fills the binary's field and is recorded with **OK**. Each platform's answer is
+   listed. The Server does not check signatures: a wrong key shows when a Client refuses the
+   package.
+
+The same signed file serves every Deployment that offers the Package — the signature covers the
+type, the version and the hash, not the Deployment — so import it on each.
 
 ## `pki`
 

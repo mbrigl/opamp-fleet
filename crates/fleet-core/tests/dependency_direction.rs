@@ -156,6 +156,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("fetch", Adapter),
             ("package", Adapter),
             ("pki", Adapter),
+            ("signing", Adapter),
         ],
     ),
 ];

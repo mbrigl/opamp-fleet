@@ -261,6 +261,15 @@
       .text-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
       .text-full { margin: 0; padding: 8px 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
       .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+      /* A Package's entries: one chip per row, its columns aligned across the rows. */
+      .entry-list { flex-direction: column; align-items: flex-start; }
+      .entry-list .chip { display: flex; gap: 14px; align-items: baseline; font-family: var(--mono); white-space: normal; max-width: 100%; }
+      .entry-list .platform { min-width: 110px; }
+      .entry-list .size { min-width: 64px; text-align: right; }
+      .entry-list .sha { user-select: all; word-break: break-all; }
+      .entry-list .sig { display: flex; gap: 6px; align-items: center; margin-left: auto; }
+      .entry-list .sig input { width: 22ch; font-family: var(--mono); font-size: 12px; }
+      .dep-pkg-head { display: flex; gap: 10px; align-items: center; margin: 8px 0 4px; }
       .chip { background: var(--chip-bg); color: var(--chip-fg); border-radius: 6px; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
       .num { font-variant-numeric: tabular-nums; color: var(--muted); }
       .empty { padding: 40px 0; text-align: center; color: var(--muted); }
@@ -372,7 +381,7 @@
           <span id="set-state" class="sub"></span>
         </div>
         <h2>Entries — one per platform, no duplicates; a file upload or a source URL with its sha256. Editable until the package is assigned to an agent; frozen from then on. Signatures live on the deployment that offers the bytes.</h2>
-        <div id="set-entries" class="chips" style="margin-bottom: 10px"></div>
+        <div id="set-entries" class="chips entry-list" style="margin-bottom: 10px"></div>
         <div id="entry-editor">
         <div class="config-fields">
           <input id="entry-os" class="narrow" placeholder="os: linux, darwin, windows" autocomplete="off"
@@ -398,6 +407,8 @@
         <div class="config-actions">
           <button id="set-delete" class="btn btn-ghost"
                   title="Delete this Set — entries, artifacts, metadata, and every per-agent assignment that referenced it. Nothing is uninstalled: an agent keeps running what it took.">Delete</button>
+          <button id="set-signing" class="btn btn-ghost"
+                  title="Download what a signature covers, as JSON: the Agent type, the version, and each entry's platform and SHA-256. The platform is not signed; it says which deployment signature the entry's signature goes to.">Signing info</button>
           <span id="set-error" class="err" style="flex: 1"></span>
           <button id="set-cancel" class="btn btn-ghost" style="margin-left: auto"
                   title="Discard the form's changes: back to the stored state, or close the form when it was creating a new Set.">Cancel</button>
@@ -447,27 +458,19 @@
         <div class="config-actions" style="margin: 0 0 10px">
           <span id="dep-state" class="sub"></span>
         </div>
-        <h2>Packages — at most one per agent type, because an agent has one binary to replace</h2>
-        <div id="dep-packages" class="chips" style="margin-bottom: 10px"></div>
+        <h2>Packages — at most one per agent type, each artifact signed for this channel, because what an operator signs off on is a release to a set of machines</h2>
         <div class="config-fields">
           <select id="dep-package-pick" style="flex: 1"></select>
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
           <button id="dep-package-add" class="btn btn-ghost btn-sm"
-                  title="Put this package into the channel. A second package of an agent type this channel already holds is refused, naming the one in the way; adding the same one again is the same request arriving twice.">＋ Add package</button>
-          <span class="sub">a package already here for that agent type is <b>replaced</b> — which is how the version a channel runs is changed</span>
+                  title="Put this package into the channel; on a new deployment it goes in with OK. A package already here for that agent type is replaced, which is how the version a channel runs is changed.">＋ Add package</button>
+          <input id="dep-sig-file" type="file" accept=".json,application/json" style="color: var(--muted); font-size: 13px;" />
+          <button id="dep-sig-import" class="btn btn-ghost btn-sm"
+                  title="Fill the signatures of a package here from a signing file — the Packages tab's Signing info, signed with opamp-fleetctl package sign --signing-info. Each signature goes to the entry with its platform and SHA-256; on a saved deployment it is recorded at once, on a new one with OK.">Import signing file</button>
         </div>
-        <h2>Signatures — one per artifact, because what an operator signs off on is a release to a set of machines</h2>
-        <div class="config-fields">
-          <input id="dep-sig-package" class="quarter" placeholder="agent type@version (a package above)" autocomplete="off" />
-          <input id="dep-sig-os" class="narrow" placeholder="os" autocomplete="off" />
-          <input id="dep-sig-arch" class="narrow" placeholder="arch" autocomplete="off" />
-          <input id="dep-sig-hex" placeholder="hex Ed25519 signature — what opamp-fleetctl package sign prints" autocomplete="off" />
-        </div>
-        <div class="config-actions" style="margin: 0 0 10px">
-          <button id="dep-sig-add" class="btn btn-ghost btn-sm"
-                  title="Record this artifact's signature on the channel. A platform left unsigned is offered unsigned — a client with a verification key refuses it, which is the operator's policy meeting their omission.">＋ Add signature</button>
-        </div>
+        <div id="dep-packages" style="margin-bottom: 10px"></div>
+        <div id="dep-sig-result" class="sub" style="margin: 0 0 10px; white-space: pre-line"></div>
         <div class="config-actions">
           <button id="dep-delete" class="btn btn-ghost"
                   title="Delete this deployment. The offers it released are withdrawn; nothing is uninstalled — an agent keeps running what it took.">Delete</button>
@@ -1276,13 +1279,15 @@
         }).join("");
       }
 
-      // The entries of the current Set. Each carries a ✕ that deletes it; on a Set that is
-      // assigned to an agent the bytes are frozen and the Server answers 409 with the reason —
-      // one rule, held where the assignments are known (ADR-0025).
+      // The entries of the current Set, one row each: platform, size, and the full SHA-256 —
+      // selectable on its own, since it is what an operator compares against the file they sign.
+      // Each carries a ✕ that deletes it; on a Set that is assigned to an agent the bytes are
+      // frozen and the Server answers 409 with the reason — one rule, held where the assignments
+      // are known (ADR-0025).
       function renderSetEntries(p) {
         const entries = p ? p.entries || [] : [];
         $("set-entries").innerHTML = entries.map((e) =>
-          `<span class="chip">${esc(e.os)}-${esc(e.arch)} · ${e.source_url ? "↗ " + esc(e.source_url) : fmtBytes(e.size)}&nbsp;<span class="entry-del" data-os="${esc(e.os)}" data-arch="${esc(e.arch)}" style="cursor: pointer; font-weight: 700;" title="Delete this entry (its artifact goes with it). Refused while the set is assigned to an agent.">✕</span></span>`
+          `<span class="chip"><span class="platform">${esc(e.os)}-${esc(e.arch)}</span><span class="size"${e.source_url ? ` title="${esc(e.source_url)}"` : ""}>${e.source_url ? "↗ source" : fmtBytes(e.size)}</span><span class="sha" title="The SHA-256 each Agent verifies its download against. Compare it with opamp-fleetctl package sha256 on the file you sign.">${esc(e.content_hash)}</span><span class="entry-del" data-os="${esc(e.os)}" data-arch="${esc(e.arch)}" style="cursor: pointer; font-weight: 700;" title="Delete this entry (its artifact goes with it). Refused while the set is assigned to an agent.">✕</span></span>`
         ).join("") || `<span class="chip">no entries yet — a package needs one for a host to take it</span>`;
       }
 
@@ -1309,6 +1314,7 @@
           ? "will be saved — nothing reaches an agent until a rollout act names it"
           : "saved — distributed only by a rollout act; entries freeze while the set is assigned to an agent";
         $("set-delete").disabled = creatingSet;
+        $("set-signing").disabled = creatingSet || !(p.entries || []).length;
         renderSetEntries(p);
         for (const id of ["entry-os", "entry-arch", "entry-url", "entry-sha256", "entry-file"]) {
           $(id).disabled = false;
@@ -1374,6 +1380,7 @@
         $("set-detail-title").textContent = "New package set — saved, distributed by a rollout act";
         $("set-state").textContent = "will be saved — nothing reaches an agent until a rollout act names it";
         $("set-delete").disabled = true;
+        $("set-signing").disabled = true;
         renderSetEntries(null);
         $("set-error").textContent = "";
         setFormDirty = false;
@@ -1429,6 +1436,30 @@
         currentSet = null;
         renderSets();
         $("set-detail").style.display = "none";
+      });
+
+      // The signing file's one format (ADR-0027): written by the download, required by the import.
+      const SIGNING_FORMAT = "opamp-fleet-signing-v1";
+
+      // What a signature covers (ADR-0026 clause 54), as a file to take to where the key is: the
+      // Agent type, the version and each entry's SHA-256. Built from what the page already read —
+      // the Server is not asked again, so the file is exactly what the operator saw.
+      $("set-signing").addEventListener("click", () => {
+        const p = currentSetView();
+        if (!p) return;
+        const info = {
+          format: SIGNING_FORMAT,
+          agent_type: p.agent_type,
+          version: p.version,
+          entries: (p.entries || []).map((e) => ({ os: e.os, arch: e.arch, sha256: e.content_hash })),
+        };
+        const blob = new Blob([JSON.stringify(info, null, 2) + "\n"], { type: "application/json" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = `${p.agent_type}_${p.version}_signing.json`;
+        link.click();
+        // Released once the click has handed the URL to the download, not before it.
+        setTimeout(() => URL.revokeObjectURL(link.href), 0);
       });
 
       // Delete: the Set goes — entries, artifacts, metadata — and with it the current record, so
@@ -1621,23 +1652,88 @@
         }).join("");
       }
 
+      // The packages a new deployment takes with OK, as agent_type@version: it does not exist yet,
+      // so nothing can be put into it before then.
+      let depPending = [];
+
+      // What the form lists: the packages the saved deployment holds, or those a new one will take.
+      function depHeld(d) {
+        if (d) {
+          return (d.packages || []).map((p) => ({
+            type: p.agent_type, version: p.version, display_name: p.display_name,
+            signed: new Set(p.signed_platforms || []),
+          }));
+        }
+        return depPending.map((key) => {
+          const [type, version] = key.split("@");
+          const p = packages.find((x) => setKey(x) === key);
+          return { type, version, display_name: p ? p.display_name : key, signed: new Set() };
+        });
+      }
+
+      const depSigPath = (name, type, version, os, arch) =>
+        `${depPath(name)}/signatures/${encodeURIComponent(type)}/${encodeURIComponent(version)}/${encodeURIComponent(os)}/${encodeURIComponent(arch)}`;
+      const depSigKey = (el) => `${el.dataset.type}@${el.dataset.version}/${el.dataset.os}/${el.dataset.arch}`;
+      const depSigFields = () => [...document.querySelectorAll("#dep-packages .dep-sig-hex")];
+
+      // Every package with all its binaries, one row each: platform, size, the full SHA-256 the
+      // signature covers (ADR-0026 clause 54), and the signature — held, or a field to give it.
+      // What is typed survives a re-render, so a refresh never takes a signature from the operator.
+      function renderDepPackages(d) {
+        const typed = {};
+        for (const f of depSigFields()) if (f.value.trim()) typed[depSigKey(f)] = f.value.trim();
+        $("dep-packages").innerHTML = depHeld(d).map((h) => {
+          const p = packages.find((x) => x.agent_type === h.type && x.version === h.version);
+          const entries = p ? p.entries || [] : [];
+          const signedCount = entries.filter((e) => h.signed.has(`${e.os}/${e.arch}`)).length;
+          const rows = entries.map((e) => {
+            const at = `data-type="${esc(h.type)}" data-version="${esc(h.version)}" data-os="${esc(e.os)}" data-arch="${esc(e.arch)}"`;
+            const sig = h.signed.has(`${e.os}/${e.arch}`)
+              ? `<span class="pill green">🔏 signed</span><span class="dep-sig-del" ${at} style="cursor: pointer; font-weight: 700;" title="Take this signature away. The entry is offered to nobody without one, and the channel is not rolled out until it is signed again.">✕</span>`
+              : `<input class="dep-sig-hex" ${at} placeholder="hex Ed25519 signature" autocomplete="off" value="${esc(typed[`${h.type}@${h.version}/${e.os}/${e.arch}`] || "")}" title="What opamp-fleetctl package sign prints for this artifact. ${d ? "Sign records it now; OK records every one typed." : "Recorded with OK."}" />`
+                + (d ? `<button class="btn btn-ghost btn-sm dep-sig-put" ${at}>Sign</button>` : "");
+            return `<span class="chip"><span class="platform">${esc(e.os)}-${esc(e.arch)}</span><span class="size">${e.source_url ? "↗ source" : fmtBytes(e.size)}</span><span class="sha" title="The SHA-256 the signature covers. Compare it with opamp-fleetctl package sha256 on the file you sign.">${esc(e.content_hash)}</span><span class="sig">${sig}</span></span>`;
+          }).join("") || `<span class="chip">${p ? "no entries — nothing to sign, and nothing a host could take" : "not in the package store"}</span>`;
+          const complete = entries.length && signedCount === entries.length;
+          return `<div class="dep-pkg-head"><b>${esc(h.display_name)}</b>`
+            + `<span class="pill ${complete ? "green" : "amber"}" title="${complete ? "every binary is signed for this channel" : "an unsigned binary is offered to nobody, and the channel is not rolled out while one is left"}">${signedCount} of ${entries.length} signed</span>`
+            + `<span class="dep-pkg-del" data-type="${esc(h.type)}" data-version="${esc(h.version)}" style="cursor: pointer; font-weight: 700;" title="Take this package out of the channel — its signatures go with it. Nothing is uninstalled.">✕</span></div>`
+            + `<div class="chips entry-list">${rows}</div>`;
+        }).join("") || `<span class="chip">no packages yet — a channel with none cannot be rolled out</span>`;
+      }
+
+      // Every signature typed into the form, recorded on the named deployment one request each.
+      // Returns the answers that went wrong, one line per binary.
+      async function sendDepSignatures(name) {
+        const problems = [];
+        for (const f of depSigFields()) {
+          const signature = f.value.trim();
+          if (!signature) continue;
+          const failed = await putJson(depSigPath(name, f.dataset.type, f.dataset.version, f.dataset.os, f.dataset.arch), { signature });
+          if (failed) problems.push(`${depSigKey(f)}: ${failed}`);
+        }
+        return problems;
+      }
+
+      // Which Deployment the import's answers under its signatures were given for.
+      let depSigResultFor = "";
       function showDepDetail() {
         const d = currentDepView();
         if (!d && !creatingDep) { $("dep-detail").style.display = "none"; return; }
         $("dep-detail").style.display = "block";
+        // An import's answers belong to the Deployment they were given on, not the next one shown.
+        const shown = creatingDep ? "" : d.name;
+        if (shown !== depSigResultFor) { $("dep-sig-result").textContent = ""; }
+        depSigResultFor = shown;
         $("dep-detail-title").textContent = creatingDep ? "New deployment — saved, distributed by the row's rollout press" : `Deployment ${d.name}`;
         $("dep-name").value = d ? d.name : "";
         $("dep-name").disabled = !creatingDep;
         $("dep-selector").value = d ? selectorText(d.selector) : "";
         $("dep-state").textContent = !d
-          ? "will be saved — nothing reaches an agent until the rollout press"
+          ? "will be saved with its packages and signatures — nothing reaches an agent until the rollout press"
           : "saved — the rollout press on its row is what distributes; re-aiming it changes only what is proposed";
         $("dep-delete").disabled = creatingDep;
-        $("dep-packages").innerHTML = d
-          ? ((d.packages || []).map((p) =>
-              `<span class="chip">${esc(p.display_name)} · ${(p.signed_platforms || []).length ? "🔏 " + esc((p.signed_platforms || []).join(" ")) : "⚠ unsigned"}&nbsp;<span class="dep-pkg-del" data-type="${esc(p.agent_type)}" data-version="${esc(p.version)}" style="cursor: pointer; font-weight: 700;" title="Take this package out of the channel — its signatures go with it. Nothing is uninstalled.">✕</span></span>`
-            ).join("") || `<span class="chip">no packages yet — a channel with none cannot be rolled out</span>`)
-          : "";
+        renderDepPackages(d);
         // The picker offers what the store holds; the Server refuses a package nobody uploaded.
         $("dep-package-pick").innerHTML = packages.map((p) =>
           `<option value="${esc(p.agent_type)}@${esc(p.version)}">${esc(p.display_name)}</option>`
@@ -1661,8 +1757,11 @@
         if (!tr) return;
         e.preventDefault();
         creatingDep = false;
+        depPending = [];
+        depFormDirty = false;
         currentDep = currentDep === tr.dataset.name ? null : tr.dataset.name;
         $("dep-error").textContent = "";
+        $("dep-packages").innerHTML = "";
         renderDeployments();
         showDepDetail();
       });
@@ -1670,6 +1769,8 @@
       $("dep-create").addEventListener("click", () => {
         creatingDep = true;
         currentDep = null;
+        depPending = [];
+        $("dep-packages").innerHTML = "";
         renderDeployments();
         showDepDetail();
         $("dep-name").value = "";
@@ -1678,6 +1779,9 @@
         depFormDirty = true;
       });
 
+      // OK saves the name and the selector, and carries along what the form holds besides: on a new
+      // deployment its packages, and on either every signature typed. A failed request keeps the
+      // form open on the saved deployment, beside its message.
       $("dep-ok").addEventListener("click", async () => {
         $("dep-error").textContent = "";
         const name = $("dep-name").value.trim();
@@ -1687,18 +1791,34 @@
         catch (e) { $("dep-error").textContent = e.message; return; }
         const failed = await putJson(depPath(name), { selector });
         if (failed) { $("dep-error").textContent = failed; return; }
+        const problems = [];
+        if (creatingDep) {
+          for (const key of depPending) {
+            const [type, version] = key.split("@");
+            const res = await fetch(`${depPath(name)}/packages/${encodeURIComponent(type)}/${encodeURIComponent(version)}?replace=true`, { method: "PUT" });
+            if (!res.ok) problems.push(`${key}: ${(await res.json().catch(() => ({}))).error || `HTTP ${res.status}`}`);
+          }
+        }
+        problems.push(...await sendDepSignatures(name));
         creatingDep = false;
-        currentDep = null;
+        depPending = [];
         depFormDirty = false;
+        currentDep = problems.length ? name : null;
         await refreshDeployments();
         refreshAgents();
+        if (problems.length) {
+          showDepDetail();
+          $("dep-error").textContent = problems.join("; ");
+        }
       });
 
       $("dep-cancel").addEventListener("click", () => {
         creatingDep = false;
         currentDep = null;
+        depPending = [];
         depFormDirty = false;
         $("dep-error").textContent = "";
+        $("dep-packages").innerHTML = "";
         renderDeployments();
         showDepDetail();
       });
@@ -1719,11 +1839,18 @@
       });
 
       $("dep-package-add").addEventListener("click", async () => {
-        const d = currentDepView();
-        if (!d) { $("dep-error").textContent = "save the deployment first — a package goes into a channel that exists"; return; }
         const pick = $("dep-package-pick").value;
         if (!pick) { $("dep-error").textContent = "no package to add"; return; }
         const [type, version] = pick.split("@");
+        $("dep-error").textContent = "";
+        if (creatingDep) {
+          // One package per agent type: the one picked takes the place of another version.
+          depPending = depPending.filter((key) => key.split("@")[0] !== type).concat(pick);
+          renderDepPackages(null);
+          return;
+        }
+        const d = currentDepView();
+        if (!d) return;
         // `replace`: pointing a channel at another version of a type it already holds is the ordinary
         // act, and it is what an operator means by pressing Add on a package they chose.
         const res = await fetch(`${depPath(d.name)}/packages/${encodeURIComponent(type)}/${encodeURIComponent(version)}?replace=true`, { method: "PUT" });
@@ -1733,36 +1860,102 @@
         showDepDetail();
       });
 
+      // The package list: its ✕, a binary's Sign and the ✕ of a held signature, each one request.
       $("dep-packages").addEventListener("click", async (e) => {
-        const del = e.target.closest(".dep-pkg-del");
         const d = currentDepView();
-        if (!del || !d) return;
-        const res = await fetch(`${depPath(d.name)}/packages/${encodeURIComponent(del.dataset.type)}/${encodeURIComponent(del.dataset.version)}`, { method: "DELETE" });
-        const body = await res.json().catch(() => ({}));
-        $("dep-error").textContent = res.ok ? "" : (body.error || `HTTP ${res.status}`);
+        const del = e.target.closest(".dep-pkg-del");
+        if (del && creatingDep) {
+          depPending = depPending.filter((key) => key !== `${del.dataset.type}@${del.dataset.version}`);
+          renderDepPackages(null);
+          return;
+        }
+        if (!d) return;
+        let res = null;
+        if (del) {
+          res = await fetch(`${depPath(d.name)}/packages/${encodeURIComponent(del.dataset.type)}/${encodeURIComponent(del.dataset.version)}`, { method: "DELETE" });
+        }
+        const unsign = e.target.closest(".dep-sig-del");
+        if (unsign) {
+          const s = unsign.dataset;
+          res = await fetch(depSigPath(d.name, s.type, s.version, s.os, s.arch), { method: "DELETE" });
+        }
+        const sign = e.target.closest(".dep-sig-put");
+        if (sign) {
+          const field = depSigFields().find((f) => depSigKey(f) === depSigKey(sign));
+          const signature = field ? field.value.trim() : "";
+          if (!signature) { $("dep-error").textContent = "type the hex signature first"; return; }
+          const s = sign.dataset;
+          const failed = await putJson(depSigPath(d.name, s.type, s.version, s.os, s.arch), { signature });
+          $("dep-error").textContent = failed;
+          if (!failed) field.value = "";
+        } else if (res) {
+          $("dep-error").textContent = res.ok ? "" : ((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+        } else {
+          return;
+        }
+        // Whatever else is typed stays; the form follows the store again once nothing is.
+        depFormDirty = depSigFields().some((f) => f.value.trim());
         await refreshDeployments();
         showDepDetail();
       });
 
-      $("dep-sig-add").addEventListener("click", async () => {
+      $("dep-packages").addEventListener("input", () => { depFormDirty = true; });
+
+      // A signed signing file (ADR-0027) matched to the package it names and to each binary by its
+      // platform and SHA-256: a signature for other bytes than the entry's is not taken. On a saved
+      // deployment each signature goes through the same route as Sign at once; on a new one it
+      // fills the binary's field and goes with OK. Nothing is checked against a key here — every
+      // Client does that before it opens the artifact (ADR-0026 clause 54).
+      $("dep-sig-import").addEventListener("click", async () => {
         const d = currentDepView();
-        if (!d) return;
-        const pick = $("dep-sig-package").value.trim();
-        const [type, version] = pick.split("@");
-        const os = $("dep-sig-os").value.trim();
-        const arch = $("dep-sig-arch").value.trim();
-        const signature = $("dep-sig-hex").value.trim();
-        if (!type || !version || !os || !arch || !signature) {
-          $("dep-error").textContent = "a signature names the package, the platform, and the hex signature";
+        const file = $("dep-sig-file").files[0];
+        if (!file) {
+          $("dep-sig-result").textContent = "choose a signed signing file first";
           return;
         }
-        const failed = await putJson(
-          `${depPath(d.name)}/signatures/${encodeURIComponent(type)}/${encodeURIComponent(version)}/${encodeURIComponent(os)}/${encodeURIComponent(arch)}`,
-          { signature });
-        $("dep-error").textContent = failed || "";
-        if (!failed) { $("dep-sig-hex").value = ""; }
-        await refreshDeployments();
-        showDepDetail();
+        if (file.size > 1024 * 1024) {
+          $("dep-sig-result").textContent = `${file.name} is far larger than a signing file`;
+          return;
+        }
+        let info;
+        try { info = JSON.parse(await file.text()); }
+        catch (e) { $("dep-sig-result").textContent = `${file.name} is not JSON: ${e.message}`; return; }
+        if (!info || info.format !== SIGNING_FORMAT || !info.agent_type || !info.version || !Array.isArray(info.entries)) {
+          $("dep-sig-result").textContent = `${file.name} is not an ${SIGNING_FORMAT} file`;
+          return;
+        }
+        const key = `${info.agent_type}@${info.version}`;
+        if (!depHeld(d).some((h) => h.type === info.agent_type && h.version === info.version)) {
+          $("dep-sig-result").textContent = `${key} is not in this deployment — add the package first`;
+          return;
+        }
+        const p = packages.find((x) => setKey(x) === key);
+        const lines = [];
+        for (const e of info.entries) {
+          if (!e || !e.os || !e.arch) {
+            lines.push("an entry names no platform — skipped");
+            continue;
+          }
+          const platform = `${e.os}/${e.arch}`;
+          const entry = p && (p.entries || []).find((x) => x.os === e.os && x.arch === e.arch);
+          if (!entry) { lines.push(`${platform}: the package has no such binary — skipped`); continue; }
+          if (e.sha256 !== entry.content_hash) { lines.push(`${platform}: the SHA-256 is not this binary's — skipped`); continue; }
+          if (!e.signature) { lines.push(`${platform}: not signed — skipped`); continue; }
+          if (d) {
+            const failed = await putJson(depSigPath(d.name, info.agent_type, info.version, e.os, e.arch), { signature: e.signature });
+            lines.push(`${platform}: ${failed || "recorded"}`);
+            continue;
+          }
+          const field = depSigFields().find((f) => depSigKey(f) === `${key}/${platform}`);
+          if (field) { field.value = e.signature; depFormDirty = true; }
+          lines.push(`${platform}: filled — recorded with OK`);
+        }
+        $("dep-sig-result").textContent = `${key}\n${lines.join("\n")}`;
+        $("dep-sig-file").value = "";
+        if (d) {
+          await refreshDeployments();
+          showDepDetail();
+        }
       });
 
       for (const id of ["dep-name", "dep-selector"]) {
