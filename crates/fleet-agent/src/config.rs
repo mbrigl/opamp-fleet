@@ -101,6 +101,11 @@ pub struct ClientConfig {
     /// [`service_state_dir`](Self::service_state_dir)).
     #[serde(skip)]
     pub state_dir_as_written: PathBuf,
+    /// The bootstrap identity a `bootstrap.p12` opened to, held in memory for the enrolment and
+    /// never written to disk (ADR-0029 clause 7). Presented while the Client holds no issued
+    /// certificate; set by the install, never by the file.
+    #[serde(skip)]
+    pub bootstrap_identity: Option<BootstrapIdentity>,
     /// The largest OpAMP message the Client accepts or sends, on either transport and in either
     /// direction — the Supervisor Endpoint included. The Baseline requires the limit, recommends
     /// this default, and asks that it be configurable.
@@ -118,6 +123,20 @@ pub struct ClientConfig {
     /// itself as a single Agent, as before.
     #[serde(default, rename = "supervisor")]
     pub supervisors: Vec<SupervisorBlock>,
+}
+
+/// A bootstrap certificate and its key as PEM, held in memory (ADR-0029 clause 7). Its `Debug`
+/// names neither.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BootstrapIdentity {
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
+}
+
+impl std::fmt::Debug for BootstrapIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BootstrapIdentity").finish_non_exhaustive()
+    }
 }
 
 /// One `[[supervisor]]` block (ADR-0017). The common keys are extracted here; everything else
@@ -911,6 +930,7 @@ impl Default for ClientConfig {
             source: None,
             path: None,
             state_dir_as_written: default_state_dir(),
+            bootstrap_identity: None,
             max_message_size_bytes: default_max_message_size(),
             max_artifact_size_bytes: default_max_artifact_size(),
             supervisors: Vec::new(),

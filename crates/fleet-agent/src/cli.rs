@@ -191,9 +191,9 @@ pub struct InstallArgs {
     /// the MSI's endpoint dialog and a `.deb`/`.rpm` post-install both have an answer and no
     /// terminal. An existing file is kept, never overwritten.
     ///
-    /// Only the endpoint. The client identity comes from an enrolment: name a bootstrap
-    /// certificate and its key in the file afterwards as `[tls] cert_file` and `key_file`, or run
-    /// `service config`.
+    /// Only the endpoint. The client identity comes from an enrolment, with the bootstrap identity
+    /// beside the program or in `--fleet-files`; or name a bootstrap certificate and its key in the
+    /// file afterwards as `[tls] cert_file` and `key_file`, or run `service config`.
     #[arg(long, value_name = "URL", conflicts_with = "interactive")]
     pub endpoint: Option<String>,
     // ADR-0018.
@@ -210,6 +210,24 @@ pub struct InstallArgs {
     /// untouched, as it is for every other answer here.
     #[arg(long, conflicts_with = "interactive")]
     pub no_self_update: bool,
+    // ADR-0029.
+    /// Look for the fleet's files in this directory instead of beside the program:
+    /// `server-ca.pem`, `package-signing-key.pub`, and the bootstrap identity — `bootstrap.pem` with
+    /// `bootstrap-key.pem`, or `bootstrap.p12`.
+    ///
+    /// What a host installed from a `.deb` or `.rpm` needs: its program lies where nobody puts
+    /// these files. The install never looks in both places.
+    #[arg(long, value_name = "DIR")]
+    pub fleet_files: Option<PathBuf>,
+    // ADR-0029.
+    /// Read the password of a `bootstrap.p12` from the first line of this file, instead of asking
+    /// for it.
+    ///
+    /// Required when an install without `--interactive` enrols with a `bootstrap.p12`. The file is
+    /// read once and left as it is; the password is never written anywhere and never sent. There
+    /// is no way to give it on the command line or in the environment.
+    #[arg(long, value_name = "PATH")]
+    pub bootstrap_password_file: Option<PathBuf>,
     // ADR-0019.
     /// Run the service as this account instead of root/`LocalSystem`, and hand this
     /// installation's files — both roots — over to it.

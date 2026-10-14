@@ -12,3 +12,14 @@ publish.workspace = true
 # linked into no artifact, and it sits here rather than in each binary so that both ends report a
 # version computed by one implementation.
 git2.workspace = true
+
+[dependencies]
+# The bootstrap certificate as a password-protected PKCS#12 file, written by the Server and read by
+# the Client (ADR-0029): `pkcs12`, `pkcs5` and `der` read which schemes a file uses; `rcgen` and
+# `x509-parser` tell whether the key and the certificate belong together.
+p12-keystore.workspace = true
+pkcs12.workspace = true
+pkcs5.workspace = true
+der.workspace = true
+rcgen.workspace = true
+x509-parser.workspace = true

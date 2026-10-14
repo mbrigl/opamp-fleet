@@ -237,6 +237,8 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
             list_bootstrap_certificates,
             issue_bootstrap_certificate
         ))
+        .routes(routes!(download_bootstrap_p12))
+        .routes(routes!(delete_bootstrap_certificate))
         .routes(routes!(list_certificates))
         .routes(routes!(list_revocations, revoke))
         .routes(routes!(lift_revocation))
@@ -2323,7 +2325,7 @@ struct PendingEnrolment {
     bootstrap_serial: String,
 }
 
-/// What an operator asks a bootstrap certificate for (ADR-0028 clauses 21 to 23).
+/// What an operator asks a bootstrap certificate for (ADR-0028 clauses 21 to 23, ADR-0029).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct IssueBootstrapRequest {
@@ -2332,6 +2334,12 @@ struct IssueBootstrapRequest {
     /// 1 to 90; 10 when absent. Cut to the bootstrap CA's end.
     #[serde(default)]
     validity_days: Option<u32>,
+    /// 12 to 128 characters without a control character. With it the key is not answered in PEM:
+    /// the Server keeps a PKCS#12 file of the certificate and its key under this password, to be
+    /// downloaded until the certificate ends or is revoked. The password is kept nowhere.
+    #[serde(default)]
+    #[schema(format = Password)]
+    password: Option<String>,
 }
 
 /// The subject of a bootstrap certificate: these attributes only, each optional and 1 to 64
@@ -2347,7 +2355,8 @@ struct BootstrapSubject {
 }
 
 /// An issued bootstrap certificate with its private key — the one time the key is handed out
-/// (ADR-0028 clause 21).
+/// (ADR-0028 clause 21) — or, issued with a password, without it: the key is then in the PKCS#12
+/// file of `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0029 clause 3).
 #[derive(Serialize, ToSchema)]
 struct IssuedBootstrap {
     /// What a revocation names, with the authority `bootstrap`.
@@ -2356,7 +2365,9 @@ struct IssuedBootstrap {
     not_before_ms: u64,
     not_after_ms: u64,
     certificate_pem: String,
-    private_key_pem: String,
+    /// Absent when a password was named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    private_key_pem: Option<String>,
 }
 
 /// A bootstrap certificate on record (ADR-0028 clause 24).
@@ -2369,6 +2380,8 @@ struct BootstrapView {
     issued_ms: u64,
     not_after_ms: u64,
     revoked: bool,
+    /// Whether its PKCS#12 file can be downloaded (ADR-0029 clause 4).
+    p12: bool,
 }
 
 /// The valid bootstrap certificates this Server issued, oldest first.
@@ -2395,6 +2408,7 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
         .into_iter()
         .map(|entry| BootstrapView {
             revoked: revoked(&entry.id),
+            p12: entry.p12 && !revoked(&entry.id),
             serial: entry.serial,
             subject: entry.subject,
             key_fingerprint: entry.key_fingerprint,
@@ -2405,17 +2419,19 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
     Json(list).into_response()
 }
 
-/// Issues a bootstrap certificate with the subject an operator names. The private key is in this
-/// answer and nowhere else: the Server keeps the certificate's facts, never its key. A host with
-/// it may only ask to enrol, inside an open window, and an operator approves (ADR-0028).
+/// Issues a bootstrap certificate with the subject an operator names. Without a password the
+/// private key is in this answer and nowhere else: the Server keeps the certificate's facts, never
+/// its key. With one, the key is in no answer: the Server keeps it, encrypted under that password
+/// in a PKCS#12 file, for download (ADR-0029). A host with it may only ask to enrol, inside an open
+/// window, and an operator approves (ADR-0028).
 #[utoipa::path(
     post,
     path = "/api/v1/bootstrap-certificates",
     tag = "enrolment",
     request_body = IssueBootstrapRequest,
     responses(
-        (status = 201, description = "Issued; the certificate and its private key, this once", body = IssuedBootstrap),
-        (status = 400, description = "A subject attribute this route does not know, a value out of bounds, or validity_days outside 1 to 90", body = ErrorBody),
+        (status = 201, description = "Issued; the certificate and, without a password, its private key, this once", body = IssuedBootstrap),
+        (status = 400, description = "A subject attribute this route does not know, a value out of bounds, validity_days outside 1 to 90, or a password outside 12 to 128 characters", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody),
         (status = 409, description = "No bootstrap_ca_key_file is configured, the bootstrap CA has ended, or the record is full", body = ErrorBody),
@@ -2440,11 +2456,19 @@ async fn issue_bootstrap_certificate(
                     organizational_unit: subject.organizational_unit,
                 },
                 validity_days: request.validity_days,
+                password: request.password.map(crate::bootstrap::Password),
             }
         }
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    match bootstrap.issue(&request) {
+    // Off the async workers: sealing a PKCS#12 file takes the better part of a second, as
+    // password hashing does (ADR-0029).
+    let issuer = bootstrap.clone();
+    let issued = match tokio::task::spawn_blocking(move || issuer.issue(&request)).await {
+        Ok(issued) => issued,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    match issued {
         Ok(pair) => {
             // The key leaves only once the issuance is on the record (ADR-0022): a refused record
             // leaves a listed, revocable entry and no key in anyone's hands.
@@ -2453,9 +2477,14 @@ async fn issue_bootstrap_certificate(
                     crate::audit::Entry::new("enrolment.bootstrap_issued", "issued")
                         .with("serial", pair.serial.clone())
                         .with("subject", pair.subject.clone())
-                        .with("not_after_ms", pair.not_after_ms),
+                        .with("not_after_ms", pair.not_after_ms)
+                        .with("p12", pair.pkcs12.is_some().to_string()),
                 );
                 if recorded.is_err() {
+                    // Nor later: an issuance that is not on the record keeps no file to download.
+                    if pair.pkcs12.is_some() {
+                        let _ = bootstrap.forget_p12(&pair.serial);
+                    }
                     return error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "the audit record cannot be written now; nothing was handed out",
@@ -2495,6 +2524,135 @@ async fn issue_bootstrap_certificate(
             "the bootstrap CA has ended — replace it with `opamp-fleetctl pki bootstrap-ca`",
         ),
         Err(IssueError::Failed(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// The PKCS#12 file of a bootstrap certificate issued with a password, as often as it is asked,
+/// until the certificate ends or is revoked (ADR-0029 clause 4). Each download is on the record.
+#[utoipa::path(
+    get,
+    path = "/api/v1/bootstrap-certificates/{serial}/p12",
+    tag = "enrolment",
+    params(("serial" = String, Path, description = "the serial, as the list names it")),
+    responses(
+        (status = 200, description = "The PKCS#12 file, `bootstrap.p12`", content_type = "application/x-pkcs12", body = Vec<u8>),
+        (status = 404, description = "No such certificate, none issued with a password, revoked or ended — or enrolment is not configured", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was handed out", body = ErrorBody)
+    )
+)]
+async fn download_bootstrap_p12(
+    State(state): State<Arc<AppState>>,
+    Path(serial): Path<String>,
+) -> Response {
+    let Some(bootstrap) = state.bootstrap() else {
+        return enrolment_off();
+    };
+    let none = || {
+        error(
+            StatusCode::NOT_FOUND,
+            format!("no PKCS#12 file for the bootstrap certificate {serial:?}"),
+        )
+    };
+    let (entry, file) = match bootstrap.p12(&serial) {
+        Ok(Some(found)) => found,
+        Ok(None) => return none(),
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    // A revocation removes the file before it is answered; one that could not is still no
+    // licence to hand it out.
+    if state
+        .revocations()
+        .is_some_and(|revocations| revocations.is_certificate_revoked(&entry.id))
+    {
+        let _ = bootstrap.forget_p12(&entry.serial);
+        return none();
+    }
+    if let Some(audit) = state.audit() {
+        let recorded = audit.record(
+            crate::audit::Entry::new("enrolment.bootstrap_p12_downloaded", "downloaded")
+                .with("serial", entry.serial.clone()),
+        );
+        if recorded.is_err() {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the audit record cannot be written now; nothing was handed out",
+            );
+        }
+    }
+    info!(serial = %entry.serial, "bootstrap PKCS#12 file downloaded");
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/x-pkcs12".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", fleet_core::pkcs12::FILE_NAME),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        file,
+    )
+        .into_response()
+}
+
+/// Deletes a revoked bootstrap certificate's entry, and any PKCS#12 file of it, from the record.
+/// Its revocation stays on the list, so it stays refused for as long as it is valid (ADR-0029 clause 15).
+#[utoipa::path(
+    delete,
+    path = "/api/v1/bootstrap-certificates/{serial}",
+    tag = "enrolment",
+    params(("serial" = String, Path, description = "the serial, as the list names it")),
+    responses(
+        (status = 204, description = "Deleted from the record; the revocation stays"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No such certificate on record, or enrolment is not configured", body = ErrorBody),
+        (status = 409, description = "The certificate is not revoked — revoke it first", body = ErrorBody),
+        (status = 503, description = "The audit record cannot be written; nothing was deleted", body = ErrorBody)
+    )
+)]
+async fn delete_bootstrap_certificate(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(serial): Path<String>,
+) -> Response {
+    let Some(bootstrap) = state.bootstrap() else {
+        return enrolment_off();
+    };
+    use crate::bootstrap::DeleteError;
+    let revoked = |entry: &crate::bootstrap::Entry| {
+        state
+            .revocations()
+            .is_some_and(|revocations| revocations.is_certificate_revoked(&entry.id))
+    };
+    let recorded = |entry: &crate::bootstrap::Entry| {
+        state.audit().is_none_or(|audit| {
+            audit
+                .record(
+                    crate::audit::Entry::new("enrolment.bootstrap_deleted", "deleted")
+                        .with("serial", entry.serial.clone())
+                        .with("subject", entry.subject.clone()),
+                )
+                .is_ok()
+        })
+    };
+    match bootstrap.delete(&serial, revoked, recorded) {
+        Ok(entry) => {
+            info!(serial = %entry.serial, "revoked bootstrap certificate deleted from the record");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(DeleteError::NotFound) => error(
+            StatusCode::NOT_FOUND,
+            format!("no bootstrap certificate {serial:?} on record"),
+        ),
+        Err(DeleteError::NotRevoked) => error(
+            StatusCode::CONFLICT,
+            format!("the bootstrap certificate {serial:?} is not revoked — revoke it first"),
+        ),
+        Err(DeleteError::Unrecorded) => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the audit record cannot be written now; nothing was deleted",
+        ),
+        Err(DeleteError::Failed(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -2976,6 +3134,25 @@ async fn revoke(
     match outcome {
         Ok(entry) => {
             info!(revocation = %entry.id, "revoked");
+            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0029
+            // clause 4); the download refuses it either way.
+            let crate::revocation::Revoked::Certificate {
+                authority, serial, ..
+            } = &entry.revoked;
+            if authority == "bootstrap" {
+                if let Some(Err(e)) = state.bootstrap().map(|b| b.forget_p12(serial)) {
+                    // Said, not swallowed: lifting this revocation would make the file
+                    // downloadable again.
+                    warn!(serial = %serial, "cannot remove the revoked PKCS#12 file: {e}");
+                    return error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "revoked as {}, but its PKCS#12 file could not be removed: {e}",
+                            entry.id
+                        ),
+                    );
+                }
+            }
             note(
                 &state,
                 revocation_entry("revocation.revoked", "revoked", &entry),

@@ -57,9 +57,11 @@ fn the_post_install_prints_no_endpoint_the_client_refuses_at_startup() {
 
 /// The first step the post-install prints is the questionnaire, which asks for the client identity;
 /// an endpoint alone is never offered as a complete step, since a Client with nothing more refuses
-/// to start. The manual alternative names the identity, `[tls] cert_file` and `key_file`, and
-/// nothing the Client does not read (ADR-0019 clause 37).
-/// Verifies: ADR-0019
+/// to start. The `--endpoint` it does print is the scripted form, with `--fleet-files`, where the
+/// install finds the bootstrap identity it enrols with. The manual alternative names the identity,
+/// `[tls] cert_file` and `key_file`, and nothing the Client does not read; a password it names is
+/// a `bootstrap.p12`'s, never a credential (ADR-0029 clause 13, which restates ADR-0019 clause 37).
+/// Verifies: ADR-0029
 #[test]
 fn the_post_install_steps_ask_for_the_client_identity() {
     let script = post_install();
@@ -69,20 +71,38 @@ fn the_post_install_steps_ask_for_the_client_identity() {
         .find(|line| line.trim_start().starts_with("opamp-fleet service install"))
         .expect("a step that writes the configuration");
     assert!(first_step.contains("--interactive"), "{first_step}");
-    assert!(
-        !printed.iter().any(|line| line.contains("--endpoint")),
-        "an endpoint-only install is not offered as a step"
-    );
     let text = printed.join("\n");
+    let scripted = text
+        .replace("\\\n", " ")
+        .lines()
+        .filter(|line| line.contains("--endpoint"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert!(!scripted.is_empty(), "the scripted form is printed");
+    for line in &scripted {
+        assert!(
+            line.contains("--fleet-files"),
+            "an endpoint-only install is not offered as a step: {line}"
+        );
+    }
     assert!(
         text.contains("[tls]") && text.contains("cert_file") && text.contains("key_file"),
         "{text}"
     );
     let lower = text.to_lowercase();
-    for absent in ["[auth]", "credential", "bearer_token", "password"] {
+    for absent in ["[auth]", "credential", "bearer_token"] {
         assert!(
             !lower.contains(absent),
             "the post-install names {absent}: {text}"
+        );
+    }
+    for line in printed
+        .iter()
+        .filter(|l| l.to_lowercase().contains("password"))
+    {
+        assert!(
+            line.contains("bootstrap"),
+            "a password the post-install names is a bootstrap.p12's: {line}"
         );
     }
 }

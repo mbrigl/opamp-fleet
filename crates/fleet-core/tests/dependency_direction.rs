@@ -53,6 +53,9 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("ending", Core),
             ("naming", Core),
             ("package", Core),
+            // The bootstrap PKCS#12 file (ADR-0029): its rule, and its binding to `p12-keystore`.
+            ("pkcs12", Core),
+            ("pkcs12::file", Adapter),
             ("platform", Core),
             ("renewal", Core),
             ("version", Core),

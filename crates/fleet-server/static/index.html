@@ -523,8 +523,10 @@
       </div>
 
       <!-- Bootstrap certificates (ADR-0028): issued by this Server with the customer (O) and site
-           (OU) an operator names. The private key is in the issuing answer only, so the UI holds it
-           in memory until the operator has saved it and never stores it. -->
+           (OU) an operator names. Without a password the private key is in the issuing answer only,
+           so the UI holds it in memory until the operator has saved it and never stores it. With
+           one, the Server keeps a PKCS#12 file of the pair under it, which any later page offers
+           for download; the typed password is sent once and kept nowhere (ADR-0029). -->
       <section id="boot-section" class="card config" style="display: none">
         <h2>Bootstrap certificates — one per customer, site or batch; each opens nothing without an open window and an approval</h2>
         <div class="config-fields">
@@ -534,8 +536,12 @@
                  title="The organizational unit, typically the site. Optional; 1 to 64 characters." />
           <input id="boot-days" class="narrow" type="number" min="1" max="90" value="10"
                  title="How many days the certificate is valid: 1 to 90, cut to the bootstrap CA's end." />
+          <input id="boot-pass" class="quarter" type="password" placeholder="password (optional)" autocomplete="new-password"
+                 title="With a password the Server keeps the certificate and its key as bootstrap.p12, encrypted under it, for download until the certificate ends or is revoked. 12 to 128 characters. The Server keeps the password nowhere: give it to the host by another way than the file." />
+          <input id="boot-pass2" class="quarter" type="password" placeholder="password again" autocomplete="new-password"
+                 title="The same password once more." />
           <button id="boot-issue" class="btn btn-primary"
-                  title="Issue a bootstrap certificate with a fresh key. Its row offers the pair for saving while this page stays open; the Server does not keep the key.">Issue</button>
+                  title="Issue a bootstrap certificate with a fresh key. Without a password its row offers the pair for saving while this page stays open, and the Server does not keep the key; with one, its row offers bootstrap.p12 in any page.">Issue</button>
         </div>
         <div id="boot-keys-note" class="err" style="display: none; margin-bottom: 6px">This page holds the private keys of the certificates issued in it until it is reloaded or closed: the Server does not keep them. Save both files from the row; a lost key is replaced by issuing again.</div>
         <span id="boot-result" class="sub"></span>
@@ -2057,7 +2063,7 @@
         const fingerprint = `<br /><span class="fingerprint sub" title="the bootstrap certificate's fingerprint">${esc(e.bootstrap_fingerprint)}</span>`;
         const b = boots.find((b) => b.serial === e.bootstrap_serial);
         if (!b) {
-          return `${esc(e.bootstrap_subject)}<br /><span class="sub" title="not on this Server's record: made elsewhere, or under a bootstrap CA since replaced">serial ${esc(e.bootstrap_serial)} · not issued here</span>${fingerprint}`;
+          return `${esc(e.bootstrap_subject)}<br /><span class="sub" title="not on this Server's record: made elsewhere, under a bootstrap CA since replaced, or deleted from the record after its revocation">serial ${esc(e.bootstrap_serial)} · not issued here</span>${fingerprint}`;
         }
         return `${esc(b.subject)}<br /><span class="sub">serial ${esc(b.serial)} · issued ${esc(when(b.issued_ms))} · valid until ${esc(when(b.not_after_ms))}</span>${fingerprint}`;
       }
@@ -2113,6 +2119,8 @@
         const shown = JSON.stringify([boots, [...issuedPairs.keys()]]);
         if (shown === bootsShown) return;
         bootsShown = shown;
+        const p12 = (b) => b.p12 && !b.revoked ? `
+              <button class="btn btn-ghost btn-sm boot-p12" data-serial="${esc(b.serial)}" title="Save the certificate and its key as bootstrap.p12, encrypted under the password it was issued with. Offered until the certificate ends or is revoked.">Save bootstrap.p12</button>` : "";
         const saves = (b) => issuedPairs.has(b.serial) && !b.revoked ? `
               <button class="btn btn-ghost btn-sm boot-save" data-serial="${esc(b.serial)}" data-part="certificate" title="Save the certificate as bootstrap.pem — the cert_file a host's supervisor.toml names">Save bootstrap.pem</button>
               <button class="btn btn-ghost btn-sm boot-save" data-serial="${esc(b.serial)}" data-part="key" title="Save the private key as bootstrap-key.pem — the key_file a host's supervisor.toml names. Offered only while this page stays open.">Save bootstrap-key.pem</button>` : "";
@@ -2123,7 +2131,8 @@
             <td>${esc(when(b.issued_ms))}</td>
             <td>${esc(when(b.not_after_ms))}</td>
             <td>${b.revoked ? `<span class="pill red">revoked</span>` : `<span class="pill green">valid</span>`}</td>
-            <td><div style="display: flex; flex-direction: column; align-items: flex-start; gap: 4px">${saves(b)}${b.revoked ? "" : `
+            <td><div style="display: flex; flex-direction: column; align-items: flex-start; gap: 4px">${p12(b)}${saves(b)}${b.revoked ? `
+              <button class="btn btn-ghost btn-sm boot-delete" data-serial="${esc(b.serial)}" title="Delete this revoked certificate from the list. Its revocation stays: no host can enrol with it.">Delete</button>` : `
               <button class="btn btn-ghost btn-sm boot-revoke" data-serial="${esc(b.serial)}" title="Revoke this certificate: no host can enrol with it any more">Revoke</button>`}</div></td>
           </tr>`).join("");
       }
@@ -2213,12 +2222,21 @@
         const unit = $("boot-unit").value.trim();
         if (organization) subject.organization = organization;
         if (unit) subject.organizational_unit = unit;
+        const request = { subject, validity_days: Number($("boot-days").value) };
+        const password = $("boot-pass").value;
+        if (password || $("boot-pass2").value) {
+          if (password !== $("boot-pass2").value) {
+            $("boot-error").textContent = "the two passwords differ";
+            return;
+          }
+          request.password = password;
+        }
         // Disabled while the request runs, so a double click issues one certificate.
         $("boot-issue").disabled = true;
         const res = await fetch("/api/v1/bootstrap-certificates", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ subject, validity_days: Number($("boot-days").value) }),
+          body: JSON.stringify(request),
         }).catch(() => null);
         const body = res ? await res.json().catch(() => ({})) : {};
         $("boot-issue").disabled = false;
@@ -2226,8 +2244,15 @@
           $("boot-error").textContent = body.error || (res ? `HTTP ${res.status}` : "the Server could not be reached");
           return;
         }
-        issuedPairs.set(body.serial, { certificate_pem: body.certificate_pem, private_key_pem: body.private_key_pem, not_after_ms: body.not_after_ms });
-        $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save its pair from its row.`;
+        // The page keeps no password once it is sent (ADR-0029 clause 5).
+        $("boot-pass").value = "";
+        $("boot-pass2").value = "";
+        if (body.private_key_pem) {
+          issuedPairs.set(body.serial, { certificate_pem: body.certificate_pem, private_key_pem: body.private_key_pem, not_after_ms: body.not_after_ms });
+          $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save its pair from its row.`;
+        } else {
+          $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save bootstrap.p12 from its row, now or later.`;
+        }
         await refreshEnrolments();
       });
 
@@ -2242,12 +2267,46 @@
       window.addEventListener("beforeunload", (e) => { if (issuedPairs.size) e.preventDefault(); });
 
       $("boots").addEventListener("click", async (e) => {
+        const p12 = e.target.closest(".boot-p12");
+        if (p12) {
+          $("boot-error").textContent = "";
+          const res = await fetch(`/api/v1/bootstrap-certificates/${encodeURIComponent(p12.dataset.serial)}/p12`).catch(() => null);
+          if (!res || !res.ok) {
+            const body = res ? await res.json().catch(() => ({})) : {};
+            $("boot-error").textContent = body.error || (res ? `HTTP ${res.status}` : "the Server could not be reached");
+            await refreshEnrolments();
+            return;
+          }
+          const link = document.createElement("a");
+          link.href = URL.createObjectURL(await res.blob());
+          link.download = "bootstrap.p12";
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(link.href), 0);
+          return;
+        }
         const save = e.target.closest(".boot-save");
         if (save) {
           const pair = issuedPairs.get(save.dataset.serial);
           if (!pair) return;
           if (save.dataset.part === "key") saveText(pair.private_key_pem, "bootstrap-key.pem");
           else saveText(pair.certificate_pem, "bootstrap.pem");
+          return;
+        }
+        const del = e.target.closest(".boot-delete");
+        if (del) {
+          e.preventDefault();
+          const serial = del.dataset.serial;
+          if (!confirm(`Delete the revoked bootstrap certificate with serial\n\n${serial}\n\nfrom the list? Its revocation stays.`)) return;
+          $("boot-error").textContent = "";
+          $("boot-result").textContent = "";
+          const res = await fetch(`/api/v1/bootstrap-certificates/${encodeURIComponent(serial)}`, { method: "DELETE" }).catch(() => null);
+          if (!res || !res.ok) {
+            const body = res ? await res.json().catch(() => ({})) : {};
+            $("boot-error").textContent = body.error || (res ? `HTTP ${res.status}` : "the Server could not be reached");
+          } else {
+            $("boot-result").textContent = `${serial.slice(0, 16)}…: deleted`;
+          }
+          await refreshEnrolments();
           return;
         }
         const btn = e.target.closest(".boot-revoke");

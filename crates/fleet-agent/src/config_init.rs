@@ -6,9 +6,9 @@
 //! development defaults — a service that installs, starts, dials `127.0.0.1`, and manages nothing.
 //! This module is the way out of that state: it asks the handful of questions a fresh host cannot
 //! answer for itself, offering what the file already holds as each default, and writes the file
-//! or edits the keys it asked about. The bootstrap pair it asks for on a host not yet enrolled is
-//! handed back, not written: [`enrol`](crate::service::enrol) carries the host to its first
-//! certificate with it.
+//! or edits the keys it asked about. The bootstrap identity it asks for on a host not yet enrolled —
+//! a PEM pair, or a `bootstrap.p12` and its password (ADR-0029) — is handed back, not written:
+//! [`enrol`](crate::service::enrol) carries the host to its first certificate with it.
 //!
 //! The split here is deliberate. [`ask`] is the only part that touches a terminal; [`render`] and
 //! [`edit`] are pure functions from answers to TOML, and [`write_new`] is the one that refuses to
@@ -19,7 +19,7 @@
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 
-use dialoguer::Input;
+use dialoguer::{Input, Password};
 
 use crate::config::ClientConfig;
 
@@ -41,14 +41,19 @@ pub const BOOTSTRAP_KEY_FILE: &str = "bootstrap-key.pem";
 /// The package verification key, in hex, the install looks for beside its program (ADR-0020).
 pub const VERIFICATION_KEY_FILE: &str = "package-signing-key.pub";
 
-/// The fleet's files that lie beside the program the install runs from (ADR-0020 clause 1): the
-/// questionnaire's defaults, and what a non-interactive install takes without a question.
+/// The bootstrap certificate and its key in one password-protected file, which the install looks
+/// for beside its program (ADR-0029 clause 6).
+pub const BOOTSTRAP_P12_FILE: &str = fleet_core::pkcs12::FILE_NAME;
+
+/// The fleet's files that lie beside the program the install runs from, or in the directory
+/// `--fleet-files` names (ADR-0029 clause 6): the questionnaire's defaults, and what a
+/// non-interactive install takes without a question.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Beside {
     /// `server-ca.pem`.
     pub ca_file: Option<PathBuf>,
-    /// `bootstrap.pem` and `bootstrap-key.pem`, only as a pair.
-    pub bootstrap: Option<Bootstrap>,
+    /// `bootstrap.pem` and `bootstrap-key.pem` only as a pair, or `bootstrap.p12` — never both.
+    pub bootstrap: Option<BootstrapFiles>,
     /// The content of `package-signing-key.pub`, when it is a key.
     pub verification_key: Option<String>,
     /// What was there and not taken, each said once by the install.
@@ -66,22 +71,54 @@ impl Beside {
             .unwrap_or_default()
     }
 
+    /// What lies in the directory `--fleet-files` names, looked in instead of beside the program
+    /// (ADR-0029 clause 6).
+    ///
+    /// # Errors
+    /// Returns an error naming the flag when `dir` is not a readable directory.
+    pub fn in_named_dir(dir: &Path) -> Result<Self, String> {
+        std::fs::read_dir(dir).map_err(|e| {
+            format!(
+                "--fleet-files {}: not a readable directory ({e})",
+                dir.display()
+            )
+        })?;
+        Ok(Self::in_dir(dir))
+    }
+
     /// What lies in `dir` under the fleet's file names.
     #[must_use]
     pub fn in_dir(dir: &Path) -> Self {
         let file = |name: &str| Some(dir.join(name)).filter(|path| path.is_file());
         let mut warnings = Vec::new();
-        let bootstrap = match (file(BOOTSTRAP_CERT_FILE), file(BOOTSTRAP_KEY_FILE)) {
-            (Some(cert), Some(key)) => Some(Bootstrap { cert, key }),
+        let pair = match (file(BOOTSTRAP_CERT_FILE), file(BOOTSTRAP_KEY_FILE)) {
+            (Some(cert), Some(key)) => Some(BootstrapFiles::Pair { cert, key }),
             (Some(alone), None) | (None, Some(alone)) => {
                 warnings.push(format!(
-                    "{} lies beside the program without the other half of the bootstrap pair \
+                    "{} lies there without the other half of the bootstrap pair \
                      ({BOOTSTRAP_CERT_FILE} and {BOOTSTRAP_KEY_FILE}); not used",
                     alone.display()
                 ));
                 None
             }
             (None, None) => None,
+        };
+        // Two identities would leave the install to guess which one is meant (ADR-0029 clause 6).
+        let bootstrap = match (file(BOOTSTRAP_P12_FILE), pair) {
+            (Some(p12), None)
+                if file(BOOTSTRAP_CERT_FILE).is_none() && file(BOOTSTRAP_KEY_FILE).is_none() =>
+            {
+                Some(BootstrapFiles::Pkcs12(p12))
+            }
+            (Some(p12), _) => {
+                warnings.push(format!(
+                    "{} lies beside {BOOTSTRAP_CERT_FILE} or {BOOTSTRAP_KEY_FILE}; neither bootstrap \
+                     identity is used — leave one",
+                    p12.display()
+                ));
+                None
+            }
+            (None, pair) => pair,
         };
         let verification_key = file(VERIFICATION_KEY_FILE).and_then(|path| {
             let key = std::fs::read_to_string(&path)
@@ -105,15 +142,54 @@ impl Beside {
         }
     }
 
-    /// The bootstrap pair a non-interactive install enrols with (ADR-0020 clause 4): the pair
+    /// The bootstrap identity a non-interactive install enrols with (ADR-0029 clause 10): the one
     /// beside the program, when `config` reaches its Server over TLS and its state directory
-    /// holds no issued certificate.
-    #[must_use]
-    pub fn unasked_enrolment(&self, config: &ClientConfig) -> Option<Bootstrap> {
-        if is_tls_endpoint(&config.endpoint) && !config.is_enrolled() {
-            self.bootstrap.clone()
-        } else {
-            None
+    /// holds no issued certificate. A `bootstrap.p12` is opened here, with `password` — what
+    /// `--bootstrap-password-file` read — so a file that does not open stops the install before
+    /// anything is written.
+    ///
+    /// # Errors
+    /// Returns an error naming `--bootstrap-password-file` when a `bootstrap.p12` would be taken
+    /// without it or does not open under it, and when it is given with no `bootstrap.p12` there.
+    pub fn unasked_enrolment(
+        &self,
+        config: &ClientConfig,
+        password: Option<&str>,
+    ) -> Result<Option<Bootstrap>, String> {
+        let p12 = match &self.bootstrap {
+            Some(BootstrapFiles::Pkcs12(file)) => Some(file),
+            _ => None,
+        };
+        if password.is_some() && p12.is_none() {
+            return Err(format!(
+                "--bootstrap-password-file names the password of a {BOOTSTRAP_P12_FILE}, and \
+                 there is none to open"
+            ));
+        }
+        if !is_tls_endpoint(&config.endpoint) || config.is_enrolled() {
+            return Ok(None);
+        }
+        match &self.bootstrap {
+            None => Ok(None),
+            Some(BootstrapFiles::Pair { cert, key }) => Ok(Some(Bootstrap::Pair {
+                cert: cert.clone(),
+                key: key.clone(),
+            })),
+            Some(BootstrapFiles::Pkcs12(file)) => {
+                let Some(password) = password else {
+                    return Err(format!(
+                        "{} is a bootstrap identity under a password: name a file holding it \
+                         with --bootstrap-password-file",
+                        file.display()
+                    ));
+                };
+                let identity = crate::tls::pkcs12_identity(file, password)
+                    .map_err(|e| format!("{}: {e} (--bootstrap-password-file)", file.display()))?;
+                Ok(Some(Bootstrap::Pkcs12 {
+                    file: file.clone(),
+                    identity,
+                }))
+            }
         }
     }
 
@@ -149,25 +225,48 @@ pub struct Answers {
     pub self_update: bool,
 }
 
-/// The bootstrap certificate and its private key (ADR-0021), where they lie on this host. Asked for
-/// only while the Client is not enrolled, and never copied or written into the file: the
-/// questionnaire's enrolment presents them once, to obtain the certificate the Server issues
-/// (ADR-0019 clause 17).
+/// A bootstrap identity found on this host, not yet opened (ADR-0029 clause 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bootstrap {
-    /// The bootstrap certificate (PEM).
-    pub cert: PathBuf,
-    /// Its private key (PEM).
-    pub key: PathBuf,
+pub enum BootstrapFiles {
+    /// `bootstrap.pem` and `bootstrap-key.pem`.
+    Pair { cert: PathBuf, key: PathBuf },
+    /// `bootstrap.p12`.
+    Pkcs12(PathBuf),
+}
+
+/// The bootstrap identity (ADR-0021) the Client enrols with. Asked for only while the Client is
+/// not enrolled, and never copied or written into the file: the questionnaire's enrolment presents
+/// it once, to obtain the certificate the Server issues (ADR-0019 clause 17, ADR-0029 clause 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bootstrap {
+    /// The bootstrap certificate and its private key, PEM, where they lie on this host.
+    Pair { cert: PathBuf, key: PathBuf },
+    /// A `bootstrap.p12`, opened under its password: the identity is held in memory only.
+    Pkcs12 {
+        file: PathBuf,
+        identity: crate::config::BootstrapIdentity,
+    },
+}
+
+impl Bootstrap {
+    /// The files it was read from, for what the install prints.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Bootstrap::Pair { cert, key } => format!("{} and {}", cert.display(), key.display()),
+            Bootstrap::Pkcs12 { file, .. } => file.display().to_string(),
+        }
+    }
 }
 
 /// What the questionnaire left behind: the files it wrote beside the configuration, which an
-/// install hands over to the service account with the file, and the bootstrap pair to enrol with.
+/// install hands over to the service account with the file, and the bootstrap identity to enrol
+/// with.
 #[derive(Debug, Default)]
 pub struct Written {
     /// The copy of the answered Server CA, when one was answered.
     pub copies: Vec<PathBuf>,
-    /// The pair to enrol with; `None` on an enrolled Client, which was not asked.
+    /// The identity to enrol with; `None` on an enrolled Client, which was not asked.
     pub bootstrap: Option<Bootstrap>,
 }
 
@@ -178,7 +277,9 @@ pub struct Written {
 /// (ADR-0020 clause 2). A new file is rendered whole; an existing one is edited in place,
 /// the asked keys changed and everything else — comments, `[[supervisor]]` blocks, the
 /// self-update consent — kept as written. `enrolled` says whether the state directory already
-/// holds an issued certificate, in which case no bootstrap pair is asked for.
+/// holds an issued certificate, in which case no bootstrap identity is asked for. `password` is
+/// what `--bootstrap-password-file` read, which opens an answered `bootstrap.p12` instead of a
+/// question (ADR-0029 clause 8).
 ///
 /// The answered CA is copied beside the file first, and the file names the copy
 /// ([`copy_ca_beside`]).
@@ -191,6 +292,7 @@ pub fn run(
     current: &ClientConfig,
     enrolled: bool,
     beside: &Beside,
+    password: Option<&str>,
 ) -> Result<Written, String> {
     if !std::io::stdin().is_terminal() {
         return Err(format!(
@@ -213,7 +315,7 @@ pub fn run(
         );
     }
     beside.report();
-    let (answers, bootstrap) = ask(current, enrolled, beside)?;
+    let (answers, bootstrap) = ask(current, enrolled, beside, password)?;
     let (answers, copies) = copy_ca_beside(answers, path)?;
     for copy in &copies {
         println!("copied {}", copy.display());
@@ -446,15 +548,17 @@ fn keeping_existing(path: &Path) -> bool {
 /// Put the questions to the operator, each offering what `current` holds as its default. The only
 /// function here that reads a terminal.
 ///
-/// The bootstrap pair is asked for only when `enrolled` is `false` (ADR-0019 clause 17), and comes
-/// back beside the answers rather than in them: it is enrolled with, not written.
+/// The bootstrap identity is asked for only when `enrolled` is `false` (ADR-0019 clause 17), and
+/// comes back beside the answers rather than in them: it is enrolled with, not written.
 ///
 /// # Errors
-/// Returns an error if a prompt cannot be read.
+/// Returns an error if a prompt cannot be read, or an answered `bootstrap.p12` does not open under
+/// the `password` given.
 pub fn ask(
     current: &ClientConfig,
     enrolled: bool,
     beside: &Beside,
+    password: Option<&str>,
 ) -> Result<(Answers, Option<Bootstrap>), String> {
     let defaults = Defaults::of(current, beside);
 
@@ -489,23 +593,19 @@ pub fn ask(
         None
     };
 
-    // The bootstrap pair (ADR-0021) a host not yet enrolled enrols with. There is no answer
-    // without one, and no question asks for a credential (ADR-0019). An enrolled host renews what
-    // it was issued and is not asked.
+    // The bootstrap identity (ADR-0021) a host not yet enrolled enrols with: a PEM certificate and
+    // its key, or a PKCS#12 file and its password (ADR-0029 clause 8). There is no answer without
+    // one, and no question asks for a credential (ADR-0019) — the password opens a file on this
+    // host and is sent nowhere. An enrolled host renews what it was issued and is not asked.
     let bootstrap = if enrolled {
         println!("enrolled: this Client holds a certificate the Server issued");
         None
     } else {
-        Some(Bootstrap {
-            cert: ask_path(
-                "Bootstrap certificate this Client enrols with (PEM path)",
-                defaults.cert_file,
-            )?,
-            key: ask_path(
-                "Private key of the bootstrap certificate (PEM path)",
-                defaults.key_file,
-            )?,
-        })
+        Some(ask_bootstrap(
+            defaults.cert_file,
+            defaults.key_file,
+            password,
+        )?)
     };
 
     // Without it nothing is installed, the Client's own updates included (ADR-0026); an empty
@@ -539,6 +639,98 @@ pub fn ask(
         },
         bootstrap,
     ))
+}
+
+/// The bootstrap identity: its certificate first, then the key of a PEM certificate, or the
+/// password of a PKCS#12 file — asked with input hidden, and again until the file opens. A file
+/// that is no bootstrap identity sends the question back to its path.
+fn ask_bootstrap(
+    cert_default: Option<String>,
+    key_default: Option<String>,
+    password: Option<&str>,
+) -> Result<Bootstrap, String> {
+    use fleet_core::pkcs12::file::OpenError;
+    let mut cert_default = cert_default;
+    loop {
+        let cert = ask_path(
+            "Bootstrap certificate this Client enrols with (PEM, or a PKCS#12 .p12 path)",
+            cert_default.clone(),
+        )?;
+        if !is_pkcs12_path(&cert) {
+            let key = ask_path(
+                "Private key of the bootstrap certificate (PEM path)",
+                key_default,
+            )?;
+            return Ok(Bootstrap::Pair { cert, key });
+        }
+        if let Some(password) = password {
+            let identity = crate::tls::pkcs12_identity(&cert, password)
+                .map_err(|e| format!("{}: {e} (--bootstrap-password-file)", cert.display()))?;
+            return Ok(Bootstrap::Pkcs12 {
+                file: cert,
+                identity,
+            });
+        }
+        loop {
+            let typed = Password::new()
+                .with_prompt(format!("Password of {}", cert.display()))
+                .interact()
+                .map_err(prompt_failed)?;
+            match crate::tls::pkcs12_identity(&cert, &typed) {
+                Ok(identity) => {
+                    return Ok(Bootstrap::Pkcs12 {
+                        file: cert,
+                        identity,
+                    })
+                }
+                Err(OpenError::WrongPassword) => {
+                    println!("that password does not open {}", cert.display());
+                }
+                Err(OpenError::Invalid(why)) => {
+                    println!("{why}");
+                    cert_default = None;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Whether an answered path is read as PKCS#12: by its extension, `.p12` or `.pfx` in any case
+/// (ADR-0029 clause 8).
+#[must_use]
+pub fn is_pkcs12_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("p12") || e.eq_ignore_ascii_case("pfx"))
+}
+
+/// The password `--bootstrap-password-file` names: the file's first line, without its `\n` or
+/// `\r\n` (ADR-0029 clause 10). The file is read once, at most 4 KiB of it, and left as it is.
+///
+/// # Errors
+/// Returns an error naming the flag when the file cannot be read or its first line is empty.
+pub fn read_password_file(path: &Path) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(4096).read_to_end(&mut bytes))
+        .map_err(|e| format!("--bootstrap-password-file {}: {e}", path.display()))?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        format!(
+            "--bootstrap-password-file {}: not UTF-8 text",
+            path.display()
+        )
+    })?;
+    let line = text.split('\n').next().unwrap_or_default();
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.is_empty() {
+        return Err(format!(
+            "--bootstrap-password-file {}: its first line is empty",
+            path.display()
+        ));
+    }
+    Ok(line.to_string())
 }
 
 /// A path to a readable file, offering `default` when there is one.
@@ -577,16 +769,18 @@ impl Defaults {
     fn of(current: &ClientConfig, beside: &Beside) -> Self {
         let tls = current.tls.as_ref();
         let path = |p: Option<&PathBuf>| p.map(|p| p.to_string_lossy().into_owned());
-        let pair = beside.bootstrap.as_ref();
+        let (beside_cert, beside_key) = match &beside.bootstrap {
+            Some(BootstrapFiles::Pair { cert, key }) => (Some(cert), Some(key)),
+            Some(BootstrapFiles::Pkcs12(file)) => (Some(file), None),
+            None => (None, None),
+        };
         Defaults {
             endpoint: current.endpoint.clone(),
             name: current.name.clone(),
             ca_file: path(tls.and_then(|t| t.ca_file.as_ref()))
                 .or_else(|| path(beside.ca_file.as_ref())),
-            cert_file: path(tls.and_then(|t| t.cert_file.as_ref()))
-                .or_else(|| path(pair.map(|b| &b.cert))),
-            key_file: path(tls.and_then(|t| t.key_file.as_ref()))
-                .or_else(|| path(pair.map(|b| &b.key))),
+            cert_file: path(tls.and_then(|t| t.cert_file.as_ref())).or_else(|| path(beside_cert)),
+            key_file: path(tls.and_then(|t| t.key_file.as_ref())).or_else(|| path(beside_key)),
             verification_key: current
                 .packages
                 .as_ref()
@@ -1094,8 +1288,14 @@ mod tests {
     fn interactive_without_a_terminal_fails_instead_of_blocking() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(FILE_NAME);
-        let err = run(&path, &ClientConfig::default(), false, &Beside::default())
-            .expect_err("no terminal, no questionnaire");
+        let err = run(
+            &path,
+            &ClientConfig::default(),
+            false,
+            &Beside::default(),
+            None,
+        )
+        .expect_err("no terminal, no questionnaire");
         assert!(err.contains("needs a terminal"), "{err}");
         assert!(!path.exists(), "nothing was written");
     }
@@ -1147,7 +1347,7 @@ mod tests {
         assert_eq!(beside.ca_file, Some(dir.path().join(SERVER_CA_FILE)));
         assert_eq!(
             beside.bootstrap,
-            Some(Bootstrap {
+            Some(BootstrapFiles::Pair {
                 cert: dir.path().join(BOOTSTRAP_CERT_FILE),
                 key: dir.path().join(BOOTSTRAP_KEY_FILE),
             })
@@ -1258,23 +1458,186 @@ mod tests {
             state_dir: state.path().to_path_buf(),
             ..ClientConfig::default()
         };
-        assert_eq!(beside.unasked_enrolment(&config), beside.bootstrap);
-        assert!(beside.unasked_enrolment(&config).is_some());
+        assert_eq!(
+            beside.unasked_enrolment(&config, None),
+            Ok(Some(Bootstrap::Pair {
+                cert: program.path().join(BOOTSTRAP_CERT_FILE),
+                key: program.path().join(BOOTSTRAP_KEY_FILE),
+            }))
+        );
 
         let loopback = ClientConfig {
             endpoint: "ws://127.0.0.1:4320/v1/opamp".to_string(),
             ..config.clone()
         };
-        assert_eq!(beside.unasked_enrolment(&loopback), None);
+        assert_eq!(beside.unasked_enrolment(&loopback, None), Ok(None));
 
         for name in [crate::tls::ISSUED_CERT_FILE, crate::tls::ISSUED_KEY_FILE] {
             std::fs::write(state.path().join(name), "issued").expect("write");
         }
-        assert_eq!(beside.unasked_enrolment(&config), None, "enrolled already");
         assert_eq!(
-            Beside::default().unasked_enrolment(&ClientConfig::default()),
-            None
+            beside.unasked_enrolment(&config, None),
+            Ok(None),
+            "enrolled already"
         );
+        assert_eq!(
+            Beside::default().unasked_enrolment(&ClientConfig::default(), None),
+            Ok(None)
+        );
+    }
+
+    const P12_PASSWORD: &str = "a password of the operator";
+
+    /// A `bootstrap.p12` sealed as the Server seals one, with the PEM of its certificate.
+    fn p12_in(dir: &Path) -> String {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = rcgen::CertificateParams::new(vec!["bootstrap".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert");
+        let file = fleet_core::pkcs12::file::seal(cert.der(), &key.serialize_der(), P12_PASSWORD)
+            .expect("sealed");
+        std::fs::write(dir.join(BOOTSTRAP_P12_FILE), file).expect("write");
+        cert.pem()
+    }
+
+    /// A `bootstrap.p12` is found as a bootstrap identity; lying beside a file of the pair,
+    /// neither is taken; `--fleet-files` names a directory that must be one (ADR-0029 clause 6).
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_bootstrap_p12_is_found_alone_and_never_beside_the_pair() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        p12_in(dir.path());
+        let beside = Beside::in_named_dir(dir.path()).expect("a directory");
+        assert_eq!(
+            beside.bootstrap,
+            Some(BootstrapFiles::Pkcs12(dir.path().join(BOOTSTRAP_P12_FILE)))
+        );
+        assert!(beside.warnings.is_empty(), "{:?}", beside.warnings);
+        let defaults = Defaults::of(&ClientConfig::default(), &beside);
+        assert_eq!(
+            defaults.cert_file,
+            Some(
+                dir.path()
+                    .join(BOOTSTRAP_P12_FILE)
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+            "offered as the certificate's default"
+        );
+        assert_eq!(defaults.key_file, None);
+
+        std::fs::write(dir.path().join(BOOTSTRAP_KEY_FILE), "key").expect("write");
+        let both = Beside::in_dir(dir.path());
+        assert_eq!(both.bootstrap, None, "the install never guesses");
+        assert!(
+            both.warnings.iter().any(|w| w.contains(BOOTSTRAP_P12_FILE)),
+            "{:?}",
+            both.warnings
+        );
+
+        // `--endpoint` takes the CA from the directory named, as it would from beside the program.
+        std::fs::write(dir.path().join(SERVER_CA_FILE), "ca").expect("write");
+        let named = Beside::in_named_dir(dir.path()).expect("a directory");
+        let data = tempfile::tempdir().expect("tempdir");
+        let copies = run_with_endpoint(
+            &data.path().join(FILE_NAME),
+            "wss://fleet.example.com/v1/opamp",
+            true,
+            &named,
+        )
+        .expect("write");
+        assert_eq!(copies, vec![data.path().join(SERVER_CA_FILE)]);
+
+        let missing = dir.path().join("no such directory");
+        let refused = Beside::in_named_dir(&missing).expect_err("refused");
+        assert!(refused.contains("--fleet-files"), "{refused}");
+        let a_file = dir.path().join(BOOTSTRAP_KEY_FILE);
+        assert!(
+            Beside::in_named_dir(&a_file).is_err(),
+            "a file is no directory"
+        );
+    }
+
+    /// Unasked, a `bootstrap.p12` enrols with the password `--bootstrap-password-file` gives, and
+    /// fails the install without it, under a password that does not open it, or when the flag has
+    /// no file to open (ADR-0029 clause 10).
+    /// Verifies: ADR-0029
+    #[test]
+    fn an_unasked_install_opens_a_bootstrap_p12_with_the_password_file_or_fails() {
+        let program = tempfile::tempdir().expect("tempdir");
+        let cert_pem = p12_in(program.path());
+        let beside = Beside::in_dir(program.path());
+        let state = tempfile::tempdir().expect("tempdir");
+        let config = ClientConfig {
+            endpoint: "wss://fleet.example.com/v1/opamp".to_string(),
+            state_dir: state.path().to_path_buf(),
+            ..ClientConfig::default()
+        };
+        let without = beside
+            .unasked_enrolment(&config, None)
+            .expect_err("no password");
+        assert!(without.contains("--bootstrap-password-file"), "{without}");
+        let wrong = beside
+            .unasked_enrolment(&config, Some("not the password"))
+            .expect_err("wrong password");
+        assert!(wrong.contains("--bootstrap-password-file"), "{wrong}");
+        match beside.unasked_enrolment(&config, Some(P12_PASSWORD)) {
+            Ok(Some(Bootstrap::Pkcs12 { file, identity })) => {
+                assert_eq!(file, program.path().join(BOOTSTRAP_P12_FILE));
+                assert_eq!(
+                    identity.cert_pem,
+                    cert_pem.replace("\r\n", "\n").into_bytes()
+                );
+                opamp::tls::private_key(&identity.key_pem).expect("a key");
+            }
+            other => panic!("expected the opened file, got {other:?}"),
+        }
+
+        let pair_only = tempfile::tempdir().expect("tempdir");
+        fleet_files(pair_only.path());
+        let refused = Beside::in_dir(pair_only.path())
+            .unasked_enrolment(&config, Some(P12_PASSWORD))
+            .expect_err("no file to open");
+        assert!(refused.contains("--bootstrap-password-file"), "{refused}");
+
+        for name in [crate::tls::ISSUED_CERT_FILE, crate::tls::ISSUED_KEY_FILE] {
+            std::fs::write(state.path().join(name), "issued").expect("write");
+        }
+        assert_eq!(
+            beside.unasked_enrolment(&config, None),
+            Ok(None),
+            "an enrolled Client takes no bootstrap identity, and needs no password"
+        );
+    }
+
+    /// The password is the file's first line without its line ending; an empty one is refused
+    /// (ADR-0029 clause 10). `.p12` and `.pfx` are read as PKCS#12 (clause 8).
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_password_file_gives_its_first_line_and_a_p12_path_is_known_by_its_extension() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("bootstrap.pass");
+        for (content, expected) in [
+            ("secret password\n", "secret password"),
+            ("secret password\r\nsecond line\n", "secret password"),
+            ("secret password", "secret password"),
+        ] {
+            std::fs::write(&file, content).expect("write");
+            assert_eq!(read_password_file(&file).as_deref(), Ok(expected));
+        }
+        std::fs::write(&file, "\nsecret").expect("write");
+        assert!(read_password_file(&file).is_err(), "an empty first line");
+        assert!(read_password_file(&dir.path().join("none")).is_err());
+
+        for (path, p12) in [
+            ("bootstrap.p12", true),
+            ("/x/BOOTSTRAP.PFX", true),
+            ("bootstrap.pem", false),
+            ("p12", false),
+        ] {
+            assert_eq!(is_pkcs12_path(Path::new(path)), p12, "{path}");
+        }
     }
 
     /// The answered CA lands beside the configuration under a fixed name, owner-only, and the

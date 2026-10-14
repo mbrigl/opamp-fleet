@@ -101,6 +101,16 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 # renew (ADR-0021). rcgen parses X.509 only behind a private, test-only path, so this is the
 # public way in — and it is the very parser rcgen itself uses, already in the tree.
 x509-parser = "0.18"
+# The bootstrap certificate as a password-protected PKCS#12 file (ADR-0029): the Server writes it,
+# the Client reads it. Pure Rust on the RustCrypto crates, for the password-based encryption only;
+# the TLS handshake stays on ring. Pinned exactly, and without its default `pbes1` feature, so the
+# legacy RC2 and 3DES schemes are not linked. `pkcs12`, `pkcs5` and `der` read the file's structure,
+# so the Client refuses what `p12-keystore` would accept beyond PBES2 with PBKDF2-HMAC-SHA-2 and
+# AES-CBC under a SHA-2 MAC — the same versions it already pulls in.
+p12-keystore = { version = "=0.4.1", default-features = false }
+pkcs12 = "=0.2.0-pre.0"
+pkcs5 = { version = "0.8", features = ["pbes2"] }
+der = "0.8"
 # The Agent's own telemetry (ADR-0016): the standard's own implementation, not a second copy of its
 # schema. `http-proto` is the OTLP/HTTP protobuf encoding the Baseline's destination_endpoint
 # requires; `reqwest-client` replaces the default *blocking* client, which would stall a tokio
@@ -165,9 +175,25 @@ clap = { version = "4", features = ["derive"] }
 service-manager = "0.11"
 # The questionnaire of `service install --interactive` and `service config` (ADR-0019 clause
 # 21): validated answers, defaults and a yes/no confirmation, the same on three operating systems.
-# No feature is asked for — the questionnaire asks for no secret, so no prompt hides its input —
-# and it pulls no TLS/crypto backend, so ADR-0013 holds.
-dialoguer = { version = "0.12", default-features = false }
+# `password` is the one feature: the password of a `bootstrap.p12` is asked with input hidden
+# (ADR-0029), and its one dependency, `zeroize`, is already in the tree. It pulls no TLS/crypto
+# backend, so ADR-0013 holds.
+dialoguer = { version = "0.12", default-features = false, features = ["password"] }
 # The Windows-only SCM runtime shim (ADR-0019): status reporting and the stop control handler,
 # without which the SCM kills the service with error 1053. Compiled on Windows targets only.
 windows-service = "0.8"
+
+# The key derivations of the bootstrap PKCS#12 file (ADR-0029) run 600 000 iterations: unoptimized,
+# a test that seals and opens one file waits seconds. The crates their loops are compiled in are
+# optimized in the dev profile too; nothing else is.
+[profile.dev.package]
+p12-keystore.opt-level = 3
+pkcs12.opt-level = 3
+pkcs5.opt-level = 3
+pbkdf2.opt-level = 3
+hmac.opt-level = 3
+sha2.opt-level = 3
+digest.opt-level = 3
+block-buffer.opt-level = 3
+aes.opt-level = 3
+cbc.opt-level = 3

@@ -3254,6 +3254,338 @@ async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_ser
     );
 }
 
+/// Issued with a password, a bootstrap certificate's key is in no answer: the Server keeps a
+/// PKCS#12 file of it under the password and hands it out as often as asked, each download on the
+/// record, until the certificate is revoked — and the file enrols like the pair. The password is
+/// in no file the Server writes (ADR-0029 clauses 2 to 4).
+/// Verifies: ADR-0029
+#[tokio::test]
+async fn a_bootstrap_certificate_issued_with_a_password_is_a_pkcs12_file_until_revoked() {
+    const PASSWORD: &str = "a password of the operator";
+    let pki = Pki::new();
+    let bootstrap = Pki::named("acme bootstrap CA");
+    let audit_dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            issue_bootstrap: true,
+            revocations: true,
+            audit: Some(audit_in(audit_dir.path())),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    for short in ["eleven char", "tab\tin a long password"] {
+        let refused = operator_client
+            .post(operator(&served, "/api/v1/bootstrap-certificates"))
+            .json(&serde_json::json!({ "password": short }))
+            .send()
+            .await
+            .expect("issue");
+        assert_eq!(refused.status(), 400, "{short:?}");
+    }
+    let response = operator_client
+        .post(operator(&served, "/api/v1/bootstrap-certificates"))
+        .json(&serde_json::json!({
+            "subject": { "organization": "Kunde GmbH" },
+            "password": PASSWORD
+        }))
+        .send()
+        .await
+        .expect("issue");
+    assert_eq!(response.status(), 201);
+    let issued: serde_json::Value = response.json().await.expect("json");
+    assert!(
+        issued.get("private_key_pem").is_none(),
+        "no PEM key: {issued}"
+    );
+    let serial = issued["serial"].as_str().expect("serial").to_string();
+    let cert = issued["certificate_pem"]
+        .as_str()
+        .expect("cert")
+        .to_string();
+
+    let listed: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/bootstrap-certificates"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed[0]["p12"], true);
+
+    let download = |client: reqwest::Client| {
+        let url = operator(
+            &served,
+            &format!("/api/v1/bootstrap-certificates/{serial}/p12"),
+        );
+        async move { client.get(url).send().await.expect("download") }
+    };
+    let mut file = Vec::new();
+    for _ in 0..2 {
+        let response = download(operator_client.clone()).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "application/x-pkcs12");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"bootstrap.p12\""
+        );
+        file = response.bytes().await.expect("body").to_vec();
+    }
+    let opened = fleet_core::pkcs12::file::open(&file, PASSWORD).expect("opens");
+    assert_eq!(
+        opened.certificate_der,
+        opamp::tls::certificates(cert.as_bytes()).expect("pem")[0].as_ref(),
+        "the certificate issued"
+    );
+    let recorded = entries(audit_dir.path()).await;
+    let issuance = named(&recorded, "enrolment.bootstrap_issued");
+    assert_eq!(issuance[0]["p12"], "true");
+    assert_eq!(
+        named(&recorded, "enrolment.bootstrap_p12_downloaded").len(),
+        2,
+        "each download is on the record"
+    );
+    for root in [served.config_dir.as_path(), audit_dir.path()] {
+        for written in walk(root) {
+            let bytes = std::fs::read(&written).expect("read");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(PASSWORD),
+                "{} holds the password",
+                written.display()
+            );
+        }
+    }
+
+    // The file enrols as the pair would.
+    let key = KeyPair::try_from(opened.private_key_der.as_slice())
+        .expect("key")
+        .serialize_pem();
+    operator_client
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    let (csr, _key) = csr_for("edge-01");
+    decode(post(&enrolling, &served.endpoint, csr_report(csr)).await).await;
+    let pending: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/enrolments"))
+        .send()
+        .await
+        .expect("pending")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(pending[0]["bootstrap_serial"], serial.as_str());
+
+    let revoked = operator_client
+        .post(operator(&served, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "bootstrap", "serial": serial }
+        }))
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(revoked.status(), 201);
+    assert_eq!(download(operator_client.clone()).await.status(), 404);
+    let kept = served
+        .config_dir
+        .join("bootstrap-certificates")
+        .join(format!("{serial}.p12"));
+    assert!(!kept.exists(), "the revocation removed {}", kept.display());
+    let listed: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/bootstrap-certificates"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed[0]["p12"], false);
+    let unknown = operator_client
+        .get(operator(&served, "/api/v1/bootstrap-certificates/../p12"))
+        .send()
+        .await
+        .expect("download");
+    assert_eq!(unknown.status(), 404);
+}
+
+/// An audit record that can be made to refuse, to see what a route does without one.
+struct Refusable {
+    inner: Arc<dyn fleet_server::audit::Audit>,
+    refuse: std::sync::atomic::AtomicBool,
+}
+
+impl fleet_server::audit::Audit for Refusable {
+    fn record(
+        &self,
+        entry: fleet_server::audit::Entry,
+    ) -> Result<(), fleet_server::audit::Unavailable> {
+        // Only the deletion, so the operator's act passes and the route's own refusal is seen.
+        if self.refuse.load(std::sync::atomic::Ordering::SeqCst)
+            && entry.event == "enrolment.bootstrap_deleted"
+        {
+            return Err(fleet_server::audit::Unavailable);
+        }
+        self.inner.record(entry)
+    }
+}
+
+/// A revoked bootstrap certificate's entry can be deleted, with its PKCS#12 file, and the deletion
+/// is on the record; its revocation stays, so it is still refused. A valid one is not deleted, an
+/// unknown serial is not found, and without an audit record nothing is deleted (ADR-0029 clause 15).
+/// Verifies: ADR-0029
+#[tokio::test]
+async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refused() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("acme bootstrap CA");
+    let audit_dir = tempfile::tempdir().expect("tempdir");
+    let audit = Arc::new(Refusable {
+        inner: audit_in(audit_dir.path()),
+        refuse: std::sync::atomic::AtomicBool::new(false),
+    });
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            issue_bootstrap: true,
+            revocations: true,
+            audit: Some(audit.clone()),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let issued: serde_json::Value = operator_client
+        .post(operator(&served, "/api/v1/bootstrap-certificates"))
+        .json(&serde_json::json!({ "password": "a password of the operator" }))
+        .send()
+        .await
+        .expect("issue")
+        .json()
+        .await
+        .expect("json");
+    let serial = issued["serial"].as_str().expect("serial").to_string();
+    let cert = issued["certificate_pem"]
+        .as_str()
+        .expect("cert")
+        .to_string();
+    let file: Vec<u8> = operator_client
+        .get(operator(
+            &served,
+            &format!("/api/v1/bootstrap-certificates/{serial}/p12"),
+        ))
+        .send()
+        .await
+        .expect("download")
+        .bytes()
+        .await
+        .expect("body")
+        .to_vec();
+    let opened =
+        fleet_core::pkcs12::file::open(&file, "a password of the operator").expect("opens");
+    let key = KeyPair::try_from(opened.private_key_der.as_slice())
+        .expect("key")
+        .serialize_pem();
+    let delete = |serial: String| {
+        let client = operator_client.clone();
+        let url = operator(&served, &format!("/api/v1/bootstrap-certificates/{serial}"));
+        async move { client.delete(url).send().await.expect("delete").status() }
+    };
+
+    assert_eq!(
+        delete(serial.clone()).await,
+        409,
+        "a valid one is revoked first"
+    );
+    assert_eq!(delete("abcdef".to_string()).await, 404);
+    let revoked = operator_client
+        .post(operator(&served, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "bootstrap", "serial": serial }
+        }))
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(revoked.status(), 201);
+
+    audit
+        .refuse
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(delete(serial.clone()).await, 503);
+    audit
+        .refuse
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let listed: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/bootstrap-certificates"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(
+        listed[0]["serial"],
+        serial.as_str(),
+        "kept without a record"
+    );
+
+    assert_eq!(delete(serial.clone()).await, 204);
+    let listed: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/bootstrap-certificates"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed, serde_json::json!([]), "gone from the list");
+    let dir = served.config_dir.join("bootstrap-certificates");
+    assert!(!dir.join(format!("{serial}.json")).exists());
+    assert!(!dir.join(format!("{serial}.p12")).exists());
+    let recorded = entries(audit_dir.path()).await;
+    let deleted = named(&recorded, "enrolment.bootstrap_deleted");
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0]["serial"], serial.as_str());
+    assert_eq!(deleted[0]["subject"], issued["subject"]);
+    let revocations: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/revocations"))
+        .send()
+        .await
+        .expect("revocations")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(
+        revocations[0]["certificate"]["serial"],
+        serial.as_str(),
+        "the revocation stays"
+    );
+
+    operator_client
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    let (csr, _key) = csr_for("edge-01");
+    let refused = post(&enrolling, &served.endpoint, csr_report(csr)).await;
+    assert!(
+        !refused.status().is_success(),
+        "a deleted entry's certificate stays refused: {}",
+        refused.status()
+    );
+}
+
 /// Without the bootstrap CA's key the Server issues nothing and says why, a request outside the
 /// bounds is refused, and an empty one is issued (ADR-0028 clauses 22 and 23 and ADR-0021 clause 19).
 /// Verifies: ADR-0028

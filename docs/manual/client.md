@@ -352,12 +352,14 @@ without the flag it registers exactly as before — root/`LocalSystem`, no hando
 ### Files beside the program
 
 `service install` looks in the directory of the program it runs from for the fleet's files, under
-the names the operator tools give them:
+the names the operator tools give them — or, with `--fleet-files <dir>`, in that directory instead,
+never in both:
 
 | File | What the install does with it |
 |---|---|
 | `server-ca.pem` | offers it as the CA certificate of the Server; without `--interactive`, copies it beside `supervisor.toml` and names it in `[tls] ca_file` |
 | `bootstrap.pem` and `bootstrap-key.pem` | offers them as the bootstrap pair; without `--interactive`, enrols with them and waits for an operator's approval. Both or neither: one alone is named in a warning and ignored |
+| `bootstrap.p12` | the bootstrap certificate and its key in one file under a password, as the Server hands it out; offered as the bootstrap certificate, and the password is asked with input hidden. Without `--interactive`, it enrols with it under the password `--bootstrap-password-file` reads. Lying beside `bootstrap.pem` or `bootstrap-key.pem`, neither identity is used, with a warning |
 | `package-signing-key.pub` | offers its content as the package verification key; without `--interactive`, writes it as `[packages] verification_key`. A file that holds no 64-digit hex key is named in a warning and ignored |
 
 So a host is set up by copying the program and these four files into one directory and running,
@@ -382,6 +384,23 @@ issued. An install run from a directory that holds a bootstrap pair waits for th
 stops it and registers nothing. The files stay where they are: remove the bootstrap pair once the
 host is enrolled. `service config` runs the installed copy of the program and does not look.
 
+**A `bootstrap.p12` needs its password.** `--bootstrap-password-file <path>` names a file whose
+first line is the password; it is read once and left as it is, and the password is never written
+and never sent — it only opens the file on this host. There is no way to give it on the command
+line or in the environment, where other processes could read it. The install opens the file before
+it writes anything, so a missing flag, a password that does not open the file, or the flag with no
+`bootstrap.p12` to open stops it with nothing changed:
+
+```console
+$ sudo ./opamp-fleet service install --endpoint wss://fleet.example.com:4320/v1/opamp \
+    --bootstrap-password-file /root/fleet-files/bootstrap.pass
+…
+enrolling with /root/fleet-files/bootstrap.p12
+```
+
+The key it decrypts is held in memory for the enrolment and never written to disk; what the host
+keeps is the key it makes for its own certificate.
+
 ### The questionnaire: `--interactive` and `service config`
 
 A release artifact is the bare binary, so a freshly downloaded Client has no `supervisor.toml` to
@@ -396,7 +415,7 @@ No configuration at /var/lib/opamp-fleet/supervisor.toml — answering these wri
 Server OpAMP endpoint [wss://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com/v1/opamp
 This Agent's name (service.instance.name) [Supervisor Agent]: host-01
 CA certificate of the Server — the CA that signed its certificate (PEM path): /etc/opamp/ca.pem
-Bootstrap certificate this Client enrols with (PEM path): /etc/opamp/bootstrap.pem
+Bootstrap certificate this Client enrols with (PEM, or a PKCS#12 .p12 path): /etc/opamp/bootstrap.pem
 Private key of the bootstrap certificate (PEM path): /etc/opamp/bootstrap-key.pem
 Package verification key (hex Ed25519 public key; empty takes no packages): 3b6a27bc…
 copied /var/lib/opamp-fleet/server-ca.pem
@@ -517,6 +536,21 @@ $ sudo systemctl start opamp-fleet
 The first asks for the endpoint, the client certificate and its key, and the verification key.
 `--endpoint` alone writes a file the Client refuses until you add the certificate and its key. An upgrade of a host whose service was running restarts it on the delivered
 binary.
+
+**Without a terminal**, as configuration management installs a host, the package is installed first
+and the host enrolled in a step after it — the package's own install never enrols, so `apt` and
+`dnf` never wait for an approval. Put the fleet's files in a directory and name it:
+
+```console
+$ sudo dnf install -y ./supervisor_1.2.3_linux_amd64.rpm
+$ sudo opamp-fleet service install --endpoint wss://fleet.example.com:4320/v1/opamp \
+    --fleet-files /root/fleet --bootstrap-password-file /root/fleet/bootstrap.pass
+$ sudo systemctl start opamp-fleet
+```
+
+The second step waits for an operator's approval, as every enrolment does; run it as a task that may
+wait, such as an asynchronous task in Ansible, while the enrolment window is open. Remove the
+directory afterwards. With a PEM pair in it, `--bootstrap-password-file` is left out.
 
 On Windows the `.msi` asks for the installation folder, the endpoint, and the self-update consent.
 The endpoint field is prefilled with `wss://127.0.0.1:4320/v1/opamp` in the interactive install
@@ -926,8 +960,8 @@ transports, to its Server's own origin and to no other host.
 
 #### Enrolment: the first certificate
 
-A fresh host is given a bootstrap certificate and its key. The Server issues the pair on an
-operator's request (see [the Server](server.md#bootstrap-certificates-issued-by-the-server)), from
+A fresh host is given a bootstrap certificate and its key, as two PEM files or as one
+`bootstrap.p12` under a password. The Server issues them on an operator's request (see [the Server](server.md#bootstrap-certificates-issued-by-the-server)), from
 the CA it names in `[enrolment] bootstrap_ca_file`. The [questionnaire](#the-questionnaire---interactive-and-service-config)
 enrols with the pair where it lies before the service is registered, and copies neither file; a
 file written by hand names the pair as `cert_file` and `key_file`, and the service enrols when it

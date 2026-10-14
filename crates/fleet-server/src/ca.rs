@@ -534,6 +534,7 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         subject: &[(crate::bootstrap::Attribute, String)],
         now_ms: u64,
         not_after_ms: u64,
+        password: Option<&str>,
     ) -> Result<crate::bootstrap::Pair, String> {
         use crate::bootstrap::{Attribute, Pair};
         let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
@@ -560,6 +561,18 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         let (_, parsed) = X509Certificate::from_der(certificate.der())
             .map_err(|e| format!("the bootstrap certificate does not parse: {e}"))?;
         let facts = facts(certificate.der())?;
+        // With a password the key leaves only sealed with its certificate (ADR-0029 clause 3).
+        let (private_key_pem, pkcs12) = match password {
+            Some(password) => (
+                None,
+                Some(fleet_core::pkcs12::file::seal(
+                    certificate.der(),
+                    &key.serialize_der(),
+                    password,
+                )?),
+            ),
+            None => (Some(key.serialize_pem()), None),
+        };
         Ok(Pair {
             serial: facts.id.serial.clone(),
             id: facts.id,
@@ -570,7 +583,8 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
                 .saturating_mul(1000),
             not_after_ms: facts.not_after_ms,
             certificate_pem: certificate.pem(),
-            private_key_pem: key.serialize_pem(),
+            private_key_pem,
+            pkcs12,
         })
     }
 }
@@ -1144,6 +1158,7 @@ mod tests {
                 ],
                 now,
                 now + 86_400_000,
+                None,
             )
             .expect("signed");
         let der = opamp::tls::certificates(pair.certificate_pem.as_bytes()).expect("pem");
@@ -1163,10 +1178,62 @@ mod tests {
             cert.validity().not_after.timestamp() * 1000,
             (now + 86_400_000) as i64
         );
-        let key = KeyPair::from_pem(&pair.private_key_pem).expect("key");
+        let key = KeyPair::from_pem(pair.private_key_pem.as_deref().expect("PEM")).expect("key");
         assert_eq!(
             cert.public_key().raw,
             key.subject_public_key_info().as_slice()
         );
+        assert!(pair.pkcs12.is_none(), "no file without a password");
+    }
+
+    /// With a password the key is not handed back in PEM: it is in a PKCS#12 file with its
+    /// certificate, which opens under that password to exactly the two (ADR-0029 clause 3).
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_password_seals_the_key_with_its_certificate() {
+        use crate::bootstrap::{Attribute, BootstrapSigner as _};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (cert_pem, key_pem) = ca();
+        let signer =
+            BootstrapCa::from_config(&enrolment_with(dir.path(), &cert_pem, &key_pem), None)
+                .expect("loads")
+                .expect("a key");
+        let now = 1_800_000_000_000;
+        let pair = signer
+            .sign(
+                &[(Attribute::CommonName, "fleet bootstrap".to_string())],
+                now,
+                now + 86_400_000,
+                Some("twelve chars"),
+            )
+            .expect("signed");
+        assert!(pair.private_key_pem.is_none(), "no PEM key");
+        let opened = fleet_core::pkcs12::file::open(&pair.pkcs12.expect("a file"), "twelve chars")
+            .expect("opens");
+        let der = opamp::tls::certificates(pair.certificate_pem.as_bytes()).expect("pem");
+        assert_eq!(
+            opened.certificate_der,
+            der[0].as_ref(),
+            "the certificate signed"
+        );
+        assert!(fleet_core::pkcs12::file::open(
+            &opened_file_again(&signer, now),
+            "wrong password!"
+        )
+        .is_err());
+    }
+
+    fn opened_file_again(signer: &BootstrapCa, now: u64) -> Vec<u8> {
+        use crate::bootstrap::{Attribute, BootstrapSigner as _};
+        signer
+            .sign(
+                &[(Attribute::CommonName, "fleet bootstrap".to_string())],
+                now,
+                now + 86_400_000,
+                Some("twelve chars"),
+            )
+            .expect("signed")
+            .pkcs12
+            .expect("a file")
     }
 }

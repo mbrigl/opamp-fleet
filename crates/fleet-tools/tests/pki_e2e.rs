@@ -100,7 +100,13 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
         .issue(&fleet_server::bootstrap::IssueRequest::default())
         .expect("a bootstrap pair");
     std::fs::write(offline_dir.join("bootstrap.pem"), &pair.certificate_pem).expect("write");
-    std::fs::write(offline_dir.join("bootstrap-key.pem"), &pair.private_key_pem).expect("write");
+    std::fs::write(
+        offline_dir.join("bootstrap-key.pem"),
+        pair.private_key_pem
+            .as_deref()
+            .expect("issued without a password"),
+    )
+    .expect("write");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("state")

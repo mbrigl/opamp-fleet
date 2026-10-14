@@ -2,8 +2,11 @@
 //!
 //! An operator asks for one with a subject of their choosing — a customer, a site, a batch — and
 //! is handed the certificate and its private key once. The Server keeps the certificate's facts,
-//! never its key, so it can list what is valid and an operator can revoke one by its serial
-//! (ADR-0021 clause 34). A bootstrap certificate opens nothing on its own: it needs an open
+//! never its key in the clear, so it can list what is valid and an operator can revoke one by its
+//! serial (ADR-0021 clause 34). Asked with a password, the key never leaves in PEM: the Server
+//! seals it with its certificate into a PKCS#12 file under that password, keeps the file and
+//! hands it out on request until the certificate ends or is revoked; the password it keeps
+//! nowhere (ADR-0029). A bootstrap certificate opens nothing on its own: it needs an open
 //! enrolment window and an operator's approval (ADR-0021 clauses 20, 21).
 //!
 //! The signing is the [`BootstrapSigner`] port, the bootstrap CA in [`crate::ca`] its adapter; the
@@ -95,10 +98,25 @@ pub struct IssueRequest {
     /// 1 to 90; 10 when absent.
     #[serde(default)]
     pub validity_days: Option<u32>,
+    /// The password of the PKCS#12 file to make instead of handing out the key (ADR-0029).
+    #[serde(default)]
+    pub password: Option<Password>,
 }
 
-/// A certificate the signer made, with the key that belongs to it.
-#[derive(Clone, Debug)]
+/// A password, which no `Debug` and no log line shows (ADR-0029 clause 2).
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct Password(pub String);
+
+impl std::fmt::Debug for Password {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Password(..)")
+    }
+}
+
+/// A certificate the signer made, with the key that belongs to it — in PEM, or sealed with the
+/// certificate into a PKCS#12 file under the password the request named.
+#[derive(Clone)]
 pub struct Pair {
     pub id: CertId,
     /// The serial as the certificate carries it, hex.
@@ -110,7 +128,20 @@ pub struct Pair {
     pub not_before_ms: u64,
     pub not_after_ms: u64,
     pub certificate_pem: String,
-    pub private_key_pem: String,
+    /// The key, when no password was named.
+    pub private_key_pem: Option<String>,
+    /// The PKCS#12 file, when a password was named (ADR-0029 clause 3).
+    pub pkcs12: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Pair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pair")
+            .field("serial", &self.serial)
+            .field("subject", &self.subject)
+            .field("pkcs12", &self.pkcs12.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The port that signs a bootstrap certificate: the bootstrap CA with its key.
@@ -127,19 +158,23 @@ pub trait BootstrapSigner: Send + Sync {
     fn ca_key_fingerprint(&self) -> String;
 
     /// Makes a fresh key and signs a client-authentication leaf for it, valid from `now_ms`
-    /// less the allowance for clocks that disagree until `not_after_ms`.
+    /// less the allowance for clocks that disagree until `not_after_ms`. With a `password` the key
+    /// is sealed with the certificate into a PKCS#12 file and not handed back in PEM (ADR-0029).
     ///
     /// # Errors
-    /// Returns an error when no key can be made or the certificate cannot be signed.
+    /// Returns an error when no key can be made, the certificate cannot be signed, or the file
+    /// cannot be written.
     fn sign(
         &self,
         subject: &[(Attribute, String)],
         now_ms: u64,
         not_after_ms: u64,
+        password: Option<&str>,
     ) -> Result<Pair, String>;
 }
 
-/// What the record keeps of a bootstrap certificate — never its key (ADR-0028 clause 24).
+/// What the record keeps of a bootstrap certificate — never its key in the clear (ADR-0028
+/// clause 24, ADR-0029 clause 4).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Entry {
     pub id: CertId,
@@ -151,6 +186,9 @@ pub struct Entry {
     /// The issuing CA's key fingerprint: an entry of a CA since replaced is forgotten.
     #[serde(default)]
     pub ca_key: String,
+    /// Whether the store keeps its PKCS#12 file, for download (ADR-0029 clause 4).
+    #[serde(default)]
+    pub p12: bool,
 }
 
 /// The port the record persists through: one document per certificate.
@@ -167,11 +205,29 @@ pub trait BootstrapStore: Send + Sync {
     /// Returns an error when it cannot be written.
     fn put(&self, entry: &Entry) -> Result<(), String>;
 
-    /// Forgets one entry.
+    /// Forgets one entry, and its PKCS#12 file with it.
     ///
     /// # Errors
     /// Returns an error when it cannot be removed.
     fn remove(&self, serial: &str) -> Result<(), String>;
+
+    /// Keeps the PKCS#12 file of one entry, owner-only.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be written.
+    fn put_p12(&self, serial: &str, file: &[u8]) -> Result<(), String>;
+
+    /// The PKCS#12 file of one entry, `None` when there is none.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be read.
+    fn p12(&self, serial: &str) -> Result<Option<Vec<u8>>, String>;
+
+    /// Forgets the PKCS#12 file of one entry, keeping the entry.
+    ///
+    /// # Errors
+    /// Returns an error when it cannot be removed.
+    fn remove_p12(&self, serial: &str) -> Result<(), String>;
 }
 
 /// Why a bootstrap certificate was not issued.
@@ -186,6 +242,19 @@ pub enum IssueError {
     /// The bootstrap CA has ended; what it signs now would be dead on arrival — `409`.
     CaEnded,
     /// The record or the signer failed — `500`.
+    Failed(String),
+}
+
+/// Why a bootstrap certificate's entry was not deleted (ADR-0029 clause 15).
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeleteError {
+    /// No certificate on record under that serial — `404`.
+    NotFound,
+    /// The certificate is not revoked — `409`.
+    NotRevoked,
+    /// The audit record cannot be written — `503`.
+    Unrecorded,
+    /// The store failed — `500`.
     Failed(String),
 }
 
@@ -255,20 +324,27 @@ impl BootstrapCertificates {
             .subject
             .attributes(&signer.leaf_common_name())
             .map_err(IssueError::Invalid)?;
-        let mut entries = self.entries.lock().expect("bootstrap record lock");
-        self.prune(&mut entries).map_err(IssueError::Failed)?;
-        if entries.len() >= MAX_VALID {
-            return Err(IssueError::Full);
+        let password = request.password.as_ref().map(|p| p.0.as_str());
+        if let Some(password) = password {
+            fleet_core::pkcs12::check_password(password).map_err(IssueError::Invalid)?;
         }
+        self.room()?;
         let now = self.clock.now_ms();
         if signer.ca_not_after_ms() <= now {
             return Err(IssueError::CaEnded);
         }
         // Never past the CA (ADR-0028 clause 23).
         let not_after = (now + u64::from(days) * DAY_MS).min(signer.ca_not_after_ms());
+        // Outside the record's lock: sealing a PKCS#12 file derives three keys of 600 000
+        // iterations, and the list and the download must not wait for it (ADR-0029).
         let pair = signer
-            .sign(&attributes, now, not_after)
+            .sign(&attributes, now, not_after, password)
             .map_err(IssueError::Failed)?;
+        let mut entries = self.entries.lock().expect("bootstrap record lock");
+        self.prune(&mut entries).map_err(IssueError::Failed)?;
+        if entries.len() >= MAX_VALID {
+            return Err(IssueError::Full);
+        }
         let entry = Entry {
             id: pair.id.clone(),
             serial: pair.serial.clone(),
@@ -277,10 +353,31 @@ impl BootstrapCertificates {
             issued_ms: now,
             not_after_ms: pair.not_after_ms,
             ca_key: signer.ca_key_fingerprint(),
+            p12: pair.pkcs12.is_some(),
         };
-        self.store.put(&entry).map_err(IssueError::Failed)?;
+        // The file before the entry that says it is there (ADR-0029 clause 4), and gone again
+        // when the entry cannot be written: no file is kept that no entry ends.
+        if let Some(file) = &pair.pkcs12 {
+            self.store
+                .put_p12(&entry.serial, file)
+                .map_err(IssueError::Failed)?;
+        }
+        if let Err(e) = self.store.put(&entry) {
+            let _ = self.store.remove_p12(&entry.serial);
+            return Err(IssueError::Failed(e));
+        }
         entries.insert(entry.serial.clone(), entry);
         Ok(pair)
+    }
+
+    /// Whether the record has room for one more valid certificate.
+    fn room(&self) -> Result<(), IssueError> {
+        let mut entries = self.entries.lock().expect("bootstrap record lock");
+        self.prune(&mut entries).map_err(IssueError::Failed)?;
+        if entries.len() >= MAX_VALID {
+            return Err(IssueError::Full);
+        }
+        Ok(())
     }
 
     /// The valid bootstrap certificates on record, oldest first.
@@ -298,6 +395,67 @@ impl BootstrapCertificates {
             .collect();
         list.sort_by(|a, b| a.issued_ms.cmp(&b.issued_ms).then(a.serial.cmp(&b.serial)));
         list
+    }
+
+    /// The entry of a valid certificate and its PKCS#12 file, `None` when the certificate is not
+    /// on record, has ended, or has no file (ADR-0029 clause 4). Whether it is revoked is the
+    /// caller's to tell, from the revocation list.
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be read.
+    pub fn p12(&self, serial: &str) -> Result<Option<(Entry, Vec<u8>)>, String> {
+        let mut entries = self.entries.lock().expect("bootstrap record lock");
+        self.prune(&mut entries)?;
+        let Some(entry) = entries.get(serial).filter(|entry| entry.p12) else {
+            return Ok(None);
+        };
+        Ok(self.store.p12(serial)?.map(|file| (entry.clone(), file)))
+    }
+
+    /// Deletes a revoked certificate's entry and any PKCS#12 file of it (ADR-0029 clause 15).
+    /// `revoked` tells whether the entry is revoked, and `recorded` puts the deletion on the audit
+    /// record; both run under the record's lock with the removal, so a second request, or a
+    /// revocation lifted meanwhile, cannot slip between the check and the deletion.
+    ///
+    /// # Errors
+    /// See [`DeleteError`]; on every error the entry is kept.
+    pub fn delete(
+        &self,
+        serial: &str,
+        revoked: impl FnOnce(&Entry) -> bool,
+        recorded: impl FnOnce(&Entry) -> bool,
+    ) -> Result<Entry, DeleteError> {
+        let mut entries = self.entries.lock().expect("bootstrap record lock");
+        self.prune(&mut entries).map_err(DeleteError::Failed)?;
+        let entry = entries.get(serial).cloned().ok_or(DeleteError::NotFound)?;
+        if !revoked(&entry) {
+            return Err(DeleteError::NotRevoked);
+        }
+        if !recorded(&entry) {
+            return Err(DeleteError::Unrecorded);
+        }
+        self.store.remove(serial).map_err(DeleteError::Failed)?;
+        entries.remove(serial);
+        Ok(entry)
+    }
+
+    /// Forgets the PKCS#12 file of a certificate, which a revocation does before it is answered
+    /// (ADR-0029 clause 4). A certificate without one is left as it is.
+    ///
+    /// # Errors
+    /// Returns an error when the file or the entry cannot be written.
+    pub fn forget_p12(&self, serial: &str) -> Result<(), String> {
+        let mut entries = self.entries.lock().expect("bootstrap record lock");
+        let Some(entry) = entries.get_mut(serial).filter(|entry| entry.p12) else {
+            return Ok(());
+        };
+        // The entry first, so it never names a file that is gone — and a file left by a failed
+        // removal is never handed out, since the entry no longer says it is there.
+        let mut forgotten = entry.clone();
+        forgotten.p12 = false;
+        self.store.put(&forgotten)?;
+        *entry = forgotten;
+        self.store.remove_p12(serial)
     }
 
     /// Forgets every certificate that has ended (ADR-0028 clause 24).
@@ -329,12 +487,19 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MemoryStore(Mutex<BTreeMap<String, Entry>>);
+    struct MemoryStore(
+        Mutex<BTreeMap<String, Entry>>,
+        Mutex<BTreeMap<String, Vec<u8>>>,
+        std::sync::atomic::AtomicBool,
+    );
     impl BootstrapStore for Arc<MemoryStore> {
         fn load(&self) -> Result<Vec<Entry>, String> {
             Ok(self.0.lock().unwrap().values().cloned().collect())
         }
         fn put(&self, entry: &Entry) -> Result<(), String> {
+            if self.2.load(Ordering::SeqCst) {
+                return Err("the disk is full".to_string());
+            }
             self.0
                 .lock()
                 .unwrap()
@@ -343,6 +508,21 @@ mod tests {
         }
         fn remove(&self, serial: &str) -> Result<(), String> {
             self.0.lock().unwrap().remove(serial);
+            self.1.lock().unwrap().remove(serial);
+            Ok(())
+        }
+        fn put_p12(&self, serial: &str, file: &[u8]) -> Result<(), String> {
+            self.1
+                .lock()
+                .unwrap()
+                .insert(serial.to_string(), file.to_vec());
+            Ok(())
+        }
+        fn p12(&self, serial: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.1.lock().unwrap().get(serial).cloned())
+        }
+        fn remove_p12(&self, serial: &str) -> Result<(), String> {
+            self.1.lock().unwrap().remove(serial);
             Ok(())
         }
     }
@@ -367,6 +547,7 @@ mod tests {
             subject: &[(Attribute, String)],
             now_ms: u64,
             not_after_ms: u64,
+            password: Option<&str>,
         ) -> Result<Pair, String> {
             let serial = format!("{:x}", self.serial.fetch_add(1, Ordering::SeqCst) + 1);
             Ok(Pair {
@@ -381,7 +562,8 @@ mod tests {
                 not_before_ms: now_ms,
                 not_after_ms,
                 certificate_pem: String::new(),
-                private_key_pem: String::new(),
+                private_key_pem: password.is_none().then(String::new),
+                pkcs12: password.map(|p| format!("sealed under {p}").into_bytes()),
             })
         }
     }
@@ -531,5 +713,112 @@ mod tests {
             record.issue(&IssueRequest::default()),
             Err(IssueError::NoKey)
         ));
+    }
+
+    /// With a password the Server keeps the file, not the key, and hands it out until the
+    /// certificate ends or a revocation forgets it; a password out of bounds issues nothing.
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_password_keeps_a_pkcs12_file_until_the_certificate_ends_or_is_forgotten() {
+        let (record, clock, store) = fixture(u64::MAX);
+        let short = record.issue(&request(serde_json::json!({"password": "eleven char"})));
+        assert!(matches!(short, Err(IssueError::Invalid(_))));
+        assert!(record.list().is_empty(), "nothing issued");
+
+        let plain = record.issue(&IssueRequest::default()).expect("issued");
+        assert!(plain.private_key_pem.is_some() && plain.pkcs12.is_none());
+        assert_eq!(
+            record.p12(&plain.serial).expect("read"),
+            None,
+            "no file without a password"
+        );
+
+        let sealed = record
+            .issue(&request(
+                serde_json::json!({"validity_days": 1, "password": "twelve chars"}),
+            ))
+            .expect("issued");
+        assert!(
+            sealed.private_key_pem.is_none(),
+            "no PEM key with a password"
+        );
+        let (entry, file) = record.p12(&sealed.serial).expect("read").expect("kept");
+        assert!(entry.p12);
+        assert_eq!(file, b"sealed under twelve chars");
+        assert!(
+            store.0.lock().unwrap()[&sealed.serial].p12,
+            "the entry says so"
+        );
+
+        let other = record
+            .issue(&request(serde_json::json!({"password": "twelve chars"})))
+            .expect("issued");
+        record.forget_p12(&other.serial).expect("forgotten");
+        assert_eq!(record.p12(&other.serial).expect("read"), None);
+        assert!(
+            store.1.lock().unwrap().get(&other.serial).is_none(),
+            "the file is gone"
+        );
+        assert!(!store.0.lock().unwrap()[&other.serial].p12);
+
+        clock.0.store(1_000 + 2 * DAY_MS, Ordering::SeqCst);
+        assert_eq!(record.p12(&sealed.serial).expect("read"), None, "ended");
+        assert!(
+            store.1.lock().unwrap().get(&sealed.serial).is_none(),
+            "removed with its entry"
+        );
+    }
+
+    /// Verifies: ADR-0029
+    #[test]
+    fn no_debug_shows_a_password_or_a_key() {
+        let request = request(serde_json::json!({"password": "do not show me"}));
+        assert!(!format!("{request:?}").contains("do not show me"));
+        let (record, _, _) = fixture(u64::MAX);
+        let pair = record.issue(&IssueRequest::default()).expect("issued");
+        assert!(!format!("{pair:?}").contains("private_key_pem"));
+    }
+
+    /// An entry that cannot be written leaves no PKCS#12 file behind, which nothing would end.
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_failed_entry_keeps_no_pkcs12_file() {
+        let (record, _, store) = fixture(u64::MAX);
+        store.2.store(true, Ordering::SeqCst);
+        let failed = record.issue(&request(serde_json::json!({"password": "twelve chars"})));
+        assert!(matches!(failed, Err(IssueError::Failed(_))));
+        assert!(
+            store.1.lock().unwrap().is_empty(),
+            "no file without its entry"
+        );
+    }
+
+    /// Only a revoked entry is deleted, and only with its deletion on the record; it goes from the
+    /// list and the store with its PKCS#12 file, and a second deletion finds nothing.
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_revoked_entry_is_deleted_with_its_pkcs12_file_once() {
+        let (record, _, store) = fixture(u64::MAX);
+        let sealed = record
+            .issue(&request(serde_json::json!({"password": "twelve chars"})))
+            .expect("issued");
+        let serial = sealed.serial.as_str();
+        assert_eq!(
+            record.delete(serial, |_| false, |_| true),
+            Err(DeleteError::NotRevoked)
+        );
+        assert_eq!(
+            record.delete(serial, |_| true, |_| false),
+            Err(DeleteError::Unrecorded)
+        );
+        assert_eq!(record.list().len(), 1, "kept on either refusal");
+        let deleted = record.delete(serial, |_| true, |_| true).expect("deleted");
+        assert_eq!(deleted.serial, sealed.serial);
+        assert!(record.list().is_empty());
+        assert!(store.0.lock().unwrap().is_empty() && store.1.lock().unwrap().is_empty());
+        assert_eq!(
+            record.delete(serial, |_| true, |_| true),
+            Err(DeleteError::NotFound)
+        );
     }
 }

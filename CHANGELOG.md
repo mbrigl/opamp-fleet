@@ -15,6 +15,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ## [0.5.3]
 
+### Added
+
+- **A bootstrap certificate as one file under a password**
+  ([ADR-0029](docs/adr/0029-a-bootstrap-certificate-as-a-password-protected-pkcs12-file-the-server-keeps.md)).
+  Issued with a `password` — in the Enrolments tab, typed twice — the Server hands out no PEM key:
+  it keeps `bootstrap.p12`, the certificate and its key encrypted under that password, and offers it
+  for download (`GET /api/v1/bootstrap-certificates/{serial}/p12`, **Save bootstrap.p12**) until the
+  certificate ends or is revoked. The password is kept nowhere. Each download is audited as
+  `enrolment.bootstrap_p12_downloaded`. Without a password nothing changes.
+- **The Client enrols with a `bootstrap.p12`.** `service install` finds it beside its program, and
+  the questionnaire takes a `.p12` path, asking its password with input hidden. Without a terminal,
+  `--bootstrap-password-file <file>` gives the password; an install that would take a
+  `bootstrap.p12` without it stops before writing anything.
+- **`service install --fleet-files <dir>`** looks for the fleet's files in that directory instead of
+  beside the program — what a host installed from a `.deb` or `.rpm` needs to enrol from a script:
+  install the package, then run `service install --endpoint <URL> --fleet-files <dir>` and approve
+  the request.
+
+- **A revoked bootstrap certificate can be deleted from the list**
+  ([ADR-0029](docs/adr/0029-a-bootstrap-certificate-as-a-password-protected-pkcs12-file-the-server-keeps.md) clause 15):
+  **Delete** in its row of the Enrolments tab, or
+  `DELETE /api/v1/bootstrap-certificates/{serial}`. The entry and any `bootstrap.p12` go; the
+  revocation stays, so the certificate is still refused. A valid certificate is not deleted.
+
 ### Removed
 
 - **The Supervisor kinds `icinga2`, `glpi` and `telegraf`** are no longer in the Client, and

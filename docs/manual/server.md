@@ -398,29 +398,78 @@ $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
 certificate, keeps the serial, subject, key fingerprint and end, and forgets the key. A lost key is
 not fetched again; issue another certificate. The answer carries `Cache-Control: no-store`.
 
+#### With a password: `bootstrap.p12`
+
+Name a `password`, 12 to 128 characters without a control character, and the key is in no answer
+at all. The Server puts the certificate and its key into one PKCS#12 file encrypted under that
+password, keeps the file, and hands it out as often as it is asked, until the certificate ends or
+is revoked. The answer carries no `private_key_pem`:
+
+```console
+$ cat request.json        # written with an editor, so the password stays out of the shell's history
+{"subject": {"organization": "Example Customer"}, "password": "correct horse battery staple"}
+$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' -d @request.json \
+       https://127.0.0.1:4321/api/v1/bootstrap-certificates
+{"serial":"6723…","subject":"O=Example Customer, CN=OpAMP Fleet Bootstrap Certificate",
+ "not_before_ms":…,"not_after_ms":…,"certificate_pem":"-----BEGIN CERTIFICATE-----…"}
+$ curl --cacert ca.pem -o bootstrap.p12 \
+       https://127.0.0.1:4321/api/v1/bootstrap-certificates/6723…/p12
+```
+
+The file holds the certificate and its key and nothing else, not the server CA: a host gets
+`server-ca.pem` from you as before. It is encrypted with AES-256 under a key derived from the
+password (PBKDF2-HMAC-SHA-256, 600 000 iterations) and carries an HMAC-SHA-256 MAC, so OpenSSL 3
+opens it with its defaults (`openssl pkcs12 -in bootstrap.p12 -info`). The Server keeps it beside
+the certificate's record under `config_dir/bootstrap-certificates/`, readable by its own account
+only. **The password is kept nowhere** — not in the file's directory, not in a log, not in the
+audit — so give it to the host by another way than the file. Every download is recorded in the
+audit as `enrolment.bootstrap_p12_downloaded` with the serial; a download is answered `503` while
+the audit record cannot be written, and `404` for a certificate with no file, a revoked one, an
+ended one or an unknown serial. A revocation removes the file before it is answered; lifting the
+revocation does not bring it back.
+
 The subject labels the certificate and authorizes nothing. It shows on every enrolment request
 the certificate carries, as `bootstrap_subject` with its `bootstrap_serial`, so the approver sees
-whose request it is. Every issuance is recorded in the audit as `enrolment.bootstrap_issued`.
+whose request it is. Every issuance is recorded in the audit as `enrolment.bootstrap_issued`,
+with `p12` saying whether a file was made.
 
 The UI's **Enrolments** tab does the same: it issues a certificate for the customer and site you
-type and lists the valid ones with a **Revoke** press. The row of each certificate issued in the
-open page offers **Save bootstrap.pem** and **Save bootstrap-key.pem**. The page holds those keys
-only until it is reloaded or closed, and asks before either: save both files first. A
-certificate issued earlier or elsewhere offers no pair.
+type and lists the valid ones with a **Revoke** press. Without a password, the row of each
+certificate issued in the open page offers **Save bootstrap.pem** and **Save bootstrap-key.pem**.
+The page holds those keys only until it is reloaded or closed, and asks before either: save both
+files first. A certificate issued earlier or elsewhere offers no pair. With a password, typed twice,
+the row offers **Save bootstrap.p12** in this page and in every later one, until the certificate
+ends or is revoked.
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/bootstrap-certificates
 [{"serial":"6723…","subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
-  "key_fingerprint":"…","issued_ms":…,"not_after_ms":…,"revoked":false}]
+  "key_fingerprint":"…","issued_ms":…,"not_after_ms":…,"revoked":false,"p12":false}]
 ```
 
 The list holds every valid bootstrap certificate the Server issued, oldest first; an ended one is
 dropped, and so is every one of a bootstrap CA since replaced. Revoke one by its serial with the authority `bootstrap`
-([Revocation](#revocation-withdrawing-a-certificate)). The Server holds at most 10 000 valid ones,
-and answers a request beyond that `409`. It answers `409` too while it holds no
+([Revocation](#revocation-withdrawing-a-certificate)).
+
+A revoked one stays in the list, marked revoked, until it ends. To drop it sooner, delete it —
+**Delete** in its row, or:
+
+```console
+$ curl --cacert ca.pem -X DELETE https://127.0.0.1:4321/api/v1/bootstrap-certificates/6723…
+```
+
+Deleting removes the entry and any `bootstrap.p12` of it, answered `204`, and is recorded in the
+audit as `enrolment.bootstrap_deleted`. **The revocation stays**: the certificate is still refused
+for as long as it would be valid, and `GET /api/v1/revocations` still lists it. A request that
+carries it shows *not issued here*. Only a revoked certificate is deleted; a valid one is answered
+`409` — revoke it first — and an unknown serial `404`; while the audit record cannot be written,
+nothing is deleted and the answer is `503`.
+
+When issuing, the Server holds at most 10 000 valid ones, revoked ones included until they end or
+are deleted, and answers a request beyond that `409`. It answers `409` too while it holds no
 `bootstrap_ca_key_file` or once the bootstrap CA has ended, `503` while the audit record cannot be
 written, since no key is handed out unrecorded, and `400` for a subject attribute it does not know, a value out of bounds,
-or `validity_days` outside 1 to 90.
+`validity_days` outside 1 to 90, or a password outside 12 to 128 characters.
 
 **The window is closed by default.** Open it for as long as you are enrolling hosts, from 1 to
 86400 seconds:

@@ -67,12 +67,20 @@ pub fn client_tls_for(
                 key_pem: key_file(&key)?,
             })
         }
-        None => match config.client_identity() {
-            Some((cert, key)) => Some(Identity {
-                cert_pem: certificates_file(&cert)?,
-                key_pem: key_file(&key)?,
+        // An identity opened from a `bootstrap.p12` stands in for the configured one until the
+        // Server's certificate is stored (ADR-0029 clause 7); the issued one outranks both.
+        None => match (&config.bootstrap_identity, config.is_enrolled()) {
+            (Some(bootstrap), false) => Some(Identity {
+                cert_pem: bootstrap.cert_pem.clone(),
+                key_pem: bootstrap.key_pem.clone(),
             }),
-            None => None,
+            _ => match config.client_identity() {
+                Some((cert, key)) => Some(Identity {
+                    cert_pem: certificates_file(&cert)?,
+                    key_pem: key_file(&key)?,
+                }),
+                None => None,
+            },
         },
     };
     Ok(ClientTls { ca_pem, identity })
@@ -105,6 +113,133 @@ pub(crate) fn key_file(path: &Path) -> Result<Vec<u8>, String> {
     Ok(pem)
 }
 
+/// The identity in the PKCS#12 file at `path`, under `password`, as PEM in memory (ADR-0029
+/// clause 7). A file over [`fleet_core::pkcs12::MAX_FILE_BYTES`] is refused before it is read.
+///
+/// # Errors
+/// [`OpenError::WrongPassword`](fleet_core::pkcs12::file::OpenError) when the password does not
+/// open it, and `Invalid` naming the file for everything else.
+pub fn pkcs12_identity(
+    path: &Path,
+    password: &str,
+) -> Result<crate::config::BootstrapIdentity, fleet_core::pkcs12::file::OpenError> {
+    use fleet_core::pkcs12::file::OpenError;
+    use std::io::Read as _;
+    let invalid = |why: String| OpenError::Invalid(format!("{}: {why}", path.display()));
+    let limit = fleet_core::pkcs12::MAX_FILE_BYTES;
+    // Before it is read, and only a regular file, so a pipe cannot hold the install.
+    let meta = std::fs::metadata(path).map_err(|e| invalid(format!("cannot read it: {e}")))?;
+    if !meta.is_file() {
+        return Err(invalid("not a regular file".to_string()));
+    }
+    if meta.len() > limit {
+        return Err(invalid(format!("larger than {limit} bytes")));
+    }
+    let file = std::fs::File::open(path).map_err(|e| invalid(format!("cannot read it: {e}")))?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| invalid(format!("cannot read it: {e}")))?;
+    let opened = fleet_core::pkcs12::file::open(&bytes, password).map_err(|e| match e {
+        OpenError::WrongPassword => OpenError::WrongPassword,
+        OpenError::Invalid(why) => invalid(why),
+    })?;
+    Ok(crate::config::BootstrapIdentity {
+        cert_pem: pem_block("CERTIFICATE", &opened.certificate_der).into_bytes(),
+        key_pem: pem_block("PRIVATE KEY", &opened.private_key_der).into_bytes(),
+    })
+}
+
+/// `der` as one PEM block.
+fn pem_block(label: &str, der: &[u8]) -> String {
+    use base64::Engine as _;
+    let body = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = format!("-----BEGIN {label}-----\n");
+    for line in body.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+        pem.push('\n');
+    }
+    pem.push_str(&format!("-----END {label}-----\n"));
+    pem
+}
+
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `bootstrap.p12` opens to PEM in memory and stands in for the configured identity until
+    /// the Server's certificate is stored; a file over the bound is refused unread (ADR-0029
+    /// clause 7).
+    /// Verifies: ADR-0029
+    #[test]
+    fn an_opened_bootstrap_p12_is_presented_until_the_client_is_enrolled() {
+        use fleet_core::pkcs12::file::OpenError;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = rcgen::CertificateParams::new(vec!["bootstrap".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert");
+        let p12 = dir.path().join("bootstrap.p12");
+        std::fs::write(
+            &p12,
+            fleet_core::pkcs12::file::seal(cert.der(), &key.serialize_der(), "twelve chars")
+                .expect("sealed"),
+        )
+        .expect("write");
+        assert_eq!(
+            pkcs12_identity(&p12, "not the password"),
+            Err(OpenError::WrongPassword)
+        );
+        let identity = pkcs12_identity(&p12, "twelve chars").expect("opens");
+        assert_eq!(
+            opamp::tls::certificates(&identity.cert_pem).expect("pem")[0].as_ref(),
+            cert.der().as_ref()
+        );
+
+        let config = ClientConfig {
+            state_dir: dir.path().join("state"),
+            bootstrap_identity: Some(identity.clone()),
+            ..ClientConfig::default()
+        };
+        std::fs::create_dir_all(&config.state_dir).expect("state");
+        assert_eq!(
+            client_tls(&config).expect("tls").identity,
+            Some(Identity {
+                cert_pem: identity.cert_pem.clone(),
+                key_pem: identity.key_pem.clone(),
+            })
+        );
+
+        let issued = rcgen::KeyPair::generate().expect("key");
+        let issued_cert = rcgen::CertificateParams::new(vec!["issued".to_string()])
+            .expect("params")
+            .self_signed(&issued)
+            .expect("cert");
+        std::fs::write(config.state_dir.join(ISSUED_CERT_FILE), issued_cert.pem()).expect("w");
+        std::fs::write(
+            config.state_dir.join(ISSUED_KEY_FILE),
+            issued.serialize_pem(),
+        )
+        .expect("w");
+        let presented = client_tls(&config).expect("tls").identity.expect("one");
+        assert_eq!(
+            presented.cert_pem,
+            issued_cert.pem().into_bytes(),
+            "the issued certificate outranks the bootstrap identity"
+        );
+
+        let large = dir.path().join("large.p12");
+        let file = std::fs::File::create(&large).expect("create");
+        file.set_len(fleet_core::pkcs12::MAX_FILE_BYTES + 1)
+            .expect("size");
+        assert!(matches!(
+            pkcs12_identity(&large, "twelve chars"),
+            Err(OpenError::Invalid(why)) if why.contains("larger than")
+        ));
+    }
 }

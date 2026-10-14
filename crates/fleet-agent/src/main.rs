@@ -180,12 +180,35 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         data_root.join(config_init::FILE_NAME)
     };
 
-    // The fleet's files the operator put beside this program, before it is staged anywhere else
-    // (ADR-0020 clause 1).
-    let beside = config_init::Beside::the_program();
+    // The fleet's files the operator put beside this program, before it is staged anywhere else,
+    // or in the directory `--fleet-files` names (ADR-0029 clause 6).
+    let beside = match &args.fleet_files {
+        Some(dir) => config_init::Beside::in_named_dir(&absolute(dir)?)?,
+        None => config_init::Beside::the_program(),
+    };
+    let password = args
+        .bootstrap_password_file
+        .as_deref()
+        .map(config_init::read_password_file)
+        .transpose()?;
+    // Not asked, the bootstrap identity found enrols a Client that holds no issued certificate,
+    // over TLS (ADR-0029 clause 10) — decided, and a `bootstrap.p12` opened, before anything is
+    // written, against the file this install is about to write or keep.
+    let unasked = if args.interactive {
+        None
+    } else {
+        // An absent file loads as the defaults; `--endpoint` then writes its endpoint, and an
+        // existing file is kept.
+        let mut about_to_run = ClientConfig::load(&config_path)?;
+        if let (false, Some(endpoint)) = (config_path.exists(), &args.endpoint) {
+            about_to_run.endpoint.clone_from(endpoint);
+        }
+        about_to_run.state_dir = about_to_run.service_state_dir(&data_root);
+        beside.unasked_enrolment(&about_to_run, password.as_deref())?
+    };
     let mut written = config_init::Written::default();
     if args.interactive {
-        written = ask(&config_path, &data_root, &beside)?;
+        written = ask(&config_path, &data_root, &beside, password.as_deref())?;
     } else if let Some(endpoint) = &args.endpoint {
         // The same file, from an answer given rather than asked for (ADR-0019): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with
@@ -222,17 +245,9 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
         windows_rights::restrict_data_root(level, &state_dir)?;
     }
-    // Not asked, the bootstrap pair beside the program enrols a Client that holds no issued
-    // certificate, over TLS (ADR-0020 clause 4).
-    if !args.interactive {
-        if let Some(pair) = beside.unasked_enrolment(&config) {
-            println!(
-                "enrolling with {} and {} from beside the program",
-                pair.cert.display(),
-                pair.key.display()
-            );
-            written.bootstrap = Some(pair);
-        }
+    if let Some(bootstrap) = unasked {
+        println!("enrolling with {}", bootstrap.describe());
+        written.bootstrap = Some(bootstrap);
     }
     // Before anything is staged or registered (ADR-0020 clause 5): an enrolment that is stopped
     // leaves the answered file and nothing else.
@@ -308,7 +323,12 @@ fn configure(config_path: &Path, config_named: bool, args: &ConfigArgs) -> Resul
         data_root.join(config_init::FILE_NAME)
     };
     // The installed copy runs from the layout, where no fleet files lie (ADR-0020, out of scope).
-    let written = ask(&config_path, &data_root, &config_init::Beside::default())?;
+    let written = ask(
+        &config_path,
+        &data_root,
+        &config_init::Beside::default(),
+        None,
+    )?;
 
     let mut config = ClientConfig::load(&config_path)?;
     let state_dir = config.service_state_dir(&data_root);
@@ -337,17 +357,24 @@ fn configure(config_path: &Path, config_named: bool, args: &ConfigArgs) -> Resul
 }
 
 /// The questionnaire against the file at `config_path`, offering what it holds and asking for the
-/// bootstrap pair only while the state directory under `data_root` holds no issued certificate
+/// bootstrap identity only while the state directory under `data_root` holds no issued certificate
 /// (ADR-0019 clauses 16, 17).
 fn ask(
     config_path: &Path,
     data_root: &Path,
     beside: &config_init::Beside,
+    password: Option<&str>,
 ) -> Result<config_init::Written, String> {
     let current = ClientConfig::load(config_path)?;
     let mut in_service = current.clone();
     in_service.state_dir = current.service_state_dir(data_root);
-    config_init::run(config_path, &current, in_service.is_enrolled(), beside)
+    config_init::run(
+        config_path,
+        &current,
+        in_service.is_enrolled(),
+        beside,
+        password,
+    )
 }
 
 /// Absolutize without requiring existence (`canonicalize` would fail for a config file that

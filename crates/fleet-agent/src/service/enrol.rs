@@ -1,5 +1,6 @@
 //! The questionnaire's enrolment (ADR-0019 clause 17): a host not yet enrolled is carried to its
-//! first certificate before its service is registered, with the bootstrap pair where it lies.
+//! first certificate before its service is registered, with the bootstrap pair where it lies, or
+//! the identity a `bootstrap.p12` opened to, in memory (ADR-0029).
 //!
 //! Nothing here is a second enrolment. It is the Client's own upstream connection (ADR-0021) —
 //! the same CSR, the same pending key, the same acceptance of the offered certificate into the
@@ -77,13 +78,20 @@ pub async fn enrol(
     bootstrap: Bootstrap,
     mut shutdown: Shutdown,
 ) -> Result<(), String> {
-    let tls = config.tls.get_or_insert(crate::config::TlsConfig {
-        ca_file: None,
-        cert_file: None,
-        key_file: None,
-    });
-    tls.cert_file = Some(bootstrap.cert);
-    tls.key_file = Some(bootstrap.key);
+    match bootstrap {
+        Bootstrap::Pair { cert, key } => {
+            let tls = config.tls.get_or_insert(crate::config::TlsConfig {
+                ca_file: None,
+                cert_file: None,
+                key_file: None,
+            });
+            tls.cert_file = Some(cert);
+            tls.key_file = Some(key);
+        }
+        // The decrypted key is never written: the connection reads it from memory (ADR-0029
+        // clause 7).
+        Bootstrap::Pkcs12 { identity, .. } => config.bootstrap_identity = Some(identity),
+    }
     // Read now, so a pair that is no certificate and key is named before anything connects.
     crate::tls::client_tls(&config)?;
 

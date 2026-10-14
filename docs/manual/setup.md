@@ -277,6 +277,14 @@ The answer is the only place the private key ever appears: the Server keeps the 
 serial, subject and end, never the key. Lost, it is not fetched again but issued anew. One pair
 may go to every host of that customer.
 
+**Or as one file under a password.** Type a password, twice, in the UI, or name `"password"` in
+the request, and the Server hands out no PEM key: it keeps `bootstrap.p12`, the certificate and its
+key encrypted under that password, which **Save bootstrap.p12** in the row — or
+`GET /api/v1/bootstrap-certificates/<serial>/p12` — downloads now or on any later day, until the
+certificate ends or is revoked. The Server keeps the password nowhere; give it to the host's
+installer by another way than the file
+([With a password](server.md#with-a-password-bootstrapp12)).
+
 Copy the three files to the host, with the key readable by root only, together with
 `package-signing-key.pub` from the offline directory. The simplest place is the directory you run
 the Client's program from: the install looks there first, offers what it finds as its answers, and
@@ -296,7 +304,7 @@ $ sudo opamp-fleet service install --interactive
 Server OpAMP endpoint [wss://127.0.0.1:4320/v1/opamp]: wss://fleet.example.com:4320/v1/opamp
 This Agent's name (service.instance.name) [Supervisor Agent]: host-01
 CA certificate of the Server — the CA that signed its certificate (PEM path): /etc/opamp/server-ca.pem
-Bootstrap certificate this Client enrols with (PEM path): /etc/opamp/bootstrap.pem
+Bootstrap certificate this Client enrols with (PEM, or a PKCS#12 .p12 path): /etc/opamp/bootstrap.pem
 Private key of the bootstrap certificate (PEM path): /etc/opamp/bootstrap-key.pem
 Package verification key (hex Ed25519 public key; empty takes no packages): 3b6a27bc…
 copied /var/lib/opamp-fleet/server-ca.pem
@@ -308,8 +316,11 @@ installed opamp-fleet
 ```
 
 With the files beside the program, each of the three path questions offers the file there, and
-Enter takes it. Without a terminal, `service install --endpoint <URL>` run from that directory takes
-the CA and the verification key, enrols with the bootstrap pair and waits for the same approval.
+Enter takes it. Answering a `bootstrap.p12` asks its password instead of a key, with input hidden.
+Without a terminal, `service install --endpoint <URL>` run from that directory — or naming it with
+`--fleet-files <dir>`, as a host installed from a package needs — takes the CA and the
+verification key, enrols with the bootstrap pair or `bootstrap.p12` (its password from
+`--bootstrap-password-file <file>`) and waits for the same approval.
 
 Approve the fingerprint it logs, as step 5 describes, and the install carries on. The bootstrap
 pair is used only for this request: it is not copied, and `/etc/opamp/bootstrap*.pem` can be

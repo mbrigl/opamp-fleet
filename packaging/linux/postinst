@@ -1,5 +1,5 @@
 #!/bin/sh
-# Post-install for the `.deb` and the `.rpm` alike (ADR-0019 clauses 36 and 37).
+# Post-install for the `.deb` and the `.rpm` alike (ADR-0019 clause 36, ADR-0029 clause 13).
 #
 # The package delivered `/usr/libexec/opamp-fleet/supervisor` and nothing else. The install itself —
 # the versioned layout, the `current` pointer, the systemd unit — belongs to the Client's own
@@ -64,11 +64,19 @@ certificate refuses to start. Two steps remain:
   opamp-fleet service install --interactive
   systemctl start opamp-fleet
 
-The first asks for the endpoint, the Server's CA, a bootstrap certificate and its key, and the
-package verification key, writes supervisor.toml, and enrols this host with the Server: open the
-enrolment window first and approve the request it waits for. `opamp-fleet service config` asks
-again later. To write the file yourself instead, give it at least the endpoint and the client
-identity, and the service enrols when it starts:
+The first asks for the endpoint, the Server's CA, a bootstrap certificate and its key (or a
+bootstrap.p12 and its password), and the package verification key, writes supervisor.toml, and
+enrols this host with the Server: open the enrolment window first and approve the request it waits
+for. `opamp-fleet service config` asks again later.
+
+Without a terminal, put the fleet's files in a directory and name it. A bootstrap.p12 also needs
+the file holding its password (--bootstrap-password-file). This waits for the same approval:
+
+  opamp-fleet service install --endpoint wss://<server>/v1/opamp \
+    --fleet-files /root/fleet --bootstrap-password-file /root/fleet/bootstrap.pass
+
+To write the file yourself instead, give it at least the endpoint and the client identity, and the
+service enrols when it starts:
 
   endpoint = "wss://<server>/v1/opamp"
   [tls]

@@ -17,6 +17,7 @@ libfuzzer-sys = "0.4"
 opamp = { path = "../crates/opamp", features = ["client", "server"] }
 fleet-agent = { path = "../crates/fleet-agent" }
 fleet-server = { path = "../crates/fleet-server" }
+fleet-core = { path = "../crates/fleet-core" }
 prost = "0.14"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 tempfile = "3"
@@ -67,6 +68,13 @@ bench = false
 [[bin]]
 name = "archive_tree"
 path = "fuzz_targets/archive_tree.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pkcs12"
+path = "fuzz_targets/pkcs12.rs"
 test = false
 doc = false
 bench = false

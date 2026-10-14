@@ -168,7 +168,7 @@ async fn the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_n
     let (_stop, shutdown) = fleet_agent::shutdown::shutdown_channel();
     let enrolling = tokio::spawn(fleet_agent::service::enrol::enrol(
         config,
-        fleet_agent::config_init::Bootstrap {
+        fleet_agent::config_init::Bootstrap::Pair {
             cert: pki.join("bootstrap.pem"),
             key: pki.join("bootstrap-key.pem"),
         },
@@ -205,6 +205,93 @@ async fn the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_n
         .map(|entry| entry.expect("entry").file_name())
         .collect();
     assert_eq!(beside, ["supervisor.toml"], "nothing copied beside it");
+}
+
+/// A `bootstrap.p12` enrols as the pair does, from memory: the questionnaire's enrolment opens it
+/// under its password and stores the issued certificate, and the bootstrap key it decrypted is in
+/// no file it writes (ADR-0029 clauses 7 and 8).
+/// Verifies: ADR-0029
+#[tokio::test]
+async fn a_bootstrap_p12_enrols_and_its_key_is_never_written() {
+    const PASSWORD: &str = "a password of the operator";
+    let served = Served::start(600).await;
+    let pki = served.dir.path();
+    let key_pem = std::fs::read_to_string(pki.join("bootstrap-key.pem")).expect("key");
+    let cert_pem = std::fs::read(pki.join("bootstrap.pem")).expect("cert");
+    let key = KeyPair::from_pem(&key_pem).expect("key");
+    let cert_der = opamp::tls::certificates(&cert_pem).expect("cert")[0].to_vec();
+    let p12_dir = pki.join("fleet-files");
+    std::fs::create_dir_all(&p12_dir).expect("dir");
+    let p12 = p12_dir.join("bootstrap.p12");
+    std::fs::write(
+        &p12,
+        fleet_core::pkcs12::file::seal(&cert_der, &key.serialize_der(), PASSWORD).expect("seal"),
+    )
+    .expect("write");
+    // The key leaves the file: the PEM files a pair would use are gone.
+    std::fs::remove_file(pki.join("bootstrap-key.pem")).expect("remove");
+
+    let data_root = pki.join("data");
+    std::fs::create_dir_all(&data_root).expect("data root");
+    let config_path = data_root.join("supervisor.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "endpoint = \"wss://localhost:{}/v1/opamp\"\nstate_dir = {:?}\n\
+             [tls]\nca_file = {:?}\n",
+            served.port,
+            served.state_dir.display().to_string(),
+            pki.join("client-ca.pem").display().to_string(),
+        ),
+    )
+    .expect("write");
+    let config = fleet_agent::config::ClientConfig::load(&config_path).expect("load");
+    let beside = fleet_agent::config_init::Beside::in_named_dir(&p12_dir).expect("dir");
+    let bootstrap = beside
+        .unasked_enrolment(&config, Some(PASSWORD))
+        .expect("opens")
+        .expect("taken");
+
+    let (_stop, shutdown) = fleet_agent::shutdown::shutdown_channel();
+    let enrolling = tokio::spawn(fleet_agent::service::enrol::enrol(
+        config, bootstrap, shutdown,
+    ));
+    let id = until("an enrolment request", Duration::from_secs(20), || {
+        served
+            .enrolment
+            .pending()
+            .first()
+            .map(|pending| pending.id.clone())
+    })
+    .await;
+    served.state.approve_enrolment(&id).expect("approve");
+    tokio::time::timeout(Duration::from_secs(20), enrolling)
+        .await
+        .expect("the enrolment ends once the certificate is stored")
+        .expect("task")
+        .expect("enrolled");
+    assert!(held(&served.state_dir).is_some(), "the issued certificate");
+
+    let key_body: String = key_pem
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    for dir in [data_root.as_path(), served.state_dir.as_path()] {
+        for entry in std::fs::read_dir(dir).expect("list") {
+            let path = entry.expect("entry").path();
+            if path.is_file() {
+                let text: String = std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .lines()
+                    .collect();
+                assert!(
+                    !text.contains(&key_body),
+                    "{} holds the bootstrap key",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 /// Enrols the real Client and lets it renew once, checking after each step that the register holds

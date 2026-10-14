@@ -23,7 +23,7 @@ API, so a script can do the same. The API calls are on the pages this one links 
 | Stage | Who acts | Where | What happens |
 |---|---|---|---|
 | 1. Bootstrap certificate | you, once per customer, site or batch | **Enrolments** tab | The Server issues a short-lived certificate that lets a new host ask to join, and nothing more. |
-| 2. Installation | you, on the host | the host | The Client is installed as a service and told the Server's address, the server CA and the bootstrap pair. |
+| 2. Installation | you, on the host | the host | The Client is installed as a service and told the Server's address, the server CA and the bootstrap certificate. |
 | 3. Enrolment | the host asks, you approve | **Enrolments** tab | The host makes its own key and asks for a certificate. You approve it, and the Server signs it. |
 | 4. Renewal | nobody | — | The host replaces its certificate on its own, long before it ends. |
 | 5. Updates | you release, the host installs | **Packages** and **Deployments** tabs | A signed Package reaches the hosts of a channel. Each host verifies it, installs it, and rolls back what will not run. |
@@ -41,29 +41,40 @@ In the UI, open the **Enrolments** tab and go to **Bootstrap certificates**:
    approver sees them on every request this certificate carries, and they grant nothing.
 2. Set how many **days** it is valid: 10 by default, 90 at most. Choose the time it takes to set the
    hosts up.
-3. Press **Issue**. The new certificate appears in the list with its serial and end.
-4. In its row, press **Save bootstrap.pem** and **Save bootstrap-key.pem**.
+3. Optionally type a **password**, twice. With it, the certificate and its key come as one file,
+   `bootstrap.p12`, encrypted under that password.
+4. Press **Issue**. The new certificate appears in the list with its serial and end.
+5. In its row, press **Save bootstrap.p12** — or, without a password, **Save bootstrap.pem** and
+   **Save bootstrap-key.pem**.
 
-**Save both files before you leave the page.** The Server does not keep the private key. The page
-holds it only while it stays open, and asks before it is reloaded or closed. A certificate issued
-earlier, or from a script, shows no save buttons. A lost key is not a problem: issue another
-certificate.
+**With a password, the file stays available.** The Server keeps `bootstrap.p12` and offers it in
+every later visit to the page, until the certificate ends or is revoked. It does not keep the
+password: hand that to whoever installs the hosts by another way than the file, a phone call
+rather than the same mail.
+
+**Without one, save both files before you leave the page.** The Server does not keep the private
+key. The page holds it only while it stays open, and asks before it is reloaded or closed. A
+certificate issued earlier, or from a script, shows no save buttons. A lost key is not a problem:
+issue another certificate.
 
 One pair may go to every host of that customer or site. It opens nothing on its own: a host that
 holds it can ask for a certificate only while the enrolment window is open, and gets one only
-when you approve it. To withdraw a pair early, press **Revoke** in its row.
+when you approve it. To withdraw a pair early, press **Revoke** in its row. A revoked certificate
+stays in the list until it ends; **Delete** in its row removes it sooner, and it stays revoked.
 
 Details: [Bootstrap certificates, issued by the Server](server.md#bootstrap-certificates-issued-by-the-server).
 
 ## 2. Install the Client
 
-Each host needs three files, best kept in one directory such as `/etc/opamp/`:
+Each host needs the server CA and the bootstrap certificate, best kept in one directory such as
+`/etc/opamp/`:
 
 | File | From | Notes |
 |---|---|---|
 | `server-ca.pem` | the offline directory `pki init` made | The Client trusts this CA, and only it. |
-| `bootstrap.pem` | step 1 | |
-| `bootstrap-key.pem` | step 1 | Readable by root only. |
+| `bootstrap.p12` | step 1, with a password | Or the two files below. The install asks for its password, or reads it from a file. |
+| `bootstrap.pem` | step 1, without a password | |
+| `bootstrap-key.pem` | step 1, without a password | Readable by root only. |
 
 Install the Client from the release's `.deb`, `.rpm` or `.msi`. The package registers the service
 and leaves it stopped. Then configure it in one of two ways:
@@ -73,11 +84,15 @@ and leaves it stopped. Then configure it in one of two ways:
   the three files and the package verification key, writes the configuration, and enrols the host
   on the spot. It waits for your approval and shows the key fingerprint to approve. On Windows, run
   it in an elevated shell.
-- **With a file**, which suits configuration management: write `supervisor.toml` naming the three
-  files, then start the service. It enrols when it starts.
+- **From a script**, which suits configuration management: after the package, run
+  `sudo opamp-fleet service install --endpoint <address> --fleet-files /etc/opamp`, adding
+  `--bootstrap-password-file <file>` for a `bootstrap.p12`. It enrols the host and waits for your
+  approval, then `systemctl start opamp-fleet`. The package's own install never waits.
+- **With a file**: write `supervisor.toml` naming the server CA and the PEM pair, then start the
+  service. It enrols when it starts. A `bootstrap.p12` cannot be named there.
 
-The bootstrap pair is used only for this first request. Once the host holds its own certificate,
-the bootstrap files can be removed.
+The bootstrap certificate is used only for this first request. Once the host holds its own
+certificate, the bootstrap files, and a password file, can be removed.
 
 Details: [Configure and install a Client](setup.md#4-configure-and-install-a-client) and
 [Installing from a native package](client.md#installing-from-a-native-package).
