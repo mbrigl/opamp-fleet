@@ -1,6 +1,6 @@
 # ADR-0020: The Client's install takes the fleet's files it finds beside its program
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clauses 1, 2, 3 and 4 superseded by [ADR-0029](0029-a-bootstrap-certificate-as-a-password-protected-pkcs12-file-the-server-keeps.md)
 - **Date:** 2026-10-13
 - **Deciders:** Markus Brigl
 - **Applies to:** `service install` and `service config` of the Client in `crates/fleet-agent/src/main.rs`, the questionnaire and the installer's answers in `crates/fleet-agent/src/config_init.rs`, the enrolment in `crates/fleet-agent/src/service/enrol.rs`, and every document that tells an operator how to install a Client
