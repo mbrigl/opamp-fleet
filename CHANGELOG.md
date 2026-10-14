@@ -24,6 +24,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   upgrading, remove those blocks from `supervisor.toml` and from every Supervisor set on the Server.
   An agent that has to stay under management runs under a `command` block instead.
 
+### Security
+
+- **rustls 0.23.46**, for RUSTSEC-2026-0346 to -0349. None of the four is reachable in this build:
+  it enables no `brotli` certificate compression, uses no Encrypted Client Hello and no session
+  store of its own, and its *ring* provider offers no post-quantum hybrid group to be downgraded
+  from. **What to do:** nothing beyond the upgrade.
+
 ## [0.5.2] - 2026-10-13
 
 ### Added
