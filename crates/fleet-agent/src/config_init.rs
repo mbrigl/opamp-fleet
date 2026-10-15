@@ -705,28 +705,25 @@ pub fn is_pkcs12_path(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("p12") || e.eq_ignore_ascii_case("pfx"))
 }
 
-/// The password `--bootstrap-password-file` names: the file's first line, without its `\n` or
-/// `\r\n` (ADR-0029 clause 10). The file is read once, at most 4 KiB of it, and left as it is.
+/// The password a password file holds: its first line, without its `\n` or `\r\n` (ADR-0029
+/// clause 10). The file is read once, at most 4 KiB of it, and left as it is. `flag` is the option
+/// that named it, `--bootstrap-password-file` here, for the error.
 ///
 /// # Errors
 /// Returns an error naming the flag when the file cannot be read or its first line is empty.
-pub fn read_password_file(path: &Path) -> Result<String, String> {
+pub fn read_password_file(path: &Path, flag: &str) -> Result<String, String> {
     use std::io::Read as _;
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .and_then(|file| file.take(4096).read_to_end(&mut bytes))
-        .map_err(|e| format!("--bootstrap-password-file {}: {e}", path.display()))?;
-    let text = String::from_utf8(bytes).map_err(|_| {
-        format!(
-            "--bootstrap-password-file {}: not UTF-8 text",
-            path.display()
-        )
-    })?;
+        .map_err(|e| format!("{flag} {}: {e}", path.display()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("{flag} {}: not UTF-8 text", path.display()))?;
     let line = text.split('\n').next().unwrap_or_default();
     let line = line.strip_suffix('\r').unwrap_or(line);
     if line.is_empty() {
         return Err(format!(
-            "--bootstrap-password-file {}: its first line is empty",
+            "{flag} {}: its first line is empty",
             path.display()
         ));
     }
@@ -1624,11 +1621,17 @@ mod tests {
             ("secret password", "secret password"),
         ] {
             std::fs::write(&file, content).expect("write");
-            assert_eq!(read_password_file(&file).as_deref(), Ok(expected));
+            assert_eq!(
+                read_password_file(&file, "--bootstrap-password-file").as_deref(),
+                Ok(expected)
+            );
         }
         std::fs::write(&file, "\nsecret").expect("write");
-        assert!(read_password_file(&file).is_err(), "an empty first line");
-        assert!(read_password_file(&dir.path().join("none")).is_err());
+        assert!(
+            read_password_file(&file, "--bootstrap-password-file").is_err(),
+            "an empty first line"
+        );
+        assert!(read_password_file(&dir.path().join("none"), "--bootstrap-password-file").is_err());
 
         for (path, p12) in [
             ("bootstrap.p12", true),

@@ -189,7 +189,7 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     let password = args
         .bootstrap_password_file
         .as_deref()
-        .map(config_init::read_password_file)
+        .map(|path| config_init::read_password_file(path, "--bootstrap-password-file"))
         .transpose()?;
     // Not asked, the bootstrap identity found enrols a Client that holds no issued certificate,
     // over TLS (ADR-0029 clause 10) — decided, and a `bootstrap.p12` opened, before anything is

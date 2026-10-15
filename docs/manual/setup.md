@@ -315,7 +315,9 @@ key encrypted under that password, which **Save bootstrap.p12** in the row — o
 `GET /api/v1/bootstrap-certificates/<serial>/p12` — downloads now or on any later day, until the
 certificate ends or is revoked. The Server keeps the password nowhere; give it to the host's
 installer by another way than the file
-([With a password](server.md#with-a-password-bootstrapp12)).
+([With a password](server.md#with-a-password-bootstrapp12)). Where a host or a tool needs the PEM
+pair instead, `opamp-fleetctl pki p12-extract bootstrap.p12 --out <dir>` writes it
+([`pki`](tools.md#pki)).
 
 Copy the three files to the host, with the key readable by root only, together with
 `package-signing-key.pub` from the offline directory. The simplest place is the directory you run

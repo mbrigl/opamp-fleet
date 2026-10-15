@@ -33,7 +33,7 @@ pub const DEFAULT_PRODUCT: &str = naming::DEFAULT_PRODUCT;
 /// How far a certificate's life starts before the moment it is signed, as the client CA's do.
 const CLOCK_SKEW: Duration = Duration::minutes(5);
 
-/// The commands of `opamp-fleetctl pki` (ADR-0028 clauses 1 and 15).
+/// The commands of `opamp-fleetctl pki` (ADR-0028 clause 1, ADR-0031 clause 2).
 #[derive(Subcommand)]
 pub enum Command {
     /// Make a fleet's certificates from nothing: what the Server host needs into --server-dir,
@@ -111,6 +111,18 @@ pub enum Command {
         /// The directory `init` wrote --offline-dir to.
         #[arg(long)]
         offline_dir: PathBuf,
+    },
+    /// Write a bootstrap.p12's certificate and key as bootstrap.pem and bootstrap-key.pem, the key
+    /// unencrypted and owner-only. The password is asked for with input hidden.
+    P12Extract {
+        /// The bootstrap.p12 the Server issued.
+        file: PathBuf,
+        /// Receives bootstrap.pem and bootstrap-key.pem.
+        #[arg(long)]
+        out: PathBuf,
+        /// A file whose first line is the password, for use without a terminal.
+        #[arg(long)]
+        password_file: Option<PathBuf>,
     },
 }
 
@@ -197,6 +209,19 @@ pub fn run(command: Command) -> Result<u8, String> {
             out,
             days,
         } => bootstrap_ca(&product, &organization, days, &out)?,
+        Command::P12Extract {
+            file,
+            out,
+            password_file,
+        } => {
+            use std::io::IsTerminal as _;
+            let password = p12_password(
+                password_file.as_deref(),
+                std::io::stdin().is_terminal(),
+                &file,
+            )?;
+            p12_extract(&file, &password, &out)?
+        }
         Command::Status { offline_dir } => {
             let endings = status(&offline_dir)?;
             let now = OffsetDateTime::now_utc();
@@ -446,6 +471,68 @@ pub fn bootstrap_ca(
              bootstrap certificates of the old CA stop working",
         out.display(),
         ca.end.date()
+    )])
+}
+
+/// The password of `pki p12-extract` (ADR-0031 clause 4): the first line of `--password-file`,
+/// or a hidden question on a terminal. Without either it fails before the file is read.
+fn p12_password(
+    password_file: Option<&Path>,
+    terminal: bool,
+    file: &Path,
+) -> Result<String, String> {
+    if let Some(path) = password_file {
+        return fleet_agent::config_init::read_password_file(path, "--password-file");
+    }
+    if !terminal {
+        return Err(
+            "no terminal to ask the password on; name a file holding it with --password-file"
+                .to_string(),
+        );
+    }
+    dialoguer::Password::new()
+        .with_prompt(format!("Password of {}", file.display()))
+        .interact()
+        .map_err(|e| format!("cannot ask for the password: {e}"))
+}
+
+/// `pki p12-extract` (ADR-0031 clauses 3 and 5): the certificate and key of a bootstrap PKCS#12
+/// file, opened with the reader the Client's install uses, written as `bootstrap.pem` and
+/// `bootstrap-key.pem` into `out` — both or neither, the key owner-only. Returns the lines to
+/// print, which name the certificate and never the key.
+///
+/// # Errors
+/// Returns the message to print when the file does not open, either file exists, or writing fails.
+pub fn p12_extract(file: &Path, password: &str, out: &Path) -> Result<Vec<String>, String> {
+    let identity = fleet_agent::tls::pkcs12_identity(file, password).map_err(|e| match e {
+        fleet_core::pkcs12::file::OpenError::WrongPassword => {
+            format!("{}: the password does not open it", file.display())
+        }
+        fleet_core::pkcs12::file::OpenError::Invalid(why) => why,
+    })?;
+    write_all(&[Target {
+        dir: out.to_path_buf(),
+        files: vec![
+            File {
+                name: "bootstrap.pem",
+                contents: identity.cert_pem,
+                key: false,
+            },
+            File {
+                name: "bootstrap-key.pem",
+                contents: identity.key_pem,
+                key: true,
+            },
+        ],
+    }])?;
+    let ending = read_ending(&out.join("bootstrap.pem"))?;
+    Ok(vec![format!(
+        "{}: bootstrap.pem and bootstrap-key.pem — {}, serial {}, ending {}; the key is \
+         unencrypted, keep the directory to yourself",
+        out.display(),
+        ending.subject,
+        ending.serial,
+        ending.not_after.date()
     )])
 }
 
@@ -1387,5 +1474,125 @@ mod tests {
                 "{file} lives {life}"
             );
         }
+    }
+
+    /// A `bootstrap.p12` under `password`, of a fresh key and a certificate for it, in `dir`.
+    fn bootstrap_p12(dir: &Path, password: &str) -> (PathBuf, KeyPair) {
+        let key = KeyPair::generate().expect("key");
+        let certificate = CertificateParams::new(vec!["bootstrap".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("certificate");
+        let file = dir.join("bootstrap.p12");
+        let sealed =
+            fleet_core::pkcs12::file::seal(certificate.der(), &key.serialize_der(), password)
+                .expect("sealed");
+        std::fs::write(&file, sealed).expect("written");
+        (file, key)
+    }
+
+    /// Verifies: ADR-0031
+    #[test]
+    fn p12_extract_writes_the_certificate_and_its_key_the_key_owner_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (file, key) = bootstrap_p12(dir.path(), "four");
+        let out = dir.path().join("out");
+        let lines = p12_extract(&file, "four", &out).expect("extracted");
+        assert!(lines[0].contains("bootstrap.pem") && !lines[0].contains("PRIVATE KEY"));
+
+        let key_pem = std::fs::read_to_string(out.join("bootstrap-key.pem")).expect("key");
+        let extracted = KeyPair::from_pem(&key_pem).expect("a PKCS#8 key");
+        assert_eq!(extracted.public_key_raw(), key.public_key_raw());
+        let der = parsed(&out.join("bootstrap.pem"));
+        let (_, certificate) = X509Certificate::from_der(&der).expect("a certificate");
+        assert_eq!(
+            certificate.public_key().subject_public_key.data.as_ref(),
+            key.public_key_raw(),
+            "the certificate is the key's"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |name: &str| {
+                std::fs::metadata(out.join(name))
+                    .expect("meta")
+                    .permissions()
+                    .mode()
+                    & 0o777
+            };
+            assert_eq!(mode("bootstrap-key.pem"), 0o600);
+            assert_eq!(mode("bootstrap.pem"), 0o644);
+        }
+    }
+
+    /// Verifies: ADR-0031
+    #[test]
+    fn p12_extract_refuses_what_does_not_open_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (file, _) = bootstrap_p12(dir.path(), "four");
+        let out = dir.path().join("out");
+        let wrong = p12_extract(&file, "five!", &out).expect_err("wrong password");
+        assert!(wrong.contains("password does not open it"), "{wrong}");
+
+        let garbage = dir.path().join("garbage.p12");
+        std::fs::write(&garbage, b"no PKCS#12 file").expect("written");
+        assert!(p12_extract(&garbage, "four", &out).is_err());
+
+        let large = dir.path().join("large.p12");
+        let limit = usize::try_from(fleet_core::pkcs12::MAX_FILE_BYTES).expect("small");
+        std::fs::write(&large, vec![0u8; limit + 1]).expect("written");
+        let refused = p12_extract(&large, "four", &out).expect_err("too large");
+        assert!(refused.contains("larger than"), "{refused}");
+        assert!(!out.exists(), "nothing was written");
+    }
+
+    /// Verifies: ADR-0031
+    #[test]
+    fn p12_extract_overwrites_neither_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (file, _) = bootstrap_p12(dir.path(), "four");
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).expect("out");
+        std::fs::write(out.join("bootstrap.pem"), b"kept").expect("written");
+        let refused = p12_extract(&file, "four", &out).expect_err("exists");
+        assert!(refused.contains("bootstrap.pem exists"), "{refused}");
+        assert_eq!(
+            std::fs::read(out.join("bootstrap.pem")).expect("read"),
+            b"kept"
+        );
+        assert!(!out.join("bootstrap-key.pem").exists());
+    }
+
+    /// Verifies: ADR-0031
+    #[test]
+    fn the_password_comes_from_a_file_or_a_terminal_and_never_from_a_flag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("never read.p12");
+        let refused = p12_password(None, false, &missing).expect_err("no terminal");
+        assert!(refused.contains("--password-file"), "{refused}");
+
+        let password_file = dir.path().join("password");
+        std::fs::write(&password_file, "four\r\nsecond line").expect("written");
+        assert_eq!(
+            p12_password(Some(&password_file), false, &missing).expect("read"),
+            "four"
+        );
+
+        #[derive(clap::Parser)]
+        struct Pki {
+            #[command(subcommand)]
+            command: Command,
+        }
+        use clap::Parser as _;
+        let parsed = Pki::try_parse_from([
+            "pki",
+            "p12-extract",
+            "bootstrap.p12",
+            "--out",
+            "out",
+            "--password",
+            "four",
+        ]);
+        assert!(parsed.is_err(), "no flag takes the password itself");
     }
 }

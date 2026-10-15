@@ -41,6 +41,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   **Delete** in its row of the Enrolments tab, or
   `DELETE /api/v1/bootstrap-certificates/{serial}`. The entry and any `bootstrap.p12` go; the
   revocation stays, so the certificate is still refused. A valid certificate is not deleted.
+- **`opamp-fleetctl pki p12-extract <bootstrap.p12> --out <dir>`**
+  ([ADR-0031](docs/adr/0031-opamp-fleetctl-extracts-a-bootstrap-pkcs12-file-into-pem.md)) writes
+  the file's certificate as `bootstrap.pem` and its key, unencrypted and owner-only, as
+  `bootstrap-key.pem`: the pair a Client's install takes, without OpenSSL. The password is asked
+  for with input hidden, or read from the first line of `--password-file`; neither file is
+  overwritten.
 
 ### Security
 

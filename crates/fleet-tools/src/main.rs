@@ -71,7 +71,7 @@ mod tests {
             .collect()
     }
 
-    // Verifies: ADR-0028
+    // Verifies: ADR-0028, ADR-0031
     #[test]
     fn the_program_has_two_trees_holding_the_operator_commands() {
         let cli = Cli::command();
@@ -84,7 +84,13 @@ mod tests {
         );
         assert_eq!(
             subcommands(tree("pki")),
-            ["init", "server-cert", "bootstrap-ca", "status"]
+            [
+                "init",
+                "server-cert",
+                "bootstrap-ca",
+                "status",
+                "p12-extract"
+            ]
         );
         assert!(
             Cli::try_parse_from(["opamp-fleetctl", "pki", "bootstrap-cert", "--out", "b"]).is_err(),

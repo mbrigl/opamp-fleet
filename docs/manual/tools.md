@@ -12,7 +12,7 @@ the keys it makes are the ones to keep off that host.
 |---|---|
 | **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
 | **[`package pack`, `sha256`, `keygen`, `sign`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, and make the package signing key |
-| **[`pki init`, `server-cert`, `bootstrap-ca`, `status`](#pki)** | make the fleet's certificate authorities and the Server's or a Gateway's certificate, replace the bootstrap CA, and say when the server CA ends |
+| **[`pki init`, `server-cert`, `bootstrap-ca`, `status`, `p12-extract`](#pki)** | make the fleet's certificate authorities and the Server's or a Gateway's certificate, replace the bootstrap CA, say when the server CA ends, and turn a `bootstrap.p12` into its PEM pair |
 
 Reach for `package fetch` first: for the agents it knows, it replaces every step of building an
 artifact by hand. The other `package` commands serve everything else — your own agent, an internal
@@ -332,6 +332,7 @@ The fleet's certificates, made without `openssl` or any other tool.
 | `server-cert --offline-dir <dir> --name <dns\|ip>… --out <dir>` | makes another server certificate from the offline server CA, for the Server or a Gateway; it carries the CA's organization unless `--organization` or `--organizational-unit` replaces it |
 | `bootstrap-ca --product <name> --out <dir>` | makes a new bootstrap CA, valid for a year, to replace the Server's `[enrolment]` files |
 | `status --offline-dir <dir>` | says when the server CA in the offline directory ends; exits `0`, `1` when it is ending, `2` when it has ended |
+| `p12-extract <bootstrap.p12> --out <dir> [--password-file <file>]` | writes the file's certificate as `bootstrap.pem` and its key, unencrypted and owner-only, as `bootstrap-key.pem`, the pair a Client's install takes; asks for the password with input hidden, or reads it from the first line of `--password-file`; overwrites neither file |
 
 None of them makes a bootstrap certificate: the Server issues those, on
 `POST /api/v1/bootstrap-certificates` ([Setting up a fleet](setup.md#4-configure-and-install-a-client)).
