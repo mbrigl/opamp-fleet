@@ -22,7 +22,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   Issued with a `password` — in the Enrolments tab, typed twice — the Server hands out no PEM key:
   it keeps `bootstrap.p12`, the certificate and its key encrypted under that password, and offers it
   for download (`GET /api/v1/bootstrap-certificates/{serial}/p12`, **Save bootstrap.p12**) until the
-  certificate ends or is revoked. The password is kept nowhere. Each download is audited as
+  certificate ends or is revoked. The password is 4 to 128 characters
+  ([ADR-0030](docs/adr/0030-a-pkcs12-password-of-4-to-128-characters.md)) and is kept nowhere.
+  A short password is quick to break offline should the file leak; an operator's approval of each
+  enrolment request is then what stands in the way. Each download is audited as
   `enrolment.bootstrap_p12_downloaded`. Without a password nothing changes.
 - **The Client enrols with a `bootstrap.p12`.** `service install` finds it beside its program, and
   the questionnaire takes a `.p12` path, asking its password with input hidden. Without a terminal,

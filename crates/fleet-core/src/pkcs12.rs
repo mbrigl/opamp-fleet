@@ -20,16 +20,16 @@ pub const FILE_NAME: &str = "bootstrap.p12";
 /// key make about 2 KiB.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 
-/// The shortest password the Server takes (ADR-0029 clause 2).
-pub const MIN_PASSWORD_CHARS: usize = 12;
+/// The shortest password the Server takes (ADR-0030 clause 1).
+pub const MIN_PASSWORD_CHARS: usize = 4;
 
-/// The longest password the Server takes (ADR-0029 clause 2).
+/// The longest password the Server takes (ADR-0030 clause 1).
 pub const MAX_PASSWORD_CHARS: usize = 128;
 
 /// The PBKDF2 iterations of the encryption, and those of the MAC (ADR-0029 clause 1).
 pub const ITERATIONS: u32 = 600_000;
 
-/// Whether `password` is one the Server takes: 12 to 128 characters without a control character.
+/// Whether `password` is one the Server takes: 4 to 128 characters without a control character.
 ///
 /// # Errors
 /// Returns the `400` text naming the rule it breaks.
@@ -50,16 +50,16 @@ pub fn check_password(password: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0030
     #[test]
-    fn a_password_is_twelve_to_128_characters_without_control_characters() {
-        assert!(check_password("eleven char").is_err());
-        assert!(check_password("twelve chars").is_ok());
+    fn a_password_is_four_to_128_characters_without_control_characters() {
+        assert!(check_password("abc").is_err());
+        assert!(check_password("four").is_ok());
         assert!(
             check_password(&"ä".repeat(128)).is_ok(),
             "characters, not bytes"
         );
         assert!(check_password(&"a".repeat(129)).is_err());
-        assert!(check_password("twelve\tchars").is_err());
+        assert!(check_password("fo\tur").is_err());
     }
 }

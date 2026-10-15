@@ -3375,7 +3375,7 @@ async fn a_bootstrap_certificate_issued_with_a_password_is_a_pkcs12_file_until_r
     )
     .await;
     let operator_client = client(&served.ca_pem, None);
-    for short in ["eleven char", "tab\tin a long password"] {
+    for short in ["abc", "tab\tin a long password"] {
         let refused = operator_client
             .post(operator(&served, "/api/v1/bootstrap-certificates"))
             .json(&serde_json::json!({ "password": short }))

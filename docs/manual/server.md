@@ -400,10 +400,15 @@ not fetched again; issue another certificate. The answer carries `Cache-Control:
 
 #### With a password: `bootstrap.p12`
 
-Name a `password`, 12 to 128 characters without a control character, and the key is in no answer
+Name a `password`, 4 to 128 characters without a control character, and the key is in no answer
 at all. The Server puts the certificate and its key into one PKCS#12 file encrypted under that
 password, keeps the file, and hands it out as often as it is asked, until the certificate ends or
-is revoked. The answer carries no `private_key_pem`:
+is revoked. The answer carries no `private_key_pem`.
+
+A short password is quick to break offline: should the file leak, four characters fall to a GPU
+within hours. Whoever opens it can file enrolment requests while the window is open, so your
+approval of each request is then what stands in the way. Choose a longer password where you can,
+and check each host before you approve it.
 
 ```console
 $ cat request.json        # written with an editor, so the password stays out of the shell's history
@@ -469,7 +474,7 @@ When issuing, the Server holds at most 10 000 valid ones, revoked ones included 
 are deleted, and answers a request beyond that `409`. It answers `409` too while it holds no
 `bootstrap_ca_key_file` or once the bootstrap CA has ended, `503` while the audit record cannot be
 written, since no key is handed out unrecorded, and `400` for a subject attribute it does not know, a value out of bounds,
-`validity_days` outside 1 to 90, or a password outside 12 to 128 characters.
+`validity_days` outside 1 to 90, or a password outside 4 to 128 characters.
 
 **The window is closed by default.** Open it for as long as you are enrolling hosts, from 1 to
 86400 seconds:

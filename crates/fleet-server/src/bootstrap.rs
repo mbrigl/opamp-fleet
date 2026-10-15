@@ -715,13 +715,28 @@ mod tests {
         ));
     }
 
+    /// A password of four characters is taken and one of three is not.
+    /// Verifies: ADR-0030
+    #[test]
+    fn a_password_of_four_characters_issues_a_file_and_one_of_three_nothing() {
+        let (record, _clock, _store) = fixture(u64::MAX);
+        let short = record.issue(&request(serde_json::json!({"password": "abc"})));
+        assert!(matches!(short, Err(IssueError::Invalid(_))));
+        assert!(record.list().is_empty(), "nothing issued");
+        let sealed = record
+            .issue(&request(serde_json::json!({"password": "four"})))
+            .expect("issued");
+        let (_, file) = record.p12(&sealed.serial).expect("read").expect("kept");
+        assert_eq!(file, b"sealed under four");
+    }
+
     /// With a password the Server keeps the file, not the key, and hands it out until the
     /// certificate ends or a revocation forgets it; a password out of bounds issues nothing.
     /// Verifies: ADR-0029
     #[test]
     fn a_password_keeps_a_pkcs12_file_until_the_certificate_ends_or_is_forgotten() {
         let (record, clock, store) = fixture(u64::MAX);
-        let short = record.issue(&request(serde_json::json!({"password": "eleven char"})));
+        let short = record.issue(&request(serde_json::json!({"password": "abc"})));
         assert!(matches!(short, Err(IssueError::Invalid(_))));
         assert!(record.list().is_empty(), "nothing issued");
 

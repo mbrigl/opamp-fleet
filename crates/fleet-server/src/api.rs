@@ -2496,7 +2496,7 @@ struct IssueBootstrapRequest {
     /// 1 to 90; 10 when absent. Cut to the bootstrap CA's end.
     #[serde(default)]
     validity_days: Option<u32>,
-    /// 12 to 128 characters without a control character. With it the key is not answered in PEM:
+    /// 4 to 128 characters without a control character. With it the key is not answered in PEM:
     /// the Server keeps a PKCS#12 file of the certificate and its key under this password, to be
     /// downloaded until the certificate ends or is revoked. The password is kept nowhere.
     #[serde(default)]
@@ -2593,7 +2593,7 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
     request_body = IssueBootstrapRequest,
     responses(
         (status = 201, description = "Issued; the certificate and, without a password, its private key, this once", body = IssuedBootstrap),
-        (status = 400, description = "A subject attribute this route does not know, a value out of bounds, validity_days outside 1 to 90, or a password outside 12 to 128 characters", body = ErrorBody),
+        (status = 400, description = "A subject attribute this route does not know, a value out of bounds, validity_days outside 1 to 90, or a password outside 4 to 128 characters", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody),
         (status = 409, description = "No bootstrap_ca_key_file is configured, the bootstrap CA has ended, or the record is full", body = ErrorBody),
