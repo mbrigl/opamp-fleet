@@ -368,6 +368,61 @@ impl std::fmt::Display for StoreFull {
     }
 }
 
+/// The bytes of one upload still arriving, counted against the package store's ceiling until it is
+/// dropped (ADR-0026). Taken from [`AppState::admit_upload`].
+pub struct UploadReservation<'a> {
+    state: &'a AppState,
+    /// The stored artifacts' bytes when the upload began; walking the store per chunk would cost
+    /// more than the chunk.
+    stored: u64,
+    bytes: u64,
+}
+
+impl UploadReservation<'_> {
+    /// Counts `more` bytes of this upload as they arrive.
+    ///
+    /// # Errors
+    /// [`StoreFull::WouldExceed`] once the store and every upload in progress pass the ceiling.
+    pub fn grow(&mut self, more: u64) -> Result<(), StoreFull> {
+        self.bytes += more;
+        let uploading = self.state.uploading_bytes.fetch_add(more, Ordering::SeqCst) + more;
+        self.within(self.stored, uploading)
+    }
+
+    /// Whether the upload, whole now, may be committed: the store as it stands and every upload in
+    /// progress, this one included, within the ceiling. With
+    /// [`admit_upload`](AppState::admit_upload) before the stream, this is what stops a caller
+    /// filling the disk under distinct names.
+    ///
+    /// # Errors
+    /// [`StoreFull::WouldExceed`] when committing it would pass the ceiling.
+    pub fn admit_artifact(&self) -> Result<(), StoreFull> {
+        self.within(
+            self.state.stored_package_bytes(),
+            self.state.uploading_bytes.load(Ordering::SeqCst),
+        )
+    }
+
+    fn within(&self, stored: u64, uploading: u64) -> Result<(), StoreFull> {
+        let limit = self.state.max_total_package_bytes;
+        if stored.saturating_add(uploading) > limit {
+            return Err(StoreFull::WouldExceed {
+                size: self.bytes,
+                limit,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Drop for UploadReservation<'_> {
+    fn drop(&mut self) {
+        self.state
+            .uploading_bytes
+            .fetch_sub(self.bytes, Ordering::SeqCst);
+    }
+}
+
 /// The package store plus the base URL each `download_url` is built from (ADR-0026).
 pub struct PackageOffering {
     store: PackageStore,
@@ -453,6 +508,9 @@ pub struct AppState {
     /// (ADR-0026): what bounds the store — and so the disk — against many uploads under distinct
     /// names, where `max_package_size` bounds only one.
     max_total_package_bytes: u64,
+    /// The bytes of uploads still arriving, counted against `max_total_package_bytes` beside the
+    /// stored artifacts, so uploads sent at once cannot pass the ceiling together.
+    uploading_bytes: AtomicU64,
     /// How long an Agent that promised to report periodically may be silent before the fleet view
     /// calls it stale (ADR-0024). Overridden by an offered heartbeat interval, which is the period
     /// this Server actually asked for.
@@ -522,6 +580,7 @@ impl AppState {
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
             max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
             max_total_package_bytes: DEFAULT_MAX_TOTAL_PACKAGE_SIZE,
+            uploading_bytes: AtomicU64::new(0),
             stale_after: DEFAULT_STALE_AFTER,
             max_agents: DEFAULT_MAX_AGENTS,
         })
@@ -574,32 +633,23 @@ impl AppState {
     }
 
     /// Whether the package store takes another upload at all (ADR-0026): one already at its
-    /// ceiling takes nothing more. Asked before an upload is streamed, so a gibibyte that would only
-    /// be rejected is never read.
+    /// ceiling, counting the uploads still arriving, takes nothing more. Asked before an upload is
+    /// streamed, so a gibibyte that would only be rejected is never read. The upload's bytes are
+    /// counted through the answer as they arrive, and no longer once it is dropped.
     ///
     /// # Errors
     /// [`StoreFull::AtLimit`] when the store is at or past [`max_total_package_bytes`](Self::max_total_package_bytes).
-    pub fn admit_upload(&self) -> Result<(), StoreFull> {
+    pub fn admit_upload(&self) -> Result<UploadReservation<'_>, StoreFull> {
         let limit = self.max_total_package_bytes;
-        if self.stored_package_bytes() >= limit {
+        let stored = self.stored_package_bytes();
+        if stored.saturating_add(self.uploading_bytes.load(Ordering::SeqCst)) >= limit {
             return Err(StoreFull::AtLimit { limit });
         }
-        Ok(())
-    }
-
-    /// Whether an uploaded artifact of `size` bytes may be committed (ADR-0026): not when it would
-    /// take the store past its ceiling. With [`admit_upload`](Self::admit_upload) before the
-    /// stream, this is what stops a caller filling the disk under distinct names. An upload still
-    /// staged is not yet an artifact, so the store does not count it.
-    ///
-    /// # Errors
-    /// [`StoreFull::WouldExceed`] when committing it would pass the ceiling.
-    pub fn admit_artifact(&self, size: u64) -> Result<(), StoreFull> {
-        let limit = self.max_total_package_bytes;
-        if self.stored_package_bytes() + size > limit {
-            return Err(StoreFull::WouldExceed { size, limit });
-        }
-        Ok(())
+        Ok(UploadReservation {
+            state: self,
+            stored,
+            bytes: 0,
+        })
     }
 
     /// Arms the connection-settings offer (ADR-0014); with it the Server declares
@@ -2243,6 +2293,19 @@ impl AppState {
         self.package_store()?.staging_path(id, platform)
     }
 
+    /// Whether [`set_package_entry_source`](Self::set_package_entry_source) would take this
+    /// reference, answered without storing it.
+    pub fn check_package_entry_source(
+        &self,
+        id: &PackageId,
+        content_hash: &[u8],
+        source: &Source,
+    ) -> Result<(), String> {
+        self.refuse_if_assigned(id)?;
+        self.package_store()?
+            .check_entry_source(id, content_hash, source)
+    }
+
     /// Points one entry of a Package at an artifact hosted elsewhere (ADR-0026).
     /// Refused while the Package is assigned to an Agent (ADR-0025 point 8).
     pub fn set_package_entry_source(
@@ -3586,24 +3649,48 @@ mod tests {
     }
 
     /// The whole-store ceiling (ADR-0026), decided without a request: a store at its limit takes
-    /// no upload, and an artifact is refused when it alone would take the store past it.
+    /// no upload, an artifact is refused when it would take the store past it, and an upload still
+    /// arriving counts until it is dropped.
     #[test]
     fn the_package_store_ceiling_admits_up_to_its_limit() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = AppState::new(dir.path().join("configs"))
             .expect("state")
             .with_max_total_package_bytes(100);
-        assert_eq!(state.admit_upload(), Ok(()));
-        assert_eq!(state.admit_artifact(100), Ok(()));
-        assert_eq!(
-            state.admit_artifact(101),
-            Err(StoreFull::WouldExceed {
-                size: 101,
-                limit: 100
-            })
+        {
+            let mut upload = state
+                .admit_upload()
+                .expect("an empty store takes an upload");
+            assert_eq!(upload.grow(100), Ok(()));
+            assert_eq!(upload.admit_artifact(), Ok(()));
+            assert!(
+                matches!(state.admit_upload(), Err(StoreFull::AtLimit { limit: 100 })),
+                "an upload in progress fills the store as much as a stored one"
+            );
+            assert_eq!(
+                upload.grow(1),
+                Err(StoreFull::WouldExceed {
+                    size: 101,
+                    limit: 100
+                })
+            );
+            assert_eq!(
+                upload.admit_artifact(),
+                Err(StoreFull::WouldExceed {
+                    size: 101,
+                    limit: 100
+                })
+            );
+        }
+        assert!(
+            state.admit_upload().is_ok(),
+            "a dropped upload counts no more"
         );
         let full = state.with_max_total_package_bytes(0);
-        assert_eq!(full.admit_upload(), Err(StoreFull::AtLimit { limit: 0 }));
+        assert!(matches!(
+            full.admit_upload(),
+            Err(StoreFull::AtLimit { limit: 0 })
+        ));
     }
 
     /// A certificate of one host does not speak for another host's Agent: the reporter is re-keyed

@@ -171,7 +171,7 @@ async fn authenticate(
         },
         _ => None,
     };
-    let verdict = auth.0.check(request.headers()).await;
+    let verdict = auth.0.check(peer, request.headers()).await;
     if verdict == crate::credentials::Verdict::Busy {
         return crate::transport::busy();
     }
@@ -271,12 +271,76 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         Some(audit) => router.layer(middleware::from_fn_with_state(audit, record_act)),
         None => router,
     };
-    match auth {
-        // The outermost layer, so the guard covers every route on this listener — including the
+    let router = match auth {
+        // Outside every route, so the guard covers every route on this listener — including the
         // UI and the API docs, which are as much of the plane as `/api/v1` is (ADR-0021).
         Some(auth) => router.layer(middleware::from_fn_with_state(Arc::new(auth), authenticate)),
         None => router,
+    };
+    // Outermost, so a refusal of the guard carries the headers too.
+    router.layer(middleware::from_fn(security_headers))
+}
+
+/// The policy every page of the plane is held to. Scripts come from this origin, or are the
+/// bundled UI's inline ones named by their hash; styles may be inline, as the UI's `style`
+/// attributes and the API docs' rendered styles are. Nothing may frame the plane.
+static CONTENT_SECURITY_POLICY: std::sync::LazyLock<header::HeaderValue> =
+    std::sync::LazyLock::new(|| {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let page = include_str!("../static/index.html");
+        // Each `<script …>` without a `src`, whatever its other attributes.
+        let hashes: String = page
+            .split("<script")
+            .skip(1)
+            .filter_map(|chunk| chunk.split_once('>'))
+            .filter(|(attributes, _)| !attributes.contains("src="))
+            .filter_map(|(_, rest)| rest.split_once("</script>"))
+            .map(|(script, _)| {
+                let digest = sha2::Sha256::digest(script.as_bytes());
+                format!(
+                    " 'sha256-{}'",
+                    base64::engine::general_purpose::STANDARD.encode(digest)
+                )
+            })
+            .collect();
+        header::HeaderValue::from_str(&format!(
+            "default-src 'self'; script-src 'self'{hashes}; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; \
+             form-action 'self'; frame-ancestors 'none'"
+        ))
+        .expect("the policy is a header value")
+    });
+
+/// The response headers of the Operator plane: its policy, no framing, no content sniffing, no
+/// referrer, and no cached `/api/v1` answer.
+async fn security_headers(request: Request, next: Next) -> Response {
+    let api = request.uri().path().starts_with("/api/v1/");
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        CONTENT_SECURITY_POLICY.clone(),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    if api {
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        );
     }
+    response
 }
 
 /// The one route of `/api/v1` that is not the operator's: the artifact bytes an Agent downloads.
@@ -364,7 +428,25 @@ fn agent_response(state: &AppState, uid: &InstanceUid) -> Response {
 /// a portal — sends no such header and is unaffected, which is why this needs no token and no change
 /// to any API client. It is not authentication (that is a separate decision, ADR-0021); it only
 /// keeps a browser from being turned into a confused deputy.
+///
+/// A browser without Fetch Metadata still sends `Origin` on a `POST`, so without `Sec-Fetch-Site`
+/// an `Origin` other than the plane's own (`null` included) is refused the same way.
 struct SameOrigin;
+
+/// Whether `origin` names the authority this request was sent to — the `Host` header, or the
+/// request target's authority over HTTP/2. The scheme is not compared: the plane serves one.
+fn is_own_origin(parts: &axum::http::request::Parts, origin: &str) -> bool {
+    let own = parts.uri.authority().map(|a| a.as_str()).or_else(|| {
+        parts
+            .headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+    });
+    match (own, origin.split_once("://")) {
+        (Some(own), Some((_, authority))) => own.eq_ignore_ascii_case(authority),
+        _ => false,
+    }
+}
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for SameOrigin {
     type Rejection = Response;
@@ -382,7 +464,17 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for SameOrigin {
                 StatusCode::FORBIDDEN,
                 format!("cross-site request refused (Sec-Fetch-Site: {site})"),
             )),
-            _ => Ok(SameOrigin),
+            Some(_) => Ok(SameOrigin),
+            None => match parts.headers.get(header::ORIGIN) {
+                Some(origin) => match origin.to_str() {
+                    Ok(origin) if is_own_origin(parts, origin) => Ok(SameOrigin),
+                    _ => Err(error(
+                        StatusCode::FORBIDDEN,
+                        format!("cross-origin request refused (Origin: {origin:?})"),
+                    )),
+                },
+                None => Ok(SameOrigin),
+            },
         }
     }
 }
@@ -1384,33 +1476,47 @@ async fn put_package_entry(
         Ok(path) => path,
         Err(e) => return package_error(e),
     };
-    if let Err(full) = state.admit_upload() {
-        return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string());
-    }
+    let mut reservation = match state.admit_upload() {
+        Ok(reservation) => reservation,
+        Err(full) => return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string()),
+    };
+    // Removed however the request ends short of an artifact, a cancelled one included.
+    let staged = Staged(Some(staged));
     // The artifact is streamed to the store's own directory and bounded as it arrives: taking it
     // as `Bytes` would mean holding a whole program in memory — twice — before writing it out.
-    let written = match stream_to_file(body, &staged, state.max_package_size()).await {
+    let written = match stream_to_file(
+        body,
+        staged.path(),
+        state.max_package_size(),
+        &mut reservation,
+    )
+    .await
+    {
         Ok(written) => written,
         Err(UploadError::TooLarge(limit)) => {
-            let _ = tokio::fs::remove_file(&staged).await;
             return error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!("the artifact exceeds the {limit}-byte package size limit"),
             );
         }
+        Err(UploadError::StoreFull(full)) => {
+            return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string());
+        }
         Err(UploadError::Io(e)) => {
-            let _ = tokio::fs::remove_file(&staged).await;
             return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("the upload could not be stored: {e}"),
             );
         }
     };
-    if let Err(full) = state.admit_artifact(written) {
-        let _ = tokio::fs::remove_file(&staged).await;
+    if let Err(full) = reservation.admit_artifact() {
         return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string());
     }
-    match state.put_package_entry(&id, &platform, &staged) {
+    // The store takes the staged file from here: it moves it into place or removes it.
+    let committed = state.put_package_entry(&id, &platform, &staged.keep());
+    // Stored now, or gone: either way the store counts it from here, and the upload no longer.
+    drop(reservation);
+    match committed {
         Ok(()) => {
             info!(set = %id, bytes = written, "package entry stored from the API");
             set_response(&state, &id)
@@ -1532,13 +1638,17 @@ async fn put_package_entry_source(
                 .to_string(),
         );
     }
-    if let Err(e) = probe(&spec.url, &spec.headers).await {
-        return error(StatusCode::BAD_REQUEST, e);
-    }
     let source = Source {
         url: spec.url.clone(),
         headers: spec.headers.clone(),
     };
+    // The store's own checks come first, so a URL it would refuse never receives the headers.
+    if let Err(e) = state.check_package_entry_source(&id, &content_hash, &source) {
+        return package_error(e);
+    }
+    if let Err(e) = probe(&spec.url, &spec.headers).await {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
     match state.set_package_entry_source(&id, &platform, content_hash, source) {
         Ok(()) => {
             info!(set = %id, url = %spec.url, "package entry source stored from the API");
@@ -1641,7 +1751,8 @@ async fn ssrf_blocked(url: &str) -> Option<String> {
 /// The line is deliberate. This blocks the cloud-metadata address and the ranges that are never a
 /// legitimate artifact source — link-local (where `169.254.169.254` lives), the shared/CGNAT range
 /// (Alibaba's `100.100.100.200` among it), the unspecified address, broadcast, documentation, and
-/// `0.0.0.0/8`. It does **not** block loopback or the RFC 1918 / unique-local private ranges: an
+/// `0.0.0.0/8` — also where an IPv6 address carries one of them — and AWS's IPv6 metadata address
+/// `fd00:ec2::254`. It does **not** block loopback or the RFC 1918 / unique-local private ranges: an
 /// operator's mirror (ADR-0026) legitimately lives on an internal network, and the URL here is the
 /// operator's, not a stranger's. Redirects are disabled separately, so a public URL cannot bounce
 /// the probe onto a blocked address behind this check.
@@ -1649,12 +1760,34 @@ fn is_internal(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => is_v4_internal(v4),
         std::net::IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_v4_internal(mapped);
+            if let Some(embedded) = embedded_v4(v6) {
+                return is_v4_internal(embedded);
             }
-            // link-local fe80::/10, and the unspecified address.
-            v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80
+            // link-local fe80::/10, the unspecified address, and AWS's IPv6 metadata endpoint.
+            v6.is_unspecified()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6 == std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
         }
+    }
+}
+
+/// The IPv4 address an IPv6 one carries and reaches: IPv4-mapped `::ffff:a.b.c.d`,
+/// IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::a.b.c.d` and 6to4 `2002:aabb:ccdd::/48`. The
+/// loopback `::1` and the unspecified `::` are themselves, not IPv4 addresses.
+fn embedded_v4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let s = v6.segments();
+    let low = |hi: u16, lo: u16| {
+        let [a, b] = hi.to_be_bytes();
+        let [c, d] = lo.to_be_bytes();
+        std::net::Ipv4Addr::new(a, b, c, d)
+    };
+    match s {
+        [0, 0, 0, 0, 0, 0xffff, hi, lo] | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => Some(low(hi, lo)),
+        [0, 0, 0, 0, 0, 0, hi, lo] if !v6.is_loopback() && !v6.is_unspecified() => {
+            Some(low(hi, lo))
+        }
+        [0x2002, hi, lo, ..] => Some(low(hi, lo)),
+        _ => None,
     }
 }
 
@@ -1760,15 +1893,41 @@ async fn download_package(
 enum UploadError {
     /// The body grew past the configured package limit; the number is that limit.
     TooLarge(usize),
+    /// The body, with the uploads in progress beside it, would take the store past its ceiling.
+    StoreFull(crate::fleet::StoreFull),
     Io(std::io::Error),
 }
 
-/// Streams a request body into `path`, refusing it the moment it grows past `limit`. Returns how
-/// many bytes were written.
+/// An upload's staging file, removed when dropped unless the store took it: a request that ends
+/// short of an artifact, or is cancelled mid-body, leaves nothing staged.
+struct Staged(Option<std::path::PathBuf>);
+
+impl Staged {
+    fn path(&self) -> &std::path::Path {
+        self.0.as_deref().expect("held until kept")
+    }
+
+    /// Hands the file to the store, which moves it into place or removes it.
+    fn keep(mut self) -> std::path::PathBuf {
+        self.0.take().expect("held until kept")
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Streams a request body into `path`, refusing it the moment it grows past `limit` or takes the
+/// store past its ceiling. Returns how many bytes were written.
 async fn stream_to_file(
     body: Body,
     path: &std::path::Path,
     limit: usize,
+    reservation: &mut crate::fleet::UploadReservation<'_>,
 ) -> Result<u64, UploadError> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -1784,6 +1943,9 @@ async fn stream_to_file(
         if written > limit as u64 {
             return Err(UploadError::TooLarge(limit));
         }
+        reservation
+            .grow(chunk.len() as u64)
+            .map_err(UploadError::StoreFull)?;
         file.write_all(&chunk).await.map_err(UploadError::Io)?;
     }
     file.flush().await.map_err(UploadError::Io)?;
@@ -3202,5 +3364,41 @@ async fn lift_revocation(
         }
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no revocation {id:?}")),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_internal;
+
+    /// The IPv6 forms that carry an IPv4 address — NAT64, 6to4 and IPv4-compatible — are judged by
+    /// that address, so none of them reaches a blocked one, and AWS's IPv6 metadata address is
+    /// blocked by name. Loopback and the unique-local range stay reachable, as their IPv4
+    /// counterparts do.
+    #[test]
+    fn an_ipv4_address_inside_an_ipv6_one_is_judged_as_itself() {
+        for blocked in [
+            "fd00:ec2::254",
+            "64:ff9b::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+            "::169.254.169.254",
+            "::ffff:169.254.169.254",
+            "64:ff9b::6464:64c8",
+        ] {
+            let ip: std::net::IpAddr = blocked.parse().expect("an address");
+            assert!(is_internal(ip), "{blocked} must be blocked");
+        }
+        for allowed in [
+            "::1",
+            "fd00::1",
+            "fd00:ec2::253",
+            "64:ff9b::808:808",
+            "2002:808:808::1",
+            "::10.0.0.5",
+            "2606:4700::1111",
+        ] {
+            let ip: std::net::IpAddr = allowed.parse().expect("an address");
+            assert!(!is_internal(ip), "{allowed} must stay allowed");
+        }
     }
 }

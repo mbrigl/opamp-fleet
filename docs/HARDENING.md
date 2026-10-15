@@ -109,7 +109,9 @@ has:
   refused at startup without being echoed. The Server offers no credential (ADR-0014).
 - **An audit record of every security decision** (ADR-0022): admissions and refusals, enrolment,
   issuance, revocation, operator acts and package outcomes, one hash-chained line each; no
-  admission without its record, and no `Authorization` value in any line, not even as a hash.
+  admission without its record, refusals aggregated per peer before they are queued and kept to
+  half the queue so they cannot crowd out any other record, and no `Authorization` value in any
+  line, not even as a hash.
 - **Certificates live 30 days by default** (ADR-0021 clause 9) and are renewed at two thirds of
   that; a test with lives of seconds watches three generations each replace the one before it
   expires (`certificate_renewal_e2e.rs`). A soak on real hosts before a rollout is the operator's.
@@ -142,9 +144,13 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     per Agent within a Gateway's aggregate (ADR-0013)
 - **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0013).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ Basic over the whole plane, required beyond the loopback (ADR-0021) ·
-    ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes
+    ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes, by `Origin` where a browser sends
+    no Fetch Metadata
+  - ✅ a Content-Security-Policy that names the UI's inline scripts by hash and forbids framing ·
+    ✅ `nosniff`, `no-referrer` on every response · ✅ `/api/v1` answers never cached
   - ✅ the package upload has no deadline, but is held to the floor above, and its size to
-    `max_package_size_bytes` · ✅ capped, HTTP/2-bounded and throttled as above
+    `max_package_size_bytes` and the whole store, uploads still arriving included, to
+    `max_total_package_bytes` · ✅ capped, HTTP/2-bounded and throttled as above
 - **Client → Server**, outbound (`opamp::client::connection`, ADR-0010).
   - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
     ✅ reconnect backoff · ✅ message size in both directions

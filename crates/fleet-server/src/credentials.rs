@@ -6,6 +6,7 @@
 //! hash once and not per request.
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,6 +55,8 @@ pub struct Credentials {
     /// answer's timing does not tell which users exist.
     dummy: String,
     hashing: Arc<tokio::sync::Semaphore>,
+    /// The one password hash each peer address may have under way, an IPv6 one by its /64.
+    in_flight: Mutex<HashMap<IpAddr, Arc<tokio::sync::Mutex<()>>>>,
     /// The `WWW-Authenticate` value a `401` answers with (RFC 9110).
     challenge: String,
 }
@@ -92,6 +95,7 @@ impl Credentials {
             remembered: Mutex::new(HashMap::new()),
             dummy,
             hashing: Arc::new(tokio::sync::Semaphore::new(CONCURRENT_HASHES)),
+            in_flight: Mutex::new(HashMap::new()),
             challenge,
         })
     }
@@ -102,8 +106,10 @@ impl Credentials {
 
     /// Checks a request's `Authorization` header. A password hash, when one is needed, runs on a
     /// blocking thread and at most [`CONCURRENT_HASHES`] at once; past that the answer is
-    /// [`Verdict::Busy`].
-    pub async fn check(self: &Arc<Self>, headers: &HeaderMap) -> Verdict {
+    /// [`Verdict::Busy`]. One peer address — an IPv6 one by its /64 — has at most one hash under
+    /// way: its next request waits for it rather than taking another slot, so wrong passwords from
+    /// one address cannot hold every slot.
+    pub async fn check(self: &Arc<Self>, peer: Option<IpAddr>, headers: &HeaderMap) -> Verdict {
         let presented = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -117,12 +123,29 @@ impl Credentials {
                 Verdict::Refused
             };
         }
+        let verdict = self.hash_in_turn(peer, presented).await;
+        if let Some(peer) = peer {
+            self.end_turn(peer);
+        }
+        verdict
+    }
+
+    async fn hash_in_turn(self: &Arc<Self>, peer: Option<IpAddr>, presented: String) -> Verdict {
+        let turn = match peer {
+            Some(peer) => Some(self.turn_of(peer).lock_owned().await),
+            None => None,
+        };
+        // The hash this one waited for may have verified the same header.
+        if self.is_remembered(&presented) {
+            return Verdict::Permitted;
+        }
         let Ok(permit) = self.hashing.clone().try_acquire_owned() else {
             return Verdict::Busy;
         };
         let this = self.clone();
         let verified = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let _turn = turn;
             this.verify(&presented)
         })
         .await
@@ -131,6 +154,31 @@ impl Credentials {
             Verdict::Permitted
         } else {
             Verdict::Refused
+        }
+    }
+
+    /// The turn a peer address waits for before it hashes. Turns nobody holds any more are
+    /// dropped whenever a new address takes one, so a request cancelled mid-hash leaves nothing
+    /// behind for long.
+    fn turn_of(&self, peer: IpAddr) -> Arc<tokio::sync::Mutex<()>> {
+        let key = crate::throttle::peer_key(peer);
+        let mut in_flight = self.in_flight.lock().expect("credentials lock");
+        if let Some(turn) = in_flight.get(&key) {
+            return turn.clone();
+        }
+        in_flight.retain(|_, turn| Arc::strong_count(turn) > 1);
+        in_flight.entry(key).or_default().clone()
+    }
+
+    /// Drops a peer address's turn once nobody holds or waits for it.
+    fn end_turn(&self, peer: IpAddr) {
+        let key = crate::throttle::peer_key(peer);
+        let mut in_flight = self.in_flight.lock().expect("credentials lock");
+        if in_flight
+            .get(&key)
+            .is_some_and(|turn| Arc::strong_count(turn) == 1)
+        {
+            in_flight.remove(&key);
         }
     }
 
@@ -370,7 +418,9 @@ mod tests {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
         let credentials = Arc::new(Credentials::new(&users, "Basic".into()).expect("credentials"));
         assert_eq!(
-            credentials.check(&header(&basic("ops", "s3cret"))).await,
+            credentials
+                .check(None, &header(&basic("ops", "s3cret")))
+                .await,
             Verdict::Permitted
         );
         let held: Vec<_> = (0..CONCURRENT_HASHES)
@@ -383,19 +433,71 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            credentials.check(&header(&basic("ops", "wrong"))).await,
+            credentials
+                .check(None, &header(&basic("ops", "wrong")))
+                .await,
             Verdict::Busy
         );
         assert_eq!(
-            credentials.check(&header(&basic("ops", "s3cret"))).await,
+            credentials
+                .check(None, &header(&basic("ops", "s3cret")))
+                .await,
             Verdict::Permitted,
             "a remembered success needs no hash"
         );
         drop(held);
         assert_eq!(
-            credentials.check(&header(&basic("ops", "wrong"))).await,
+            credentials
+                .check(None, &header(&basic("ops", "wrong")))
+                .await,
             Verdict::Refused
         );
+    }
+
+    /// One address holds at most one password hash at a time: wrong passwords sent at once from
+    /// it wait for each other, and an operator at another address still finds a slot.
+    /// Verifies: ADR-0021
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_address_holds_one_password_hash_at_a_time() {
+        let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
+        let credentials = Arc::new(Credentials::new(&users, "Basic".into()).expect("credentials"));
+        // Two addresses of one IPv6 /64 are one address here, as the throttle counts them.
+        let guesser = |n: u16| -> Option<IpAddr> {
+            Some(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, n).into())
+        };
+        let guesses: Vec<_> = (0..u16::try_from(CONCURRENT_HASHES * 2).expect("fits"))
+            .map(|n| {
+                let credentials = credentials.clone();
+                tokio::spawn(async move {
+                    credentials
+                        .check(guesser(n), &header(&basic("ops", "wrong")))
+                        .await
+                })
+            })
+            .collect();
+        // Only to know the guesses are under way before the operator signs in; what is asserted
+        // is the operator's answer.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while credentials.hashing.available_permits() == CONCURRENT_HASHES {
+            assert!(Instant::now() < deadline, "no guess started");
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(
+            credentials
+                .check(
+                    Some("192.0.2.7".parse().expect("ip")),
+                    &header(&basic("ops", "s3cret"))
+                )
+                .await,
+            Verdict::Permitted,
+            "the operator found every slot taken"
+        );
+        for guess in guesses {
+            assert_eq!(guess.await.expect("task"), Verdict::Refused);
+        }
+        // That no turn outlives its hash is a matter of memory, which no interface shows.
+        assert!(credentials.in_flight.lock().expect("lock").is_empty());
     }
 
     /// The comparison hash for an unknown user costs what the costliest user's hash costs.

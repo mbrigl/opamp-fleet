@@ -73,6 +73,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 - **A report refused at `max_agents` binds no `instance_uid` to its host**, and the host register
   forgets a host that holds no valid certificate, no Agent and no Gateway mark. **What to do:**
   nothing.
+- **The Operator plane answers with security headers**: a Content-Security-Policy that forbids
+  framing and runs only the UI's own scripts, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`
+  and `Cache-Control: no-store` on `/api/v1`. **What to do:** nothing, unless a proxy in
+  front adds headers of its own that conflict.
+- **A body-less `POST` whose `Origin` is not the plane's own is refused** (`403`) when the browser
+  sends no Fetch Metadata. **What to do:** a TLS-terminating proxy in front keeps the `Host` the
+  browser sent.
+- **A package source is checked before it is probed**, so a URL the Server refuses never receives
+  its headers, and the probe refuses an IPv6 address that carries a blocked IPv4 one (NAT64, 6to4,
+  IPv4-compatible) and AWS's `fd00:ec2::254`. **What to do:** nothing.
+- **An upload still arriving counts against `max_total_package_bytes`**: one that would take the
+  store past it is answered `507` while it streams, and an upload that ends without being stored
+  leaves no file behind. **What to do:** nothing.
+- **One password check at a time per address on the Operator plane** (an IPv6 address by its
+  /64): a second sign-in from the same address waits for the first. Behind a proxy every
+  operator shares one address, so first sign-ins are checked one after another. **What to do:**
+  nothing.
+- **Refused requests cannot crowd out the audit record** (ADR-0022): refusals are counted per
+  peer before they are queued and hold at most half of the queue, so admissions and operator acts
+  are still recorded under a flood. **What to do:** nothing.
 
 ## [0.5.2] - 2026-10-13
 
