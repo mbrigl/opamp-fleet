@@ -233,18 +233,25 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     // The state directory the service will run with — where an issued certificate counts.
     let state_dir = config.service_state_dir(&data_root);
     config.state_dir.clone_from(&state_dir);
-    // On Windows every local user inherits read access under %ProgramData%; the data root, and a
-    // state directory placed elsewhere, are cut off from it before anyone is granted anything
-    // (H8) — and before an enrolment writes its private key there. Unix needs nothing here: the
-    // Client writes its secrets owner-only itself.
+    // On Windows every local user inherits read access under %ProgramData%; the data root, a state
+    // directory placed elsewhere, and a Supervisors' root this install creates outside both are cut
+    // off from it before anyone is granted anything (H8) — and before an enrolment writes its
+    // private key there. Decided before anything is created. Unix needs nothing here: the Client writes its
+    // secrets owner-only itself.
+    let restrictions = windows_rights::plan(
+        &data_root,
+        args.root.is_some() || args.data_root.is_some(),
+        &state_dir,
+        &config.supervisors_root(),
+        Path::exists,
+    );
     std::fs::create_dir_all(&data_root)
         .map_err(|e| format!("cannot create {}: {e}", data_root.display()))?;
-    windows_rights::restrict_data_root(level, &data_root)?;
     if !state_dir.starts_with(&data_root) {
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
-        windows_rights::restrict_data_root(level, &state_dir)?;
     }
+    let created_outside = windows_rights::restrict(level, &restrictions)?;
     if let Some(bootstrap) = unasked {
         println!("enrolling with {}", bootstrap.describe());
         written.bootstrap = Some(bootstrap);
@@ -284,6 +291,15 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
         run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path])?;
+        // A Supervisors' root this install created and cut on Windows is the service's to write
+        // too (ADR-0017 clause 21); none is created on Unix.
+        run_as.hand_over(
+            &created_outside
+                .iter()
+                .filter(|dir| **dir != state_dir)
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>(),
+        )?;
         // The copy beside a configuration named outside the data root is not under it.
         run_as.hand_over(
             &written

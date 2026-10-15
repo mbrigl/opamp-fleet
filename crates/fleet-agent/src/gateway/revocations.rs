@@ -157,6 +157,20 @@ struct Entry {
     serial: String,
 }
 
+/// The revoked certificates a list body from the Server names, each by issuer hash and serial.
+///
+/// # Errors
+/// Returns an error for a body that is not the list's JSON.
+pub fn parse_list(body: &[u8]) -> Result<HashSet<(String, String)>, String> {
+    let body: ListBody =
+        serde_json::from_slice(body).map_err(|e| format!("an unreadable list: {e}"))?;
+    Ok(body
+        .certificates
+        .into_iter()
+        .map(|entry| (entry.issuer, entry.serial))
+        .collect())
+}
+
 /// One attempt to bring `list` up to date, and every session told to judge itself again. What the
 /// Gateway awaits before it serves, so it does not refuse its first peers for want of a list.
 pub async fn update(list: &RevocationList, config: &ClientConfig) {
@@ -227,13 +241,7 @@ async fn fetch_within(
     let body = read_within(response, limit)
         .await
         .map_err(|e| format!("{url}: an unreadable list: {e}"))?;
-    let body: ListBody =
-        serde_json::from_slice(&body).map_err(|e| format!("{url}: an unreadable list: {e}"))?;
-    let revoked: HashSet<(String, String)> = body
-        .certificates
-        .into_iter()
-        .map(|entry| (entry.issuer, entry.serial))
-        .collect();
+    let revoked = parse_list(&body).map_err(|e| format!("{url}: {e}"))?;
     let count = revoked.len();
     list.replace(revoked, etag);
     Ok(Some(count))

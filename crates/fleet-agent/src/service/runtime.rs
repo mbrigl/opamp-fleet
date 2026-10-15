@@ -261,6 +261,8 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         // and the host would stay on a version that never reaches the Server to say so.
         Err(error) => return unreadable_config(&spec, error),
     };
+    // A certificate swap a crash cut short is completed before the identity in force is read.
+    crate::csr::recover(&config.state_dir)?;
     // Without a client certificate the Server refuses this Client; it says so and stops rather
     // than retrying for ever (ADR-0021).
     config

@@ -21,6 +21,9 @@ pub const ISSUED_KEY_FILE: &str = "client-key.pem";
 /// The key a request in flight asks to be certified, kept apart from [`ISSUED_KEY_FILE`] so the
 /// certificate in force keeps its own key until the new one is proved (ADR-0021 clause 11).
 pub const PENDING_KEY_FILE: &str = "client-key.pending.pem";
+/// An issued certificate staged beside [`PENDING_KEY_FILE`] while the two are put in force, so a
+/// swap cut short is completed at the next start rather than leaving a mismatched pair.
+pub const PENDING_CERT_FILE: &str = "client-cert.pending.pem";
 /// The request in flight, re-sent unchanged until it is answered — the enrolment queue knows a
 /// request by its public key (ADR-0021 clause 21).
 pub const PENDING_CSR_FILE: &str = "client-csr.pending.pem";

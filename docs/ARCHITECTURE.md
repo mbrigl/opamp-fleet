@@ -134,8 +134,9 @@ core module names an adapter or a technology, and when a module has no role.
   stops on; the Plugins and the process runner are its adapters. How a `[[supervisor]]` block is
   read — its plugin, program, Agent type and timings — is `supervisor::block`, and what a
   Server-delivered block may bring is `supervisor::delivered`; the registry of Plugins stays in
-  `supervisor`, which knows the kinds and hands them to both. When a failed process is started
-  again or held is `supervisor::restart`'s decision; the runner reads the clock and starts it.
+  `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the
+  Supervisors' root as an absolute path too. When a failed process is started again or held is
+  `supervisor::restart`'s decision; the runner reads the clock and starts it.
   `supervisor::agent`, an Agent's decisions, names two more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, and `HostFacts`, which `host::SystemHost`
   implements from the platform. It answers each Server message in `handle` and leaves three

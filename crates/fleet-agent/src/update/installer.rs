@@ -210,10 +210,11 @@ pub fn install(
 
     // Refuse a downgrade. An offer for an older release than the one running — even a genuinely
     // signed one — is how a compromised Server pushes a build with a known vulnerability back onto a
-    // fleet; the Ed25519 signature is over the artifact bytes only and carries no version ordering,
-    // so an old release stays validly signed forever. A rebuild of the same release (Equal) and any
-    // newer one still install. Rollback to the *previous* version is a separate mechanism — the
-    // crash-loop pointer move ([`on_start`]) — not a Server-offered older version.
+    // fleet; the Ed25519 signature covers the Agent type, the version and the hash (ADR-0026), which
+    // ties an artifact to its own version but says nothing of how that version orders against the
+    // running one, so an old release stays validly signed forever. A rebuild of the same release
+    // (Equal) and any newer one still install. Rollback to the *previous* version is a separate
+    // mechanism — the crash-loop pointer move ([`on_start`]) — not a Server-offered older version.
     let running = fleet_core::version::current();
     if fleet_core::version::precedence(version, running) == Some(std::cmp::Ordering::Less) {
         return Err(format!(

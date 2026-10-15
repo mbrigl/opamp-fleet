@@ -50,6 +50,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Security
 
+- **A Windows `service install` takes the default data root over.** `%ProgramData%\<product>`
+  and everything in it now belong to the Administrators, and every right in it that the install
+  does not grant is removed — a directory a local user created there before the install included;
+  a `--run-as` account is granted its rights again by the same install. A `supervisor_dir` outside
+  the data root and the state directory that the install creates is cut off from inherited rights
+  and granted to the `--run-as` account, as a state directory outside the data root is; one that
+  already exists is left as it is, and the install warns about it. **What to do:** restrict such an
+  existing `supervisor_dir` to LocalSystem, the Administrators and the service account yourself.
 - **rustls 0.23.46**, for RUSTSEC-2026-0346 to -0349. None of the four is reachable in this build:
   it enables no `brotli` certificate compression, uses no Encrypted Client Hello and no session
   store of its own, and its *ring* provider offers no post-quantum hybrid group to be downgraded
@@ -101,6 +109,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 - **A Gateway frees what it kept for an Agent once that Agent is gone**: a departed socket's pool
   places and routes, and the route of an exchange that ends without its reply. A plain-HTTP
   Agent's pool place still lasts until its upstream connection drops. **What to do:** nothing.
+- **A delivered Supervisor block is held to more of ADR-0017 clause 38's rule.** The clause
+  refuses, whatever `[supervisors] delivered_env` allows, a variable that steers which code a
+  program loads and a value pointing where the Server delivers files no one signed. Beyond the names
+  and placeholders the clause lists, the Client now applies that rule to `PATHEXT`, `COMSPEC`,
+  `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB` and `RUBYLIB`, and to a new or changed value that
+  starts with a path under the Supervisors' root. A value the running block already carries still
+  passes. **What to do:** an offered set that brings such a variable or value is refused whole;
+  write it into the host's `supervisor.toml` by hand instead.
+- **A `.tar.gz` package is decompressed no further than its bound** (ADR-0026): the members'
+  2 GiB plus 64 MiB for the tar's own headers, GNU long names and PAX records. Memory is not bounded
+  per record below that: the tar parser holds a single long-name or PAX record in memory whole, up
+  to the same bound. **What to do:** nothing; a real release stays far below it.
 
 ## [0.5.2] - 2026-10-13
 

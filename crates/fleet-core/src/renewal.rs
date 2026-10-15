@@ -39,8 +39,9 @@ pub fn encode(certificate_der: &[u8], signature: &[u8]) -> Vec<u8> {
 #[must_use]
 pub fn decode(content: &[u8]) -> Option<(&[u8], &[u8])> {
     let length = usize::try_from(u32::from_be_bytes(content.get(..4)?.try_into().ok()?)).ok()?;
-    let certificate = content.get(4..4 + length)?;
-    let signature = content.get(4 + length..)?;
+    let end = 4usize.checked_add(length)?;
+    let certificate = content.get(4..end)?;
+    let signature = content.get(end..)?;
     (!certificate.is_empty() && !signature.is_empty()).then_some((certificate, signature))
 }
 
@@ -56,5 +57,15 @@ mod tests {
         assert_eq!(decode(&content[..6]), None);
         assert_eq!(decode(&encode(b"cert", b"")), None);
         assert_eq!(statement(&[0xab]), b"opamp-fleet-renewal-v1\nab\n".to_vec());
+    }
+
+    /// A length prefix past what the content holds — the largest one included — does not parse,
+    /// on any pointer width.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_length_past_the_content_does_not_parse() {
+        let mut content = u32::MAX.to_be_bytes().to_vec();
+        content.extend_from_slice(b"cert-and-sig");
+        assert_eq!(decode(&content), None);
     }
 }

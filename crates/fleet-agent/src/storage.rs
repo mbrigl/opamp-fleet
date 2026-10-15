@@ -231,6 +231,8 @@ impl AgentStorage for Storage {
     /// its name is recorded in [`SUPPLEMENTARY_FILE`] for the plugin to leave out of what it
     /// starts the process with.
     fn store_remote_config(&self, config: &AgentRemoteConfig) -> io::Result<()> {
+        // Refused before the previous offer's files go: a refusal leaves them as they were.
+        check_entry_names(config).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         // The protobuf and the entry files can carry secret material (a roled `${file:...}` entry
         // that is a certificate or key), so both the config directory and the files are owner-only.
         let config_dir = self.dir.join(CONFIG_DIR);
@@ -380,6 +382,48 @@ pub(crate) fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     {
         std::fs::write(path, contents)
     }
+}
+
+/// Refuses a configuration whose entries cannot each be stored as a file of their own on every
+/// host: a configuration means the same wherever it lands, so what Windows cannot hold is refused
+/// on Linux and macOS too.
+///
+/// An entry file name may not be a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+/// `LPT1`–`LPT9`, in any case and with any extension) nor end in a dot, which Windows strips. Two
+/// entries may not map to one file name, compared without case, as a case-insensitive file system
+/// compares them: which of them was written would depend on the map's iteration order.
+///
+/// # Errors
+/// Returns a sentence naming the entry, or the two entries, refused.
+pub fn check_entry_names(config: &AgentRemoteConfig) -> Result<(), String> {
+    let Some(map) = &config.config else {
+        return Ok(());
+    };
+    let mut names: Vec<&String> = map.config_map.keys().collect();
+    names.sort();
+    let mut seen: BTreeMap<String, &String> = BTreeMap::new();
+    for name in names {
+        let file_name = entry_file_name(name);
+        let folded = file_name.to_ascii_lowercase();
+        let stem = folded.split('.').next().unwrap_or_default();
+        if crate::config::WINDOWS_RESERVED.contains(&stem) {
+            return Err(format!(
+                "entry {name:?} would be stored as {file_name:?}, a reserved device name on Windows"
+            ));
+        }
+        if file_name.ends_with('.') {
+            return Err(format!(
+                "entry {name:?} would be stored as {file_name:?}, a name ending in a dot, which \
+                 Windows cannot hold"
+            ));
+        }
+        if let Some(other) = seen.insert(folded, name) {
+            return Err(format!(
+                "entries {other:?} and {name:?} would be stored in one file, {file_name:?}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Config-map keys are arbitrary peer input; a file name derived from one must never escape the
@@ -715,6 +759,64 @@ mod tests {
         // itself.
         assert_eq!(entry_file_name("."), "config");
         assert_eq!(entry_file_name("..."), "config");
+    }
+
+    /// A configuration means the same on every host, so an entry name Windows cannot hold as a
+    /// file — a device name, with or without an extension, or a name ending in a dot — is refused
+    /// on every host, and the previous offer's files stay as they were. The refusal is what the
+    /// Agent reports `FAILED` with (ADR-0017 clause 7).
+    /// Verifies: ADR-0017
+    #[test]
+    fn an_entry_name_windows_cannot_hold_is_refused_on_every_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        storage
+            .store_remote_config(&roled_offer(&[("base", b"a\n", "")]))
+            .expect("store");
+
+        for name in [
+            "CON", "con", "Prn", "aux", "NUL", "nul.yaml", "com1", "COM9.txt", "lpt1", "LPT9.x.y",
+            "base.", "a..",
+        ] {
+            let error = storage
+                .store_remote_config(&roled_offer(&[(name, b"x\n", "")]))
+                .expect_err(name);
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}");
+            assert!(error.to_string().contains(name), "{name}: {error}");
+        }
+        assert_eq!(entry_names(&storage.config_dir()), vec!["base"]);
+        for name in ["console", "com10", "lpt", "nul-x", "con_"] {
+            check_entry_names(&roled_offer(&[(name, b"x\n", "")]))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
+    /// Two entries that would land in one file — equal once mapped, or equal to a case-insensitive
+    /// file system — are refused rather than one silently overwriting the other in an order the map
+    /// decides.
+    /// Verifies: ADR-0017
+    #[test]
+    fn entries_that_would_share_a_file_are_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        for pair in [
+            ["A", "a"],
+            ["x y", "x_y"],
+            ["", "config"],
+            ["Base.yaml", "base.YAML"],
+        ] {
+            let error = storage
+                .store_remote_config(&roled_offer(&[
+                    (pair[0], b"1\n", ""),
+                    (pair[1], b"2\n", ""),
+                ]))
+                .expect_err(&format!("{pair:?}"));
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{pair:?}");
+            assert!(
+                !storage.config_dir().exists() || entry_names(&storage.config_dir()).is_empty(),
+                "{pair:?}: nothing written"
+            );
+        }
     }
 
     #[test]

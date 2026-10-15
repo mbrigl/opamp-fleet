@@ -24,7 +24,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [frame_decode, body_decode, client_receive, pem, csr_sign, archive_tree, pkcs12]
+        target:
+          - frame_decode
+          - body_decode
+          - client_receive
+          - pem
+          - csr_sign
+          - archive_tree
+          - pkcs12
+          - revocation_list
+          - supervisor_set
+          - archive_member
+          - renewal_proof
     env:
       SECONDS_PER_TARGET: ${{ github.event_name == 'schedule' && '900' || '60' }}
     steps:

@@ -16,7 +16,9 @@
 //!   member this Client will not write refuses the whole archive.
 //! - **The output is bounded.** Extraction stops at [`MAX_UNPACKED_BYTES`] — for a tree, across all
 //!   its members, and at [`MAX_TREE_MEMBERS`] members — so an archive that expands without end
-//!   fills a temporary file up to that limit and then fails, rather than a disk.
+//!   fills a temporary file up to that limit and then fails, rather than a disk. A `.tar.gz` is
+//!   also read no further than that limit and [`TAR_OVERHEAD_BYTES`], records the tar parser
+//!   consumes on its own included.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -31,6 +33,12 @@ const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 /// The most members a tree may hold (ADR-0026). An agent with its libraries and plugins is a few
 /// hundred files; a hundred thousand empty ones is a way to spend an afternoon creating inodes.
 const MAX_TREE_MEMBERS: usize = 10_000;
+
+/// What a `.tar.gz` may decompress to beyond its members' own bytes: the tar's headers and
+/// padding — at most a KiB a member, so ten megabytes for a tree at [`MAX_TREE_MEMBERS`] — and
+/// the records the tar parser reads on its own, GNU long names and PAX headers, which a real
+/// archive keeps to a few hundred bytes each.
+const TAR_OVERHEAD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Adds one member's declared (uncompressed) size to a running total and refuses the archive if the
 /// total passes `limit`. The point is *when* it is checked: from the tar header, before the entries
@@ -368,7 +376,7 @@ fn extract_tar_gz_within(
     out: &mut File,
     limit: u64,
 ) -> Result<u64, String> {
-    let mut tar = open_tar_gz(archive)?;
+    let mut tar = open_tar_gz(archive, limit)?;
     let entries = tar
         .entries()
         .map_err(|e| format!("cannot read the archive: {e}"))?;
@@ -462,7 +470,7 @@ fn extract_tree_tar_gz_within(
     let members = list_tar_gz(archive, limit)?;
     let prefix = locate_program(&members, program_path)?;
 
-    let mut tar = open_tar_gz(archive)?;
+    let mut tar = open_tar_gz(archive, limit)?;
     let mut summary = TreeSummary::default();
     for entry in tar
         .entries()
@@ -536,16 +544,54 @@ fn write_member(
     Ok(Some(out_path))
 }
 
-fn open_tar_gz(archive: &Path) -> Result<tar::Archive<flate2::read::GzDecoder<File>>, String> {
+/// Opens a `.tar.gz` whose decompressed stream is cut off past `limit` and [`TAR_OVERHEAD_BYTES`].
+/// [`accrue_within`] bounds the members the entries iterator yields; the tar parser also reads
+/// records it never yields — GNU long names, PAX headers — whole into memory, and only a bound
+/// under the parser reaches those.
+fn open_tar_gz(
+    archive: &Path,
+    limit: u64,
+) -> Result<tar::Archive<ReadWithin<flate2::read::GzDecoder<File>>>, String> {
     let file =
         File::open(archive).map_err(|e| format!("cannot read {}: {e}", archive.display()))?;
-    Ok(tar::Archive::new(flate2::read::GzDecoder::new(file)))
+    Ok(tar::Archive::new(ReadWithin {
+        inner: flate2::read::GzDecoder::new(file),
+        left: limit.saturating_add(TAR_OVERHEAD_BYTES),
+    }))
+}
+
+/// A reader that fails, rather than ends, once it has passed on `left` bytes and more follow: a
+/// tar cut short by a mere end of input would read as a shorter, valid archive.
+struct ReadWithin<R> {
+    inner: R,
+    left: u64,
+}
+
+impl<R: Read> Read for ReadWithin<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.left == 0 {
+            let mut probe = [0u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::other(
+                    "the archive decompresses past its bound — refusing it as a decompression bomb",
+                )),
+            };
+        }
+        let wanted = usize::try_from(self.left).map_or(buf.len(), |left| left.min(buf.len()));
+        let read = self.inner.read(&mut buf[..wanted])?;
+        self.left -= read as u64;
+        Ok(read)
+    }
 }
 
 /// Reads every member path of a `.tar.gz`, validating each — the pass that decides whether the
 /// archive may be unpacked at all, before a byte of it is written.
 fn list_tar_gz(archive: &Path, limit: u64) -> Result<Vec<std::path::PathBuf>, String> {
-    let mut tar = open_tar_gz(archive)?;
+    let mut tar = open_tar_gz(archive, limit)?;
     let mut members = Vec::new();
     let mut decompressed: u64 = 0;
     for entry in tar
@@ -1104,6 +1150,65 @@ mod tests {
         // A single member whose header alone claims more than the ceiling: refused before its data.
         let mut fresh = 0;
         assert!(accrue_within(&mut fresh, u64::MAX, 1024).is_err());
+    }
+
+    /// A `.tar.gz` whose first record is a GNU long name of `name_len` bytes `a`, naming the one
+    /// member after it. The tar parser reads such a record into memory itself and never yields it
+    /// as an entry.
+    fn tar_gz_with_long_name(dir: &Path, name_len: u64) -> std::path::PathBuf {
+        let path = dir.join("long-name.tar.gz");
+        let file = File::create(&path).expect("create");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let mut long = tar::Header::new_gnu();
+        long.as_gnu_mut().expect("gnu").name[..13].copy_from_slice(b"././@LongLink");
+        long.set_entry_type(tar::EntryType::GNULongName);
+        long.set_size(name_len);
+        long.set_cksum();
+        builder
+            .append(&long, std::io::repeat(b'a').take(name_len))
+            .expect("long name");
+        let mut header = tar::Header::new_gnu();
+        header.set_size(11);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "otelcol", &b"the-program"[..])
+            .expect("append");
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+        path
+    }
+
+    /// A record the tar parser consumes on its own — a GNU long name, a PAX header — is read under
+    /// the same bound as the members: one past the unpacked limit and the room for the tar's own
+    /// headers refuses the archive, on the single-member and the tree path alike, instead of being
+    /// inflated into memory.
+    /// Verifies: ADR-0026
+    #[test]
+    fn a_hidden_record_past_the_bound_refuses_the_archive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = tar_gz_with_long_name(dir.path(), 1024 + TAR_OVERHEAD_BYTES + 1);
+        let mut out = File::create(dir.path().join("out")).expect("create");
+        let err = extract_tar_gz_within(&archive, "otelcol", &mut out, 1024)
+            .expect_err("a long name past the bound");
+        assert!(err.contains("decompression bomb"), "{err}");
+        let err = extract_tree_tar_gz_within(
+            &archive,
+            Path::new("otelcol"),
+            &dir.path().join("tree"),
+            1024,
+        )
+        .expect_err("a long name past the bound");
+        assert!(err.contains("decompression bomb"), "{err}");
+
+        // Within the bound the same shape is an ordinary archive, the long name naming the member.
+        let fits = tar_gz_with_long_name(dir.path(), 100);
+        let mut out = File::create(dir.path().join("out")).expect("create");
+        extract_tar_gz_within(&fits, &"a".repeat(100), &mut out, 1024).expect("within the bound");
     }
 
     /// A member whose declared size lies ahead of the wanted one is refused before it is skipped —

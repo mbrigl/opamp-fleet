@@ -209,7 +209,14 @@ pub fn check_delivered_block(
     running: &ClientConfig,
     block: &SupervisorBlock,
 ) -> Result<(), String> {
-    delivered::check(running, block, &registry())
+    let root = running.supervisors_root();
+    let roots = [
+        root.to_string_lossy().into_owned(),
+        crate::config_file::absolute(&root)
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    delivered::check(running, block, &registry(), &roots)
 }
 
 /// The program a block resolves to, for callers that must inspect ownership rather than just
