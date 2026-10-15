@@ -92,6 +92,8 @@ pub async fn enrol(
         // clause 7).
         Bootstrap::Pkcs12 { identity, .. } => config.bootstrap_identity = Some(identity),
     }
+    // A certificate swap a crash cut short is completed before anything reads the state.
+    crate::csr::recover(&config.state_dir)?;
     // Read now, so a pair that is no certificate and key is named before anything connects.
     crate::tls::client_tls(&config)?;
 

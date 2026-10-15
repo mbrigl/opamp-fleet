@@ -50,10 +50,77 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Security
 
+- **A Windows `service install` takes the default data root over.** `%ProgramData%\<product>`
+  and everything in it now belong to the Administrators, and every right in it that the install
+  does not grant is removed — a directory a local user created there before the install included;
+  a `--run-as` account is granted its rights again by the same install. A `supervisor_dir` outside
+  the data root and the state directory that the install creates is cut off from inherited rights
+  and granted to the `--run-as` account, as a state directory outside the data root is; one that
+  already exists is left as it is, and the install warns about it. **What to do:** restrict such an
+  existing `supervisor_dir` to LocalSystem, the Administrators and the service account yourself.
 - **rustls 0.23.46**, for RUSTSEC-2026-0346 to -0349. None of the four is reachable in this build:
   it enables no `brotli` certificate compression, uses no Encrypted Client Hello and no session
   store of its own, and its *ring* provider offers no post-quantum hybrid group to be downgraded
   from. **What to do:** nothing beyond the upgrade.
+- **Release builds check integer overflow.** An arithmetic overflow in the Server, the Client or
+  `opamp-fleetctl` panics instead of wrapping into a wrong value. **What to do:** nothing.
+- **The Server's systemd unit in [the setup guide](docs/manual/setup.md) is sandboxed**: no new
+  privileges, no capabilities, a read-only file system but for its state directory, and no access
+  to home directories, devices or kernel settings. **What to do:** a unit copied from an earlier
+  guide can take the new lines; a `config_dir` or `packages_dir` outside
+  `/var/lib/opamp-fleet-server` then needs a `ReadWritePaths=` line naming it.
+- **A client certificate past its end is refused on every request**, not only in the TLS
+  handshake: a kept-alive HTTP or HTTP/2 connection gets `401` on `/v1/opamp` and on the download
+  route once its certificate has expired
+  ([ADR-0021](docs/adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
+  **What to do:** nothing; a Client that renews on time never meets it.
+- **A peer is a fleet member only when its certificate verifies against a client CA's key**, not
+  when its issuer merely carries a client CA's name. **What to do:** nothing.
+- **A revocation is on disk before it is answered**: the Server syncs the file and its directory.
+  **What to do:** nothing.
+- **A report refused at `max_agents` binds no `instance_uid` to its host**, and the host register
+  forgets a host that holds no valid certificate, no Agent and no Gateway mark. **What to do:**
+  nothing.
+- **The Operator plane answers with security headers**: a Content-Security-Policy that forbids
+  framing and runs only the UI's own scripts, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`
+  and `Cache-Control: no-store` on `/api/v1`. **What to do:** nothing, unless a proxy in
+  front adds headers of its own that conflict.
+- **A body-less `POST` whose `Origin` is not the plane's own is refused** (`403`) when the browser
+  sends no Fetch Metadata. **What to do:** a TLS-terminating proxy in front keeps the `Host` the
+  browser sent.
+- **A package source is checked before it is probed**, so a URL the Server refuses never receives
+  its headers, and the probe refuses an IPv6 address that carries a blocked IPv4 one (NAT64, 6to4,
+  IPv4-compatible) and AWS's `fd00:ec2::254`. **What to do:** nothing.
+- **An upload still arriving counts against `max_total_package_bytes`**: one that would take the
+  store past it is answered `507` while it streams, and an upload that ends without being stored
+  leaves no file behind. **What to do:** nothing.
+- **One password check at a time per address on the Operator plane** (an IPv6 address by its
+  /64): a second sign-in from the same address waits for the first. Behind a proxy every
+  operator shares one address, so first sign-ins are checked one after another. **What to do:**
+  nothing.
+- **Refused requests cannot crowd out the audit record** (ADR-0022): refusals are counted per
+  peer before they are queued and hold at most half of the queue, so admissions and operator acts
+  are still recorded under a flood. **What to do:** nothing.
+- **A Gateway reads the revocation list within 128 MiB** (ADR-0015, ADR-0021). A larger list
+  is refused as unreadable, and a Gateway that holds no list younger than 300 s admits nobody.
+  The bound holds every list the Server names with up to eight client CA subjects and serials of
+  the length RFC 5280 allows. **What to do:** keep `client_ca_file` to eight certificates or
+  fewer, and revoke only serials of real certificates.
+- **A Gateway frees what it kept for an Agent once that Agent is gone**: a departed socket's pool
+  places and routes, and the route of an exchange that ends without its reply. A plain-HTTP
+  Agent's pool place still lasts until its upstream connection drops. **What to do:** nothing.
+- **A delivered Supervisor block is held to more of ADR-0017 clause 38's rule.** The clause
+  refuses, whatever `[supervisors] delivered_env` allows, a variable that steers which code a
+  program loads and a value pointing where the Server delivers files no one signed. Beyond the names
+  and placeholders the clause lists, the Client now applies that rule to `PATHEXT`, `COMSPEC`,
+  `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB` and `RUBYLIB`, and to a new or changed value that
+  starts with a path under the Supervisors' root. A value the running block already carries still
+  passes. **What to do:** an offered set that brings such a variable or value is refused whole;
+  write it into the host's `supervisor.toml` by hand instead.
+- **A `.tar.gz` package is decompressed no further than its bound** (ADR-0026): the members'
+  2 GiB plus 64 MiB for the tar's own headers, GNU long names and PAX records. Memory is not bounded
+  per record below that: the tar parser holds a single long-name or PAX record in memory whole, up
+  to the same bound. **What to do:** nothing; a real release stays far below it.
 
 ## [0.5.2] - 2026-10-13
 

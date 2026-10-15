@@ -197,3 +197,8 @@ digest.opt-level = 3
 block-buffer.opt-level = 3
 aes.opt-level = 3
 cbc.opt-level = 3
+
+# A release build checks integer arithmetic as a debug build does: an overflowing length, index or
+# deadline panics instead of wrapping into a wrong value.
+[profile.release]
+overflow-checks = true

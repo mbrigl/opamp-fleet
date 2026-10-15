@@ -17,7 +17,9 @@ use rcgen::{CertificateParams, KeyPair};
 use tracing::{info, warn};
 
 use crate::config::ClientConfig;
-use crate::tls::{ISSUED_CERT_FILE, ISSUED_KEY_FILE, PENDING_CSR_FILE, PENDING_KEY_FILE};
+use crate::tls::{
+    ISSUED_CERT_FILE, ISSUED_KEY_FILE, PENDING_CERT_FILE, PENDING_CSR_FILE, PENDING_KEY_FILE,
+};
 
 /// A certificate is renewed once it is this far through its validity — early enough that a Server
 /// that cannot sign for a while costs nothing, and that the attempt can fail twice before the
@@ -54,6 +56,12 @@ pub fn request(config: &ClientConfig) -> Option<Vec<u8>> {
 /// Stores an issued certificate beside the key it was requested for, putting it in force on the
 /// next connection (ADR-0021).
 ///
+/// The certificate and its key are two files, so the swap runs in an order every step of which
+/// [`recover`] completes: the certificate is staged whole beside the pending key, then the key goes
+/// into force, then the certificate. A crash after the staging leaves the old pair in force and
+/// the new one staged; a crash after the key leaves the staged certificate as the one thing to
+/// finish.
+///
 /// # Errors
 /// Returns an error when the certificate cannot be written, or when no pending key is there to go
 /// with it — a certificate this Client did not ask for is refused rather than stored.
@@ -65,13 +73,71 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
             pending.display()
         ));
     }
-    std::fs::write(state_dir.join(ISSUED_CERT_FILE), cert_pem)
+    stage(&state_dir.join(PENDING_CERT_FILE), cert_pem)
         .map_err(|e| format!("cannot store the issued certificate: {e}"))?;
-    // The pending key becomes the key in force, and the request is answered.
-    std::fs::rename(&pending, state_dir.join(ISSUED_KEY_FILE))
-        .map_err(|e| format!("cannot put the issued key in force: {e}"))?;
-    let _ = std::fs::remove_file(state_dir.join(PENDING_CSR_FILE));
+    recover(state_dir)
+}
+
+/// Writes `contents` to `path` through a temporary file, synced before it is renamed into place,
+/// so `path` holds either nothing or all of it.
+fn stage(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let tmp = path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
+}
+
+/// Completes a swap [`accept`] began, when one was cut short: a staged certificate goes into force
+/// beside the key it certifies — the pending key, which goes into force first, or the key already
+/// in force when the crash came between the two renames. A staged certificate that certifies
+/// neither is stale and dropped, so it is never paired with a key it does not belong to. Nothing
+/// staged is nothing to do — a pending key alone is a request in flight. Run before the identity
+/// in force is read.
+///
+/// # Errors
+/// Returns an error when a file of the swap cannot be renamed or removed.
+pub fn recover(state_dir: &Path) -> Result<(), String> {
+    let staged = state_dir.join(PENDING_CERT_FILE);
+    let Ok(cert_pem) = std::fs::read(&staged) else {
+        return Ok(());
+    };
+    let pending = state_dir.join(PENDING_KEY_FILE);
+    let in_force = state_dir.join(ISSUED_KEY_FILE);
+    if certifies(&cert_pem, &pending) {
+        std::fs::rename(&pending, &in_force)
+            .map_err(|e| format!("cannot put the issued key in force: {e}"))?;
+    } else if !certifies(&cert_pem, &in_force) {
+        warn!(file = %staged.display(), "a staged certificate certifies no key on this host; dropping it");
+        return std::fs::remove_file(&staged)
+            .map_err(|e| format!("cannot remove {}: {e}", staged.display()));
+    }
+    std::fs::rename(&staged, state_dir.join(ISSUED_CERT_FILE))
+        .map_err(|e| format!("cannot put the issued certificate in force: {e}"))?;
+    // The request is answered — unless a later one is in flight beside it.
+    if !pending.exists() {
+        let _ = std::fs::remove_file(state_dir.join(PENDING_CSR_FILE));
+    }
     Ok(())
+}
+
+/// Whether the PEM certificate `cert_pem` is issued for the private key in `key_file`.
+fn certifies(cert_pem: &[u8], key_file: &Path) -> bool {
+    use rcgen::PublicKeyData as _;
+    let Ok(key_pem) = std::fs::read_to_string(key_file) else {
+        return false;
+    };
+    let Ok(key) = KeyPair::from_pem(&key_pem) else {
+        return false;
+    };
+    let Ok((_, block)) = x509_parser::pem::parse_x509_pem(cert_pem) else {
+        return false;
+    };
+    block
+        .parse_x509()
+        .is_ok_and(|cert| cert.public_key().raw == key.subject_public_key_info().as_slice())
 }
 
 /// The SHA-256 fingerprint of the key a request in flight asks to be certified — the one logged
@@ -162,7 +228,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
         .pem()
         .map_err(|e| format!("cannot encode the certificate request: {e}"))?;
 
-    std::fs::create_dir_all(&config.state_dir)
+    crate::storage::create_private_dir(&config.state_dir)
         .map_err(|e| format!("cannot create {}: {e}", config.state_dir.display()))?;
     // The key is written no wider than its owner, the mode set in the open call so it is never on
     // disk at the umask default even briefly; a key file left at a wider mode by a prior enrolment
@@ -259,6 +325,177 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "the private key must be owner-only");
+    }
+
+    /// A state directory the request creates is owner-only, like every other one the Client
+    /// creates for its secrets — the key in it is `0600`, and the directory listing is no wider.
+    #[cfg(unix)]
+    /// Verifies: ADR-0021
+    #[test]
+    fn the_state_directory_a_request_creates_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        request(&config(&state_dir)).expect("a request");
+        let mode = state_dir.metadata().expect("metadata").permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "the state directory must be owner-only"
+        );
+    }
+
+    /// Signs `csr` the way a Server does.
+    fn sign(csr: Vec<u8>) -> String {
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut ca_params = CertificateParams::new(vec!["test-ca".to_string()]).expect("ca params");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca");
+        let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_cert.pem(), ca_key).expect("issuer");
+        rcgen::CertificateSigningRequestParams::from_pem(&String::from_utf8(csr).unwrap())
+            .expect("csr")
+            .signed_by(&issuer)
+            .expect("signed")
+            .pem()
+    }
+
+    /// Whether the certificate and the key in force belong together.
+    fn pair_in_force_matches(state_dir: &Path) -> bool {
+        use rcgen::PublicKeyData as _;
+        let cert_pem = std::fs::read(state_dir.join(ISSUED_CERT_FILE)).expect("certificate");
+        let key_pem = std::fs::read_to_string(state_dir.join(ISSUED_KEY_FILE)).expect("key");
+        let (_, block) = x509_parser::pem::parse_x509_pem(&cert_pem).expect("pem");
+        let cert = block.parse_x509().expect("x509");
+        let key = KeyPair::from_pem(&key_pem).expect("key pem");
+        cert.public_key().raw == key.subject_public_key_info().as_slice()
+    }
+
+    /// A host enrolled once, with a renewal requested and answered: the pair in force is the old
+    /// one, the pending key the new one, and `signed` its certificate.
+    fn renewal_answered(state_dir: &Path) -> String {
+        let config = config(state_dir);
+        accept(state_dir, sign(request(&config).expect("first")).as_bytes()).expect("accept");
+        sign(generate(&config).expect("a renewal request"))
+    }
+
+    /// Storing an issued certificate is two files, and a crash between them must not leave a
+    /// certificate in force beside a key it does not belong to: from the certificate staged
+    /// beside the pending key, and from the key put in force before the certificate, the next start
+    /// completes the swap into the new pair.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_swap_cut_short_recovers_to_a_matching_pair() {
+        // Staged, nothing renamed yet.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let signed = renewal_answered(dir.path());
+        std::fs::write(dir.path().join(PENDING_CERT_FILE), &signed).expect("stage");
+        recover(dir.path()).expect("recover");
+        assert!(pair_in_force_matches(dir.path()));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(ISSUED_CERT_FILE)).expect("cert"),
+            signed,
+            "the swap is completed, not undone"
+        );
+        assert!(!dir.path().join(PENDING_KEY_FILE).exists());
+        assert!(!dir.path().join(PENDING_CERT_FILE).exists());
+        assert!(!dir.path().join(PENDING_CSR_FILE).exists());
+
+        // The key in force already, the certificate still staged.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let signed = renewal_answered(dir.path());
+        std::fs::write(dir.path().join(PENDING_CERT_FILE), &signed).expect("stage");
+        std::fs::rename(
+            dir.path().join(PENDING_KEY_FILE),
+            dir.path().join(ISSUED_KEY_FILE),
+        )
+        .expect("key in force");
+        assert!(!pair_in_force_matches(dir.path()), "the torn state");
+        recover(dir.path()).expect("recover");
+        assert!(pair_in_force_matches(dir.path()));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(ISSUED_CERT_FILE)).expect("cert"),
+            signed
+        );
+    }
+
+    /// A request in flight with nothing staged is no torn swap: recovery leaves it alone.
+    #[test]
+    fn recovery_leaves_a_request_in_flight_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = renewal_answered(dir.path());
+        recover(dir.path()).expect("recover");
+        assert!(dir.path().join(PENDING_KEY_FILE).exists());
+        assert!(dir.path().join(PENDING_CSR_FILE).exists());
+        assert!(pair_in_force_matches(dir.path()));
+    }
+
+    /// A staged certificate is put in force only beside the key it certifies. Left staged after
+    /// its key went into force, it outlives the next renewal's pending key — and is paired with the
+    /// key in force, not with that one; a staged certificate that certifies neither is dropped.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_stale_staged_certificate_is_never_paired_with_another_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let signed = renewal_answered(dir.path());
+        std::fs::write(dir.path().join(PENDING_CERT_FILE), &signed).expect("stage");
+        std::fs::rename(
+            dir.path().join(PENDING_KEY_FILE),
+            dir.path().join(ISSUED_KEY_FILE),
+        )
+        .expect("key in force");
+        // The next renewal, before any start completed the swap.
+        generate(&config(dir.path())).expect("another request");
+        let next_key = std::fs::read(dir.path().join(PENDING_KEY_FILE)).expect("pending");
+
+        recover(dir.path()).expect("recover");
+        assert!(pair_in_force_matches(dir.path()));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(ISSUED_CERT_FILE)).expect("cert"),
+            signed
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(PENDING_KEY_FILE)).expect("still pending"),
+            next_key,
+            "the request in flight is left alone"
+        );
+
+        // A certificate for a key this host does not hold.
+        let stranger =
+            sign(generate(&config(tempfile::tempdir().expect("t").path())).expect("csr"));
+        std::fs::write(dir.path().join(PENDING_CERT_FILE), stranger).expect("stage");
+        recover(dir.path()).expect("recover");
+        assert!(!dir.path().join(PENDING_CERT_FILE).exists(), "dropped");
+        assert!(pair_in_force_matches(dir.path()));
+        assert!(dir.path().join(PENDING_KEY_FILE).exists());
+    }
+
+    /// `accept` stopped at each of its steps — a directory standing where the step writes makes
+    /// exactly that write fail — leaves a state `recover` turns into a matching pair.
+    /// Verifies: ADR-0021
+    #[test]
+    fn accept_cut_short_at_any_step_recovers_to_a_matching_pair() {
+        for (blocked, completes) in [
+            (PENDING_CERT_FILE, false),
+            (ISSUED_KEY_FILE, true),
+            (ISSUED_CERT_FILE, true),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let signed = renewal_answered(dir.path());
+            let target = dir.path().join(blocked);
+            let _ = std::fs::remove_file(&target);
+            std::fs::create_dir_all(target.join("in-the-way")).expect("block");
+
+            accept(dir.path(), signed.as_bytes()).expect_err(blocked);
+            std::fs::remove_dir_all(&target).expect("unblock");
+            recover(dir.path()).expect("recover");
+            assert!(pair_in_force_matches(dir.path()), "{blocked}");
+            assert_eq!(
+                dir.path().join(PENDING_KEY_FILE).exists(),
+                !completes,
+                "{blocked}: the swap is completed exactly when the certificate was staged"
+            );
+        }
     }
 
     /// What comes back is stored beside the key and is what the Client presents from then on.

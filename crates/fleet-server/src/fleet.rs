@@ -368,6 +368,61 @@ impl std::fmt::Display for StoreFull {
     }
 }
 
+/// The bytes of one upload still arriving, counted against the package store's ceiling until it is
+/// dropped (ADR-0026). Taken from [`AppState::admit_upload`].
+pub struct UploadReservation<'a> {
+    state: &'a AppState,
+    /// The stored artifacts' bytes when the upload began; walking the store per chunk would cost
+    /// more than the chunk.
+    stored: u64,
+    bytes: u64,
+}
+
+impl UploadReservation<'_> {
+    /// Counts `more` bytes of this upload as they arrive.
+    ///
+    /// # Errors
+    /// [`StoreFull::WouldExceed`] once the store and every upload in progress pass the ceiling.
+    pub fn grow(&mut self, more: u64) -> Result<(), StoreFull> {
+        self.bytes += more;
+        let uploading = self.state.uploading_bytes.fetch_add(more, Ordering::SeqCst) + more;
+        self.within(self.stored, uploading)
+    }
+
+    /// Whether the upload, whole now, may be committed: the store as it stands and every upload in
+    /// progress, this one included, within the ceiling. With
+    /// [`admit_upload`](AppState::admit_upload) before the stream, this is what stops a caller
+    /// filling the disk under distinct names.
+    ///
+    /// # Errors
+    /// [`StoreFull::WouldExceed`] when committing it would pass the ceiling.
+    pub fn admit_artifact(&self) -> Result<(), StoreFull> {
+        self.within(
+            self.state.stored_package_bytes(),
+            self.state.uploading_bytes.load(Ordering::SeqCst),
+        )
+    }
+
+    fn within(&self, stored: u64, uploading: u64) -> Result<(), StoreFull> {
+        let limit = self.state.max_total_package_bytes;
+        if stored.saturating_add(uploading) > limit {
+            return Err(StoreFull::WouldExceed {
+                size: self.bytes,
+                limit,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Drop for UploadReservation<'_> {
+    fn drop(&mut self) {
+        self.state
+            .uploading_bytes
+            .fetch_sub(self.bytes, Ordering::SeqCst);
+    }
+}
+
 /// The package store plus the base URL each `download_url` is built from (ADR-0026).
 pub struct PackageOffering {
     store: PackageStore,
@@ -453,6 +508,9 @@ pub struct AppState {
     /// (ADR-0026): what bounds the store — and so the disk — against many uploads under distinct
     /// names, where `max_package_size` bounds only one.
     max_total_package_bytes: u64,
+    /// The bytes of uploads still arriving, counted against `max_total_package_bytes` beside the
+    /// stored artifacts, so uploads sent at once cannot pass the ceiling together.
+    uploading_bytes: AtomicU64,
     /// How long an Agent that promised to report periodically may be silent before the fleet view
     /// calls it stale (ADR-0024). Overridden by an offered heartbeat interval, which is the period
     /// this Server actually asked for.
@@ -522,6 +580,7 @@ impl AppState {
             max_message_size: opamp::frame::DEFAULT_MAX_MESSAGE_SIZE,
             max_package_size: DEFAULT_MAX_PACKAGE_SIZE,
             max_total_package_bytes: DEFAULT_MAX_TOTAL_PACKAGE_SIZE,
+            uploading_bytes: AtomicU64::new(0),
             stale_after: DEFAULT_STALE_AFTER,
             max_agents: DEFAULT_MAX_AGENTS,
         })
@@ -574,32 +633,23 @@ impl AppState {
     }
 
     /// Whether the package store takes another upload at all (ADR-0026): one already at its
-    /// ceiling takes nothing more. Asked before an upload is streamed, so a gibibyte that would only
-    /// be rejected is never read.
+    /// ceiling, counting the uploads still arriving, takes nothing more. Asked before an upload is
+    /// streamed, so a gibibyte that would only be rejected is never read. The upload's bytes are
+    /// counted through the answer as they arrive, and no longer once it is dropped.
     ///
     /// # Errors
     /// [`StoreFull::AtLimit`] when the store is at or past [`max_total_package_bytes`](Self::max_total_package_bytes).
-    pub fn admit_upload(&self) -> Result<(), StoreFull> {
+    pub fn admit_upload(&self) -> Result<UploadReservation<'_>, StoreFull> {
         let limit = self.max_total_package_bytes;
-        if self.stored_package_bytes() >= limit {
+        let stored = self.stored_package_bytes();
+        if stored.saturating_add(self.uploading_bytes.load(Ordering::SeqCst)) >= limit {
             return Err(StoreFull::AtLimit { limit });
         }
-        Ok(())
-    }
-
-    /// Whether an uploaded artifact of `size` bytes may be committed (ADR-0026): not when it would
-    /// take the store past its ceiling. With [`admit_upload`](Self::admit_upload) before the
-    /// stream, this is what stops a caller filling the disk under distinct names. An upload still
-    /// staged is not yet an artifact, so the store does not count it.
-    ///
-    /// # Errors
-    /// [`StoreFull::WouldExceed`] when committing it would pass the ceiling.
-    pub fn admit_artifact(&self, size: u64) -> Result<(), StoreFull> {
-        let limit = self.max_total_package_bytes;
-        if self.stored_package_bytes() + size > limit {
-            return Err(StoreFull::WouldExceed { size, limit });
-        }
-        Ok(())
+        Ok(UploadReservation {
+            state: self,
+            stored,
+            bytes: 0,
+        })
     }
 
     /// Arms the connection-settings offer (ADR-0014); with it the Server declares
@@ -1457,11 +1507,13 @@ impl AppState {
 
         // An instance_uid belongs to the host whose certificate first reported it (ADR-0021
         // clause 7): a certificate of another host does not speak for it, nor re-keys it. Such a
-        // reporter is re-keyed — it gets an identity of its own, never the one it claimed.
+        // reporter is re-keyed — it gets an identity of its own, never the one it claimed. The
+        // binding is made only once the report is admitted below.
+        let mut binding = None;
         if let (Some(host), Some(revocations)) =
             (presented.and_then(|p| p.host.as_deref()), &self.revocations)
         {
-            if revocations.check_report(host, uid.as_bytes()).is_err() {
+            if revocations.may_report(host, uid.as_bytes()).is_err() {
                 let new_uid = InstanceUid::default();
                 warn!(
                     claimed = %uid, new = %new_uid, host,
@@ -1478,7 +1530,7 @@ impl AppState {
                 uid = new_uid;
                 // A CSR in the same message must not name the claimed identity either.
                 sender = uid.as_bytes().to_vec();
-                if let Err(e) = revocations.check_report(host, uid.as_bytes()) {
+                if let Err(e) = revocations.may_report(host, uid.as_bytes()) {
                     return Processed {
                         reply: bad_request(&e),
                         uid: None,
@@ -1486,10 +1538,12 @@ impl AppState {
                     };
                 }
             }
+            binding = Some((host, uid));
         }
 
         // The Agent asked the Server to assign its identity (AgentToServerFlags_RequestInstanceUid):
         // mint a UUID v7 and re-key the record; the reply tells the Agent to adopt it.
+        let mut rekeyed = None;
         if identification.is_none()
             && msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0
         {
@@ -1504,12 +1558,7 @@ impl AppState {
             identification = Some(AgentIdentification {
                 new_instance_uid: new_uid.as_bytes().to_vec(),
             });
-            // A re-key the Agent asked for keeps its host (ADR-0021 clause 7).
-            if let Some(revocations) = &self.revocations {
-                if let Err(e) = revocations.rebind(uid.as_bytes(), new_uid.as_bytes()) {
-                    warn!(error = %e, "cannot move the host binding to the new instance_uid");
-                }
-            }
+            rekeyed = Some((uid, new_uid));
             uid = new_uid;
         }
 
@@ -1554,6 +1603,23 @@ impl AppState {
                 uid: None,
                 disconnected: false,
             };
+        }
+        if let Some(revocations) = &self.revocations {
+            if let Some((host, bound)) = binding {
+                if let Err(e) = revocations.check_report(host, bound.as_bytes()) {
+                    return Processed {
+                        reply: bad_request(&e),
+                        uid: None,
+                        disconnected: false,
+                    };
+                }
+            }
+            // A re-key an Agent asks for keeps its host (ADR-0021 clause 7).
+            if let Some((old, new)) = rekeyed {
+                if let Err(e) = revocations.rebind(old.as_bytes(), new.as_bytes()) {
+                    warn!(error = %e, "cannot move the host binding to the new instance_uid");
+                }
+            }
         }
         // Labels outlive the record (ADR-0024): a host that was forgotten, or that this Server has
         // only just restarted into, comes back in the channel the operator put it in.
@@ -2225,6 +2291,19 @@ impl AppState {
     ) -> Result<std::path::PathBuf, String> {
         self.refuse_if_assigned(id)?;
         self.package_store()?.staging_path(id, platform)
+    }
+
+    /// Whether [`set_package_entry_source`](Self::set_package_entry_source) would take this
+    /// reference, answered without storing it.
+    pub fn check_package_entry_source(
+        &self,
+        id: &PackageId,
+        content_hash: &[u8],
+        source: &Source,
+    ) -> Result<(), String> {
+        self.refuse_if_assigned(id)?;
+        self.package_store()?
+            .check_entry_source(id, content_hash, source)
     }
 
     /// Points one entry of a Package at an artifact hosted elsewhere (ADR-0026).
@@ -3570,24 +3649,48 @@ mod tests {
     }
 
     /// The whole-store ceiling (ADR-0026), decided without a request: a store at its limit takes
-    /// no upload, and an artifact is refused when it alone would take the store past it.
+    /// no upload, an artifact is refused when it would take the store past it, and an upload still
+    /// arriving counts until it is dropped.
     #[test]
     fn the_package_store_ceiling_admits_up_to_its_limit() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = AppState::new(dir.path().join("configs"))
             .expect("state")
             .with_max_total_package_bytes(100);
-        assert_eq!(state.admit_upload(), Ok(()));
-        assert_eq!(state.admit_artifact(100), Ok(()));
-        assert_eq!(
-            state.admit_artifact(101),
-            Err(StoreFull::WouldExceed {
-                size: 101,
-                limit: 100
-            })
+        {
+            let mut upload = state
+                .admit_upload()
+                .expect("an empty store takes an upload");
+            assert_eq!(upload.grow(100), Ok(()));
+            assert_eq!(upload.admit_artifact(), Ok(()));
+            assert!(
+                matches!(state.admit_upload(), Err(StoreFull::AtLimit { limit: 100 })),
+                "an upload in progress fills the store as much as a stored one"
+            );
+            assert_eq!(
+                upload.grow(1),
+                Err(StoreFull::WouldExceed {
+                    size: 101,
+                    limit: 100
+                })
+            );
+            assert_eq!(
+                upload.admit_artifact(),
+                Err(StoreFull::WouldExceed {
+                    size: 101,
+                    limit: 100
+                })
+            );
+        }
+        assert!(
+            state.admit_upload().is_ok(),
+            "a dropped upload counts no more"
         );
         let full = state.with_max_total_package_bytes(0);
-        assert_eq!(full.admit_upload(), Err(StoreFull::AtLimit { limit: 0 }));
+        assert!(matches!(
+            full.admit_upload(),
+            Err(StoreFull::AtLimit { limit: 0 })
+        ));
     }
 
     /// A certificate of one host does not speak for another host's Agent: the reporter is re-keyed
@@ -3677,6 +3780,61 @@ mod tests {
         assert_eq!(adopted.uid, Some(new_uid));
         assert!(adopted.reply.agent_identification.is_none());
         assert_eq!(state.snapshot().len(), 2, "one record per Agent, no more");
+    }
+
+    /// A report refused at the record ceiling binds no `instance_uid` to the host that sent it,
+    /// so it cannot speak for that Agent once there is room — nor lock out the host it belongs to.
+    /// Verifies: ADR-0021, ADR-0024
+    #[test]
+    fn a_report_refused_at_the_ceiling_binds_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(
+                    crate::fs::FsLedgerStore::open(dir.path().join("revocation")).expect("ledger"),
+                ),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_max_agents(1)
+            .with_revocations(Some(revocations.clone()));
+        let presented = |host: &str| Presented {
+            id: CertId::new(b"CA", host),
+            host: Some(host.to_string()),
+        };
+        let first = InstanceUid::default();
+        let accepted = state.process_presented(
+            report(&first, 1),
+            Transport::Http,
+            None,
+            Some(&presented("h1")),
+        );
+        assert!(accepted.reply.error_response.is_none());
+
+        for flags in [0, AgentToServerFlags::RequestInstanceUid as u64] {
+            let refused_uid = InstanceUid::default();
+            let mut refused = report(&refused_uid, 1);
+            refused.flags = flags;
+            let refused =
+                state.process_presented(refused, Transport::Http, None, Some(&presented("h2")));
+            assert_eq!(
+                refused.reply.error_response.expect("refused").r#type,
+                ServerErrorResponseType::Unavailable as i32
+            );
+            assert_eq!(
+                revocations.speaks_for("h2"),
+                SpeaksFor::Agents(BTreeSet::new()),
+                "a refused report bound an instance_uid (flags {flags})"
+            );
+        }
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([hex::encode(first.as_bytes())].into())
+        );
     }
 
     // ---- Who may fetch an uploaded artifact (ADR-0026) ----

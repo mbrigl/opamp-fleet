@@ -6,6 +6,8 @@
 //! Status goes to stderr and results to stdout, so a hash, a key or a signature composes into a
 //! shell variable while the commentary stays on the terminal.
 
+#![forbid(unsafe_code)]
+
 mod fetch;
 mod package;
 mod pki;

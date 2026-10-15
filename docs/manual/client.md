@@ -155,8 +155,10 @@ delivered block may name only a program the Client owns, so a Server cannot use 
 delivery to run an arbitrary binary on your host. And a delivered block **brings nothing that
 reaches past the package signature**: it may set environment variables and arguments only as the
 running block of the same name already has them, or as you allow below; never a variable that
-steers which code a program loads (`PATH`, `LD_*`, `DYLD_*`, `JAVA_TOOL_OPTIONS`, `PYTHONPATH` and
-the like) and never a value pointing into the Supervisor's own directories.
+steers which code a program loads (`PATH`, `PATHEXT`, `COMSPEC`, `LD_*`, `DYLD_*`,
+`JAVA_TOOL_OPTIONS`, `PYTHONPATH`, `PERL5LIB`, `RUBYLIB`, `NODE_PATH` and the like) and never a
+value pointing into the Supervisors' own directories, whether by `${config_dir}`,
+`${supervisor_dir}` or a path under the Supervisors' root.
 
 ```toml
 [supervisors]

@@ -355,7 +355,7 @@ scripts/              # consistency checks and sensors (check-all.sh runs them a
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 interop/              # the Go side of the interop check against opamp-go (ADR-0011)
 observability/        # the development observability stack — Collector, ClickHouse, Grafana — run on the host
-rust-toolchain.toml   # pinned Rust toolchain (stable + rustfmt + clippy)
+rust-toolchain.toml   # pinned Rust toolchain (an exact stable release + rustfmt + clippy)
 .githooks/            # git hooks: refuse a commit on main and a push while the checks are red
 .github/              # CI workflows, Dependabot, issue & pull request templates, code owners
 .devcontainer/        # Dev Container definition (base image + Features + the OTLP forwarder)

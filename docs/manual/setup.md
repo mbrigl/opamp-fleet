@@ -208,11 +208,43 @@ Wants=network-online.target
 User=opamp-fleet-server
 ExecStart=/usr/local/bin/server --config /etc/opamp-fleet-server/server.toml
 StateDirectory=opamp-fleet-server
+UMask=0077
 Restart=on-failure
+
+# The Server writes under config_dir and packages_dir and nowhere else, binds ports above 1024,
+# and needs no privilege, device or kernel interface.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+`ProtectSystem=strict` leaves the whole file system read-only to the Server except its
+`StateDirectory`, `/var/lib/opamp-fleet-server`, which holds `config_dir` and `packages_dir` in the
+configuration above. A `config_dir` or `packages_dir` anywhere else needs a `ReadWritePaths=` line
+naming it. A `listen` or `[rest] listen` port below 1024 needs
+`CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and `AmbientCapabilities=CAP_NET_BIND_SERVICE` instead
+of the empty lines. `systemd-analyze security opamp-fleet-server` rates what the unit leaves open.
 
 The Server refuses an unsafe or incomplete configuration at startup and names the key, for
 example `[enrolment] needs [client_ca]: an approved request is signed by it`. Fix what it names and

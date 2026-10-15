@@ -16,6 +16,8 @@ use crate::packages::{
 /// One directory per Package, owner-only, with its metadata and its uploaded artifacts.
 pub struct FsPackageBackend {
     dir: PathBuf,
+    /// Numbers each upload's staging file, so two uploads of one entry never share one.
+    next_upload: std::sync::atomic::AtomicU64,
 }
 
 impl FsPackageBackend {
@@ -24,7 +26,10 @@ impl FsPackageBackend {
     /// other local users on the Server host. The metadata files are written `0600` as well.
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         super::create_private_dir(&dir)?;
-        Ok(FsPackageBackend { dir })
+        Ok(FsPackageBackend {
+            dir,
+            next_upload: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     fn set_dir(&self, id: &PackageId) -> PathBuf {
@@ -152,11 +157,15 @@ impl PackageBackend for FsPackageBackend {
         &self.dir
     }
 
-    /// In the Package's own directory, so the commit is a rename — and named per Platform, so
-    /// uploading a release's five artifacts at once cannot have them overwrite each other while
-    /// they are still in flight.
+    /// In the Package's own directory, so the commit is a rename — and named per Platform and
+    /// per upload, so neither a release's five artifacts uploaded at once nor two uploads of one
+    /// entry can overwrite each other while they are still in flight.
     fn staging_path(&self, id: &PackageId, platform: &Platform) -> PathBuf {
-        self.set_dir(id).join(format!("{}.upload", platform.tag()))
+        let n = self
+            .next_upload
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.set_dir(id)
+            .join(format!("{}.{n}.upload", platform.tag()))
     }
 
     fn hash_staged(&self, staged: &Path) -> Result<(u64, Vec<u8>), String> {

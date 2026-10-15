@@ -61,7 +61,9 @@ has:
   Agent presents a client certificate the Agent plane and every Gateway ask for in the TLS
   handshake. A fresh host enrols with a bootstrap certificate from a CA of its own, only inside an
   operator-opened window, and only once an operator approves its request. Repeated admission
-  failures from one address are answered `429` before anything else is checked, on both planes.
+  failures from one address are answered `429` before admission checks anything else, on both
+  planes. On the Agent plane the TLS handshake and its client-certificate verification come
+  before that, and a failed handshake is not counted as an admission failure.
 - **Nothing installed unsigned, and downloads only from allowed sources** (ADR-0026):
   a Client without the verification key takes no package, the Server offers no entry its
   Deployment has not signed, and every download hop is held to `https://` and the Server's origin
@@ -74,13 +76,15 @@ has:
   send its request line and headers, and 10 seconds to complete the TLS handshake, before it is hung
   up on — enforced below every other limit in this list, because it applies before a request exists
   and therefore before Admission ever runs.
-- Package content hashed always, and Ed25519-verified when a key is configured; archive members
+- Package content hashed and Ed25519-verified always, with no unsigned posture: without a
+  verification key, or for an offer without a signature, nothing is downloaded. Archive members are
   validated before anything is written.
 - **Revocation that ends sessions** (ADR-0021): the Server keeps a persisted
   list of revoked certificates, by issuing CA and serial and extended along every renewal it
   signed. Admission refuses them on both transports and on the
-  download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, and every
-  session ends when the certificate that admitted it expires.
+  download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, every
+  session ends when the certificate that admitted it expires, and a kept-alive connection is
+  refused on both transports and on the download once its certificate has expired.
 - **A Gateway refuses what the Server revoked** (ADR-0015, ADR-0021): a host marked as a Gateway
   fetches the revoked certificates of the client CA every 30 s and refuses them downstream, closing
   the sessions they hold with `1008`; while it holds no list younger than 300 s it admits nobody.
@@ -97,18 +101,29 @@ has:
   Gateway too. An operator marks a Gateway, whose certificate then speaks for any Agent.
 - **Key material and configuration readable by their owner alone** (ADR-0021 clause 8, ADR-0019
   clause 18): on Unix the private key, the stored connection settings and `supervisor.toml` are
-  written `0600` in `0700` directories; on Windows a system-scope install cuts the data root off
-  from the read right every local user inherits under `%ProgramData%` and leaves it to LocalSystem,
-  the Administrators and the service account.
+  written `0600` in `0700` directories. On Windows a system-scope install gives the default data
+  root under `%ProgramData%` to the Administrators, whoever created it, drops every right in it
+  that the install does not grant, cuts it off from the read right every local user inherits
+  there, and leaves it to LocalSystem, the Administrators and the service account. A data root
+  named with `--root` or `--data-root`, a state directory outside the data root, and a Supervisors'
+  root outside both that the install creates, is only cut off from inherited rights and left to the
+  same accounts; such a Supervisors' root that already exists is left as it is, with a warning, and
+  protecting it is the operator's. A local user acting while the install runs is not covered.
 - **A delivered Supervisor block reaches no further than the package signature** (ADR-0017): no
-  environment or arguments beyond what the running block has or the operator allowed, never a
-  loader variable or `PATH`, and no file outside its own `config/` directory.
+  environment or arguments beyond what the running block has or the operator allowed, and no file
+  outside its own `config/` directory. Under clause 38's rule — no variable that steers which code
+  a program loads, no value pointing where the Server delivers unsigned files — the Client refuses
+  the names and placeholders the clause lists, and further loader variables (`PATHEXT`, `COMSPEC`,
+  `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB`, `RUBYLIB`) and new values that start with a path
+  under the Supervisors' root.
 - **No credential in `server.toml` authenticates on its own** (ADR-0021 clause 26): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0014).
 - **An audit record of every security decision** (ADR-0022): admissions and refusals, enrolment,
   issuance, revocation, operator acts and package outcomes, one hash-chained line each; no
-  admission without its record, and no `Authorization` value in any line, not even as a hash.
+  admission without its record, refusals aggregated per peer before they are queued and kept to
+  half the queue so they cannot crowd out any other record, and no `Authorization` value in any
+  line, not even as a hash.
 - **Certificates live 30 days by default** (ADR-0021 clause 9) and are renewed at two thirds of
   that; a test with lives of seconds watches three generations each replace the one before it
   expires (`certificate_renewal_e2e.rs`). A soak on real hosts before a rollout is the operator's.
@@ -117,8 +132,12 @@ has:
 - **The Supervisor Endpoint admits only the process its Supervisor started** (ADR-0015): a token
   made at every start, handed to the process in its environment, asked of every connection.
 - **A package signature covers the Agent type, the version and the hash** (ADR-0026): a signed
-  artifact installs as its own type's program at its own version and nowhere else, and a
-  Supervisor refuses a version older than the one it runs.
+  artifact installs as its own type's program at its own version and nowhere else. A Supervisor
+  refuses a package whose version SemVer orders below the one its installed-package record names;
+  a version on either side that is not SemVer cannot be ordered and is taken, and with no record —
+  a program the operator placed, or a Supervisor after a purge — any version is. The Client's own
+  self-update refuses an offered version that is not SemVer, and one SemVer orders below the
+  running build.
 - `TLSConnectionSettings`, `ProxyConnectionSettings` and offered `headers` refused on merit, so a
   Server cannot command a Client to weaken its own verification or plant a header on every
   connection of the fleet (ADR-0014 clause 8,
@@ -141,9 +160,13 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     per Agent within a Gateway's aggregate (ADR-0013)
 - **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0013).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ Basic over the whole plane, required beyond the loopback (ADR-0021) ·
-    ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes
+    ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes, by `Origin` where a browser sends
+    no Fetch Metadata
+  - ✅ a Content-Security-Policy that names the UI's inline scripts by hash and forbids framing ·
+    ✅ `nosniff`, `no-referrer` on every response · ✅ `/api/v1` answers never cached
   - ✅ the package upload has no deadline, but is held to the floor above, and its size to
-    `max_package_size_bytes` · ✅ capped, HTTP/2-bounded and throttled as above
+    `max_package_size_bytes` and the whole store, uploads still arriving included, to
+    `max_total_package_bytes` · ✅ capped, HTTP/2-bounded and throttled as above
 - **Client → Server**, outbound (`opamp::client::connection`, ADR-0010).
   - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
     ✅ reconnect backoff · ✅ message size in both directions
@@ -154,6 +177,9 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     carries the Gateway's own certificate alone (ADR-0015)
   - ✅ a downstream peer that never finishes its headers after the handshake is hung up on
     ([`gateway_tls.rs`](../crates/fleet-agent/tests/gateway_tls.rs))
+  - ✅ an Agent's place in the upstream pool is released when the socket that carried it goes ·
+    ⚠️ a plain-HTTP Agent's place is released only when its upstream connection drops, so a peer
+    that polls under ever new `instance_uid`s grows the pool's assignments until then
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
   - ✅ headers ≤ 30 s (HTTP/1), from the same listener · ✅ connections served concurrently ·
     ✅ message size in both directions
@@ -197,7 +223,8 @@ Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. 
 build can still replace the program that reads them where `[packages] self_update` consents
 (ADR-0018).
 
-It **cannot**: write outside a Supervisor's `config/` (entry names are sanitized); name a program
+It **cannot**: write outside a Supervisor's `config/` (entry names are sanitized), or store there an
+entry Windows cannot hold or two entries in one file (such an offer is refused); name a program
 outside a Supervisor's `program/`, by absolute, rooted or escaping path, or a wrapped kind's program
 at all; start a kind that is not compiled in; change any key of `supervisor.toml` but the
 `[[supervisor]]` array — not the endpoint, `state_dir`, `[tls]`, the verification key,

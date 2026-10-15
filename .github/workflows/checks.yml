@@ -16,7 +16,10 @@ name: Checks
 #   self-test has passed.
 # - Action references: every action a workflow uses is referenced by its major version tag and
 #   Dependabot is configured to raise the major bump (ADR-0007), checked by
-#   scripts/check-action-refs.sh after its own self-test has passed.
+#   scripts/check-action-refs.sh after its own self-test has passed. The same job runs
+#   scripts/check-build-hardening.sh after its self-test: no checkout keeps the token, the release
+#   is gated on advisories and built uncached with pinned tools, and the compiler, the release
+#   profile's overflow checks and the crates that forbid unsafe code are as that script lists.
 # - Sensors: what weakens the test suite and no toolchain's tools notice — test files deleted
 #   and skip markers added since the pull request's base — reported by
 #   scripts/sensor-tests-kept.sh for the reviewer (AGENTS.md, section 5), and the changes since
@@ -113,6 +116,10 @@ jobs:
         run: bash scripts/test-check-action-refs.sh
       - name: Check that actions are referenced by major version tag and Dependabot covers them
         run: bash scripts/check-action-refs.sh
+      - name: Self-test the build hardening check
+        run: bash scripts/test-check-build-hardening.sh
+      - name: Check that checkouts keep no token and the release is gated, uncached and pinned
+        run: bash scripts/check-build-hardening.sh
 
   sensors:
     runs-on: ubuntu-latest
@@ -145,6 +152,8 @@ jobs:
           persist-credentials: false
       - name: Self-test the git hooks
         run: bash scripts/test-git-hooks.sh
+      - name: The self-tests' fixtures leave an inherited repository alone
+        run: bash scripts/test-fixture-isolation.sh
       - name: Lint shell scripts with ShellCheck
         run: bash scripts/check-shell.sh
 
@@ -155,7 +164,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # rustup honours rust-toolchain.toml (stable + rustfmt + clippy) on first use.
+      # rustup honours rust-toolchain.toml (the pinned release + rustfmt + clippy) on first use.
       - uses: Swatinem/rust-cache@v2
       - name: Build, test and lint the workspace
         run: bash scripts/check-rust.sh

@@ -35,6 +35,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::config::ClientConfig;
+use crate::gateway::policy::{Bindings, Bound, Limits};
 use crate::gateway::revocations::{RevocationList, Verdict};
 use crate::packages::{Patience, Waits};
 use crate::shutdown::Shutdown;
@@ -194,18 +195,10 @@ impl RefusalLog {
     }
 }
 
-/// An `instance_uid`'s host, and when it last reported.
-struct Binding {
-    host: String,
-    reported: u64,
-}
-
 #[derive(Default)]
 struct Inner {
     /// Each `instance_uid` to the host of its first report (ADR-0026 clause 45).
-    bound: HashMap<InstanceUid, Binding>,
-    /// How many `instance_uid`s each host has bound.
-    bound_per_host: HashMap<String, usize>,
+    bindings: Bindings,
     offers: HashMap<InstanceUid, Vec<Artifact>>,
     /// The `instance_uid`s with a current offer, by the host they are bound to.
     by_host: HashMap<String, HashSet<InstanceUid>>,
@@ -435,54 +428,21 @@ impl PackageCache {
         let Some(host) = host else {
             return;
         };
-        let mut inner = self.inner();
-        inner.tick += 1;
-        let tick = inner.tick;
-        if let Some(binding) = inner.bound.get_mut(&uid) {
-            binding.reported = tick;
-            return;
-        }
-        let refused =
-            if inner.bound_per_host.get(host).copied().unwrap_or(0) >= self.per_host_bindings {
-                Some("the host holds as many bindings as max_carried_agents allows")
-            } else if inner.bound.len() >= self.knobs.max_bindings {
-                let idle = inner
-                    .bound
-                    .iter()
-                    .filter(|(uid, _)| !routed(uid) && !inner.offers.contains_key(*uid))
-                    .min_by_key(|(_, binding)| binding.reported)
-                    .map(|(uid, _)| *uid);
-                match idle {
-                    Some(idle) => {
-                        if let Some(binding) = inner.bound.remove(&idle) {
-                            if let Some(count) = inner.bound_per_host.get_mut(&binding.host) {
-                                *count -= 1;
-                                if *count == 0 {
-                                    inner.bound_per_host.remove(&binding.host);
-                                }
-                            }
-                        }
-                        None
-                    }
-                    None => Some("the Gateway holds as many bindings as it may, none of them idle"),
-                }
-            } else {
-                None
-            };
-        if let Some(why) = refused {
+        let limits = Limits {
+            per_host: self.per_host_bindings,
+            total: self.knobs.max_bindings,
+        };
+        let mut guard = self.inner();
+        let inner = &mut *guard;
+        let offers = &inner.offers;
+        let bound = inner.bindings.bind(uid, host, limits, |uid| {
+            !routed(uid) && !offers.contains_key(uid)
+        });
+        if let Bound::Refused(why) = bound {
             if inner.refusals.note(host, Instant::now()) != Note::Count {
                 warn!(agent = %uid, %host, "not binding an instance_uid: {why}");
             }
-            return;
         }
-        inner.bound.insert(
-            uid,
-            Binding {
-                host: host.to_string(),
-                reported: tick,
-            },
-        );
-        *inner.bound_per_host.entry(host.to_string()).or_default() += 1;
     }
 
     /// Records what a `ServerToAgent` relayed to `uid` offers, over a downstream connection whose
@@ -511,7 +471,7 @@ impl PackageCache {
             .collect();
         let start = {
             let mut inner = self.inner();
-            let bound = inner.bound.get(&uid).map(|binding| binding.host.clone());
+            let bound = inner.bindings.host_of(&uid).map(str::to_string);
             if bound.as_deref() != Some(host.as_str()) {
                 if inner.refusals.note(&host, Instant::now()) != Note::Count {
                     warn!(
@@ -1516,22 +1476,29 @@ mod tests {
             cache.bind(*uid, Some("flood"), |_| false);
         }
         assert_eq!(
-            cache.inner().bound_per_host["flood"],
+            cache.inner().bindings.count_of("flood"),
             3,
             "its share and no more"
         );
         let other = InstanceUid::default();
         cache.bind(other, Some("other"), |_| false);
-        assert_eq!(cache.inner().bound.len(), 4, "the global cap");
+        assert_eq!(cache.inner().bindings.len(), 4, "the global cap");
 
         let real = InstanceUid::default();
         cache.bind(real, Some("real"), |uid| *uid == other);
         {
             let inner = cache.inner();
-            assert_eq!(inner.bound[&real].host, "real", "an idle binding made room");
-            assert!(inner.bound.contains_key(&other), "a routed one did not");
+            assert_eq!(
+                inner.bindings.host_of(&real),
+                Some("real"),
+                "an idle binding made room"
+            );
             assert!(
-                !inner.bound.contains_key(&flood[0]),
+                inner.bindings.host_of(&other).is_some(),
+                "a routed one did not"
+            );
+            assert!(
+                inner.bindings.host_of(&flood[0]).is_none(),
                 "the least recently reported did"
             );
         }
@@ -1721,7 +1688,7 @@ mod tests {
         cache.bind(uid, None, |_| false);
         cache.observe(uid, None, &offer(uid, &[&one]));
         let inner = cache.inner();
-        assert!(inner.bound.is_empty() && inner.offers.is_empty() && inner.fetching.is_empty());
+        assert!(inner.bindings.is_empty() && inner.offers.is_empty() && inner.fetching.is_empty());
     }
 
     /// A fetch whose task ends without settling leaves no entry and no reservation behind.

@@ -1641,6 +1641,63 @@ async fn a_plaintext_source_off_the_loopback_is_refused() {
     );
 }
 
+/// A source the store refuses is never probed: a plaintext URL off the loopback, or one for a
+/// Package that does not exist, is refused before the Server sends a request — and with it the
+/// operator's headers — anywhere.
+/// Verifies: ADR-0013, ADR-0026
+#[tokio::test]
+async fn a_refused_source_is_never_probed() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (server, _scratch) = spawn_with_packages().await;
+    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let reached = Arc::new(AtomicUsize::new(0));
+    let counted = reached.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            counted.fetch_add(1, Ordering::SeqCst);
+            let mut scratch = [0u8; 1024];
+            let _ = stream.read(&mut scratch).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+        }
+    });
+
+    let put = |version: &str, source: String| {
+        reqwest::Client::new()
+            .put(format!(
+                "{}/entries/{HOST}/source",
+                set_url(&server, support::AGENT_TYPE, version)
+            ))
+            .json(&serde_json::json!({
+                "url": source,
+                "headers": { "Authorization": "Bearer mirror-token" },
+                "sha256": hex::encode(sha256(b"x")),
+            }))
+            .send()
+    };
+    // `localhost` is a host name, never the loopback, so plaintext to it is refused.
+    let plaintext = put("1.0.0", format!("http://localhost:{port}/otelcol.tar.gz"))
+        .await
+        .expect("put source");
+    assert_eq!(plaintext.status(), 400);
+    let missing = put("9.9.9", format!("http://127.0.0.1:{port}/otelcol.tar.gz"))
+        .await
+        .expect("put source");
+    assert_eq!(missing.status(), 404);
+    assert_eq!(
+        reached.load(Ordering::SeqCst),
+        0,
+        "a refused source was probed"
+    );
+}
+
 /// The store has a whole-store ceiling, so a caller cannot fill the disk by uploading artifact after
 /// artifact under distinct names: once the store is at its limit, the next upload is refused.
 /// Verifies: ADR-0026
@@ -2674,6 +2731,195 @@ async fn an_upload_that_stops_is_answered_408_and_leaves_nothing_staged() {
         "{:?}",
         staged_uploads(dir.path())
     );
+}
+
+/// Two uploads of one entry at once each stream to a staging file of their own: the one that ends
+/// last is stored whole, and the other neither corrupts nor deletes it.
+/// Verifies: ADR-0026
+#[tokio::test]
+async fn two_uploads_of_one_entry_at_once_do_not_share_a_staging_file() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    opamp::tls::install_ring_provider();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = PackageStore::open(dir.path().join("packages")).expect("store");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("configs")
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            )),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(
+        opamp::server::listen::Listener::new(listener, opamp::server::listen::Handle::new())
+            .serve(fleet_server::operator_app(state, None)),
+    );
+    let set = format!(
+        "http://127.0.0.1:{port}/api/v1/packages/{}/1.0.0",
+        support::AGENT_TYPE
+    );
+    let created = reqwest::Client::new()
+        .put(&set)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("put set");
+    assert_eq!(created.status(), 200);
+
+    // The first upload sends half its body and waits.
+    let first = vec![b'a'; 200];
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    socket
+        .write_all(
+            format!(
+                "PUT /api/v1/packages/{}/1.0.0/entries/linux/amd64 HTTP/1.1\r\nHost: localhost\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                support::AGENT_TYPE,
+                first.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write");
+    socket.write_all(&first[..100]).await.expect("write");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while staged_uploads(dir.path()).is_empty() {
+        assert!(std::time::Instant::now() < deadline, "nothing was staged");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // A second upload of the same entry runs from start to end meanwhile.
+    let second = reqwest::Client::new()
+        .put(format!("{set}/entries/linux/amd64"))
+        .body(vec![b'b'; 50])
+        .send()
+        .await
+        .expect("put entry");
+    assert_eq!(second.status(), 200);
+
+    socket.write_all(&first[100..]).await.expect("write");
+    let mut answer = Vec::new();
+    socket.read_to_end(&mut answer).await.expect("read");
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+
+    let stored: Vec<_> = {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.path().join("packages")];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "bin") {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    };
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(
+        std::fs::read(&stored[0]).expect("artifact"),
+        first,
+        "the upload that ended last is stored whole"
+    );
+    assert!(staged_uploads(dir.path()).is_empty());
+}
+
+/// An upload still arriving counts against the store's ceiling, so uploads sent at once cannot
+/// pass it together; and one cut off mid-body — here by the listener shutting down, which drops
+/// the request — leaves nothing staged behind.
+/// Verifies: ADR-0026
+#[tokio::test]
+async fn an_upload_in_progress_counts_against_the_ceiling_and_a_cancelled_one_leaves_nothing() {
+    use tokio::io::AsyncWriteExt as _;
+
+    opamp::tls::install_ring_provider();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = PackageStore::open(dir.path().join("packages")).expect("store");
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("configs")
+            .with_packages(Some(
+                PackageOffering::new(store, String::new()).expect("deployments"),
+            ))
+            .with_max_total_package_bytes(150),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let handle = opamp::server::listen::Handle::new();
+    let served = tokio::spawn(
+        opamp::server::listen::Listener::new(listener, handle.clone())
+            .serve(fleet_server::operator_app(state, None)),
+    );
+    let set = format!(
+        "http://127.0.0.1:{port}/api/v1/packages/{}/1.0.0",
+        support::AGENT_TYPE
+    );
+    let created = reqwest::Client::new()
+        .put(&set)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("put set");
+    assert_eq!(created.status(), 200);
+
+    // A hundred bytes of an announced two hundred, and then nothing.
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    socket
+        .write_all(
+            format!(
+                "PUT /api/v1/packages/{}/1.0.0/entries/linux/amd64 HTTP/1.1\r\nHost: localhost\r\n\
+                 Content-Length: 200\r\n\r\n{}",
+                support::AGENT_TYPE,
+                "x".repeat(100)
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while staged_uploads(dir.path())
+        .iter()
+        .map(|path| std::fs::metadata(path).map_or(0, |m| m.len()))
+        .sum::<u64>()
+        < 100
+    {
+        assert!(std::time::Instant::now() < deadline, "nothing was staged");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let second = reqwest::Client::new()
+        .put(format!("{set}/entries/linux/arm64"))
+        .body(vec![b'y'; 60])
+        .send()
+        .await
+        .expect("put entry");
+    assert_eq!(
+        second.status(),
+        507,
+        "an upload passed the ceiling beside one still arriving"
+    );
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), served).await;
+    drop(socket);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !staged_uploads(dir.path()).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a cancelled upload stayed staged: {:?}",
+            staged_uploads(dir.path())
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 /// A member over its rate is answered `429` with `Retry-After: 30` and not served the artifact;

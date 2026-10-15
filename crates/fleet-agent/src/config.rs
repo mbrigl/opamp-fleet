@@ -312,8 +312,9 @@ impl std::fmt::Display for InstanceName {
 }
 
 /// Windows reserved device names: legal under the grammar below, but invalid directory names on
-/// Windows — an instance must be a directory everywhere.
-const WINDOWS_RESERVED: [&str; 22] = [
+/// Windows — an instance must be a directory everywhere. A config-map entry file name is held to
+/// the same list (`storage::check_entry_names`).
+pub(crate) const WINDOWS_RESERVED: [&str; 22] = [
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];

@@ -80,35 +80,145 @@ fn restrict_args(path: &std::path::Path) -> Vec<std::ffi::OsString> {
     args
 }
 
-/// Cuts a system-scope data root off from what `%ProgramData%` lets every local user do.
+/// The Administrators group, by SID: the owner of a system-scope data root (ADR-0019 clause 18).
+#[cfg(any(windows, test))]
+const OWNER: &str = "*S-1-5-32-544";
+
+/// The `icacls.exe` runs, in order, that take the default data root over and leave it and
+/// everything in it to [`KEEPERS`] alone, whoever created it.
+///
+/// `%ProgramData%` lets every local user create a folder, so the data root may already exist and
+/// belong to one of them. Its owner may rewrite its rights at any time, and an explicit grant of
+/// theirs survives removing the inherited ones. So every item is first given to the
+/// Administrators — a link itself, never what it names — and every explicit right in the tree is
+/// reset away, before the root is cut off by [`restrict_args`]. No `/C`: an item that cannot be
+/// taken over fails the install instead of staying behind.
+#[cfg(any(windows, test))]
+fn take_over_commands(path: &std::path::Path) -> Vec<Vec<std::ffi::OsString>> {
+    let path = path.as_os_str().to_owned();
+    vec![
+        vec![
+            path.clone(),
+            "/setowner".into(),
+            OWNER.into(),
+            "/T".into(),
+            "/L".into(),
+        ],
+        vec![path.clone(), "/reset".into(), "/T".into(), "/L".into()],
+        restrict_args(std::path::Path::new(&path)),
+    ]
+}
+
+/// What a system-scope install does to the rights of one directory that holds the Client's
+/// secrets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Treatment {
+    /// The platform's own data root under `%ProgramData%`: taken over whole
+    /// ([`take_over_commands`]), whoever created it.
+    TakeOver,
+    /// A data root the operator named, a state directory outside it, or a Supervisors' root
+    /// outside both that the install creates: cut off from inherited rights ([`restrict_args`]),
+    /// nothing else changed.
+    Cut,
+    /// A Supervisors' root outside the data root and the state directory that already exists: the
+    /// operator's, left as it is and named in a warning.
+    Untouched,
+}
+
+/// Which directories a system-scope install restricts, and how: the data root — taken over when it
+/// is the platform default, cut when the operator named it — and the state directory and the
+/// Supervisors' root wherever one lies outside every directory already listed. A state directory
+/// outside the data root is always cut. A Supervisors' root outside both is cut when the install
+/// creates it (`exists` says it does not exist yet) and left untouched when it exists. A directory
+/// inside a listed one inherits its rights and is not listed. Decided before the install creates
+/// anything.
+#[must_use]
+pub fn plan(
+    data_root: &std::path::Path,
+    data_root_named: bool,
+    state_dir: &std::path::Path,
+    supervisors_root: &std::path::Path,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Vec<(std::path::PathBuf, Treatment)> {
+    let first = if data_root_named {
+        Treatment::Cut
+    } else {
+        Treatment::TakeOver
+    };
+    let mut plan = vec![(data_root.to_path_buf(), first)];
+    for (dir, may_exist) in [(state_dir, true), (supervisors_root, false)] {
+        if plan.iter().any(|(root, _)| dir.starts_with(root)) {
+            continue;
+        }
+        let treatment = if !may_exist && exists(dir) {
+            Treatment::Untouched
+        } else {
+            Treatment::Cut
+        };
+        plan.push((dir.to_path_buf(), treatment));
+    }
+    plan
+}
+
+/// Applies a [`plan`] at system scope: creates each directory it cuts or takes over, runs
+/// `icacls.exe`, and warns about each it leaves untouched. Returns the directories it created
+/// outside the data root, for the handover to grant the service account.
 ///
 /// Every folder created under `%ProgramData%` inherits `BUILTIN\Users:(OI)(CI)(RX)`: any local
 /// user could read the configuration and the archive key it may hold, the private key and the
 /// stored connection settings. On Unix the Client writes those `0600` in a `0700` directory itself;
-/// here the install removes the inherited rights and leaves the directory to LocalSystem and the
-/// Administrators, before the handover grants the service account its own. A user-scope install
-/// lives in the user's profile, which is private already.
+/// here the install leaves them to LocalSystem and the Administrators, before the handover grants
+/// the service account its own. A user-scope install lives in the user's profile, which is private
+/// already.
 ///
 /// # Errors
-/// Returns an error when `icacls.exe` cannot be run or refuses the change.
+/// Returns an error when a directory cannot be created, or `icacls.exe` cannot be run or refuses
+/// the change.
 #[cfg(windows)]
-pub fn restrict_data_root(level: ServiceLevel, path: &std::path::Path) -> Result<(), String> {
+pub fn restrict(
+    level: ServiceLevel,
+    plan: &[(std::path::PathBuf, Treatment)],
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut created = Vec::new();
     if level != ServiceLevel::System {
-        return Ok(());
+        return Ok(created);
     }
-    let output = std::process::Command::new("icacls.exe")
-        .args(restrict_args(path))
-        .output()
-        .map_err(|e| format!("cannot run icacls.exe: {e}"))?;
-    if output.status.success() {
-        return Ok(());
+    for (index, (dir, treatment)) in plan.iter().enumerate() {
+        let commands = match treatment {
+            Treatment::TakeOver => take_over_commands(dir),
+            Treatment::Cut => vec![restrict_args(dir)],
+            Treatment::Untouched => {
+                println!(
+                    "warning: {} exists already and is left as it is — restrict it to \
+                     LocalSystem, the Administrators and the service account yourself",
+                    dir.display()
+                );
+                continue;
+            }
+        };
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        for args in commands {
+            let output = std::process::Command::new("icacls.exe")
+                .args(&args)
+                .output()
+                .map_err(|e| format!("cannot run icacls.exe: {e}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "cannot restrict {} to LocalSystem and the Administrators: icacls.exe {} \
+                     exited with {} ({})",
+                    dir.display(),
+                    args[1].to_string_lossy(),
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout).trim()
+                ));
+            }
+        }
+        if index > 0 {
+            created.push(dir.clone());
+        }
     }
-    Err(format!(
-        "cannot restrict {} to LocalSystem and the Administrators: icacls.exe exited with {} ({})",
-        path.display(),
-        output.status,
-        String::from_utf8_lossy(&output.stdout).trim()
-    ))
+    Ok(created)
 }
 
 /// A no-op on Unix, where the Client writes its secrets owner-only itself.
@@ -116,8 +226,11 @@ pub fn restrict_data_root(level: ServiceLevel, path: &std::path::Path) -> Result
 /// # Errors
 /// Never.
 #[cfg(not(windows))]
-pub fn restrict_data_root(_level: ServiceLevel, _path: &std::path::Path) -> Result<(), String> {
-    Ok(())
+pub fn restrict(
+    _level: ServiceLevel,
+    _plan: &[(std::path::PathBuf, Treatment)],
+) -> Result<Vec<std::path::PathBuf>, String> {
+    Ok(Vec::new())
 }
 
 /// `ERROR_ACCESS_DENIED` — the one refusal that means "elevate", matched on the number because the
@@ -135,7 +248,138 @@ const NEEDS_ADMINISTRATOR: &str = "the Windows service control manager denied ac
 
 #[cfg(test)]
 mod tests {
-    use super::{restrict_args, ACCESS_DENIED, KEEPERS, NEEDS_ADMINISTRATOR};
+    use super::{
+        plan, restrict_args, take_over_commands, Treatment, ACCESS_DENIED, KEEPERS,
+        NEEDS_ADMINISTRATOR,
+    };
+    use std::path::{Path, PathBuf};
+
+    fn strings(args: &[std::ffi::OsString]) -> Vec<String> {
+        args.iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// A data root a local user created before the install is theirs: as its owner they could
+    /// rewrite its rights at any time, and an explicit grant of theirs survives cutting the
+    /// inherited ones. So the whole tree is first given to the Administrators, every explicit
+    /// right in it is dropped, and only then is the root cut off and left to the keepers — the
+    /// result is the same whoever made the directory.
+    /// Verifies: ADR-0019
+    #[test]
+    fn a_data_root_someone_else_made_is_taken_over_before_it_is_cut_off() {
+        let root = Path::new(r"C:\ProgramData\opamp-fleet");
+        let commands: Vec<Vec<String>> = take_over_commands(root)
+            .iter()
+            .map(|args| strings(args))
+            .collect();
+        assert_eq!(commands.len(), 3, "{commands:?}");
+        assert_eq!(
+            commands[0],
+            [
+                root.to_str().unwrap(),
+                "/setowner",
+                "*S-1-5-32-544",
+                "/T",
+                "/L"
+            ],
+            "the Administrators own every item, the links themselves and not what they name"
+        );
+        assert_eq!(
+            commands[1],
+            [root.to_str().unwrap(), "/reset", "/T", "/L"],
+            "no explicit right survives anywhere in the tree"
+        );
+        assert_eq!(commands[2], strings(&restrict_args(root)), "then the cut");
+        assert!(
+            commands.iter().flatten().all(|arg| arg != "/C"),
+            "an item that cannot be taken over fails the install rather than being skipped"
+        );
+    }
+
+    /// Only the platform's own data root is taken over. One the operator named is cut, as is a
+    /// state directory outside it, existing or not, and a Supervisors' root outside both that the
+    /// install creates; such a Supervisors' root that already exists is the operator's and is left
+    /// alone. A directory inside a listed one inherits its rights.
+    /// Verifies: ADR-0019
+    #[test]
+    fn only_the_default_data_root_is_taken_over_and_only_a_created_directory_is_cut() {
+        use Treatment::{Cut, TakeOver, Untouched};
+        let data = Path::new("/data");
+        let made = |dirs: &'static [&'static str]| {
+            move |dir: &Path| dirs.iter().any(|d| dir == Path::new(d))
+        };
+        let entries = |plan: Vec<(PathBuf, Treatment)>| -> Vec<(String, Treatment)> {
+            plan.into_iter()
+                .map(|(dir, t)| (dir.display().to_string(), t))
+                .collect()
+        };
+
+        assert_eq!(
+            entries(plan(
+                data,
+                false,
+                Path::new("/data/state"),
+                Path::new("/data/state/supervisors"),
+                made(&[])
+            )),
+            [("/data".to_string(), TakeOver)]
+        );
+        assert_eq!(
+            entries(plan(
+                data,
+                true,
+                Path::new("/data/state"),
+                Path::new("/data/supervisors"),
+                made(&[])
+            )),
+            [("/data".to_string(), Cut)],
+            "a data root the operator named is cut, not taken over"
+        );
+        assert_eq!(
+            entries(plan(
+                data,
+                false,
+                Path::new("/var/state"),
+                Path::new("/srv/supervisors"),
+                made(&[])
+            )),
+            [
+                ("/data".to_string(), TakeOver),
+                ("/var/state".to_string(), Cut),
+                ("/srv/supervisors".to_string(), Cut)
+            ]
+        );
+        assert_eq!(
+            entries(plan(
+                data,
+                false,
+                Path::new("/var/state"),
+                Path::new("/srv/supervisors"),
+                made(&["/var/state", "/srv/supervisors"])
+            )),
+            [
+                ("/data".to_string(), TakeOver),
+                ("/var/state".to_string(), Cut),
+                ("/srv/supervisors".to_string(), Untouched)
+            ],
+            "an existing state directory is still cut; an existing Supervisors' root is the \
+             operator's"
+        );
+        assert_eq!(
+            entries(plan(
+                data,
+                false,
+                Path::new("/var/state"),
+                Path::new("/var/state/supervisors"),
+                made(&[])
+            )),
+            [
+                ("/data".to_string(), TakeOver),
+                ("/var/state".to_string(), Cut)
+            ]
+        );
+    }
 
     /// The data root keeps no inherited right — `BUILTIN\Users` read among them — and full control
     /// only for LocalSystem and the Administrators, each granted by SID.

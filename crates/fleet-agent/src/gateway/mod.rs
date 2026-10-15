@@ -17,6 +17,7 @@
 //! what is the Gateway's is the [`Forwarding`] handler behind it.
 
 pub mod cache;
+pub mod policy;
 pub mod pool;
 pub mod registry;
 pub mod revocations;
@@ -255,6 +256,19 @@ struct Downstream {
     host: Option<String>,
 }
 
+/// Releases a plain-HTTP exchange's route when the exchange ends, unless its reply took it.
+struct Abandon<'a> {
+    registry: &'a Registry,
+    uid: InstanceUid,
+    exchange: u64,
+}
+
+impl Drop for Abandon<'_> {
+    fn drop(&mut self) {
+        self.registry.abandon(self.uid, self.exchange);
+    }
+}
+
 /// What the Server says about the Agents a socket carries, routed back to it by the registry —
 /// until the revocation list no longer admits the certificate the socket was opened with.
 struct Replies {
@@ -386,9 +400,11 @@ impl Handler for Forwarding {
     /// The peer is gone. Its Agents stop being routable here — and nothing is said upstream on
     /// their behalf, because they said nothing (ADR-0015 clause 10).
     fn on_closed(&self, downstream: Downstream) {
-        if downstream.transport == Transport::WebSocket {
+        if let Some(replies) = &downstream.replies {
             let count = downstream.carried.len();
-            self.registry.detach_all(downstream.carried);
+            self.registry
+                .detach_all(downstream.carried.iter().copied(), replies);
+            self.pool.release(downstream.carried);
             debug!(peer = %downstream.peer, agents = count, "a downstream client disconnected");
         }
     }
@@ -443,8 +459,16 @@ impl Forwarding {
             );
         };
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.registry
+        let exchange = self
+            .registry
             .expect_once(uid, reply_tx, downstream.host.clone());
+        // However the exchange ends — no reply in time, no Server, or the peer gone — its route
+        // goes with it.
+        let _route = Abandon {
+            registry: &self.registry,
+            uid,
+            exchange,
+        };
         if let Err(e) = self.pool.forward(uid, &report).await {
             warn!(agent = %uid, error = %e, "cannot forward a report upstream");
             return Reply::Refuse(StatusCode::BAD_GATEWAY, "cannot reach the Server".into());
@@ -459,5 +483,142 @@ impl Forwarding {
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Server that takes every report and answers none.
+    async fn silent_upstream() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use futures_util::StreamExt;
+                    if let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await {
+                        while socket.next().await.is_some() {}
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    fn certificate() -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("key");
+        rcgen::CertificateParams::new(vec!["edge".into()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert")
+            .der()
+            .to_vec()
+    }
+
+    /// A Gateway's handler in front of a silent upstream, with a fresh, empty revocation list.
+    async fn forwarding(state: &std::path::Path) -> Forwarding {
+        opamp::tls::install_ring_provider();
+        let server = silent_upstream().await;
+        let config: Arc<ClientConfig> = Arc::new(
+            toml::from_str(&format!(
+                "endpoint = \"ws://{server}/v1/opamp\"\nstate_dir = {:?}\n\
+                 [gateway]\nlisten = \"127.0.0.1:9\"\n",
+                state.display().to_string()
+            ))
+            .expect("config"),
+        );
+        let (stop, shutdown) = crate::shutdown::shutdown_channel();
+        std::mem::forget(stop);
+        let cache = cache::PackageCache::open(config.clone(), shutdown)
+            .await
+            .expect("cache");
+        let registry = Arc::new(Registry::new(cache));
+        let revocations = RevocationList::new(REVOCATION_MAX_AGE);
+        revocations.replace(HashSet::new(), None);
+        Forwarding {
+            pool: Pool::new(config, registry.clone()),
+            registry,
+            max_agents: 10,
+            revocations,
+        }
+    }
+
+    fn downstream(
+        transport: Transport,
+        replies: Option<mpsc::Sender<ServerToAgent>>,
+    ) -> Downstream {
+        Downstream {
+            transport,
+            peer: "test".to_string(),
+            replies,
+            carried: HashSet::new(),
+            ended: Arc::default(),
+            certificate: certificate(),
+            host: None,
+        }
+    }
+
+    fn report(uid: InstanceUid) -> AgentToServer {
+        AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// A peer that goes takes its Agents' places on the upstream connections with it, so a peer
+    /// coming back under ever new `instance_uid`s grows nothing; an Agent another socket carries
+    /// by then keeps its place and its route.
+    /// Verifies: ADR-0015
+    #[tokio::test]
+    async fn the_agents_a_departed_peer_carried_are_released_from_the_pool() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let (first_tx, _first_rx) = mpsc::channel(64);
+        let mut first = downstream(Transport::WebSocket, Some(first_tx));
+        let uids: Vec<InstanceUid> = (0..3).map(|_| InstanceUid::default()).collect();
+        for uid in &uids {
+            forwarding
+                .forward_from_socket(&mut first, report(*uid))
+                .await;
+        }
+        let (second_tx, _second_rx) = mpsc::channel(64);
+        let mut second = downstream(Transport::WebSocket, Some(second_tx));
+        forwarding
+            .forward_from_socket(&mut second, report(uids[0]))
+            .await;
+        assert_eq!(forwarding.pool.assignments().0.len(), 3);
+
+        forwarding.on_closed(first);
+
+        assert_eq!(
+            forwarding.pool.assignments(),
+            (HashSet::from([uids[0]]), 1),
+            "only the Agent still carried keeps its place"
+        );
+        assert!(forwarding.registry.routes(&uids[0]), "and its route");
+        assert!(!forwarding.registry.routes(&uids[1]));
+    }
+
+    /// A plain-HTTP exchange that ends without its reply leaves no route behind.
+    /// Verifies: ADR-0015
+    #[tokio::test]
+    async fn an_exchange_that_ends_without_its_reply_leaves_no_route() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let uid = InstanceUid::default();
+        let peer = downstream(Transport::Http, None);
+
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            forwarding.forward_exchange(&peer, report(uid)),
+        )
+        .await;
+
+        assert!(waited.is_err(), "the silent upstream sent no reply");
+        assert!(!forwarding.registry.routes(&uid), "the route is gone");
     }
 }

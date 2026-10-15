@@ -6,12 +6,14 @@
 //! through a bounded channel to the writer task. When the channel is full, or the last write failed,
 //! the call answers [`Unavailable`], and the caller refuses what it was about to allow — a security
 //! decision is never taken without its record (clause 6). Refusals are aggregated per event and
-//! peer past ten a second, never dropped (clause 5). The store behind the writer is a port; the
+//! peer past ten a second, never dropped (clause 5), and counted before they reach the channel,
+//! where they may take no more than [`REFUSAL_SHARE`] of it: a flood of refusals from however many
+//! peers cannot leave an admission or an operator act without room for its record. The store behind the writer is a port; the
 //! filesystem adapter is [`crate::fs::FsAuditStore`].
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -26,6 +28,10 @@ pub const CHANNEL_CAPACITY: usize = 10_000;
 
 /// The refusals of one event from one peer written per second before the rest are counted.
 pub const REFUSALS_PER_SECOND: u32 = 10;
+
+/// The entries of the channel refusals may take at once; the rest is kept for every other
+/// decision.
+pub const REFUSAL_SHARE: usize = CHANNEL_CAPACITY / 2;
 
 /// The hash a chain starts from.
 pub const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -89,6 +95,109 @@ pub struct AuditLog {
     failing: Arc<AtomicBool>,
     /// Decisions refused because they could not be recorded, told in the next entry.
     unrecorded: Arc<AtomicU64>,
+    clock: Arc<dyn Clock>,
+    refusals: Arc<Mutex<Refusals>>,
+    /// Refusals in the channel right now, bounded by [`REFUSAL_SHARE`].
+    queued_refusals: Arc<AtomicUsize>,
+}
+
+/// Which refusals are aggregated together: the event and the peer, an IPv6 peer by its /64.
+type RefusalKey = (String, Option<String>);
+
+/// The refusals counted per event and peer, shared by [`AuditLog::record`], which counts them
+/// before they are queued, and the writer, which writes the aggregates.
+#[derive(Default)]
+struct Refusals {
+    /// Each event and peer heard from, at most [`REFUSAL_KEYS`] of them.
+    window: HashMap<RefusalKey, Slot>,
+}
+
+/// The refusals of one event and peer the writer has not yet accounted for.
+#[derive(Clone, Copy)]
+struct Slot {
+    /// The second `count` belongs to.
+    second: u64,
+    count: u32,
+    /// Refusals past the allowance of earlier seconds, not yet written as an aggregate.
+    carried: u32,
+}
+
+/// The events and peers counted at once at most. Only the writer's tick lets go of them, so while
+/// it is stalled a refusal of yet another event or peer finds no room and goes unrecorded.
+pub const REFUSAL_KEYS: usize = CHANNEL_CAPACITY;
+
+/// What becomes of one refusal.
+#[derive(Debug, PartialEq, Eq)]
+enum Counted {
+    /// Among the first [`REFUSALS_PER_SECOND`] of its second: written as it is.
+    Queue,
+    /// Past them: counted for the aggregate.
+    Aggregated,
+    /// No room to count it.
+    NoRoom,
+}
+
+impl Refusals {
+    /// Counts one refusal.
+    fn admit(&mut self, key: RefusalKey, second: u64) -> Counted {
+        if !self.window.contains_key(&key) && self.window.len() >= REFUSAL_KEYS {
+            return Counted::NoRoom;
+        }
+        let slot = self.window.entry(key).or_insert(Slot {
+            second,
+            count: 0,
+            carried: 0,
+        });
+        if slot.second != second {
+            slot.carried = slot
+                .carried
+                .saturating_add(slot.count.saturating_sub(REFUSALS_PER_SECOND));
+            slot.second = second;
+            slot.count = 0;
+        }
+        slot.count = slot.count.saturating_add(1);
+        if slot.count <= REFUSALS_PER_SECOND {
+            Counted::Queue
+        } else {
+            Counted::Aggregated
+        }
+    }
+
+    /// Takes the unwritten counts of every second before `second`, letting go of the events and
+    /// peers that have nothing left in the current one.
+    fn take_passed(&mut self, second: u64) -> Vec<(RefusalKey, u32)> {
+        let mut passed = Vec::new();
+        self.window.retain(|key, slot| {
+            let current = slot.second >= second;
+            let unwritten = if current {
+                slot.carried
+            } else {
+                slot.carried
+                    .saturating_add(slot.count.saturating_sub(REFUSALS_PER_SECOND))
+            };
+            if unwritten > 0 {
+                passed.push((key.clone(), unwritten));
+            }
+            slot.carried = 0;
+            current
+        });
+        passed
+    }
+}
+
+fn refusal_key(entry: &Entry) -> RefusalKey {
+    (
+        entry.event.clone(),
+        // Counted as the throttle counts it: an IPv6 peer by its /64, so new addresses from one
+        // block do not each get ten lines a second.
+        match entry.fields.get("peer") {
+            Some(Field::Text(peer)) => Some(peer.parse::<std::net::IpAddr>().map_or_else(
+                |_| peer.clone(),
+                |ip| crate::throttle::peer_key(ip).to_string(),
+            )),
+            _ => None,
+        },
+    )
 }
 
 impl AuditLog {
@@ -108,13 +217,16 @@ impl AuditLog {
         let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_CAPACITY);
         let failing = Arc::new(AtomicBool::new(false));
         let unrecorded = Arc::new(AtomicU64::new(0));
+        let refusals = Arc::new(Mutex::new(Refusals::default()));
+        let queued_refusals = Arc::new(AtomicUsize::new(0));
         let mut writer = Writer {
             store,
             limits,
-            clock,
+            clock: clock.clone(),
             seq,
             prev,
-            window: HashMap::new(),
+            refusals: refusals.clone(),
+            queued_refusals: queued_refusals.clone(),
             failing: failing.clone(),
             unrecorded: unrecorded.clone(),
         };
@@ -131,21 +243,49 @@ impl AuditLog {
             tx,
             failing,
             unrecorded,
+            clock,
+            refusals,
+            queued_refusals,
         })
+    }
+
+    fn unrecorded(&self) -> Unavailable {
+        self.unrecorded.fetch_add(1, Ordering::SeqCst);
+        Unavailable
     }
 }
 
 impl Audit for AuditLog {
     /// Records one decision. Answers [`Unavailable`] while the last write failed or the channel is
-    /// full; the decision is then counted and told in the next entry that is written.
+    /// full; the decision is then counted and told in the next entry that is written. A refusal
+    /// past the per-second allowance of its event and peer is counted for its aggregate and never
+    /// queued; one that finds the refusals' share of the channel taken, or no room to be counted
+    /// ([`REFUSAL_KEYS`]), is counted as unrecorded.
     fn record(&self, entry: Entry) -> Result<(), Unavailable> {
         if self.failing.load(Ordering::SeqCst) {
-            self.unrecorded.fetch_add(1, Ordering::SeqCst);
-            return Err(Unavailable);
+            return Err(self.unrecorded());
+        }
+        if !entry.is_refusal() {
+            return self.tx.try_send(entry).map_err(|_| self.unrecorded());
+        }
+        let second = self.clock.now_ms() / 1000;
+        let counted = self
+            .refusals
+            .lock()
+            .expect("audit refusals lock")
+            .admit(refusal_key(&entry), second);
+        match counted {
+            Counted::Queue => {}
+            Counted::Aggregated => return Ok(()),
+            Counted::NoRoom => return Err(self.unrecorded()),
+        }
+        if self.queued_refusals.fetch_add(1, Ordering::SeqCst) >= REFUSAL_SHARE {
+            self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
+            return Err(self.unrecorded());
         }
         self.tx.try_send(entry).map_err(|_| {
-            self.unrecorded.fetch_add(1, Ordering::SeqCst);
-            Unavailable
+            self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
+            self.unrecorded()
         })
     }
 }
@@ -163,8 +303,8 @@ struct Writer {
     clock: Arc<dyn Clock>,
     seq: u64,
     prev: String,
-    /// Refusals per event and peer in the current second: the second, and how many came.
-    window: HashMap<(String, Option<String>), (u64, u32)>,
+    refusals: Arc<Mutex<Refusals>>,
+    queued_refusals: Arc<AtomicUsize>,
     failing: Arc<AtomicBool>,
     unrecorded: Arc<AtomicU64>,
 }
@@ -184,13 +324,21 @@ impl Writer {
             }
             if last_tick.elapsed() >= Duration::from_secs(1) {
                 last_tick = std::time::Instant::now();
-                self.tick();
+                self.tick(rx);
             }
         }
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, rx: &std::sync::mpsc::Receiver<Entry>) {
         let second = self.clock.now_ms() / 1000;
+        // What was queued before the second ended is written before its aggregates, so they
+        // follow the refusals they count.
+        for _ in 0..CHANNEL_CAPACITY {
+            match rx.try_recv() {
+                Ok(entry) => self.take(entry),
+                Err(_) => break,
+            }
+        }
         self.flush_window(second);
         // While writing fails nothing is let through, so the writer itself tries again; the first
         // entry that lands says how much went unrecorded.
@@ -199,56 +347,27 @@ impl Writer {
         }
     }
 
-    /// Writes an entry, or counts it when it is a refusal past the per-second allowance.
+    /// Writes an entry that came through the channel.
     fn take(&mut self, entry: Entry) {
         if entry.is_refusal() {
-            let second = self.clock.now_ms() / 1000;
-            let key = (
-                entry.event.clone(),
-                // Counted as the throttle counts it: an IPv6 peer by its /64, so new addresses from
-                // one block do not each get ten lines a second.
-                match entry.fields.get("peer") {
-                    Some(Field::Text(peer)) => Some(peer.parse::<std::net::IpAddr>().map_or_else(
-                        |_| peer.clone(),
-                        |ip| crate::throttle::peer_key(ip).to_string(),
-                    )),
-                    _ => None,
-                },
-            );
-            let slot = self.window.entry(key.clone()).or_insert((second, 0));
-            if slot.0 != second {
-                let (_, count) = *slot;
-                *slot = (second, 0);
-                if count > REFUSALS_PER_SECOND {
-                    self.write_aggregate(&key, count - REFUSALS_PER_SECOND);
-                }
-            }
-            let slot = self.window.get_mut(&key).expect("just inserted");
-            slot.1 += 1;
-            if slot.1 > REFUSALS_PER_SECOND {
-                return;
-            }
+            self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
         }
         self.write(entry);
     }
 
     /// Writes one aggregate per event and peer whose second has passed.
     fn flush_window(&mut self, second: u64) {
-        let passed: Vec<_> = self
-            .window
-            .iter()
-            .filter(|(_, (at, _))| *at < second)
-            .map(|(key, (_, count))| (key.clone(), *count))
-            .collect();
+        let passed = self
+            .refusals
+            .lock()
+            .expect("audit refusals lock")
+            .take_passed(second);
         for (key, count) in passed {
-            self.window.remove(&key);
-            if count > REFUSALS_PER_SECOND {
-                self.write_aggregate(&key, count - REFUSALS_PER_SECOND);
-            }
+            self.write_aggregate(&key, count);
         }
     }
 
-    fn write_aggregate(&mut self, (event, peer): &(String, Option<String>), count: u32) {
+    fn write_aggregate(&mut self, (event, peer): &RefusalKey, count: u32) {
         self.write(
             Entry::new(&format!("{event}.aggregated"), "refused")
                 .with("peer", peer.clone())
@@ -623,6 +742,84 @@ mod tests {
             lines.iter().any(|l| l.contains("\"unrecorded_before\":2")),
             "the admission that found no room and the refusal are counted"
         );
+    }
+
+    /// A flood of refusals — from one peer, and from as many peers as the channel holds entries —
+    /// never leaves an admission without room for its record, even while the writer is stalled.
+    /// Verifies: ADR-0022
+    #[test]
+    fn a_flood_of_refusals_leaves_room_for_every_other_record() {
+        let memory = Memory::default();
+        let clock = clock();
+        let audit = AuditLog::start(Box::new(memory.clone()), Limits::default(), clock.clone())
+            .expect("start");
+        // The writer waits on the store while the test holds it, as it would on a slow disk.
+        let held = memory.0.lock().expect("lock");
+        for _ in 0..CHANNEL_CAPACITY * 2 {
+            audit.refusal(
+                Entry::new("operator.refused", "refused")
+                    .peer(Some("192.0.2.1".parse().expect("ip"))),
+            );
+        }
+        for n in 0..u32::try_from(CHANNEL_CAPACITY * 2).expect("fits") {
+            audit.refusal(
+                Entry::new("operator.refused", "refused")
+                    .peer(Some(std::net::Ipv4Addr::from(0x0a00_0000 + n).into())),
+            );
+        }
+        assert_eq!(
+            audit.record(Entry::new("admission.admitted", "admitted")),
+            Ok(()),
+            "an admission found the channel full of refusals"
+        );
+        drop(held);
+        // Once the second has passed, the one peer's flood is ten lines and an aggregate.
+        clock.0.fetch_add(1_000, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let aggregate = loop {
+            let lines = memory.lines();
+            if let Some(aggregate) = lines
+                .iter()
+                .find(|l| l.contains("operator.refused.aggregated") && l.contains("192.0.2.1"))
+            {
+                break aggregate.clone();
+            }
+            assert!(std::time::Instant::now() < deadline, "no aggregate");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(
+            aggregate.contains(&format!("\"count\":{}", CHANNEL_CAPACITY * 2 - 10)),
+            "{aggregate}"
+        );
+        let written = memory
+            .lines()
+            .iter()
+            .filter(|l| l.contains("\"operator.refused\"") && l.contains("\"192.0.2.1\""))
+            .count();
+        assert_eq!(written, REFUSALS_PER_SECOND as usize);
+    }
+
+    /// While the writer is stalled, the refusals it has yet to account for are counted for a
+    /// bounded number of events and peers; a refusal of one more is unrecorded, not remembered.
+    /// The bound is on memory, which no interface shows, so the table is looked at directly.
+    /// Verifies: ADR-0022
+    #[test]
+    fn a_stalled_writer_counts_refusals_for_a_bounded_number_of_peers() {
+        let memory = Memory::default();
+        let audit =
+            AuditLog::start(Box::new(memory.clone()), Limits::default(), clock()).expect("start");
+        let held = memory.0.lock().expect("lock");
+        for n in 0..u32::try_from(REFUSAL_KEYS * 3).expect("fits") {
+            audit.refusal(
+                Entry::new("operator.refused", "refused")
+                    .peer(Some(std::net::Ipv4Addr::from(0x0a00_0000 + n).into())),
+            );
+        }
+        assert!(
+            audit.refusals.lock().expect("lock").window.len() <= REFUSAL_KEYS,
+            "every peer of a stalled writer is remembered"
+        );
+        drop(held);
     }
 
     /// Verifies: ADR-0022

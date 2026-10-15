@@ -1343,6 +1343,81 @@ async fn a_session_is_closed_when_its_certificate_expires() {
     );
 }
 
+/// A client presenting a certificate that expires in ten seconds, and the instant it expires —
+/// `not_after` in whole seconds, as the certificate carries it.
+fn expiring_client(pki: &Pki, served: &Served) -> (reqwest::Client, time::OffsetDateTime) {
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(vec!["edge-01".to_string()]).expect("params");
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::minutes(1);
+    params.not_after = (now + time::Duration::seconds(10))
+        .replace_nanosecond(0)
+        .expect("whole second");
+    let cert = params.signed_by(&key, &pki.issuer()).expect("signed").pem();
+    (
+        client(&served.ca_pem, Some((&cert, &key.serialize_pem()))),
+        params.not_after,
+    )
+}
+
+/// Waits until a second past `not_after`.
+async fn sleep_past(not_after: time::OffsetDateTime) {
+    let wait = not_after + time::Duration::seconds(1) - time::OffsetDateTime::now_utc();
+    tokio::time::sleep(wait.try_into().unwrap_or_default()).await;
+}
+
+/// A connection that outlives its certificate is admitted no further: plain HTTP keeps one
+/// connection across polls, and the handshake that checked the certificate's validity is not
+/// repeated, so each request on it is refused once the certificate has expired
+/// (ADR-0021 clauses 6, 40, 41).
+/// Verifies: ADR-0021
+#[tokio::test]
+async fn a_kept_alive_connection_is_refused_once_its_certificate_expires() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (http, not_after) = expiring_client(&pki, &served);
+    let uid = InstanceUid::default();
+    assert!(post(&http, &served.endpoint, report(&uid))
+        .await
+        .status()
+        .is_success());
+
+    sleep_past(not_after).await;
+    // An answer at all proves the pooled connection was reused: a new one would fail the
+    // handshake on the expired certificate, and `post` would panic on the send.
+    assert_eq!(
+        post(&http, &served.endpoint, report(&uid)).await.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "an expired certificate was admitted on a kept-alive connection"
+    );
+}
+
+/// The download is held to the same: a kept-alive connection reaches it no further once its
+/// certificate has expired (ADR-0021 clauses 6, 23).
+/// Verifies: ADR-0021
+#[tokio::test]
+async fn a_kept_alive_connection_reaches_the_download_no_further_once_its_certificate_expires() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (http, not_after) = expiring_client(&pki, &served);
+    let download = served.endpoint.replace(
+        "/v1/opamp",
+        "/api/v1/packages/otelcol/1.0.0/file?os=linux&arch=amd64",
+    );
+    assert_ne!(
+        http.get(&download).send().await.expect("send").status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    sleep_past(not_after).await;
+    // As above, an answer at all proves the connection was reused.
+    assert_eq!(
+        http.get(&download).send().await.expect("send").status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "an expired certificate reached the download on a kept-alive connection"
+    );
+}
+
 /// A certificate renewed before its predecessor was revoked is revoked with it: the register
 /// records the presented certificate as the issued one's predecessor (ADR-0021 clauses 32, 33, 35).
 /// Verifies: ADR-0021
@@ -1690,20 +1765,35 @@ fn audit_in(dir: &std::path::Path) -> Arc<dyn fleet_server::audit::Audit> {
     )
 }
 
-/// Every entry written so far, once the writer has caught up.
-async fn entries(dir: &std::path::Path) -> Vec<serde_json::Value> {
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    fleet_server::fs::audit_files(dir)
-        .expect("files")
-        .iter()
-        .flat_map(|file| {
-            std::fs::read_to_string(file)
-                .expect("read")
-                .lines()
-                .map(|line| serde_json::from_str(line).expect("json"))
-                .collect::<Vec<serde_json::Value>>()
-        })
-        .collect()
+/// Every entry written so far, once `count` entries named `until` are among them.
+async fn entries(dir: &std::path::Path, until: &str, count: usize) -> Vec<serde_json::Value> {
+    // The writer keeps the order the entries were queued in, so once `count` entries named `until`
+    // are on disk, everything queued before the last of them is too.
+    let read = || -> Vec<serde_json::Value> {
+        fleet_server::fs::audit_files(dir)
+            .expect("files")
+            .iter()
+            .flat_map(|file| {
+                std::fs::read_to_string(file)
+                    .expect("read")
+                    .lines()
+                    .map(|line| serde_json::from_str(line).expect("json"))
+                    .collect::<Vec<serde_json::Value>>()
+            })
+            .collect()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let all = read();
+        if named(&all, until).len() >= count {
+            return all;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no {count} {until} entries were written: {all:#?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 fn named<'a>(entries: &'a [serde_json::Value], event: &str) -> Vec<&'a serde_json::Value> {
@@ -1741,7 +1831,7 @@ async fn an_admission_and_its_refusal_each_leave_one_entry() {
         .await
         .is_err());
 
-    let all = entries(dir.path()).await;
+    let all = entries(dir.path(), "admission.refused", 1).await;
     let admitted = named(&all, "admission.admitted");
     assert_eq!(admitted.len(), 1, "{all:#?}");
     assert_eq!(admitted[0]["transport"], "websocket");
@@ -1785,7 +1875,7 @@ async fn an_authorization_an_older_client_sends_is_never_written() {
         .expect("send");
     assert!(response.status().is_success(), "{:?}", response.status());
 
-    let all = entries(dir.path()).await;
+    let all = entries(dir.path(), "admission.admitted", 2).await;
     let admitted = named(&all, "admission.admitted");
     assert_eq!(admitted.len(), 2, "{all:#?}");
     let text = std::fs::read_dir(dir.path())
@@ -1828,7 +1918,7 @@ async fn an_issued_certificate_is_recorded_with_its_predecessor() {
     )
     .await;
     assert!(reply.connection_settings.is_some(), "signed");
-    let all = entries(dir.path()).await;
+    let all = entries(dir.path(), "issuance.signed", 1).await;
     let signed = named(&all, "issuance.signed");
     assert_eq!(signed.len(), 1, "{all:#?}");
     assert_eq!(signed[0]["kind"], "renewal");
@@ -1865,7 +1955,7 @@ async fn a_revocation_records_the_sessions_it_ended() {
         .revoke_certificate("client", &serial)
         .expect("revoke");
     closed_with(&mut socket, 5).await;
-    let all = entries(dir.path()).await;
+    let all = entries(dir.path(), "session.ended", 1).await;
     let ended = named(&all, "session.ended");
     assert_eq!(ended.len(), 1, "{all:#?}");
     assert_eq!(ended[0]["reason"], "revoked");
@@ -1919,7 +2009,7 @@ async fn an_operator_act_names_the_operator() {
         .expect("send");
     assert_eq!(refused.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    let all = entries(dir.path()).await;
+    let all = entries(dir.path(), "operator.refused", 1).await;
     let acts = named(&all, "operator.act");
     assert_eq!(acts.len(), 2, "{all:#?}");
     assert_eq!(acts[0]["outcome"], "requested");
@@ -2167,7 +2257,7 @@ async fn an_unmarked_member_asking_for_the_list_leaves_a_refusal() {
     .host
     .expect("a host");
 
-    let all = entries(dir.path()).await;
+    let all = entries(dir.path(), "gateway_list.refused", 1).await;
     let refused = named(&all, "gateway_list.refused");
     assert_eq!(refused.len(), 1, "{all:#?}");
     assert_eq!(refused[0]["host"], host.as_str());
@@ -3022,7 +3112,7 @@ async fn a_refused_fetch_leaves_one_download_refused_entry_naming_its_check() {
         reqwest::StatusCode::NOT_FOUND
     );
 
-    let all = entries(dir.path()).await;
+    let all = entries(dir.path(), "download.refused", 1).await;
     let refused = named(&all, "download.refused");
     assert_eq!(refused.len(), 1, "{all:#?}");
     assert_eq!(refused[0]["outcome"], "refused");
@@ -3075,7 +3165,14 @@ async fn a_malformed_token_is_answered_400_before_the_offer_is_tested() {
             "{path}"
         );
     }
-    let all = entries(dir.path()).await;
+    // One more admission, queued after whatever the three caused: once it is on disk, so is that.
+    fetch(
+        &served,
+        &other,
+        "/api/v1/packages/otelcol/1.0.0/file?os=linux",
+    )
+    .await;
+    let all = entries(dir.path(), "download.admitted", 4).await;
     assert!(named(&all, "download.refused").is_empty(), "{all:#?}");
 }
 
@@ -3170,7 +3267,7 @@ async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_ser
     );
     let cert = issued["certificate_pem"].as_str().expect("cert");
     let key = issued["private_key_pem"].as_str().expect("key");
-    let recorded = entries(audit_dir.path()).await;
+    let recorded = entries(audit_dir.path(), "enrolment.bootstrap_issued", 1).await;
     let recorded = named(&recorded, "enrolment.bootstrap_issued");
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0]["serial"], serial.as_str());
@@ -3343,7 +3440,7 @@ async fn a_bootstrap_certificate_issued_with_a_password_is_a_pkcs12_file_until_r
         opamp::tls::certificates(cert.as_bytes()).expect("pem")[0].as_ref(),
         "the certificate issued"
     );
-    let recorded = entries(audit_dir.path()).await;
+    let recorded = entries(audit_dir.path(), "enrolment.bootstrap_p12_downloaded", 2).await;
     let issuance = named(&recorded, "enrolment.bootstrap_issued");
     assert_eq!(issuance[0]["p12"], "true");
     assert_eq!(
@@ -3551,7 +3648,7 @@ async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refu
     let dir = served.config_dir.join("bootstrap-certificates");
     assert!(!dir.join(format!("{serial}.json")).exists());
     assert!(!dir.join(format!("{serial}.p12")).exists());
-    let recorded = entries(audit_dir.path()).await;
+    let recorded = entries(audit_dir.path(), "enrolment.bootstrap_deleted", 1).await;
     let deleted = named(&recorded, "enrolment.bootstrap_deleted");
     assert_eq!(deleted.len(), 1);
     assert_eq!(deleted[0]["serial"], serial.as_str());

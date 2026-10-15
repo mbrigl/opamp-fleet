@@ -11,6 +11,7 @@
 //! dropped with a log line rather than broadcast.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use opamp::proto::ServerToAgent;
@@ -32,12 +33,15 @@ struct Route {
 enum Downstream {
     /// A WebSocket peer: everything for this Agent goes down this channel until it disconnects.
     Socket(mpsc::Sender<ServerToAgent>),
-    /// A plain-HTTP peer mid-exchange: one reply, then gone.
-    Exchange(oneshot::Sender<ServerToAgent>),
+    /// A plain-HTTP peer mid-exchange: one reply, then gone. The number tells this exchange from
+    /// a later one for the same Agent.
+    Exchange(oneshot::Sender<ServerToAgent>, u64),
 }
 
 pub struct Registry {
     routes: Mutex<HashMap<InstanceUid, Route>>,
+    /// The number the next plain-HTTP exchange is registered under.
+    exchanges: AtomicU64,
     /// What sees every offer on its way down (ADR-0026 clause 42).
     cache: Arc<PackageCache>,
 }
@@ -46,6 +50,7 @@ impl Registry {
     pub fn new(cache: Arc<PackageCache>) -> Self {
         Registry {
             routes: Mutex::new(HashMap::new()),
+            exchanges: AtomicU64::new(0),
             cache,
         }
     }
@@ -73,33 +78,63 @@ impl Registry {
         );
     }
 
-    /// A plain-HTTP peer waits for exactly one reply for this Agent.
+    /// A plain-HTTP peer waits for exactly one reply for this Agent. Returns the number that
+    /// [`Registry::abandon`] takes once the exchange ends without one.
     pub fn expect_once(
         &self,
         uid: InstanceUid,
         reply: oneshot::Sender<ServerToAgent>,
         host: Option<String>,
-    ) {
+    ) -> u64 {
+        let exchange = self.exchanges.fetch_add(1, Ordering::Relaxed);
         let mut routes = self.routes.lock().expect("registry lock");
         self.cache
             .bind(uid, host.as_deref(), |uid| routes.contains_key(uid));
         routes.insert(
             uid,
             Route {
-                downstream: Downstream::Exchange(reply),
+                downstream: Downstream::Exchange(reply, exchange),
                 host,
             },
         );
+        exchange
     }
 
-    /// Releases every Agent a departing WebSocket peer carried.
+    /// Releases the route of a plain-HTTP exchange that ended without its reply, unless a later
+    /// exchange or a socket has claimed the Agent since.
+    pub fn abandon(&self, uid: InstanceUid, exchange: u64) {
+        let mut routes = self.routes.lock().expect("registry lock");
+        if matches!(
+            routes.get(&uid).map(|route| &route.downstream),
+            Some(Downstream::Exchange(_, current)) if *current == exchange
+        ) {
+            routes.remove(&uid);
+        }
+    }
+
+    /// Whether anyone downstream is waiting for this Agent's replies.
+    pub fn routes(&self, uid: &InstanceUid) -> bool {
+        self.routes.lock().expect("registry lock").contains_key(uid)
+    }
+
+    /// Releases every Agent a departing WebSocket peer carried, save those another downstream
+    /// connection has claimed since.
     ///
     /// Nothing is sent upstream about it: a downstream Client that vanished said no goodbye, and
     /// this Gateway does not say one for it (ADR-0015 clause 10).
-    pub fn detach_all(&self, uids: impl IntoIterator<Item = InstanceUid>) {
+    pub fn detach_all(
+        &self,
+        uids: impl IntoIterator<Item = InstanceUid>,
+        sink: &mpsc::Sender<ServerToAgent>,
+    ) {
         let mut routes = self.routes.lock().expect("registry lock");
         for uid in uids {
-            routes.remove(&uid);
+            if matches!(
+                routes.get(&uid).map(|route| &route.downstream),
+                Some(Downstream::Socket(own)) if own.same_channel(sink)
+            ) {
+                routes.remove(&uid);
+            }
         }
     }
 
@@ -113,7 +148,7 @@ impl Registry {
             let mut routes = self.routes.lock().expect("registry lock");
             let host = routes.get(&uid).and_then(|route| route.host.clone());
             let downstream = match routes.get(&uid).map(|route| &route.downstream) {
-                Some(Downstream::Exchange(_)) => routes.remove(&uid).map(|route| route.downstream),
+                Some(Downstream::Exchange(..)) => routes.remove(&uid).map(|route| route.downstream),
                 Some(Downstream::Socket(sink)) => Some(Downstream::Socket(sink.clone())),
                 None => None,
             };
@@ -127,7 +162,7 @@ impl Registry {
             Some(Downstream::Socket(sink)) => {
                 let _ = sink.send(reply).await;
             }
-            Some(Downstream::Exchange(reply_to)) => {
+            Some(Downstream::Exchange(reply_to, _)) => {
                 let _ = reply_to.send(reply);
             }
             None => debug!(agent = %uid, "dropping a Server message for an unknown Agent"),

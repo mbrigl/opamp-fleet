@@ -21,6 +21,7 @@ fleet-core = { path = "../crates/fleet-core" }
 prost = "0.14"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 tempfile = "3"
+toml = "1"
 # Reads the issued certificate back, so the assertion is on what was signed, not on its text.
 x509-parser = "0.18"
 
@@ -75,6 +76,34 @@ bench = false
 [[bin]]
 name = "pkcs12"
 path = "fuzz_targets/pkcs12.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "revocation_list"
+path = "fuzz_targets/revocation_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "supervisor_set"
+path = "fuzz_targets/supervisor_set.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_member"
+path = "fuzz_targets/archive_member.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "renewal_proof"
+path = "fuzz_targets/renewal_proof.rs"
 test = false
 doc = false
 bench = false

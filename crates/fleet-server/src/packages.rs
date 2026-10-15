@@ -496,8 +496,8 @@ impl PackageStore {
 
     /// Where an upload for one entry is streamed before it becomes an artifact. In the Package's
     /// own directory, so [`put_staged`](Self::put_staged) can move it into place with a rename —
-    /// and named per Platform, so uploading a release's five artifacts at once cannot have them
-    /// overwrite each other while they are still in flight.
+    /// and named per Platform and per upload, so neither a release's five artifacts uploaded at
+    /// once nor two uploads of one entry can overwrite each other while they are still in flight.
     ///
     /// # Errors
     /// Returns an error when no Package of that identity exists. The fleet refuses the upload
@@ -597,6 +597,30 @@ impl PackageStore {
         content_hash: Vec<u8>,
         source: Source,
     ) -> Result<(), String> {
+        self.check_entry_source(id, &content_hash, &source)?;
+        // The reference replaces any bytes this Server was holding, wholesale. Another version is
+        // another Package — nothing is remembered here (ADR-0026).
+        self.backend.remove_artifact(id, platform)?;
+        self.put_entry_record(
+            id,
+            Entry {
+                platform: platform.clone(),
+                content_hash,
+                size: 0,
+                source: Some(source),
+            },
+        )
+    }
+
+    /// Whether [`set_entry_source`](Self::set_entry_source) would take this reference: the Package
+    /// exists, the hash is a SHA-256 and the URL is one an Agent may be sent to. Answered before
+    /// anything is sent to the source, so a refused URL never receives the operator's headers.
+    pub fn check_entry_source(
+        &self,
+        id: &PackageId,
+        content_hash: &[u8],
+        source: &Source,
+    ) -> Result<(), String> {
         self.writable(id)?;
         if content_hash.len() != 32 {
             return Err(
@@ -613,19 +637,7 @@ impl PackageStore {
         }
         // Neither the artifact nor the headers an Agent sends for it cross a network in plaintext
         // (ADR-0026).
-        opamp::endpoint::check_url(&source.url).map_err(|e| format!("the source url {e}"))?;
-        // The reference replaces any bytes this Server was holding, wholesale. Another version is
-        // another Package — nothing is remembered here (ADR-0026).
-        self.backend.remove_artifact(id, platform)?;
-        self.put_entry_record(
-            id,
-            Entry {
-                platform: platform.clone(),
-                content_hash,
-                size: 0,
-                source: Some(source),
-            },
-        )
+        opamp::endpoint::check_url(&source.url).map_err(|e| format!("the source url {e}"))
     }
 
     /// Writes one entry into the Package's map and its `package.json` — the single path every

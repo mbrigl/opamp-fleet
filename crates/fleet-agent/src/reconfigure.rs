@@ -308,10 +308,10 @@ fn start(
 /// so the offered text survives as written.
 ///
 /// # Errors
-/// Returns an error for an entry that is not TOML, a `supervisor` key that is not an array of
-/// tables, a block the startup parser would refuse, or a duplicate Supervisor name — a genuine
-/// ambiguity inside the accepted scope.
-fn offered_blocks(
+/// Returns an error for entry names no host can store as files of their own, an entry that is not
+/// TOML, a `supervisor` key that is not an array of tables, a block the startup parser would
+/// refuse, or a duplicate Supervisor name — a genuine ambiguity inside the accepted scope.
+pub fn offered_blocks(
     offer: &AgentRemoteConfig,
 ) -> Result<(Vec<SupervisorBlock>, Vec<toml_edit::Table>), String> {
     let map = offer
@@ -319,6 +319,9 @@ fn offered_blocks(
         .as_ref()
         .map(|c| &c.config_map)
         .ok_or_else(|| "the offer carries no configuration".to_string())?;
+    // The set is stored as entry files once it applied; an entry no host can store is refused now,
+    // before anything stops.
+    crate::storage::check_entry_names(offer)?;
     // Entries in name order: the composed map is unordered on the wire, and the written file
     // should not depend on iteration luck.
     let mut entries: Vec<(&String, &opamp::proto::AgentConfigObject)> = map.iter().collect();
@@ -600,6 +603,22 @@ mod tests {
         assert!(err.contains("duplicate supervisor name"), "{err}");
     }
 
+    /// The set is stored as entry files once it applied, so entry names no host could store are
+    /// refused before anything stops, not found out after the set already runs.
+    /// Verifies: ADR-0017
+    #[test]
+    fn an_offer_whose_entries_cannot_all_be_stored_is_refused() {
+        let block = "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"agent\"\n";
+        let err = offered_blocks(&offer_of(&[("nul", block)])).expect_err("a device name");
+        assert!(err.contains("\"nul\""), "{err}");
+        let err = offered_blocks(&offer_of(&[("Fleet", block), ("fleet", "")]))
+            .expect_err("two entries, one file");
+        assert!(
+            err.contains("\"Fleet\"") && err.contains("\"fleet\""),
+            "{err}"
+        );
+    }
+
     /// A block the startup parser would refuse is refused here, naming the entry — the same
     /// strictness ADR-0010 asks of the file.
     #[test]
@@ -686,6 +705,69 @@ mod tests {
             let err = crate::supervisor::check_delivered_block(&allowing, &block).expect_err(value);
             assert!(err.contains("own directories"), "{err}");
         }
+    }
+
+    /// The interpreters' and shells' own loader variables are refused like the dynamic loader's,
+    /// in any case, whatever the operator allowed and whatever the value.
+    /// Verifies: ADR-0017
+    #[test]
+    fn an_interpreter_or_shell_loader_variable_is_refused_whatever_the_operator_allowed() {
+        let allowing = running("[supervisors]\ndelivered_env = [\"*\"]\n", AGENT);
+        for name in [
+            "PERLLIB",
+            "PERL5DB",
+            "PYTHONHOME",
+            "RUBYLIB",
+            "NODE_PATH",
+            "PATHEXT",
+            "COMSPEC",
+            "ComSpec",
+            "node_path",
+        ] {
+            let block = delivered(&format!("{AGENT}env = {{ {name} = \"x\" }}\n"));
+            let err = crate::supervisor::check_delivered_block(&allowing, &block)
+                .expect_err("a loader variable");
+            assert!(err.contains(name) && err.contains("steer"), "{err}");
+        }
+    }
+
+    /// A value naming a path under the Supervisors' root is refused as the placeholders are: the
+    /// Server delivers files there that no one signed. `delivered_env = ["*"]` itself stands, a
+    /// value the running block already carries stands, and a sibling of the root is not under it.
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_delivered_value_may_not_name_a_path_under_the_supervisors_root() {
+        let root = std::env::temp_dir().join("fleet-supervisors");
+        let s = std::path::MAIN_SEPARATOR;
+        let list = if cfg!(windows) { ';' } else { ':' };
+        let globals = format!(
+            "supervisor_dir = {:?}\n[supervisors]\ndelivered_env = [\"*\"]\n",
+            root.display().to_string()
+        );
+        let allowing = running(&globals, AGENT);
+        let r = root.display();
+        for value in [
+            format!("{r}{s}agent{s}config{s}x.jar"),
+            format!("{r}"),
+            format!("-javaagent:{r}{s}agent{s}config{s}x.jar"),
+            format!("{s}opt{list}{r}{s}other{s}config"),
+            format!("{r}{s}.{s}agent{s}{s}config{s}x"),
+            format!("{r}{s}..{s}fleet-supervisors{s}agent{s}config{s}x"),
+        ] {
+            let block = delivered(&format!(
+                "{AGENT}env = {{ OTEL_JAVAAGENT_EXTENSIONS = {value:?} }}\n"
+            ));
+            let err =
+                crate::supervisor::check_delivered_block(&allowing, &block).expect_err(&value);
+            assert!(err.contains("own directories"), "{value}: {err}");
+        }
+        for value in [format!("{r}-other{s}x"), "info".to_owned()] {
+            let block = delivered(&format!("{AGENT}env = {{ OTEL_LOG_LEVEL = {value:?} }}\n"));
+            crate::supervisor::check_delivered_block(&allowing, &block).expect(&value);
+        }
+        let kept = format!("{AGENT}env = {{ OTEL_X = {:?} }}\n", format!("{r}{s}x"));
+        crate::supervisor::check_delivered_block(&running(&globals, &kept), &delivered(&kept))
+            .expect("a value the running block carries");
     }
 
     /// Tables from two entries keep their sub-tables: what is written reads back as the set that

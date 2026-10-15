@@ -132,12 +132,16 @@ core module names an adapter or a technology, and when a module has no role.
 - **Client supervision** — `supervisor::ports` is the Port a Plugin implements
   ([ADR-0017](adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)), and `shutdown` the handle every task
   stops on; the Plugins and the process runner are its adapters. How a `[[supervisor]]` block is
-  read — its plugin, program, Agent type and timings — is `supervisor::block`; the registry of
-  Plugins stays in `supervisor`, which knows the kinds. When a failed process is started again or
-  held is `supervisor::restart`'s decision; the runner reads the clock and starts it.
+  read — its plugin, program, Agent type and timings — is `supervisor::block`, and what a
+  Server-delivered block may bring is `supervisor::delivered`; the registry of Plugins stays in
+  `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the
+  Supervisors' root as an absolute path too. When a failed process is started again or held is
+  `supervisor::restart`'s decision; the runner reads the clock and starts it.
   `supervisor::agent`, an Agent's decisions, names two more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, and `HostFacts`, which `host::SystemHost`
-  implements from the platform.
+  implements from the platform. It answers each Server message in `handle` and leaves three
+  channels and its description each to a submodule: `packages`, `remote_config`,
+  `connection_settings`, and `description`, what the Agent reports about itself.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0010](adr/0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)); `config_file` reads it from disk, makes its
   directories absolute, and finds the identity the state directory holds.
@@ -151,6 +155,8 @@ core module names an adapter or a technology, and when a module has no role.
   The Gateway's `cache` sees every offer `registry` hands down, fetches each Server-hosted
   artifact once into the state directory, and serves it on the downstream download route to the
   hosts it was offered to ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+  Which host the Gateway takes to speak for an `instance_uid` is decided in the core module
+  `gateway::policy`; the cache holds the bindings.
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.

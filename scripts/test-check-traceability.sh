@@ -15,6 +15,11 @@
 
 set -uo pipefail
 
+# The fixtures are repositories of their own: an inherited GIT_DIR, GIT_INDEX_FILE or the like, as
+# a hook exports, would point their git commands at the repository this runs in.
+mapfile -t git_env < <(git rev-parse --local-env-vars)
+unset "${git_env[@]}"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECK="$ROOT/scripts/check-traceability.sh"
 

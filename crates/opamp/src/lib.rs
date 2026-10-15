@@ -18,6 +18,7 @@
 //! `v0.20.0`, which [`BASELINE`] states.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![forbid(unsafe_code)]
 
 /// The OpAMP protobuf types, generated from the vendored Baseline schema by
 /// [`build.rs`](../build.rs). The `.proto` package is `opamp.proto.v1`; the generated types are

@@ -68,9 +68,10 @@ fn ensure_safe_package_name(name: &str) -> Result<(), String> {
 /// artifact, ready for the Supervisor to swap over the Managed Process's binary.
 ///
 /// The artifact is a program — tens or hundreds of megabytes — so it is streamed to `staging_dir`
-/// and hashed as it arrives, never assembled in memory. Only a signature check reads it back,
-/// because Ed25519 verifies over the whole message. `staging_dir` is the receiving Agent's own
-/// (ADR-0017), so the install that follows is a rename inside one filesystem.
+/// and hashed as it arrives, never assembled in memory or read back: the signature covers the
+/// Agent type, the version and that hash, not the bytes themselves. `staging_dir` is the
+/// receiving Agent's own (ADR-0017), so the install that follows is a rename inside one
+/// filesystem.
 /// Verifies: ADR-0026
 pub async fn download_and_verify(
     package: &PackageDownload,

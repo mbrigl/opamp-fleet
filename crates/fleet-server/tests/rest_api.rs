@@ -707,6 +707,154 @@ async fn a_cross_site_state_changing_post_is_refused() {
     );
 }
 
+/// A browser that sends no Fetch Metadata still sends `Origin` on a `POST`. An `Origin` that is
+/// not the plane's own marks a cross-site caller and is refused, while the plane's own origin and
+/// a caller with neither header pass the guard.
+/// Verifies: ADR-0021
+#[tokio::test]
+async fn a_post_from_a_foreign_origin_without_fetch_metadata_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    let restart = || {
+        client.post(url(
+            server.rest_addr,
+            &format!("/api/v1/agents/{uid}/restart"),
+        ))
+    };
+
+    for origin in ["https://attacker.example", "null"] {
+        let foreign = restart()
+            .header("origin", origin)
+            .send()
+            .await
+            .expect("restart");
+        assert_eq!(foreign.status(), 403, "Origin {origin} is refused");
+    }
+
+    let own = restart()
+        .header("origin", format!("http://{}", server.rest_addr))
+        .send()
+        .await
+        .expect("restart");
+    assert_eq!(
+        own.status(),
+        404,
+        "the plane's own origin reaches the handler"
+    );
+
+    // A page on port 80 is another origin than a plane addressed on 443, though both name the host.
+    let port_80 = restart()
+        .header("host", "127.0.0.1:443")
+        .header("origin", "http://127.0.0.1")
+        .send()
+        .await
+        .expect("restart");
+    assert_eq!(port_80.status(), 403, "an Origin on port 80 is refused");
+}
+
+/// Every response of the Operator plane — the UI, the API, the API docs and a miss alike —
+/// forbids framing and content sniffing and sends no referrer, and an `/api/v1` answer is never
+/// cached.
+#[tokio::test]
+async fn every_operator_response_carries_the_security_headers() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    for path in [
+        "/",
+        "/api/v1/agents",
+        "/api/v1/docs",
+        "/api/v1/openapi.json",
+        "/no-such-page",
+    ] {
+        let response = client
+            .get(url(server.rest_addr, path))
+            .send()
+            .await
+            .expect("get");
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let policy = header("content-security-policy");
+        assert!(
+            policy.contains("frame-ancestors 'none'") && policy.contains("default-src 'self'"),
+            "{path}: {policy:?}"
+        );
+        assert_eq!(header("x-frame-options"), "DENY", "{path}");
+        assert_eq!(header("x-content-type-options"), "nosniff", "{path}");
+        assert_eq!(header("referrer-policy"), "no-referrer", "{path}");
+        if path.starts_with("/api/v1/") {
+            assert_eq!(header("cache-control"), "no-store", "{path}");
+        }
+    }
+}
+
+/// The bundled UI runs under the plane's policy: every inline script of the page, whatever its
+/// attributes, is one the policy names by its hash, and no element carries an inline event
+/// handler the policy would block.
+#[tokio::test]
+async fn the_policy_names_every_inline_script_of_the_ui() {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let server = spawn().await;
+    let response = reqwest::get(url(server.rest_addr, "/")).await.expect("get");
+    let policy = response
+        .headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .expect("a policy")
+        .to_string();
+    let script_src = policy
+        .split(';')
+        .map(str::trim)
+        .find(|d| d.starts_with("script-src "))
+        .expect("a script-src directive")
+        .to_string();
+    assert!(!script_src.contains("'unsafe-inline'"), "{script_src}");
+    let page = response.text().await.expect("page");
+    let lower = page.to_ascii_lowercase();
+
+    // Every `<script …>` without a `src`, whatever its attributes, is named by its hash.
+    let mut inline = 0;
+    let mut rest = 0;
+    while let Some(start) = lower[rest..].find("<script").map(|i| rest + i) {
+        let open_end = start + lower[start..].find('>').expect("a closed tag");
+        let close = open_end + lower[open_end..].find("</script").expect("a closed script");
+        rest = close;
+        if lower[start..open_end].contains("src=") {
+            continue;
+        }
+        let body = &page[open_end + 1..close];
+        let hash = base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(body));
+        assert!(
+            script_src.contains(&format!("'sha256-{hash}'")),
+            "an inline script the policy does not name: {}",
+            &page[start..open_end + 1]
+        );
+        inline += 1;
+    }
+
+    // No element of the page, nor one its scripts write, carries an inline event handler.
+    for (at, _) in lower.match_indices('<') {
+        let tag = &lower[at + 1..];
+        if !tag.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            continue;
+        }
+        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+        assert!(
+            !tag.split_whitespace()
+                .any(|attr| attr.starts_with("on") && attr.contains('=')),
+            "an inline event handler: <{tag}>"
+        );
+    }
+    assert!(inline > 0, "the page has inline scripts to name");
+}
+
 /// The fleet as the REST API shows it.
 async fn agents(client: &reqwest::Client, addr: std::net::SocketAddr) -> Vec<serde_json::Value> {
     client
