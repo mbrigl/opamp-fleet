@@ -17,6 +17,7 @@
 //! what is the Gateway's is the [`Forwarding`] handler behind it.
 
 pub mod cache;
+pub mod policy;
 pub mod pool;
 pub mod registry;
 pub mod revocations;
