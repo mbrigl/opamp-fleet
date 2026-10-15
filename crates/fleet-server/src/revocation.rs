@@ -8,7 +8,7 @@
 //! so an open session can end the moment the certificate that admitted it is revoked.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -128,6 +128,9 @@ pub enum SpeaksFor {
     Agents(BTreeSet<String>),
 }
 
+/// A version of the hosts, numbered so no older one is written over a newer.
+type HostsVersion = (u64, BTreeMap<String, Host>);
+
 /// The certificates one host may hold at once (ADR-0021 clause 7): the one in force, its renewal,
 /// and one more for a renewal whose answer was lost.
 pub const MAX_PER_HOST: usize = 3;
@@ -235,6 +238,8 @@ pub struct Revocations {
     clock: Arc<dyn Clock>,
     authorities: Vec<Authority>,
     state: Mutex<State>,
+    /// The version of the hosts last written: one write at a time, never an older over a newer.
+    hosts_written: Mutex<u64>,
     changes: watch::Sender<u64>,
 }
 
@@ -249,13 +254,20 @@ struct State {
     /// The earliest `not_after` in the register: nothing can be pruned before it.
     earliest_expiry_ms: u64,
     hosts: BTreeMap<String, Host>,
+    /// Counts the changes to `hosts`.
+    hosts_version: u64,
     /// Which host each bound `instance_uid` belongs to, hex.
     owners: BTreeMap<String, String>,
+    /// Every revoked certificate, once built: `None` after a change it has not caught up with.
+    revoked: Option<BTreeSet<CertId>>,
+    /// How often the revoked set was built.
+    #[cfg(test)]
+    rebuilds: usize,
 }
 
 impl State {
-    /// Every revoked certificate, by issuer and serial.
-    fn revoked_certificates(&self) -> BTreeSet<CertId> {
+    /// Every certificate the list names, by issuer and serial.
+    fn named(&self) -> BTreeSet<CertId> {
         self.revocations
             .iter()
             .flat_map(|entry| {
@@ -270,24 +282,62 @@ impl State {
             .collect()
     }
 
-    /// Whether `id`, or a certificate it renewed, is in `revoked` (clause 4).
-    fn descends_from(&self, id: &CertId, revoked: &BTreeSet<CertId>) -> bool {
-        let mut current = Some(id);
-        // A chain is never longer than the register; the bound also ends a cycle a damaged file
-        // could hold.
-        for _ in 0..=self.issued.len() {
-            let Some(id) = current else {
-                return false;
-            };
-            if revoked.contains(id) {
-                return true;
+    /// Every revoked certificate (clause 35), built once after the list or the register changed.
+    fn revoked(&mut self) -> &BTreeSet<CertId> {
+        let revoked = match self.revoked.take() {
+            Some(revoked) => revoked,
+            None => {
+                #[cfg(test)]
+                {
+                    self.rebuilds += 1;
+                }
+                self.resolve()
             }
-            current = self
-                .issued
-                .get(id)
-                .and_then(|issued| issued.predecessor.as_ref());
+        };
+        self.revoked.insert(revoked)
+    }
+
+    /// The certificates the list names, and every register entry that renewed one of them, each
+    /// chain walked once.
+    fn resolve(&self) -> BTreeSet<CertId> {
+        let mut revoked = self.named();
+        if revoked.is_empty() {
+            return revoked;
         }
-        false
+        let mut answered: BTreeMap<&CertId, bool> = BTreeMap::new();
+        for id in self.issued.keys() {
+            let mut path = Vec::new();
+            let mut current = Some(id);
+            let mut found = false;
+            // A chain is never longer than the register; the bound also ends a cycle a damaged
+            // file could hold.
+            for _ in 0..=self.issued.len() {
+                let Some(at) = current else { break };
+                if let Some(&known) = answered.get(at) {
+                    found = known;
+                    break;
+                }
+                if revoked.contains(at) {
+                    found = true;
+                    break;
+                }
+                path.push(at);
+                current = self
+                    .issued
+                    .get(at)
+                    .and_then(|issued| issued.predecessor.as_ref());
+            }
+            for at in path {
+                answered.insert(at, found);
+            }
+        }
+        revoked.extend(
+            answered
+                .into_iter()
+                .filter(|(_, found)| *found)
+                .map(|(id, _)| id.clone()),
+        );
+        revoked
     }
 
     /// The root of a registered entry's chain, by walking its predecessor links.
@@ -322,6 +372,13 @@ impl State {
     fn insert(&mut self, issued: Issued) {
         let id = issued.facts.id.clone();
         self.remove(&id);
+        // A renewal of a revoked certificate is revoked, and so is whatever already names it as
+        // its predecessor: built anew. Any other new entry changes no answer.
+        if let (Some(revoked), Some(predecessor)) = (&self.revoked, &issued.predecessor) {
+            if revoked.contains(predecessor) && !revoked.contains(&id) {
+                self.revoked = None;
+            }
+        }
         let root = self.root_below(issued.predecessor.as_ref(), &id);
         *self.descendants.entry(root.clone()).or_default() += 1;
         self.roots.insert(id.clone(), root);
@@ -333,6 +390,7 @@ impl State {
         if self.issued.remove(id).is_none() {
             return;
         }
+        self.revoked = None;
         if let Some(root) = self.roots.remove(id) {
             if let Some(count) = self.descendants.get_mut(&root) {
                 *count -= 1;
@@ -375,6 +433,10 @@ impl Revocations {
                         })
                         .collect(),
                     hosts: ledger.hosts,
+                    hosts_version: 0,
+                    revoked: None,
+                    #[cfg(test)]
+                    rebuilds: 0,
                 };
                 for issued in ledger.issued {
                     state.earliest_expiry_ms =
@@ -392,12 +454,14 @@ impl Revocations {
             }),
             store,
             clock,
+            hosts_written: Mutex::new(0),
             changes: watch::channel(0).0,
         };
-        {
+        let forgotten = {
             let mut state = revocations.state.lock().expect("revocation lock");
-            revocations.prune(&mut state)?;
-        }
+            revocations.prune(&mut state)?
+        };
+        revocations.write_forgotten(forgotten);
         Ok(revocations)
     }
 
@@ -431,7 +495,20 @@ impl Revocations {
         predecessor: Option<CertId>,
     ) -> Result<(), String> {
         let mut state = self.state.lock().expect("revocation lock");
-        self.prune(&mut state)?;
+        let forgotten = self.prune(&mut state)?;
+        let recorded = self.admit(&mut state, facts, instance_uid, predecessor);
+        drop(state);
+        self.write_forgotten(forgotten);
+        recorded
+    }
+
+    fn admit(
+        &self,
+        state: &mut State,
+        facts: Facts,
+        instance_uid: &[u8],
+        predecessor: Option<CertId>,
+    ) -> Result<(), String> {
         let limit = if predecessor.is_some() {
             MAX_ISSUED - ENROLMENT_RESERVE
         } else {
@@ -475,6 +552,17 @@ impl Revocations {
     }
 
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
+    /// (ADR-0021 clause 7), binding nothing: [`check_report`](Self::check_report) binds it once
+    /// the report is admitted.
+    ///
+    /// # Errors
+    /// Returns the refusal.
+    pub fn may_report(&self, host: &str, instance_uid: &[u8]) -> Result<(), String> {
+        let state = self.state.lock().expect("revocation lock");
+        Self::admits(&state, host, &hex::encode(instance_uid)).map(|_| ())
+    }
+
+    /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
     /// (ADR-0021 clause 7). An `instance_uid` first heard from a host is bound to it; one bound to
     /// another host is refused. A Gateway's certificate binds nothing — it carries other hosts'
     /// Agents.
@@ -484,11 +572,26 @@ impl Revocations {
     pub fn check_report(&self, host: &str, instance_uid: &[u8]) -> Result<(), String> {
         let uid = hex::encode(instance_uid);
         let mut state = self.state.lock().expect("revocation lock");
-        if state.hosts.get(host).is_some_and(|entry| entry.gateway) {
+        if !Self::admits(&state, host, &uid)? {
             return Ok(());
         }
-        match state.owners.get(&uid) {
-            Some(owner) if owner == host => return Ok(()),
+        state
+            .hosts
+            .entry(host.to_string())
+            .or_default()
+            .instance_uids
+            .insert(uid.clone());
+        state.owners.insert(uid, host.to_string());
+        self.save_hosts(state)
+    }
+
+    /// Whether `host` may report for `uid`, and whether that would bind it.
+    fn admits(state: &State, host: &str, uid: &str) -> Result<bool, String> {
+        if state.hosts.get(host).is_some_and(|entry| entry.gateway) {
+            return Ok(false);
+        }
+        match state.owners.get(uid) {
+            Some(owner) if owner == host => return Ok(false),
             Some(owner) => {
                 let owner_is_gateway = state.hosts.get(owner).is_some_and(|entry| entry.gateway);
                 if !owner_is_gateway {
@@ -497,15 +600,16 @@ impl Revocations {
             }
             None => {}
         }
-        let entry = state.hosts.entry(host.to_string()).or_default();
-        if entry.instance_uids.len() >= MAX_UIDS_PER_HOST {
+        if state
+            .hosts
+            .get(host)
+            .is_some_and(|entry| entry.instance_uids.len() >= MAX_UIDS_PER_HOST)
+        {
             return Err(format!(
                 "this host already speaks for {MAX_UIDS_PER_HOST} Agents"
             ));
         }
-        entry.instance_uids.insert(uid.clone());
-        state.owners.insert(uid, host.to_string());
-        self.store.save_hosts(&state.hosts)
+        Ok(true)
     }
 
     /// The Agents a certificate naming `host` speaks for (ADR-0026 clause 37): the `instance_uid`s
@@ -537,7 +641,7 @@ impl Revocations {
             entry.instance_uids.insert(new.clone());
         }
         state.owners.insert(new, host);
-        self.store.save_hosts(&state.hosts)
+        self.save_hosts(state)
     }
 
     /// Marks `host` as a Gateway, or not; answers whether this Server knows the host.
@@ -555,8 +659,41 @@ impl Revocations {
             return Ok(false);
         }
         state.hosts.entry(host.to_string()).or_default().gateway = gateway;
-        self.store.save_hosts(&state.hosts)?;
+        self.save_hosts(state)?;
         Ok(true)
+    }
+
+    /// Writes the hosts as `state` holds them, once its lock is released, so no check of the list
+    /// waits for the disk. It returns once they, or a later version of them, are written.
+    fn save_hosts(&self, mut state: MutexGuard<'_, State>) -> Result<(), String> {
+        let (version, hosts) = Self::hosts_changed(&mut state);
+        drop(state);
+        self.write_hosts(version, &hosts)
+    }
+
+    /// Writes the hosts a prune forgot. The register does not depend on it, so a failure is
+    /// logged and left to the next write of the hosts.
+    fn write_forgotten(&self, forgotten: Option<HostsVersion>) {
+        if let Some((version, hosts)) = forgotten {
+            if let Err(e) = self.write_hosts(version, &hosts) {
+                tracing::warn!(error = %e, "cannot write the hosts a prune forgot");
+            }
+        }
+    }
+
+    fn hosts_changed(state: &mut State) -> HostsVersion {
+        state.hosts_version += 1;
+        (state.hosts_version, state.hosts.clone())
+    }
+
+    fn write_hosts(&self, version: u64, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+        let mut written = self.hosts_written.lock().expect("hosts lock");
+        if *written >= version {
+            return Ok(());
+        }
+        self.store.save_hosts(hosts)?;
+        *written = version;
+        Ok(())
     }
 
     /// Every host this Server knows, and how many valid certificates each holds.
@@ -650,6 +787,7 @@ impl Revocations {
             state.revocations.pop();
             return Err(RevokeError::Store(e));
         }
+        state.revoked = None;
         drop(state);
         self.changes.send_modify(|rev| *rev += 1);
         Ok(entry)
@@ -680,15 +818,18 @@ impl Revocations {
             state.revocations.insert(index, entry);
             return Err(e);
         }
+        state.revoked = None;
         Ok(true)
     }
 
     /// Whether `certificate`, or a certificate it renewed, is revoked (clause 4).
     #[must_use]
     pub fn is_certificate_revoked(&self, certificate: &CertId) -> bool {
-        let state = self.state.lock().expect("revocation lock");
-        let revoked = state.revoked_certificates();
-        !revoked.is_empty() && state.descends_from(certificate, &revoked)
+        self.state
+            .lock()
+            .expect("revocation lock")
+            .revoked()
+            .contains(certificate)
     }
 
     /// Every certificate of the CAs of `role` that is revoked, itself or through a certificate it
@@ -702,25 +843,14 @@ impl Revocations {
             .filter(|authority| authority.role == role)
             .map(|authority| authority.subject.as_str())
             .collect();
-        let state = self.state.lock().expect("revocation lock");
-        let revoked = state.revoked_certificates();
-        if revoked.is_empty() {
-            return revoked;
-        }
-        let mut named: BTreeSet<CertId> = revoked
+        self.state
+            .lock()
+            .expect("revocation lock")
+            .revoked()
             .iter()
             .filter(|id| issuers.contains(id.issuer.as_str()))
             .cloned()
-            .collect();
-        named.extend(
-            state
-                .issued
-                .keys()
-                .filter(|id| issuers.contains(id.issuer.as_str()))
-                .filter(|id| state.descends_from(id, &revoked))
-                .cloned(),
-        );
-        named
+            .collect()
     }
 
     /// Whether `host` is marked as a Gateway.
@@ -743,10 +873,14 @@ impl Revocations {
     /// Drops the register entries that have expired and from which no valid certificate descends,
     /// and the revocations of certificates those entries held (clause 6). A revoked ancestor of a
     /// valid renewal stays, so the renewal stays revoked.
-    fn prune(&self, state: &mut State) -> Result<(), String> {
+    ///
+    /// A host that holds no valid certificate, speaks for no Agent and is not marked as a Gateway
+    /// is forgotten; what is left of the hosts is answered for the caller to write once the lock
+    /// is released.
+    fn prune(&self, state: &mut State) -> Result<Option<HostsVersion>, String> {
         let now = self.clock.now_ms();
         if now < state.earliest_expiry_ms {
-            return Ok(());
+            return Ok(None);
         }
         let mut needed: BTreeSet<CertId> = BTreeSet::new();
         for issued in state.issued.values() {
@@ -771,6 +905,20 @@ impl Revocations {
             .filter(|id| !needed.contains(*id))
             .cloned()
             .collect();
+        // A host that holds no valid certificate in the register leaves nothing to keep when it
+        // speaks for no Agent — none can be taken over — and is not marked as a Gateway, whose
+        // certificate may be one an operator provisioned outside the register.
+        let holding: BTreeSet<&str> = state
+            .issued
+            .values()
+            .filter(|issued| issued.facts.not_after_ms > now)
+            .filter_map(|issued| issued.facts.host.as_deref())
+            .collect();
+        let known = state.hosts.len();
+        state.hosts.retain(|name, host| {
+            host.gateway || !host.instance_uids.is_empty() || holding.contains(name.as_str())
+        });
+        let forgotten = (state.hosts.len() != known).then(|| Self::hosts_changed(state));
         // Kept entries that have expired are revoked ancestors' chains: the next prune is due when
         // the first entry still valid expires.
         state.earliest_expiry_ms = state
@@ -781,7 +929,7 @@ impl Revocations {
             .min()
             .unwrap_or(u64::MAX);
         if gone.is_empty() {
-            return Ok(());
+            return Ok(forgotten);
         }
         for id in &gone {
             self.store.remove_issued(id)?;
@@ -797,9 +945,10 @@ impl Revocations {
                 .any(|id| &id.serial == serial && issuers.contains(&id.issuer))
         });
         if state.revocations.len() != before {
+            state.revoked = None;
             self.store.save_revocations(&state.revocations)?;
         }
-        Ok(())
+        Ok(forgotten)
     }
 }
 
@@ -990,6 +1139,238 @@ mod tests {
         );
     }
 
+    /// A host that holds no valid certificate, speaks for no Agent and is not marked as a Gateway
+    /// is forgotten. One that still speaks for an Agent keeps it, so no other host can take it
+    /// over, and a marked Gateway keeps its mark: its certificate may be one the register never held.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_host_without_a_certificate_an_agent_or_a_mark_is_forgotten() {
+        let store = Memory::default();
+        let (revocations, clock) = open(&store);
+        let soon = |serial: &str, host: &str| Facts {
+            host: Some(host.to_string()),
+            ..facts(serial, NOW + 1_000)
+        };
+        revocations
+            .record(soon("a1", "gw"), &[1; 16], None)
+            .expect("record");
+        revocations
+            .record(soon("b2", "h1"), &[2; 16], None)
+            .expect("record");
+        revocations
+            .record(soon("e5", "old"), &[4; 16], None)
+            .expect("record");
+        revocations
+            .record(on_host("c3", "h2"), &[3; 16], None)
+            .expect("record");
+        assert!(revocations.set_gateway("gw", true).expect("mark"));
+        assert!(revocations.set_gateway("old", true).expect("mark"));
+        assert!(revocations.set_gateway("old", false).expect("unmark"));
+        revocations.check_report("h1", &[2; 16]).expect("binds");
+
+        clock.0.fetch_add(1_000, Ordering::SeqCst);
+        revocations
+            .record(on_host("d4", "h2"), &[3; 16], None)
+            .expect("a record prunes");
+        let names: Vec<String> = revocations
+            .hosts()
+            .into_iter()
+            .map(|(name, ..)| name)
+            .collect();
+        assert_eq!(names, ["gw", "h1", "h2"], "old is forgotten");
+        assert!(revocations.is_gateway("gw"), "the Gateway keeps its mark");
+        assert!(
+            revocations.check_report("h2", &[2; 16]).is_err(),
+            "h1's Agent stays h1's"
+        );
+        assert_eq!(
+            store
+                .0
+                .lock()
+                .expect("lock")
+                .hosts
+                .keys()
+                .collect::<Vec<_>>(),
+            ["gw", "h1"],
+            "the forgetting is written"
+        );
+    }
+
+    /// A store whose host writes fail.
+    #[derive(Clone, Default)]
+    struct NoHosts(Memory);
+
+    impl LedgerStore for NoHosts {
+        fn load(&self) -> Result<Ledger, String> {
+            self.0.load()
+        }
+        fn put_issued(&self, issued: &Issued) -> Result<(), String> {
+            self.0.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+            self.0.remove_issued(id)
+        }
+        fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
+            self.0.save_revocations(revocations)
+        }
+        fn save_hosts(&self, _: &BTreeMap<String, Host>) -> Result<(), String> {
+            Err("the disk is full".into())
+        }
+    }
+
+    /// A host the prune forgets but cannot write fails neither an issuance nor a start.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_failed_write_of_forgotten_hosts_fails_no_issuance_or_start() {
+        let memory = Memory::default();
+        memory.0.lock().expect("lock").hosts =
+            BTreeMap::from([("old".to_string(), Host::default())]);
+        memory
+            .put_issued(&Issued {
+                facts: Facts {
+                    host: Some("old".into()),
+                    ..facts("a1", NOW - 1)
+                },
+                instance_uid: hex::encode([1; 16]),
+                predecessor: None,
+                issued_ms: 0,
+            })
+            .expect("seed");
+        let clock = Arc::new(Manual(AtomicU64::new(NOW - 10)));
+        let open_at = |clock: Arc<Manual>| {
+            Revocations::open(Box::new(NoHosts(memory.clone())), clock, Vec::new())
+        };
+        let revocations = open_at(clock.clone()).expect("open");
+        clock.0.store(NOW, Ordering::SeqCst);
+        revocations
+            .record(on_host("b2", "h1"), &[2; 16], None)
+            .expect("issued all the same");
+        let names: Vec<String> = revocations.hosts().into_iter().map(|(n, ..)| n).collect();
+        assert_eq!(names, ["h1"], "old is forgotten");
+
+        assert!(
+            memory.0.lock().expect("lock").hosts.contains_key("old"),
+            "the write failed"
+        );
+        // Started once b2 has expired too, the Server prunes as it opens.
+        clock.0.store(NOW + 1_000_000, Ordering::SeqCst);
+        let reopened = open_at(clock).expect("the Server starts");
+        assert!(!reopened.hosts().iter().any(|(n, ..)| n == "old"));
+    }
+
+    /// A store whose host writes wait for a go-ahead.
+    struct Held {
+        inner: Memory,
+        writing: std::sync::mpsc::SyncSender<()>,
+        go: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl LedgerStore for Held {
+        fn load(&self) -> Result<Ledger, String> {
+            self.inner.load()
+        }
+        fn put_issued(&self, issued: &Issued) -> Result<(), String> {
+            self.inner.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+            self.inner.remove_issued(id)
+        }
+        fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
+            self.inner.save_revocations(revocations)
+        }
+        fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+            self.writing.send(()).map_err(|e| e.to_string())?;
+            self.go
+                .lock()
+                .expect("lock")
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| "held past the test's patience".to_string())?;
+            self.inner.save_hosts(hosts)
+        }
+    }
+
+    /// A revocation check does not wait for the host register to reach the disk.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_check_does_not_wait_for_a_host_write() {
+        let (writing, written) = std::sync::mpsc::sync_channel(1);
+        let (go, held) = std::sync::mpsc::channel();
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(Held {
+                    inner: Memory::default(),
+                    writing,
+                    go: Mutex::new(held),
+                }),
+                Arc::new(Manual(AtomicU64::new(NOW))),
+                Vec::new(),
+            )
+            .expect("open"),
+        );
+        let reporter = {
+            let revocations = revocations.clone();
+            std::thread::spawn(move || revocations.check_report("h1", &[1; 16]))
+        };
+        written.recv().expect("the binding is being written");
+        assert!(!revocations.is_certificate_revoked(&id("a1")));
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([hex::encode([1; 16])].into())
+        );
+        go.send(()).expect("go");
+        reporter
+            .join()
+            .expect("reporter")
+            .expect("the binding is written");
+    }
+
+    /// A revocation check does not wait for the hosts a prune forgot to reach the disk.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_check_does_not_wait_for_a_prune_to_write_the_hosts() {
+        let memory = Memory::default();
+        memory.0.lock().expect("lock").hosts =
+            BTreeMap::from([("old".to_string(), Host::default())]);
+        memory
+            .put_issued(&Issued {
+                facts: Facts {
+                    host: Some("old".into()),
+                    ..facts("a1", NOW - 1)
+                },
+                instance_uid: hex::encode([1; 16]),
+                predecessor: None,
+                issued_ms: 0,
+            })
+            .expect("seed");
+        let (writing, written) = std::sync::mpsc::sync_channel(1);
+        let (go, held) = std::sync::mpsc::channel();
+        let clock = Arc::new(Manual(AtomicU64::new(NOW - 10)));
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(Held {
+                    inner: memory.clone(),
+                    writing,
+                    go: Mutex::new(held),
+                }),
+                clock.clone(),
+                Vec::new(),
+            )
+            .expect("open"),
+        );
+        clock.0.store(NOW, Ordering::SeqCst);
+        let issuer = {
+            let revocations = revocations.clone();
+            std::thread::spawn(move || revocations.record(on_host("b2", "h1"), &[2; 16], None))
+        };
+        written
+            .recv()
+            .expect("the forgotten hosts are being written");
+        assert!(!revocations.is_certificate_revoked(&id("b2")));
+        go.send(()).expect("go");
+        issuer.join().expect("issuer").expect("issued");
+        assert!(!memory.0.lock().expect("lock").hosts.contains_key("old"));
+    }
+
     /// Verifies: ADR-0021
     #[test]
     fn a_revocation_follows_every_renewal() {
@@ -1021,6 +1402,153 @@ mod tests {
             revocations.revoke_certificate("bootstrap", "01"),
             Err(RevokeError::Invalid(_))
         ));
+    }
+
+    /// What clause 35 answers for `id`, worked out from the list and the register as they are
+    /// listed: named on the list, itself or a predecessor in its register chain.
+    fn expected_revoked(revocations: &Revocations, id: &CertId) -> bool {
+        let named: BTreeSet<CertId> = revocations
+            .list()
+            .iter()
+            .flat_map(|entry| {
+                let Revoked::Certificate {
+                    issuers, serial, ..
+                } = &entry.revoked;
+                issuers.iter().map(|issuer| CertId {
+                    issuer: issuer.clone(),
+                    serial: serial.clone(),
+                })
+            })
+            .collect();
+        let register: BTreeMap<CertId, Issued> = revocations
+            .issued()
+            .into_iter()
+            .map(|issued| (issued.facts.id.clone(), issued))
+            .collect();
+        let mut current = Some(id.clone());
+        while let Some(id) = current {
+            if named.contains(&id) {
+                return true;
+            }
+            current = register.get(&id).and_then(|i| i.predecessor.clone());
+        }
+        false
+    }
+
+    fn assert_answers(revocations: &Revocations, when: &str) {
+        let ids: Vec<CertId> = ["a1", "b2", "c3", "d4", "e5", "f6", "ff", "99"]
+            .into_iter()
+            .map(id)
+            .collect();
+        for id in &ids {
+            assert_eq!(
+                revocations.is_certificate_revoked(id),
+                expected_revoked(revocations, id),
+                "{} {when}",
+                id.serial
+            );
+        }
+        let gateway: BTreeSet<CertId> = ids
+            .iter()
+            .filter(|id| {
+                expected_revoked(revocations, id)
+                    && (revocations.issued_entry(id).is_some()
+                        || revocations.list().iter().any(|entry| {
+                            matches!(&entry.revoked, Revoked::Certificate { serial, .. }
+                                if *serial == id.serial)
+                        }))
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            revocations.revoked_certificates("client"),
+            gateway,
+            "the Gateways' list {when}"
+        );
+    }
+
+    /// The answer for every certificate follows the list and the register through revocations,
+    /// renewals, lifts, an expiry and a restart.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_revocation_answers_the_same_through_every_change() {
+        let store = Memory::default();
+        let (revocations, clock) = open(&store);
+        let far = NOW + 1_000_000;
+        revocations
+            .record(facts("a1", NOW + 1_000), &[1; 16], None)
+            .expect("record");
+        revocations
+            .record(facts("b2", far), &[1; 16], Some(id("a1")))
+            .expect("record");
+        revocations
+            .record(facts("d4", NOW + 1_000), &[2; 16], None)
+            .expect("record");
+        assert_answers(&revocations, "before any revocation");
+        revocations
+            .revoke_certificate("client", "a1")
+            .expect("revoke");
+        assert_answers(&revocations, "after a1 is revoked");
+        revocations
+            .record(facts("c3", far), &[1; 16], Some(id("b2")))
+            .expect("a renewal of a revoked chain");
+        assert_answers(&revocations, "after b2 is renewed");
+        revocations
+            .revoke_certificate("client", "ff")
+            .expect("one the register never held");
+        revocations
+            .record(facts("f6", far), &[3; 16], Some(id("ff")))
+            .expect("a renewal of a provisioned certificate");
+        assert_answers(&revocations, "after ff is revoked and renewed");
+        revocations
+            .revoke_certificate("client", "d4")
+            .expect("revoke");
+        assert_answers(&revocations, "after d4 is revoked");
+        let a1 = revocations.list()[0].id.clone();
+        assert!(revocations.lift(&a1).expect("lift"));
+        assert_answers(&revocations, "after a1 is lifted");
+        revocations
+            .revoke_certificate("client", "a1")
+            .expect("revoke");
+        clock.0.fetch_add(1_000, Ordering::SeqCst);
+        revocations
+            .record(facts("e5", far), &[4; 16], None)
+            .expect("a record prunes");
+        assert!(revocations.issued_entry(&id("d4")).is_none(), "d4 expired");
+        assert_answers(&revocations, "after d4 expired");
+        drop(revocations);
+        let (reopened, _) = open(&store);
+        assert_answers(&reopened, "after a restart");
+    }
+
+    /// Checking a certificate does not build the revoked set again: it is built when the list
+    /// changes, however many sessions check themselves against it.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_check_does_not_rebuild_the_revoked_set() {
+        let (revocations, _) = open(&Memory::default());
+        let far = NOW + 1_000_000;
+        revocations
+            .record(facts("a1", far), &[1; 16], None)
+            .expect("record");
+        revocations
+            .record(facts("b2", far), &[1; 16], Some(id("a1")))
+            .expect("record");
+        revocations
+            .revoke_certificate("client", "a1")
+            .expect("revoke");
+        let rebuilds = || revocations.state.lock().expect("lock").rebuilds;
+        let before = rebuilds();
+        for _ in 0..1_000 {
+            assert!(revocations.is_certificate_revoked(&id("b2")));
+            assert!(!revocations.is_certificate_revoked(&id("cc")));
+        }
+        let _ = revocations.revoked_certificates("client");
+        assert!(
+            rebuilds() - before <= 1,
+            "{} rebuilds for 2 001 checks",
+            rebuilds() - before
+        );
     }
 
     /// The revoked ancestor of a valid renewal outlives its own expiry, and so does every link

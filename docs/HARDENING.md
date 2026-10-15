@@ -79,8 +79,9 @@ has:
 - **Revocation that ends sessions** (ADR-0021): the Server keeps a persisted
   list of revoked certificates, by issuing CA and serial and extended along every renewal it
   signed. Admission refuses them on both transports and on the
-  download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, and every
-  session ends when the certificate that admitted it expires.
+  download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, every
+  session ends when the certificate that admitted it expires, and a kept-alive connection is
+  refused on both transports and on the download once its certificate has expired.
 - **A Gateway refuses what the Server revoked** (ADR-0015, ADR-0021): a host marked as a Gateway
   fetches the revoked certificates of the client CA every 30 s and refuses them downstream, closing
   the sessions they hold with `1008`; while it holds no list younger than 300 s it admits nobody.

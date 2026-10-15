@@ -217,6 +217,19 @@ impl Admission {
     }
 }
 
+/// Milliseconds since the Unix epoch, on the host's clock.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Whether a certificate whose `not_after` is `not_after_ms` has expired: from that instant on it
+/// admits nothing, as it ends a WebSocket session then (ADR-0021 clause 41).
+fn expired(not_after_ms: u64) -> bool {
+    not_after_ms <= now_ms()
+}
+
 /// `401` without a challenge: the Agent plane admits by certificate, which no header can supply
 /// (ADR-0021 clause 1).
 fn unauthorized(text: &'static str) -> Response {
@@ -301,6 +314,9 @@ async fn admit_download(
     let member = match certificate {
         Some(cert) => {
             guard.issuers.classify(cert.as_ref()) == Peer::Member
+                && !facts
+                    .as_ref()
+                    .is_some_and(|facts| expired(facts.not_after_ms))
                 && !guard.revocations.as_ref().is_some_and(|revocations| {
                     facts
                         .as_ref()
@@ -545,6 +561,18 @@ async fn admit(
             )
         }
     };
+    // The handshake checked the certificate's validity once per connection; a kept-alive one
+    // outlives it, so each request is checked again (ADR-0021 clauses 6, 41).
+    if presented
+        .as_ref()
+        .is_some_and(|facts| expired(facts.not_after_ms))
+    {
+        debug!("refused: an expired certificate");
+        return refuse(
+            "expired",
+            unauthorized("the OpAMP endpoint requires a certificate of the fleet"),
+        );
+    }
     if let Some(revocations) = &admission.revocations {
         let proofs = Proofs {
             certificate: presented
@@ -696,11 +724,8 @@ impl Guard {
         ended: Arc<Mutex<Option<&'static str>>>,
     ) -> Self {
         let expires = proofs.certificate.as_ref().map(|(_, not_after_ms)| {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
             tokio::time::Instant::now()
-                + std::time::Duration::from_millis(not_after_ms.saturating_sub(now_ms))
+                + std::time::Duration::from_millis(not_after_ms.saturating_sub(now_ms()))
         });
         let mut changes = revocations.subscribe();
         // A revocation that landed between admission and here is checked at once.

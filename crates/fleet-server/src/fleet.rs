@@ -1457,11 +1457,13 @@ impl AppState {
 
         // An instance_uid belongs to the host whose certificate first reported it (ADR-0021
         // clause 7): a certificate of another host does not speak for it, nor re-keys it. Such a
-        // reporter is re-keyed — it gets an identity of its own, never the one it claimed.
+        // reporter is re-keyed — it gets an identity of its own, never the one it claimed. The
+        // binding is made only once the report is admitted below.
+        let mut binding = None;
         if let (Some(host), Some(revocations)) =
             (presented.and_then(|p| p.host.as_deref()), &self.revocations)
         {
-            if revocations.check_report(host, uid.as_bytes()).is_err() {
+            if revocations.may_report(host, uid.as_bytes()).is_err() {
                 let new_uid = InstanceUid::default();
                 warn!(
                     claimed = %uid, new = %new_uid, host,
@@ -1478,7 +1480,7 @@ impl AppState {
                 uid = new_uid;
                 // A CSR in the same message must not name the claimed identity either.
                 sender = uid.as_bytes().to_vec();
-                if let Err(e) = revocations.check_report(host, uid.as_bytes()) {
+                if let Err(e) = revocations.may_report(host, uid.as_bytes()) {
                     return Processed {
                         reply: bad_request(&e),
                         uid: None,
@@ -1486,10 +1488,12 @@ impl AppState {
                     };
                 }
             }
+            binding = Some((host, uid));
         }
 
         // The Agent asked the Server to assign its identity (AgentToServerFlags_RequestInstanceUid):
         // mint a UUID v7 and re-key the record; the reply tells the Agent to adopt it.
+        let mut rekeyed = None;
         if identification.is_none()
             && msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0
         {
@@ -1504,12 +1508,7 @@ impl AppState {
             identification = Some(AgentIdentification {
                 new_instance_uid: new_uid.as_bytes().to_vec(),
             });
-            // A re-key the Agent asked for keeps its host (ADR-0021 clause 7).
-            if let Some(revocations) = &self.revocations {
-                if let Err(e) = revocations.rebind(uid.as_bytes(), new_uid.as_bytes()) {
-                    warn!(error = %e, "cannot move the host binding to the new instance_uid");
-                }
-            }
+            rekeyed = Some((uid, new_uid));
             uid = new_uid;
         }
 
@@ -1554,6 +1553,23 @@ impl AppState {
                 uid: None,
                 disconnected: false,
             };
+        }
+        if let Some(revocations) = &self.revocations {
+            if let Some((host, bound)) = binding {
+                if let Err(e) = revocations.check_report(host, bound.as_bytes()) {
+                    return Processed {
+                        reply: bad_request(&e),
+                        uid: None,
+                        disconnected: false,
+                    };
+                }
+            }
+            // A re-key an Agent asks for keeps its host (ADR-0021 clause 7).
+            if let Some((old, new)) = rekeyed {
+                if let Err(e) = revocations.rebind(old.as_bytes(), new.as_bytes()) {
+                    warn!(error = %e, "cannot move the host binding to the new instance_uid");
+                }
+            }
         }
         // Labels outlive the record (ADR-0024): a host that was forgotten, or that this Server has
         // only just restarted into, comes back in the channel the operator put it in.
@@ -3677,6 +3693,61 @@ mod tests {
         assert_eq!(adopted.uid, Some(new_uid));
         assert!(adopted.reply.agent_identification.is_none());
         assert_eq!(state.snapshot().len(), 2, "one record per Agent, no more");
+    }
+
+    /// A report refused at the record ceiling binds no `instance_uid` to the host that sent it,
+    /// so it cannot speak for that Agent once there is room — nor lock out the host it belongs to.
+    /// Verifies: ADR-0021, ADR-0024
+    #[test]
+    fn a_report_refused_at_the_ceiling_binds_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(
+                    crate::fs::FsLedgerStore::open(dir.path().join("revocation")).expect("ledger"),
+                ),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_max_agents(1)
+            .with_revocations(Some(revocations.clone()));
+        let presented = |host: &str| Presented {
+            id: CertId::new(b"CA", host),
+            host: Some(host.to_string()),
+        };
+        let first = InstanceUid::default();
+        let accepted = state.process_presented(
+            report(&first, 1),
+            Transport::Http,
+            None,
+            Some(&presented("h1")),
+        );
+        assert!(accepted.reply.error_response.is_none());
+
+        for flags in [0, AgentToServerFlags::RequestInstanceUid as u64] {
+            let refused_uid = InstanceUid::default();
+            let mut refused = report(&refused_uid, 1);
+            refused.flags = flags;
+            let refused =
+                state.process_presented(refused, Transport::Http, None, Some(&presented("h2")));
+            assert_eq!(
+                refused.reply.error_response.expect("refused").r#type,
+                ServerErrorResponseType::Unavailable as i32
+            );
+            assert_eq!(
+                revocations.speaks_for("h2"),
+                SpeaksFor::Agents(BTreeSet::new()),
+                "a refused report bound an instance_uid (flags {flags})"
+            );
+        }
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([hex::encode(first.as_bytes())].into())
+        );
     }
 
     // ---- Who may fetch an uploaded artifact (ADR-0026) ----

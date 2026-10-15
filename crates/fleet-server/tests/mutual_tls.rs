@@ -1343,6 +1343,81 @@ async fn a_session_is_closed_when_its_certificate_expires() {
     );
 }
 
+/// A client presenting a certificate that expires in ten seconds, and the instant it expires —
+/// `not_after` in whole seconds, as the certificate carries it.
+fn expiring_client(pki: &Pki, served: &Served) -> (reqwest::Client, time::OffsetDateTime) {
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(vec!["edge-01".to_string()]).expect("params");
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::minutes(1);
+    params.not_after = (now + time::Duration::seconds(10))
+        .replace_nanosecond(0)
+        .expect("whole second");
+    let cert = params.signed_by(&key, &pki.issuer()).expect("signed").pem();
+    (
+        client(&served.ca_pem, Some((&cert, &key.serialize_pem()))),
+        params.not_after,
+    )
+}
+
+/// Waits until a second past `not_after`.
+async fn sleep_past(not_after: time::OffsetDateTime) {
+    let wait = not_after + time::Duration::seconds(1) - time::OffsetDateTime::now_utc();
+    tokio::time::sleep(wait.try_into().unwrap_or_default()).await;
+}
+
+/// A connection that outlives its certificate is admitted no further: plain HTTP keeps one
+/// connection across polls, and the handshake that checked the certificate's validity is not
+/// repeated, so each request on it is refused once the certificate has expired
+/// (ADR-0021 clauses 6, 40, 41).
+/// Verifies: ADR-0021
+#[tokio::test]
+async fn a_kept_alive_connection_is_refused_once_its_certificate_expires() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (http, not_after) = expiring_client(&pki, &served);
+    let uid = InstanceUid::default();
+    assert!(post(&http, &served.endpoint, report(&uid))
+        .await
+        .status()
+        .is_success());
+
+    sleep_past(not_after).await;
+    // An answer at all proves the pooled connection was reused: a new one would fail the
+    // handshake on the expired certificate, and `post` would panic on the send.
+    assert_eq!(
+        post(&http, &served.endpoint, report(&uid)).await.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "an expired certificate was admitted on a kept-alive connection"
+    );
+}
+
+/// The download is held to the same: a kept-alive connection reaches it no further once its
+/// certificate has expired (ADR-0021 clauses 6, 23).
+/// Verifies: ADR-0021
+#[tokio::test]
+async fn a_kept_alive_connection_reaches_the_download_no_further_once_its_certificate_expires() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (http, not_after) = expiring_client(&pki, &served);
+    let download = served.endpoint.replace(
+        "/v1/opamp",
+        "/api/v1/packages/otelcol/1.0.0/file?os=linux&arch=amd64",
+    );
+    assert_ne!(
+        http.get(&download).send().await.expect("send").status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    sleep_past(not_after).await;
+    // As above, an answer at all proves the connection was reused.
+    assert_eq!(
+        http.get(&download).send().await.expect("send").status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "an expired certificate reached the download on a kept-alive connection"
+    );
+}
+
 /// A certificate renewed before its predecessor was revoked is revoked with it: the register
 /// records the presented certificate as the issued one's predecessor (ADR-0021 clauses 32, 33, 35).
 /// Verifies: ADR-0021

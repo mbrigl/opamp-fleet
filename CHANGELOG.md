@@ -61,6 +61,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   to home directories, devices or kernel settings. **What to do:** a unit copied from an earlier
   guide can take the new lines; a `config_dir` or `packages_dir` outside
   `/var/lib/opamp-fleet-server` then needs a `ReadWritePaths=` line naming it.
+- **A client certificate past its end is refused on every request**, not only in the TLS
+  handshake: a kept-alive HTTP or HTTP/2 connection gets `401` on `/v1/opamp` and on the download
+  route once its certificate has expired
+  ([ADR-0021](docs/adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
+  **What to do:** nothing; a Client that renews on time never meets it.
+- **A peer is a fleet member only when its certificate verifies against a client CA's key**, not
+  when its issuer merely carries a client CA's name. **What to do:** nothing.
+- **A revocation is on disk before it is answered**: the Server syncs the file and its directory.
+  **What to do:** nothing.
+- **A report refused at `max_agents` binds no `instance_uid` to its host**, and the host register
+  forgets a host that holds no valid certificate, no Agent and no Gateway mark. **What to do:**
+  nothing.
 
 ## [0.5.2] - 2026-10-13
 

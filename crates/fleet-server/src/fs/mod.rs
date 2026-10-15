@@ -43,31 +43,49 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     rename_into_place(&temp, path)
 }
 
-/// [`replace`], with the file owner-only (`0600`) on Unix. The mode is set in the open call rather
-/// than after the write, so the content is never briefly readable by another local user, and the
-/// rename carries the mode with it.
+/// [`replace`], with the file owner-only (`0600`) on Unix, and durable: the content reaches the
+/// disk before the rename makes it the document, and on Unix the rename reaches it before this
+/// returns, so a power loss leaves the old document or the new one, never an empty file or a
+/// revocation lost after it was answered. The mode is set in the open call rather than after the
+/// write, so the content is never briefly readable by another local user, and the rename carries
+/// the mode with it.
 pub fn replace_owner_only(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
     let temp = temp_of(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temp)
-            .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
-        file.write_all(bytes)
-            .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+        options.mode(0o600);
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(&temp, bytes)
-            .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
-    }
-    rename_into_place(&temp, path)
+    let mut file = options
+        .open(&temp)
+        .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+    drop(file);
+    rename_into_place(&temp, path)?;
+    sync_dir_of(path)
+}
+
+/// Makes a rename into `path`'s directory durable by syncing the directory itself.
+#[cfg(unix)]
+fn sync_dir_of(path: &Path) -> Result<(), String> {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    std::fs::File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| format!("cannot persist {}: {e}", path.display()))
+}
+
+/// Windows opens no directory as a file to sync, so the rename is left to the filesystem.
+#[cfg(not(unix))]
+fn sync_dir_of(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn temp_of(path: &Path) -> PathBuf {
@@ -78,4 +96,34 @@ fn temp_of(path: &Path) -> PathBuf {
 
 fn rename_into_place(temp: &Path, path: &Path) -> Result<(), String> {
     std::fs::rename(temp, path).map_err(|e| format!("cannot persist {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A durable replace still replaces: the new content under the old name, nothing left beside
+    /// it, and on Unix only the owner may read it. That it reached the disk before a power loss is
+    /// not observable from a test.
+    #[test]
+    fn replace_owner_only_replaces_the_document() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("revocations.json");
+        replace_owner_only(&path, b"old").expect("first write");
+        replace_owner_only(&path, b"new").expect("replace");
+        assert_eq!(std::fs::read(&path).expect("read"), b"new");
+        assert!(
+            !temp_of(&path).exists(),
+            "the temporary file was left behind"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
 }

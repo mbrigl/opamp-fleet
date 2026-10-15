@@ -11,7 +11,7 @@ use std::path::Path;
 
 use opamp::server::listen::{ClientAuth, ServerTls};
 use opamp::tls::Identity;
-use x509_parser::prelude::{FromDer, X509Certificate};
+use x509_parser::prelude::{FromDer, SubjectPublicKeyInfo, X509Certificate};
 
 use crate::config::{EnrolmentConfig, TlsConfig};
 use crate::revocation::{name_hash, Authority, CertId};
@@ -25,15 +25,26 @@ pub struct PlaneTls {
     pub authorities: Vec<Authority>,
 }
 
-/// The subjects of both CA files. Without a bootstrap CA the handshake trusts the client CA alone,
-/// so every certificate it accepted belongs to a member. With one, a member is only a certificate
-/// issued directly by a CA of `client_ca_file`; any other — one from the bootstrap CA, or from an
-/// intermediate below either — may only enrol, so a chain cannot lift a bootstrap certificate into
-/// the fleet.
+/// The CAs of both files. Without a bootstrap CA the handshake trusts the client CA alone, so
+/// every certificate it accepted belongs to a member. With one, a member is only a certificate
+/// issued directly by a CA of `client_ca_file` — named as its issuer and signed with its key; any
+/// other — one from the bootstrap CA, or from an intermediate below either, whatever it is named —
+/// may only enrol, so a chain cannot lift a bootstrap certificate into the fleet.
 #[derive(Clone, Debug, Default)]
 pub struct Issuers {
-    members: Vec<Vec<u8>>,
-    bootstrap: Vec<Vec<u8>>,
+    /// The CAs of `client_ca_file`.
+    members: Vec<Ca>,
+    /// The CAs of `bootstrap_ca_file`.
+    bootstrap: Vec<Ca>,
+}
+
+/// One certificate of a CA file, as far as it is read: its subject, raw and as text, and its
+/// public key (`SubjectPublicKeyInfo`, DER).
+#[derive(Clone, Debug)]
+struct Ca {
+    subject: Vec<u8>,
+    name: String,
+    key: Vec<u8>,
 }
 
 /// What the certificate a connection carries makes it (ADR-0021).
@@ -66,10 +77,11 @@ impl Issuers {
         };
         let issuer = parsed.issuer().as_raw();
         let member = self.bootstrap.is_empty()
-            || self
-                .members
-                .iter()
-                .any(|subject| subject.as_slice() == issuer);
+            || self.members.iter().any(|ca| {
+                ca.subject == issuer
+                    && SubjectPublicKeyInfo::from_der(&ca.key)
+                        .is_ok_and(|(_, key)| parsed.verify_signature(Some(&key)).is_ok())
+            });
         if member {
             return Peer::Member;
         }
@@ -100,19 +112,18 @@ pub fn server_tls(
         .as_ref()
         .ok_or("[tls] client_ca_file is required")?;
     let mut ca_pem = read(client_ca_file)?;
-    let client_names = subjects(client_ca_file, &ca_pem)?;
-    let mut authorities = authorities_of("client", &client_names);
-    let client_subjects: Vec<Vec<u8>> = client_names.into_iter().map(|(raw, _)| raw).collect();
+    let client_cas = cas(client_ca_file, &ca_pem)?;
+    let mut authorities = authorities_of("client", &client_cas);
     let mut issuers = Issuers::default();
     if let Some(enrolment) = enrolment {
         let bootstrap_pem = read(&enrolment.bootstrap_ca_file)?;
-        let bootstrap_names = subjects(&enrolment.bootstrap_ca_file, &bootstrap_pem)?;
-        authorities.extend(authorities_of("bootstrap", &bootstrap_names));
-        let bootstrap: Vec<Vec<u8>> = bootstrap_names.into_iter().map(|(raw, _)| raw).collect();
-        if bootstrap
-            .iter()
-            .any(|subject| client_subjects.contains(subject))
-        {
+        let bootstrap_cas = cas(&enrolment.bootstrap_ca_file, &bootstrap_pem)?;
+        authorities.extend(authorities_of("bootstrap", &bootstrap_cas));
+        if bootstrap_cas.iter().any(|bootstrap| {
+            client_cas
+                .iter()
+                .any(|client| client.subject == bootstrap.subject)
+        }) {
             return Err(format!(
                 "[enrolment] bootstrap_ca_file {} shares a CA with [tls] client_ca_file — a \
                  bootstrap certificate must be told apart from an issued one",
@@ -123,8 +134,8 @@ pub fn server_tls(
             ca_pem.push(b'\n');
         }
         ca_pem.extend_from_slice(&bootstrap_pem);
-        issuers.bootstrap = bootstrap;
-        issuers.members = client_subjects;
+        issuers.bootstrap = bootstrap_cas;
+        issuers.members = client_cas;
     }
     let identity = Identity { cert_pem, key_pem };
     Ok(PlaneTls {
@@ -141,25 +152,28 @@ pub fn server_tls(
     })
 }
 
-fn authorities_of(role: &str, names: &[(Vec<u8>, String)]) -> Vec<Authority> {
-    names
-        .iter()
-        .map(|(raw, name)| Authority {
+fn authorities_of(role: &str, cas: &[Ca]) -> Vec<Authority> {
+    cas.iter()
+        .map(|ca| Authority {
             role: role.to_string(),
-            subject: name_hash(raw),
-            name: name.clone(),
+            subject: name_hash(&ca.subject),
+            name: ca.name.clone(),
         })
         .collect()
 }
 
-/// The raw subject of every certificate in a CA file, and its text.
-fn subjects(path: &Path, pem: &[u8]) -> Result<Vec<(Vec<u8>, String)>, String> {
+/// Every certificate in a CA file, read once.
+fn cas(path: &Path, pem: &[u8]) -> Result<Vec<Ca>, String> {
     opamp::tls::certificates(pem)
         .map_err(|e| in_file(path, &e))?
         .iter()
         .map(|der| {
             X509Certificate::from_der(der.as_ref())
-                .map(|(_, cert)| (cert.subject().as_raw().to_vec(), cert.subject().to_string()))
+                .map(|(_, cert)| Ca {
+                    subject: cert.subject().as_raw().to_vec(),
+                    name: cert.subject().to_string(),
+                    key: cert.public_key().raw.to_vec(),
+                })
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))
         })
         .collect()
@@ -183,7 +197,8 @@ mod tests {
     use super::*;
     use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
 
-    fn ca(name: &str, issuer: Option<&Issuer<'_, KeyPair>>) -> (Vec<u8>, Vec<u8>, KeyPair) {
+    /// A CA, with what [`Issuers`] keeps of it.
+    fn ca(name: &str, issuer: Option<&Issuer<'_, KeyPair>>) -> (Vec<u8>, Ca, KeyPair) {
         let key = KeyPair::generate().expect("key");
         let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
         params.distinguished_name.push(DnType::CommonName, name);
@@ -193,13 +208,56 @@ mod tests {
             Some(issuer) => params.signed_by(&key, issuer),
         }
         .expect("ca");
-        let subject = X509Certificate::from_der(cert.der())
-            .expect("parse")
-            .1
-            .subject()
-            .as_raw()
-            .to_vec();
-        (cert.der().to_vec(), subject, key)
+        let parsed = X509Certificate::from_der(cert.der()).expect("parse").1;
+        let kept = Ca {
+            subject: parsed.subject().as_raw().to_vec(),
+            name: parsed.subject().to_string(),
+            key: parsed.public_key().raw.to_vec(),
+        };
+        (cert.der().to_vec(), kept, key)
+    }
+
+    /// The PEM form of a certificate.
+    fn pem(der: &[u8]) -> String {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+        let lines: Vec<&str> = encoded
+            .as_bytes()
+            .chunks(64)
+            .map(|line| std::str::from_utf8(line).expect("base64"))
+            .collect();
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            lines.join("\n")
+        )
+    }
+
+    /// What the Agent plane serves with when `client` is `client_ca_file` and `bootstrap` is
+    /// `[enrolment] bootstrap_ca_file`, read from the files as at startup.
+    fn issuers_from_files(client: &[u8], bootstrap: &[u8]) -> Issuers {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = KeyPair::generate().expect("key");
+        let server_cert = CertificateParams::new(vec!["localhost".to_string()])
+            .expect("params")
+            .self_signed(&server)
+            .expect("server certificate");
+        let path = |name: &str, content: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).expect("write");
+            path
+        };
+        let tls = TlsConfig {
+            cert_file: path("server.pem", &server_cert.pem()),
+            key_file: path("server-key.pem", &server.serialize_pem()),
+            client_ca_file: Some(path("client-ca.pem", &pem(client))),
+        };
+        let enrolment = EnrolmentConfig {
+            bootstrap_ca_file: path("bootstrap-ca.pem", &pem(bootstrap)),
+            bootstrap_ca_key_file: None,
+        };
+        server_tls(&tls, Some(&enrolment))
+            .expect("server material")
+            .issuers
     }
 
     fn leaf(issuer: &Issuer<'_, KeyPair>) -> Vec<u8> {
@@ -242,6 +300,38 @@ mod tests {
             Issuers::default().classify(&leaf(&intermediate)),
             Peer::Member,
             "without a bootstrap CA the handshake trusts the client CA alone"
+        );
+    }
+
+    /// An intermediate below the bootstrap CA that copies the client CA's name issues nothing a
+    /// member holds: membership is what the client CA's key signed, not a name an issuer can
+    /// take (ADR-0021 clause 19).
+    /// Verifies: ADR-0021
+    #[test]
+    fn an_intermediate_named_like_the_client_ca_only_enrols() {
+        let (client_der, _, client_key) = ca("client CA", None);
+        let (root_der, _, root_key) = ca("bootstrap CA", None);
+        let issuers = issuers_from_files(&client_der, &root_der);
+        let client = Issuer::from_ca_cert_der(&client_der.into(), client_key).expect("issuer");
+        let root = Issuer::from_ca_cert_der(&root_der.into(), root_key).expect("issuer");
+        let (forged_der, _, forged_key) = ca("client CA", Some(&root));
+        let forged = Issuer::from_ca_cert_der(&forged_der.into(), forged_key).expect("issuer");
+        let forged_leaf = leaf(&forged);
+        assert_eq!(
+            X509Certificate::from_der(&forged_leaf)
+                .expect("parse")
+                .1
+                .issuer(),
+            X509Certificate::from_der(&leaf(&client))
+                .expect("parse")
+                .1
+                .issuer(),
+            "the intermediate copies the client CA's name"
+        );
+        assert_eq!(issuers.classify(&leaf(&client)), Peer::Member);
+        assert!(
+            matches!(issuers.classify(&forged_leaf), Peer::Enrolling { .. }),
+            "an intermediate named like the client CA lifted its certificate into the fleet"
         );
     }
 }
