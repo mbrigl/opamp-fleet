@@ -161,6 +161,9 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     carries the Gateway's own certificate alone (ADR-0015)
   - ✅ a downstream peer that never finishes its headers after the handshake is hung up on
     ([`gateway_tls.rs`](../crates/fleet-agent/tests/gateway_tls.rs))
+  - ✅ an Agent's place in the upstream pool is released when the socket that carried it goes ·
+    ⚠️ a plain-HTTP Agent's place is released only when its upstream connection drops, so a peer
+    that polls under ever new `instance_uid`s grows the pool's assignments until then
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
   - ✅ headers ≤ 30 s (HTTP/1), from the same listener · ✅ connections served concurrently ·
     ✅ message size in both directions

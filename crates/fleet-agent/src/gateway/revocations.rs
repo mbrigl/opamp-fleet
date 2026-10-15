@@ -31,6 +31,13 @@ pub const REVOCATION_MAX_AGE: Duration = Duration::from_secs(300);
 /// How long a starting Gateway waits for its first list before it serves without one.
 pub const REVOCATION_FIRST_WAIT: Duration = Duration::from_secs(5);
 
+/// The largest list body the Gateway reads. The Server names the revoked certificates of its
+/// register, at most 100 000 (ADR-0021 clause 33), and every entry of its list, at most 100 000
+/// (clause 37), once per subject in its client CA file. An entry is at most 130 bytes of JSON with
+/// a 64-character issuer hash and the 40 hex digits of the longest serial RFC 5280 allows. This is
+/// room for all of them with up to eight client CA subjects: 900 000 entries, 117 MB.
+const MAX_LIST_BYTES: usize = 128 << 20;
+
 /// Where the Server serves the list, on its Agent plane.
 const PATH: &str = "/v1/gateway/revocations";
 
@@ -106,7 +113,7 @@ impl RevocationList {
         self.changes.subscribe()
     }
 
-    fn replace(&self, revoked: HashSet<(String, String)>, etag: Option<String>) {
+    pub(super) fn replace(&self, revoked: HashSet<(String, String)>, etag: Option<String>) {
         let mut held = self.held.write().expect("revocation list lock");
         held.revoked = revoked;
         held.etag = etag;
@@ -181,6 +188,15 @@ pub async fn refresh(
 
 /// One fetch: `Ok(Some(n))` for a new list of `n` certificates, `Ok(None)` when it is unchanged.
 async fn fetch(list: &RevocationList, config: &ClientConfig) -> Result<Option<usize>, String> {
+    fetch_within(list, config, MAX_LIST_BYTES).await
+}
+
+/// [`fetch`], with a list body of more than `limit` bytes refused as unreadable.
+async fn fetch_within(
+    list: &RevocationList,
+    config: &ClientConfig,
+    limit: usize,
+) -> Result<Option<usize>, String> {
     let url = crate::packages::resolve_url(PATH, &config.endpoint)?;
     let builder = reqwest::Client::builder()
         .use_rustls_tls()
@@ -208,10 +224,11 @@ async fn fetch(list: &RevocationList, config: &ClientConfig) -> Result<Option<us
         .get(reqwest::header::ETAG)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let body: ListBody = response
-        .json()
+    let body = read_within(response, limit)
         .await
         .map_err(|e| format!("{url}: an unreadable list: {e}"))?;
+    let body: ListBody =
+        serde_json::from_slice(&body).map_err(|e| format!("{url}: an unreadable list: {e}"))?;
     let revoked: HashSet<(String, String)> = body
         .certificates
         .into_iter()
@@ -220,6 +237,25 @@ async fn fetch(list: &RevocationList, config: &ClientConfig) -> Result<Option<us
     let count = revoked.len();
     list.replace(revoked, etag);
     Ok(Some(count))
+}
+
+/// Reads a response body, abandoning it the moment it grows past `limit`, so a list too large to
+/// be the Server's is never held whole.
+async fn read_within(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(format!("it exceeds {limit} bytes"));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if body.len() + chunk.len() > limit {
+            return Err(format!("it exceeds {limit} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -283,6 +319,55 @@ mod tests {
             vec![None],
             "the list was fetched once, without an Authorization"
         );
+    }
+
+    /// A list body larger than the bound is refused as an unreadable one is, whether it says its
+    /// length up front or streams without one: the Gateway keeps what it held, and with nothing
+    /// held it still admits nobody.
+    /// Verifies: ADR-0015, ADR-0021
+    #[tokio::test]
+    async fn an_oversized_revocation_list_is_refused_like_an_unreadable_one() {
+        const LIMIT: usize = 4096;
+        opamp::tls::install_ring_provider();
+        let entry = format!(r#"{{"issuer":"{}","serial":"1"}},"#, "a".repeat(64));
+        let mut chunks = vec![String::from(r#"{"certificates":["#)];
+        while chunks.iter().map(String::len).sum::<usize>() <= LIMIT {
+            chunks.push(entry.clone());
+        }
+        chunks.push(r#"{"issuer":"b","serial":"2"}]}"#.to_string());
+        let whole = chunks.concat();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fixed = axum::routing::get(move || async move { whole });
+        let streamed = axum::routing::get(move || async move {
+            axum::body::Body::from_stream(futures_util::stream::iter(
+                chunks.into_iter().map(Ok::<_, std::io::Error>),
+            ))
+        });
+        for (how, route) in [("with a length", fixed), ("streamed", streamed)] {
+            let app = axum::Router::new().route(PATH, route);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let server = listener.local_addr().expect("addr");
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+            let path = dir.path().join(crate::config_init::FILE_NAME);
+            std::fs::write(&path, format!("endpoint = \"ws://{server}/v1/opamp\"\n"))
+                .expect("write");
+            let config = ClientConfig::load(&path).expect("config");
+
+            let list = RevocationList::new(REVOCATION_MAX_AGE);
+            let fetched = fetch_within(&list, &config, LIMIT).await;
+            assert!(
+                fetched.as_ref().is_err_and(|e| e.contains("exceeds")),
+                "an oversized list {how} is refused: {fetched:?}"
+            );
+            assert_eq!(
+                list.verdict(&certificate()),
+                Verdict::Stale,
+                "nothing was taken from the list {how}"
+            );
+        }
     }
 
     /// A Gateway with no list yet, or one past its age, admits nobody; with a fresh list it admits

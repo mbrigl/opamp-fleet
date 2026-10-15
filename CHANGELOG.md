@@ -93,6 +93,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 - **Refused requests cannot crowd out the audit record** (ADR-0022): refusals are counted per
   peer before they are queued and hold at most half of the queue, so admissions and operator acts
   are still recorded under a flood. **What to do:** nothing.
+- **A Gateway reads the revocation list within 128 MiB** (ADR-0015, ADR-0021). A larger list
+  is refused as unreadable, and a Gateway that holds no list younger than 300 s admits nobody.
+  The bound holds every list the Server names with up to eight client CA subjects and serials of
+  the length RFC 5280 allows. **What to do:** keep `client_ca_file` to eight certificates or
+  fewer, and revoke only serials of real certificates.
+- **A Gateway frees what it kept for an Agent once that Agent is gone**: a departed socket's pool
+  places and routes, and the route of an exchange that ends without its reply. A plain-HTTP
+  Agent's pool place still lasts until its upstream connection drops. **What to do:** nothing.
 
 ## [0.5.2] - 2026-10-13
 

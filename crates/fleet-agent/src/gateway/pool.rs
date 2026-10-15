@@ -231,4 +231,32 @@ impl Pool {
             }
         }
     }
+
+    /// Releases the places of Agents no downstream connection carries any more, so a peer that
+    /// keeps coming back under new `instance_uid`s grows nothing here. Nothing is said upstream on
+    /// their behalf (ADR-0015 clause 10). The registry is asked under the pool's lock, so an Agent
+    /// claimed again in between keeps the place its next report is forwarded on.
+    pub fn release(&self, uids: impl IntoIterator<Item = InstanceUid>) {
+        let mut inner = self.inner.lock().expect("pool lock");
+        for uid in uids {
+            if self.registry.routes(&uid) {
+                continue;
+            }
+            if let Some(index) = inner.assigned.remove(&uid) {
+                if let Some(connection) = inner.connections.get_mut(index) {
+                    connection.carries.retain(|carried| *carried != uid);
+                }
+            }
+        }
+    }
+
+    /// The Agents assigned to a connection, and how many entries the connections' `carries` hold.
+    #[cfg(test)]
+    pub(crate) fn assignments(&self) -> (std::collections::HashSet<InstanceUid>, usize) {
+        let inner = self.inner.lock().expect("pool lock");
+        (
+            inner.assigned.keys().copied().collect(),
+            inner.connections.iter().map(|c| c.carries.len()).sum(),
+        )
+    }
 }
