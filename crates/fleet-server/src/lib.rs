@@ -3,6 +3,8 @@
 //!
 //! A library crate so integration tests can assemble the exact router the binary serves.
 
+#![forbid(unsafe_code)]
+
 pub mod agent_rate;
 pub mod agent_store;
 pub mod api;

@@ -46,9 +46,25 @@ env:
   OPERATOR_TOOL: opamp-fleetctl
 
 jobs:
+  # A version with a known advisory is never tagged: the gate of audit.yml, over the lockfile the
+  # binaries are built from, run in a job of its own so no action beyond the checkout runs where
+  # the token can push.
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: No known advisory in the dependency graph
+        run: cargo deny check advisories
+
   # Decides the number, makes it a tag, and proves the compiler saw it. Everything below is named
   # from this job's answer, so the artifacts cannot disagree with each other or with the binary.
   version:
+    needs: advisories
     runs-on: ubuntu-latest
     permissions:
       # Pushing the tag (ADR-0012). Read alone would be enough for everything else here.
@@ -63,7 +79,11 @@ jobs:
           # The baked version is resolved from the repository's tags; a shallow clone would bake
           # `0.0.0-dev` and publish it.
           fetch-depth: 0
-      - uses: Swatinem/rust-cache@v2
+          # This job's token can push, and the build below runs every build script of the
+          # dependency graph. The token stays out of .git/config and is handed to the two steps
+          # that talk to the remote, in their own environment. No cache either: a release is built
+          # from the sources and the lockfile, not from what other runs wrote.
+          persist-credentials: false
       - name: Read the version out of Cargo.toml
         id: read
         run: |
@@ -106,6 +126,9 @@ jobs:
           tag="version/$version"
           taken=""
 
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$GITHUB_SERVER_URL/.extraheader"
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          export GIT_CONFIG_VALUE_0
           on=$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)
           if [ -n "$on" ]; then
             # On a push run this very tag is what started us; anywhere else it is a spent number.
@@ -129,9 +152,14 @@ jobs:
           echo "$tag is free"
       - name: Tag this commit
         if: steps.read.outputs.publish == 'true' && github.event_name != 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="version/${{ steps.read.outputs.version }}"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$GITHUB_SERVER_URL/.extraheader"
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          export GIT_CONFIG_VALUE_0
           # The guard above proved the tag is free; the push is what proves it still is, since it
           # is refused rather than forced if a concurrent run got there first.
           git tag "$tag" "$GITHUB_SHA"
@@ -184,9 +212,10 @@ jobs:
         with:
           # Full history *and* the tag the version job just pushed, or this build bakes `-dev`.
           fetch-depth: 0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+          # Nothing in this job talks to the remote after the checkout. No cache either: what ships
+          # is built from the sources and the lockfile, not from a target/ or ~/.cargo/bin other
+          # runs wrote.
+          persist-credentials: false
       - name: Add the target
         run: rustup target add ${{ matrix.target }}
       - name: Build the Client
@@ -268,9 +297,8 @@ jobs:
 
       - name: Install the Linux packaging tools
         if: matrix.os == 'linux'
-        # Cached by rust-cache along with the rest of `~/.cargo/bin`, so this compiles once per
-        # runner image rather than once per release.
-        run: cargo install cargo-deb cargo-generate-rpm --locked
+        # Exact versions, raised by a reviewed commit: these tools write the packages that ship.
+        run: cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.0
 
       - name: Build the Debian and RPM packages
         if: matrix.os == 'linux'

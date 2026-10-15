@@ -8,22 +8,14 @@
 all-features = true
 
 [advisories]
-# Every advisory fails, the unmaintained and unsound kinds included, except those reviewed below. A
-# new advisory against one of these same crates carries a new id and fails again.
+# Every advisory fails, the unmaintained and unsound kinds included, except those reviewed in
+# `ignore`. A new advisory against an ignored crate carries a new id and fails again. An ignore that
+# matches nothing fails the run that does not see it: audit.yml checks Cargo.lock and
+# fuzz/Cargo.lock against this one file, so an ignore here must match in both lockfiles.
 unmaintained = "all"
 yanked = "deny"
-ignore = [
-    # `paste`: unmaintained. A transitive proc-macro helper with no first-party use, no security
-    # impact, and no maintained drop-in.
-    { id = "RUSTSEC-2024-0436", reason = "transitive proc-macro, no runtime code" },
-    # `rustls-pemfile`: unmaintained. This project reads PEM with `rustls-pki-types` itself
-    # (crates/opamp/src/tls.rs); the crate remains only through `axum-server`.
-    { id = "RUSTSEC-2025-0134", reason = "transitive through axum-server only" },
-    # `git2`: unsound `Remote::list()` and buffer-created `BlameHunk`. Neither API is used; git2 runs
-    # only in crates/fleet-core/build.rs, which reads tags and HEAD at build time.
-    { id = "RUSTSEC-2026-0183", reason = "build script only, API unused" },
-    { id = "RUSTSEC-2026-0184", reason = "build script only, API unused" },
-]
+unused-ignored-advisory = "deny"
+ignore = []
 
 [licenses]
 # Permissive licences only. A crate offering several licences passes when one of them is here.

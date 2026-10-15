@@ -37,6 +37,8 @@ jobs:
         os: [windows-latest]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       # Built as its own step so a compile failure is not reported as a smoke-test failure.
       - name: Build

@@ -30,6 +30,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
@@ -40,6 +42,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
@@ -60,6 +64,8 @@ jobs:
           - { name: server-linux, os: ubuntu-latest, package: fleet-server, binary: target/release/server }
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Build (release)
         run: cargo build -p ${{ matrix.package }} --release --locked

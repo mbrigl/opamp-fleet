@@ -29,6 +29,8 @@ jobs:
       SECONDS_PER_TARGET: ${{ github.event_name == 'schedule' && '900' || '60' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Install the nightly toolchain
         run: rustup toolchain install nightly --profile minimal
       - uses: taiki-e/install-action@v2

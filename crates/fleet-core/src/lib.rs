@@ -4,6 +4,8 @@
 //! bootstrap certificate's PKCS#12 file (ADR-0029).
 //! The protocol and its transport, TLS included, are in the `opamp` crate (ADR-0010).
 
+#![forbid(unsafe_code)]
+
 pub mod ending;
 pub mod naming;
 pub mod package;

@@ -54,6 +54,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   it enables no `brotli` certificate compression, uses no Encrypted Client Hello and no session
   store of its own, and its *ring* provider offers no post-quantum hybrid group to be downgraded
   from. **What to do:** nothing beyond the upgrade.
+- **Release builds check integer overflow.** An arithmetic overflow in the Server, the Client or
+  `opamp-fleetctl` panics instead of wrapping into a wrong value. **What to do:** nothing.
+- **The Server's systemd unit in [the setup guide](docs/manual/setup.md) is sandboxed**: no new
+  privileges, no capabilities, a read-only file system but for its state directory, and no access
+  to home directories, devices or kernel settings. **What to do:** a unit copied from an earlier
+  guide can take the new lines; a `config_dir` or `packages_dir` outside
+  `/var/lib/opamp-fleet-server` then needs a `ReadWritePaths=` line naming it.
 
 ## [0.5.2] - 2026-10-13
 
