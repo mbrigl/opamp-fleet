@@ -94,6 +94,7 @@ fails the handshake and reaches no route (see
 | `/api/v1/openapi.json` | The OpenAPI document — the contract to generate a client from. It describes this plane, so the artifact download above is not in it. |
 | `/api/v1/docs` | Interactive API documentation (Redoc, vendored and served from this origin, so it works offline). |
 | `/` | The bundled UI: one embedded page, no frontend toolchain. It is deliberately rudimentary — the API is the product. |
+| `/ui.css`, `/ui-carbon.css`, `/ui-quiet.css` | The bundled UI's three looks, embedded beside the page; its style combo chooses between them. |
 
 The Agent plane has no credential; the Operator plane has one of its own,
 [`[rest.auth]`](#the-operator-plane-restauth). This port carries the authority to reconfigure and

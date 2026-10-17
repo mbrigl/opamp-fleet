@@ -146,7 +146,14 @@ async fn the_ui_and_the_api_docs_are_guarded_too() {
     let server = spawn_guarded().await;
     let credential = basic("fleet-admin", "secret");
 
-    for path in ["/", "/api/v1/docs", "/api/v1/openapi.json"] {
+    for path in [
+        "/",
+        "/ui.css",
+        "/ui-carbon.css",
+        "/ui-quiet.css",
+        "/api/v1/docs",
+        "/api/v1/openapi.json",
+    ] {
         assert_eq!(
             get(&server, path, None).await.status(),
             401,

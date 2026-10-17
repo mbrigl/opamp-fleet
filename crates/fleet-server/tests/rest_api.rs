@@ -762,6 +762,9 @@ async fn every_operator_response_carries_the_security_headers() {
     let client = reqwest::Client::new();
     for path in [
         "/",
+        "/ui.css",
+        "/ui-carbon.css",
+        "/ui-quiet.css",
         "/api/v1/agents",
         "/api/v1/docs",
         "/api/v1/openapi.json",
@@ -853,6 +856,67 @@ async fn the_policy_names_every_inline_script_of_the_ui() {
         );
     }
     assert!(inline > 0, "the page has inline scripts to name");
+}
+
+/// The bundled UI's look lives in its own stylesheets: the page links the default, carries no
+/// `<style>` of its own, names every look its style combo offers, and each is served as CSS from
+/// the plane's origin, which the policy admits.
+#[tokio::test]
+async fn the_ui_takes_its_look_from_its_own_stylesheet() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let page = client
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI");
+    let policy = page
+        .headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .expect("a policy")
+        .to_string();
+    assert!(
+        policy
+            .split(';')
+            .map(str::trim)
+            .any(|d| d.starts_with("style-src ") && d.contains("'self'")),
+        "{policy}"
+    );
+    let html = page.text().await.expect("html").to_ascii_lowercase();
+    assert!(
+        html.contains(r#"<link id="ui-style" rel="stylesheet" href="/ui.css" />"#),
+        "the page no longer links /ui.css"
+    );
+    assert!(!html.contains("<style"), "the page carries a <style> again");
+
+    // Each look defines the theme it does not open in, since the page always sets one outright.
+    for (path, other_theme) in [
+        ("/ui.css", r#":root[data-theme="light"]"#),
+        ("/ui-carbon.css", r#":root[data-theme="light"]"#),
+        ("/ui-quiet.css", r#":root[data-theme="dark"]"#),
+    ] {
+        assert!(
+            html.contains(&format!(r#"href: "{path}""#)),
+            "the style combo does not offer {path}"
+        );
+        let css = client
+            .get(url(server.rest_addr, path))
+            .send()
+            .await
+            .expect("get the stylesheet");
+        assert_eq!(css.status(), 200, "{path}");
+        assert_eq!(
+            css.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/css; charset=utf-8"),
+            "{path}"
+        );
+        let css = css.text().await.expect("css");
+        assert!(css.contains(":root"), "{path}");
+        assert!(css.contains(other_theme), "{path} lacks {other_theme}");
+    }
 }
 
 /// The fleet as the REST API shows it.

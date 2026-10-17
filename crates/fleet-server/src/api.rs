@@ -264,6 +264,9 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/api/v1/docs", get(docs))
         .route("/api/v1/docs/redoc.js", get(redoc_js))
         .route("/", get(index))
+        .route("/ui.css", get(ui_css))
+        .route("/ui-carbon.css", get(ui_carbon_css))
+        .route("/ui-quiet.css", get(ui_quiet_css))
         .with_state(state.clone());
     // Inside the guard, so an act is recorded only once it is authenticated, and named by the
     // operator who made it (ADR-0022 clause 1).
@@ -282,8 +285,9 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
 }
 
 /// The policy every page of the plane is held to. Scripts come from this origin, or are the
-/// bundled UI's inline ones named by their hash; styles may be inline, as the UI's `style`
-/// attributes and the API docs' rendered styles are. Nothing may frame the plane.
+/// bundled UI's inline ones named by their hash; styles come from this origin, as the UI's
+/// stylesheet does, or are inline, as the UI's `style` attributes and the API docs' rendered
+/// styles are. Nothing may frame the plane.
 static CONTENT_SECURITY_POLICY: std::sync::LazyLock<header::HeaderValue> =
     std::sync::LazyLock::new(|| {
         use base64::Engine as _;
@@ -362,6 +366,26 @@ pub fn download_router(state: Arc<AppState>) -> Router {
 /// The bundled UI: one embedded page, no frontend toolchain (ADR-0010).
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
+}
+
+/// The bundled UI's default stylesheet, kept apart from the page so its look can be replaced
+/// without touching the markup or the scripts.
+async fn ui_css() -> Response {
+    stylesheet(include_str!("../static/ui.css"))
+}
+
+/// The bundled UI's second look, after IBM's Carbon Design System as Würth Phoenix's NetEye wears it.
+async fn ui_carbon_css() -> Response {
+    stylesheet(include_str!("../static/ui-carbon.css"))
+}
+
+/// The bundled UI's third look, the quiet one, where colour says only state and selection.
+async fn ui_quiet_css() -> Response {
+    stylesheet(include_str!("../static/ui-quiet.css"))
+}
+
+fn stylesheet(css: &'static str) -> Response {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], css).into_response()
 }
 
 /// The API docs page: renders the OpenAPI document with the vendored Redoc bundle (ADR-0013).

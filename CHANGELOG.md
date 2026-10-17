@@ -17,6 +17,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Added
 
+- **Two more looks for the UI:** a style combo beside the theme button chooses between the
+  GitKraken look, a Carbon look — IBM's Carbon Design System as Würth Phoenix's NetEye wears it,
+  Gray 100 with its purple — or a quiet look where colour says only state and selection. Each look
+  remembers its own light or dark; a first visit opens the GitKraken and Carbon looks in dark, the
+  GitKraken one as before, and the quiet one in light.
+
 - **The UI can present a certificate of its own**
   ([ADR-0032](docs/adr/0032-the-operator-plane-may-serve-a-certificate-of-its-own.md)). An optional
   `[rest.tls]` with `cert_file` and `key_file` gives the Operator plane — the UI, the REST API and
@@ -26,6 +32,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `server.toml` has to change. `server pki status` and the expiry warnings include it.
 
 ### Changed
+
+- **The UI's look follows GitKraken Dark as GitKraken Desktop 12.6 ships it:** charcoal panels,
+  GitKraken's blue for buttons and the selected row, and its purple for what is selected. Light
+  follows GitKraken Light. The theme button and a browser's remembered choice work as before.
 
 - **The enrolment queue names a request's bootstrap certificate by what it was issued for.** The
   Enrolments tab leads with its customer and site, then its serial and end, and marks a revoked
