@@ -763,8 +763,8 @@ impl PackageStore {
     /// One Agent's offer, composed from its **assignment** (ADR-0025): the entry [`offered_entry`]
     /// names, plus the `all_packages_hash` over it (the Baseline's per-Agent aggregate). `None`
     /// when the Agent is offered nothing — it keeps running what it runs. An assignment whose
-    /// Package is gone composes nothing rather than failing: deletion removes assignments, so the
-    /// case is a race, not a state.
+    /// Package is gone composes nothing rather than failing: a pinned Package cannot be deleted
+    /// (ADR-0034 clause 8), so the case is a race, not a state.
     pub fn offer_for_assigned(
         &self,
         assigned: Option<&PackageId>,
@@ -1159,6 +1159,7 @@ mod tests {
             name: "stable".to_string(),
             selector: BTreeMap::from([("channel".to_string(), "stable".to_string())]),
             packages: BTreeMap::from([(id.agent_type.clone(), id.clone())]),
+            configurations: Default::default(),
         }
     }
 

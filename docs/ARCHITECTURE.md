@@ -175,13 +175,17 @@ core module names an adapter or a technology, and when a module has no role.
 The few paths worth following end to end, such as a request, a job, or a build, and where state
 lives between them. Only what a newcomer would otherwise reconstruct from code.
 
-**A Configuration reaches an Agent.** An operator saves a Configuration through `api` and rolls
-it out; `fleet` assigns it to every Agent its Selector and Agent type match, composes each Agent's
+**A Configuration reaches an Agent.** An operator saves a Configuration through `api`, puts it
+into a Deployment in `deployments`, and rolls the Deployment out; `fleet` replaces the assignment of
+every Agent the Deployment's Selector claims with one release — the Package for its type and every
+Configuration that fits its type, pinned by revision hash in `configs` — composes each Agent's
 configuration and pushes the offer over the Agent's WebSocket, or answers the next poll with it.
 On the Client, `engine` routes the offer to the Agent's Supervisor, which writes the entries into
 the Supervisor's `config/` directory and restarts its process; the Agent reports `APPLIED` or
 `FAILED` with the reason, and the Server stops offering once the reported hash matches
-([ADR-0023](adr/0023-configurations-and-the-rest-api.md)). A Configuration typed for the Client
+([ADR-0023](adr/0023-configurations-and-the-rest-api.md),
+[ADR-0034](adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)). A
+Configuration typed for the Client
 itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes into
 `supervisor.toml` before it starts or stops anything
 ([ADR-0017](adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)).
@@ -189,7 +193,7 @@ itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes in
 **A package reaches an Agent.** An operator uploads an artifact into `packages` and signs its
 entry there — `packages` checks the signature against `[packages] verification_key` when the
 Server holds one, and only reports — then puts the Package into a Deployment with a Selector and
-releases it. The Agent is offered the package with its entry's signature; the Client downloads it
+releases it, together with the Configurations the Deployment holds. The Agent is offered the package with its entry's signature; the Client downloads it
 from its own Server's origin and nowhere else, and `api` serves it only when `fleet` finds it
 offered to an Agent the certificate's host speaks for, by the test `packages` shares with the
 offer ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md),

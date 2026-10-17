@@ -157,9 +157,10 @@ Package            Deployment                    Client, on each host
 - A **Package** is what an agent type runs at a version, with one binary per platform and your
   signature on each. On its own, it reaches nobody.
 - A **Deployment** is a channel: a Selector that names the hosts it aims at, such as
-  `channel = stable`, and the Packages it offers. A host belongs to at most one Deployment.
-- The **rollout act** releases the Deployment to the hosts it claims. Nothing changes on any host
-  before it.
+  `channel = stable`, the Packages it offers, and the Configurations that go with them. A host
+  belongs to at most one Deployment.
+- The **rollout act** releases the Deployment — its Packages and its Configurations together — to
+  the hosts it claims. Nothing changes on any host before it.
 - The **Client** takes a package only when its `[packages] verification_key` is set, and only when
   the binary's hash and signature verify. It installs the binary, restarts the program, and checks
   that it stays up. A version that does not stay up is rolled back to the one before.

@@ -1,4 +1,4 @@
-//! Configurations on the filesystem (ADR-0023, ADR-0025): the default adapter behind
+//! Configurations on the filesystem (ADR-0025, ADR-0034): the default adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one JSON file per Configuration, written in
 //! one step.
 
@@ -41,7 +41,20 @@ impl ConfigBackend for FsConfigBackend {
             }
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            let config: Configuration = serde_json::from_str(&text)
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+            if names_a_selector(&value) {
+                // The shape before ADR-0034: a Configuration aimed by itself. Read as content only,
+                // it would silently reach nobody — or, put into a Deployment, other hosts than it
+                // named — so it is refused and the operator decides where it belongs.
+                return Err(format!(
+                    "{} carries a selector, and a Configuration has none any more (ADR-0034): put \
+                     it into a Deployment, whose Selector aims it, and remove the selector from \
+                     the file",
+                    path.display()
+                ));
+            }
+            let config: Configuration = serde_json::from_value(value)
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
             configs.push(config);
         }
@@ -57,6 +70,18 @@ impl ConfigBackend for FsConfigBackend {
         let path = self.path(name);
         std::fs::remove_file(&path).map_err(|e| format!("cannot delete {}: {e}", path.display()))
     }
+}
+
+/// Whether a stored Configuration names a selector anywhere a revision could carry one: on the
+/// record itself, on its saved revision, or on a retained one.
+fn names_a_selector(value: &serde_json::Value) -> bool {
+    let carries = |v: &serde_json::Value| v.get("selector").is_some();
+    carries(value)
+        || value.get("saved").is_some_and(carries)
+        || value
+            .get("retained")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|retained| retained.values().any(carries))
 }
 
 #[cfg(test)]
@@ -75,9 +100,9 @@ mod tests {
     fn the_store_round_trips_through_the_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = open(dir.path()).expect("open");
-        let assignments = put_assigned(&store, "base", revision(&[], "receivers: {}\n"));
+        let assignments = put_assigned(&store, "base", revision("receivers: {}\n"));
         store
-            .put_saved("other", revision(&[], "exporters: {}\n"))
+            .put_saved("other", revision("exporters: {}\n"))
             .expect("put");
 
         let reopened = open(dir.path()).expect("reopen");
@@ -92,8 +117,10 @@ mod tests {
     }
 
     /// No legacy reader: a file in a shape this Server does not write is a startup error that names
-    /// the path, not a file quietly read as something else. Both retired shapes are covered — a
-    /// flat record and a two-revision one.
+    /// the path, not a file quietly read as something else. The retired shapes are covered — a
+    /// flat record, a two-revision one, and a saved or retained revision still carrying the
+    /// selector a Configuration no longer has (ADR-0034).
+    /// Verifies: ADR-0034
     #[test]
     fn a_file_in_a_retired_shape_refuses_to_open_and_names_it() {
         for (file, body) in [
@@ -104,6 +131,14 @@ mod tests {
             (
                 "staged.json",
                 r#"{"name":"staged","draft":{"body":"v2\n"},"published":{"body":"v1\n"}}"#,
+            ),
+            (
+                "aimed.json",
+                r#"{"name":"aimed","saved":{"selector":{"os.type":"linux"},"body":"v1\n"}}"#,
+            ),
+            (
+                "pinned.json",
+                r#"{"name":"pinned","saved":{"body":"v2\n"},"retained":{"ab":{"selector":{},"body":"v1\n"}}}"#,
             ),
         ] {
             let dir = tempfile::tempdir().expect("tempdir");
@@ -116,6 +151,12 @@ mod tests {
                 error.contains(file),
                 "the error must name the file an operator has to deal with, got: {error}"
             );
+            if file == "aimed.json" || file == "pinned.json" {
+                assert!(
+                    error.contains("selector") && error.contains("Deployment"),
+                    "the refusal says where the aim went: {error}"
+                );
+            }
         }
     }
 
@@ -126,7 +167,7 @@ mod tests {
         put_assigned(
             &store,
             "certs",
-            with_role(revision(&[], "PEM\n"), ROLE_SUPPLEMENTARY),
+            with_role(revision("PEM\n"), ROLE_SUPPLEMENTARY),
         );
         let reopened = open(dir.path()).expect("reopen");
         assert_eq!(

@@ -1,7 +1,7 @@
 //! Deployments on the filesystem (ADR-0026): the default adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -90,6 +90,9 @@ struct DeploymentMeta {
     selector: BTreeMap<String, String>,
     #[serde(default)]
     packages: Vec<PackageRefMeta>,
+    /// The Configurations it holds, by name (ADR-0034). Absent in a file that holds none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    configurations: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -111,6 +114,7 @@ impl DeploymentMeta {
                     version: id.version.clone(),
                 })
                 .collect(),
+            configurations: deployment.configurations.iter().cloned().collect(),
         }
     }
 
@@ -123,10 +127,17 @@ impl DeploymentMeta {
             let id = PackageId::new(&reference.agent_type, &reference.version).map_err(named)?;
             packages.insert(id.agent_type.clone(), id);
         }
+        let mut configurations = BTreeSet::new();
+        for configuration in self.configurations {
+            validate_name(&configuration)
+                .map_err(|e| named(format!("configuration {configuration:?}: {e}")))?;
+            configurations.insert(configuration);
+        }
         Ok(Deployment {
             name: self.name,
             selector: self.selector,
             packages,
+            configurations,
         })
     }
 }
@@ -142,7 +153,7 @@ mod tests {
     }
 
     /// The whole store survives a reopen.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0026, ADR-0034
     #[test]
     fn a_deployment_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -153,6 +164,9 @@ mod tests {
             store
                 .put_package("canary", &telegraf, false)
                 .expect("package");
+            store
+                .put_configuration("canary", "base")
+                .expect("configuration");
         }
 
         let reopened = open(dir.path()).expect("reopen");
@@ -160,6 +174,11 @@ mod tests {
         assert_eq!(canary.selector["channel"], "canary");
         assert_eq!(canary.selector["env"], "prod");
         assert_eq!(canary.package_for("telegraf"), Some(&telegraf));
+        assert_eq!(
+            canary.configurations.iter().collect::<Vec<_>>(),
+            ["base"],
+            "the Configurations it holds survive too (ADR-0034)"
+        );
 
         assert!(reopened.delete("canary").expect("delete"));
         assert!(!reopened

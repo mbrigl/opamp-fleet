@@ -173,9 +173,7 @@ impl OurServer {
     async fn start() -> OurServer {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
-        let state = Arc::new(
-            AppState::new(dir.path().join("fleet-configs")).expect("open the configuration store"),
-        );
+        let state = Arc::new(common::fleet_state(dir.path()));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Agent plane");
         let addr = listener.local_addr().expect("local addr");
         let app =
@@ -304,22 +302,8 @@ async fn go_client_against_our_server(scheme: &str) {
     }
 
     // Remote config: offered, acknowledged as APPLIED with its hash, and not offered again.
-    server
-        .state
-        .save_configuration(
-            "interop",
-            fleet_server::configs::Revision {
-                selector: Default::default(),
-                body: "interop: true\n".to_string(),
-                role: String::new(),
-                service_name: String::new(),
-            },
-        )
-        .expect("save the Configuration");
-    server
-        .state
-        .rollout_configuration("interop")
-        .expect("roll the Configuration out");
+    common::save(&server.state, "interop", "interop: true\n", "");
+    common::release_to_every_agent(&server.state, &["interop"]);
     wait_until("the Configuration to be assigned to the Go Client", || {
         server
             .agent(&uid)
@@ -770,9 +754,7 @@ impl Party {
 async fn our_tls_server(pki: &TestPki) -> (SocketAddr, Arc<AppState>, tempfile::TempDir) {
     opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(
-        AppState::new(dir.path().join("fleet-configs")).expect("open the configuration store"),
-    );
+    let state = Arc::new(common::fleet_state(dir.path()));
     let server = pki.issue(LOOPBACK);
     let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
         "cert_file = {:?}\nkey_file = {:?}\nclient_ca_file = {:?}\n",
@@ -835,20 +817,8 @@ async fn go_client_against_our_tls_server(scheme: &str) {
         agent(&uid).filter(|a| a.service_name == GO_AGENT_TYPE)
     })
     .await;
-    state
-        .save_configuration(
-            "interop-tls",
-            fleet_server::configs::Revision {
-                selector: Default::default(),
-                body: "interop: tls\n".to_string(),
-                role: String::new(),
-                service_name: String::new(),
-            },
-        )
-        .expect("save the Configuration");
-    state
-        .rollout_configuration("interop-tls")
-        .expect("roll the Configuration out");
+    common::save(&state, "interop-tls", "interop: tls\n", "");
+    common::release_to_every_agent(&state, &["interop-tls"]);
     wait_until("the configuration APPLIED over TLS", || {
         agent(&uid).filter(|a| a.remote_config_status == "APPLIED" && a.in_sync)
     })

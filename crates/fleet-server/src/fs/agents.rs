@@ -46,26 +46,27 @@ struct Envelope {
     package_statuses: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     available_components: Option<String>,
-    /// The config assignments (ADR-0025), name → revision hash. Absent in a file an older Server
-    /// wrote, which is exactly the migration marker the fleet reads.
+    /// What the last rollout released to this Agent (ADR-0034 clause 5). Absent means nothing was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    config_assignments: Option<BTreeMap<String, String>>,
-    /// What was rolled out to this Agent (ADR-0025, ADR-0026): the Deployment that released it
-    /// and the Package it pinned, as `<agent type>@<version>`. Absent means nothing was.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    package_assignment: Option<PackageAssignmentMeta>,
+    assignment: Option<AssignmentMeta>,
 }
 
-/// One Agent's package assignment as persisted.
+/// One Agent's assignment as persisted: the Deployment, the Package as `<agent type>@<version>`,
+/// and each Configuration's pinned revision hash.
 #[derive(Serialize, Deserialize)]
-struct PackageAssignmentMeta {
+#[serde(deny_unknown_fields)]
+struct AssignmentMeta {
     deployment: String,
-    package: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    configurations: BTreeMap<String, String>,
 }
 
-/// Version 2 is ADR-0026's assignment shape, and there is **no reader for version 1**: no legacy
-/// store to support, so an envelope this Server did not write is named rather than guessed at.
-const ENVELOPE_VERSION: u32 = 2;
+/// Version 3 is ADR-0034's assignment shape — one release per Agent, Package and Configurations
+/// together — and there is **no reader for an earlier version**: no legacy store to support, so an
+/// envelope this Server did not write is named rather than guessed at.
+const ENVELOPE_VERSION: u32 = 3;
 
 fn encode<M: Message>(message: &Option<M>) -> Option<String> {
     message
@@ -101,12 +102,10 @@ impl Envelope {
             connection_settings_status: encode(&record.connection_settings_status),
             package_statuses: encode(&record.package_statuses),
             available_components: encode(&record.available_components),
-            config_assignments: record.config_assignments.clone(),
-            package_assignment: record.package_assignment.as_ref().map(|assignment| {
-                PackageAssignmentMeta {
-                    deployment: assignment.deployment.clone(),
-                    package: assignment.package.to_string(),
-                }
+            assignment: record.assignment.as_ref().map(|assignment| AssignmentMeta {
+                deployment: assignment.deployment.clone(),
+                package: assignment.package.as_ref().map(PackageId::to_string),
+                configurations: assignment.configurations.clone(),
             }),
         }
     }
@@ -117,8 +116,10 @@ impl Envelope {
             // and one silently skipped would look exactly like a host that never enrolled.
             return Err(format!(
                 "envelope version {} is not the understood {ENVELOPE_VERSION} — this Server reads \
-                 no earlier record format. Clear the agents directory; every Agent re-enrols and \
-                 re-reports on its next message, and what is lost is the operator's rollouts",
+                 no earlier record format, and since ADR-0034 an assignment is one release per \
+                 Agent, its Package and Configurations together. Clear the agents directory; \
+                 every Agent re-reports on its next message, and what is lost is the operator's \
+                 rollouts, which a press on each Deployment writes again",
                 self.version
             ));
         }
@@ -138,16 +139,20 @@ impl Envelope {
             transport: Transport::parse(&self.transport),
             last_seen_ms: self.last_seen_ms,
             restart_pending: self.restart_pending,
-            config_assignments: self.config_assignments,
-            package_assignment: self
-                .package_assignment
+            assignment: self
+                .assignment
                 .map(|assignment| {
-                    PackageId::parse(&assignment.package)
-                        .map(|package| crate::fleet::PackageAssignment {
-                            deployment: assignment.deployment,
-                            package,
-                        })
-                        .map_err(|e| format!("invalid package assignment: {e}"))
+                    let package = assignment
+                        .package
+                        .as_deref()
+                        .map(PackageId::parse)
+                        .transpose()
+                        .map_err(|e| format!("invalid package in the assignment: {e}"))?;
+                    Ok::<_, String>(crate::fleet::Assignment {
+                        deployment: assignment.deployment,
+                        package,
+                        configurations: assignment.configurations,
+                    })
                 })
                 .transpose()?,
         })
@@ -232,28 +237,62 @@ mod tests {
         assert!(restored[&uid] == record(), "the record round-trips whole");
     }
 
-    /// ADR-0026 point 34: an envelope written before the ADR has no assignment fields, and they
-    /// restore as `None` — the marker the fleet's migration reads. They are not invented as
-    /// empty, which would silently un-roll the Agent.
-    /// Verifies: ADR-0026
+    /// A record nothing was rolled out to carries no assignment on disk, and restores as `None`
+    /// rather than as an empty release.
+    /// Verifies: ADR-0034
     #[test]
-    fn a_record_without_assignments_restores_with_none() {
+    fn a_record_without_an_assignment_restores_with_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
         let uid = InstanceUid::default();
-        let mut old = record();
-        old.config_assignments = None;
-        old.package_assignment = None;
-        store.put(&uid, &old).expect("put");
+        let mut unassigned = record();
+        unassigned.assignment = None;
+        store.put(&uid, &unassigned).expect("put");
         let text = std::fs::read_to_string(dir.path().join("agents").join(format!("{uid}.json")))
             .expect("read");
         assert!(
-            !text.contains("assignments"),
-            "absent fields stay absent on disk: {text}"
+            !text.contains("assignment"),
+            "an absent field stays absent on disk: {text}"
         );
         let restored = store.load().expect("load");
-        assert!(restored[&uid].config_assignments.is_none());
-        assert!(restored[&uid].package_assignment.is_none());
+        assert!(restored[&uid].assignment.is_none());
+    }
+
+    /// A record in the shape before ADR-0034 — a configuration map and a package assignment side
+    /// by side — fails the load naming the file and the reason, rather than being read as an Agent
+    /// nothing was rolled out to.
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_record_with_the_old_assignment_shape_fails_the_load_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let uid = InstanceUid::default();
+        store.put(&uid, &record()).expect("put");
+        let path = dir.path().join("agents").join(format!("{uid}.json"));
+        let mut old: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        let fields = old.as_object_mut().expect("object");
+        fields.remove("assignment");
+        fields.insert("version".into(), 2.into());
+        fields.insert(
+            "config_assignments".into(),
+            serde_json::json!({"base": "0123abcd"}),
+        );
+        fields.insert(
+            "package_assignment".into(),
+            serde_json::json!({"deployment": "stable", "package": "otelcol@1.2.3"}),
+        );
+        std::fs::write(&path, serde_json::to_vec(&old).expect("json")).expect("write");
+
+        let error = store.load().expect_err("the old shape is refused");
+        assert!(
+            error.contains(&format!("{uid}.json")),
+            "names the file: {error}"
+        );
+        assert!(
+            error.contains("version 2") && error.contains("ADR-0034"),
+            "says why: {error}"
+        );
     }
 
     /// Forgetting removes the file (ADR-0024 extended); removing the absent is not an error.

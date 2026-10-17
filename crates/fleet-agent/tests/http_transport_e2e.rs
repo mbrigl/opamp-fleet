@@ -124,7 +124,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
 #[tokio::test]
 async fn a_configuration_rollout_reaches_a_polling_client() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(AppState::new(dir.path().join("fleet-configs")).expect("store"));
+    let state = Arc::new(common::fleet_state(dir.path()));
     let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -164,18 +164,8 @@ async fn a_configuration_rollout_reaches_a_polling_client() {
     })
     .await;
 
-    state
-        .save_configuration(
-            "fleet",
-            fleet_server::configs::Revision {
-                selector: Default::default(),
-                body: "receivers: {}\n".to_string(),
-                role: String::new(),
-                service_name: String::new(),
-            },
-        )
-        .expect("save");
-    state.rollout_configuration("fleet").expect("rollout");
+    common::save(&state, "fleet", "receivers: {}\n", "");
+    common::release_to_every_agent(&state, &["fleet"]);
 
     wait_until("the polling agent to apply the configuration", || {
         let s = state.snapshot();

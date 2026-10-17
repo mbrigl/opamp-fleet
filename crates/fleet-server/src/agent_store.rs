@@ -13,7 +13,7 @@
 //! ([`FsAgentStore`](crate::fs::FsAgentStore)) answers with an owner-only directory; any other
 //! adapter must answer with its own access control.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use opamp::proto::{
     AgentDescription, AvailableComponents, ComponentHealth, ConnectionSettingsStatus,
@@ -43,13 +43,10 @@ pub struct PersistedAgent {
     pub last_seen_ms: u64,
     /// A queued restart is operator intent and survives like any other (ADR-0024).
     pub restart_pending: bool,
-    /// The Configurations the operator rolled out to this Agent (ADR-0025): name → the pinned
-    /// revision's hash. `None` marks a record persisted before the ADR, whose assignments the
-    /// fleet seeds at startup from what was published then (point 9).
-    pub config_assignments: Option<BTreeMap<String, String>>,
-    /// The package Sets the operator rolled out to this Agent (ADR-0025), keyed by package name.
-    /// `None` marks a record whose seed has not run — it runs when package delivery is armed.
-    pub package_assignment: Option<crate::fleet::PackageAssignment>,
+    /// What the operator's last rollout released to this Agent (ADR-0034 clause 5): the
+    /// Deployment, the Package pinned, and each Configuration's pinned revision. `None` — nothing
+    /// has been rolled out.
+    pub assignment: Option<crate::fleet::Assignment>,
 }
 
 impl PersistedAgent {
@@ -86,8 +83,7 @@ impl PersistedAgent {
             available_components,
             transport,
             restart_pending,
-            config_assignments,
-            package_assignment,
+            assignment,
         } = self;
         let mut digest = Sha256::new();
         field(&mut digest, &capabilities.to_le_bytes());
@@ -104,16 +100,22 @@ impl PersistedAgent {
         message(&mut digest, available_components.as_ref());
         field(&mut digest, transport.as_str().as_bytes());
         field(&mut digest, &[u8::from(*restart_pending)]);
-        field(&mut digest, &[u8::from(config_assignments.is_some())]);
-        for (name, hash) in config_assignments.iter().flatten() {
-            field(&mut digest, name.as_bytes());
-            field(&mut digest, hash.as_bytes());
-        }
-        field(&mut digest, &[u8::from(package_assignment.is_some())]);
-        if let Some(assignment) = package_assignment {
+        field(&mut digest, &[u8::from(assignment.is_some())]);
+        if let Some(assignment) = assignment {
             field(&mut digest, assignment.deployment.as_bytes());
-            field(&mut digest, assignment.package.agent_type.as_bytes());
-            field(&mut digest, assignment.package.version.as_bytes());
+            field(&mut digest, &[u8::from(assignment.package.is_some())]);
+            if let Some(package) = &assignment.package {
+                field(&mut digest, package.agent_type.as_bytes());
+                field(&mut digest, package.version.as_bytes());
+            }
+            field(
+                &mut digest,
+                &(assignment.configurations.len() as u64).to_le_bytes(),
+            );
+            for (name, hash) in &assignment.configurations {
+                field(&mut digest, name.as_bytes());
+                field(&mut digest, hash.as_bytes());
+            }
         }
         digest.finalize().into()
     }
@@ -150,6 +152,7 @@ pub trait AgentStore: Send + Sync {
 pub(crate) mod tests {
     use super::*;
     use crate::packages::PackageId;
+    use std::collections::BTreeMap;
 
     pub(crate) fn record() -> PersistedAgent {
         PersistedAgent {
@@ -177,13 +180,10 @@ pub(crate) mod tests {
             transport: Transport::WebSocket,
             last_seen_ms: 123,
             restart_pending: true,
-            config_assignments: Some(BTreeMap::from([(
-                "base".to_string(),
-                "0123abcd".to_string(),
-            )])),
-            package_assignment: Some(crate::fleet::PackageAssignment {
+            assignment: Some(crate::fleet::Assignment {
                 deployment: "stable".to_string(),
-                package: PackageId::new("otelcol", "1.2.3").expect("package id"),
+                package: Some(PackageId::new("otelcol", "1.2.3").expect("package id")),
+                configurations: BTreeMap::from([("base".to_string(), "0123abcd".to_string())]),
             }),
         }
     }
@@ -211,23 +211,34 @@ pub(crate) mod tests {
     #[test]
     fn every_durable_change_moves_the_digest() {
         let settled = record().durable_digest();
-        let changes: [fn(&mut PersistedAgent); 7] = [
+        let changes: [fn(&mut PersistedAgent); 9] = [
             |r| r.capabilities ^= 1,
             |r| r.effective_config = Some("x: 1".into()),
             |r| r.transport = Transport::Http,
             |r| r.restart_pending = !r.restart_pending,
-            |r| r.config_assignments = Some(BTreeMap::new()),
+            |r| r.assignment = None,
             |r| {
-                r.config_assignments = Some(BTreeMap::from([("a".into(), "1".into())]));
+                if let Some(a) = r.assignment.as_mut() {
+                    a.configurations.insert("a".into(), "1".into());
+                }
             },
             |r| {
-                r.package_assignment = Some(crate::fleet::PackageAssignment {
-                    deployment: "d".into(),
-                    package: PackageId {
+                if let Some(a) = r.assignment.as_mut() {
+                    a.package = None;
+                }
+            },
+            |r| {
+                if let Some(a) = r.assignment.as_mut() {
+                    a.deployment = "d".into();
+                }
+            },
+            |r| {
+                if let Some(a) = r.assignment.as_mut() {
+                    a.package = Some(PackageId {
                         agent_type: "t".into(),
                         version: "1".into(),
-                    },
-                });
+                    });
+                }
             },
         ];
         for (i, change) in changes.iter().enumerate() {

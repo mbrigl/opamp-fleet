@@ -27,11 +27,12 @@ listen = "127.0.0.1:4320"
 # limit for a fleet larger than this.
 max_connections = 10000
 
-# Where Configurations are persisted across Server restarts — one JSON file each,
-# holding the draft revision an operator edits and, once released, the published revision the
-# fleet is offered. SAVING NEVER DISTRIBUTES: a Configuration reaches the Agents of
-# its type that its Selector matches only after
-# PUT /api/v1/configurations/{name}/publication — body {"published": true}.
+# Where Configurations are persisted across Server restarts — one JSON file each, holding the
+# saved revision an operator edits and every revision still rolled out somewhere. A Configuration
+# is content only — {"body", "service_name", "role"}, no Selector — written with
+# PUT /api/v1/configurations/{name}. SAVING NEVER DISTRIBUTES: a Configuration reaches an Agent
+# only through a Deployment that holds it (see packages_dir below), when that Deployment is rolled
+# out, and only the Agents of the type its service_name names (every type when it names none).
 config_dir = "fleet-configs"
 
 # The largest OpAMP message accepted or sent, on either transport and in either direction. The
@@ -57,8 +58,8 @@ stale_after_secs = 90
 #                                            its Ed25519 signature. It aims at nobody and is never
 #                                            rolled out.
 #   <packages_dir>/deployments/<name>.json   a DEPLOYMENT: a name, the channel its Selector aims at,
-#                                            and at most one Package per Agent type. The only
-#                                            thing rolled out.
+#                                            at most one Package per Agent type, and any number
+#                                            of Configurations. The only thing rolled out.
 #
 # The Agent type is compared raw against the `service.name` the Agents report, so spell
 # it exactly — a Client updating itself is typed `supervisor`.
@@ -71,13 +72,17 @@ stale_after_secs = 90
 # entries share a platform — writing one again replaces it, and its signature with it. One
 # signature serves every Deployment that holds the Package.
 #
-# Then put it in a channel:
+# Then put it in a channel, with the Configurations that go with it:
 #   PUT  /api/v1/deployments/{name}                    body {"selector": {"channel": "stable"}}
 #   PUT  /api/v1/deployments/{name}/packages/{agent_type}/{version}
+#   PUT  /api/v1/deployments/{name}/configurations/{configuration}
 #   POST /api/v1/deployments/{name}/rollout               <- THE ONLY CALL THAT DISTRIBUTES
 #
-# SAVING NEVER DISTRIBUTES: everything above the rollout stores. An Agent that enrols, or is
-# labelled into the channel, afterwards waits for an act of its own.
+# SAVING NEVER DISTRIBUTES: everything above the rollout stores. The rollout replaces each Agent's
+# assignment with one release — the Package for its type, and every Configuration that fits its
+# type, as saved now — and sends only what changed. An Agent that enrols, or is labelled into the
+# channel, afterwards waits for an act of its own. A Deployment stays editable in every state;
+# an edit waits for the next press.
 #
 # An Agent belongs to AT MOST ONE Deployment. Two claiming it is a conflict — it is offered
 # nothing new and the fleet view names both — so a Selector may not be empty and there is no
@@ -92,7 +97,8 @@ stale_after_secs = 90
 # have both claim the same hosts.
 #
 # While a Package is rolled out to an Agent its entries are immutable; ship a change as the next
-# version, which is a new Package. Taking a bad version back is not a rollout: the fleet only
+# version, which is a new Package. Nothing an Agent's assignment pins — a Package, a Configuration
+# or a Deployment — can be deleted: roll those Agents out through a Deployment without it first. Taking a bad version back is not a rollout: the fleet only
 # moves forward, and what reverses a release is the host's own health-gated rollback.
 #
 # The download endpoint sits on the Agent plane, behind the same handshake as /v1/opamp: only an
@@ -220,8 +226,8 @@ client_ca_file = "client-ca.pem"
 #
 # Five things worth knowing before you fill this in:
 #
-#  - The destinations are FLEET-WIDE. There is no Selector here as there is on Configurations
-#    and packages: every Agent is offered the same three addresses. The only
+#  - The destinations are FLEET-WIDE. There is no Selector here as there is on Deployments:
+#    every Agent is offered the same three addresses. The only
 #    per-Agent variation is which of the three signals it gets, and that follows the capabilities
 #    the Agent itself declares.
 #  - A change here needs a SERVER RESTART. The offer is compiled once at startup; there is no

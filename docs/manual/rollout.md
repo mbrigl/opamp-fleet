@@ -253,8 +253,9 @@ Packages tab — the steps, and the comparison of hashes they depend on, are in
 
 ## 5. Put it in a deployment
 
-A **Deployment** is the channel this release goes to: a name, a Selector, and the Packages it
-offers. It is the only thing that is rolled out.
+A **Deployment** is the channel this release goes to: a name, a Selector, the Packages it offers,
+and the Configurations that go with them (step 7). It is the only thing that is rolled out, and one
+press releases the Package and the Configurations together.
 
 ```console
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "beta"}}' \
@@ -292,10 +293,11 @@ the act would actually move, which is what the press changes. `conflicting_agent
 cannot reach because a second Deployment claims them too — resolve that by narrowing a Selector,
 because the Server will not pick between two channels.
 
-The act assigns the channel's Package to every Agent it claims, **as the fleet is now**. A host that
+The act assigns the channel's release — its Package and its Configurations — to every Agent it
+claims, **as the fleet is now**. A host that
 enrols (or is labelled into the channel) afterwards is not touched: its row on the Agents tab shows
-the Package *waiting*, with a per-Agent **roll out** control — press that, or repeat the channel's
-act, when it should follow. To try one host first, use the per-Agent act:
+what it would receive *waiting*, with a per-Agent **roll out** control — press that, or repeat the
+channel's act, when it should follow. To try one host first, use the per-Agent act:
 
 ```console
 $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
@@ -303,8 +305,9 @@ $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
        https://127.0.0.1:4321/api/v1/agents/<instance_uid>/rollout
 ```
 
-It must be the Deployment that actually claims that Agent, and it is refused while a second one
-claims it too — naming one here would sidestep the conflict rather than fix it.
+It must be the Deployment that actually claims that Agent — an empty body means the same — and it
+is refused while a second one claims it too: naming one here would sidestep the conflict rather
+than fix it.
 
 **Finishing the rollout** is giving the stable channel the same version and pressing again. Widening
 the canary channel instead is *not* how it ends: both channels would then claim the same hosts, which is
@@ -312,23 +315,28 @@ a conflict, not a rollout.
 
 ## 7. Send its configuration
 
-The binary and the configuration travel independently — the Supervisor writes every matching
-Configuration into its `config/` directory under that Configuration's own name, and the program is
-pointed at it by the `-config.file=${config_dir}/promtail-conf` argument from step 1:
+The Supervisor writes every Configuration it is released into its `config/` directory under that
+Configuration's own name, and the program is pointed at it by the
+`-config.file=${config_dir}/promtail-conf` argument from step 1. A Configuration is content only —
+it has no Selector — and it reaches the Agents through the same Deployment as the binary:
 
 ```console
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
-       -d '{"service_name": "promtail", "selector": {"env": "canary"}, "body": "server:\n  http_listen_port: 9080\n"}' \
+       -d '{"service_name": "promtail", "body": "server:\n  http_listen_port: 9080\n"}' \
        https://127.0.0.1:4321/api/v1/configurations/promtail-conf
-$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/promtail-conf/rollout
+$ curl --cacert ca.pem -X PUT https://127.0.0.1:4321/api/v1/deployments/canary/configurations/promtail-conf
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/canary/rollout
 ```
 
-The first call only stores — saving never distributes; the second is the rollout act that
-releases it to every matching Agent, and the `service_name` keeps the body away from every Agent
-that is not a promtail, whatever the Selector says. The Configuration's name and the file name in
-the argument are the same string. Change the Configuration and roll it out again: the Supervisor
-rewrites the file and restarts the process so it re-reads it. An Agent keeps the exact revision
-it was rolled out — an edit waits, visible per Agent on the fleet view, until the next act.
+The first two calls only store — saving never distributes; the third is the rollout act. Done
+before step 6, the one press releases the binary and its configuration together; done after it,
+the press sends only the configuration, because the package offer has not changed and the hash
+gates send nothing twice. The `service_name` keeps the body away from every Agent of the channel
+that is not a promtail, so one channel can carry the configurations of several Agent types. The
+Configuration's name and the file name in the argument are the same string. Change the
+Configuration and press the channel again: the Supervisor rewrites the file and restarts the
+process so it re-reads it. An Agent keeps the exact revision it was rolled out — an edit waits,
+visible per Agent on the fleet view, until the next act.
 
 ## 8. Watch it land
 
@@ -346,7 +354,7 @@ What to look for, in the order it happens:
 | `packages[].version` | The version the Agent has installed; empty until the first one lands. |
 | `service_version` | What `version_args` probed from the program — but **probed once, when the Supervisor started**. After an in-place package update it still shows the version that was running then; `packages[].version` above is the field that tracks what was installed. A Collector reporting through its own `opampextension` is the exception: it re-reports for itself. |
 | `healthy`, `health_status` | `no process installed` before the first package; healthy once it runs. |
-| `remote_config_status`, `effective_config` | The configuration half of step 6. |
+| `remote_config_status`, `effective_config` | The configuration half of the release (step 7). |
 
 Behind that, on the host: the artifact is streamed to `<supervisor_dir>/promtail/packages/`,
 verified, unpacked, swapped over `program/promtail`, made executable, restarted, and **health-gated
@@ -406,7 +414,8 @@ only moves forward.
 | `InstallFailed`, the signature does not verify | The Client's `verification_key` is not the key the entry's signature was made with, or the signature belongs to another artifact. With the Server's `[packages] verification_key` set, the Packages tab shows such an entry `invalid` before the rollout. |
 | `InstallFailed`, naming an origin | The download URL, or a redirect hop, leads outside the Client's own Server origin. A Client fetches from its Server alone; this Server offers only paths, so look for a redirect off the Server's origin. |
 | The rollout answers `409` naming unsigned platforms | Sign each named entry on the Packages tab (step 4), then press again. |
-| An Agent that accepts packages is offered nothing | Two Deployments claim it, and an Agent belongs to at most one; `package_conflict` on its fleet row names both. Narrow one Selector. |
+| An Agent is offered nothing | Two Deployments claim it, and an Agent belongs to at most one; `package_conflict` on its fleet row names both. Narrow one Selector. |
+| Deleting a Configuration, a Package or a Deployment answers `409` | An Agent's assignment pins it; the message says how many. Roll those Agents out through a Deployment without it — or forget them — and delete it then. |
 | An Agent shows no deployment at all | It carries no attribute any channel's Selector matches. That is the ordinary state right after an enrolment — label it into a channel (`PUT /api/v1/agents/<uid>/labels`) or set `channel` in its `[attributes]`. |
 | A package shows `in no deployment` | Stored and unreachable: nothing aims it. Put it in a channel. |
 | A channel shows `aims at nobody` | Its Selector names an attribute nobody reports, or a value nobody carries. Compare it against the attributes on the Agents tab. |

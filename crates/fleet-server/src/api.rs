@@ -27,7 +27,7 @@ use crate::config::RestAuthConfig;
 use crate::configs::{self, Configuration, Revision};
 use crate::credentials::Credentials;
 use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
-use crate::fleet::{self, AppState, ForgetError, RestartError, RolloutError, RolloutTarget};
+use crate::fleet::{self, AppState, DeleteError, ForgetError, RestartError, RolloutError};
 use crate::labels::LabelError;
 use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
 
@@ -35,15 +35,18 @@ use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
 #[openapi(
     info(
         title = "OpAMP Fleet REST API",
-        description = "Read fleet state; create, change, and delete Selector-targeted \
-                       Configurations. The stable contract any UI or portal builds on (ADR-0023)."
+        description = "Read fleet state; create, change, and delete Configurations, Packages \
+                       and the Deployments that aim and release them. The stable contract any UI \
+                       or portal builds on (ADR-0023, ADR-0034)."
     ),
     tags(
         (name = "fleet", description = "The fleet as the Server sees it"),
-        (name = "configurations", description = "Selector-targeted Configurations"),
+        (name = "configurations", description = "Configurations: content an Agent type runs, \
+                                                 released only through a Deployment (ADR-0034)"),
         (name = "packages", description = "Software packages the Server delivers (ADR-0026)"),
-        (name = "deployments", description = "What reaches a channel of hosts — the only thing \
-                                              rolled out (ADR-0026)"),
+        (name = "deployments", description = "What reaches a channel of hosts — Packages and \
+                                              Configurations under one Selector, and the only \
+                                              thing rolled out (ADR-0026, ADR-0034)"),
         (name = "enrolment", description = "How a host gets its first certificate: a window an \
                                             operator opens, and requests an operator decides \
                                             (ADR-0021)"),
@@ -204,7 +207,6 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
             put_configuration,
             delete_configuration
         ))
-        .routes(routes!(rollout_configuration))
         .routes(routes!(list_packages))
         .routes(routes!(
             get_package_set,
@@ -220,6 +222,10 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .routes(routes!(get_deployment, put_deployment, delete_deployment))
         .routes(routes!(put_deployment_selector))
         .routes(routes!(put_deployment_package, delete_deployment_package))
+        .routes(routes!(
+            put_deployment_configuration,
+            delete_deployment_configuration
+        ))
         .routes(routes!(rollout_deployment))
         .routes(routes!(
             get_enrolment_window,
@@ -528,12 +534,12 @@ struct AgentResponse {
     identifying_attributes: BTreeMap<String, String>,
     /// Every reported non-identifying attribute — Selectors match these too.
     non_identifying_attributes: BTreeMap<String, String>,
-    /// The Configurations whose saved revision currently matches this Agent — the **candidates**
-    /// a rollout act would release to it (ADR-0025), in name order. Never what it runs; that is
-    /// [`assigned_configurations`](Self::assigned_configurations).
+    /// The Configurations a press of the Deployment claiming this Agent would release to it — the
+    /// ones it holds that fit this Agent's type (ADR-0034), in name order. Never what it runs;
+    /// that is [`assigned_configurations`](Self::assigned_configurations).
     matched_configurations: Vec<String>,
-    /// The Configurations rolled out to this Agent (ADR-0025), in name order — what its offer is
-    /// composed from.
+    /// The Configurations rolled out to this Agent (ADR-0034 clause 5), in name order — what its
+    /// offer is composed from.
     assigned_configurations: Vec<String>,
     /// The Deployment that claims this Agent **now** — whose Selector matches it — or empty when
     /// none does.
@@ -546,7 +552,7 @@ struct AgentResponse {
     /// in each case, which is why the Server says which one it is rather than showing an empty
     /// row three ways.
     deployment: String,
-    /// The Deployment this Agent's package was released **through** (ADR-0026), or empty when
+    /// The Deployment this Agent's release went **through** (ADR-0034 clause 5), or empty when
     /// nothing has been rolled out to it. Pinned as of that act, so it may name a channel that no
     /// longer claims this Agent.
     assigned_deployment: String,
@@ -556,12 +562,15 @@ struct AgentResponse {
     /// putting a newer Package in that channel, changes what is *proposed* and never what this Agent
     /// was already given.
     assigned_package: String,
-    /// The Configurations waiting for a rollout act toward this Agent (ADR-0025 point 4): a
-    /// candidate not yet assigned (`change: "new"`), or one whose saved revision is newer than
-    /// the assigned one (`change: "update"`). The Server never acts on this by itself.
+    /// The Configurations waiting for a rollout act toward this Agent (ADR-0025 point 4,
+    /// ADR-0034): one its Deployment holds and it is not assigned (`change: "new"`), one whose
+    /// saved revision differs from the assigned one (`change: "update"`), or one assigned that the
+    /// next press drops because the Deployment no longer holds it (`change: "remove"`). The
+    /// Server never acts on this by itself.
     pending_configurations: Vec<PendingConfigurationResponse>,
-    /// The Package waiting for a rollout act toward this Agent (ADR-0025 point 4) — at most one,
-    /// the candidate of the Deployment that claims it, when that is not what it is assigned.
+    /// The Package waiting for a rollout act toward this Agent (ADR-0025 point 4) — at most one:
+    /// the candidate of the Deployment that claims it, when that is not what it is assigned, or
+    /// the assigned one the next press drops (`change: "remove"`).
     pending_packages: Vec<PendingPackageResponse>,
     /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
     /// nothing.
@@ -573,9 +582,9 @@ struct AgentResponse {
     available_components: Vec<String>,
     /// The Agent's package installations (ADR-0026), in name order; empty until reported.
     packages: Vec<PackageStatusResponse>,
-    /// Why this Agent is proposed no package although it accepts them — more than one Deployment
-    /// claims it, and an Agent belongs to at most one (ADR-0026 point 26). The message names every
-    /// Deployment in the way. Absent when at most one claims it.
+    /// Why this Agent is proposed nothing — more than one Deployment claims it, and an Agent
+    /// belongs to at most one (ADR-0026 point 26). The message names every Deployment in the way.
+    /// Absent when at most one claims it.
     #[serde(skip_serializing_if = "Option::is_none")]
     package_conflict: Option<String>,
     /// What the Agent said about the *offer* rather than about a package it holds — an offer it
@@ -670,8 +679,8 @@ impl From<fleet::AgentView> for AgentResponse {
 #[schema(as = PendingConfigurationView)]
 struct PendingConfigurationResponse {
     name: String,
-    /// `new` — a candidate not yet assigned; `update` — the saved revision is newer than the
-    /// assigned one.
+    /// `new` — held by the claiming Deployment and not yet assigned; `update` — the saved
+    /// revision differs from the assigned one; `remove` — assigned, and dropped by the next press.
     change: String,
 }
 
@@ -695,7 +704,8 @@ struct PendingPackageResponse {
     version: String,
     /// What an operator reads: the Agent type and the version together.
     display_name: String,
-    /// `new` — nothing is assigned for this Agent type; `update` — another version is.
+    /// `new` — nothing is assigned for this Agent type; `update` — another version is; `remove` —
+    /// the assigned one, which the next press drops.
     change: String,
 }
 
@@ -807,8 +817,8 @@ struct LabelsBody {
     params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
     request_body = LabelsBody,
     description = "Replace this Agent's labels (ADR-0024). A label is an operator's key/value pair \
-                   that joins what a Selector matches — for Configurations and for packages alike — \
-                   so a rollout channel is a Server-side decision instead of an edit to supervisor.toml on \
+                   that joins what a Deployment's Selector matches, so a rollout channel is a \
+                   Server-side decision instead of an edit to supervisor.toml on \
                    the host. An empty map clears them. Labels never travel to the Agent, and they \
                    outlive it: forgetting an Agent does not clear them. A key the Agent already \
                    reports is refused, because reported attributes decide which artifact fits the \
@@ -844,42 +854,38 @@ async fn set_agent_labels(
     }
 }
 
-/// What a per-Agent rollout act releases (ADR-0025). Name at most one of the two; an empty body
-/// releases everything currently waiting for the Agent.
+/// What a per-Agent rollout act names (ADR-0034 clause 6): nothing, or the Deployment that claims
+/// the Agent. An empty body releases that Deployment just the same.
 #[derive(Deserialize, ToSchema, Default)]
 #[serde(deny_unknown_fields)]
 struct AgentRolloutSpec {
-    /// Release this Configuration — its saved revision, pinned as of this press.
-    #[serde(default)]
-    configuration: Option<String>,
-    /// Release this Agent's Deployment — the Package it holds for the Agent's type, pinned as of
-    /// this press.
+    /// The Deployment the operator means — the one that claims this Agent; its release replaces
+    /// the Agent's assignment, pinned as of this press.
     ///
-    /// It must be the Deployment that actually claims this Agent. Naming another is refused, and
-    /// so is naming one while a second Deployment also claims the Agent: an operator who names one
-    /// has said which they mean, but honouring that would sidestep the conflict for good instead
-    /// of fixing it, and make this path the way into a state the fleet-wide act forbids
-    /// (ADR-0026 point 30).
+    /// Naming another is refused, and so is any act while no Deployment or a second one claims the
+    /// Agent: honouring a name over a conflict would sidestep the conflict for good instead of
+    /// fixing it, and make this path the way into a state the fleet-wide act forbids.
     #[serde(default)]
     deployment: Option<String>,
 }
 
-/// Rolls a Configuration or this Agent's Deployment out to **this Agent** (ADR-0025) — or, with an empty
-/// body, everything the fleet view shows as waiting for it. The operator's press is the only
-/// thing that distributes: saving, publishing-like states, Selector edits and label moves all
-/// merely change what is *proposed* here.
+/// Rolls the Deployment that claims **this Agent** out to it (ADR-0034 clause 6): its Package for
+/// the Agent's type, if that is a candidate, and every Configuration it holds that fits the
+/// Agent's type, at its saved revision — replacing the Agent's assignment. The operator's press is
+/// the only thing that distributes: saving, Selector edits and label moves all merely change what
+/// is *proposed* here.
 #[utoipa::path(
     post,
     path = "/api/v1/agents/{instance_uid}/rollout",
     tag = "fleet",
     params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
-    request_body(content = AgentRolloutSpec, description = "What to release; empty releases everything waiting"),
+    request_body(content = AgentRolloutSpec, description = "Empty, or the claiming Deployment's name"),
     responses(
-        (status = 200, description = "Rolled out; the Agent with its new assignments", body = AgentResponse),
+        (status = 200, description = "Rolled out; the Agent with its new assignment", body = AgentResponse),
         (status = 400, description = "Malformed Instance UID or body", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such Agent, Configuration, or Deployment", body = ErrorBody),
-        (status = 409, description = "The named resource does not fit or aim at this Agent", body = ErrorBody)
+        (status = 404, description = "No such Agent", body = ErrorBody),
+        (status = 409, description = "The Agent is in no Deployment, in a conflict, or in another one than named; or the Deployment holds nothing, or a Package with an unsigned entry", body = ErrorBody)
     )
 )]
 async fn rollout_to_agent(
@@ -893,16 +899,7 @@ async fn rollout_to_agent(
         Err((status, why)) => return error(status, why),
     };
     let spec = body.map(|Json(spec)| spec).unwrap_or_default();
-    let target = match (spec.configuration, spec.deployment) {
-        (Some(_), Some(_)) => return error(
-            StatusCode::BAD_REQUEST,
-            "name a configuration or a deployment, not both — or neither for everything waiting",
-        ),
-        (Some(name), None) => RolloutTarget::Configuration(name),
-        (None, Some(deployment)) => RolloutTarget::Deployment(deployment),
-        (None, None) => RolloutTarget::Everything,
-    };
-    match state.rollout_to_agent(&uid, &target) {
+    match state.rollout_to_agent(&uid, spec.deployment.as_deref()) {
         Ok(()) => agent_response(&state, &uid),
         Err(e) => rollout_error(e),
     }
@@ -950,12 +947,11 @@ async fn forget_agent(
 }
 
 /// The writable part of a [`Configuration`] — the `PUT` request body; the name comes from the
-/// URL. Writes the saved revision (ADR-0025): saving only saves.
+/// URL. Writes the saved revision (ADR-0025): saving only saves. A Configuration is content only
+/// (ADR-0034): what aims it is the Selector of a Deployment that holds it.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct ConfigurationSpec {
-    #[serde(default)]
-    selector: std::collections::BTreeMap<String, String>,
     body: String,
     /// See [`Revision::role`]. Absent means top-level configuration.
     #[serde(default)]
@@ -963,45 +959,61 @@ struct ConfigurationSpec {
     /// See [`Revision::service_name`]. Absent means every Agent type.
     #[serde(default)]
     service_name: String,
+    /// Read only to refuse it by name: a Configuration has no Selector (ADR-0034 clause 9).
+    #[serde(default)]
+    #[schema(ignore)]
+    selector: Option<serde_json::Value>,
 }
 
-/// One Configuration as the API shows it (ADR-0025): the **saved** revision — what editing
-/// operates on and what a rollout act releases. Which Agents run which pinned revision is a fact
-/// about the Agents, answered per Agent by `GET /api/v1/agents`.
+/// One Configuration as the API shows it (ADR-0025, ADR-0034): the **saved** revision — what
+/// editing operates on and what a rollout act releases — and the Deployments holding it. Which
+/// Agents run which pinned revision is a fact about the Agents, answered per Agent by
+/// `GET /api/v1/agents`.
 #[derive(Serialize, ToSchema)]
 struct ConfigurationView {
     name: String,
-    selector: std::collections::BTreeMap<String, String>,
     body: String,
     /// The Baseline's `AgentConfigObject.role` (ADR-0023); absent means top-level configuration.
     #[serde(skip_serializing_if = "String::is_empty")]
     role: String,
-    /// The Agent type this Configuration is for (ADR-0023); absent means every type.
+    /// The Agent type this Configuration is for (ADR-0034 clause 3); absent means every type.
     #[serde(skip_serializing_if = "String::is_empty")]
     service_name: String,
+    /// The Deployments that hold this Configuration, in name order — where "whom does it reach"
+    /// is answered. Empty means it is saved and no rollout act can release it.
+    deployments: Vec<String>,
 }
 
-impl From<Configuration> for ConfigurationView {
-    fn from(config: Configuration) -> Self {
+impl ConfigurationView {
+    fn of(config: Configuration, deployments: Vec<String>) -> Self {
         ConfigurationView {
             name: config.name,
-            selector: config.saved.selector,
             body: config.saved.body,
             role: config.saved.role,
             service_name: config.saved.service_name,
+            deployments,
         }
     }
 }
 
-/// What a resource-level rollout act did (ADR-0025 point 5).
+/// One Configuration as the API answers with it, with the Deployments that hold it read now.
+fn configuration_view(state: &AppState, config: Configuration) -> ConfigurationView {
+    let deployments = state
+        .deployments_holding_configurations()
+        .remove(&config.name)
+        .unwrap_or_default();
+    ConfigurationView::of(config, deployments)
+}
+
+/// What a Deployment's rollout act did (ADR-0034 clause 6).
 #[derive(Serialize, ToSchema)]
 struct RolloutOutcome {
-    /// How many Agents the act assigned the resource to — every Agent it currently fits and
-    /// aims at. An Agent that appears later waits for its own act.
+    /// How many Agents the act assigned — every Agent the Deployment claims and the press moved.
+    /// An Agent that appears later waits for its own act.
     assigned_agents: usize,
 }
 
-/// All Configurations, in name order.
+/// All Configurations, in name order, each with the Deployments that hold it.
 #[utoipa::path(
     get,
     path = "/api/v1/configurations",
@@ -1009,12 +1021,16 @@ struct RolloutOutcome {
     responses((status = 200, description = "Every stored Configuration", body = [ConfigurationView]))
 )]
 async fn list_configurations(State(state): State<Arc<AppState>>) -> Json<Vec<ConfigurationView>> {
+    let mut holding = state.deployments_holding_configurations();
     Json(
         state
             .configurations()
             .list()
             .into_iter()
-            .map(ConfigurationView::from)
+            .map(|config| {
+                let deployments = holding.remove(&config.name).unwrap_or_default();
+                ConfigurationView::of(config, deployments)
+            })
             .collect(),
     )
 }
@@ -1035,14 +1051,17 @@ async fn get_configuration(
     Path(name): Path<String>,
 ) -> Response {
     match state.configurations().get(&name) {
-        Some(config) => Json(ConfigurationView::from(config)).into_response(),
+        Some(config) => Json(configuration_view(&state, config)).into_response(),
         None => error(StatusCode::NOT_FOUND, format!("no configuration {name:?}")),
     }
 }
 
 /// Creates a Configuration or replaces its saved revision. **Saving only saves** (ADR-0025):
 /// nothing reaches any Agent — every Agent keeps the revision its assignment pins — until a
-/// rollout act (`POST …/rollout`, or per Agent) releases the saved revision as one snapshot.
+/// rollout act of a Deployment holding it releases the saved revision as one snapshot.
+///
+/// A Configuration has no Selector (ADR-0034): a body naming one is refused, and the Deployment
+/// that holds the Configuration is where it is aimed.
 #[utoipa::path(
     put,
     path = "/api/v1/configurations/{name}",
@@ -1050,8 +1069,8 @@ async fn get_configuration(
     params(("name" = String, Path, description = "The Configuration's name (ADR-0019 grammar)")),
     request_body = ConfigurationSpec,
     responses(
-        (status = 200, description = "The stored Configuration — distributed to nobody until rolled out", body = ConfigurationView),
-        (status = 400, description = "Invalid name or empty body", body = ErrorBody),
+        (status = 200, description = "The stored Configuration — distributed to nobody until a Deployment holding it is rolled out", body = ConfigurationView),
+        (status = 400, description = "Invalid name, an empty body, or a selector", body = ErrorBody),
         (status = 500, description = "The Configuration could not be persisted", body = ErrorBody)
     )
 )]
@@ -1060,6 +1079,13 @@ async fn put_configuration(
     Path(name): Path<String>,
     Json(spec): Json<ConfigurationSpec>,
 ) -> Response {
+    if spec.selector.is_some() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "a Configuration has no selector — put it into a Deployment and aim the Deployment \
+             (PUT /api/v1/deployments/{name}/configurations/{configuration})",
+        );
+    }
     if let Err(e) = configs::validate_name(&name) {
         return error(
             StatusCode::BAD_REQUEST,
@@ -1077,25 +1103,25 @@ async fn put_configuration(
         body.push('\n');
     }
     let revision = Revision {
-        selector: spec.selector,
         body,
         // Carried verbatim (ADR-0023): the values are Agent-type-specific, so the Server never
         // validates one against a vocabulary of its own. Empty is top-level configuration.
         role: spec.role,
-        // Compared raw against the reported `service.name` (ADR-0023); empty is every type. Not
-        // validated against the fleet, because a Configuration may precede its first Agent.
+        // Compared raw against the reported `service.name` (ADR-0034 clause 3); empty is every
+        // type. Not validated against the fleet, because a Configuration may precede its first
+        // Agent.
         service_name: spec.service_name,
     };
     match state.save_configuration(&name, revision) {
         Ok(config) => {
             info!(configuration = %config.name, role = %config.saved.role, service_name = %config.saved.service_name, bytes = config.saved.body.len(), "configuration saved from the API");
-            Json(ConfigurationView::from(config)).into_response()
+            Json(configuration_view(&state, config)).into_response()
         }
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
-/// Maps a rollout refusal onto the REST contract (ADR-0025).
+/// Maps a rollout refusal onto the REST contract (ADR-0034 clause 6).
 fn rollout_error(e: RolloutError) -> Response {
     match e {
         RolloutError::UnknownAgent => error(StatusCode::NOT_FOUND, "no such agent"),
@@ -1105,50 +1131,18 @@ fn rollout_error(e: RolloutError) -> Response {
     }
 }
 
-/// Rolls a Configuration out to **every Agent it currently fits and aims at** (ADR-0025).
-///
-/// **This is the moment the fleet changes.** The saved revision is pinned as one snapshot and
-/// written into each matching Agent's assignment; a later edit changes nothing anywhere until
-/// the next rollout act. An Agent that enrols — or starts matching — later is *not* included: it
-/// surfaces in the fleet view as waiting, for its own act.
-#[utoipa::path(
-    post,
-    path = "/api/v1/configurations/{name}/rollout",
-    tag = "configurations",
-    params(("name" = String, Path, description = "The Configuration's name")),
-    responses(
-        (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
-        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No Configuration of that name", body = ErrorBody),
-        (status = 500, description = "The rollout could not be persisted", body = ErrorBody)
-    )
-)]
-async fn rollout_configuration(
-    State(state): State<Arc<AppState>>,
-    _csrf: SameOrigin,
-    Path(name): Path<String>,
-) -> Response {
-    match state.rollout_configuration(&name) {
-        Ok(assigned_agents) => {
-            info!(configuration = %name, agents = assigned_agents, "configuration rolled out from the API");
-            Json(RolloutOutcome { assigned_agents }).into_response()
-        }
-        Err(e) => rollout_error(e),
-    }
-}
-
-/// Deletes a Configuration and removes every per-Agent assignment that referenced it
-/// (ADR-0025). That is **not inert** for an Agent that had it assigned: its composed map
-/// shrinks, and it applies the map without the entry; only an Agent left assigned nothing keeps
-/// running what it runs.
+/// Deletes a Configuration — refused with `409` while an Agent's assignment pins it, saying how
+/// many (ADR-0034 clause 8). Rolling those Agents out through a Deployment without it, or
+/// forgetting them, comes first. A deleted Configuration leaves every Deployment that held it.
 #[utoipa::path(
     delete,
     path = "/api/v1/configurations/{name}",
     tag = "configurations",
     params(("name" = String, Path, description = "The Configuration's name")),
     responses(
-        (status = 204, description = "Deleted"),
+        (status = 204, description = "Deleted, and taken out of every Deployment that held it"),
         (status = 404, description = "No Configuration of that name", body = ErrorBody),
+        (status = 409, description = "An Agent's assignment pins it", body = ErrorBody),
         (status = 500, description = "The Configuration could not be deleted", body = ErrorBody)
     )
 )]
@@ -1159,7 +1153,8 @@ async fn delete_configuration(
     match state.delete_configuration(&name) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no configuration {name:?}")),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(DeleteError::Pinned(e)) => error(StatusCode::CONFLICT, e),
+        Err(DeleteError::Storage(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -1335,7 +1330,7 @@ fn package_error(e: String) -> Response {
     if e.contains("not configured") || e.starts_with("no package set") || e.starts_with("no entry")
     {
         error(StatusCode::NOT_FOUND, e)
-    } else if e.contains("immutable") || e.contains("holds no entries") {
+    } else if e.contains("immutable") || e.contains("holds no entries") || e.contains("is pinned") {
         error(StatusCode::CONFLICT, e)
     } else if e.starts_with("invalid") || e.starts_with("the ") || e.contains("empty") {
         error(StatusCode::BAD_REQUEST, e)
@@ -1440,9 +1435,9 @@ async fn put_package_set(
     }
 }
 
-/// Deletes a Package — entries, artifacts, metadata, and every per-Agent assignment that
-/// referenced it (ADR-0025): the offer is withdrawn, and Agents that installed it keep running it
-/// (ADR-0026).
+/// Deletes a Package — entries, artifacts and metadata — refused with `409` while an Agent's
+/// assignment pins it, saying how many (ADR-0034 clause 8). A deleted Package leaves every
+/// Deployment that held it; nothing is ever uninstalled (ADR-0026).
 #[utoipa::path(
     delete,
     path = "/api/v1/packages/{agent_type}/{version}",
@@ -1455,6 +1450,7 @@ async fn put_package_set(
         (status = 204, description = "Deleted"),
         (status = 400, description = "Invalid identity", body = ErrorBody),
         (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "An Agent's assignment pins the Package", body = ErrorBody),
         (status = 500, description = "The Set could not be deleted", body = ErrorBody)
     )
 )]
@@ -1883,7 +1879,8 @@ fn read_chunks(
 }
 
 // -------------------------------------------------------------------------------------------
-// Deployments (ADR-0026): the aim and the act — what a Package does not have.
+// Deployments (ADR-0026, ADR-0034): the aim and the act — what a Package and a Configuration do
+// not have.
 // -------------------------------------------------------------------------------------------
 
 /// One Deployment as the REST API shows it.
@@ -1897,15 +1894,19 @@ struct DeploymentView {
     selector: std::collections::BTreeMap<String, String>,
     /// At most one Package per Agent type — an Agent has one binary to replace.
     packages: Vec<DeploymentPackageView>,
+    /// The Configurations it holds, by name, in name order (ADR-0034). Each reaches the Agents of
+    /// this channel whose type it fits.
+    configurations: Vec<String>,
     /// Agents this channel claims, and no other does.
     ///
     /// **Zero is the value worth looking at**: a channel aims at nobody when its Selector names an
     /// attribute no Agent reports, or a value none of them carries — and neither is a rejected
     /// write, so nothing else would say so.
     claiming_agents: usize,
-    /// Of those, the Agents a rollout act would actually move — this channel holds a Package for what
-    /// they report and it is an upgrade (ADR-0025). Zero here with a non-zero `claiming_agents`
-    /// means everyone in the channel already runs it: nothing to do, and nothing wrong.
+    /// Of those, the Agents a rollout act would actually move — what it would release to them
+    /// differs from what their assignment pins (ADR-0034 clause 6). Zero here with a non-zero
+    /// `claiming_agents` means everyone in the channel already holds it: nothing to do, and nothing
+    /// wrong.
     targeted_agents: usize,
     /// Agents this channel matches that **another Deployment matches too**. They are offered nothing
     /// new until an operator narrows a Selector, and they are not in `claiming_agents`.
@@ -1940,6 +1941,7 @@ impl DeploymentView {
             name: deployment.name,
             selector: deployment.selector,
             packages,
+            configurations: deployment.configurations.into_iter().collect(),
             claiming_agents: reach.claiming,
             targeted_agents: reach.targeted,
             conflicting_agents: reach.conflicting,
@@ -1970,7 +1972,7 @@ fn deployment_error(refusal: DeploymentError) -> Response {
     let text = refusal.to_string();
     match refusal {
         E::Invalid(_) => error(StatusCode::BAD_REQUEST, text),
-        E::NotFound => error(StatusCode::NOT_FOUND, text),
+        E::NotFound | E::Missing(_) => error(StatusCode::NOT_FOUND, text),
         E::TypeTaken { .. } | E::Conflict(_) => error(StatusCode::CONFLICT, text),
         E::Storage(_) => error(StatusCode::INTERNAL_SERVER_ERROR, text),
     }
@@ -2079,9 +2081,9 @@ async fn put_deployment(
     }
 }
 
-/// Deletes a Deployment — refused with `409` while an Agent's assignment names it (ADR-0026 point
-/// 31). Rolling those Agents out through another Deployment, or deleting the Package, ends the
-/// offer first. Nothing is uninstalled either way (ADR-0025).
+/// Deletes a Deployment — refused with `409` while an Agent's assignment names it, saying how many
+/// (ADR-0034 clause 8). Rolling those Agents out through another Deployment, or forgetting them,
+/// comes first. Nothing is uninstalled either way (ADR-0025).
 #[utoipa::path(
     delete,
     path = "/api/v1/deployments/{name}",
@@ -2107,7 +2109,7 @@ async fn delete_deployment(
     }
 }
 
-/// Re-aims a Deployment. Editable in every state — aim is not bytes, and moving a channel is how a
+/// Re-aims a Deployment. Editable in every state (ADR-0034 clause 7) — moving a channel is how a
 /// rollout proceeds. It changes whom the *next* act would reach, never a running offer.
 #[utoipa::path(
     put,
@@ -2185,8 +2187,8 @@ async fn put_deployment_package(
     }
 }
 
-/// Takes a Package out of a Deployment — refused while an Agent's assignment released through this
-/// Deployment pins it (ADR-0026 point 31).
+/// Takes a Package out of a Deployment. Editable in every state (ADR-0034 clause 7): an Agent
+/// already released keeps the Package its assignment pins until the next press, which drops it.
 #[utoipa::path(
     delete,
     path = "/api/v1/deployments/{name}/packages/{agent_type}/{version}",
@@ -2199,8 +2201,7 @@ async fn put_deployment_package(
     responses(
         (status = 200, description = "The Deployment, without the Package", body = DeploymentView),
         (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
-        (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "An Agent's assignment released through this Deployment pins the Package", body = ErrorBody)
+        (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody)
     )
 )]
 async fn delete_deployment_package(
@@ -2217,18 +2218,71 @@ async fn delete_deployment_package(
     }
 }
 
+/// Puts a Configuration into a Deployment (ADR-0034 clause 4). A Configuration may sit in several
+/// Deployments; holding it already is the same request arriving twice. **This distributes
+/// nothing**: the Agents of the channel see it waiting until the next press.
+#[utoipa::path(
+    put,
+    path = "/api/v1/deployments/{name}/configurations/{configuration}",
+    tag = "deployments",
+    params(
+        ("name" = String, Path, description = "the Deployment's name"),
+        ("configuration" = String, Path, description = "the Configuration's name")
+    ),
+    responses(
+        (status = 200, description = "The Deployment, with the Configuration", body = DeploymentView),
+        (status = 404, description = "No such Deployment or Configuration, or package delivery is not configured", body = ErrorBody)
+    )
+)]
+async fn put_deployment_configuration(
+    State(state): State<Arc<AppState>>,
+    Path((name, configuration)): Path<(String, String)>,
+) -> Response {
+    match state.put_deployment_configuration(&name, &configuration) {
+        Ok(deployment) => deployment_response(&state, deployment),
+        Err(e) => deployment_error(e),
+    }
+}
+
+/// Takes a Configuration out of a Deployment. Editable in every state (ADR-0034 clause 7): an
+/// Agent already released keeps the revision its assignment pins until the next press, which drops
+/// it from the Agent's map.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/deployments/{name}/configurations/{configuration}",
+    tag = "deployments",
+    params(
+        ("name" = String, Path, description = "the Deployment's name"),
+        ("configuration" = String, Path, description = "the Configuration's name")
+    ),
+    responses(
+        (status = 200, description = "The Deployment, without the Configuration", body = DeploymentView),
+        (status = 404, description = "No such Deployment, or it does not hold the Configuration, or package delivery is not configured", body = ErrorBody)
+    )
+)]
+async fn delete_deployment_configuration(
+    State(state): State<Arc<AppState>>,
+    Path((name, configuration)): Path<(String, String)>,
+) -> Response {
+    match state.remove_deployment_configuration(&name, &configuration) {
+        Ok(deployment) => deployment_response(&state, deployment),
+        Err(e) => deployment_error(e),
+    }
+}
+
 /// `?replace=true` on putting a Package into a Deployment.
 #[derive(Deserialize, IntoParams)]
 struct ReplaceQuery {
     replace: Option<bool>,
 }
 
-/// Rolls a Deployment out to **every Agent it claims** (ADR-0025 point 5, ADR-0026 point 29).
+/// Rolls a Deployment out to **every Agent it claims and would move** (ADR-0034 clause 6).
 ///
-/// **This is the moment the fleet changes.** Each claimed Agent's assignment is written with this
-/// channel and the Package it holds for what that Agent reports, pinned as of this press. An Agent
-/// that enrols — or is labelled into the channel — later is *not* included: it surfaces in the fleet
-/// view as waiting, for its own act.
+/// **This is the moment the fleet changes.** Each such Agent's assignment is replaced with this
+/// channel's release, pinned as of this press: the Package it holds for the Agent's type, if that
+/// is a candidate, and every Configuration it holds that fits the Agent's type, at its saved
+/// revision. The hash gates send only what changed. An Agent that enrols — or is labelled into the
+/// channel — later is *not* included: it surfaces in the fleet view as waiting, for its own act.
 ///
 /// An Agent some **other** Deployment also claims is skipped rather than counted. Its conflict is
 /// reported on the Agent, and a press that quietly resolved it here would be the ranking this
@@ -2243,7 +2297,7 @@ struct ReplaceQuery {
         (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Deployment holds no packages", body = ErrorBody)
+        (status = 409, description = "The Deployment holds no Package and no Configuration, or a Package with an unsigned entry", body = ErrorBody)
     )
 )]
 async fn rollout_deployment(

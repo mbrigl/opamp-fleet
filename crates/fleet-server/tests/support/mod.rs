@@ -55,6 +55,20 @@ pub async fn spawn_with(offer: Option<fleet_server::fleet::ConnectionOffer>) -> 
     .await
 }
 
+/// The fleet state on `dir`, wired as the binary wires it: the Configuration store under
+/// `fleet-configs`, and an empty package store under `packages`, which arms the Deployments that
+/// release Configurations and Packages alike (ADR-0034).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub fn state_on(dir: &std::path::Path) -> AppState {
+    let packages =
+        fleet_server::packages::PackageStore::open(dir.join("packages")).expect("package store");
+    AppState::new(dir.join("fleet-configs"))
+        .expect("open the configuration store")
+        .with_packages(Some(
+            fleet_server::fleet::PackageOffering::new(packages).expect("deployments"),
+        ))
+}
+
 async fn spawn_full(
     offer: Option<fleet_server::fleet::ConnectionOffer>,
     limit: usize,
@@ -64,8 +78,7 @@ async fn spawn_full(
     opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
-        AppState::new(dir.path().join("fleet-configs"))
-            .expect("open the configuration store")
+        state_on(dir.path())
             .with_connection_offer(offer)
             .with_max_message_size(limit)
             .with_stale_after(stale_after),
@@ -187,44 +200,90 @@ pub fn compressed_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer 
     }
 }
 
+/// The Deployment [`distribute`] releases through: it claims every scaffolded Agent, since they all
+/// report [`AGENT_TYPE`].
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub const FLEET_DEPLOYMENT: &str = "fleet";
+
 /// Stores **and rolls out** a Configuration through the REST API v1, the way an operator (or
-/// portal) does — two calls (ADR-0025), because saving alone distributes nothing and the rollout
-/// act is what assigns it to every currently matching Agent.
-#[allow(dead_code)]
-pub async fn distribute(rest_addr: SocketAddr, name: &str, selector: &[(&str, &str)], body: &str) {
-    distribute_with_role(rest_addr, name, selector, body, "").await;
+/// portal) does (ADR-0034): the Configuration is saved, held by the [`FLEET_DEPLOYMENT`] that
+/// claims the whole scaffolded fleet, and that Deployment is rolled out — saving alone distributes
+/// nothing (ADR-0025).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn distribute(rest_addr: SocketAddr, name: &str, body: &str) {
+    distribute_with_role(rest_addr, name, body, "").await;
 }
 
 /// [`distribute`] with the Baseline's `AgentConfigObject.role` set (ADR-0023); an empty role is the
 /// ordinary top-level configuration and stays out of the request.
-pub async fn distribute_with_role(
-    rest_addr: SocketAddr,
-    name: &str,
-    selector: &[(&str, &str)],
-    body: &str,
-    role: &str,
-) {
-    let selector: std::collections::BTreeMap<&str, &str> = selector.iter().copied().collect();
-    let mut spec = serde_json::json!({ "selector": selector, "body": body });
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn distribute_with_role(rest_addr: SocketAddr, name: &str, body: &str, role: &str) {
+    save_configuration(rest_addr, name, body, role).await;
+    deploy(
+        rest_addr,
+        FLEET_DEPLOYMENT,
+        &[("service.name", AGENT_TYPE)],
+        &[name],
+    )
+    .await;
+}
+
+/// Saves a Configuration through the REST API — content only, distributed to nobody.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn save_configuration(rest_addr: SocketAddr, name: &str, body: &str, role: &str) {
+    let mut spec = serde_json::json!({ "body": body });
     if !role.is_empty() {
         spec["role"] = role.into();
     }
-    let client = reqwest::Client::new();
-    let response = client
+    let response = reqwest::Client::new()
         .put(format!("http://{rest_addr}/api/v1/configurations/{name}"))
         .json(&spec)
         .send()
         .await
         .expect("put the configuration");
     assert_eq!(response.status(), 200, "the configuration is accepted");
+}
+
+/// Aims the Deployment `name` at `selector`, puts `configurations` into it beside what it already
+/// holds, and rolls it out through the REST API (ADR-0034).
+#[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
+pub async fn deploy(
+    rest_addr: SocketAddr,
+    name: &str,
+    selector: &[(&str, &str)],
+    configurations: &[&str],
+) {
+    let client = reqwest::Client::new();
+    let selector: std::collections::BTreeMap<&str, &str> = selector.iter().copied().collect();
+    let response = client
+        .put(format!("http://{rest_addr}/api/v1/deployments/{name}"))
+        .json(&serde_json::json!({ "selector": selector }))
+        .send()
+        .await
+        .expect("put the deployment");
+    assert_eq!(response.status(), 200, "the deployment is accepted");
+    for configuration in configurations {
+        let response = client
+            .put(format!(
+                "http://{rest_addr}/api/v1/deployments/{name}/configurations/{configuration}"
+            ))
+            .send()
+            .await
+            .expect("hold the configuration");
+        assert_eq!(
+            response.status(),
+            200,
+            "the deployment holds {configuration}"
+        );
+    }
     let response = client
         .post(format!(
-            "http://{rest_addr}/api/v1/configurations/{name}/rollout"
+            "http://{rest_addr}/api/v1/deployments/{name}/rollout"
         ))
         .send()
         .await
-        .expect("roll out the configuration");
-    assert_eq!(response.status(), 200, "the configuration is rolled out");
+        .expect("roll out the deployment");
+    assert_eq!(response.status(), 200, "the deployment is rolled out");
 }
 
 /// A clock a test moves by hand, so a rate limit refills when the test says (ADR-0013).
@@ -260,15 +319,9 @@ pub async fn spawn_with_agent_rate(
     opamp::tls::install_ring_provider();
     let clock = ManualClock::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(
-        AppState::new(dir.path().join("fleet-configs"))
-            .expect("open the configuration store")
-            .with_agent_rate(Some(Arc::new(fleet_server::agent_rate::AgentRate::new(
-                limits,
-                100,
-                clock.clone(),
-            )))),
-    );
+    let state = Arc::new(state_on(dir.path()).with_agent_rate(Some(Arc::new(
+        fleet_server::agent_rate::AgentRate::new(limits, 100, clock.clone()),
+    ))));
     let (addr, rest_addr) = serve(state.clone(), fleet_server::transport::Admission::open()).await;
     (
         TestServer {
@@ -286,11 +339,7 @@ pub async fn spawn_with_agent_rate(
 pub async fn spawn_with_telemetry(offer: fleet_server::fleet::TelemetryOffer) -> TestServer {
     opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(
-        AppState::new(dir.path().join("fleet-configs"))
-            .expect("open the configuration store")
-            .with_telemetry_offer(offer),
-    );
+    let state = Arc::new(state_on(dir.path()).with_telemetry_offer(offer));
     let (addr, rest_addr) = serve(state.clone(), fleet_server::transport::Admission::open()).await;
     TestServer {
         addr,

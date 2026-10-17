@@ -24,13 +24,14 @@ a service.
 
 ## What the Server does
 
-- **Distributes Configurations to the Agents a Selector names — when you say so**: saving stores,
-  an explicit rollout act releases, and every push is gated on a content hash so nothing the
-  Agent already runs is sent again.
+- **Distributes Configurations and packages through Deployments — when you say so**: a
+  Deployment's Selector aims, saving stores, an explicit rollout act of the Deployment releases,
+  and every push is gated on a content hash so nothing the Agent already runs is sent again.
 - **Tracks the fleet**: which Agents exist, what they report, whether they are connected, healthy,
-  and in sync, which Configurations match them, and which packages they have installed.
-- **Distributes packages**: versioned Sets of uploaded, signed artifacts, aimed at part of the
-  fleet by a Deployment's Selector — released only by an explicit rollout act,
+  and in sync, which Deployment claims them and what it would release, and which packages they
+  have installed.
+- **Distributes packages**: versioned Sets of uploaded, signed artifacts, held by a Deployment
+  beside its Configurations — released only by an explicit rollout act,
   and only ever forwards: a Package reaches an Agent when it is an upgrade over the version that
   Agent reports installed, never when it would move it back or leave it where it is.
 - **Restarts a Managed Process on request** — an Agent backed by a Supervisor accepts a restart
@@ -668,37 +669,35 @@ Agent asks again. Refusals past ten a second from one address are counted into o
 
 ## Configurations: what the fleet runs
 
-A **Configuration** is a name, a body of text, an optional **Agent type**, an optional
-**Selector**, and an optional **role**.
+A **Configuration** is content: a name, a body of text, an optional **Agent type**, and an
+optional **role**. It has no Selector and is never rolled out by itself — a
+[Deployment](#packages-and-deployments-distributing-software) holds it, and the Deployment's
+Selector aims it. One Configuration may sit in several Deployments.
 
 **Names** become file names here, config-map keys on the wire, and entry files on every Client
 — including Windows ones. The grammar is therefore narrow: 1–32 characters, lowercase letters,
 digits, and `-`, not starting or ending with `-`, and not a Windows reserved device name (`con`,
 `nul`, `com1`, …).
 
-**Saving never distributes**. `PUT` stores the Configuration — complete, aimed, and reaching
-nobody. Distribution is a **rollout act**, and there are two of the same meaning:
-`POST …/rollout` releases the saved text to **every Agent it currently fits and aims at**, and
-the per-Agent control on the fleet view releases it to one Agent. Either act pins a snapshot:
-the Agent keeps exactly the revision it was rolled out, so a later edit changes nothing anywhere
-— the fleet view shows the newer save *waiting* per Agent — until the next act. An Agent that
-connects (or starts matching) after the act waits the same way: nothing is distributed by
-enrolment, by a Selector edit, or by a label move.
+**Saving never distributes**. `PUT` stores the Configuration and reaches nobody. A body naming a
+`selector` is refused `400`: aim it by putting it into a Deployment. Distribution is the
+Deployment's **rollout act** — `POST /api/v1/deployments/{name}/rollout` for every Agent it
+claims, or the per-Agent press on the fleet view. Either act pins a snapshot: the Agent keeps
+exactly the revision it was rolled out, so a later edit changes nothing anywhere — the fleet view
+shows the newer save *waiting* per Agent — until the next act. An Agent that connects (or is
+labelled into a Deployment) after the act waits the same way: nothing is distributed by
+enrolment, by a Deployment edit, or by a label move.
 
-**Deleting is not inert**: removing a Configuration removes it from every Agent it was rolled out
-to; those Agents apply their config map without the entry and restart. Only an Agent left with
-nothing assigned keeps running what it runs.
+**Nothing in use can be deleted**: deleting a Configuration that any Agent's assignment pins is
+refused `409`, and the answer says how many Agents pin it. Roll those Agents out through a
+Deployment that no longer holds it — they apply their config map without the entry — or forget
+them, and then delete it. A deleted Configuration leaves every Deployment that held it.
 
-**The type decides whom it can reach at all**. `service_name`, when set, must equal
-the `service.name` the Agent reports — compared raw, before the Selector. Unset means every type,
-which for a Collector body is rarely what you want: every Agent a Client presents accepts remote
-configuration, so an untyped fleet-wide body reaches Foreign Agents and the Client's own Agent
-too. (A Selector pair `service.name=…` still works; the field is the visible, first-class way to
-say the same thing.)
-
-**The Selector decides who gets it.** Each `key=value` pair must equal an attribute the Agent
-reported — identifying or non-identifying, both are matched. An empty Selector targets every
-Agent of the type (or every Agent, if no type is set either).
+**The type decides which Agents of the Deployment receive it**. `service_name`, when set, must
+equal the `service.name` the Agent reports — compared raw. Unset means every Agent the Deployment
+claims, which for a Collector body is rarely what you want: every Agent a Client presents accepts
+remote configuration, so an untyped body reaches Foreign Agents and the Client's own Agent too.
+That is how one Deployment serves several Agent types.
 
 The examples on this page call the Operator plane on the loopback, over TLS. `--cacert ca.pem`
 names the CA that signed the Server's certificate. Off the loopback, add the
@@ -706,14 +705,15 @@ names the CA that signed the Server's certificate. Off the loopback, add the
 
 ```console
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
-       -d '{"service_name": "otelcol-contrib", "selector": {"os.type": "linux", "env": "prod"}, "body": "receivers: {}"}' \
-       https://127.0.0.1:4321/api/v1/configurations/linux-prod
-$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/linux-prod/rollout
+       -d '{"service_name": "otelcol-contrib", "body": "receivers: {}"}' \
+       https://127.0.0.1:4321/api/v1/configurations/contrib-base
+$ curl --cacert ca.pem -X PUT https://127.0.0.1:4321/api/v1/deployments/stable/configurations/contrib-base
+$ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/stable/rollout
 ```
 
-**Several Configurations may match one Agent.** It receives all of them, as named entries in one
-config map, and merges them itself. An Agent matching none is left running what it already runs —
-the Server never blanks an Agent by omission.
+**A Deployment may hold several Configurations.** An Agent receives every one that fits its type,
+as named entries in one config map, and merges them itself. An Agent in no Deployment is offered
+nothing and keeps running what it already runs — the Server never blanks an Agent by omission.
 
 **The role marks content that is not configuration**. `role: "supplementary"` means the
 Managed Process reads this content *by path* — a rule file, a lookup table — so the Client writes it
@@ -730,8 +730,9 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
 
 **Nothing is sent twice.** The Server composes the entries an Agent was **rolled out**, hashes
 them, and compares that hash to what the Agent reports. Equal hashes mean nothing crosses the
-wire. This is why repeating a rollout act with unchanged content is free, and why a role change
-*does* reach the fleet once rolled out: the role is part of the hash.
+wire. This is why repeating a rollout act with unchanged content is free, why a press that changed
+only a Configuration sends no package offer (and the reverse), and why a role change *does* reach
+the fleet once rolled out: the role is part of the hash.
 
 **How a change travels.** The rollout act is the moment it starts — over WebSocket the Server
 pushes it within a second; over plain HTTP it rides the Agent's next poll. The Agent then reports
@@ -739,11 +740,12 @@ the configuration back as applied or failed, with the hash it applied — visibl
 row as `remote_config_status`, `remote_config_error`, and `in_sync`.
 
 **The fleet view shows what waits.** Per Agent, `GET /api/v1/agents` answers what is rolled out
-to it (`assigned_configurations`, `assigned_packages`) and what could be
-(`pending_configurations`, `pending_packages` — a candidate not yet rolled out, or a newer save
-than the one in force). The Server never acts on the waiting list by itself; the per-Agent
-rollout (`POST /api/v1/agents/{instance_uid}/rollout`, empty body for everything waiting, or
-`{"configuration": "…"}` / `{"package": {…}}` for one resource) is the operator's press.
+to it (`assigned_deployment`, `assigned_configurations`, `assigned_package`) and what the next
+press of its Deployment would change (`pending_configurations`, `pending_packages`, each with a
+`change`: `new`, `update` — a newer save or version — or `remove` — the Deployment no longer
+releases it to this Agent). The Server never acts on the waiting list by itself; the per-Agent
+rollout (`POST /api/v1/agents/{instance_uid}/rollout`, with an empty body or
+`{"deployment": "…"}` naming the Deployment that claims the Agent) is the operator's press.
 
 ## Packages and Deployments: distributing software
 
@@ -754,11 +756,13 @@ store holds something. Two objects share that directory, and the split is the wh
   the version**, and it holds one entry per platform — the Linux build, the macOS builds, the
   Windows build — each an uploaded artifact with its SHA-256 and the operator's **signature**.
   Nothing else: no name of its own, no Selector. It aims at nobody and is never rolled out.
-- A **Deployment** is *where that goes*. A name, the **channel** it aims at, and one Package per
-  Agent type. It is the only thing that is rolled out.
+- A **Deployment** is *where that goes*. A name, the **channel** it aims at, one Package per Agent
+  type, and any number of [Configurations](#configurations-what-the-fleet-runs). It is the only
+  thing that is rolled out, and one press releases its Packages and its Configurations together.
 
 An Agent belongs to **at most one Deployment**. Two matching the same Agent is a conflict: that
-Agent is offered nothing new, and the fleet view says so on its row in `package_conflict`. There
+Agent is offered nothing new — no Package and no Configuration — and the fleet view says so on its
+row in `package_conflict`. There
 is no most-specific-wins and no newest-wins — a rule that decides which artifact a host gets by
 comparing every stored object against every other is a rule nobody can evaluate by looking at
 anything.
@@ -870,7 +874,11 @@ $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/canary/
 ```
 
 **Nothing is offered before that last line.** Everything above stores; the **rollout act** is the
-only thing that distributes, the same act Configurations have. Five platforms' artifacts can be
+only thing that distributes, for the Package and the channel's Configurations alike. The press
+replaces each Agent's assignment with one release: the Package the channel holds for its type,
+when that is an upgrade, and every Configuration that fits its type, at its saved revision. A
+Package the press cannot move — the Agent already runs it, or it would move it backwards — stays
+pinned as it is. Five platforms' artifacts can be
 uploaded, signed, put in a channel and then released together, and the window in which a
 half-described release is already reaching the fleet does not exist. An Agent that enrols — or is
 labelled into the channel — later waits, marked pending on its fleet row, for an act of its own.
@@ -880,17 +888,22 @@ second is refused `409` naming the one in the way; `?replace=true` is how you sa
 the version the channel runs. Adding the same one again is the same request arriving twice and
 succeeds.
 
-A rollout of a Deployment holding a Package with an unsigned entry is refused `409`, naming each
-Package and the platforms it is unsigned for, and nothing is released. The UI marks such a package
-`⚠` on the channel's row.
+A rollout of a Deployment holding no Package and no Configuration is refused `409`, and so is one
+holding a Package with an unsigned entry — naming each such Package and the platforms it is
+unsigned for — and nothing is released. The UI marks such a package `⚠` on the channel's row.
 
 **While a Package is rolled out to at least one Agent its entries are frozen**, signatures
 included (the fleet is installing those bytes; uploads and signature writes answer `409`); ship a
-change as the next version, which is a new Package. On the channel, the same rule covers its hold
-on a Package it released: removing it answers `409`. **Swapping the
-version a channel holds is not frozen**, because that is how a rollout proceeds: the hosts already
-released keep what they have, and the new version shows as waiting until the next press. Deleting a Package withdraws it from every Agent it was rolled out to, and **nothing is
-uninstalled** — an Agent keeps running what it installed. Deleting a Deployment does the same.
+change as the next version, which is a new Package. **The channel freezes nothing**: its Selector,
+its Packages and its Configurations stay editable in every state, because an Agent's assignment
+pins the Package and the revisions themselves. Swapping the version a channel holds, editing a
+Configuration or taking one out is how a rollout proceeds: the hosts already released keep what
+they have, and the change shows as waiting until the next press.
+
+**Nothing in use can be deleted.** Deleting a Package or a Deployment that an Agent's assignment
+pins is refused `409`, saying how many Agents pin it; roll those Agents out through a Deployment
+without it, or forget them, first. A deleted Package leaves every Deployment that held it, and
+**nothing is uninstalled** — an Agent keeps running what it installed.
 
 ### The canary shape
 
@@ -929,7 +942,7 @@ hunting for:
 | count | zero means |
 |---|---|
 | `claiming_agents` | the channel aims at nobody — a Selector naming an attribute nobody reports, or a value nobody carries |
-| `targeted_agents` | everyone it claims already runs what it holds; nothing to do |
+| `targeted_agents` | everyone it claims already holds what a press would release; nothing to do |
 | `conflicting_agents` | *non*-zero is the one to act on: another channel claims those Agents too |
 
 On the other side, each Agent's row says which channel claims it (`deployment`) as well as which one
@@ -940,7 +953,7 @@ in each:
 | the row shows | what it means | what to do |
 |---|---|---|
 | no `deployment`, no conflict | no channel's Selector matches this host | label it, or give it a `channel` attribute |
-| a `deployment`, nothing assigned, nothing pending | the channel holds nothing this Agent can take — no Package for its type, none for its platform, or an entry without a signature | upload the entry, put the right Package in the channel, or sign the entry |
+| a `deployment`, nothing assigned, nothing pending | the channel holds nothing this Agent can take — no Configuration for its type, and no Package for its type or its platform | put the right Configuration or Package in the channel, or upload the entry |
 | a `deployment` and something pending | it is waiting for a rollout act | press it |
 | `package_conflict` | two channels claim it | narrow one Selector |
 
@@ -948,8 +961,9 @@ in each:
 installed is part of matching: a Package reaches it only if the Package's version is **greater**,
 compared as SemVer (major, minor, patch, then the pre-release rules). Equal is not greater — a
 Package an Agent already runs reaches it with nothing — and a reported version nothing can order
-is refused rather than guessed at. The bulk act skips such Agents; the per-Agent act answers `409`
-and says which version the Agent reports.
+is refused rather than guessed at. The bulk act leaves the package part of such Agents as it is;
+a per-Agent press that would change nothing because of it answers `409` and says which version the
+Agent reports.
 
 **An Agent that reports no version for the package is held against the version it reports
 *running*** — its `service.version`.
@@ -990,11 +1004,10 @@ stays in the store — but **taking a bad version back is not a rollout**:
   will carry.
 
 **Deleting.** `DELETE /api/v1/packages/otelcol-contrib/0.109.0` removes the Package — its entries,
-artifacts, metadata, and every per-Agent assignment that referenced it; the entry route with a
-platform removes just that one entry. `DELETE` on a Deployment is refused (`409`) while an Agent's
-assignment still names it: roll those Agents out through another Deployment, or delete the
-Package, first. Nothing is uninstalled by any
-of them.
+artifacts and metadata — and takes it out of every Deployment that held it; the entry route with a
+platform removes just that one entry. Both, and `DELETE` on a Deployment, are refused (`409`)
+while an Agent's assignment pins what they name: roll those Agents out through another Deployment,
+or forget them, first. Nothing is uninstalled by any of them.
 
 **Building and signing**. The helper that ships with the Client writes the
 artifact, hashes it, and signs it:
@@ -1070,31 +1083,31 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 
 | Method & path | What it does |
 |---|---|
-| `GET /api/v1/agents` | The whole fleet: every Agent, its attributes, capabilities, matching Configurations, package installations, health, and sync state. |
+| `GET /api/v1/agents` | The whole fleet: every Agent, its attributes, capabilities, the Deployment that claims it, what is rolled out to it and what waits, package installations, health, and sync state. |
 | `POST /api/v1/agents/{instance_uid}/restart` | Queue a restart of that Agent's Managed Process. Delivered on the next exchange — pushed over WebSocket, on the next poll over plain HTTP. Only Supervisor-backed Agents accept it; a Client's own Agent has no process to restart. |
 | `PUT /api/v1/agents/{instance_uid}/labels` | Set this Agent's labels — see [Labels: rollout channels without touching the host](#labels-rollout-channels-without-touching-the-host). Body: `{"labels": {…}}`; an empty map clears them. |
 | `DELETE /api/v1/agents/{instance_uid}` | Forget this Agent — see [Forgetting an Agent](#forgetting-an-agent) below. Reaches no host. `409` while it is still reporting. |
-| `POST /api/v1/agents/{instance_uid}/rollout` | The per-Agent rollout act. Empty body: everything the fleet view shows as waiting for this Agent. `{"configuration": "…"}` or `{"package": {"name": "…", "agent_type": "…", "version": "…"}}`: that one resource — any version that fits, aims at, and would upgrade this Agent; `409` with the reason when it would not. |
-| `GET /api/v1/configurations` | Every Configuration — the saved revision each. |
+| `POST /api/v1/agents/{instance_uid}/rollout` | The per-Agent rollout act: releases the Deployment that claims this Agent to it, replacing its assignment. Empty body, or `{"deployment": "…"}` naming that Deployment. `409` when the Agent is in no Deployment, in a conflict, or in another one than named, when the Deployment holds nothing or a Package with an unsigned entry, and when the press would change nothing because the Package it holds is no upgrade (the reason names the version). |
+| `GET /api/v1/configurations` | Every Configuration — the saved revision each, with the Deployments that hold it. |
 | `GET /api/v1/configurations/{name}` | One Configuration. |
-| `PUT /api/v1/configurations/{name}` | Create it, or replace its saved revision. Body: `{"selector": {…}, "body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted. **Distributes nothing**. |
-| `POST /api/v1/configurations/{name}/rollout` | Roll the saved revision out to every Agent it currently fits and aims at — the moment a change starts travelling. Answers how many Agents were assigned. |
-| `DELETE /api/v1/configurations/{name}` | Remove it — from every Agent it was rolled out to as well, which those Agents apply. |
+| `PUT /api/v1/configurations/{name}` | Create it, or replace its saved revision. Body: `{"body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted; a `selector` is refused `400`. **Distributes nothing**. |
+| `DELETE /api/v1/configurations/{name}` | Remove it, and take it out of every Deployment that holds it. `409` while an Agent's assignment pins it, saying how many. |
 | `GET /api/v1/packages` | Every stored Package (never the artifact bytes), each with its entries — their hash, size, signature and `signature_state` — and the Deployments that hold it. |
 | `PUT /api/v1/packages/{agent_type}/{version}` | Create a Package. The body has no writable field — `{}`. **Distributes nothing**. |
 | `GET /api/v1/packages/{agent_type}/{version}` | One Package. |
 | `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body); new bytes remove the entry's signature. `409` while the Package is rolled out to an Agent. A `?signature=` is refused `400` naming the signature route. |
 | `PUT` / `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature` | Record or remove that entry's Ed25519 signature. Body: `{"signature": "<hex>"}`. `404` for an entry that does not exist, `400` for an empty or malformed signature, `409` while the Package is rolled out to an Agent. The answer is the Package, with the entry's `signature_state`. |
 | `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Package is rolled out to an Agent. |
-| `DELETE /api/v1/packages/{agent_type}/{version}` | Remove the Package — and every per-Agent assignment that referenced it. Uninstalls nothing. |
+| `DELETE /api/v1/packages/{agent_type}/{version}` | Remove the Package, and take it out of every Deployment that holds it. `409` while an Agent's assignment pins it, saying how many. Uninstalls nothing. |
 | `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. It requires a client certificate from the client CA in the handshake; a bootstrap certificate is answered `401`. It serves only an artifact offered to an Agent the host speaks for, and answers every other request `404`, as for an artifact that does not exist. |
-| `GET /api/v1/deployments` | Every Deployment, with its channel, its Packages, and the three reach counts. |
+| `GET /api/v1/deployments` | Every Deployment, with its channel, its Packages, its Configurations, and the three reach counts. |
 | `PUT /api/v1/deployments/{name}` | Create one or re-aim it. Body: `{"selector": {…}}` — **never empty** (`400`). **Distributes nothing**. |
-| `GET` / `DELETE /api/v1/deployments/{name}` | One Deployment; `DELETE` is `409` while an Agent's assignment names it, and uninstalls nothing. |
+| `GET` / `DELETE /api/v1/deployments/{name}` | One Deployment; `DELETE` is `409` while an Agent's assignment names it, saying how many, and uninstalls nothing. |
 | `PUT /api/v1/deployments/{name}/selector` | Re-aim it. Never distributes. |
 | `PUT /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Put a Package in the channel. `409` on a second of an Agent type it already holds; `?replace=true` swaps it. `404` for a Package nobody uploaded. |
-| `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Take it out. `409` while an Agent's assignment released through this Deployment pins it. |
-| `POST /api/v1/deployments/{name}/rollout` | Roll it out to every Agent it claims and would move — the moment a rollout starts. Agents another Deployment also claims are skipped and reported as conflicts. `409` while the channel holds no Packages, and `409` naming each Package and platform while any entry of a Package it holds lacks a signature. |
+| `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Take it out. Never refused for being rolled out: the next press drops it from the Agents' release. |
+| `PUT` / `DELETE /api/v1/deployments/{name}/configurations/{configuration}` | Put a Configuration in the channel, or take it out. `404` for a Configuration the Server does not hold, or, on `DELETE`, one the channel does not hold. **Distributes nothing**. |
+| `POST /api/v1/deployments/{name}/rollout` | Roll it out to every Agent it claims and would move — its Packages and Configurations in one release, the moment a rollout starts. Agents another Deployment also claims are skipped and reported as conflicts. `409` while the channel holds no Package and no Configuration, and `409` naming each Package and platform while any entry of a Package it holds lacks a signature. |
 | `GET` / `POST` / `DELETE /api/v1/enrolment/window` | Read, open or close the enrolment window — see [Enrolment](#enrolment-a-new-host-approved-by-an-operator). `POST` body: `{"open_for_secs": n}`, 1 to 86400. `404` while `[enrolment]` is not configured. |
 | `GET /api/v1/enrolments` | The pending enrolment requests, oldest first, each with its `id` — the fingerprint the enrolling Client logs. |
 | `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. |
@@ -1110,7 +1123,8 @@ A Package carries no count of its own — it aims at nobody — and answers the 
 channels that hold it. A Package in no channel is stored and unreachable, which is the state a Selector
 matching nobody used to be.
 
-`targeted_agents` is what a rollout act would change; `claiming_agents` is who is in the channel
+`targeted_agents` is the Agents a rollout act would change — their release differs from what their
+assignment pins; `claiming_agents` is who is in the channel
 whatever they run; `conflicting_agents` is who this channel cannot reach because a second one claims
 them too. It answers for the fleet **as reported so far**: a channel aimed at hosts that have not
 connected yet legitimately reaches nobody, which is why these are counts to be read rather than
@@ -1118,7 +1132,7 @@ errors to be raised.
 
 ### Labels: rollout channels without touching the host
 
-A Selector aims a Configuration or a Deployment at the Agents whose attributes match it — and the
+A Deployment's Selector aims it at the Agents whose attributes match it — and the
 attribute a staged rollout actually wants, `channel = "beta"`, is one you invent. Until now it could
 only be invented in `[attributes]` in `supervisor.toml`, so moving a host between channels meant
 editing a file **on that host** and restarting it.
@@ -1131,10 +1145,10 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
        https://127.0.0.1:4321/api/v1/agents/<instance-uid>/labels
 ```
 
-A label is matched exactly like a reported attribute, by **both** halves of the targeting: the
-Configuration an Agent is sent and the Deployment it belongs to. So trying a new collector binary on
-a few hosts is a Deployment aimed at `channel = beta` plus this call on the hosts that should get it
-first — and moving a host back is the same call with the value it had.
+A label is matched exactly like a reported attribute, by the Selector of the Deployment the Agent
+belongs to — which carries its Configurations and its Package alike. So trying a new collector
+binary on a few hosts is a Deployment aimed at `channel = beta` plus this call on the hosts that
+should get it first — and moving a host back is the same call with the value it had.
 
 The same call carries any other partition: `{"labels": {"region": "eu-central"}}` or
 `{"labels": {"tenant": "acme"}}`. The Server treats all of them identically, because it knows none

@@ -5,10 +5,10 @@
 //! moving a host between channels would be a file edit plus a restart *on that host*: the per-host
 //! wiring ADR-0026 removes, surviving in the one place it matters most.
 //!
-//! A label joins the attribute set a Selector matches against — for Configurations (ADR-0023) and
-//! for packages (ADR-0026) alike, since both resolve against the same `AgentDescription`. It never
-//! travels to the Agent: it is an input to matching here, and the Agent experiences it only as the
-//! Configuration and the packages it is offered.
+//! A label joins the attribute set a Deployment's Selector matches against (ADR-0034), which
+//! releases Configurations and packages alike. It never travels to the Agent: it is an input to
+//! matching here, and the Agent experiences it only as the Configurations and the packages it is
+//! offered.
 //!
 //! **A label can never restate a reported attribute.** `os.type` and `host.arch` decide which
 //! artifact an Agent is offered (ADR-0026) and `service.name` decides which packages fit it at all
@@ -149,12 +149,12 @@ mod tests {
         let described = described(&[("os.type", "linux")]);
         let effective = effective_description(Some(&described), &labels(&[("rollout", "canary")]))
             .expect("some");
-        assert!(crate::configs::matches(
+        assert!(crate::deployments::matches(
             &labels(&[("rollout", "canary")]),
             Some(&effective)
         ));
         // And the reported ones still match, so a label adds reach rather than replacing it.
-        assert!(crate::configs::matches(
+        assert!(crate::deployments::matches(
             &labels(&[("os.type", "linux")]),
             Some(&effective)
         ));
@@ -169,11 +169,11 @@ mod tests {
         let effective = effective_description(Some(&described), &labels(&[("os.type", "windows")]))
             .expect("some");
         assert!(
-            crate::configs::matches(&labels(&[("os.type", "linux")]), Some(&effective)),
+            crate::deployments::matches(&labels(&[("os.type", "linux")]), Some(&effective)),
             "the reported platform is what matches"
         );
         assert!(
-            !crate::configs::matches(&labels(&[("os.type", "windows")]), Some(&effective)),
+            !crate::deployments::matches(&labels(&[("os.type", "windows")]), Some(&effective)),
             "and the label does not"
         );
         assert_eq!(
@@ -189,7 +189,7 @@ mod tests {
     fn an_agent_that_reported_nothing_can_still_be_labelled() {
         let effective =
             effective_description(None, &labels(&[("rollout", "canary")])).expect("some");
-        assert!(crate::configs::matches(
+        assert!(crate::deployments::matches(
             &labels(&[("rollout", "canary")]),
             Some(&effective)
         ));

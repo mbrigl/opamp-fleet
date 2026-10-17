@@ -171,10 +171,10 @@ the agent's default with it — the same bodies as
 [`config/examples/`](../../config/examples/), compiled into the tool so they travel with the
 released binary:
 
-| `--agent` | Configuration | Aimed at |
+| `--agent` | Configuration | Agent type |
 |---|---|---|
-| `otelcol` | `otelcol-conf` | Selector `service.name = otelcol` |
-| `otelcol-contrib` | `otelcol-contrib-conf` | Selector `service.name = otelcol-contrib` |
+| `otelcol` | `otelcol-conf` | `service_name = otelcol` |
+| `otelcol-contrib` | `otelcol-contrib-conf` | `service_name = otelcol-contrib` |
 | `supervisor` | none | — a Client is configured by `supervisor.toml` on its own host, and the fleet owns only its `[[supervisor]]` blocks |
 
 Two rules keep this from surprising anyone:
@@ -182,13 +182,14 @@ Two rules keep this from surprising anyone:
 - **An existing Configuration is never written over.** The name is asked for first, and one the
   Server already holds is left exactly as you left it, edits and all. That is what makes a second
   upload of a newer version safe.
-- **Nothing is distributed.** Saving only saves, so the default reaches
-  no host until you roll it out. Read it first: these bodies carry example values.
+- **Nothing is distributed.** Saving only saves, and a Configuration reaches a host only through
+  a Deployment that holds it, so the default reaches no host until you put it into the Deployment
+  that carries the package and roll that out. Read it first: these bodies carry example values.
 
 ```console
   stored as the linux/amd64 entry — not distributed: press the rollout when it should reach hosts
   storing the default configuration otelcol-contrib-conf …
-  saved — read it over and press its rollout when it should reach hosts, since it carries example values
+  saved — read it over, put it into the deployment that should carry it and press that deployment's rollout when it should reach hosts, since it carries example values
 ```
 
 and on the next upload of the same agent:
@@ -203,7 +204,7 @@ The Server decides some uploads before it reads a byte of the artifact, and says
 
 | What it answers | What to do |
 |---|---|
-| `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed. Fetch under a new version, or delete the Package first. |
+| `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed. Fetch under a new version. |
 | `507 … max_total_package_bytes` | The package store is at its ceiling. Delete a Package no channel holds, or raise the limit ([the Server's configuration reference](server.md#top-level)). |
 | `404 … not configured` | The Server has no package store: `packages_dir` is unset in `server.toml` ([Packages](server.md#packages-and-deployments-distributing-software)). |
 | `413 …` | The artifact is past `max_package_size_bytes`. |

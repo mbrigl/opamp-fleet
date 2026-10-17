@@ -1389,17 +1389,17 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
     // The Selector is not bytes, and stays editable.
     ring_holding(&server, "stable", &[("os.type", "linux")], "2.0.0").await;
 
-    // Deleting the Set removes its assignments with it: the offer is withdrawn, and nothing is
-    // uninstalled — an Agent that already took it keeps running it (ADR-0026).
+    // Deleting the assigned Set is refused (ADR-0034 clause 8): a deletion must not change what
+    // a running Agent receives, so the offer stands.
     let deleted = reqwest::Client::new()
         .delete(set_url(&server, support::AGENT_TYPE, "2.0.0"))
         .send()
         .await
         .expect("delete set");
-    assert_eq!(deleted.status(), 204);
+    assert_eq!(deleted.status(), 409);
     assert!(
-        offered_now(&server, &uid, 4).await.is_none(),
-        "a deleted set is not handed to an Agent that has not taken it"
+        offered_now(&server, &uid, 4).await.is_some(),
+        "the refused deletion withdrew nothing"
     );
 
     // Rolling out a Set that does not exist is a 404, not a Set conjured out of a URL.
@@ -1891,10 +1891,11 @@ async fn a_deployments_aim_is_editable_and_deleting_it_is_its_own_act() {
     assert_eq!(again.status(), 404);
 }
 
-/// A Deployment that has released something cannot be deleted while the assignment names it
-/// (ADR-0026 point 31). The refusal says which acts end the offer first, and the offer stands with
-/// the entry's own signature (ADR-0033).
-/// Verifies: ADR-0026, ADR-0033
+/// A Deployment that has released something cannot be deleted while the assignment names it, nor
+/// can the Package it pinned (ADR-0034 clause 8). The refusal says how many Agents pin it, and the
+/// offer stands with the entry's own signature (ADR-0033). Once the Agent is released through
+/// another Deployment, both go, and the deleted Package leaves the channel that held it.
+/// Verifies: ADR-0033, ADR-0034
 #[tokio::test]
 async fn a_deployment_that_released_a_package_refuses_to_be_deleted() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -1942,13 +1943,44 @@ async fn a_deployment_that_released_a_package_refuses_to_be_deleted() {
         vec![7u8; 64]
     );
 
-    // Deleting the Package withdraws the assignment, and then the channel goes too.
+    // The Package it pinned is not deleted either.
+    let package = reqwest::Client::new()
+        .delete(set_url(&server, support::AGENT_TYPE, "1.0.0"))
+        .send()
+        .await
+        .expect("delete package");
+    assert_eq!(package.status(), 409);
+    let why = package.text().await.expect("body");
+    assert!(why.contains("1 Agent"), "the refusal says how many: {why}");
+
+    // Released through another Deployment that carries only a Configuration, the Agent pins
+    // neither any more — and then both go.
+    assert_eq!(
+        put_deployment(&server, &channel, &[("channel", "nobody")])
+            .await
+            .status(),
+        200
+    );
+    support::save_configuration(server.rest_addr, "base", "receivers: {}", "").await;
+    support::deploy(
+        server.rest_addr,
+        "other",
+        &[("service.name", support::AGENT_TYPE)],
+        &["base"],
+    )
+    .await;
     let package = reqwest::Client::new()
         .delete(set_url(&server, support::AGENT_TYPE, "1.0.0"))
         .send()
         .await
         .expect("delete package");
     assert_eq!(package.status(), 204);
+    let emptied = ring_view(&server, &channel).await;
+    assert_eq!(
+        emptied["packages"],
+        serde_json::json!([]),
+        "a deleted Package leaves every Deployment that held it"
+    );
     let deleted = reqwest::Client::new()
         .delete(deployment_url(&server, &channel))
         .send()
@@ -2156,14 +2188,12 @@ async fn the_per_agent_act_refuses_to_pick_a_side() {
 /// What a standing offer travels with is frozen. The entry's signature is a write to an assigned
 /// Package's entries and refused `409` like any other (ADR-0033 clause 4, ADR-0025): the re-offer
 /// gate does not cover the signature, so one changed under a standing offer would never reach the
-/// Agent. The channel's hold on the Package it released is frozen too (ADR-0026 point 31).
-///
-/// **Swapping the version the channel holds is deliberately not frozen**, and an assertion here
-/// pins that: it is how a rollout proceeds, it leaves every standing offer exactly as it was, and
-/// a rule that forbade it would forbid updating a fleet at all.
-/// Verifies: ADR-0026, ADR-0033
+/// Agent. **The channel freezes nothing** (ADR-0034 clause 7): the assignment pins the Package
+/// itself, so taking it out of the channel or swapping the version it holds leaves every standing
+/// offer exactly as it was, and is how a rollout proceeds.
+/// Verifies: ADR-0033, ADR-0034
 #[tokio::test]
-async fn a_ring_freezes_what_it_has_released() {
+async fn a_released_package_freezes_its_entries_and_not_the_ring() {
     let (server, _scratch) = spawn_with_packages().await;
     let uid = InstanceUid::default();
     let mut report = full_report(&uid, "edge-01", 1);
@@ -2213,14 +2243,14 @@ async fn a_ring_freezes_what_it_has_released() {
         deployment_url(&server, &channel),
         support::AGENT_TYPE
     );
-    let refused = reqwest::Client::new()
+    let removed = reqwest::Client::new()
         .delete(&removal)
         .send()
         .await
         .expect("remove");
-    assert_eq!(refused.status(), 409, "DELETE {removal} must be frozen");
+    assert_eq!(removed.status(), 200, "DELETE {removal} is not frozen");
 
-    // But pointing the channel at the next version is not frozen — that is the ordinary upgrade.
+    // Nor is pointing the channel at the next version — that is the ordinary upgrade.
     let swapped = reqwest::Client::new()
         .put(format!(
             "{}/packages/{}/2.0.0?replace=true",

@@ -40,6 +40,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Changed
 
+- **A Deployment carries Configurations, and is the one thing rolled out** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)). A
+  Deployment holds any number of Configurations beside its Packages
+  (`PUT|DELETE /api/v1/deployments/{name}/configurations/{configuration}`, or the Deployments
+  tab), and one press of its rollout releases both: each Agent it claims gets the Package for its
+  type and every Configuration that fits its type, and the hash gates send only what changed. A
+  Configuration is content only — `{"body", "service_name", "role"}`; a `PUT` naming a `selector`
+  is refused `400`, `GET` lists the Deployments holding each one, and an Agent in no Deployment is
+  offered no Configuration. The per-Agent rollout takes an empty body or
+  `{"deployment": "<the one that claims it>"}`; naming a Configuration or a Package is refused.
+  A Deployment stays editable in every state: taking a Package out of a channel that released it
+  is no longer refused. The fleet view shows per Configuration and for the Package what the next
+  press would change, including what it drops (`change: "remove"`). The Configurations tab edits
+  content only; the Deployments tab holds the Selector, the Packages and the Configurations.
+  **What to do:** before upgrading, note each Configuration's Selector. A stored Configuration that
+  still carries a selector fails the Server's start, naming the file — remove the `selector` from
+  it (and from every revision under `retained`). After the upgrade, put each Configuration into a
+  Deployment whose Selector reaches the Agents it was aimed at — an Agent belongs to at most one
+  Deployment, so a fleet-wide Configuration goes into every channel — and roll the Deployments
+  out. The Agent records are kept in a new shape: a record written by an earlier Server fails the
+  start naming the file; clear `<config_dir>/agents/`, and every Agent re-reports on its next
+  message — what is lost is the rollouts, which the presses above write again.
+  `opamp-fleetctl package fetch` stores its default Configurations typed for their Collector, and
+  `scripts/seed_test_configs.sh` puts each into a Deployment of that Collector's name.
+
+- **Nothing an Agent's assignment pins can be deleted** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)). Deleting a Configuration, a
+  Package or a Deployment that any Agent's assignment pins answers `409`, saying how many Agents
+  pin it. Deleting a Package no longer withdraws it from the Agents it was rolled out to, and a
+  deleted Configuration or Package leaves every Deployment that held it. **What to do:** roll the
+  Agents out through a Deployment without it — or forget them — and delete it then.
+
 - **A package's signature lives on its entry, not on the Deployment** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). Sign each
   entry once, with `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature`
   (`{"signature": "<hex>"}`) or on the Packages tab, where the signing-file import now lives too;
@@ -70,6 +100,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   requests waiting with each certificate.
 
 ### Removed
+
+- **A Configuration's own Selector and its rollout route** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)).
+  `POST /api/v1/configurations/{name}/rollout` answers `404`, and the Configurations tab has no
+  Selector and no rollout press. **What to do:** aim through a Deployment and press its rollout
+  (see *A Deployment carries Configurations* above); a script that calls the route or sends a
+  `selector` has to change the same way.
 
 - **Referenced package entries** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). An entry is an uploaded artifact and nothing
   else: `PUT …/entries/{os}/{arch}/source`, its `url`, `sha256` and `headers`, and the Server's

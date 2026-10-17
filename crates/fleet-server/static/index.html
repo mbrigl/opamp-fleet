@@ -68,26 +68,52 @@
         <button class="tab" data-tab="enrolments">Enrolments<span class="num" id="enrolment-count">0</span></button>
       </nav>
 
+      <!-- Configurations (ADR-0034): content only — a body for an agent type, and a role. One table
+           of Configurations and a detail form for the current one; no Selector and no rollout
+           press here, because a Configuration aims at nobody: a Deployment holds it, and the
+           rollout press is that Deployment's. -->
       <div id="panel-configurations" class="tab-panel">
-      <section id="config-card" class="card config">
-        <h2>Configurations — each proposes itself to the Agents of its type that its Selector matches; only a rollout act distributes</h2>
-        <div id="config-list" class="chips" style="margin-bottom: 12px"></div>
+      <div class="card filters" style="align-items: center; gap: 12px;">
+        <button id="config-create" class="btn btn-primary"
+                title="Write a new configuration: a name, the agent type it is for, a role and a body. Saved only — a deployment holding it releases it.">＋ Create</button>
+        <span class="sub">A <b>configuration</b> is content: a body in the agent's own format, the agent type it is for, and a role. It aims at nobody by itself and is never rolled out; a <b>deployment</b> holds it — one configuration may sit in several — and reaches the agents of its channel whose type it fits. Select a row to edit it.</span>
+        <span id="configs-error" class="err"></span>
+      </div>
+
+      <div class="card table-wrap" style="margin-bottom: 20px;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 22%">Name</th>
+              <th style="width: 20%">Agent type</th>
+              <th style="width: 14%">Role</th>
+              <th>In deployments</th>
+            </tr>
+          </thead>
+          <tbody id="configs"></tbody>
+        </table>
+        <div id="configs-empty" class="empty">No configurations yet. Create one.</div>
+      </div>
+
+      <section id="config-detail" class="card config" style="display: none">
+        <h2 id="config-detail-title">Configuration</h2>
         <div class="config-fields">
-          <input id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off" />
+          <input id="config-name" class="quarter" placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
+                 title="The configuration's name — the file name its entry gets on the agent. Frozen once created." />
           <input id="config-type" list="config-type-options" placeholder="agent type: the service.name it is for (empty: every type)" autocomplete="off"
-                 title="Compared raw for equality against the service.name the agents report, before the selector (ADR-0023). Empty means every type — which for a collector body is rarely what you want." />
+                 title="Compared raw for equality against the service.name the agents report (ADR-0034): of the agents a deployment holding it claims, only those of this type receive it. Empty means every type — which for a collector body is rarely what you want." />
           <datalist id="config-type-options"></datalist>
-          <input id="config-selector" placeholder="selector: key=value, key=value … (empty matches every agent of the type)" autocomplete="off" />
           <input id="config-role" placeholder="role (empty = configuration; 'supplementary' = a file the agent reads by path)" autocomplete="off" title="The Baseline's AgentConfigFile.role, sent to the agent verbatim. Empty means top-level configuration. 'supplementary' means the content is written next to the configuration but never passed as configuration — a fragment, a certificate, a rule file." />
         </div>
-        <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
-        <textarea id="config" placeholder="The configuration body — saved only; distributed by a rollout act, per agent or to all matching…"></textarea>
+        <textarea id="config" placeholder="The configuration body — saved only; released by the rollout press of a deployment that holds it…"></textarea>
         <div class="config-actions">
-          <button id="save" class="btn btn-primary" title="Save the form as this Configuration. Nothing is distributed by this press (ADR-0025); every agent keeps the revision its assignment pins, and the Agents tab shows the save waiting.">Save</button>
-          <button id="config-rollout" class="btn btn-ghost" title="Roll the saved revision out to every agent it currently fits and aims at — the press that changes the fleet. Agents that appear later wait for their own act (Agents tab).">Roll out to all matching</button>
-          <button id="delete" class="btn btn-ghost">Delete</button>
+          <button id="config-delete" class="btn btn-ghost"
+                  title="Delete this configuration — refused while an agent's assignment pins it. It leaves every deployment that holds it.">Delete</button>
           <span id="config-state" class="sub"></span>
-          <span id="config-error" class="err"></span>
+          <span id="config-error" class="err" style="flex: 1"></span>
+          <button id="config-cancel" class="btn btn-ghost" style="margin-left: auto">Cancel</button>
+          <button id="config-ok" class="btn btn-primary"
+                  title="Save the form as this configuration. Nothing is distributed by this press (ADR-0025); every agent keeps the revision its assignment pins, and the Agents tab shows the save waiting.">OK</button>
         </div>
       </section>
       </div>
@@ -162,7 +188,7 @@
              seam — the press that changes the fleet is never the press that carries the bytes). -->
         <div class="config-actions">
           <button id="set-delete" class="btn btn-ghost"
-                  title="Delete this Set — entries, artifacts, metadata, and every per-agent assignment that referenced it. Nothing is uninstalled: an agent keeps running what it took.">Delete</button>
+                  title="Delete this Set — entries, artifacts and metadata — refused while an agent's assignment pins it. It leaves every deployment that holds it. Nothing is uninstalled: an agent keeps running what it took.">Delete</button>
           <button id="set-signing" class="btn btn-ghost"
                   title="Download what a signature covers, as JSON: the Agent type, the version, and each entry's platform and SHA-256. The platform is not signed; it says which entry the signature goes to. Sign it with opamp-fleetctl package sign --signing-info and import it here.">Signing info</button>
           <input id="set-sig-file" type="file" accept=".json,application/json" style="color: var(--muted); font-size: 13px;" />
@@ -186,8 +212,8 @@
       <div id="panel-deployments" class="tab-panel">
       <div class="card filters" style="align-items: center; gap: 12px;">
         <button id="dep-create" class="btn btn-primary"
-                title="Define a new deployment: a name and the channel it aims at. Saved only — nothing reaches any agent until the row's rollout press.">＋ Create</button>
-        <span class="sub">A <b>deployment</b> is a name, the channel it aims at, and one package per agent type. An agent belongs to <b>at most one</b>: two matching the same agent is a conflict, and that agent is offered nothing new until a selector is narrowed. There is no fleet-wide default — a selector is equality and cannot say "not", so channels are a partition over an attribute every agent carries (<code>channel = stable</code>), set at provisioning or as a label on the Agents tab.</span>
+                title="Define a new deployment: a name, the channel it aims at, its packages and its configurations. Saved only — nothing reaches any agent until the row's rollout press.">＋ Create</button>
+        <span class="sub">A <b>deployment</b> is a name, the channel it aims at, one package per agent type, and any number of configurations — the one thing rolled out. An agent belongs to <b>at most one</b>: two matching the same agent is a conflict, and that agent is offered nothing new until a selector is narrowed. There is no fleet-wide default — a selector is equality and cannot say "not", so channels are a partition over an attribute every agent carries (<code>channel = stable</code>), set at provisioning or as a label on the Agents tab.</span>
         <span id="dep-result" class="sub"></span>
         <span id="deps-error" class="err"></span>
       </div>
@@ -199,12 +225,13 @@
               <th style="width: 18%">Name</th>
               <th>Selector</th>
               <th>Packages</th>
+              <th>Configurations</th>
               <th style="width: 170px">Reach</th>
             </tr>
           </thead>
           <tbody id="deps"></tbody>
         </table>
-        <div id="deps-empty" class="empty">No deployments yet. Create one — a package reaches nobody without a channel to hold it.</div>
+        <div id="deps-empty" class="empty">No deployments yet. Create one — a package or a configuration reaches nobody without a channel to hold it.</div>
       </div>
 
       <section id="dep-detail" class="card config" style="display: none">
@@ -215,6 +242,7 @@
           <input id="dep-selector" placeholder="selector: channel=stable — required, and never empty" autocomplete="off"
                  title="Equality pairs that must all match an attribute the agent reported, labels included. It may not be empty: an empty selector matches every agent, so it would collide with every other channel. Always editable — re-aiming distributes nothing by itself." />
         </div>
+        <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
         <div class="config-actions" style="margin: 0 0 10px">
           <span id="dep-state" class="sub"></span>
         </div>
@@ -227,9 +255,18 @@
                   title="Put this package into the channel; on a new deployment it goes in with OK. A package already here for that agent type is replaced, which is how the version a channel runs is changed.">＋ Add package</button>
         </div>
         <div id="dep-packages" style="margin-bottom: 10px"></div>
+        <h2>Configurations — any number. Each reaches the agents of this channel whose type it fits.</h2>
+        <div class="config-fields">
+          <select id="dep-config-pick" style="flex: 1"></select>
+        </div>
+        <div class="config-actions" style="margin: 0 0 10px">
+          <button id="dep-config-add" class="btn btn-ghost btn-sm"
+                  title="Put this configuration into the channel; on a new deployment it goes in with OK. Nothing is distributed: the agents of the channel show it waiting until the rollout press.">＋ Add configuration</button>
+        </div>
+        <div id="dep-configs" class="chips" style="margin-bottom: 10px"></div>
         <div class="config-actions">
           <button id="dep-delete" class="btn btn-ghost"
-                  title="Delete this deployment. The offers it released are withdrawn; nothing is uninstalled — an agent keeps running what it took.">Delete</button>
+                  title="Delete this deployment — refused while an agent's assignment names it. Nothing is uninstalled — an agent keeps running what it took.">Delete</button>
           <span id="dep-error" class="err" style="flex: 1"></span>
           <button id="dep-cancel" class="btn btn-ghost" style="margin-left: auto">Cancel</button>
           <button id="dep-ok" class="btn btn-primary"
@@ -598,7 +635,7 @@
         }
         chips.push(`<span class="chip clickable label-btn" data-uid="${esc(a.instance_uid)}" title="Set this Agent's labels — the whole set, as key=value pairs separated by commas. Empty clears them. A key the Agent reports itself is refused.">🏷 labels…</span>`);
         if (a.package_conflict) {
-          chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">pkg: ambiguous target</span>`);
+          chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">deployment: ambiguous target</span>`);
         }
         for (const p of a.packages || []) {
           const cls = p.status === "Installed" ? "green"
@@ -619,37 +656,47 @@
         // a second one nested inside it would wrap them as a single item rather than individually.
         return chips.join("");
       }
-      // The rollout column (ADR-0025): what is rolled out to this Agent (its assignments), what
-      // waits for the operator's press, and the press itself. The Server never rolls out on its
-      // own — a save, a Selector edit, a label move, or this Agent enrolling only ever adds to
-      // the waiting list here.
+      // The rollout column (ADR-0025, ADR-0034): what is rolled out to this Agent (its assignment —
+      // the Deployment it went through, its Configurations and its Package), what waits for the
+      // operator's press, per Configuration and for the Package, and the press itself. The Server
+      // never rolls out on its own — a save, a Deployment edit, a label move, or this Agent
+      // enrolling only ever adds to the waiting list here.
       function rolloutCell(a) {
         const chips = [];
+        if (a.assigned_deployment) {
+          chips.push(`<span class="chip" title="the deployment this agent's release went through — pinned as of that act, so re-aiming or editing the deployment changes nothing here">⤷ ${esc(a.assigned_deployment)}</span>`);
+        }
         for (const n of a.assigned_configurations || []) {
           chips.push(`<span class="chip" title="rolled out to this agent — the pinned revision it is offered">${esc(n)}</span>`);
         }
         if (a.assigned_package) {
-          chips.push(`<span class="chip" title="rolled out to this agent through deployment ${esc(a.assigned_deployment)} — pinned as of that act, so re-aiming the channel or putting a newer package in it changes nothing here">pkg ${esc(a.assigned_package)} · ${esc(a.assigned_deployment)}</span>`);
+          chips.push(`<span class="chip" title="rolled out to this agent — pinned as of that act, so putting a newer package in the channel changes nothing here">pkg ${esc(a.assigned_package)}</span>`);
         }
-        // Four states that would otherwise be the same empty cell, and the operator's next move
+        // Three states that would otherwise be the same empty cell, and the operator's next move
         // differs in each (ADR-0026 point 25). Calm, not alarming: a freshly enrolled host is in no
         // channel yet, which is the ordinary state and not a fault.
-        if (!a.package_conflict && (a.capabilities || []).includes("AcceptsPackages")) {
+        const pending = (a.pending_configurations || []).length + (a.pending_packages || []).length;
+        if (!a.package_conflict) {
           if (!a.deployment) {
             chips.push(`<span class="pill gray" title="no deployment's selector matches this agent, so nothing aims at it — give it a channel: a label here, or a channel attribute at provisioning. This is the ordinary state right after an enrolment.">in no deployment</span>`);
-          } else if (!a.assigned_package && !(a.pending_packages || []).length) {
-            chips.push(`<span class="pill gray" title="deployment ${esc(a.deployment)} claims this agent but holds nothing it can take — no package for the type it reports, or none built for its platform">${esc(a.deployment)}: nothing for this agent</span>`);
+          } else if (!a.assigned_deployment && !pending) {
+            chips.push(`<span class="pill gray" title="deployment ${esc(a.deployment)} claims this agent but holds nothing it can take — no configuration for its type, and no package for its type or its platform">${esc(a.deployment)}: nothing for this agent</span>`);
           }
         }
+        const why = {
+          new: "waits for its first rollout act",
+          update: "a newer save or version waits for a rollout act",
+          remove: "the deployment no longer releases it to this agent — the next rollout act drops it",
+        };
+        const mark = { new: "", update: " ✎", remove: " ✕" };
         for (const p of a.pending_configurations || []) {
-          chips.push(`<span class="pill amber" title="${p.change === "update" ? "a newer save of this configuration waits for a rollout act" : "this configuration matches the agent and waits for its first rollout act"}">⏳ ${esc(p.name)}${p.change === "update" ? " ✎" : ""}</span>`);
+          chips.push(`<span class="pill amber" title="configuration ${esc(p.name)}: ${why[p.change] || esc(p.change)}">⏳ ${esc(p.name)}${mark[p.change] || ""}</span>`);
         }
         for (const p of a.pending_packages || []) {
-          chips.push(`<span class="pill amber" title="${p.change === "update" ? "another version of this package waits for a rollout act" : "this package fits the agent and waits for its first rollout act"}">⏳ pkg ${esc(p.display_name)} · ${esc(p.deployment)}${p.change === "update" ? " ✎" : ""}</span>`);
+          chips.push(`<span class="pill amber" title="package ${esc(p.display_name)} through ${esc(p.deployment)}: ${why[p.change] || esc(p.change)}">⏳ pkg ${esc(p.display_name)} · ${esc(p.deployment)}${mark[p.change] || ""}</span>`);
         }
-        const waiting = (a.pending_configurations || []).length + (a.pending_packages || []).length;
-        if (waiting) {
-          chips.push(`<span class="chip clickable agent-rollout-btn" data-uid="${esc(a.instance_uid)}" title="Roll out everything waiting to this agent — the one press that distributes (ADR-0025)">⤴ roll out</span>`);
+        if (pending) {
+          chips.push(`<span class="chip clickable agent-rollout-btn" data-uid="${esc(a.instance_uid)}" title="Roll out the deployment that claims this agent to it — the one press that distributes (ADR-0034)">⤴ roll out</span>`);
         }
         if (!chips.length) return `<span class="pill gray">none</span>`;
         return `<div class="chips">${chips.join("")}</div>`;
@@ -740,7 +787,7 @@
       $("agents").addEventListener("click", (e) => {
         const rolloutBtn = e.target.closest(".agent-rollout-btn");
         if (rolloutBtn) {
-          // The empty body releases everything the row shows as waiting (ADR-0025).
+          // The empty body releases the deployment that claims this agent (ADR-0034).
           fetch(`/api/v1/agents/${encodeURIComponent(rolloutBtn.dataset.uid)}/rollout`, { method: "POST" })
             .then(async (res) => {
               $("fleet-error").textContent = res.ok
@@ -901,11 +948,12 @@
         renderSelection();
       });
 
-      // Configurations editor (ADR-0023): name + type + selector + body, PUT/DELETE per
-      // Configuration. A PUT only saves; the rollout act is what changes the fleet (ADR-0025),
-      // and the type limits whom a Configuration can be rolled out to (ADR-0023).
+      // Configurations (ADR-0034): a master table of content, and a detail form for the *current*
+      // one — name, agent type, role, body. A PUT only saves (ADR-0025); a Configuration reaches an
+      // agent only through a Deployment that holds it, whose row carries the rollout press.
       let configurations = [];
-      let selectedName = null;
+      let currentConfig = null;    // the name of the current row, or null — no current, no form
+      let creatingConfig = false;  // the form is writing a new one: the name is writable
 
       const selectorText = (sel) => Object.entries(sel || {}).map(([k, v]) => `${k}=${v}`).join(", ");
       function parseSelector(text) {
@@ -917,97 +965,124 @@
         }
         return selector;
       }
-      function renderConfigList() {
+      const currentConfigView = () => configurations.find((c) => c.name === currentConfig) || null;
+      const configPath = (name) => `/api/v1/configurations/${encodeURIComponent(name)}`;
+
+      function renderConfigs() {
         $("config-count").textContent = configurations.length;
-        $("config-list").innerHTML = configurations.map((c) =>
-          `<span class="chip clickable${c.name === selectedName ? " selected" : ""}" data-name="${esc(c.name)}" title="saved — which agents run which revision is in the Agents tab${c.role ? " · role: " + esc(c.role) + " — written next to the configuration, not passed as configuration" : ""}">${esc(c.name)}${c.service_name ? " · " + esc(c.service_name) : ""}${Object.keys(c.selector || {}).length ? " · " + esc(selectorText(c.selector)) : ""}${c.role ? " · " + esc(c.role) : ""}</span>`
-        ).join("") || `<span class="chip">none yet</span>`;
-        document.querySelectorAll("#config-list .clickable").forEach((chip) => {
-          chip.addEventListener("click", () => selectConfig(chip.dataset.name));
-        });
+        $("configs-empty").style.display = configurations.length ? "none" : "block";
+        $("configs").innerHTML = configurations.map((c) => {
+          const held = (c.deployments || []).map((d) => `<span class="chip">${esc(d)}</span>`).join("")
+            || `<span class="chip" title="no deployment holds it, so no rollout press can release it">in no deployment</span>`;
+          return `
+          <tr class="agent${c.name === currentConfig ? " current" : ""}" data-name="${esc(c.name)}">
+            <td><a class="name" href="#">${esc(c.name)}</a></td>
+            <td>${c.service_name ? esc(c.service_name) : `<span class="sub">every type</span>`}</td>
+            <td>${c.role ? esc(c.role) : `<span class="sub">configuration</span>`}</td>
+            <td><div class="chips">${held}</div></td>
+          </tr>`;
+        }).join("");
       }
-      // The action row follows the selected Configuration: the rollout act needs a stored name
-      // to act on (ADR-0025), so it is disabled until one is selected.
-      function renderConfigActions() {
-        const config = configurations.find((c) => c.name === selectedName);
-        $("config-rollout").disabled = !config;
-        $("config-state").textContent = "";
+
+      function showConfigDetail() {
+        const c = currentConfigView();
+        if (!c && !creatingConfig) { $("config-detail").style.display = "none"; return; }
+        $("config-detail").style.display = "block";
+        $("config-detail-title").textContent = creatingConfig
+          ? "New configuration — content only; a deployment holding it releases it"
+          : `Configuration ${c.name}`;
+        $("config-name").value = c ? c.name : "";
+        $("config-name").disabled = !creatingConfig;
+        $("config-type").value = c ? c.service_name || "" : "";
+        $("config-role").value = c ? c.role || "" : "";
+        $("config").value = c ? c.body : "";
+        const held = c ? c.deployments || [] : [];
+        $("config-state").textContent = !c
+          ? "put it into a deployment on the Deployments tab to release it"
+          : held.length
+            ? `held by ${held.join(", ")} — a save waits for their rollout press`
+            : "held by no deployment — it reaches nobody";
+        $("config-delete").disabled = creatingConfig;
       }
-      function selectConfig(name) {
-        const config = configurations.find((c) => c.name === name);
-        if (!config) return;
-        selectedName = name;
+
+      $("configs").addEventListener("click", (e) => {
+        const tr = e.target.closest("tr.agent");
+        if (!tr) return;
+        e.preventDefault();
+        creatingConfig = false;
         configDirty = false;
-        $("config-name").value = config.name;
-        $("config-type").value = config.service_name || "";
-        $("config-selector").value = selectorText(config.selector);
-        $("config-role").value = config.role || "";
-        $("config").value = config.body;
+        currentConfig = currentConfig === tr.dataset.name ? null : tr.dataset.name;
         $("config-error").textContent = "";
-        renderConfigList();
-        renderConfigActions();
+        renderConfigs();
+        showConfigDetail();
+      });
+
+      $("config-create").addEventListener("click", () => {
+        creatingConfig = true;
+        currentConfig = null;
+        configDirty = true;
+        $("config-error").textContent = "";
+        renderConfigs();
+        showConfigDetail();
+      });
+
+      for (const id of ["config-name", "config-type", "config-role", "config"]) {
+        $(id).addEventListener("input", () => { configDirty = true; });
       }
-      $("config").addEventListener("input", () => { configDirty = true; });
-      $("save").addEventListener("click", async () => {
+
+      // OK saves and closes the form; a refused save keeps it open beside its message.
+      $("config-ok").addEventListener("click", async () => {
+        $("config-error").textContent = "";
         const name = $("config-name").value.trim();
+        if (!name) { $("config-error").textContent = "a configuration needs a name"; return; }
         const type = $("config-type").value.trim();
         const role = $("config-role").value.trim();
-        try { selector = parseSelector($("config-selector").value); } catch (e) { $("config-error").textContent = e.message; return; }
-        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, {
+        const res = await fetch(configPath(name), {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           // An empty role or type is left out entirely rather than sent as "": absent is what
           // the resource means by top-level configuration and by every-type.
-          body: JSON.stringify({ selector, body: $("config").value, ...(role ? { role } : {}), ...(type ? { service_name: type } : {}) }),
+          body: JSON.stringify({ body: $("config").value, ...(role ? { role } : {}), ...(type ? { service_name: type } : {}) }),
         });
         if (!res.ok) {
-          $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
+          $("config-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
           return;
         }
-        $("config-error").textContent = "";
+        creatingConfig = false;
+        currentConfig = null;
         configDirty = false;
-        selectedName = name;
-        await refreshConfigs();
-        refreshAgents();
-      });
-      $("config-rollout").addEventListener("click", async () => {
-        const config = configurations.find((c) => c.name === selectedName);
-        if (!config) return;
-        // The one press that distributes (ADR-0025): the saved revision is pinned and assigned
-        // to every agent it currently fits and aims at. Latecomers wait in the Agents tab.
-        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(config.name)}/rollout`, {
-          method: "POST",
-        });
-        if (!res.ok) {
-          $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
-          return;
-        }
-        const outcome = await res.json();
-        $("config-error").textContent = "";
-        await refreshConfigs();
-        refreshAgents();
-        $("config-state").textContent = `rolled out to ${outcome.assigned_agents} agent(s)`;
-      });
-      $("delete").addEventListener("click", async () => {
-        const name = $("config-name").value.trim();
-        if (!name) return;
-        // Deletion removes every per-agent assignment with the Configuration (ADR-0025) — an
-        // active change on the agents that had it, so it asks first.
-        if (!confirm(`Delete "${name}"?\n\nEvery agent it was rolled out to applies its config map without this entry and restarts. Only an agent left assigned nothing keeps running unchanged.`)) return;
-        const res = await fetch(`/api/v1/configurations/${encodeURIComponent(name)}`, { method: "DELETE" });
-        if (!res.ok && res.status !== 404) {
-          $("config-error").textContent = (await res.json()).error || `HTTP ${res.status}`;
-          return;
-        }
-        $("config-error").textContent = "";
-        selectedName = null;
-        $("config-name").value = ""; $("config-type").value = ""; $("config-selector").value = ""; $("config-role").value = ""; $("config").value = "";
         await refreshConfigs();
         refreshAgents();
       });
 
-      // Every attribute the fleet currently reports, as clickable key=value suggestions for the
-      // selector — what a Selector can actually match on.
+      $("config-cancel").addEventListener("click", () => {
+        creatingConfig = false;
+        currentConfig = null;
+        configDirty = false;
+        $("config-error").textContent = "";
+        renderConfigs();
+        showConfigDetail();
+      });
+
+      // Refused while an agent's assignment pins it (ADR-0034): the Server says how many, and the
+      // way out is a rollout of a deployment without it.
+      $("config-delete").addEventListener("click", async () => {
+        const c = currentConfigView();
+        if (!c) return;
+        const res = await fetch(configPath(c.name), { method: "DELETE" });
+        if (!res.ok && res.status !== 404) {
+          $("config-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          return;
+        }
+        currentConfig = null;
+        configDirty = false;
+        $("config-error").textContent = "";
+        await refreshConfigs();
+        refreshDeployments();
+      });
+
+      // Every attribute the fleet currently reports, as clickable key=value suggestions for a
+      // deployment's selector — what a Selector can actually match on.
       function renderSelectorOptions() {
         const pairs = new Set();
         for (const a of agents) {
@@ -1018,16 +1093,17 @@
         $("selector-options").innerHTML = [...pairs].sort().map((p) =>
           `<span class="chip clickable" data-pair="${esc(p)}">${esc(p)}</span>`
         ).join("") || `<span class="chip">no agents reporting yet</span>`;
-        // The types the fleet currently reports, as suggestions for the type input (ADR-0023) —
-        // so limiting a Configuration to a type is a pick, not a remembered spelling.
+        // The types the fleet currently reports, as suggestions for a configuration's type
+        // (ADR-0034) — so stating the type is a pick, not a remembered spelling.
         const types = [...new Set(agents.map((a) => a.service_name).filter(Boolean))].sort();
         $("config-type-options").innerHTML = types.map((t) => `<option value="${esc(t)}"></option>`).join("");
         document.querySelectorAll("#selector-options .clickable").forEach((chip) => {
           chip.addEventListener("click", () => {
-            const input = $("config-selector");
+            const input = $("dep-selector");
             const current = input.value.trim();
             if (current.split(",").map((p) => p.trim()).includes(chip.dataset.pair)) return;
             input.value = current ? `${current}, ${chip.dataset.pair}` : chip.dataset.pair;
+            depFormDirty = true;
           });
         });
       }
@@ -1492,7 +1568,7 @@
       });
 
 
-      // ── Deployments (ADR-0026) ─────────────────────────────────────────────
+      // ── Deployments (ADR-0026, ADR-0034) ───────────────────────────────────
       let deployments = [];
       let currentDep = null;      // the channel whose detail form is on screen
       let creatingDep = false;    // the form is defining a new one: the name is writable
@@ -1510,9 +1586,9 @@
           bits.push(`<span class="pill amber" title="another deployment matches ${d.conflicting_agents} of the agents this one does — an agent belongs to at most one, so they are offered nothing new until a selector is narrowed">⚠ ${d.conflicting_agents} in conflict</span>`);
         }
         if (d.targeted_agents) {
-          bits.push(`<button class="btn btn-ok rollout-dep-btn" data-name="${esc(d.name)}" title="Roll this deployment out to the ${d.targeted_agents} agent(s) it would move (ADR-0025) — the press that changes the fleet. Agents that join the channel later wait for their own act on the Agents tab.">Roll out (${d.targeted_agents})</button>`);
+          bits.push(`<button class="btn btn-ok rollout-dep-btn" data-name="${esc(d.name)}" title="Roll this deployment out to the ${d.targeted_agents} agent(s) it would move (ADR-0034) — its packages and configurations in one release, the press that changes the fleet. Agents that join the channel later wait for their own act on the Agents tab.">Roll out (${d.targeted_agents})</button>`);
         } else if (d.claiming_agents) {
-          bits.push(`<span class="pill gray" title="the ${d.claiming_agents} agent(s) this channel claims already run what it holds, so a rollout act would change nothing (ADR-0025)">${d.claiming_agents} up to date</span>`);
+          bits.push(`<span class="pill gray" title="the ${d.claiming_agents} agent(s) this channel claims already hold what it releases, so a rollout act would change nothing (ADR-0025)">${d.claiming_agents} up to date</span>`);
         } else if (!d.conflicting_agents) {
           bits.push(`<span class="pill amber" title="this channel claims no agent at all — its selector names an attribute nobody reports, or a value nobody carries. Not a rejected write, so nothing else would say so.">aims at nobody</span>`);
         }
@@ -1534,15 +1610,17 @@
           <tr class="agent${d.name === currentDep ? " current" : ""}" data-name="${esc(d.name)}">
             <td><a class="name" href="#">${esc(d.name)}</a></td>
             <td>${esc(selectorText(d.selector))}</td>
-            <td><div class="chips">${pkgs || `<span class="chip">no packages yet</span>`}</div></td>
+            <td><div class="chips">${pkgs || `<span class="chip">no packages</span>`}</div></td>
+            <td><div class="chips">${(d.configurations || []).map((c) => `<span class="chip">${esc(c)}</span>`).join("") || `<span class="chip">no configurations</span>`}</div></td>
             <td>${depReachCell(d)}</td>
           </tr>`;
         }).join("");
       }
 
-      // The packages a new deployment takes with OK, as agent_type@version: it does not exist yet,
-      // so nothing can be put into it before then.
+      // The packages a new deployment takes with OK, as agent_type@version, and its configurations
+      // by name: it does not exist yet, so nothing can be put into it before then.
       let depPending = [];
+      let depConfigPending = [];
 
       // What the form lists: the packages the saved deployment holds, or those a new one will take.
       function depHeld(d) {
@@ -1573,7 +1651,22 @@
             + `<span class="pill ${complete ? "green" : "amber"}" title="${complete ? "every entry is signed" : "an unsigned entry is offered to nobody, and the channel is not rolled out while one is left — sign it on the Packages tab"}">${signedCount} of ${entries.length} signed</span>`
             + `<span class="dep-pkg-del" data-type="${esc(h.type)}" data-version="${esc(h.version)}" style="cursor: pointer; font-weight: 700;" title="Take this package out of the channel. Nothing is uninstalled.">✕</span></div>`
             + `<div class="chips entry-list">${rows}</div>`;
-        }).join("") || `<span class="chip">no packages yet — a channel with none cannot be rolled out</span>`;
+        }).join("") || `<span class="chip">no packages</span>`;
+      }
+
+      // The configurations the saved deployment holds, or those a new one will take with OK — each
+      // with its ✕ — and the picker offering every configuration the store holds besides.
+      function renderDepConfigs(d) {
+        const held = d ? d.configurations || [] : depConfigPending;
+        $("dep-configs").innerHTML = held.map((name) => {
+          const c = configurations.find((x) => x.name === name);
+          const type = c && c.service_name ? ` · ${esc(c.service_name)}` : "";
+          return `<span class="chip" title="${c && c.service_name ? `reaches the agents of this channel that report ${esc(c.service_name)}` : "reaches every agent of this channel"}">${esc(name)}${type} <span class="dep-config-del" data-name="${esc(name)}" style="cursor: pointer; font-weight: 700;" title="Take this configuration out of the channel. Agents keep the revision they were given until the next press, which drops it from their map.">✕</span></span>`;
+        }).join("") || `<span class="chip">no configurations</span>`;
+        $("dep-config-pick").innerHTML = configurations
+          .filter((c) => !held.includes(c.name))
+          .map((c) => `<option value="${esc(c.name)}">${esc(c.name)}${c.service_name ? " · " + esc(c.service_name) : ""}</option>`)
+          .join("") || `<option value="">no other configuration saved</option>`;
       }
 
       function showDepDetail() {
@@ -1585,10 +1678,11 @@
         $("dep-name").disabled = !creatingDep;
         $("dep-selector").value = d ? selectorText(d.selector) : "";
         $("dep-state").textContent = !d
-          ? "will be saved with its packages — nothing reaches an agent until the rollout press"
-          : "saved — the rollout press on its row is what distributes; re-aiming it changes only what is proposed";
+          ? "will be saved with its packages and configurations — nothing reaches an agent until the rollout press"
+          : "saved — the rollout press on its row is what distributes; editing it changes only what is proposed";
         $("dep-delete").disabled = creatingDep;
         renderDepPackages(d);
+        renderDepConfigs(d);
         // The picker offers what the store holds; the Server refuses a package nobody uploaded.
         $("dep-package-pick").innerHTML = packages.map((p) =>
           `<option value="${esc(p.agent_type)}@${esc(p.version)}">${esc(p.display_name)}</option>`
@@ -1613,6 +1707,7 @@
         e.preventDefault();
         creatingDep = false;
         depPending = [];
+        depConfigPending = [];
         depFormDirty = false;
         currentDep = currentDep === tr.dataset.name ? null : tr.dataset.name;
         $("dep-error").textContent = "";
@@ -1625,6 +1720,7 @@
         creatingDep = true;
         currentDep = null;
         depPending = [];
+        depConfigPending = [];
         $("dep-packages").innerHTML = "";
         renderDeployments();
         showDepDetail();
@@ -1635,8 +1731,8 @@
       });
 
       // OK saves the name and the selector, and carries along what the form holds besides: on a new
-      // deployment its packages. A failed request keeps the form open on the saved deployment,
-      // beside its message.
+      // deployment its packages and configurations. A failed request keeps the form open on the
+      // saved deployment, beside its message.
       $("dep-ok").addEventListener("click", async () => {
         $("dep-error").textContent = "";
         const name = $("dep-name").value.trim();
@@ -1653,12 +1749,18 @@
             const res = await fetch(`${depPath(name)}/packages/${encodeURIComponent(type)}/${encodeURIComponent(version)}?replace=true`, { method: "PUT" });
             if (!res.ok) problems.push(`${key}: ${(await res.json().catch(() => ({}))).error || `HTTP ${res.status}`}`);
           }
+          for (const configuration of depConfigPending) {
+            const res = await fetch(`${depPath(name)}/configurations/${encodeURIComponent(configuration)}`, { method: "PUT" });
+            if (!res.ok) problems.push(`${configuration}: ${(await res.json().catch(() => ({}))).error || `HTTP ${res.status}`}`);
+          }
         }
         creatingDep = false;
         depPending = [];
+        depConfigPending = [];
         depFormDirty = false;
         currentDep = problems.length ? name : null;
         await refreshDeployments();
+        refreshConfigs();
         refreshAgents();
         if (problems.length) {
           showDepDetail();
@@ -1670,6 +1772,7 @@
         creatingDep = false;
         currentDep = null;
         depPending = [];
+        depConfigPending = [];
         depFormDirty = false;
         $("dep-error").textContent = "";
         $("dep-packages").innerHTML = "";
@@ -1689,6 +1792,7 @@
         currentDep = null;
         depFormDirty = false;
         await refreshDeployments();
+        refreshConfigs();
         refreshAgents();
       });
 
@@ -1731,6 +1835,45 @@
         showDepDetail();
       });
 
+      // Add configuration: one request, now — or, on a new deployment, carried along with OK.
+      $("dep-config-add").addEventListener("click", async () => {
+        const pick = $("dep-config-pick").value;
+        if (!pick) { $("dep-error").textContent = "no configuration to add"; return; }
+        $("dep-error").textContent = "";
+        if (creatingDep) {
+          if (!depConfigPending.includes(pick)) depConfigPending.push(pick);
+          renderDepConfigs(null);
+          return;
+        }
+        const d = currentDepView();
+        if (!d) return;
+        const res = await fetch(`${depPath(d.name)}/configurations/${encodeURIComponent(pick)}`, { method: "PUT" });
+        $("dep-error").textContent = res.ok ? "" : ((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+        await refreshDeployments();
+        showDepDetail();
+        refreshConfigs();
+        refreshAgents();
+      });
+
+      // The configuration list: its ✕, one request.
+      $("dep-configs").addEventListener("click", async (e) => {
+        const del = e.target.closest(".dep-config-del");
+        if (!del) return;
+        if (creatingDep) {
+          depConfigPending = depConfigPending.filter((name) => name !== del.dataset.name);
+          renderDepConfigs(null);
+          return;
+        }
+        const d = currentDepView();
+        if (!d) return;
+        const res = await fetch(`${depPath(d.name)}/configurations/${encodeURIComponent(del.dataset.name)}`, { method: "DELETE" });
+        $("dep-error").textContent = res.ok ? "" : ((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+        await refreshDeployments();
+        showDepDetail();
+        refreshConfigs();
+        refreshAgents();
+      });
+
       for (const id of ["dep-name", "dep-selector"]) {
         $(id).addEventListener("input", () => { depFormDirty = true; });
       }
@@ -1770,12 +1913,15 @@
       }
       async function refreshConfigs() {
         try { configurations = await (await fetch("/api/v1/configurations")).json(); } catch { return; }
-        renderConfigList();
-        renderConfigActions();
-        if (selectedName && !configDirty) {
-          const selected = configurations.find((c) => c.name === selectedName);
-          if (selected) { $("config").value = selected.body; $("config-type").value = selected.service_name || ""; $("config-selector").value = selectorText(selected.selector); $("config-role").value = selected.role || ""; }
+        renderConfigs();
+        // The form follows the store unless an edit is in flight — a refresh must never type
+        // over the operator.
+        if (!configDirty && (currentConfig || !creatingConfig)) {
+          if (currentConfig) showConfigDetail();
+          else if (!creatingConfig) $("config-detail").style.display = "none";
         }
+        // The Deployments form picks configurations from this list.
+        if (currentDep || creatingDep) renderDepConfigs(currentDepView());
       }
 
       // Enrolments (ADR-0021 clause 22; the UI as a client of the API, ADR-0023). A Server without

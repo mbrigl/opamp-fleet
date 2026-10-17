@@ -105,7 +105,8 @@ Every Agent reports two names that are easy to confuse:
 | **instance name** | *your* name for this one Agent | `edge-collector-3` |
 
 Aim at the type to reach every Agent of a kind; aim at the instance name to reach exactly one. A
-package is built for a type and reaches no Agent of another, whatever else its Selector says.
+package is built for a type and reaches no Agent of another, whatever Deployment holds it; a
+Configuration stated for a type does the same.
 
 The Client's own type is `supervisor` — the Agent that supervises the others. Its instance name
 defaults to a display name, deliberately not equal to the type: if both columns of the fleet view
@@ -1198,7 +1199,8 @@ A new kind of process means a new plugin, not a change to the core.
 
 The `[[supervisor]]` blocks are the fleet-manageable half of `supervisor.toml`. A
 Configuration typed for the Client itself — `service_name = "supervisor"` —
-carries `[[supervisor]]` blocks in its body, and a matching Client applies them as its new set:
+carries `[[supervisor]]` blocks in its body, and a Client its Deployment releases it to applies them
+as its new set:
 
 - **Only the blocks are read.** Every other top-level key in the offered document is ignored —
   the endpoint, the client identity, the state directory stay the host's, and can never arrive over
@@ -1348,8 +1350,8 @@ says what supplies the value now. The same check runs on a Supervisor set the Se
 block that would not work is refused *before* any running process is touched.
 
 This Client reports the kinds it was compiled with as attributes of its own Agent — one key per
-kind, `supervisor.kind.collector = "true"` — so a Supervisor set can be aimed with a Selector at the
-Clients that can actually run it.
+kind, `supervisor.kind.collector = "true"` — so a Supervisor set can be aimed, by the Selector of
+the Deployment that holds it, at the Clients that can actually run it.
 
 The published build carries every kind. A wrapper, when the code base carries one, is a Cargo feature named after its `type`, so
 a build for hosts that run only some of them leaves the others out:
@@ -1390,7 +1392,7 @@ a set the Server offers:
 
 | Key | What answers it now |
 |---|---|
-| `package` | the Server aims packages by Selector |
+| `package` | the Server aims packages by a Deployment's Selector |
 | `accepts_packages` | every Agent's program path decides |
 | `working_dir` | the process starts in the directory its program lives in |
 | `reload_signal` | a kind that knows the agent holds it; an unwrapped agent applies by restarting |
