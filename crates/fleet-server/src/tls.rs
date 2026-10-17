@@ -55,8 +55,6 @@ pub enum Peer {
     /// A bootstrap certificate: it may only enrol.
     Enrolling {
         subject: String,
-        /// Its six subject values as they read, for the operator (ADR-0036 clause 5).
-        values: Box<SubjectValues>,
         /// The values an approval carries into the host certificate, or why its subject breaks
         /// the rules they are issued by (ADR-0036 clause 3).
         carried: Box<Result<SubjectValues, String>>,
@@ -77,7 +75,6 @@ impl Issuers {
             // The handshake verified it, so it parses; a certificate that does not is no member.
             return Peer::Enrolling {
                 subject: String::new(),
-                values: Box::default(),
                 carried: Box::new(Err("the certificate does not parse".to_string())),
                 fingerprint: hex::encode(Sha256::digest(certificate)),
                 id: CertId {
@@ -98,7 +95,6 @@ impl Issuers {
         }
         Peer::Enrolling {
             subject: crate::ca::name_text(parsed.subject()),
-            values: Box::new(crate::ca::subject_values(parsed.subject())),
             carried: Box::new(crate::ca::carried_subject(parsed.subject())),
             fingerprint: hex::encode(Sha256::digest(certificate)),
             id: CertId::new(issuer, &hex::encode(parsed.raw_serial())),

@@ -564,14 +564,21 @@ struct AgentResponse {
     assigned_package: String,
     /// The Configurations waiting for a rollout act toward this Agent (ADR-0025 point 4,
     /// ADR-0034): one its Deployment holds and it is not assigned (`change: "new"`), one whose
-    /// saved revision differs from the assigned one (`change: "update"`), or one assigned that the
-    /// next press drops because the Deployment no longer holds it (`change: "remove"`). The
-    /// Server never acts on this by itself.
+    /// saved revision differs from the assigned one (`change: "update"`), one assigned that the
+    /// next press drops from a release that keeps something else, applying the smaller map
+    /// (`change: "remove"`), or one assigned while the Deployment releases nothing to this Agent
+    /// any more, so the next press leaves it with no assignment and it keeps running what it runs
+    /// (`change: "kept"`). The Server never acts on this by itself.
     pending_configurations: Vec<PendingConfigurationResponse>,
     /// The Package waiting for a rollout act toward this Agent (ADR-0025 point 4) — at most one:
     /// the candidate of the Deployment that claims it, when that is not what it is assigned, or
-    /// the assigned one the next press drops (`change: "remove"`).
+    /// the assigned one the next press drops (`change: "remove"`, or `"kept"` as for a
+    /// Configuration).
     pending_packages: Vec<PendingPackageResponse>,
+    /// The Deployment the next press releases through, when the assignment names another one or
+    /// none (ADR-0034 clause 6); empty otherwise. Set alone, it says the press moves only the
+    /// assignment over to the claiming Deployment, with the same content.
+    pending_deployment: String,
     /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
     /// nothing.
     desired_hash: String,
@@ -670,6 +677,7 @@ impl From<fleet::AgentView> for AgentResponse {
                 .map(Into::into)
                 .collect(),
             pending_packages: view.pending_packages.into_iter().map(Into::into).collect(),
+            pending_deployment: view.pending_deployment,
             desired_hash: view.desired_hash,
             capabilities: view.capabilities,
             available_components: view.available_components,
@@ -706,7 +714,9 @@ impl From<fleet::AgentView> for AgentResponse {
 struct PendingConfigurationResponse {
     name: String,
     /// `new` — held by the claiming Deployment and not yet assigned; `update` — the saved
-    /// revision differs from the assigned one; `remove` — assigned, and dropped by the next press.
+    /// revision differs from the assigned one; `remove` — assigned, and dropped by the next press,
+    /// which applies the smaller map; `kept` — assigned, and the next press leaves the Agent with
+    /// no assignment, so it keeps running it.
     change: String,
 }
 
@@ -731,7 +741,8 @@ struct PendingPackageResponse {
     /// What an operator reads: the Agent type and the version together.
     display_name: String,
     /// `new` — nothing is assigned for this Agent type; `update` — another version is; `remove` —
-    /// the assigned one, which the next press drops.
+    /// the assigned one, which the next press drops; `kept` — the assigned one, while the next
+    /// press leaves the Agent with no assignment.
     change: String,
 }
 
@@ -990,7 +1001,7 @@ struct ConfigurationSpec {
     /// See [`Revision::service_name`]. Absent means every Agent type.
     #[serde(default)]
     service_name: String,
-    /// Read only to refuse it by name: a Configuration has no Selector (ADR-0034 clause 9).
+    /// Read only to refuse it by name: a Configuration has no Selector (ADR-0034 clauses 1 and 9).
     #[serde(default)]
     #[schema(ignore)]
     selector: Option<serde_json::Value>,
@@ -1313,17 +1324,6 @@ impl PlatformQuery {
     }
 }
 
-/// The query parameters of an entry upload: everything but the artifact, which is the body — and
-/// the platform, which is the path.
-#[derive(Deserialize, IntoParams)]
-struct EntryUpload {
-    /// Refused when given: a signature is written through the entry's own signature route
-    /// (ADR-0033), and new bytes remove the one held. Accepted as a parameter only so an upload
-    /// carrying one fails by name.
-    #[serde(default)]
-    signature: Option<String>,
-}
-
 /// The `(Package, Platform)` a route names in its path, or the `400` that says which half of it
 /// does not parse. `platform_prefix` leads the platform half's message.
 fn artifact_of(
@@ -1513,13 +1513,12 @@ async fn delete_package_set(
         ("agent_type" = String, Path, description = "The Agent type"),
         ("version" = String, Path, description = "The version"),
         ("os" = String, Path, description = "The operating system this artifact is built for, as `os.type`: `linux`, `darwin`, `windows`"),
-        ("arch" = String, Path, description = "The architecture, as `host.arch`: `amd64`, `arm64`"),
-        EntryUpload
+        ("arch" = String, Path, description = "The architecture, as `host.arch`: `amd64`, `arm64`")
     ),
     request_body(content = Vec<u8>, description = "The artifact bytes", content_type = "application/octet-stream"),
     responses(
         (status = 200, description = "The Set, with the stored entry, unsigned", body = PackageSetView),
-        (status = 400, description = "Invalid identity, platform, an empty artifact, or a signature given with the upload", body = ErrorBody),
+        (status = 400, description = "Invalid identity, platform, or an empty artifact", body = ErrorBody),
         (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
         (status = 413, description = "The artifact exceeds max_package_size_bytes", body = ErrorBody),
@@ -1530,25 +1529,12 @@ async fn delete_package_set(
 async fn put_package_entry(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
-    Query(upload): Query<EntryUpload>,
     body: Body,
 ) -> Response {
     let id = match PackageId::new(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    if upload.signature.is_some() {
-        // Named rather than ignored: a signature dropped on the floor here is an unsigned rollout
-        // nobody notices, which is the one failure mode this whole gate exists to prevent.
-        return error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "a signature is not part of the upload — upload the artifact without it, then \
-                 PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature \
-                 (ADR-0033)"
-            ),
-        );
-    }
     let platform = match Platform::new(&os, &arch) {
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
@@ -2434,8 +2420,15 @@ struct PendingEnrolment {
     key_fingerprint: String,
     /// The six subject values of the bootstrap certificate the connection carried: what an
     /// approval carries into the host certificate (ADR-0036 clause 5). The request's own subject
-    /// is not listed, because it is neither trusted nor carried.
-    bootstrap_subject: HostSubject,
+    /// is not listed, because it is neither trusted nor carried. Absent when that certificate's
+    /// subject cannot be carried — `subject_refusal` then says why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bootstrap_subject: Option<HostSubject>,
+    /// Why the bootstrap certificate's subject breaks the rules of ADR-0036 clause 1, naming the
+    /// attribute: an approval is refused `409` with this reason, and nothing is signed. Absent
+    /// when the values can be carried.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject_refusal: Option<String>,
     /// The SHA-256 fingerprint of that bootstrap certificate, hex.
     bootstrap_fingerprint: String,
     /// Its serial, lowercase hex: the `serial` of `GET /api/v1/bootstrap-certificates` when this
@@ -2913,7 +2906,8 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
             arrived_ms: p.arrived_ms,
             peer: p.requester.peer.map(|ip| ip.to_string()),
             key_fingerprint: p.key_fingerprint,
-            bootstrap_subject: p.requester.bootstrap_values.into(),
+            bootstrap_subject: p.requester.carried.clone().ok().map(Into::into),
+            subject_refusal: p.requester.carried.err(),
             bootstrap_fingerprint: p.requester.bootstrap_fingerprint,
             bootstrap_serial: p.requester.bootstrap.serial,
         })
@@ -3061,7 +3055,7 @@ struct HostView {
 }
 
 /// The subject values a Host carries (ADR-0035 clause 1), or a bootstrap certificate carries into
-/// the host certificate an approval issues (ADR-0036 clause 5); an empty one is absent from the
+/// the host certificate an approval issues (ADR-0036 clause 3); an empty one is absent from the
 /// certificate.
 #[derive(Serialize, ToSchema)]
 struct HostSubject {

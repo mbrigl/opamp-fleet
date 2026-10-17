@@ -48,10 +48,10 @@ pub struct Request {
 pub struct Requester {
     /// The bootstrap certificate's subject as text, for the audit record.
     pub bootstrap_subject: String,
-    /// Its six subject values as they read, for the operator (ADR-0036 clause 5).
-    pub bootstrap_values: SubjectValues,
     /// The values an approval carries into the host certificate, or why the subject breaks the
-    /// rules of ADR-0036 clause 1 — read from the certificate verified in the handshake.
+    /// rules of ADR-0036 clause 1 — read from the certificate verified in the handshake. The queue
+    /// lists this as it stands (ADR-0036 clause 5), so an operator sees a refusal before pressing
+    /// Approve.
     pub carried: Result<SubjectValues, String>,
     pub bootstrap_fingerprint: String,
     /// The bootstrap certificate's issuer and serial; the serial as
@@ -627,7 +627,6 @@ mod tests {
     fn requester() -> Requester {
         Requester {
             bootstrap_subject: "CN=bootstrap".to_string(),
-            bootstrap_values: SubjectValues::default(),
             carried: Ok(SubjectValues::default()),
             bootstrap_fingerprint: "bf".to_string(),
             bootstrap: CertId::new(b"bootstrap CA", "b5"),
@@ -920,7 +919,6 @@ mod tests {
             ..SubjectValues::default()
         };
         let carrying = Requester {
-            bootstrap_values: values.clone(),
             carried: Ok(values.clone()),
             ..requester()
         };

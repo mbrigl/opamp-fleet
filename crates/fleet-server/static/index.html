@@ -739,7 +739,7 @@
         // Three states that would otherwise be the same empty cell, and the operator's next move
         // differs in each (ADR-0026 point 25). Calm, not alarming: a freshly enrolled host is in no
         // channel yet, which is the ordinary state and not a fault.
-        const pending = (a.pending_configurations || []).length + (a.pending_packages || []).length;
+        const pending = (a.pending_configurations || []).length + (a.pending_packages || []).length + (a.pending_deployment ? 1 : 0);
         if (!a.package_conflict) {
           if (!a.deployment) {
             chips.push(`<span class="pill gray" title="no deployment's selector matches this agent, so nothing aims at it — give it a channel: a label here, or a channel attribute at provisioning. This is the ordinary state right after an enrolment.">in no deployment</span>`);
@@ -750,9 +750,13 @@
         const why = {
           new: "waits for its first rollout act",
           update: "a newer save or version waits for a rollout act",
-          remove: "the deployment no longer releases it to this agent — the next rollout act drops it",
+          remove: "the deployment no longer releases it to this agent — the next rollout act drops it, and the smaller set is applied",
+          kept: "the deployment releases nothing to this agent any more — the next rollout act leaves it with no assignment, and it keeps running what it runs",
         };
-        const mark = { new: "", update: " ✎", remove: " ✕" };
+        const mark = { new: "", update: " ✎", remove: " ✕", kept: " ⏸" };
+        if (a.pending_deployment) {
+          chips.push(`<span class="pill amber" title="deployment ${esc(a.pending_deployment)} claims this agent — the next rollout act releases through it rather than through the deployment named in this agent's assignment, even where the content stays the same">⏳ ⤷ ${esc(a.pending_deployment)}</span>`);
+        }
         for (const p of a.pending_configurations || []) {
           chips.push(`<span class="pill amber" title="configuration ${esc(p.name)}: ${why[p.change] || esc(p.change)}">⏳ ${esc(p.name)}${mark[p.change] || ""}</span>`);
         }
@@ -1220,7 +1224,7 @@
         return `<span class="pill ${tone}" title="${esc(why)}">${label}</span>`;
       }
 
-      // Whether every entry carries a valid signature (ADR-0033 clause 6), in one pill per row.
+      // Whether every entry carries a valid signature (ADR-0033 clause 8), in one pill per row.
       function signaturesCell(p) {
         const entries = p.entries || [];
         if (!entries.length) return "";
@@ -1499,7 +1503,7 @@
       // A signed signing file (ADR-0027) matched to the package it names and to each entry by its
       // platform and SHA-256: a signature for other bytes than the entry's is not taken. Each goes
       // through the entry's signature route, one request each, and the Server's answer is reported
-      // per entry with what its check found (ADR-0033 clause 10). Nothing is checked against a key
+      // per entry with what its check found (ADR-0033 clause 12). Nothing is checked against a key
       // here — the Server does when it holds one, and every Client does before it opens the
       // artifact (ADR-0026 clause 54).
       $("set-sig-import").addEventListener("click", async () => {
@@ -2015,10 +2019,13 @@
       function bootstrapCell(e) {
         const b = boots.find((b) => b.serial === e.bootstrap_serial);
         const tip = (lines) => esc(lines.join("\n"));
-        // The values the approval carries into the host certificate (ADR-0036 clause 5).
-        const values = SUBJECT_FIELDS.filter(([field]) => e.bootstrap_subject && e.bootstrap_subject[field])
-          .map(([field, short, key]) => `<span class="chip" title="${short} — the host certificate carries it, and its agents as ${key}">${short}=${esc(e.bootstrap_subject[field])}</span>`)
-          .join("") || `<span class="sub">no subject values</span>`;
+        // The values the approval carries into the host certificate, or why it will be refused
+        // (ADR-0036 clause 5) — shown before the operator presses Approve.
+        const values = e.subject_refusal
+          ? `<span class="pill red" title="Approving this request is refused, and nothing is signed: ${esc(e.subject_refusal)}. Reject it, and give the host a bootstrap certificate whose subject follows the rules.">subject cannot be carried: ${esc(e.subject_refusal)}</span>`
+          : SUBJECT_FIELDS.filter(([field]) => e.bootstrap_subject && e.bootstrap_subject[field])
+            .map(([field, short, key]) => `<span class="chip" title="${short} — the host certificate carries it, and its agents as ${key}">${short}=${esc(e.bootstrap_subject[field])}</span>`)
+            .join("") || `<span class="sub">no subject values</span>`;
         if (!b) {
           const title = tip([`serial ${e.bootstrap_serial}`, `fingerprint ${e.bootstrap_fingerprint}`,
             "Not on this Server's record: made elsewhere, under a bootstrap CA since replaced, or deleted from the record after its revocation."]);

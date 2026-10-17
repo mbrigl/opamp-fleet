@@ -1387,7 +1387,7 @@ mod tests {
     }
 
     /// `[packages] allowed_sources` fails the load whatever it holds, naming the key as removed:
-    /// ignored, it would be a list an operator believes is in force and is not (ADR-0033 clause 11).
+    /// ignored, it would be a list an operator believes is in force and is not (ADR-0033 clause 13).
     /// Verifies: ADR-0033
     #[test]
     fn allowed_sources_fails_the_load_naming_the_key_as_removed() {

@@ -2,7 +2,7 @@
 //! filesystem before the content hash — which comes only after the whole stream lands — can reject
 //! the body. The cap is enforced both from an over-large `Content-Length` up front and, for a
 //! chunked response that advertises none, while the bytes stream in. And the download goes to this
-//! Client's own Server origin and nowhere else (ADR-0033 clause 11).
+//! Client's own Server origin and nowhere else (ADR-0033 clause 13).
 
 use std::net::SocketAddr;
 
@@ -197,7 +197,7 @@ async fn a_body_within_the_ceiling_streams_through_to_verification() {
     );
 }
 
-/// A redirect that stays on the Server's origin is followed (ADR-0033 clause 11). Reaching the
+/// A redirect that stays on the Server's origin is followed (ADR-0033 clause 13). Reaching the
 /// artifact (and then failing only on the deliberately wrong content hash) proves the redirect was
 /// followed, not refused.
 /// Verifies: ADR-0026, ADR-0033
@@ -266,7 +266,7 @@ async fn a_download_without_the_headers_is_refused_by_a_guarded_source() {
 
 /// A redirect to another origin is refused before that origin is asked, so neither the offered
 /// header nor anything else reaches it: the download fails naming the origin it pointed at
-/// (ADR-0033 clause 11). The other origin here refuses anything carrying the header, so a leak
+/// (ADR-0033 clause 13). The other origin here refuses anything carrying the header, so a leak
 /// would surface as `401` rather than as this refusal.
 /// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
@@ -408,7 +408,7 @@ async fn counted_source() -> (SocketAddr, std::sync::Arc<std::sync::atomic::Atom
 
 /// An absolute `download_url` on another origin than the Client's own Server is refused before a
 /// request is sent, naming that origin: the check is on the absence of the request, not on the
-/// outcome of the download (ADR-0033 clause 11).
+/// outcome of the download (ADR-0033 clause 13).
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn an_absolute_url_on_another_origin_is_refused_without_a_request() {
@@ -546,7 +546,7 @@ async fn tls_origin(
 
 /// This Client's certificate goes to its own Server's origin and to no other: the download from it
 /// presents the certificate, and a redirect to another host is refused before that host is reached
-/// (ADR-0033 clause 11).
+/// (ADR-0033 clause 13).
 /// Verifies: ADR-0021, ADR-0026, ADR-0033
 #[tokio::test]
 async fn the_client_certificate_goes_to_the_servers_origin_alone() {

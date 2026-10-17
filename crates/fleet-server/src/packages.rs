@@ -246,7 +246,7 @@ impl SignatureState {
 }
 
 /// The length of an Ed25519 signature (RFC 8032).
-const ED25519_SIGNATURE_LEN: usize = 64;
+pub(crate) const ED25519_SIGNATURE_LEN: usize = 64;
 
 /// The signature check's port (ADR-0006, ADR-0033): whether `signature` is the operator's over
 /// `statement`. The Ed25519 adapter over `[packages] verification_key`
@@ -805,7 +805,7 @@ impl PackageStore {
     }
 
     /// The artifact `(id, platform)`, when this Server holds it and it carries a signature — the
-    /// half of the download route's test that needs no Agent (ADR-0033 clause 8).
+    /// half of the download route's test that needs no Agent (ADR-0033 clause 10).
     pub fn offerable(&self, id: &PackageId, platform: &Platform) -> Option<Offerable> {
         let sets = self.sets.read().expect("sets lock");
         let entry = sets.get(id)?.entries.get(platform)?;
@@ -924,7 +924,7 @@ impl PackageStore {
 }
 
 /// The entry one Agent is offered, with the signature it travels with — the one test of "offered"
-/// that the offer and the download share (ADR-0033 clause 8). The Agent's assignment names the
+/// that the offer and the download share (ADR-0033 clause 10). The Agent's assignment names the
 /// Package; the Package must be built for the Agent type the Agent reports (ADR-0026 clause 9) and
 /// hold an entry for the Platform it reports; and that entry must carry a signature, because the
 /// Server never offers a Package unsigned (ADR-0033). Whether the Agent accepts packages at all is
@@ -969,7 +969,7 @@ fn no_entry(id: &PackageId, platform: &Platform) -> String {
 }
 
 /// A signed artifact this Server holds, as [`PackageStore::offerable`] found it: what the download
-/// route tests each Agent of a host against (ADR-0033 clause 8).
+/// route tests each Agent of a host against (ADR-0033 clause 10).
 pub struct Offerable {
     id: PackageId,
     platform: Platform,
@@ -1329,7 +1329,7 @@ mod tests {
 
     /// A signature is written on an entry, offered to an Agent of that Platform with exactly those
     /// bytes, and removed when new bytes are uploaded to the entry — a signature covers the hash
-    /// (ADR-0033 clause 4). Removing it takes the offer away.
+    /// (ADR-0033 clause 6). Removing it takes the offer away.
     /// Verifies: ADR-0033
     #[test]
     fn a_signature_lives_on_its_entry_and_new_bytes_remove_it() {
@@ -1376,7 +1376,7 @@ mod tests {
     }
 
     /// A signature has to name an entry the Package holds (`no entry`, a `404`), and has to be
-    /// one: empty or not 64 bytes is refused (a `400`) and nothing is stored (ADR-0033 clause 4).
+    /// one: empty or not 64 bytes is refused (a `400`) and nothing is stored (ADR-0033 clause 6).
     /// Verifies: ADR-0033
     #[test]
     fn a_signature_needs_an_entry_and_the_shape_of_one() {
@@ -1409,7 +1409,7 @@ mod tests {
 
     /// With the operator's public key the Server reports a signature over the statement `valid` and
     /// any other `invalid` — and stores both; without the key every signature is `unchecked`
-    /// (ADR-0033 clause 5). The state is checked again when the store is reopened.
+    /// (ADR-0033 clause 7). The state is checked again when the store is reopened.
     /// Verifies: ADR-0033
     #[test]
     fn the_server_checks_a_signature_against_its_key_and_only_reports() {
@@ -2170,6 +2170,38 @@ mod tests {
         );
     }
 
+    /// A stored signature is held to the length a write is held to: one that is not 64 bytes fails
+    /// the open naming the file, rather than being offered for every Client to refuse.
+    /// Verifies: ADR-0033
+    #[test]
+    fn a_stored_signature_of_the_wrong_length_fails_the_open_naming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("packages")).expect("dir");
+        std::fs::write(
+            dir.path().join("packages/otelcol@1.0.0.json"),
+            serde_json::json!({
+                "agent_type": "otelcol",
+                "version": "1.0.0",
+                "entries": [{
+                    "os": "linux",
+                    "arch": "amd64",
+                    "sha256": "00".repeat(32),
+                    "size": 1,
+                    "signature_hex": "ab".repeat(63)
+                }]
+            })
+            .to_string(),
+        )
+        .expect("metadata");
+        let error = PackageStore::open(dir.path().to_path_buf())
+            .map(|_| ())
+            .expect_err("a short signature is refused");
+        assert!(
+            error.contains("otelcol@1.0.0.json") && error.contains("signature"),
+            "the error names the file and the signature: {error}"
+        );
+    }
+
     /// The identity grammar keeps the triple a safe directory name and an unambiguous parse:
     /// `@` and path separators are refused.
     /// Verifies: ADR-0026
@@ -2213,7 +2245,7 @@ mod tests {
 
     /// Every artifact `offer_for_assigned` names is one `offers` answers yes for, and nothing else
     /// is — across assignments, Agent types, Platforms, signed and unsigned entries, and artifacts
-    /// the store does not hold (ADR-0033 clause 8). Whether the Agent accepts packages is the
+    /// the store does not hold (ADR-0033 clause 10). Whether the Agent accepts packages is the
     /// record's, asked by the fleet before either; `fleet` tests that half.
     /// Verifies: ADR-0026, ADR-0033
     #[test]
@@ -2302,7 +2334,7 @@ mod tests {
     }
 
     /// An entry that carries no signature is neither offered nor fetched, though another entry of
-    /// the same Package is signed (ADR-0033 clause 4).
+    /// the same Package is signed (ADR-0033 clause 6).
     /// Verifies: ADR-0033
     #[test]
     fn an_unsigned_entry_is_not_offered_though_another_is_signed() {

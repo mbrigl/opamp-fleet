@@ -298,9 +298,9 @@ pub(crate) fn subject_values(name: &x509_parser::x509::X509Name<'_>) -> SubjectV
 /// The six values a bootstrap certificate's subject carries into a host certificate, read under
 /// the rules they were issued by (ADR-0036 clauses 1 and 3): each attribute at most once, a
 /// country of two upper-case letters as a `PrintableString`, every other value of 1 to 64
-/// characters without a control character as a `UTF8String`. Every other attribute, the common
-/// name included, is passed over. The certificate may come from a foreign PKI, so nothing in it
-/// is taken on trust.
+/// characters without a control character as a `UTF8String` or a `PrintableString`. Every other
+/// attribute, the common name included, is passed over. The certificate may come from a foreign
+/// PKI, so nothing in it is taken on trust.
 ///
 /// # Errors
 /// Returns why the subject cannot be carried, naming the attribute.
@@ -324,12 +324,19 @@ pub(crate) fn carried_subject(
             return Err(format!("{key} appears more than once"));
         }
         seen.push(attribute);
-        let (tag, encoding) = if attribute.printable() {
-            (Tag::PrintableString, "PrintableString")
+        // The country is a PrintableString. Every other value may be a UTF8String or the
+        // PrintableString older PKIs write, a subset of it; it is carried as a UTF8String
+        // (ADR-0036 clause 3).
+        let tag = entry.attr_value().tag();
+        let (fits, encoding) = if attribute.printable() {
+            (tag == Tag::PrintableString, "PrintableString")
         } else {
-            (Tag::Utf8String, "UTF8String")
+            (
+                tag == Tag::Utf8String || tag == Tag::PrintableString,
+                "UTF8String or PrintableString",
+            )
         };
-        if entry.attr_value().tag() != tag {
+        if !fits {
             return Err(format!("{key} is not encoded as a {encoding}"));
         }
         let value = entry
@@ -1582,6 +1589,8 @@ mod tests {
         let carried = read(vec![
             (rcgen::DnType::CountryName, printable("AT")),
             (rcgen::DnType::OrganizationName, utf8("Kunde GmbH")),
+            // An older PKI's PrintableString is taken for a value that is not the country.
+            (rcgen::DnType::OrganizationalUnitName, printable("Wien")),
             (rcgen::DnType::CustomDnType(vec![2, 5, 4, 5]), utf8("SN-1")),
             (rcgen::DnType::CommonName, utf8("bootstrap of Kunde")),
         ])
@@ -1591,9 +1600,10 @@ mod tests {
             SubjectValues {
                 country: "AT".to_string(),
                 organization: "Kunde GmbH".to_string(),
+                organizational_unit: "Wien".to_string(),
                 ..SubjectValues::default()
             },
-            "serialNumber and the common name are not carried"
+            "serialNumber and the common name are not carried; a PrintableString OU is"
         );
         for (entries, named) in [
             (
@@ -1614,7 +1624,12 @@ mod tests {
                 "country",
             ),
             (
-                vec![(rcgen::DnType::OrganizationName, printable("Kunde GmbH"))],
+                vec![(
+                    rcgen::DnType::OrganizationName,
+                    rcgen::DnValue::BmpString(
+                        rcgen::string::BmpString::try_from("Kunde GmbH").expect("bmp"),
+                    ),
+                )],
                 "organization",
             ),
             (

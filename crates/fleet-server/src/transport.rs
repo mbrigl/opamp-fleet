@@ -879,7 +879,6 @@ impl Handler for Fleet {
         if let (
             Some(Peer::Enrolling {
                 subject,
-                values,
                 carried,
                 fingerprint,
                 id,
@@ -890,7 +889,6 @@ impl Handler for Fleet {
             let enrolling = Enrolling {
                 requester: Requester {
                     bootstrap_subject: subject.clone(),
-                    bootstrap_values: (**values).clone(),
                     carried: (**carried).clone(),
                     bootstrap_fingerprint: fingerprint.clone(),
                     bootstrap: id.clone(),

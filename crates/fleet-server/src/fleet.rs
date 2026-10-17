@@ -1236,9 +1236,10 @@ impl AppState {
     /// Writes releases (ADR-0025 clause 2, ADR-0037 clause 3): each Configuration's saved revision
     /// is pinned — copied into the store's retained revisions, its hash the one the assignment
     /// keeps — and the revisions and the records carrying the new assignments go to the store as
-    /// one operation. Only once it succeeded are they the fleet's; a failure leaves the fleet and
-    /// the Configurations as they were. Answers the Configurations the old and new assignments
-    /// name, whose unreferenced revisions the caller collects.
+    /// one operation. Only once it succeeded are they the fleet's. A failure leaves the fleet's
+    /// assignments as they were, the store puts back the records it wrote, and the revisions the
+    /// stored assignments do not reference are collected. Answers the Configurations the old and
+    /// new assignments name, whose unreferenced revisions the caller collects.
     fn write_releases(
         &self,
         fleet: &mut HashMap<InstanceUid, AgentRecord>,
@@ -1268,7 +1269,10 @@ impl AppState {
                 self.agent_store.release(revisions, &agents)?;
                 Ok(agents)
             })
-            .map_err(RolloutError::Storage)?;
+            .map_err(|e| {
+                self.collect_revisions(names);
+                RolloutError::Storage(e)
+            })?;
         let mut digests = self.written.lock().expect("written lock");
         let mut touched = Vec::new();
         for (uid, persisted) in written {
@@ -1363,7 +1367,7 @@ impl AppState {
             .get(name)
             .ok_or_else(|| RolloutError::UnknownResource(format!("no deployment {name:?}")))?;
         refuse_unreleasable(store, deployment)?;
-        let mut releases = Vec::new();
+        let mut releases: Vec<(InstanceUid, Option<Assignment>)> = Vec::new();
         for (uid, record) in fleet.iter() {
             let claiming = deployment_for(&deployments, record.effective_description().as_deref());
             match claiming {
@@ -1375,6 +1379,8 @@ impl AppState {
                 releases.push((*uid, release));
             }
         }
+        // In one order, so a rollout that fails part-way fails the same way every time.
+        releases.sort_by_key(|(uid, _)| uid.0);
         let assigned = releases.len();
         let touched = self.write_releases(&mut fleet, releases)?;
         self.collect_revisions(touched);
@@ -1997,8 +2003,9 @@ impl AppState {
         }
 
         // What places it in its Client and under its Host may have changed (ADR-0035): a new
-        // record, a new Host, or a new description.
-        if !known || moved || described {
+        // record, a new Host, a new description, or a new identity — a re-key took the old one
+        // out of its group, and a compressed message carries no description to place it by.
+        if !known || moved || described || rekeyed.is_some() {
             self.place(&mut fleet, &uid);
         }
         let record = fleet.get_mut(&uid).expect("the record was just written");
@@ -2204,7 +2211,7 @@ impl AppState {
 
     /// Whether a certificate naming `host` may fetch the artifact `(id, platform)` from the download
     /// route (ADR-0026): it is offered to an Agent the host speaks for. The offer's own test
-    /// decides (ADR-0033 clause 8), for each such Agent — the `instance_uid`s bound to the host, or
+    /// decides (ADR-0033 clause 10), for each such Agent — the `instance_uid`s bound to the host, or
     /// every Agent for a host marked as a Gateway. Nothing is offered without package delivery or a
     /// host register.
     ///
@@ -2627,11 +2634,11 @@ impl AppState {
                     .flatten()
                     .flat_map(|release| release.configurations.keys().cloned())
                     .collect();
-                let (pending_configurations, pending_packages) = match (&proposed, claimed) {
+                let waits = match (&proposed, claimed) {
                     (Some(release), Some(deployment)) => {
                         waiting(record.assignment.as_ref(), release.as_ref(), deployment)
                     }
-                    _ => (Vec::new(), Vec::new()),
+                    _ => Waiting::default(),
                 };
 
                 AgentView::from_record(
@@ -2641,8 +2648,7 @@ impl AppState {
                     matched,
                     package_conflict,
                     claiming_deployment,
-                    pending_configurations,
-                    pending_packages,
+                    waits,
                     is_stale(record, self.stale_after(), self.clock.now_ms()),
                 )
             })
@@ -2700,16 +2706,33 @@ fn inherit(
     }
 }
 
-/// What waits for an Agent's next press (ADR-0025 clause 4, ADR-0034 clause 5): the difference
-/// between what the claiming Deployment would release and what the assignment pins, per
-/// Configuration and for the Package. `new` is not pinned yet, `update` is pinned at another
-/// revision or version, and `remove` is pinned and would leave the release — the Deployment no
-/// longer holds it, or no longer fits it to this Agent.
+/// What waits for one Agent's next press — every part in which what the claiming Deployment
+/// would release differs from what the assignment pins.
+#[derive(Default)]
+struct Waiting {
+    configurations: Vec<PendingConfigurationView>,
+    packages: Vec<PendingPackageView>,
+    /// The Deployment the press would release through, when the assignment names another one or
+    /// none.
+    deployment: String,
+}
+
+/// What waits for an Agent's next press (ADR-0025 clause 4, ADR-0034 clauses 5 and 6): the
+/// difference between what the claiming Deployment would release and what the assignment pins,
+/// per Configuration, for the Package, and for the Deployment the release goes through — so
+/// whatever makes a press move this Agent shows here, and the reach count agrees with the view.
+///
+/// `new` is not pinned yet, `update` is pinned at another revision or version, and `remove` is
+/// pinned and leaves the release — the Deployment no longer holds it, or no longer fits it to this
+/// Agent — while the release keeps something else, so the smaller assignment is applied. `kept` is
+/// pinned while the release holds nothing for the Agent at all: the press leaves it with no
+/// assignment, it is offered nothing, and it keeps running what it runs (ADR-0034 clause 6).
 fn waiting(
     assigned: Option<&Assignment>,
     release: Option<&Assignment>,
     deployment: &Deployment,
-) -> (Vec<PendingConfigurationView>, Vec<PendingPackageView>) {
+) -> Waiting {
+    let dropped = if release.is_some() { "remove" } else { "kept" };
     let pinned = assigned.map_or(&NO_CONFIGURATIONS, |a| &a.configurations);
     let released = release.map_or(&NO_CONFIGURATIONS, |a| &a.configurations);
     let mut configurations: Vec<PendingConfigurationView> = released
@@ -2731,7 +2754,7 @@ fn waiting(
                 .filter(|name| !released.contains_key(*name))
                 .map(|name| PendingConfigurationView {
                     name: name.clone(),
-                    change: "remove".to_string(),
+                    change: dropped.to_string(),
                 }),
         )
         .collect();
@@ -2742,7 +2765,7 @@ fn waiting(
         (Some(pinned), Some(released)) if pinned == released => None,
         (Some(_), Some(released)) => Some((released, "update")),
         (None, Some(released)) => Some((released, "new")),
-        (Some(pinned), None) => Some((pinned, "remove")),
+        (Some(pinned), None) => Some((pinned, dropped)),
         (None, None) => None,
     };
     let packages = package
@@ -2755,7 +2778,15 @@ fn waiting(
         })
         .into_iter()
         .collect();
-    (configurations, packages)
+    let through = release
+        .map(|r| r.deployment.as_str())
+        .filter(|through| assigned.map(|a| a.deployment.as_str()) != Some(*through))
+        .unwrap_or_default();
+    Waiting {
+        configurations,
+        packages,
+        deployment: through.to_string(),
+    }
 }
 
 /// Whether this Agent declared that it accepts packages — the first condition of every offer
@@ -2903,14 +2934,21 @@ pub struct AgentView {
     pub assigned_package: String,
     /// The Configurations waiting for a rollout act toward this Agent (ADR-0025 point 4,
     /// ADR-0034): one its Deployment holds and it is not assigned (`change: "new"`), one whose
-    /// saved revision differs from the assigned one (`change: "update"`), or one assigned that the
-    /// next press drops because the Deployment no longer holds it (`change: "remove"`). The
-    /// Server never acts on this by itself.
+    /// saved revision differs from the assigned one (`change: "update"`), one assigned that the
+    /// next press drops from a release that keeps something else (`change: "remove"`), or one
+    /// assigned while the release holds nothing for the Agent, so the press leaves it with no
+    /// assignment and it keeps running what it runs (`change: "kept"`). The Server never acts on
+    /// this by itself.
     pub pending_configurations: Vec<PendingConfigurationView>,
     /// The Package waiting for a rollout act toward this Agent (ADR-0025 point 4) — at most one:
     /// the candidate of the Deployment that claims it, when that is not what it is assigned, or
-    /// the assigned one the next press drops (`change: "remove"`).
+    /// the assigned one the next press drops (`change: "remove"`, or `"kept"` as for a
+    /// Configuration).
     pub pending_packages: Vec<PendingPackageView>,
+    /// The Deployment the next press releases through, when the assignment names another one or
+    /// none (ADR-0034 clause 6); empty otherwise. A release whose content is unchanged still moves
+    /// the assignment to the claiming Deployment.
+    pub pending_deployment: String,
     /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
     /// nothing.
     pub desired_hash: String,
@@ -2992,7 +3030,9 @@ pub struct AgentView {
 pub struct PendingConfigurationView {
     pub name: String,
     /// `new` — held by the claiming Deployment and not yet assigned; `update` — the saved
-    /// revision differs from the assigned one; `remove` — assigned, and dropped by the next press.
+    /// revision differs from the assigned one; `remove` — assigned, and dropped by the next press,
+    /// which applies the smaller map; `kept` — assigned, and the next press leaves the Agent with no
+    /// assignment, so it keeps running it.
     pub change: String,
 }
 
@@ -3022,7 +3062,8 @@ pub struct PendingPackageView {
     /// What an operator reads: the Agent type and the version together.
     pub display_name: String,
     /// `new` — nothing is assigned for this Agent type; `update` — another version is; `remove` —
-    /// the assigned one, which the next press drops.
+    /// the assigned one, which the next press drops; `kept` — the assigned one, while the next
+    /// press leaves the Agent with no assignment.
     pub change: String,
 }
 
@@ -3152,8 +3193,7 @@ impl AgentView {
         matched_configurations: Vec<String>,
         package_conflict: Option<String>,
         claiming_deployment: String,
-        pending_configurations: Vec<PendingConfigurationView>,
-        pending_packages: Vec<PendingPackageView>,
+        waits: Waiting,
         stale: bool,
     ) -> Self {
         let (identifying, non_identifying) = match &record.description {
@@ -3207,8 +3247,9 @@ impl AgentView {
                 .assigned_package()
                 .map(PackageId::to_string)
                 .unwrap_or_default(),
-            pending_configurations,
-            pending_packages,
+            pending_configurations: waits.configurations,
+            pending_packages: waits.packages,
+            pending_deployment: waits.deployment,
             desired_hash: desired.map(|d| hex::encode(&d.hash)).unwrap_or_default(),
             capabilities: capability_names(record.capabilities),
             available_components: record
@@ -3947,6 +3988,73 @@ mod tests {
         assert!(late_view.pending_configurations.is_empty());
     }
 
+    /// A rollout whose store fails part-way leaves disk and memory agreeing: the record it wrote
+    /// first is put back as it was, the fleet keeps its assignments, the revision those still pin
+    /// stays, and the one nothing pins is collected. The next press, once the store writes again,
+    /// releases to both.
+    /// Verifies: ADR-0037
+    #[test]
+    fn a_rollout_that_fails_part_way_leaves_disk_and_memory_as_they_were() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = configuring_fleet(dir.path());
+        let (first, second) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        for uid in [first, second] {
+            state.process(report(&uid, 1), Transport::Http, None);
+        }
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 2);
+        let pinned = state
+            .configurations()
+            .get("fleet")
+            .expect("fleet")
+            .retained
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let agents = dir.path().join("configs").join("agents");
+        let first_path = agents.join(format!("{first}.json"));
+        let before = std::fs::read(&first_path).expect("the first record");
+
+        state
+            .save_configuration("fleet", body("receivers: {otlp: {}}\n"))
+            .expect("edit");
+        // The second record cannot be replaced: a directory holding a file stands in its place.
+        let second_path = agents.join(format!("{second}.json"));
+        std::fs::remove_file(&second_path).expect("remove");
+        std::fs::create_dir_all(second_path.join("in-the-way")).expect("obstacle");
+
+        assert!(matches!(
+            state.rollout_deployment("stable"),
+            Err(RolloutError::Storage(_))
+        ));
+        assert_eq!(
+            std::fs::read(&first_path).expect("the first record"),
+            before,
+            "the record written before the failure is put back"
+        );
+        for view in state.snapshot() {
+            assert_eq!(
+                view.pending_configurations[0].change, "update",
+                "{}",
+                view.instance_uid
+            );
+        }
+        let retained = state
+            .configurations()
+            .get("fleet")
+            .expect("fleet")
+            .retained
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            retained, pinned,
+            "the pinned revision stays, the unpinned one is collected"
+        );
+
+        std::fs::remove_dir_all(&second_path).expect("clear the obstacle");
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 2);
+    }
+
     /// ADR-0024: a queued restart is operator intent and survives the Server restarting.
     #[test]
     fn a_queued_restart_survives_a_restart() {
@@ -4353,7 +4461,7 @@ mod tests {
         );
     }
 
-    /// The offer and the download agree on the capability half of the test (ADR-0033 clause 8): an
+    /// The offer and the download agree on the capability half of the test (ADR-0033 clause 10): an
     /// Agent that does not declare `AcceptsPackages` is offered nothing, and its host may fetch
     /// nothing through it, although its assignment names a signed Package that fits it.
     /// Verifies: ADR-0033
@@ -4635,6 +4743,122 @@ mod tests {
             .remote_config
             .expect("the smaller map is offered");
         assert_eq!(offered_names(&offer), ["base"]);
+    }
+
+    /// A Deployment that keeps nothing for an Agent leaves it with no assignment on the next press,
+    /// and the Agent keeps running what it runs: the view shows what it was given as `kept`, never
+    /// as `remove`, and the press makes no offer that would take it away. A Package pinned with no
+    /// Configuration sends no config map either, so nothing empty ever replaces a running one.
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_release_holding_nothing_for_an_agent_keeps_what_it_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, id) = mixed_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_holding(&state, uid, &[], &[]);
+        state.rollout_deployment("stable").expect("rollout");
+        let first = report_holding(&state, uid, &[], &[]).reply;
+        let config_hash = first.remote_config.expect("config").config_hash;
+        let packages_hash = first
+            .packages_available
+            .expect("packages")
+            .all_packages_hash;
+
+        // `telegraf-conf` stays, so the Deployment still holds something and may be pressed; none
+        // of it fits this Agent.
+        state
+            .remove_deployment_configuration("stable", "base")
+            .expect("drop base");
+        state
+            .remove_deployment_package("stable", &id)
+            .expect("drop the package");
+        let view = &state.snapshot()[0];
+        let changes = |view: &AgentView| {
+            view.pending_configurations
+                .iter()
+                .map(|p| (p.name.clone(), p.change.clone()))
+                .chain(
+                    view.pending_packages
+                        .iter()
+                        .map(|p| (p.display_name.clone(), p.change.clone())),
+                )
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            changes(view),
+            [
+                ("base".to_string(), "kept".to_string()),
+                (id.display_name(), "kept".to_string())
+            ],
+            "nothing is removed from an Agent the press leaves with no assignment"
+        );
+        assert_eq!(state.deployment_reach()["stable"].targeted, 1);
+
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        let view = &state.snapshot()[0];
+        assert!(view.assigned_deployment.is_empty() && view.assigned_configurations.is_empty());
+        assert!(changes(view).is_empty(), "nothing waits any more");
+        let reply = report_holding(&state, uid, &config_hash, &packages_hash).reply;
+        assert!(
+            reply.remote_config.is_none(),
+            "no config map replaces the one it runs"
+        );
+
+        // A Package and no Configuration, to an Agent that runs nothing yet: a package offer, and
+        // no config map at all.
+        state
+            .put_deployment_package("stable", &id, true)
+            .expect("the package again");
+        let fresh = InstanceUid([2; 16]);
+        report_holding(&state, fresh, &[], &[]);
+        state.rollout_deployment("stable").expect("rollout");
+        let reply = report_holding(&state, fresh, &[], &[]).reply;
+        assert!(reply.packages_available.is_some(), "the package is offered");
+        assert!(
+            reply.remote_config.is_none(),
+            "an assignment holding no Configuration offers no empty map"
+        );
+    }
+
+    /// A Deployment that newly claims an Agent with the content its assignment already pins still
+    /// moves that assignment on a press, so the view shows the Deployment waiting — the count
+    /// beside the press, the per-Agent press and the view agree.
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_new_claiming_deployment_with_the_same_content_waits_in_the_view() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = configuring_fleet(dir.path());
+        let uid = InstanceUid::default();
+        state.process(report(&uid, 1), Transport::Http, None);
+        state.rollout_deployment("stable").expect("rollout");
+        let deployments = state.deployment_store().expect("deployments");
+        deployments
+            .put(
+                "stable",
+                BTreeMap::from([("service.name".to_string(), "nobody".to_string())]),
+            )
+            .expect("re-aim stable away");
+        deployments
+            .put(
+                "canary",
+                BTreeMap::from([("service.name".to_string(), "otelcol".to_string())]),
+            )
+            .expect("canary");
+        state
+            .put_deployment_configuration("canary", "fleet")
+            .expect("the same Configuration");
+
+        let view = &state.snapshot()[0];
+        assert_eq!(view.assigned_deployment, "stable");
+        assert!(view.pending_configurations.is_empty() && view.pending_packages.is_empty());
+        assert_eq!(view.pending_deployment, "canary");
+        assert_eq!(state.deployment_reach()["canary"].targeted, 1);
+
+        state.rollout_to_agent(&uid, None).expect("the press");
+        let view = &state.snapshot()[0];
+        assert_eq!(view.assigned_deployment, "canary");
+        assert!(view.pending_deployment.is_empty());
+        assert_eq!(state.deployment_reach()["canary"].targeted, 0);
     }
 
     /// Editing a Deployment after a rollout — a Configuration's body, a Configuration added, the
@@ -5099,6 +5323,59 @@ mod tests {
             assert!(view(&state, &uid).ambiguous, "{uid}");
         }
         assert!(!view(&state, &elsewhere).ambiguous);
+    }
+
+    /// A Client Agent re-keyed by a compressed message — no description to place it by — stays
+    /// its group's Client Agent: its Supervisor Agents keep inheriting its labels, and a label set
+    /// on its new identity reaches them.
+    /// Verifies: ADR-0035
+    #[test]
+    fn a_client_agent_rekeyed_without_a_description_keeps_its_group_inheriting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let client = InstanceUid::default();
+        let supervisor = InstanceUid::default();
+        report_over(
+            &state,
+            "h1",
+            organization("Kunde GmbH"),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        report_over(&state, "h1", organization("Kunde GmbH"), supervisor, &[]);
+        label(&state, &client, &[("site", "wien")]);
+        assert!(selects(&state, &supervisor, &[("site", "wien")]));
+
+        let rekey = AgentToServer {
+            instance_uid: client.as_bytes().to_vec(),
+            sequence_num: 2,
+            capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64,
+            flags: AgentToServerFlags::RequestInstanceUid as u64,
+            ..Default::default()
+        };
+        let rekeyed = state
+            .process_presented(
+                rekey,
+                Transport::Http,
+                None,
+                Some(&Presented {
+                    id: CertId::new(b"CA", "h1"),
+                    host: Some("h1".to_string()),
+                    subject_values: organization("Kunde GmbH"),
+                }),
+            )
+            .uid
+            .expect("the new identity");
+        assert_ne!(rekeyed, client);
+        assert!(
+            selects(&state, &supervisor, &[("site", "wien")]),
+            "the Supervisor Agent still inherits"
+        );
+        assert_eq!(view(&state, &supervisor).client_agent, rekeyed.to_string());
+        assert_eq!(view(&state, &rekeyed).client_agent, rekeyed.to_string());
+
+        label(&state, &rekeyed, &[("site", "linz")]);
+        assert!(selects(&state, &supervisor, &[("site", "linz")]));
     }
 
     /// Labels are part of the Agent's record: a re-keyed Agent keeps them, on disk too, and

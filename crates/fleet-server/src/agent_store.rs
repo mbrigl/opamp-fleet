@@ -194,7 +194,10 @@ pub trait AgentStore: Send + Sync {
     /// the records carrying the assignments that pin them, as one operation. An adapter that
     /// cannot make it one step writes the revisions first, so a failure part-way leaves at most a
     /// revision nothing references — which the next load collects — and never an assignment
-    /// pinning a revision that was not written.
+    /// pinning a revision that was not written. A record that cannot be written leaves the records
+    /// as they were: an adapter that writes them one by one puts back the ones it already wrote,
+    /// and what [`pinning`](Self::pinning) and
+    /// [`referenced_revisions`](Self::referenced_revisions) answer follows what it stores.
     ///
     /// # Errors
     /// Returns an error when the revisions or a record cannot be written.

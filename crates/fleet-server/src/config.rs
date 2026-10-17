@@ -1040,7 +1040,7 @@ mod tests {
 
     /// `[packages] verification_key` is the operator's public key, hex, as the Client's key of the
     /// same name: absent by default, decoded when given, and a malformed one fails startup naming
-    /// it (ADR-0033 clause 5).
+    /// it (ADR-0033 clause 7).
     /// Verifies: ADR-0033
     #[test]
     fn a_malformed_verification_key_fails_startup() {

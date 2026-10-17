@@ -57,6 +57,17 @@ impl PackageBackend for FsPackageBackend {
                     .map(hex::decode)
                     .transpose()
                     .map_err(|e| format!("invalid signature in {}: {e}", path.display()))?;
+                // Held to the length a write is held to (ADR-0033 clause 6).
+                if let Some(signature) = &signature {
+                    if signature.len() != crate::packages::ED25519_SIGNATURE_LEN {
+                        return Err(format!(
+                            "invalid signature in {}: {} bytes, not {}",
+                            path.display(),
+                            signature.len(),
+                            crate::packages::ED25519_SIGNATURE_LEN
+                        ));
+                    }
+                }
                 entries.insert(
                     platform.clone(),
                     Entry {

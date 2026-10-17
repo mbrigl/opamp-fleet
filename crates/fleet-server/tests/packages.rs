@@ -1614,7 +1614,7 @@ async fn a_deployment_holds_one_uploaded_package_per_agent_type() {
     );
 }
 
-/// The signature belongs to the entry (ADR-0033 clause 4): written and removed through the entry's
+/// The signature belongs to the entry (ADR-0033 clause 6): written and removed through the entry's
 /// own route, shown on the entry with its `signature_state`, and absent from the Deployment's view.
 /// A signature for an entry that does not exist is `404`, an empty or malformed one `400`.
 /// Verifies: ADR-0033
@@ -1711,7 +1711,7 @@ async fn an_entry_carries_its_signature_and_says_its_state() {
 }
 
 /// New bytes on an entry remove its signature, because a signature covers the hash (ADR-0033
-/// clause 4): the entry is offered to nobody until it is signed again.
+/// clause 6): the entry is offered to nobody until it is signed again.
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn new_bytes_on_an_entry_remove_its_signature() {
@@ -1726,7 +1726,7 @@ async fn new_bytes_on_an_entry_remove_its_signature() {
 }
 
 /// The routes ADR-0033 removed answer `404`, as for anything that does not exist: the entry's
-/// `…/source`, and the Deployment's `…/signatures/…` (ADR-0033 clause 7).
+/// `…/source`, and the Deployment's `…/signatures/…` (ADR-0033 clause 9).
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn the_source_route_and_the_deployment_signature_routes_are_gone() {
@@ -1770,7 +1770,7 @@ async fn the_source_route_and_the_deployment_signature_routes_are_gone() {
 
 /// With `[packages] verification_key` armed, the Server reports a signature over the entry's
 /// statement `valid` and a wrong one `invalid` — and stores both, because it only reports
-/// (ADR-0033 clause 5). The wrong one is offered all the same: the Agent's check decides.
+/// (ADR-0033 clause 7). The wrong one is offered all the same: the Agent's check decides.
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn with_a_verification_key_the_server_reports_valid_and_invalid_and_stores_both() {
@@ -1846,6 +1846,82 @@ async fn with_a_verification_key_the_server_reports_valid_and_invalid_and_stores
     assert_eq!(entries[1]["os"], "windows");
     assert_eq!(entries[1]["signature_state"], "invalid");
     assert!(entries[1]["signature"].is_string(), "and stored");
+}
+
+/// Has `stable` hold `version` and signs its entry with a fixed signature.
+async fn hold_and_sign(server: &TestServer, version: &str) {
+    let held = reqwest::Client::new()
+        .put(format!(
+            "{}/packages/{}/{version}",
+            deployment_url(server, "stable"),
+            support::AGENT_TYPE
+        ))
+        .send()
+        .await
+        .expect("put package");
+    assert_eq!(held.status(), 200);
+    let signed = reqwest::Client::new()
+        .put(format!(
+            "{}/entries/linux/amd64/signature",
+            set_url(server, support::AGENT_TYPE, version)
+        ))
+        .json(&serde_json::json!({ "signature": hex::encode([7u8; 64]) }))
+        .send()
+        .await
+        .expect("sign");
+    assert_eq!(signed.status(), 200);
+}
+
+/// Whether `stable` holds `version`.
+async fn stable_holds(server: &TestServer, version: &str) -> bool {
+    let view: serde_json::Value = reqwest::Client::new()
+        .get(deployment_url(server, "stable"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    view["packages"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .any(|package| package["version"] == version)
+}
+
+/// A deleted Package leaves the Deployments that held it, and its signature with it: a Package
+/// created again under the same identity, with other bytes, is held by nobody and signed by
+/// nobody until an operator says so.
+/// Verifies: ADR-0033, ADR-0034
+#[tokio::test]
+async fn a_deleted_package_leaves_every_deployment_with_its_signatures() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"v1").await;
+    put_deployment(&server, "stable", &[("channel", "stable")]).await;
+    hold_and_sign(&server, "1.0.0").await;
+
+    let deleted = reqwest::Client::new()
+        .delete(set_url(&server, support::AGENT_TYPE, "1.0.0"))
+        .send()
+        .await
+        .expect("delete");
+    assert!(deleted.status().is_success(), "{}", deleted.status());
+    assert!(!stable_holds(&server, "1.0.0").await);
+
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"other bytes").await;
+    assert!(
+        !stable_holds(&server, "1.0.0").await,
+        "the new Package is not held by the Deployment the old one was"
+    );
+    let package: serde_json::Value = reqwest::Client::new()
+        .get(set_url(&server, support::AGENT_TYPE, "1.0.0"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(package["entries"][0]["signature_state"], "missing");
 }
 
 /// The aim stays editable and the channel keeps what it holds — moving a Deployment between channels is
@@ -2000,7 +2076,7 @@ async fn a_deployment_that_released_a_package_refuses_to_be_deleted() {
 }
 
 /// One Package held by two Deployments is offered with the same signature through both: the
-/// signature is the entry's, and one serves every Deployment that holds it (ADR-0033 clause 4).
+/// signature is the entry's, and one serves every Deployment that holds it (ADR-0033 clause 6).
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn one_package_in_two_deployments_is_offered_with_the_same_signature() {
@@ -2053,35 +2129,6 @@ async fn one_package_in_two_deployments_is_offered_with_the_same_signature() {
             "{name} is offered the entry's one signature"
         );
     }
-}
-
-/// A signature given with the upload is refused **by name**, never ignored: a signature dropped on
-/// the floor is an unsigned entry nobody notices. The refusal names the entry's own signature
-/// route (ADR-0033).
-/// Verifies: ADR-0033
-#[tokio::test]
-async fn a_signature_on_the_artifact_upload_is_refused_by_name() {
-    let (server, _scratch) = spawn_with_packages().await;
-    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
-    let refused = reqwest::Client::new()
-        .put(format!(
-            "{}/entries/{HOST}?signature={}",
-            set_url(&server, support::AGENT_TYPE, "1.0.0"),
-            hex::encode([7u8; 64])
-        ))
-        .body(b"the-binary".to_vec())
-        .send()
-        .await
-        .expect("put entry");
-    assert_eq!(refused.status(), 400);
-    let body: serde_json::Value = refused.json().await.expect("json");
-    assert!(
-        body["error"]
-            .as_str()
-            .expect("error")
-            .contains("/entries/linux/amd64/signature"),
-        "the refusal names the route that takes it now: {body}"
-    );
 }
 
 /// **The rule the whole conflict model turns on.** A conflict takes the *candidate* away and never
@@ -2196,7 +2243,7 @@ async fn the_per_agent_act_refuses_to_pick_a_side() {
 }
 
 /// What a standing offer travels with is frozen. The entry's signature is a write to an assigned
-/// Package's entries and refused `409` like any other (ADR-0033 clause 4, ADR-0025): the re-offer
+/// Package's entries and refused `409` like any other (ADR-0033 clause 6, ADR-0025): the re-offer
 /// gate does not cover the signature, so one changed under a standing offer would never reach the
 /// Agent. **The channel freezes nothing** (ADR-0034 clause 7): the assignment pins the Package
 /// itself, so taking it out of the channel or swapping the version it holds leaves every standing
@@ -2247,6 +2294,16 @@ async fn a_released_package_freezes_its_entries_and_not_the_ring() {
         refused.status(),
         409,
         "PUT {entry_signature} must be frozen"
+    );
+    let unsigned = reqwest::Client::new()
+        .delete(&entry_signature)
+        .send()
+        .await
+        .expect("remove the signature");
+    assert_eq!(
+        unsigned.status(),
+        409,
+        "DELETE {entry_signature} must be frozen"
     );
     let removal = format!(
         "{}/packages/{}/1.0.0",

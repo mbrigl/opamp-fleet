@@ -750,7 +750,7 @@ impl PackageCache {
         let config = self.config.clone();
         let path = artifact.path.clone();
         // This Gateway's own certificate to its Server's origin, as every Client's download
-        // (ADR-0033 clause 11), and no offered headers. The material is read from disk, so off the
+        // (ADR-0033 clause 13), and no offered headers. The material is read from disk, so off the
         // async workers.
         let (url, origin, identified) = tokio::task::spawn_blocking(move || {
             let url = crate::packages::resolve_url(&path, &config.endpoint)?;
@@ -774,10 +774,7 @@ impl PackageCache {
             let response = crate::packages::send_download(&origin, &identified, &url, &[])
                 .await
                 .map_err(Failure::Other)?;
-            match waits
-                .asked(&origin, &url, &response)
-                .map_err(Failure::Other)?
-            {
+            match waits.asked(&url, &response).map_err(Failure::Other)? {
                 Some(wait) => {
                     drop(slot);
                     tokio::time::sleep(wait).await;
@@ -1026,7 +1023,7 @@ mod tests {
     }
 
     /// Every path on the Server's own download route with a SHA-256 is an artifact the Gateway
-    /// caches; an absolute URL is not, whichever host it names (ADR-0033 clause 9).
+    /// caches; an absolute URL is not, whichever host it names (ADR-0033 clause 11).
     /// Verifies: ADR-0026, ADR-0033
     #[test]
     fn only_a_path_on_the_servers_route_is_cached() {

@@ -202,7 +202,7 @@ pub(crate) fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::
         .map_err(|e| format!("cannot build the download client: {e}"))
 }
 
-/// Where a download may go (ADR-0033 clause 11): this Client's own Server origin — the scheme, host
+/// Where a download may go (ADR-0033 clause 13): this Client's own Server origin — the scheme, host
 /// and port of its OpAMP endpoint, `wss` mapped to `https` (and `ws` to `http`, which the endpoint
 /// may only be on the loopback) — and nowhere else. Every URL is held to the transport rule first.
 pub struct ServerOrigin {
@@ -296,7 +296,7 @@ pub(crate) async fn send_patiently(
     let waits = Waits::new(patience);
     loop {
         let response = send_download(origin, client, url, headers).await?;
-        match waits.asked(origin, url, &response)? {
+        match waits.asked(url, &response)? {
             Some(wait) => tokio::time::sleep(wait).await,
             None => return Ok(response),
         }
@@ -321,22 +321,21 @@ impl Waits {
         }
     }
 
-    /// How long `response` asks the download to wait before it asks again: `None` when it is not a
-    /// `429` or `503` with `Retry-After` in seconds from the Server's own origin, which the caller
-    /// takes as it is.
+    /// How long `response` — from the Server's own origin, the only one [`send_download`] reaches
+    /// — asks the download to wait before it asks again: `None` when it is not a `429` or `503`
+    /// with `Retry-After` in seconds, which the caller takes as it is.
     ///
     /// # Errors
     /// Returns the failure once a wait would end past the deadline.
     pub(crate) fn asked(
         &self,
-        origin: &ServerOrigin,
         url: &str,
         response: &reqwest::Response,
     ) -> Result<Option<std::time::Duration>, String> {
         let status = response.status();
         let busy = status == reqwest::StatusCode::TOO_MANY_REQUESTS
             || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
-        if !busy || !origin.is_server(response.url()) {
+        if !busy {
             return Ok(None);
         }
         let Some(after) = retry_after(response) else {
@@ -786,7 +785,7 @@ mod tests {
     }
 
     /// A redirect off the Server's origin is refused before the host it points at is asked: the
-    /// download fails naming that origin, and nothing is fetched from it (ADR-0033 clause 11).
+    /// download fails naming that origin, and nothing is fetched from it (ADR-0033 clause 13).
     /// Verifies: ADR-0033
     #[tokio::test]
     async fn a_redirect_off_the_origin_is_refused_without_a_fetch() {
@@ -823,7 +822,7 @@ mod tests {
     }
 
     /// An absolute `download_url` on another origin is refused without a byte fetched, and the
-    /// refusal names that origin (ADR-0033 clause 11) — whatever the offer's headers would have
+    /// refusal names that origin (ADR-0033 clause 13) — whatever the offer's headers would have
     /// carried never leaves the host.
     /// Verifies: ADR-0033
     #[tokio::test]
@@ -1117,7 +1116,7 @@ mod tests {
     }
 
     /// A download goes to the Server's own origin and nowhere else — not another port, not
-    /// plaintext, not another host (ADR-0033 clause 11).
+    /// plaintext, not another host (ADR-0033 clause 13).
     /// Verifies: ADR-0033
     #[test]
     fn a_download_goes_only_to_the_servers_own_origin() {

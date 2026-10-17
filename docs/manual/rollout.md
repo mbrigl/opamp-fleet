@@ -215,9 +215,8 @@ $ curl --cacert ca.pem -X PUT --data-binary @promtail-3.0.0.tar.gz \
        "https://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64"
 ```
 
-No signature in the upload — passing `?signature=` is refused with a `400` naming the route that
-takes it, rather than dropped, because a signature silently lost is an unsigned entry nobody
-notices. **Sign** the entry on its own route, with the signature from step 3:
+The upload carries no signature, and new bytes remove the one the entry held. **Sign** the entry on
+its own route, with the signature from step 3:
 
 ```console
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \

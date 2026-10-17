@@ -145,7 +145,7 @@ async fn a_configuration_carries_an_optional_role() {
     assert_eq!(stored["role"], "some-agents-own-word");
 }
 
-/// A Configuration has no Selector (ADR-0034 clause 9): a `PUT` naming one is `400` and says the
+/// A Configuration has no Selector (ADR-0034 clauses 1 and 9): a `PUT` naming one is `400` and says the
 /// Deployment is where to aim, and the Configuration's own rollout route is gone (`404`).
 /// Verifies: ADR-0034
 #[tokio::test]
@@ -639,7 +639,7 @@ async fn the_openapi_document_describes_the_contract() {
     ] {
         assert!(paths.contains_key(route), "{route} is described");
     }
-    // A signature lives on the entry, and every artifact is uploaded (ADR-0033 clause 7): the
+    // A signature lives on the entry, and every artifact is uploaded (ADR-0033 clause 9): the
     // Deployment signature routes and the entry's source route are not in the contract.
     for gone in [
         "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
@@ -1703,6 +1703,7 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         "[\"organizational_unit\", \"boot-unit\"]",
         "[\"organization_identifier\", \"boot-org-id\"]",
         "e.bootstrap_subject[field]",
+        "e.subject_refusal",
         "validity_days:",
         ".certificate_pem",
         ".private_key_pem",
@@ -1737,6 +1738,7 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
                 "peer",
                 "key_fingerprint",
                 "bootstrap_subject",
+                "subject_refusal",
                 "bootstrap_fingerprint",
                 "bootstrap_serial",
             ][..],
@@ -1782,9 +1784,10 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         "a pending request lists no subject of its own"
     );
     assert!(
-        schemas["PendingEnrolment"]["properties"]["bootstrap_subject"]["$ref"]
-            .as_str()
-            .is_some_and(|r| r.ends_with("/HostSubject")),
+        // Optional, so the reference sits beside `null` in a `oneOf`.
+        schemas["PendingEnrolment"]["properties"]["bootstrap_subject"]
+            .to_string()
+            .contains("\"#/components/schemas/HostSubject\""),
         "the bootstrap certificate's subject is listed by its values"
     );
     for path in [

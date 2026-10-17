@@ -321,7 +321,8 @@ letters, digits, `.`, `_` and `-` has it written as `%XX` in its file name.
 
 - **Owner-only.** The Server creates `data_dir` and every directory in it `0700` and writes every
   file `0600`: an Agent's reported configuration may hold credentials, and nothing here is another
-  local user's business. On Windows the data root's restricted ACL covers it.
+  local user's business. The Server ships for Linux; built for Windows it sets no ACL, so give
+  `data_dir` one that admits only the Server's account and the administrators.
 - **One step per write.** Every record is written to a temporary file beside it and renamed into
   place, so a crash leaves the old document or the new one. The register, the revocation list,
   the Hosts, the bootstrap records, the enrolment window and the audit reach the disk before the
@@ -359,17 +360,18 @@ key stops it at startup. `server migrate` moves an installation once, offline:
    - **Packages**: each artifact becomes a blob. Each entry takes the signature the Deployments
      held for it; where two Deployments held different signatures for one entry it is carried
      **unsigned** and named — sign it again. A referenced entry (one an older Server fetched from a
-     URL) is **dropped** and named; upload that artifact.
-   - **Deployments** keep their name, Selector and Packages; their signatures now live on the
-     entries.
-   - **Configurations** keep their content and every revision still rolled out, and lose their
-     Selector. Each is **listed** with the Selector it had: put it into the Deployment whose
-     Selector aims where that one did.
-   - **Agents** are carried with their labels inside their record. An Agent released through a
-     Deployment keeps that release — its Package and the Configuration revisions it was given,
-     which stay offered until the Deployment is next rolled out. Configuration pins an Agent got
-     without a Deployment are **dropped** and listed per Agent; the Agent keeps running what it
-     has until a Deployment holding those Configurations is rolled out to it.
+     URL) is **dropped** and named; upload that artifact. An artifact whose bytes do not match the
+     hash its entry recorded is **dropped** and named; upload it again.
+   - **Deployments** keep their name, Selector and the Packages that were carried; their
+     signatures now live on the entries. A Package that was not carried leaves them, named.
+   - **Configurations** keep their content and lose their Selector. Each is **listed** with the
+     Selector it had: put it into the Deployment whose Selector aims where that one did.
+   - **Agents** are carried with their labels inside their record. An Agent whose Package was
+     released through a Deployment keeps that Package assigned through it. An older Server rolled
+     every Configuration out by itself, never through a Deployment, so every Agent's Configuration
+     pins are **dropped** and listed per Agent — also for an Agent that keeps its Package. The
+     Agent keeps running the configuration it has: nothing is offered in its place until a
+     Deployment holding those Configurations is rolled out to it.
 
    When it is done it opens the new directory as the Server will. It exits non-zero when it could
    not carry trust data or the new directory would not open — then empty the new directory, fix
@@ -601,7 +603,10 @@ request names. A value fixed at issue stays until the host enrols again: put wha
 says whom the host belongs to into the subject, and nothing that changes. The values describe and
 select; they authorize nothing. They show on every enrolment request the certificate carries, as
 `bootstrap_subject` with its `bootstrap_serial`, so the approver sees whose request it is and what
-the host certificate will carry. Every issuance is recorded in the audit as `enrolment.bootstrap_issued`,
+the host certificate will carry. A bootstrap certificate of your own PKI whose subject breaks these
+rules — an attribute twice, a value of the wrong string type or length — lists no
+`bootstrap_subject` but a `subject_refusal` naming the attribute: approving it is refused, so
+reject it and give the host a certificate that follows them. Every issuance is recorded in the audit as `enrolment.bootstrap_issued`,
 with `p12` saying whether a file was made.
 
 The UI's **Enrolments** tab does the same: it issues a certificate with the values you type, the
@@ -698,9 +703,11 @@ open, and opens and closes it.
 
 Approving signs the request with `[client_ca]`, with the bootstrap certificate's subject values,
 and offers the certificate on that host's connection. A bootstrap certificate from another PKI is
-read under the same rules as one the Server issues: an attribute that appears twice, a value of the
-wrong string type or length, or a country that is not two upper-case letters makes the approval
-fail with `409` naming the attribute, and nothing is signed. Issue the host a bootstrap certificate
+read under the same rules as one the Server issues, except that a value other than the country may
+also be a `PrintableString`, as older PKIs write it; the host certificate carries it as a
+`UTF8String`. An attribute that appears twice, a value of another string type or of the wrong
+length, or a country that is not two upper-case letters makes the approval fail with `409` naming
+the attribute, nothing is signed, and the request waits. Issue the host a bootstrap certificate
 that fits, and reject the request. The host stores it as `client-cert.pem` in its state directory and reconnects with it
 as a member; from then on it renews by itself. Rejecting answers the request `BadRequest` and
 closes the connection. An unknown or expired id is answered `404`, and every enrolment route
@@ -881,8 +888,12 @@ row as `remote_config_status`, `remote_config_error`, and `in_sync`.
 **The fleet view shows what waits.** Per Agent, `GET /api/v1/agents` answers what is rolled out
 to it (`assigned_deployment`, `assigned_configurations`, `assigned_package`) and what the next
 press of its Deployment would change (`pending_configurations`, `pending_packages`, each with a
-`change`: `new`, `update` — a newer save or version — or `remove` — the Deployment no longer
-releases it to this Agent). The Server never acts on the waiting list by itself; the per-Agent
+`change`: `new`, `update` — a newer save or version — `remove` — the Deployment no longer
+releases it to this Agent, and the press applies the smaller set — or `kept` — the Deployment
+releases nothing to this Agent any more, so the press leaves it with no assignment and it keeps
+running what it runs). `pending_deployment` names the Deployment the press releases through when
+the assignment names another one, even where the content stays the same. The Server never acts on
+the waiting list by itself; the per-Agent
 rollout (`POST /api/v1/agents/{instance_uid}/rollout`, with an empty body or
 `{"deployment": "…"}` naming the Deployment that claims the Agent) is the operator's press.
 
@@ -1237,7 +1248,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `GET /api/v1/packages` | Every stored Package (never the artifact bytes), each with its entries — their hash, size, signature and `signature_state` — and the Deployments that hold it. |
 | `PUT /api/v1/packages/{agent_type}/{version}` | Create a Package. The body has no writable field — `{}`. **Distributes nothing**. |
 | `GET /api/v1/packages/{agent_type}/{version}` | One Package. |
-| `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body); new bytes remove the entry's signature. `409` while the Package is rolled out to an Agent. A `?signature=` is refused `400` naming the signature route. |
+| `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body); new bytes remove the entry's signature. `409` while the Package is rolled out to an Agent. The signature is written through the entry's signature route. |
 | `PUT` / `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature` | Record or remove that entry's Ed25519 signature. Body: `{"signature": "<hex>"}`. `404` for an entry that does not exist, `400` for an empty or malformed signature, `409` while the Package is rolled out to an Agent. The answer is the Package, with the entry's `signature_state`. |
 | `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Package is rolled out to an Agent. |
 | `DELETE /api/v1/packages/{agent_type}/{version}` | Remove the Package, and take it out of every Deployment that holds it. `409` while an Agent's assignment pins it, saying how many. Uninstalls nothing. |

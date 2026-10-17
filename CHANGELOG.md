@@ -109,12 +109,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `bootstrap_subject` and no longer lists the request's `subject`. An approval whose bootstrap
   certificate has a malformed subject — an attribute twice, a value of the wrong string type or
   length, a country that is not two upper-case letters — is answered `409` naming the attribute,
-  and nothing is signed. **What to do:** a script that reads `subject` or the text
+  and nothing is signed; the queue lists such a request with `subject_refusal` giving that reason
+  instead of `bootstrap_subject`, and the Enrolments tab shows it on the row. **What to do:** a script that reads `subject` or the text
   `bootstrap_subject` of `GET /api/v1/enrolments` reads the `bootstrap_subject` object instead.
   Host certificates issued before carry no values, and their Hosts have none until the host enrols
   again with a bootstrap certificate that names them. A bootstrap CA of your own PKI must write
-  the country as a `PrintableString` and every other value as a `UTF8String`, each at most once;
-  replace a bootstrap certificate that does not.
+  the country as a `PrintableString` and every other value as a `UTF8String` or a
+  `PrintableString`, each at most once; replace a bootstrap certificate that does not.
 
 - **Labels are part of the Agent's record, and forgetting an Agent removes them**
   ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). Labels follow an Agent
@@ -123,7 +124,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   starting `fleet.` is refused `400`, and a reported attribute starting `fleet.` is left out of what
   Selectors match and listed in `ignored_attributes` on the Agent. A label that cannot be written
   is answered `500`. **What to do:** nothing beyond `server migrate` (see *All of the Server's
-  state lives under one data directory* below), which moves each Agent's labels into its record.
+  state lives under one data directory* above), which moves each Agent's labels into its record.
 
 - **A Deployment carries Configurations, and is the one thing rolled out** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)). A
   Deployment holds any number of Configurations beside its Packages
@@ -136,22 +137,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `{"deployment": "<the one that claims it>"}`; naming a Configuration or a Package is refused.
   A Deployment stays editable in every state: taking a Package out of a channel that released it
   is no longer refused. The fleet view shows per Configuration and for the Package what the next
-  press would change, including what it drops (`change: "remove"`). The Configurations tab edits
+  press would change, including what it drops (`change: "remove"`) and what the Agent keeps
+  running because the press leaves it with no assignment (`change: "kept"`), and in
+  `pending_deployment` the Deployment the press releases through when the assignment names
+  another one. The Configurations tab edits
   content only; the Deployments tab holds the Selector, the Packages and the Configurations.
   **What to do:** `server migrate` (see *All of the Server's state lives under one data
-  directory* below) drops each Configuration's Selector and lists it with the Selector it had.
+  directory* above) drops each Configuration's Selector and lists it with the Selector it had.
   After the upgrade, put each Configuration into a Deployment whose Selector reaches the Agents it
   was aimed at — an Agent belongs to at most one Deployment, so a fleet-wide Configuration goes
-  into every channel — and roll the Deployments out. An Agent released through a Deployment keeps
-  its release until then; Configurations an Agent was given without one are listed per Agent by
-  the migration, and the Agent runs them until a Deployment holding them reaches it.
+  into every channel — and roll the Deployments out. An Agent keeps the Package it was released
+  through a Deployment until then. Every Configuration an Agent was given was released without a
+  Deployment, so the migration drops each Agent's Configuration pins and lists them per Agent; the
+  Agent keeps running them until a Deployment holding them reaches it.
   `opamp-fleetctl package fetch` stores its default Configurations typed for their Collector, and
   `scripts/seed_test_configs.sh` puts each into a Deployment of that Collector's name.
 
 - **Nothing an Agent's assignment pins can be deleted** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)). Deleting a Configuration, a
   Package or a Deployment that any Agent's assignment pins answers `409`, saying how many Agents
-  pin it. Deleting a Package no longer withdraws it from the Agents it was rolled out to, and a
-  deleted Configuration or Package leaves every Deployment that held it. **What to do:** roll the
+  pin it, where deleting a Configuration or a Package used to take it out of every assignment.
+  A deleted Configuration or Package leaves every Deployment that held it. **What to do:** roll the
   Agents out through a Deployment without it — or forget them — and delete it then.
 
 - **A package's signature lives on its entry, not on the Deployment** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). Sign each
@@ -171,8 +176,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 - **A Client downloads packages only from its own Server's origin** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). A path is
   resolved against the origin of its OpAMP endpoint; an absolute URL on any other origin, or a
   redirect off it, is refused before a byte is fetched and reported `InstallFailed` naming that
-  origin. The Server's `advertised_url`, when set, must therefore name the origin the Clients
-  connect to.
+  origin.
 
 - **The UI's look follows GitKraken Dark as GitKraken Desktop 12.6 ships it:** charcoal panels,
   GitKraken's blue for buttons and the selected row, and its purple for what is selected. Light
@@ -217,6 +221,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   and says when a file holds another certificate than the one served: restart the Server to serve
   it ([ADR-0028](docs/adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)
   clause 11).
+- **An Agent that asks the Server for a new `instance_uid` keeps its labels**
+  ([ADR-0024](docs/adr/0024-the-fleet-record.md)). The record moved to the new identity but its
+  labels stayed under the old one, so after the next restart the Agent had none and fell out of
+  the Deployment its labels put it in. Labels now live in the Agent's record and follow it.
+  **What to do:** `server migrate` lists the labels it drops because no Agent record of their
+  Instance UID exists — those are the leftovers; set them again on the re-keyed Agent.
+- **A deleted Package leaves the Deployments that held it**
+  ([ADR-0026](docs/adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+  The Deployment kept the Package and its signatures, so the Deployment still passed the check for
+  unsigned Packages, and a Package created again under the same type and version reappeared in it
+  with the old signatures. **What to do:** nothing — `server migrate` drops such a name from its
+  Deployment and lists it.
 
 ### Security
 

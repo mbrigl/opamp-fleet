@@ -3039,7 +3039,6 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
         };
         let requester = fleet_server::enrolment::Requester {
             bootstrap_subject: String::new(),
-            bootstrap_values: fleet_server::revocation::SubjectValues::default(),
             carried: Ok(fleet_server::revocation::SubjectValues::default()),
             bootstrap_fingerprint: String::new(),
             bootstrap: fleet_server::revocation::CertId {
@@ -4120,6 +4119,55 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
     );
 }
 
+/// Each rule a subject value is issued by is answered `400` over the API, naming the attribute:
+/// a lower-case or three-letter country, an empty value, one of 65 characters, and one holding a
+/// control character. A value of 64 characters is issued.
+/// Verifies: ADR-0036
+#[tokio::test]
+async fn a_subject_value_outside_the_rules_is_refused_400() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("acme bootstrap CA");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            issue_bootstrap: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let issue = |subject: serde_json::Value| {
+        let request = operator_client
+            .post(operator(&served, "/api/v1/bootstrap-certificates"))
+            .json(&serde_json::json!({ "subject": subject }));
+        async move { request.send().await.expect("issue") }
+    };
+    for (subject, attribute) in [
+        (serde_json::json!({ "country": "at" }), "country"),
+        (serde_json::json!({ "country": "AUT" }), "country"),
+        (serde_json::json!({ "locality": "" }), "locality"),
+        (
+            serde_json::json!({ "organizational_unit": "x".repeat(65) }),
+            "organizational_unit",
+        ),
+        (serde_json::json!({ "state": "Wien\u{7}" }), "state"),
+    ] {
+        let response = issue(subject.clone()).await;
+        assert_eq!(response.status(), 400, "{subject}");
+        let body: serde_json::Value = response.json().await.expect("json");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains(attribute)),
+            "the refusal names {attribute}: {body}"
+        );
+    }
+    let at_the_bound = issue(serde_json::json!({ "organizational_unit": "x".repeat(64) })).await;
+    assert_eq!(at_the_bound.status(), 201);
+}
+
 /// Every file below `dir`.
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
@@ -4190,6 +4238,74 @@ async fn the_operator_plane_serves_its_own_certificate_and_the_agent_plane_keeps
 }
 
 // ---- A bootstrap certificate's subject, carried into the host certificate (ADR-0036) ----
+
+/// A renewal through its proof — the branch a Gateway-carried renewal takes — carries the values
+/// of the certificate the proof names, not those of the certificate the connection presented.
+/// Verifies: ADR-0036
+#[tokio::test]
+async fn a_renewal_by_its_proof_carries_the_proven_certificates_values() {
+    use base64::Engine as _;
+    use rcgen::{PublicKeyData as _, SigningKey as _};
+    use sha2::{Digest as _, Sha256};
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (old_cert, old_key) = pki.issue_to_host_with(
+        "h-1",
+        &[
+            (rcgen::DnType::CountryName, "AT"),
+            (rcgen::DnType::OrganizationName, "Kunde GmbH"),
+            (rcgen::DnType::CustomDnType(vec![2, 5, 4, 97]), "K-4711"),
+            (rcgen::DnType::CommonName, "edge-01"),
+        ],
+    );
+    let (carrier_cert, carrier_key) = pki.issue_to_host_with(
+        "gw",
+        &[
+            (rcgen::DnType::OrganizationName, "Gateway GmbH"),
+            (rcgen::DnType::CommonName, "gw"),
+        ],
+    );
+    let old_key = KeyPair::from_pem(&old_key).expect("old key");
+    let new_key = KeyPair::generate().expect("new key");
+    let old_der = opamp::tls::certificates(old_cert.as_bytes()).expect("pem")[0].to_vec();
+    let signature = old_key
+        .sign(&fleet_core::renewal::statement(&Sha256::digest(
+            new_key.subject_public_key_info(),
+        )))
+        .expect("sign");
+    let proof = format!(
+        "{}{}",
+        fleet_core::renewal::URI_PREFIX,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fleet_core::renewal::encode(&old_der, &signature))
+    );
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::URI(proof.try_into().expect("uri")));
+    let csr = params
+        .serialize_request(&new_key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+
+    let http = client(&served.ca_pem, Some((&carrier_cert, &carrier_key)));
+    let uid = InstanceUid::default();
+    let reply = decode(post(&http, &served.endpoint, with_csr(&uid, csr.into_bytes())).await).await;
+    let new_cert = String::from_utf8(
+        reply
+            .connection_settings
+            .and_then(|s| s.opamp)
+            .and_then(|o| o.certificate)
+            .expect("renewed")
+            .cert,
+    )
+    .expect("pem");
+    let carried = values_of(&new_cert);
+    assert_eq!(carried, values_of(&old_cert));
+    assert_eq!(carried.organization, "Kunde GmbH");
+    assert_eq!(carried.organization_identifier, "K-4711");
+}
 
 /// The six subject values of a certificate in PEM.
 fn values_of(pem: &str) -> fleet_server::revocation::SubjectValues {
@@ -4280,6 +4396,10 @@ async fn an_enrolment_carries_the_bootstrap_subject_into_the_host_and_its_agents
         .await
         .expect("json");
     assert_eq!(pending[0]["bootstrap_subject"], six_values(), "{pending}");
+    assert!(
+        pending[0].get("subject_refusal").is_none(),
+        "a subject that can be carried is listed with no refusal: {pending}"
+    );
     assert!(pending[0].get("subject").is_none(), "{pending}");
     assert!(
         !pending.to_string().contains("Another Customer"),
@@ -4399,6 +4519,15 @@ async fn a_foreign_bootstrap_certificate_with_ou_twice_is_refused_at_approval() 
         .await
         .expect("json");
     let id = pending[0]["id"].as_str().expect("id").to_string();
+    assert!(
+        pending[0].get("bootstrap_subject").is_none(),
+        "no values are listed that the approval would not carry: {pending}"
+    );
+    let listed = pending[0]["subject_refusal"]
+        .as_str()
+        .expect("the queue says why before the operator approves")
+        .to_string();
+    assert!(listed.contains("organizational_unit"), "{listed}");
 
     let refused = operator_client
         .post(operator(
@@ -4413,8 +4542,8 @@ async fn a_foreign_bootstrap_certificate_with_ou_twice_is_refused_at_approval() 
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|e| e.contains("organizational_unit")),
-        "{body}"
+            .is_some_and(|e| e.contains("organizational_unit") && e.contains(&listed)),
+        "the approval refuses with the reason the queue listed: {body}"
     );
     assert_eq!(hosts(&served).await, serde_json::json!([]), "no Host");
     let register: serde_json::Value = operator_client

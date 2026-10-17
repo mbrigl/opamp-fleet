@@ -250,12 +250,16 @@ impl ConfigStore {
 
     /// Pins the saved revision of each of `names` for a rollout (ADR-0025 clause 2, ADR-0037
     /// clause 3): hands `write` each one's hash and the Configurations whose retained revisions
-    /// that changes, under the store's lock, and makes them the store's only once `write` — which
-    /// persists them together with the assignments that pin them — has succeeded. What `write`
-    /// answers is answered.
+    /// that changes, under the store's lock, and makes them the store's — `write` persists them
+    /// together with the assignments that pin them. What `write` answers is answered.
+    ///
+    /// The revisions are the store's even when `write` fails: it may have failed after writing
+    /// them, and with a record it could not put back that pins one. A revision is never dropped
+    /// here while a stored assignment may reference it; the caller collects the ones nothing
+    /// references ([`retain_only`](Self::retain_only)).
     ///
     /// # Errors
-    /// A name the store does not hold, or whatever `write` fails with; the store is then as it was.
+    /// A name the store does not hold, or whatever `write` fails with.
     pub fn pin<T>(
         &self,
         names: &BTreeSet<String>,
@@ -276,11 +280,11 @@ impl ConfigStore {
             }
             hashes.insert(name.clone(), hash);
         }
-        let written = write(&hashes, &changed)?;
+        let written = write(&hashes, &changed);
         for config in changed {
             configs.insert(config.name.clone(), config);
         }
-        Ok(written)
+        written
     }
 
     /// Drops every retained revision of `name` that `referenced` does not name — the collection

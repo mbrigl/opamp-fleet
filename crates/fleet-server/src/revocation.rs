@@ -1404,6 +1404,81 @@ mod tests {
         }
     }
 
+    /// A store whose host writes fail while `failing` is set.
+    #[derive(Clone, Default)]
+    struct FailingHosts {
+        inner: Memory,
+        failing: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl LedgerStore for FailingHosts {
+        fn load(&self) -> Result<Ledger, String> {
+            self.inner.load()
+        }
+        fn put_issued(&self, issued: &Issued) -> Result<(), String> {
+            self.inner.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+            self.inner.remove_issued(id)
+        }
+        fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
+            self.inner.save_revocations(revocations)
+        }
+        fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err("the disk is full".into());
+            }
+            self.inner.save_hosts(hosts)
+        }
+    }
+
+    /// An approval whose Host cannot be written is not refused: the certificate is recorded, the
+    /// Host is known with the approval's values, and it reaches the store with the next host
+    /// write — here its first report.
+    /// Verifies: ADR-0035
+    #[test]
+    fn an_approval_whose_host_cannot_be_written_is_not_refused() {
+        let store = FailingHosts::default();
+        store.failing.store(true, Ordering::SeqCst);
+        let revocations = Revocations::open(
+            Box::new(store.clone()),
+            Arc::new(Manual(AtomicU64::new(NOW))),
+            Vec::new(),
+        )
+        .expect("open");
+        let subject = SubjectValues {
+            organization: "Kunde GmbH".into(),
+            ..SubjectValues::default()
+        };
+        revocations
+            .record(
+                Facts {
+                    subject_values: subject.clone(),
+                    ..on_host("a1", "h1")
+                },
+                &[1; 16],
+                None,
+            )
+            .expect("approved all the same");
+        assert_eq!(store.inner.0.lock().expect("lock").issued.len(), 1);
+        assert!(
+            !store.inner.0.lock().expect("lock").hosts.contains_key("h1"),
+            "the Host write failed"
+        );
+        assert_eq!(revocations.placement("h1"), (false, subject.clone()));
+
+        store.failing.store(false, Ordering::SeqCst);
+        revocations
+            .check_report("h1", &SubjectValues::default(), &[1; 16])
+            .expect("its first report");
+        let host = store.inner.0.lock().expect("lock").hosts["h1"].clone();
+        assert_eq!(
+            host.subject, subject,
+            "the approval's values reach the store"
+        );
+        assert_eq!(host.approved_ms, Some(NOW));
+    }
+
     /// A host the prune forgets but cannot write fails neither an issuance nor a start.
     /// Verifies: ADR-0021
     #[test]

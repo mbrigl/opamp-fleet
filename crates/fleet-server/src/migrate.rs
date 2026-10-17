@@ -10,15 +10,19 @@
 //!   copied, not rewritten, so the chain holds. Trust data it cannot carry makes it exit non-zero.
 //! - **Packages:** each uploaded artifact becomes a blob; each entry takes the signature the
 //!   Deployments held for it — the same bytes wherever it was held, so differing ones leave the
-//!   entry unsigned, named — and a referenced entry is dropped, named.
-//! - **Deployments** keep their name, Selector and Packages; their signatures moved onto the
-//!   entries.
-//! - **Configurations** keep their content and every retained revision; each loses its Selector,
-//!   and is listed with the Selector it had, for the operator to place in a Deployment.
-//! - **Agents** are carried with their labels moved into the record. An assignment that went
-//!   through a Deployment keeps it — its Package and the Configuration revisions it pinned, which
-//!   stay offered until the next press. Configuration pins with no Deployment beside them have no
-//!   place in an assignment that names one, so they are dropped and listed per Agent.
+//!   entry unsigned, named — and a referenced entry is dropped, named. An artifact whose bytes do
+//!   not match its recorded hash is dropped, named.
+//! - **Deployments** keep their name, Selector and the Packages that were carried; their
+//!   signatures moved onto the entries, and a Package that was not carried leaves them, named.
+//! - **Configurations** keep their content; each loses its Selector, and is listed with the
+//!   Selector it had, for the operator to place in a Deployment.
+//! - **Agents** are carried with their labels moved into the record. A Package released through a
+//!   Deployment stays assigned through it, while both were carried. A 0.5 Server released every
+//!   Configuration by itself, never through a Deployment, so no Configuration pin has a place in
+//!   an assignment: every one is dropped and listed per Agent, and the Agent keeps running what
+//!   it runs — an assignment without Configurations offers no configuration — until a Deployment
+//!   holding them is rolled out to it. The retained revisions only those pins referenced are
+//!   collected at the first start.
 //!
 //! When it is done, the new `data_dir` is opened as the Server would open it, so a migration that
 //! would not start is reported here rather than at the first start.
@@ -79,21 +83,13 @@ pub fn run(config_dir: &Path, packages_dir: &Path, data_dir: &Path) -> Result<Re
     carry_register(config_dir, data_dir, &mut report)?;
     carry_bootstrap(config_dir, data_dir, &mut report)?;
     carry_audit(config_dir, data_dir, &mut report)?;
-    let signatures = carry_deployments(packages_dir, data_dir, &mut report)?;
-    carry_packages(packages_dir, data_dir, &signatures, &mut report)?;
-    let configurations = carry_configurations(config_dir, data_dir, &mut report)?;
-    let deployments: BTreeSet<String> = fs::FsDeploymentBackend::open(data_dir)?
-        .load()?
-        .into_iter()
-        .map(|deployment| deployment.name)
-        .collect();
-    carry_agents(
-        config_dir,
-        data_dir,
-        &deployments,
-        &configurations,
-        &mut report,
-    )?;
+    // The signatures come from the Deployments, and the Packages a Deployment keeps are the ones
+    // carried: read the Deployments, carry the Packages, then write the Deployments.
+    let (read, signatures) = read_deployments(packages_dir, &mut report)?;
+    let packages = carry_packages(packages_dir, data_dir, &signatures, &mut report)?;
+    let deployments = carry_deployments(read, &packages, data_dir, &mut report)?;
+    carry_configurations(config_dir, data_dir, &mut report)?;
+    carry_agents(config_dir, data_dir, &deployments, &packages, &mut report)?;
     check_opens(data_dir, &mut report);
     Ok(report)
 }
@@ -302,52 +298,93 @@ struct OldSignature {
 /// The signatures the Deployments held, per entry — `(identity, platform)` — and per Deployment.
 type Signatures = BTreeMap<(PackageId, Platform), BTreeMap<String, String>>;
 
-/// The Deployments: `packages_dir/deployments/<name>.json`, content kept, signatures collected.
-fn carry_deployments(
+/// The Deployments as `packages_dir/deployments/<name>.json` holds them, every Package they name
+/// included, and the signatures they held.
+fn read_deployments(
     packages_dir: &Path,
-    data_dir: &Path,
     report: &mut Report,
-) -> Result<Signatures, String> {
-    let backend = fs::FsDeploymentBackend::open(data_dir)?;
+) -> Result<(Vec<Deployment>, Signatures), String> {
+    let mut deployments = Vec::new();
     let mut signatures = Signatures::new();
     for (name, path) in listing(&packages_dir.join("deployments"))? {
         if !name.ends_with(".json") {
             report.line(format!("skipped: {} — not a Deployment", path.display()));
             continue;
         }
-        let carried = read_json::<OldDeployment>(&path).and_then(|old| {
+        let read = read_json::<OldDeployment>(&path).and_then(|old| {
             let mut packages = BTreeMap::new();
             for reference in &old.packages {
                 let id = PackageId::new(&reference.agent_type, &reference.version)?;
                 packages.insert(id.agent_type.clone(), id);
             }
+            let mut held = Signatures::new();
             for signature in &old.signatures {
                 let id = PackageId::new(&signature.agent_type, &signature.version)?;
                 let platform = Platform::new(&signature.os, &signature.arch)?;
-                signatures
-                    .entry((id, platform))
+                held.entry((id, platform))
                     .or_default()
                     .insert(old.name.clone(), signature.signature_hex.to_lowercase());
             }
-            let deployment = Deployment {
-                name: old.name,
-                selector: old.selector,
-                packages,
-                configurations: BTreeSet::new(),
-            };
-            backend.put(&deployment)?;
-            Ok(deployment)
+            Ok((
+                Deployment {
+                    name: old.name,
+                    selector: old.selector,
+                    packages,
+                    configurations: BTreeSet::new(),
+                },
+                held,
+            ))
         });
-        match carried {
-            Ok(deployment) => report.line(format!(
-                "carried: Deployment {} with {} Package(s); its signatures move onto the entries",
-                deployment.name,
-                deployment.packages.len()
-            )),
+        match read {
+            Ok((deployment, held)) => {
+                for (entry, by) in held {
+                    signatures.entry(entry).or_default().extend(by);
+                }
+                deployments.push(deployment);
+            }
             Err(e) => report.line(format!("dropped: {} — {e}", path.display())),
         }
     }
-    Ok(signatures)
+    Ok((deployments, signatures))
+}
+
+/// Writes the Deployments read, each keeping only the Packages that were carried — one deleted
+/// before 0.5.5 could stay named in a Deployment, and one whose metadata did not carry is gone too.
+/// Answers the names written.
+fn carry_deployments(
+    read: Vec<Deployment>,
+    packages: &BTreeSet<PackageId>,
+    data_dir: &Path,
+    report: &mut Report,
+) -> Result<BTreeSet<String>, String> {
+    let backend = fs::FsDeploymentBackend::open(data_dir)?;
+    let mut carried = BTreeSet::new();
+    for mut deployment in read {
+        deployment.packages.retain(|_, id| {
+            let kept = packages.contains(id);
+            if !kept {
+                report.line(format!(
+                    "dropped: Package {} from Deployment {} — no such Package was carried",
+                    id.display_name(),
+                    deployment.name
+                ));
+            }
+            kept
+        });
+        match backend.put(&deployment) {
+            Ok(()) => {
+                report.line(format!(
+                    "carried: Deployment {} with {} Package(s); its signatures move onto the \
+                     entries",
+                    deployment.name,
+                    deployment.packages.len()
+                ));
+                carried.insert(deployment.name);
+            }
+            Err(e) => report.line(format!("dropped: Deployment {} — {e}", deployment.name)),
+        }
+    }
+    Ok(carried)
 }
 
 /// A Package as a 0.5 Server wrote it: `<type>@<version>/package.json` beside its artifacts.
@@ -374,23 +411,27 @@ struct OldEntry {
 }
 
 /// The Packages: each artifact into the blob store, each entry with the signature its Deployments
-/// held.
+/// held. Answers the Packages carried.
 fn carry_packages(
     packages_dir: &Path,
     data_dir: &Path,
     signatures: &Signatures,
     report: &mut Report,
-) -> Result<(), String> {
+) -> Result<BTreeSet<PackageId>, String> {
     use crate::blobs::BlobStore as _;
+    let mut carried = BTreeSet::new();
     if !packages_dir.exists() {
         report.line(format!(
             "carried: no Packages — {} does not exist",
             packages_dir.display()
         ));
-        return Ok(());
+        return Ok(carried);
     }
     let backend = fs::FsPackageBackend::open(data_dir)?;
     let blobs = fs::FsBlobStore::open(data_dir)?;
+    // The blobs a carried entry names: bytes that disagree with their own entry's hash are deleted
+    // only when no carried entry holds the same bytes.
+    let mut named = BTreeSet::new();
     for (name, path) in listing(packages_dir)? {
         if name == "deployments" {
             continue;
@@ -438,7 +479,9 @@ fn carry_packages(
             let (sha256, size) = match stored {
                 Ok(stored) if stored.0 == entry.content_hash_hex.to_lowercase() => stored,
                 Ok((sha256, _)) => {
-                    let _ = blobs.delete(&sha256);
+                    if !named.contains(&sha256) {
+                        let _ = blobs.delete(&sha256);
+                    }
                     report.line(format!(
                         "dropped: {id} for {tag} — {} does not match its recorded hash",
                         artifact.display()
@@ -450,6 +493,7 @@ fn carry_packages(
                     continue;
                 }
             };
+            named.insert(sha256.clone());
             let held = signatures.get(&(id.clone(), platform.clone()));
             let distinct: BTreeSet<&String> = held.into_iter().flat_map(|h| h.values()).collect();
             let signature = match distinct.into_iter().collect::<Vec<_>>().as_slice() {
@@ -491,20 +535,22 @@ fn carry_packages(
                 },
             );
         }
-        backend.put(&Package { id, entries })?;
+        backend.put(&Package {
+            id: id.clone(),
+            entries,
+        })?;
+        carried.insert(id);
     }
-    Ok(())
+    Ok(carried)
 }
 
-/// The Configurations: `config_dir/<name>.json`, each Selector dropped and listed. Answers the
-/// names carried.
+/// The Configurations: `config_dir/<name>.json`, each Selector dropped and listed.
 fn carry_configurations(
     config_dir: &Path,
     data_dir: &Path,
     report: &mut Report,
-) -> Result<BTreeSet<String>, String> {
+) -> Result<(), String> {
     let backend = fs::FsConfigBackend::open(data_dir)?;
-    let mut carried = BTreeSet::new();
     for (name, path) in listing(config_dir)? {
         if path.is_dir() {
             if !matches!(
@@ -561,9 +607,8 @@ fn carry_configurations(
             config.name,
             selector_text(&selector)
         ));
-        carried.insert(config.name);
     }
-    Ok(carried)
+    Ok(())
 }
 
 /// A Selector as a line shows it: `{key = "value", …}`, `{}` when it matched every Agent.
@@ -583,7 +628,7 @@ fn carry_agents(
     config_dir: &Path,
     data_dir: &Path,
     deployments: &BTreeSet<String>,
-    configurations: &BTreeSet<String>,
+    packages: &BTreeSet<PackageId>,
     report: &mut Report,
 ) -> Result<(), String> {
     let agents = data_dir.join(fs::AGENTS);
@@ -637,7 +682,7 @@ fn carry_agents(
             .unwrap_or_default()
             .unwrap_or_default();
         let package = fields.remove("package_assignment");
-        let assignment = assignment(uid, package, pins, deployments, configurations, report);
+        let assignment = assignment(uid, package, &pins, deployments, packages, report);
         fields.insert("version".into(), 4.into());
         if let Some(assignment) = assignment {
             fields.insert("assignment".into(), assignment);
@@ -663,15 +708,16 @@ fn carry_agents(
     Ok(())
 }
 
-/// The assignment an old Agent record translates to: what went through a Deployment that was
-/// carried keeps it, its Package and its Configuration pins together; Configuration pins with no
-/// Deployment beside them are dropped and listed.
+/// The assignment an old Agent record translates to: a Package released through a Deployment
+/// keeps it, while both were carried. Every Configuration pin is dropped and listed: a 0.5 Server
+/// released a Configuration by itself, never through a Deployment, so none has a place in an
+/// assignment, and the Agent keeps running it until a Deployment holding it reaches it.
 fn assignment(
     uid: &str,
     package: Option<Value>,
-    mut pins: BTreeMap<String, String>,
+    pins: &BTreeMap<String, String>,
     deployments: &BTreeSet<String>,
-    configurations: &BTreeSet<String>,
+    packages: &BTreeSet<PackageId>,
     report: &mut Report,
 ) -> Option<Value> {
     #[derive(Deserialize)]
@@ -679,44 +725,33 @@ fn assignment(
         deployment: String,
         package: String,
     }
-    let pinned = |pins: &BTreeMap<String, String>| {
-        pins.iter()
+    if !pins.is_empty() {
+        let pinned = pins
+            .iter()
             .map(|(name, hash)| format!("{name}@{}", &hash[..hash.len().min(12)]))
             .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let package =
-        package.and_then(|value| serde_json::from_value::<OldPackageAssignment>(value).ok());
-    let Some(package) = package.filter(|p| deployments.contains(&p.deployment)) else {
-        if !pins.is_empty() {
-            report.line(format!(
-                "dropped: the Configuration pins of Agent {uid} ({}) — released without a \
-                 Deployment; it keeps running them until a Deployment holding them is rolled out",
-                pinned(&pins)
-            ));
-        }
-        return None;
-    };
-    let gone: BTreeMap<String, String> = pins
-        .iter()
-        .filter(|(name, _)| !configurations.contains(*name))
-        .map(|(name, hash)| (name.clone(), hash.clone()))
-        .collect();
-    if !gone.is_empty() {
+            .join(", ");
         report.line(format!(
-            "dropped: the pins of Agent {uid} on Configurations that were not carried ({})",
-            pinned(&gone)
+            "dropped: the Configuration pins of Agent {uid} ({pinned}) — released without a \
+             Deployment; it keeps running them until a Deployment holding them is rolled out"
         ));
-        pins.retain(|name, _| configurations.contains(name));
     }
-    let mut assignment = serde_json::json!({
+    let package =
+        package.and_then(|value| serde_json::from_value::<OldPackageAssignment>(value).ok())?;
+    let carried = deployments.contains(&package.deployment)
+        && packages.iter().any(|id| id.to_string() == package.package);
+    if !carried {
+        report.line(format!(
+            "dropped: the Package assignment of Agent {uid} ({} through {}) — the Package or the \
+             Deployment was not carried",
+            package.package, package.deployment
+        ));
+        return None;
+    }
+    Some(serde_json::json!({
         "deployment": package.deployment,
         "package": package.package,
-    });
-    if !pins.is_empty() {
-        assignment["configurations"] = serde_json::to_value(pins).expect("pins serialize");
-    }
-    Some(assignment)
+    }))
 }
 
 /// Opens the new `data_dir` as the Server would, so what would not start fails here.
@@ -1037,14 +1072,13 @@ mod tests {
             "{text}"
         );
 
-        // Agents: labels inside; the release through a Deployment keeps its Package and pins, and
-        // pins without a Deployment are dropped and listed.
+        // Agents: labels inside; the release through a Deployment keeps its Package, and every
+        // Configuration pin — released without a Deployment — is dropped and listed per Agent.
         let state = crate::fleet::AppState::new(data_dir.clone()).expect("the fleet opens");
         let base = state.configurations().get("base").expect("base");
-        assert_eq!(
-            base.retained.keys().collect::<Vec<_>>(),
-            [&revision_hash(&revision("receivers: {}\n"))],
-            "the revision only the dropped pins referenced is collected"
+        assert!(
+            base.retained.is_empty(),
+            "no pin is carried, so the revisions only the pins referenced are collected"
         );
         let agents = fs::FsAgentStore::open(&data_dir)
             .expect("open")
@@ -1055,19 +1089,20 @@ mod tests {
         let assignment = released.assignment.as_ref().expect("kept");
         assert_eq!(assignment.deployment, "stable");
         assert_eq!(assignment.package.as_ref(), Some(&id));
-        assert_eq!(
-            assignment.configurations["base"],
-            revision_hash(&revision("receivers: {}\n"))
+        assert!(
+            assignment.configurations.is_empty(),
+            "a pin released without a Deployment has no place in one"
         );
         let unreleased = &agents[&opamp::uid::InstanceUid::parse(&old.unreleased).expect("uid")];
         assert!(unreleased.assignment.is_none());
-        assert!(
-            text.contains(&format!(
-                "dropped: the Configuration pins of Agent {}",
-                old.unreleased
-            )),
-            "{text}"
-        );
+        for uid in [&old.released, &old.unreleased] {
+            assert!(
+                text.contains(&format!(
+                    "dropped: the Configuration pins of Agent {uid} (base@"
+                )),
+                "{text}"
+            );
+        }
 
         // The old directories are the backup: nothing was moved.
         assert!(old.config_dir.join("revocation/revocations.json").is_file());
@@ -1099,6 +1134,116 @@ mod tests {
             packages.summary(&id).expect("carried").entries[0].signature,
             None
         );
+    }
+
+    /// A Package deleted before the migration but still named in a Deployment is not carried
+    /// into that Deployment, and the report names it.
+    /// Verifies: ADR-0037
+    #[test]
+    fn a_deployment_naming_a_deleted_package_loses_that_name() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old = old_layout(root.path());
+        let canary = old.packages_dir.join("deployments/canary.json");
+        let text = std::fs::read_to_string(&canary).expect("read");
+        std::fs::write(&canary, text.replace("1.0.0", "0.9.0")).expect("write");
+        let data_dir = root.path().join("fleet-data");
+        let report = run(&old.config_dir, &old.packages_dir, &data_dir).expect("migrate");
+        let text = report.lines.join("\n");
+        assert!(
+            text.contains(
+                "dropped: Package otelcol 0.9.0 from Deployment canary — no such Package"
+            ),
+            "{text}"
+        );
+        let canary = fs::FsDeploymentBackend::open(&data_dir)
+            .expect("deployments")
+            .load()
+            .expect("load")
+            .into_iter()
+            .find(|deployment| deployment.name == "canary")
+            .expect("carried");
+        assert!(canary.packages.is_empty());
+    }
+
+    /// A Package whose metadata does not carry leaves every Deployment that named it, and an
+    /// Agent's Package assignment through it is dropped with a line — though its directory still
+    /// holds a `package.json`.
+    /// Verifies: ADR-0037
+    #[test]
+    fn a_package_that_does_not_carry_leaves_its_deployments_and_assignments() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old = old_layout(root.path());
+        write(
+            &old.packages_dir.join("otelcol@1.0.0/package.json"),
+            b"not json",
+        );
+        let data_dir = root.path().join("fleet-data");
+        let report = run(&old.config_dir, &old.packages_dir, &data_dir).expect("migrate");
+        let text = report.lines.join("\n");
+        assert!(!report.trust_failed, "the new data directory opens: {text}");
+        for name in ["canary", "stable"] {
+            assert!(
+                text.contains(&format!(
+                    "dropped: Package otelcol 1.0.0 from Deployment {name} — no such Package"
+                )),
+                "{text}"
+            );
+        }
+        let deployments = fs::FsDeploymentBackend::open(&data_dir)
+            .expect("deployments")
+            .load()
+            .expect("load");
+        assert!(deployments.iter().all(|d| d.packages.is_empty()));
+        let agents = fs::FsAgentStore::open(&data_dir)
+            .expect("open")
+            .load()
+            .expect("load");
+        let released = &agents[&opamp::uid::InstanceUid::parse(&old.released).expect("uid")];
+        assert!(released.assignment.is_none());
+        assert!(
+            text.contains(&format!(
+                "dropped: the Package assignment of Agent {}",
+                old.released
+            )),
+            "{text}"
+        );
+    }
+
+    /// An artifact whose bytes do not match its own entry's recorded hash is dropped, and the blob
+    /// of those bytes stays when another carried entry holds the same bytes.
+    /// Verifies: ADR-0037
+    #[test]
+    fn a_mismatching_artifact_leaves_the_blob_another_entry_holds() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old = old_layout(root.path());
+        write(
+            &old.packages_dir.join("otelcol@1.1.0/package.json"),
+            json(serde_json::json!({
+                "agent_type": "otelcol",
+                "version": "1.1.0",
+                "entries": [{"os": "linux", "arch": "amd64", "content_hash_hex": "11".repeat(32)}]
+            })),
+        );
+        write(
+            &old.packages_dir.join("otelcol@1.1.0/linux-amd64.bin"),
+            &old.uploaded,
+        );
+        let data_dir = root.path().join("fleet-data");
+        let report = run(&old.config_dir, &old.packages_dir, &data_dir).expect("migrate");
+        let text = report.lines.join("\n");
+        assert!(
+            text.contains("dropped: otelcol@1.1.0 for linux-amd64 —")
+                && text.contains("does not match its recorded hash"),
+            "{text}"
+        );
+        assert!(!report.trust_failed, "the new data directory opens: {text}");
+        let blob = data_dir
+            .join("blobs")
+            .join(hex::encode(Sha256::digest(&old.uploaded)));
+        assert!(blob.is_file(), "otelcol@1.0.0's artifact is still there");
+        let packages = crate::packages::PackageStore::open(data_dir).expect("packages");
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        assert_eq!(packages.summary(&id).expect("carried").entries.len(), 1);
     }
 
     /// The migration writes into an empty data directory only, and trust data it cannot carry

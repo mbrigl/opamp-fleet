@@ -204,6 +204,27 @@ impl FsAgentStore {
     fn path(&self, uid: &InstanceUid) -> PathBuf {
         self.dir.join(format!("{uid}.json"))
     }
+
+    /// Puts the records a failed release wrote back as they were — the bytes, or no file — last
+    /// first. One that cannot be put back stays as written, and so does what the store answers
+    /// about it.
+    fn put_back(&self, written: Vec<(InstanceUid, Option<Vec<u8>>, Option<Assignment>)>) {
+        for (uid, previous, assignment) in written.into_iter().rev() {
+            let path = self.path(&uid);
+            let restored = match &previous {
+                Some(bytes) => super::replace(&path, bytes),
+                None => super::remove_file(&path),
+            };
+            match restored {
+                Ok(()) => self.stored(&uid, assignment.as_ref()),
+                Err(e) => tracing::warn!(
+                    agent = %uid,
+                    error = %e,
+                    "a record a failed rollout wrote cannot be put back"
+                ),
+            }
+        }
+    }
 }
 
 impl AgentStore for FsAgentStore {
@@ -243,7 +264,10 @@ impl AgentStore for FsAgentStore {
     }
 
     /// The revisions first, then each record: a crash in between leaves revisions nothing
-    /// references, which the next load collects (ADR-0037 clause 3).
+    /// references, which the next load collects (ADR-0037 clause 3). A record that cannot be
+    /// written puts every record this call already wrote back as it was, so a failure leaves the
+    /// records as they were; one that cannot be put back stays as written, and so does what the
+    /// store answers about it.
     fn release(
         &self,
         revisions: &[Configuration],
@@ -252,8 +276,28 @@ impl AgentStore for FsAgentStore {
         for configuration in revisions {
             super::configs::write(&self.configurations, configuration)?;
         }
+        let mut written: Vec<(InstanceUid, Option<Vec<u8>>, Option<Assignment>)> = Vec::new();
         for (uid, record) in agents {
-            self.put(uid, record)?;
+            let assignment = self
+                .assignments
+                .lock()
+                .expect("assignments lock")
+                .get(uid)
+                .cloned();
+            let path = self.path(uid);
+            let step = match std::fs::read(&path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+            }
+            .and_then(|previous| self.put(uid, record).map(|()| previous));
+            match step {
+                Ok(previous) => written.push((*uid, previous, assignment)),
+                Err(e) => {
+                    self.put_back(written);
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
