@@ -37,8 +37,9 @@ pub struct ServerConfig {
     /// Configuration to offer yet.
     #[serde(default = "default_config_dir")]
     pub config_dir: PathBuf,
-    /// TLS for both listeners, with one certificate and key (ADR-0013). Required: a Server without
-    /// it is refused at startup. It is an `Option` only so that its absence can be named.
+    /// TLS for the Agent plane, and for the Operator plane unless `[rest.tls]` names its own
+    /// (ADR-0013, ADR-0032). Required: a Server without it is refused at startup. It is an
+    /// `Option` only so that its absence can be named.
     pub tls: Option<TlsConfig>,
     /// Refused at startup: the Agent plane admits by client certificate alone and has no credential
     /// of its own (ADR-0021 clause 1). Read only so that a leftover section can be named.
@@ -264,6 +265,20 @@ pub struct RestConfig {
     /// The connections the Operator plane holds at once (ADR-0013). `0` is refused at load.
     #[serde(default = "default_rest_max_connections")]
     pub max_connections: usize,
+    /// The Operator plane's own certificate and key (ADR-0032); without it, `[tls]`'s.
+    pub tls: Option<RestTlsConfig>,
+}
+
+/// The `[rest.tls]` section (ADR-0032): the certificate the Operator plane serves in place of
+/// `[tls]`'s, typically from the operator's own PKI so that browsers trust it as they are. Nothing
+/// else: the Operator plane asks for no client certificate, so a `client_ca_file` here is refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestTlsConfig {
+    /// PEM certificate chain, the leaf first.
+    pub cert_file: PathBuf,
+    /// PEM private key of the leaf.
+    pub key_file: PathBuf,
 }
 
 impl Default for RestConfig {
@@ -272,6 +287,7 @@ impl Default for RestConfig {
             listen: default_rest_listen(),
             auth: None,
             max_connections: default_rest_max_connections(),
+            tls: None,
         }
     }
 }
@@ -867,6 +883,29 @@ mod tests {
         let opened: ServerConfig =
             toml::from_str("[rest]\nlisten = \"0.0.0.0:8080\"").expect("parse");
         assert_eq!(opened.rest.listen.to_string(), "0.0.0.0:8080");
+    }
+
+    /// `[rest.tls]` takes a certificate and its key and nothing else: the Operator plane asks for
+    /// no client certificate, so a `client_ca_file` there is refused, and so is a missing key.
+    /// Verifies: ADR-0032
+    #[test]
+    fn rest_tls_takes_a_certificate_and_its_key_and_nothing_else() {
+        let cfg: ServerConfig =
+            toml::from_str("[rest.tls]\ncert_file = \"ui.pem\"\nkey_file = \"ui-key.pem\"\n")
+                .expect("parse");
+        let tls = cfg.rest.tls.expect("[rest.tls]");
+        assert_eq!(tls.cert_file, PathBuf::from("ui.pem"));
+        assert_eq!(tls.key_file, PathBuf::from("ui-key.pem"));
+        let refused = toml::from_str::<ServerConfig>(
+            "[rest.tls]\ncert_file = \"ui.pem\"\nkey_file = \"ui-key.pem\"\nclient_ca_file = \"ca.pem\"\n",
+        )
+        .expect_err("a client CA on the Operator plane");
+        assert!(refused.to_string().contains("client_ca_file"), "{refused}");
+        let refused = toml::from_str::<ServerConfig>("[rest.tls]\ncert_file = \"ui.pem\"\n")
+            .expect_err("a certificate without its key");
+        assert!(refused.to_string().contains("key_file"), "{refused}");
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert!(cfg.rest.tls.is_none(), "the section is optional");
     }
 
     /// Two planes, two sockets: an address that cannot be bound twice is a configuration mistake,

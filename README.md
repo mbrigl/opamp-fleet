@@ -266,6 +266,8 @@ $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": false}' \
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or
 `https://` endpoint — plus `ca_file` under `[tls]` when the certificate comes from a private CA.
+The UI and the REST API can present a certificate of their own, for example from your
+organization's PKI, under `[rest.tls]`; without it they present `[tls]`'s.
 
 ### Running as an OS service
 

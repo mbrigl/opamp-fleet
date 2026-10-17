@@ -148,7 +148,7 @@ impl Fleet {
             pki.join("ca.pem").display().to_string(),
         ))
         .expect("tls config");
-        let planes = fleet_server::tls::server_tls(&tls, None).expect("server material");
+        let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
         let admission = fleet_server::transport::Admission::new(true)
             .with_enrolment(planes.issuers, None)
             .with_revocations(Some(revocations.clone()));

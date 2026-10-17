@@ -1189,7 +1189,7 @@ async fn a_client_behind_a_marked_gateway_receives_an_uploaded_artifact_through_
         path("ca.pem"),
     ))
     .expect("tls config");
-    let planes = fleet_server::tls::server_tls(&tls, None).expect("server material");
+    let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
     let admission = fleet_server::transport::Admission::new(true)
         .with_enrolment(planes.issuers, None)
         .with_revocations(Some(revocations));

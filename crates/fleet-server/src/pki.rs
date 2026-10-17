@@ -64,14 +64,18 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
     })
 }
 
-/// The certificates a running Server depends on (ADR-0028 clause 11): its own, the client CA as
-/// both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each file once.
+/// The certificates a running Server depends on (ADR-0028 clause 11): its own on each plane
+/// (ADR-0032), the client CA as both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each
+/// file once.
 #[must_use]
 pub fn depended_on(config: &ServerConfig) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Some(tls) = &config.tls {
         files.push(tls.cert_file.clone());
         files.extend(tls.client_ca_file.clone());
+    }
+    if let Some(operator) = &config.rest.tls {
+        files.push(operator.cert_file.clone());
     }
     if let Some(ca) = &config.client_ca {
         files.push(ca.cert_file.clone());
@@ -280,6 +284,28 @@ mod tests {
             [served],
             "the replaced file is named for a restart"
         );
+    }
+
+    /// The Operator plane's own certificate is one the Server depends on, and a file both
+    /// sections name is watched once (ADR-0032 clause 5).
+    /// Verifies: ADR-0032
+    #[test]
+    fn the_operator_planes_certificate_is_watched_once() {
+        let config: ServerConfig = toml::from_str(
+            "[tls]\ncert_file = \"server.pem\"\nkey_file = \"server-key.pem\"\n\
+             [rest.tls]\ncert_file = \"ui.pem\"\nkey_file = \"ui-key.pem\"\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            depended_on(&config),
+            [PathBuf::from("server.pem"), PathBuf::from("ui.pem")]
+        );
+        let config: ServerConfig = toml::from_str(
+            "[tls]\ncert_file = \"server.pem\"\nkey_file = \"server-key.pem\"\n\
+             [rest.tls]\ncert_file = \"server.pem\"\nkey_file = \"server-key.pem\"\n",
+        )
+        .expect("parse");
+        assert_eq!(depended_on(&config), [PathBuf::from("server.pem")]);
     }
 
     // Verifies: ADR-0028

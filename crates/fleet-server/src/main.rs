@@ -267,7 +267,9 @@ async fn main() {
         .tls
         .as_ref()
         .ok_or_else(|| "[tls] is required".to_string())
-        .and_then(|tls| fleet_server::tls::server_tls(tls, config.enrolment.as_ref()))
+        .and_then(|tls| {
+            fleet_server::tls::server_tls(tls, config.rest.tls.as_ref(), config.enrolment.as_ref())
+        })
         .and_then(|planes| {
             let agent = planes.agent.rustls_config()?;
             let operator = planes.operator.rustls_config()?;

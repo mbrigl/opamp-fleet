@@ -15,6 +15,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ## [0.5.5]
 
+### Added
+
+- **The UI can present a certificate of its own**
+  ([ADR-0032](docs/adr/0032-the-operator-plane-may-serve-a-certificate-of-its-own.md)). An optional
+  `[rest.tls]` with `cert_file` and `key_file` gives the Operator plane — the UI, the REST API and
+  its docs — a certificate of its own, for example from your organization's PKI, so browsers trust
+  it without importing the fleet's server CA. The Agent plane keeps `[tls]`'s, and nothing changes
+  for the Clients. Without the section the Operator plane serves `[tls]`'s as before, so no
+  `server.toml` has to change. `server pki status` and the expiry warnings include it.
+
 ### Changed
 
 - **The enrolment queue names a request's bootstrap certificate by what it was issued for.** The

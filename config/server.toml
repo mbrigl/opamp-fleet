@@ -115,8 +115,9 @@ max_package_size_bytes = 1073741824
 # Sections — everything below here is a [table]. Nothing but tables may follow.
 # =============================================================================================
 
-# TLS, REQUIRED: both listeners serve HTTPS/WSS with this certificate and key, in TLS 1.3
-# only. Without the section the Server refuses to start, naming it.
+# TLS, REQUIRED: the Agent plane serves HTTPS/WSS with this certificate and key, in TLS 1.3
+# only, and so does the Operator plane unless [rest.tls] below names its own. Without the
+# section the Server refuses to start, naming it.
 #
 # client_ca_file is REQUIRED too: the Agent plane asks every peer for a client
 # certificate IN THE HANDSHAKE, and one that chains to neither this CA nor the bootstrap CA of
@@ -302,3 +303,18 @@ max_connections = 256
 # password is listed by its Argon2id hash: `server hash-credential --basic`.
 # [rest.auth.basic_users]
 # fleet-admin = "$argon2id$v=19$m=19456,t=2,p=1$…"
+
+# The Operator plane's own certificate and key, OPTIONAL. Without the section the Operator plane
+# serves [tls]'s, which chains to the fleet's server CA — the one every Client trusts, and one a
+# browser trusts only once it is imported. With it, the Operator plane serves this pair instead,
+# typically from your organization's own PKI, so that its browsers trust the UI as they are; the
+# Agent plane keeps [tls]'s. cert_file holds the leaf first and any intermediates after it.
+#
+# Nothing else belongs here: the Operator plane asks for no client certificate. A key that does
+# not match its certificate refuses the start, naming both files. A new pair takes effect when the
+# Server restarts; `server pki status` lists it, and the running Server warns before it ends.
+# A certificate from a PKI rarely names 127.0.0.1: through an SSH tunnel to a loopback listen,
+# dial the name the certificate carries.
+# [rest.tls]
+# cert_file = "ui.pem"
+# key_file = "ui-key.pem"

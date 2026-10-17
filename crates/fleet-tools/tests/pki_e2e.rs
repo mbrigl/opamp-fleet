@@ -114,7 +114,7 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
             .with_enrolment(Some(enrolment.clone()))
             .with_revocations(Some(revocations.clone())),
     );
-    let planes = fleet_server::tls::server_tls(&fragment.tls, Some(&fragment.enrolment))
+    let planes = fleet_server::tls::server_tls(&fragment.tls, None, Some(&fragment.enrolment))
         .expect("the Server accepts the material pki init made");
     let admission = fleet_server::transport::Admission::new(true)
         .with_enrolment(planes.issuers, Some(enrolment.clone()))

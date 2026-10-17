@@ -141,7 +141,7 @@ max_connections = 256
 
 | Key | Default | Meaning |
 |---|---|---|
-| `listen` | `"127.0.0.1:4321"` | Where the REST API, the API docs, and the UI are served, over the TLS of `[tls]`. It must differ from `listen` above — two equal addresses are refused at startup by name, rather than surfacing later as *address already in use*. An address other than `127.0.0.1` or `::1` requires `[rest.auth]`. |
+| `listen` | `"127.0.0.1:4321"` | Where the REST API, the API docs, and the UI are served, over the TLS of `[rest.tls]`, or of `[tls]` without it. It must differ from `listen` above — two equal addresses are refused at startup by name, rather than surfacing later as *address already in use*. An address other than `127.0.0.1` or `::1` requires `[rest.auth]`. |
 | `max_connections` | `256` | The connections the Operator plane holds at once. `0` is refused at startup. |
 
 #### `[rest.auth]`
@@ -159,9 +159,31 @@ fleet-admin = "$argon2id$v=19$m=19456,t=2,p=1$…"
 |---|---|---|
 | `basic_users` | *(empty)* | Accepted Basic credentials, `user = "<Argon2id hash>"` — see [Credentials are kept as hashes](#credentials-are-kept-as-hashes). A section without one, or an entry that is not such a hash, fails startup. |
 
+#### `[rest.tls]`
+
+Optional. The certificate and key that plane serves in place of `[tls]`'s, typically from your
+organization's PKI so that its browsers trust the UI as they are — see
+[The UI's own certificate](setup.md#the-uis-own-certificate). The Agent plane keeps `[tls]`'s.
+
+```toml
+[rest.tls]
+cert_file = "ui.pem"
+key_file = "ui-key.pem"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `cert_file` | — | Required. PEM chain, the leaf first and any intermediates after it. |
+| `key_file` | — | Required. PEM private key of the leaf. A key that does not match the certificate refuses the start, naming both files. |
+
+Nothing else belongs in the section — a `client_ca_file` is refused, since this plane asks for no
+client certificate. A new pair takes effect when the Server restarts; `server pki status` lists
+it, and the running Server warns before it ends.
+
 ### `[tls]`
 
-Required. **Both listeners** serve HTTPS and WSS in TLS 1.3, with this certificate and key. A
+Required. The Agent plane serves HTTPS and WSS in TLS 1.3 with this certificate and key, and so
+does the Operator plane unless [`[rest.tls]`](#resttls) names its own. A
 Server without the section is refused at startup with a message naming it. `client_ca_file` is
 required too. It belongs to the Agent plane alone, which asks every peer for a client certificate
 in the handshake (see [Mutual TLS](#mutual-tls-proving-who-is-on-the-connection)).
@@ -1327,8 +1349,8 @@ ignored. A Client sends no credential, so a Server that still demands one answer
 
 ## TLS
 
-`[tls]` is required, and it turns **both listeners** into HTTPS/WSS listeners with one certificate
-and key.
+`[tls]` is required, and it turns **both listeners** into HTTPS/WSS listeners: with its certificate
+and key, or on the Operator plane with those of [`[rest.tls]`](#resttls) when that section is set.
 There is no plaintext port beside either of them. Every connection speaks TLS 1.3 alone, with the
 three TLS 1.3 suites of the `ring` provider; a peer that speaks only TLS 1.2 cannot connect. Clients
 use `wss://` or `https://` endpoints, and Clients trusting a private CA set `ca_file` in their own

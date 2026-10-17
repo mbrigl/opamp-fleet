@@ -31,7 +31,7 @@ with one job:
 
 | CA | Signs | Its key lives | Its certificate is named in |
 |---|---|---|---|
-| **Server CA** | the Server's own certificate | offline, with you | the Client's `[tls] ca_file`, and your browser's trust store |
+| **Server CA** | the Server's own certificate | offline, with you | the Client's `[tls] ca_file`, and your browser's trust store — unless the UI presents a certificate of its own ([below](#the-uis-own-certificate)) |
 | **Client CA** | every host's certificate, by the Server, automatically | on the Server | the Server's `[tls] client_ca_file` and `[client_ca]` |
 | **Bootstrap CA** | bootstrap certificates, which new hosts enrol with, by the Server, on your request | on the Server | the Server's `[enrolment] bootstrap_ca_file` and `bootstrap_ca_key_file` |
 
@@ -497,6 +497,26 @@ restart it; the Clients reconnect on their own. They trust the server CA, not on
 certificate, so nothing changes on the hosts. `server-cert` also makes a **Gateway's**
 certificate: give it the Gateway's names and use the pair as its `[gateway.tls] cert_file` and
 `key_file`.
+
+### The UI's own certificate
+
+The Operator plane — the UI, the REST API and its docs — presents the server certificate unless
+`server.toml` names one of its own. Name one when your organization has a PKI whose root its
+browsers already trust, so nobody imports the fleet's server CA:
+
+```toml
+[rest.tls]
+cert_file = "/etc/opamp-fleet-server/tls/ui.pem"       # the leaf first, then any intermediates
+key_file = "/etc/opamp-fleet-server/tls/ui-key.pem"
+```
+
+The Agent plane keeps the server certificate, and the Clients notice nothing. A key that does not
+match its certificate stops the Server at startup, naming both files. Renew this certificate
+through your PKI, replace the two files, and restart the Server; `server pki status` lists it
+beside the others. A PKI certificate seldom names `127.0.0.1`, so through an SSH tunnel to a
+loopback Operator plane dial the name the certificate carries, for example through an entry in
+`/etc/hosts`. `opamp-fleetctl package fetch --cacert` then names your PKI's CA, or nothing when
+the system's roots hold it.
 
 **The bootstrap CA is yours to replace once a year**, when the Server warns that it is ending:
 

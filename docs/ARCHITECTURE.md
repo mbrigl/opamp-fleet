@@ -101,9 +101,11 @@ core module names an adapter or a technology, and when a module has no role.
   `PackageOffering::with_deployments`, `BootstrapCertificates::open` — and `lib.rs` wires the
   filesystem adapters in `AppState::new`, `PackageStore::open`, `PackageOffering::new` and
   `BootstrapCertificates::on_disk`.
-- **Server listeners** — `tls` reads the `[tls]` and `[enrolment]` files into the material each
-  plane serves with — the Agent plane requiring a client certificate in the handshake, the
-  Operator plane asking for none — and tells a member's certificate from a bootstrap one by its
+- **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
+  material each plane serves with — the Agent plane requiring a client certificate in the
+  handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
+  section is present
+  ([ADR-0032](adr/0032-the-operator-plane-may-serve-a-certificate-of-its-own.md)) — and tells a member's certificate from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
   ([ADR-0013](adr/0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
 - **Server admission** — `transport::Admission` requires the client certificate on every request

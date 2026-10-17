@@ -781,7 +781,7 @@ async fn our_tls_server(pki: &TestPki) -> (SocketAddr, Arc<AppState>, tempfile::
         server.ca.display().to_string(),
     ))
     .expect("the [tls] table");
-    let planes = fleet_server::tls::server_tls(&tls, None).expect("server material");
+    let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
     let agent_tls = planes.agent.rustls_config().expect("the Agent plane's TLS");
     let admission =
         fleet_server::transport::Admission::new(true).with_enrolment(planes.issuers, None);

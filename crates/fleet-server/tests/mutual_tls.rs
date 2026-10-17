@@ -143,6 +143,8 @@ struct Setup<'a> {
     packages: bool,
     /// The bootstrap CA's key on the Server, which then issues bootstrap certificates (ADR-0028).
     issue_bootstrap: bool,
+    /// The CA of `[rest.tls]`: the Operator plane then serves a certificate it issued (ADR-0032).
+    operator_pki: Option<&'a Pki>,
 }
 
 /// The CAs a revocation can name, as `main` takes them from `[tls]` and `[enrolment]`.
@@ -270,8 +272,19 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
         ca_file.display().to_string(),
     ))
     .expect("tls config");
-    let planes =
-        fleet_server::tls::server_tls(&tls, enrolment_config.as_ref()).expect("server material");
+    let rest_tls = setup.operator_pki.map(|operator_pki| {
+        let (cert, key) = operator_pki.issue("localhost");
+        let cert_file = dir.path().join("operator-cert.pem");
+        let key_file = dir.path().join("operator-key.pem");
+        std::fs::write(&cert_file, cert).expect("write operator cert");
+        std::fs::write(&key_file, key).expect("write operator key");
+        fleet_server::config::RestTlsConfig {
+            cert_file,
+            key_file,
+        }
+    });
+    let planes = fleet_server::tls::server_tls(&tls, rest_tls.as_ref(), enrolment_config.as_ref())
+        .expect("server material");
     let agent_tls = planes.agent.rustls_config().expect("agent plane config");
     let operator_tls = planes
         .operator
@@ -916,7 +929,7 @@ fn a_bootstrap_ca_sharing_its_subject_with_the_client_ca_is_refused() {
         bootstrap_ca_file: file("bootstrap-ca.pem", &twin.ca_pem).into(),
         bootstrap_ca_key_file: None,
     };
-    let Err(err) = fleet_server::tls::server_tls(&tls, Some(&enrolment)) else {
+    let Err(err) = fleet_server::tls::server_tls(&tls, None, Some(&enrolment)) else {
         panic!("a bootstrap CA indistinguishable from the client CA was accepted");
     };
     assert!(
@@ -3863,4 +3876,59 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     files
+}
+
+/// With `[rest.tls]` the Operator plane serves the certificate the operator's own PKI issued, and
+/// the Agent plane keeps `[tls]`'s: a browser trusts the one, a Client the other, and neither
+/// trust reaches the other plane. Without the section both planes serve `[tls]`'s
+/// (ADR-0032 clauses 1 and 2).
+/// Verifies: ADR-0032
+#[tokio::test]
+async fn the_operator_plane_serves_its_own_certificate_and_the_agent_plane_keeps_the_fleets() {
+    let pki = Pki::new();
+    let company = Pki::named("company PKI");
+    let served = serve(
+        &pki,
+        Setup {
+            operator_pki: Some(&company),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let agents = operator(&served, "/api/v1/agents");
+    let answered = client(&company.ca_pem, None)
+        .get(&agents)
+        .send()
+        .await
+        .expect("the PKI's CA vouches for the Operator plane");
+    assert!(answered.status().is_success(), "{}", answered.status());
+    assert!(
+        client(&pki.ca_pem, None).get(&agents).send().await.is_err(),
+        "the fleet's server CA does not vouch for the Operator plane's certificate"
+    );
+    let (cert, key) = pki.issue("host-1");
+    assert!(
+        client(&pki.ca_pem, Some((&cert, &key)))
+            .post(&served.endpoint)
+            .send()
+            .await
+            .is_ok(),
+        "a Client trusting the fleet's CA still reaches the Agent plane"
+    );
+    assert!(
+        client(&company.ca_pem, Some((&cert, &key)))
+            .post(&served.endpoint)
+            .send()
+            .await
+            .is_err(),
+        "the PKI's CA does not vouch for the Agent plane's certificate"
+    );
+
+    let without = serve(&pki, Setup::default()).await;
+    let answered = client(&pki.ca_pem, None)
+        .get(operator(&without, "/api/v1/agents"))
+        .send()
+        .await
+        .expect("without [rest.tls] the Operator plane serves [tls]'s certificate");
+    assert!(answered.status().is_success(), "{}", answered.status());
 }

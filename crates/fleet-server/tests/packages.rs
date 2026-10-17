@@ -118,7 +118,7 @@ async fn spawn_with_packages_for_a_host() -> (TestServer, Member) {
         files.join("ca.pem").display().to_string(),
     ))
     .expect("tls config");
-    let planes = fleet_server::tls::server_tls(&tls, None).expect("server material");
+    let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
     let agent_tls = planes.agent.rustls_config().expect("agent plane config");
 
     let revocations = Arc::new(
