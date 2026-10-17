@@ -35,7 +35,14 @@ fuzz_target!(|data: &[u8]| {
     let Ok(csr) = std::str::from_utf8(data) else {
         return;
     };
-    if let Ok(issued) = ca().sign(csr, "fuzz-host") {
+    // The subject values an approval carries (ADR-0036), so the fuzzed request is signed with
+    // a subject of the shape every host certificate has.
+    let subject = fleet_server::revocation::SubjectValues {
+        organization: "Fuzz Customer".to_string(),
+        organizational_unit: "Fuzz Site".to_string(),
+        ..fleet_server::revocation::SubjectValues::default()
+    };
+    if let Ok(issued) = ca().sign(csr, "fuzz-host", &subject) {
         let (_, pem) = x509_parser::pem::parse_x509_pem(issued.pem.as_bytes()).expect("issued PEM");
         let certificate = pem.parse_x509().expect("issued certificate");
         let is_ca = certificate
