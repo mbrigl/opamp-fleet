@@ -55,6 +55,19 @@
   --overlay: rgba(0, 0, 0, 0.5);
   --sans: "Open Sans", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   --mono: Monaco, Menlo, "Ubuntu Mono", Consolas, ui-monospace, monospace;
+  /* An effective configuration's colours (ADR-0038), from this palette: keys in the link blue,
+     strings green, numbers and booleans amber, comments muted. */
+  --shiki-foreground: #c9cacc;
+  --shiki-background: #1f2227;
+  --shiki-token-keyword: #40c5ec;
+  --shiki-token-string: #6edfa6;
+  --shiki-token-string-expression: #6edfa6;
+  --shiki-token-constant: #f0c75e;
+  --shiki-token-comment: #a9aaad;
+  --shiki-token-parameter: #f9c8e1;
+  --shiki-token-function: #bc7eff;
+  --shiki-token-punctuation: #a9aaad;
+  --shiki-token-link: #40c5ec;
 }
 /* The only other state, GitKraken Light. Dark needs no rule of its own — :root above *is*
    dark, so the page's `data-theme="dark"` matches nothing here. */
@@ -97,6 +110,18 @@
   --soft-red-bg: #eedada;
   --soft-red-fg: #9f1a16;
   --overlay: rgba(0, 0, 0, 0.35);
+  /* An effective configuration's colours (ADR-0038), the same roles in the light steps. */
+  --shiki-foreground: #3d3d3d;
+  --shiki-background: #ffffff;
+  --shiki-token-keyword: #005c95;
+  --shiki-token-string: #007a3f;
+  --shiki-token-string-expression: #007a3f;
+  --shiki-token-constant: #8a5a14;
+  --shiki-token-comment: #616161;
+  --shiki-token-parameter: #7c1449;
+  --shiki-token-function: #7600f6;
+  --shiki-token-punctuation: #616161;
+  --shiki-token-link: #005c95;
 }
 
 * { box-sizing: border-box; }

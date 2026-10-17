@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpAMP Fleet</title>
     <link id="ui-style" rel="stylesheet" href="/ui.css" />
+    <!-- Colours an Agent's effective configuration (ADR-0038); deferred, so the page never waits
+         for it, and without it every configuration stays plain text. -->
+    <script id="shiki" src="/shiki.js" defer></script>
     <script>
       // The looks the UI can wear: each a stylesheet from this origin.
       const UI_STYLES = {
@@ -600,6 +603,34 @@
       // ' and ` so the safety does not depend on every attribute staying double-quoted. Agent-
       // reported strings (names, attributes, health text) flow through here before reaching the DOM.
       const esc = (s) => (s ?? "").toString().replace(/[&<>"'`]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" }[c]));
+      // The grammar an Agent's effective configuration is coloured with, chosen by the type the
+      // Agent reports (ADR-0038 clause 3); any other type is shown plain.
+      const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["telegraf", "toml"], ["fluent-bit", "ini"]]);
+      const configGrammar = (type) => ((type || "").startsWith("otelcol") ? "yaml" : CONFIG_GRAMMARS.get(type) || null);
+      // Coloured configurations by grammar and text: the refresh every two seconds draws an
+      // unchanged one from here instead of colouring it again. A text whose colouring failed is
+      // kept as null and stays plain. Shiki escapes the text it builds its HTML from.
+      const highlighted = new Map();
+      const highlighting = new Map();
+      const highlightKey = (text, lang) => `${lang}\n${text}`;
+      function highlight(text, lang) {
+        const key = highlightKey(text, lang);
+        if (highlighted.has(key)) return Promise.resolve(highlighted.get(key));
+        // The script is deferred: until it has run, nothing is coloured and nothing is kept.
+        if (typeof window.fleetHighlight !== "function") return Promise.resolve(null);
+        if (!highlighting.has(key)) {
+          highlighting.set(key, Promise.resolve()
+            .then(() => window.fleetHighlight(text, lang))
+            .catch(() => null)
+            .then((html) => {
+              highlighting.delete(key);
+              if (highlighted.size >= 200) highlighted.clear();
+              highlighted.set(key, typeof html === "string" ? html : null);
+              return highlighted.get(key);
+            }));
+        }
+        return highlighting.get(key);
+      }
       function ago(ms) {
         const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
         if (s < 60) return s + "s ago";
@@ -883,6 +914,8 @@
         $("empty").style.display = rows.length ? "none" : "block";
         $("agents").innerHTML = rows.map((a) => {
           const current = a.instance_uid === currentAgent;
+          const grammar = a.effective_config ? configGrammar(a.service_name) : null;
+          const coloured = grammar ? highlighted.get(highlightKey(a.effective_config, grammar)) : null;
           const row = `
           <tr class="agent${current ? " current" : ""}" data-uid="${esc(a.instance_uid)}">
             <td class="chk"><input type="checkbox" class="row-select" data-uid="${esc(a.instance_uid)}"${selectedAgents.has(a.instance_uid) ? " checked" : ""} /></td>
@@ -892,7 +925,7 @@
             <td>${networkOf(a)}</td>
             <td>${configPill(a)}</td>
             <td>${rolloutCell(a)}</td>
-            <td><pre class="cfg${a.effective_config ? " cfg-open" : ""}" data-uid="${esc(a.instance_uid)}" title="${a.effective_config ? "Click to see the whole configuration" : ""}">${esc(a.effective_config) || "—"}</pre></td>
+            <td><pre class="cfg${a.effective_config ? " cfg-open" : ""}" data-uid="${esc(a.instance_uid)}" title="${a.effective_config ? "Click to see the whole configuration" : ""}">${coloured || esc(a.effective_config) || "—"}</pre></td>
             <td class="num">${a.sequence_num}</td>
             <td class="num">${ago(a.last_seen_ms)}</td>
             <td>${healthPill(a)}</td>
@@ -929,7 +962,26 @@
           const arrow = th.querySelector(".arrow");
           arrow.textContent = th.dataset.key === sortKey ? (sortDir === 1 ? "▲" : "▼") : "";
         });
+        colourConfigs(rows);
       }
+
+      // Colours each drawn configuration not yet coloured, after the table is on screen; a cell
+      // whose Agent has since reported another text, or another type, is left as it is.
+      function colourConfigs(rows) {
+        for (const a of rows) {
+          const text = a.effective_config;
+          const grammar = text ? configGrammar(a.service_name) : null;
+          if (!grammar || highlighted.has(highlightKey(text, grammar))) continue;
+          highlight(text, grammar).then((html) => {
+            const now = agents.find((x) => x.instance_uid === a.instance_uid);
+            if (!html || !now || now.effective_config !== text || configGrammar(now.service_name) !== grammar) return;
+            const cell = [...$("agents").querySelectorAll("pre.cfg-open")].find((pre) => pre.dataset.uid === a.instance_uid);
+            if (cell) cell.innerHTML = html;
+          });
+        }
+      }
+      // The deferred script runs after this one: the table drawn before it is coloured once it has.
+      $("shiki").addEventListener("load", () => render());
 
       document.querySelectorAll("th.sortable").forEach((th) => {
         th.addEventListener("click", () => {
@@ -1009,7 +1061,7 @@
         if (cfg) {
           const agent = agents.find((x) => x.instance_uid === cfg.dataset.uid);
           if (agent && agent.effective_config) {
-            openTextDialog(`${displayName(agent) || "agent"} — effective configuration`, agent.effective_config);
+            openTextDialog(`${displayName(agent) || "agent"} — effective configuration`, agent.effective_config, configGrammar(agent.service_name));
           }
           return;
         }
@@ -1044,10 +1096,17 @@
         render();
       });
       // The one way this view shows a text that does not fit its cell.
-      function openTextDialog(title, body) {
+      // A `grammar` colours the text once the dialog shows it, unless another text has replaced it.
+      function openTextDialog(title, body, grammar) {
         $("text-dialog-title").textContent = title;
         $("text-dialog-body").textContent = body;
         $("text-dialog").showModal();
+        if (!grammar) return;
+        highlight(body, grammar).then((html) => {
+          if (html && $("text-dialog").open && $("text-dialog-body").textContent === body) {
+            $("text-dialog-body").innerHTML = html;
+          }
+        });
       }
       $("text-dialog-close").addEventListener("click", () => $("text-dialog").close());
       // A click on the backdrop closes too: the dialog's own box catches clicks inside it, so a

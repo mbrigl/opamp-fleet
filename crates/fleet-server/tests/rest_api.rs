@@ -979,6 +979,7 @@ async fn every_operator_response_carries_the_security_headers() {
         "/ui.css",
         "/ui-carbon.css",
         "/ui-quiet.css",
+        "/shiki.js",
         "/api/v1/agents",
         "/api/v1/docs",
         "/api/v1/openapi.json",
@@ -1172,6 +1173,162 @@ async fn the_ui_takes_its_look_from_its_own_stylesheet() {
             css.contains(".chip-count "),
             "{path} lacks the list value's count"
         );
+    }
+}
+
+/// The vendored Shiki bundle is served from the plane's own origin as JavaScript, under the same
+/// policy as every page, and it is the file the pin names: the bundle cannot change without
+/// `scripts/vendor-shiki.lock` changing in the same commit.
+/// Verifies: ADR-0038
+#[tokio::test]
+async fn the_ui_serves_the_pinned_shiki_bundle() {
+    use sha2::Digest as _;
+    let server = spawn().await;
+    let response = reqwest::get(url(server.rest_addr, "/shiki.js"))
+        .await
+        .expect("get the bundle");
+    assert_eq!(response.status(), 200);
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        header("content-type").starts_with("text/javascript"),
+        "{}",
+        header("content-type")
+    );
+    let policy = header("content-security-policy");
+    assert!(
+        policy.contains("script-src 'self'")
+            && !policy.contains("'unsafe-eval'")
+            && !policy.contains("'wasm-unsafe-eval'"),
+        "{policy}"
+    );
+    let body = response.bytes().await.expect("the bundle");
+    let digest: String = sha2::Sha256::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let lock = include_str!("../../../scripts/vendor-shiki.lock");
+    let pinned = lock
+        .lines()
+        .find_map(|line| line.strip_prefix("sha256 "))
+        .expect("the lock pins a sha256");
+    assert_eq!(
+        digest, pinned,
+        "static/shiki.js differs from the bundle scripts/vendor-shiki.lock pins"
+    );
+    assert!(
+        lock.lines().any(|line| line == "shiki 4.5.0"),
+        "the lock pins another Shiki than ADR-0038 names"
+    );
+    let text = std::str::from_utf8(&body).expect("utf-8");
+    assert!(
+        text.starts_with("/*\n * Shiki 4.5.0") && text.contains("window.fleetHighlight"),
+        "the bundle lost its header or its one function"
+    );
+    let header_end = text.find("*/").expect("the header ends");
+    assert!(
+        text[..header_end]
+            .contains("the CSS-variables theme with this project's TOML and\n * INI token rules"),
+        "the header does not name the project's TOML and INI token rules"
+    );
+}
+
+/// The UI loads the vendored Shiki bundle without waiting for it, chooses the grammar of an
+/// Agent's effective configuration by the type the Agent reports — `otelcol*` YAML, the fleet's
+/// own Client and Telegraf TOML, Fluent Bit INI, anything else none — and each look defines the
+/// CSS-variables theme's colours in its light and its dark theme. The project's TOML and INI token
+/// rules in the bundle name only those colours, so no look needs a variable of its own for them.
+/// Verifies: ADR-0038
+#[tokio::test]
+async fn the_ui_colours_an_effective_configuration_by_the_agents_type() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let html = client
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    assert!(
+        html.contains(r#"<script id="shiki" src="/shiki.js" defer></script>"#),
+        "the page does not load /shiki.js deferred"
+    );
+    assert!(
+        html.contains(
+            r#"const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["telegraf", "toml"], ["fluent-bit", "ini"]]);"#
+        ),
+        "supervisor and telegraf are not TOML, or fluent-bit is not INI"
+    );
+    assert!(
+        html.contains(
+            r#"const configGrammar = (type) => ((type || "").startsWith("otelcol") ? "yaml" : CONFIG_GRAMMARS.get(type) || null);"#
+        ),
+        "otelcol* is not YAML, or another type is not left plain"
+    );
+    // Both places the configuration shows are coloured: the cell and the dialog.
+    assert!(
+        html.contains("colourConfigs(rows);"),
+        "the cell is not coloured"
+    );
+    assert!(
+        html.contains("agent.effective_config, configGrammar(agent.service_name));"),
+        "the dialog is not coloured"
+    );
+
+    const NAMES: [&str; 11] = [
+        "foreground",
+        "background",
+        "token-keyword",
+        "token-string",
+        "token-string-expression",
+        "token-constant",
+        "token-comment",
+        "token-parameter",
+        "token-function",
+        "token-punctuation",
+        "token-link",
+    ];
+    let bundle = include_str!("../static/shiki.js");
+    let mut named = 0;
+    for (at, _) in bundle.match_indices("var(--shiki-") {
+        let rest = &bundle[at + "var(--shiki-".len()..];
+        let name = &rest[..rest.find(')').expect("the var() closes")];
+        assert!(
+            NAMES.contains(&name),
+            "the bundle's token rules name --shiki-{name}, which no look defines"
+        );
+        named += 1;
+    }
+    assert!(
+        named > 0,
+        "the bundle carries no token rules of the project's"
+    );
+
+    for path in ["/ui.css", "/ui-carbon.css", "/ui-quiet.css"] {
+        let css = client
+            .get(url(server.rest_addr, path))
+            .send()
+            .await
+            .expect("get the stylesheet")
+            .text()
+            .await
+            .expect("css");
+        for name in NAMES {
+            // Once in the theme the look opens in, once in the other.
+            assert_eq!(
+                css.matches(&format!("--shiki-{name}:")).count(),
+                2,
+                "{path} does not define --shiki-{name} for light and dark"
+            );
+        }
     }
 }
 

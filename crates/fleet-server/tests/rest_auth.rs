@@ -151,6 +151,7 @@ async fn the_ui_and_the_api_docs_are_guarded_too() {
         "/ui.css",
         "/ui-carbon.css",
         "/ui-quiet.css",
+        "/shiki.js",
         "/api/v1/docs",
         "/api/v1/openapi.json",
     ] {

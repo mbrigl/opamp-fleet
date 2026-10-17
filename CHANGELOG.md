@@ -24,6 +24,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   independent: a theme holds across every look. A first visit follows the system; a light or dark
   chosen before in this browser still holds.
 
+- **Coloured effective configurations**
+  ([ADR-0038](docs/adr/0038-the-ui-colours-an-agents-effective-configuration-with-shiki.md)). The
+  Agents tab colours an Agent's effective configuration, in its cell and in the dialog, with the
+  TextMate grammars VS Code uses, in the colours of the look and theme chosen: YAML for
+  `otelcol*`, TOML for the fleet's own Client and Telegraf, INI for Fluent Bit; any other type stays
+  plain. TOML table headers and keys and INI section headers take the same colours as YAML's keys
+  and values, so the three languages look alike. The colouring runs in the browser from a script the Server serves itself as `/shiki.js`,
+  so nothing is loaded from elsewhere and the page's policy is unchanged. Nothing to configure.
+
 - **The UI can present a certificate of its own**
   ([ADR-0032](docs/adr/0032-the-operator-plane-may-serve-a-certificate-of-its-own.md)). An optional
   `[rest.tls]` with `cert_file` and `key_file` gives the Operator plane — the UI, the REST API and

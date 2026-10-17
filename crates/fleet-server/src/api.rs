@@ -269,6 +269,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/ui.css", get(ui_css))
         .route("/ui-carbon.css", get(ui_carbon_css))
         .route("/ui-quiet.css", get(ui_quiet_css))
+        .route("/shiki.js", get(shiki_js))
         .with_state(state.clone());
     // Inside the guard, so an act is recorded only once it is authenticated, and named by the
     // operator who made it (ADR-0022 clause 1).
@@ -384,6 +385,16 @@ async fn ui_carbon_css() -> Response {
 /// The bundled UI's third look, the quiet one, where colour says only state and selection.
 async fn ui_quiet_css() -> Response {
     stylesheet(include_str!("../static/ui-quiet.css"))
+}
+
+/// The vendored Shiki bundle the UI colours an Agent's effective configuration with (ADR-0038),
+/// served from this origin like the stylesheets, so `script-src 'self'` admits it.
+async fn shiki_js() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../static/shiki.js"),
+    )
+        .into_response()
 }
 
 fn stylesheet(css: &'static str) -> Response {

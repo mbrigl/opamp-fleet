@@ -55,6 +55,19 @@
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --ease: cubic-bezier(0.2, 0, 0, 1);
+  /* An effective configuration's colours (ADR-0038): keys in ink, values in the namespace hues
+     no state uses, comments muted, so neither a state nor the selection's indigo appears. */
+  --shiki-foreground: #1c1b19;
+  --shiki-background: #f7f6f3;
+  --shiki-token-keyword: #1c1b19;
+  --shiki-token-string: #0a4f46;
+  --shiki-token-string-expression: #0a4f46;
+  --shiki-token-constant: #123a6e;
+  --shiki-token-comment: #6b6862;
+  --shiki-token-parameter: #7c1449;
+  --shiki-token-function: #273449;
+  --shiki-token-punctuation: #6b6862;
+  --shiki-token-link: #1c1b19;
 }
 /* The only other state. Light needs no rule of its own — :root above *is* light, so the
    page's `data-theme="light"` matches nothing here. The same roles on warm graphite: panels
@@ -99,6 +112,18 @@
   --shadow-sm: 0 0 0 1px rgba(0, 0, 0, 0.2);
   --shadow-lg: 0 24px 48px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px #2a2926;
   --overlay: rgba(0, 0, 0, 0.6);
+  /* An effective configuration's colours (ADR-0038), the same roles on graphite. */
+  --shiki-foreground: #ecebe7;
+  --shiki-background: #121211;
+  --shiki-token-keyword: #ecebe7;
+  --shiki-token-string: #a5ebe0;
+  --shiki-token-string-expression: #a5ebe0;
+  --shiki-token-constant: #c3dcfb;
+  --shiki-token-comment: #9c9890;
+  --shiki-token-parameter: #f9c8e1;
+  --shiki-token-function: #d3dbe9;
+  --shiki-token-punctuation: #9c9890;
+  --shiki-token-link: #ecebe7;
 }
 
 * { box-sizing: border-box; }
