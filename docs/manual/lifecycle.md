@@ -147,17 +147,17 @@ A Client updates two kinds of software in the same way: the agents it supervises
 
 ```text
 Package            Deployment                    Client, on each host
-(agent type,  ──▶  (channel, signature    ──▶    download ─▶ verify ─▶ install ─▶ health check
- version,           per binary)                                                    └─▶ roll back
- one binary         rollout act
- per platform)
+(agent type,  ──▶  (channel,              ──▶    download ─▶ verify ─▶ install ─▶ health check
+ version,           Packages)                                                      └─▶ roll back
+ one signed         rollout act
+ binary per
+ platform)
 ```
 
-- A **Package** is what an agent type runs at a version, with one binary per platform. On its own,
-  it reaches nobody.
+- A **Package** is what an agent type runs at a version, with one binary per platform and your
+  signature on each. On its own, it reaches nobody.
 - A **Deployment** is a channel: a Selector that names the hosts it aims at, such as
-  `channel = stable`, the Packages it offers, and your signature for each binary. A host belongs to
-  at most one Deployment.
+  `channel = stable`, and the Packages it offers. A host belongs to at most one Deployment.
 - The **rollout act** releases the Deployment to the hosts it claims. Nothing changes on any host
   before it.
 - The **Client** takes a package only when its `[packages] verification_key` is set, and only when
@@ -170,7 +170,7 @@ take a bad version back, publish the old content as a new, greater version and r
 ### Releasing an update in the UI
 
 1. **Packages** tab: press **＋ Create**, enter the agent type and the version, and give the first
-   platform's binary, as an uploaded file or as a source URL with its SHA-256. A file named
+   platform's binary as a file. A file named
    `<agent type>_<version>_<os>_<arch>.tar.gz` fills the fields by itself. Press **OK**, then add
    each further platform with **＋ Add entry**.
 2. Still there, select the Package and press **Signing info**. Compare every SHA-256 in the file
@@ -180,9 +180,11 @@ take a bad version back, publish the old content as a new, greater version and r
    $ opamp-fleetctl package sign --key fleet-signing.pk8 --signing-info promtail_3.1.0_signing.json
    ```
 
+   Back on the **Packages** tab, choose the signed file and press **Import signing file**. Each
+   binary can also be signed on its own in its field. With the Server's `[packages]
+   verification_key` set, each entry shows whether its signature is valid.
 3. **Deployments** tab: select the channel, add the Package (it replaces the older version of that
-   agent type), choose the signed file and press **Import signing file**. Each binary can also be
-   signed on its own in its field. Press **OK**.
+   agent type), and press **OK**.
 4. Check the row's counts: how many hosts the channel claims, and how many the rollout would move.
    Press **Roll out (n)**.
 5. **Agents** tab: each host shows its progress, `Downloading` with percent and speed, then

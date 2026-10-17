@@ -387,7 +387,7 @@ fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
 }
 
-/// Verifies: ADR-0023, ADR-0026, G-5
+/// Verifies: ADR-0023, ADR-0026, ADR-0033, G-5
 #[tokio::test]
 async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
@@ -432,16 +432,24 @@ async fn the_openapi_document_describes_the_contract() {
         silent.is_empty(),
         "responses without a description: {silent:?}"
     );
-    // Deployments are part of the contract from the moment they exist (ADR-0026) — a portal
+    // Deployments and entry signatures are part of the contract (ADR-0026, ADR-0033) — a portal
     // generates against this document, and a route it cannot see is a route it cannot call.
     for route in [
         "/api/v1/deployments",
         "/api/v1/deployments/{name}",
         "/api/v1/deployments/{name}/selector",
         "/api/v1/deployments/{name}/packages/{agent_type}/{version}",
-        "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
+        "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature",
     ] {
         assert!(paths.contains_key(route), "{route} is described");
+    }
+    // A signature lives on the entry, and every artifact is uploaded (ADR-0033 clause 7): the
+    // Deployment signature routes and the entry's source route are not in the contract.
+    for gone in [
+        "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
+        "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/source",
+    ] {
+        assert!(!paths.contains_key(gone), "{gone} is still described");
     }
     // And the retired package paths are gone rather than lingering as a promise (ADR-0026).
     assert!(
@@ -1231,12 +1239,12 @@ async fn set_labels(
         .expect("put labels")
 }
 
-/// The Packages tab shows each entry's SHA-256 and offers what a signature covers as a signing
-/// file, and the Deployments tab imports a signed one through the signature route — so the page
-/// writes the one format `opamp-fleetctl package sign --signing-info` reads, and the fields it
-/// reads must be the ones the API serves. A rename on either side breaks here rather than in an
-/// empty column or a signing file with a hole in it.
-/// Verifies: ADR-0023, ADR-0027
+/// The Packages tab shows each entry's SHA-256 and signature state, offers what a signature covers
+/// as a signing file, and imports a signed one through the entry's signature route (ADR-0033) — so
+/// the page writes the one format `opamp-fleetctl package sign --signing-info` reads, and the
+/// fields it reads must be the ones the API serves. A rename on either side breaks here rather than
+/// in an empty column or a signing file with a hole in it.
+/// Verifies: ADR-0023, ADR-0027, ADR-0033
 #[tokio::test]
 async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
     let server = spawn().await;
@@ -1257,10 +1265,12 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
         "e.arch",
         "\"opamp-fleet-signing-v1\"",
         "format: SIGNING_FORMAT",
-        "/signatures/${encodeURIComponent(type)}",
-        "depSigPath(d.name, info.agent_type, info.version, e.os, e.arch)",
+        "/entries/${encodeURIComponent(os)}/${encodeURIComponent(arch)}/signature",
+        "entrySigPath(info.agent_type, info.version, e.os, e.arch)",
         "e.sha256 !== entry.content_hash",
-        "{ signature: e.signature }",
+        "JSON.stringify({ signature: e.signature })",
+        "e.signature_state",
+        "stored.signature_state",
     ] {
         assert!(
             html.contains(needle),
@@ -1283,6 +1293,7 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
         ("PackageEntryView", "os"),
         ("PackageEntryView", "arch"),
         ("PackageEntryView", "content_hash"),
+        ("PackageEntryView", "signature_state"),
         ("SignatureSpec", "signature"),
     ] {
         assert!(

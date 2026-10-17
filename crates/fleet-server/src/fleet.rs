@@ -29,7 +29,7 @@ use crate::configs::{self, ConfigBackend, ConfigStore, Configuration, DesiredCon
 use crate::deployments::{deployment_for, Deployment, DeploymentError, DeploymentStore};
 use crate::enrolment::{DecisionError, Enrolment};
 use crate::labels::{LabelError, LabelStore};
-use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, Source};
+use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, SignatureState};
 use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
@@ -131,9 +131,9 @@ pub struct AgentRecord {
 
 /// One Agent's package assignment: the channel it was released through, and the release itself.
 ///
-/// The Deployment is carried alongside the Package rather than derived from it, because it is what
-/// supplies the signature the offer travels with (ADR-0026 point 28) — and because a Deployment
-/// re-aimed after the act must not change what an Agent was already given.
+/// The Deployment is carried alongside the Package rather than derived from it, because a
+/// Deployment re-aimed after the act must not change what the fleet view says an Agent was given
+/// through. The signature the offer travels with is the entry's own (ADR-0033).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackageAssignment {
     pub deployment: String,
@@ -423,27 +423,17 @@ impl Drop for UploadReservation<'_> {
     }
 }
 
-/// The package store plus the base URL each `download_url` is built from (ADR-0026).
+/// The package store and the Deployments that release from it (ADR-0026). Every `download_url`
+/// is a path the Client resolves against its own endpoint — the Agent plane, where the download
+/// is served behind the same handshake as `/v1/opamp` (ADR-0033).
 pub struct PackageOffering {
     store: PackageStore,
     deployments: DeploymentStore,
-    download_base: String,
 }
 
 impl PackageOffering {
-    /// `download_base` is the advertised absolute URL, or empty for a path the Client resolves
-    /// against its own endpoint — which is the Agent plane, where the download is served
-    /// (ADR-0013), behind the same handshake as `/v1/opamp` (ADR-0021 clause 23).
-    pub fn with_deployments(
-        store: PackageStore,
-        deployments: DeploymentStore,
-        download_base: String,
-    ) -> Self {
-        PackageOffering {
-            store,
-            deployments,
-            download_base,
-        }
+    pub fn with_deployments(store: PackageStore, deployments: DeploymentStore) -> Self {
+        PackageOffering { store, deployments }
     }
 
     pub fn store(&self) -> &PackageStore {
@@ -1934,7 +1924,6 @@ impl AppState {
         let effective = record.effective_description();
         let description = effective.as_deref();
         let assigned = record.assigned_package();
-        let deployment = assigned_deployment(offering, record);
         let reported = record
             .package_statuses
             .as_ref()
@@ -1943,36 +1932,30 @@ impl AppState {
         if reported
             == offering
                 .store
-                .assigned_hash_for(assigned, deployment.as_ref(), description)
+                .assigned_hash_for(assigned, description)
                 .as_slice()
         {
             return None;
         }
-        offering.store.offer_for_assigned(
-            assigned,
-            deployment.as_ref(),
-            description,
-            &offering.download_base,
-        )
+        offering.store.offer_for_assigned(assigned, description)
     }
 
-    /// Whether a certificate naming `host` may fetch the uploaded artifact `(id, platform)` from
-    /// the download route (ADR-0026): it is offered to an Agent the host speaks for. The offer's
-    /// own test decides, for each such Agent — the `instance_uid`s bound to the host, or every Agent
-    /// for a host marked as a Gateway. Nothing is offered without package delivery or a host
-    /// register.
+    /// Whether a certificate naming `host` may fetch the artifact `(id, platform)` from the download
+    /// route (ADR-0026): it is offered to an Agent the host speaks for. The offer's own test
+    /// decides (ADR-0033 clause 8), for each such Agent — the `instance_uid`s bound to the host, or
+    /// every Agent for a host marked as a Gateway. Nothing is offered without package delivery or a
+    /// host register.
     ///
-    /// The package store, the Deployments and the host register are read first and released
-    /// before the fleet is locked: no two of those locks are held together here.
+    /// The package store and the host register are read first and released before the fleet is
+    /// locked: no two of those locks are held together here.
     pub fn offers_artifact(&self, host: &str, id: &PackageId, platform: &Platform) -> bool {
         let (Some(offering), Some(revocations)) = (&self.packages, &self.revocations) else {
             return false;
         };
         // What does not depend on the Agent is resolved once, before the fleet is locked.
-        let Some(artifact) = offering.store.uploaded(id, platform) else {
+        let Some(artifact) = offering.store.offerable(id, platform) else {
             return false;
         };
-        let signing = offering.deployments.signing(id, platform);
         let speaks_for = revocations.speaks_for(host);
         let fleet = self.fleet.lock().expect("fleet lock");
         let offered = |record: &AgentRecord| {
@@ -1981,10 +1964,6 @@ impl AppState {
                 && record.assigned_package() == Some(id)
                 && artifact.offered_to(
                     record.assigned_package(),
-                    record
-                        .package_assignment
-                        .as_ref()
-                        .is_some_and(|a| signing.contains(&a.deployment)),
                     record.effective_description().as_deref(),
                 )
         };
@@ -2119,8 +2098,7 @@ impl AppState {
     }
 
     /// Whether any Agent's assignment was released through *this* Deployment and pins *this*
-    /// Package — the gate that freezes a channel's signature and its hold on that Package
-    /// (ADR-0026 point 31).
+    /// Package — the gate that freezes the channel's hold on that Package (ADR-0026 point 31).
     ///
     /// It is not the same question as [`package_set_assigned`](Self::package_set_assigned): a
     /// Package may be assigned through one channel while another holds it untouched, and only the
@@ -2135,15 +2113,10 @@ impl AppState {
         })
     }
 
-    /// The refusal every write that would change **what a standing offer travels with** answers
-    /// with.
-    ///
-    /// What gates re-offering is the package hash, which covers the version and the content — **not
-    /// the signature**. So a signature changed under a standing offer would never reach the Agent
-    /// installing against the old one, and one *removed* would silently turn a signed rollout into
-    /// an unsigned one for any Agent that has not finished. A Client with a verification key then
-    /// refuses an artifact it was already downloading, for a reason nothing on the Server said out
-    /// loud.
+    /// The refusal a Deployment answers with when it is asked to let go of a Package it released
+    /// (ADR-0026 point 31). A signature is not frozen here: it lives on the entry, and an assigned
+    /// Package's entries — signatures included — are frozen by
+    /// [`refuse_if_assigned`](Self::refuse_if_assigned) (ADR-0033).
     ///
     /// This is narrower than freezing the channel. **Swapping the Package a channel holds is not gated**
     /// — that is how a rollout proceeds, and it leaves every standing offer exactly as it was.
@@ -2197,35 +2170,11 @@ impl AppState {
             .remove_package(name, id)
     }
 
-    /// Records one artifact's signature on a channel, frozen once the channel released that Package.
-    pub fn put_deployment_signature(
-        &self,
-        name: &str,
-        id: &PackageId,
-        platform: &Platform,
-        signature: Vec<u8>,
-    ) -> Result<Deployment, DeploymentError> {
-        self.unpinned_deployments(name, id)?
-            .put_signature(name, id, platform, signature)
-    }
-
-    /// Takes one artifact's signature away, with the same gate.
-    pub fn remove_deployment_signature(
-        &self,
-        name: &str,
-        id: &PackageId,
-        platform: &Platform,
-    ) -> Result<Deployment, DeploymentError> {
-        self.unpinned_deployments(name, id)?
-            .remove_signature(name, id, platform)
-    }
-
     /// Deletes a Deployment — **refused while an Agent's assignment names it**.
     ///
-    /// An assignment points at the channel it was released through, and that channel is where the
-    /// offer's signature lives. Deleting it under a standing offer would keep offering the Package
-    /// without one. So the operator ends the offer first, by an act that says so: rolling those
-    /// Agents out through another Deployment, or deleting the Package.
+    /// An assignment points at the channel it was released through (ADR-0026 point 31), and the
+    /// fleet view names it. So the operator ends the offer first, by an act that says so: rolling
+    /// those Agents out through another Deployment, or deleting the Package.
     ///
     /// The fleet lock is held across the check and the delete, so a rollout cannot assign through
     /// the channel in between.
@@ -2243,9 +2192,9 @@ impl AppState {
             .count();
         if released > 0 {
             return Err(DeploymentError::Conflict(format!(
-                "deployment {name:?} released a package to {released} Agent(s), and their offer \
-                 travels with its signatures — roll them out through another deployment, or delete \
-                 the package, before deleting it"
+                "deployment {name:?} released a package to {released} Agent(s), and their \
+                 assignment names it — roll them out through another deployment, or delete the \
+                 package, before deleting it"
             )));
         }
         let deleted = store.delete(name)?;
@@ -2302,33 +2251,37 @@ impl AppState {
         self.package_store()?.staging_path(id, platform)
     }
 
-    /// Whether [`set_package_entry_source`](Self::set_package_entry_source) would take this
-    /// reference, answered without storing it.
-    pub fn check_package_entry_source(
-        &self,
-        id: &PackageId,
-        content_hash: &[u8],
-        source: &Source,
-    ) -> Result<(), String> {
-        self.refuse_if_assigned(id)?;
-        self.package_store()?
-            .check_entry_source(id, content_hash, source)
-    }
-
-    /// Points one entry of a Package at an artifact hosted elsewhere (ADR-0026).
-    /// Refused while the Package is assigned to an Agent (ADR-0025 point 8).
-    pub fn set_package_entry_source(
+    /// Writes the operator's signature onto one entry of a Package (ADR-0033), and answers what the
+    /// Server found when it checked it. Refused while the Package is assigned to an Agent, like
+    /// any other write to its entries (ADR-0025 point 8): the re-offer gate does not cover the
+    /// signature, so one changed under a standing offer would never reach the Agent.
+    pub fn put_package_entry_signature(
         &self,
         id: &PackageId,
         platform: &Platform,
-        content_hash: Vec<u8>,
-        source: Source,
-    ) -> Result<(), String> {
+        signature: Vec<u8>,
+    ) -> Result<SignatureState, String> {
         self.refuse_if_assigned(id)?;
-        self.package_store()?
-            .set_entry_source(id, platform, content_hash, source)?;
-        info!(set = %id, "package entry now referenced from its source");
-        Ok(())
+        let state = self
+            .package_store()?
+            .put_signature(id, platform, signature)?;
+        info!(set = %id, platform = %platform.tag(), state = state.as_str(), "package entry signed");
+        Ok(state)
+    }
+
+    /// Takes one entry's signature away (ADR-0033); `Ok(false)` when it carries none. Refused
+    /// while the Package is assigned to an Agent (ADR-0025 point 8).
+    pub fn remove_package_entry_signature(
+        &self,
+        id: &PackageId,
+        platform: &Platform,
+    ) -> Result<bool, String> {
+        self.refuse_if_assigned(id)?;
+        let removed = self.package_store()?.remove_signature(id, platform)?;
+        if removed {
+            info!(set = %id, platform = %platform.tag(), "package entry signature removed");
+        }
+        Ok(removed)
     }
 
     /// Deletes one entry of a Package; `Ok(false)` when the Package or entry does not exist.
@@ -2485,15 +2438,6 @@ fn referenced_hashes(fleet: &HashMap<InstanceUid, AgentRecord>, name: &str) -> B
 /// (ADR-0026 clause 35).
 fn accepts_packages(record: &AgentRecord) -> bool {
     record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 != 0
-}
-
-/// The Deployment this Agent's package assignment names: the channel the act released through,
-/// not the one that claims the Agent today, because an offer travels with what the act released.
-fn assigned_deployment(offering: &PackageOffering, record: &AgentRecord) -> Option<Deployment> {
-    record
-        .package_assignment
-        .as_ref()
-        .and_then(|a| offering.deployments.get(&a.deployment))
 }
 
 /// The remote-config offer for one Agent, or `None` when the hash comparison says it already has
@@ -3068,8 +3012,8 @@ fn config_map_text(map: Option<&AgentConfigMap>) -> String {
         .join("\n")
 }
 
-/// Refuses a rollout of a Deployment that lacks a signature for any entry of any Package it holds,
-/// naming each such Package and its platforms; nothing is released (ADR-0026).
+/// Refuses a rollout of a Deployment holding a Package with an unsigned entry, naming each such
+/// Package and its platforms; nothing is released (ADR-0026 clause 29, ADR-0033).
 fn refuse_unsigned(
     store: &crate::packages::PackageStore,
     deployment: &Deployment,
@@ -3079,7 +3023,8 @@ fn refuse_unsigned(
         return Ok(());
     }
     Err(RolloutError::NotApplicable(format!(
-        "deployment {:?} carries no signature for {} — sign every artifact before rolling it out",
+        "deployment {:?} holds packages with unsigned entries: {} — sign every entry on the \
+         Packages tab before rolling it out",
         deployment.name,
         unsigned.join("; ")
     )))
@@ -3848,8 +3793,8 @@ mod tests {
 
     // ---- Who may fetch an uploaded artifact (ADR-0026) ----
 
-    /// A fleet delivering `otelcol@1.0.0`, uploaded for linux/amd64 and signed on the `stable`
-    /// channel that claims every `otelcol`, with a host register.
+    /// A fleet delivering `otelcol@1.0.0`, uploaded and signed for linux/amd64 and held by the
+    /// `stable` channel that claims every `otelcol`, with a host register.
     fn delivering_fleet(dir: &std::path::Path) -> (AppState, Arc<Revocations>, PackageId) {
         let store = PackageStore::open(dir.join("packages")).expect("store");
         let id = PackageId::new("otelcol", "1.0.0").expect("id");
@@ -3867,9 +3812,7 @@ mod tests {
         );
         let state = AppState::new(dir.join("configs"))
             .expect("state")
-            .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("offering"),
-            ))
+            .with_packages(Some(PackageOffering::new(store).expect("offering")))
             .with_revocations(Some(revocations.clone()));
         state
             .deployment_store()
@@ -3887,14 +3830,14 @@ mod tests {
         Platform::new("linux", "amd64").expect("platform")
     }
 
-    /// Puts `id` into the `stable` channel, signed for linux/amd64 — saved, released to nobody.
+    /// Signs `id` for linux/amd64 and puts it into the `stable` channel — saved, released to nobody.
     fn put_signed(state: &AppState, id: &PackageId) {
+        state
+            .put_package_entry_signature(id, &linux(), vec![1; 64])
+            .expect("signature");
         state
             .put_deployment_package("stable", id, true)
             .expect("package");
-        state
-            .put_deployment_signature("stable", id, &linux(), vec![1; 64])
-            .expect("signature");
     }
 
     /// One report of an `otelcol` Agent on linux/amd64 that accepts packages, over a certificate
@@ -3967,6 +3910,44 @@ mod tests {
             state.offers_artifact("h2", &id, &linux()),
             "a Gateway speaks for any Agent"
         );
+    }
+
+    /// The offer and the download agree on the capability half of the test (ADR-0033 clause 8): an
+    /// Agent that does not declare `AcceptsPackages` is offered nothing, and its host may fetch
+    /// nothing through it, although its assignment names a signed Package that fits it.
+    /// Verifies: ADR-0033
+    #[test]
+    fn an_agent_that_accepts_no_packages_is_neither_offered_nor_fetched_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _, id) = delivering_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_from(&state, "h1", uid, &[]);
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        assert!(state.offers_artifact("h1", &id, &linux()));
+        let attr = opamp::attributes::string_attr;
+        let reply = state.process_presented(
+            AgentToServer {
+                instance_uid: uid.as_bytes().to_vec(),
+                sequence_num: 1,
+                capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64,
+                agent_description: Some(AgentDescription {
+                    identifying_attributes: vec![attr("service.name", "otelcol")],
+                    non_identifying_attributes: vec![
+                        attr("os.type", "linux"),
+                        attr("host.arch", "amd64"),
+                    ],
+                }),
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", "h1"),
+                host: Some("h1".to_string()),
+            }),
+        );
+        assert!(reply.reply.packages_available.is_none(), "no offer");
+        assert!(!state.offers_artifact("h1", &id, &linux()), "and no fetch");
     }
 
     /// An Agent that echoes the aggregate hash of its offer is not sent it again, and can still

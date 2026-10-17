@@ -27,7 +27,7 @@ than anywhere else, and none beats one that has stopped being true.
    │                                                             └─▶ packages_dir: artifacts
    ├── Supervisor Endpoint (loopback) ◀── a Collector's opampextension
    ├── Managed Processes: Collector, any command
-   ├── package sources: the Server's origin, or a mirror in allowed_sources
+   ├── package downloads: the Server's own origin, and no other
    ├── own-telemetry destinations: OTLP/HTTP, as the Server offers them
    └── service manager: systemd, launchd or the Windows SCM
 ```
@@ -44,9 +44,11 @@ than anywhere else, and none beats one that has stopped being true.
 - **Managed Processes** run on the Client's host under a Supervisor each; a Collector reports
   through its own `opampextension` to the Supervisor Endpoint, which admits only the process its
   Supervisor started ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
-- **Package sources** serve artifacts: the Server itself, or a mirror the Client's
-  `allowed_sources` names. What arrives is checked against its hash and the operator's signature
-  ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+- **Package downloads** come from the Server alone: every artifact is uploaded to it, and a
+  Client fetches only from its own Server's origin, or from its Gateway. What arrives is checked
+  against its hash and the operator's signature
+  ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md),
+  [ADR-0033](adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)).
 - **The service manager** starts the Client and restarts it after a self-update
   ([ADR-0018](adr/0018-the-client-updates-itself-under-its-own-agent-type.md)).
 - **Upstream**, the opamp-spec release named as the Protocol Baseline in
@@ -154,9 +156,9 @@ core module names an adapter or a technology, and when a module has no role.
   ([ADR-0010](adr/0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
   ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
-  The Gateway's `cache` sees every offer `registry` hands down, fetches each Server-hosted
-  artifact once into the state directory, and serves it on the downstream download route to the
-  hosts it was offered to ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+  The Gateway's `cache` sees every offer `registry` hands down, fetches each artifact offered on
+  the Server's route once into the state directory, and serves it on the downstream download route
+  to the hosts it was offered to ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
   Which host the Gateway takes to speak for an `instance_uid` is decided in the core module
   `gateway::policy`; the cache holds the bindings.
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
@@ -184,14 +186,16 @@ itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes in
 `supervisor.toml` before it starts or stops anything
 ([ADR-0017](adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)).
 
-**A package reaches an Agent.** An operator uploads an artifact into `packages`, puts it into a
-Deployment with a Selector and the operator's signature, and releases it. The Agent is offered the
-package; the Client downloads it from the Server's origin — presenting its certificate there and
-nowhere else, and `api` serves it only when `fleet` finds it offered to an Agent the
-certificate's host speaks for, by the test `packages` shares with the offer
-([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)); behind a Gateway the
-Client downloads it from the Gateway's cache, which `gateway` fetched once from the Server — or from an
-allowed mirror, checks hash and signature in `packages`, and the
+**A package reaches an Agent.** An operator uploads an artifact into `packages` and signs its
+entry there — `packages` checks the signature against `[packages] verification_key` when the
+Server holds one, and only reports — then puts the Package into a Deployment with a Selector and
+releases it. The Agent is offered the package with its entry's signature; the Client downloads it
+from its own Server's origin and nowhere else, and `api` serves it only when `fleet` finds it
+offered to an Agent the certificate's host speaks for, by the test `packages` shares with the
+offer ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md),
+[ADR-0033](adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)); behind a Gateway the
+Client downloads it from the Gateway's cache, which `gateway` fetched once from the Server. The
+Client checks hash and signature in `packages`, and the
 Supervisor swaps the program, keeps the previous one for its grace period and rolls back if the
 new one does not stay up. The Client's own package goes through `update` instead: a version
 directory beside the running one, a self-check, the `current` pointer moved, and a restart on

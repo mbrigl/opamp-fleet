@@ -535,8 +535,9 @@ pub fn redact_secrets(text: &str) -> String {
     out
 }
 
-/// The `[packages]` block (ADR-0026): how downloaded package artifacts are verified, where they may
-/// come from, and whether this Client takes its own (ADR-0018).
+/// The `[packages]` block (ADR-0026): how downloaded package artifacts are verified, and whether
+/// this Client takes its own (ADR-0018). Where they come from is not configurable: always this
+/// Client's own Server origin (ADR-0033).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackagesConfig {
@@ -555,10 +556,11 @@ pub struct PackagesConfig {
     /// it; without it this Client takes no packages at all, its own self-update included
     /// (ADR-0026, ADR-0018).
     pub verification_key: Option<String>,
-    /// The `https://` URL prefixes a download may come from besides the Server's own origin
-    /// (ADR-0026). Every redirect hop is checked against them; empty allows the Server alone.
-    #[serde(default)]
-    pub allowed_sources: Vec<String>,
+    /// `allowed_sources`, which ADR-0033 removed: a package is downloaded only from this Client's
+    /// own Server origin. Read only so that [`ClientConfig::checked`] can refuse it by name — a
+    /// list an operator believes is in force, and is not, is worse than a failed start.
+    #[serde(default, rename = "allowed_sources")]
+    pub leftover_allowed_sources: Option<serde::de::IgnoredAny>,
     /// The key that opens an encrypted `.7z` package artifact (ADR-0026). Unset means artifacts are
     /// expected unencrypted; an encrypted one then fails to install, naming this key.
     ///
@@ -571,7 +573,7 @@ impl Default for PackagesConfig {
         PackagesConfig {
             self_update: default_self_update(),
             verification_key: None,
-            allowed_sources: Vec::new(),
+            leftover_allowed_sources: None,
             archive_key: None,
         }
     }
@@ -988,6 +990,18 @@ impl ClientConfig {
                 path.display()
             ));
         }
+        if config
+            .packages
+            .as_ref()
+            .is_some_and(|p| p.leftover_allowed_sources.is_some())
+        {
+            return Err(format!(
+                "{}: [packages] allowed_sources is removed — this Client downloads a package only \
+                 from its own Server's origin, and every artifact is uploaded to the Server \
+                 (ADR-0033). Remove the key.",
+                path.display()
+            ));
+        }
         if let Some(gateway) = &config.gateway {
             gateway
                 .check(&config.endpoint)
@@ -1369,6 +1383,26 @@ mod tests {
             let err = ClientConfig::load(&path).expect_err(section);
             assert!(err.contains("[self_update] is no longer read"), "{err}");
             assert!(err.contains("`self_update` in [packages]"), "{err}");
+        }
+    }
+
+    /// `[packages] allowed_sources` fails the load whatever it holds, naming the key as removed:
+    /// ignored, it would be a list an operator believes is in force and is not (ADR-0033 clause 11).
+    /// Verifies: ADR-0033
+    #[test]
+    fn allowed_sources_fails_the_load_naming_the_key_as_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        for packages in [
+            "[packages]\nallowed_sources = []\n",
+            "[packages]\nallowed_sources = [\"https://mirror.example/releases/\"]\n",
+        ] {
+            std::fs::write(&path, packages).expect("write");
+            let err = ClientConfig::load(&path).expect_err(packages);
+            assert!(
+                err.contains("[packages] allowed_sources is removed"),
+                "{err}"
+            );
         }
     }
 

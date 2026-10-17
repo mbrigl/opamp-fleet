@@ -1,6 +1,6 @@
 //! The package store on the filesystem (ADR-0026): the default adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one directory per Package under
-//! `packages_dir`, holding `package.json` and one `<os>-<arch>.bin` per uploaded entry.
+//! `packages_dir`, holding `package.json` and one `<os>-<arch>.bin` per entry.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::packages::{
-    Entry, Package, PackageBackend, PackageId, Platform, Source, DEPLOYMENTS_DIR,
-};
+use crate::packages::{Entry, Package, PackageBackend, PackageId, Platform, DEPLOYMENTS_DIR};
 
 /// One directory per Package, owner-only, with its metadata and its uploaded artifacts.
 pub struct FsPackageBackend {
@@ -21,9 +19,8 @@ pub struct FsPackageBackend {
 }
 
 impl FsPackageBackend {
-    /// Opens the directory, creating it owner-only: a referenced entry's metadata carries the
-    /// private source's headers — a bearer token (ADR-0026) — so the store must not be readable by
-    /// other local users on the Server host. The metadata files are written `0600` as well.
+    /// Opens the directory, creating it owner-only: what the fleet installs is not another local
+    /// user's business on the Server host. The metadata files are written `0600` as well.
     pub fn open(dir: PathBuf) -> Result<Self, String> {
         super::create_private_dir(&dir)?;
         Ok(FsPackageBackend {
@@ -103,34 +100,27 @@ impl PackageBackend for FsPackageBackend {
                     .map_err(|e| format!("invalid platform in {}: {e}", meta_path.display()))?;
                 let content_hash = hex::decode(&entry_meta.content_hash_hex)
                     .map_err(|e| format!("invalid content hash in {}: {e}", meta_path.display()))?;
-                let source = entry_meta.source_url.map(|url| Source {
-                    url,
-                    headers: entry_meta.source_headers,
-                });
-                // An uploaded artifact is re-hashed by streaming, so a corrupt one never ships. A
-                // referenced one has nothing here to check: its hash is the operator's word,
-                // verified by every Agent that downloads it (ADR-0026).
-                let size = match &source {
-                    Some(_) => 0,
-                    None => {
-                        let artifact = path.join(format!("{}.bin", platform.tag()));
-                        let (size, actual) = hash_file(&artifact)?;
-                        if actual != content_hash {
-                            return Err(format!(
-                                "set {id} for {}: artifact does not match its recorded content hash",
-                                platform.tag()
-                            ));
-                        }
-                        size
-                    }
-                };
+                let signature = entry_meta
+                    .signature_hex
+                    .map(hex::decode)
+                    .transpose()
+                    .map_err(|e| format!("invalid signature in {}: {e}", meta_path.display()))?;
+                // Every artifact is re-hashed by streaming, so a corrupt one never ships.
+                let artifact = path.join(format!("{}.bin", platform.tag()));
+                let (size, actual) = hash_file(&artifact)?;
+                if actual != content_hash {
+                    return Err(format!(
+                        "set {id} for {}: artifact does not match its recorded content hash",
+                        platform.tag()
+                    ));
+                }
                 entries.insert(
                     platform.clone(),
                     Entry {
                         platform,
                         content_hash,
                         size,
-                        source,
+                        signature,
                     },
                 );
             }
@@ -264,18 +254,20 @@ struct PackageMeta {
     entries: Vec<EntryMeta>,
 }
 
-/// One entry as persisted inside `package.json`; an uploaded entry's bytes are `<os>-<arch>.bin`
-/// beside it.
+/// One entry as persisted inside `package.json`; its bytes are `<os>-<arch>.bin` beside it.
+///
+/// Unknown fields are refused, so an entry an older Server wrote as a reference to a source
+/// (`source_url`, `source_headers`) fails the open naming the file rather than loading as
+/// something it is not: every artifact is uploaded now (ADR-0033).
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EntryMeta {
     os: String,
     arch: String,
     content_hash_hex: String,
-    /// The source of a referenced entry (ADR-0026); absent for an uploaded one.
+    /// The operator's Ed25519 signature over this entry, hex (ADR-0033); absent while unsigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    source_url: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    source_headers: BTreeMap<String, String>,
+    signature_hex: Option<String>,
 }
 
 impl EntryMeta {
@@ -284,12 +276,7 @@ impl EntryMeta {
             os: entry.platform.os.clone(),
             arch: entry.platform.arch.clone(),
             content_hash_hex: hex::encode(&entry.content_hash),
-            source_url: entry.source.as_ref().map(|s| s.url.clone()),
-            source_headers: entry
-                .source
-                .as_ref()
-                .map(|s| s.headers.clone())
-                .unwrap_or_default(),
+            signature_hex: entry.signature.as_ref().map(hex::encode),
         }
     }
 }

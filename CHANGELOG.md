@@ -31,7 +31,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   for the Clients. Without the section the Operator plane serves `[tls]`'s as before, so no
   `server.toml` has to change. `server pki status` and the expiry warnings include it.
 
+- **The Server checks package signatures, as feedback** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). An optional
+  `[packages] verification_key` in `server.toml` — the same hex public key the Clients hold —
+  makes the Server check each entry's signature when it is written and when it starts, and the
+  Packages tab and `GET /api/v1/packages` show it as `valid` or `invalid` (`unchecked` without the
+  key, `missing` with none). An invalid signature is shown as a warning and kept; each Client's own
+  check still decides what is installed. A malformed key fails startup.
+
 ### Changed
+
+- **A package's signature lives on its entry, not on the Deployment** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). Sign each
+  entry once, with `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature`
+  (`{"signature": "<hex>"}`) or on the Packages tab, where the signing-file import now lives too;
+  every Deployment that holds the Package offers that signature. Uploading new bytes to an entry
+  removes its signature, and a signature write on a Package rolled out to an Agent is refused
+  (`409`) like any other change to its entries. The Deployment signature routes
+  (`…/deployments/{name}/signatures/…`) answer `404`, the Deployment view no longer reports
+  `signed_platforms`, and the Deployments tab only shows each entry's signature state. Signatures
+  stored on a Deployment are not read any more. **What to do:** sign every entry of every Package
+  a Deployment holds again, on the Packages tab (import the signed signing file there) or through
+  the entry route — until then those entries are offered to nobody, and a rollout of such a
+  Deployment is refused naming them.
+
+- **A Client downloads packages only from its own Server's origin** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). A path is
+  resolved against the origin of its OpAMP endpoint; an absolute URL on any other origin, or a
+  redirect off it, is refused before a byte is fetched and reported `InstallFailed` naming that
+  origin. The Server's `advertised_url`, when set, must therefore name the origin the Clients
+  connect to.
 
 - **The UI's look follows GitKraken Dark as GitKraken Desktop 12.6 ships it:** charcoal panels,
   GitKraken's blue for buttons and the selected row, and its purple for what is selected. Light
@@ -42,6 +68,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   one; the full subject, issue date and fingerprint are in the tooltip, so the only fingerprint
   beside a request is the key fingerprint you compare. The bootstrap-certificate list counts the
   requests waiting with each certificate.
+
+### Removed
+
+- **Referenced package entries** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). An entry is an uploaded artifact and nothing
+  else: `PUT …/entries/{os}/{arch}/source`, its `url`, `sha256` and `headers`, and the Server's
+  probe of the URL are gone (the route answers `404`), and the Packages tab takes files only. The
+  Server sends no request for a package anywhere. A `package.json` still holding a referenced entry
+  fails the Server's start, naming the file. **What to do:** before upgrading, upload every
+  referenced artifact as a file to its entry (`opamp-fleetctl package fetch` does it for the
+  agents it knows) and sign it; a Server already refusing to start needs that entry removed from
+  the named `package.json`, then the artifact uploaded.
+
+- **`[packages] allowed_sources` in `supervisor.toml`** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). There is no other
+  download source than the Client's own Server, and a file that still names the key fails the
+  Client's start, naming it. **What to do:** delete `allowed_sources` from every `supervisor.toml`
+  before the Client is upgraded.
+
+- **`advertised_url` in `server.toml`** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). Every package is offered as a path the Client
+  resolves against its own Server, and a Client downloads from no other host, so a URL naming a
+  mirror reached no Client. A file that still names the key fails the Server's start, naming it.
+  **What to do:** delete `advertised_url` from `server.toml` before the Server is upgraded.
 
 ### Fixed
 

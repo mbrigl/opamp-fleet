@@ -147,17 +147,19 @@ started with. The Client writes it beside the configuration under its own name, 
 what the process is configured with.
 
 **Package.** What an Agent type runs at a version — its identity is those two things and nothing
-else, and it holds one artifact per platform. It reaches no Agent of another type, and it aims at
-nobody by itself.
+else, and it holds one artifact per platform, each with the operator's signature. It reaches no
+Agent of another type, and it aims at nobody by itself.
 
-**Deployment.** Where a Package goes: a name, the **channel** a Selector aims at, at most one Package
-per Agent type, and each artifact's signature. It is the only thing that is rolled out, and an
+**Deployment.** Where a Package goes: a name, the **channel** a Selector aims at, and at most one
+Package per Agent type. It is the only thing that is rolled out, and an
 Agent belongs to **at most one** — two claiming the same Agent is a conflict the Server reports
 rather than resolves. A Selector is equality and cannot say "not", so channels are a partition over an
 attribute every Agent carries; there is no fleet-wide default. The Server decides which artifact an
 Agent is offered; the Client decides whether it accepts packages at all. Every artifact is verified
-by its content hash and by its Ed25519 signature. A Client without a verification key takes no
-package, and the Server offers no entry its Deployment has not signed.
+by its content hash and by its Ed25519 signature, which the operator puts on each entry of the
+Package. A Client without a verification key takes no package, and the Server offers no entry
+that carries no signature. Every artifact is uploaded to the Server, and a Client downloads from
+its own Server alone.
 
 **Transports.** The URL scheme in the Client's `endpoint` selects the transport: `wss://` for
 WebSocket, where the Server pushes changes within seconds, and `https://` for plain-HTTP polling.

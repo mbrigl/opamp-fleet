@@ -29,8 +29,8 @@ a service.
   Agent already runs is sent again.
 - **Tracks the fleet**: which Agents exist, what they report, whether they are connected, healthy,
   and in sync, which Configurations match them, and which packages they have installed.
-- **Distributes packages**: versioned Sets of uploaded artifacts, or references to ones hosted
-  elsewhere, aimed at part of the fleet by Selector — released only by an explicit rollout act,
+- **Distributes packages**: versioned Sets of uploaded, signed artifacts, aimed at part of the
+  fleet by a Deployment's Selector — released only by an explicit rollout act,
   and only ever forwards: a Package reaches an Agent when it is an upgrade over the version that
   Agent reports installed, never when it would move it back or leave it where it is.
 - **Restarts a Managed Process on request** — an Agent backed by a Supervisor accepts a restart
@@ -122,13 +122,12 @@ optional. An unknown key fails startup rather than being ignored.
 | `listen` | `"127.0.0.1:4320"` | The **Agent plane**, as `address:port`: the OpAMP endpoint and the package downloads. `4320` is the protocol's default port. Serve the fleet with `"0.0.0.0:4320"`. |
 | `max_connections` | `10000` | The connections the Agent plane holds at once. A connection past it is closed on accept. Raise it together with the process's file-descriptor limit for a larger fleet. `0` is refused at startup. |
 | `config_dir` | `"fleet-configs"` | Where Configurations are persisted — one JSON file per Configuration, named after it. Written atomically; read back at startup. |
-| `packages_dir` | `"fleet-packages"` | Where packages are persisted — one artifact plus metadata each. |
+| `packages_dir` | `"fleet-packages"` | Where packages are persisted — the artifacts, and each Package's metadata with its entries' signatures. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
 | `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. |
 | `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. `0` is refused at startup. |
 | `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The defence against an anonymous flood is [admission](#authentication) by client certificate; this is the backstop behind it. `0` is refused at startup. |
 | `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
-| `advertised_url` | unset | The absolute base URL advertised for package downloads. Leave it unset in the ordinary case: the Client then resolves the offered path against its own OpAMP endpoint, which is exactly where the download is served. Set it only when downloads must go through a different host, such as a mirror. |
 
 ### `[rest]`
 
@@ -181,6 +180,20 @@ Nothing else belongs in the section — a `client_ca_file` is refused, since thi
 client certificate. A new pair takes effect when the Server restarts; `server pki status` lists
 it, and the running Server warns before it ends.
 
+### `[packages]`
+
+Optional. The operator's public package-signing key, against which the Server checks every entry's
+signature — as feedback, never as a gate.
+
+```toml
+[packages]
+verification_key = "<hex-encoded Ed25519 public key>"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `verification_key` | unset | The hex-encoded Ed25519 public key — the same value as the Clients' `[packages] verification_key`, as `opamp-fleetctl package keygen` prints it. With it, each entry's signature is checked when it is written and when the store is loaded, and reported `valid` or `invalid`; without it, `unchecked`. An `invalid` signature is stored and offered all the same: each Client's own check decides what is installed. A key that is not hex, or not 32 bytes, fails startup naming it. |
+
 ### `[tls]`
 
 Required. The Agent plane serves HTTPS and WSS in TLS 1.3 with this certificate and key, and so
@@ -224,8 +237,7 @@ validity_days = 30
 Without it, every host holds a certificate an operator provisioned, and such a certificate is
 served an uploaded artifact only when it names its host as a URI SAN,
 `urn:opamp-fleet:host:<id>`. A certificate that names no host fetches nothing from the download
-route; referenced artifacts are unaffected. A Server started without `[client_ca]` says so once at
-startup.
+route. A Server started without `[client_ca]` says so once at startup.
 
 ### `[enrolment]`
 
@@ -740,10 +752,10 @@ store holds something. Two objects share that directory, and the split is the wh
 
 - A **Package** is *what* an Agent type runs at a version. Its identity is the **Agent type and
   the version**, and it holds one entry per platform — the Linux build, the macOS builds, the
-  Windows build. Nothing else: no name of its own, no Selector, no signature. It aims at nobody
-  and is never rolled out.
-- A **Deployment** is *where that goes*. A name, the **channel** it aims at, one Package per Agent
-  type, and the **signature** of each artifact. It is the only thing that is rolled out.
+  Windows build — each an uploaded artifact with its SHA-256 and the operator's **signature**.
+  Nothing else: no name of its own, no Selector. It aims at nobody and is never rolled out.
+- A **Deployment** is *where that goes*. A name, the **channel** it aims at, and one Package per
+  Agent type. It is the only thing that is rolled out.
 
 An Agent belongs to **at most one Deployment**. Two matching the same Agent is a conflict: that
 Agent is offered nothing new, and the fleet view says so on its row in `package_conflict`. There
@@ -796,7 +808,7 @@ fleet-wide delivery needs every Agent to carry the same value, and a freshly enr
 belongs to no Deployment until it is labelled. That host shows on the fleet view with no
 deployment, which is the ordinary state after an enrolment and not a fault.
 
-### Create the Package, then upload its entries
+### Create the Package, upload its entries, sign them
 
 The identity is the path. The Agent type is compared **raw** against the `service.name` the Agents
 report — there is no canonical set of Agent types, so spell it exactly as they do. The create body
@@ -814,24 +826,30 @@ file name work as they are: `macos` and `osx` mean `darwin`, `x86_64` and `x64` 
 `aarch64` means `arm64`. An `os`/`arch` this Server has never heard of is stored as given rather
 than refused — the fleet may run a system nobody here anticipated.
 
-**Or reference an artifact hosted elsewhere**. The Server stores the address and your SHA-256,
-offers them verbatim, and never downloads the artifact — so the hash and the signature are the whole
-of the protection. The `url` is `https://`; `http://` is accepted only when its host is
-`127.0.0.1` or `[::1]`, and any other is refused `400` naming the rule.
-So neither the artifact nor the headers an Agent sends for it cross a network in plaintext:
+**Every artifact is uploaded.** The Server holds what it offers and sends no request for a package
+anywhere; a Client fetches from its own Server's origin alone (see
+[the Client](client.md#where-a-download-may-come-from)).
+
+**Sign each entry** on its own route, with the hex signature `opamp-fleetctl package sign` prints:
 
 ```console
-$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
-       -d '{"url": "https://mirror.example/otelcol.tar.gz", "sha256": "…"}' \
-       https://127.0.0.1:4321/api/v1/packages/otelcol-contrib/0.109.0/entries/linux/amd64/source
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
+       https://127.0.0.1:4321/api/v1/packages/otelcol-contrib/0.109.0/entries/linux/amd64/signature
 ```
 
-The URL is probed once, with one `HEAD` over TLS 1.3 that follows no redirect, to catch a typo
-while you are still looking at the screen. A definitive refusal from the source (a `4xx`) fails the
-request; a source this Server cannot reach does not, because the Server is not in the download path
-and its reachability says nothing about the Agents'. A private source can be given headers to send.
-A Client fetches from such a source only when its `[packages] allowed_sources` lists it (see
-[the Client](client.md#where-a-download-may-come-from)).
+**The signature belongs to the entry.** What it covers — the Agent type, the version and the
+artifact's SHA-256 — names no Deployment, so one signature serves every Deployment that holds the
+Package. **The Server never offers an unsigned entry**: an entry without one is no candidate, and
+the fleet view says the signature is missing. A signature for an entry that does not exist is
+`404`, an empty or malformed one `400`. Uploading new bytes to an entry removes its signature,
+because it covered the old hash. Supplying a signature on the artifact upload instead answers `400`
+naming the route that takes it.
+
+Each entry reports its `signature_state`: `missing`; `valid` or `invalid` when `[packages]
+verification_key` is set; `unchecked` when it is not. An `invalid` one is stored, offered, and
+shown on the Packages tab as a warning — **the Server only reports**, and each Client's own check
+decides. A Client with the right key refuses that artifact, so the warning is the moment to sign
+the entry again.
 
 The store keeps its Deployments in `<packages_dir>/deployments/`; every *other* entry there is a
 Package directory, and one this Server does not recognise **fails the start naming the path**
@@ -842,20 +860,18 @@ A Package that no Deployment holds reaches nobody, and the package list says so 
 deployment` in the UI, an empty `deployments` array in the API. That is the state a Selector
 matching no one used to be.
 
-### Put it in a channel, sign it there, roll it out
+### Put it in a channel, roll it out
 
 ```console
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "beta"}}' \
        https://127.0.0.1:4321/api/v1/deployments/beta
 $ curl --cacert ca.pem -X PUT https://127.0.0.1:4321/api/v1/deployments/canary/packages/otelcol-contrib/0.109.0
-$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
-       https://127.0.0.1:4321/api/v1/deployments/canary/signatures/otelcol-contrib/0.109.0/linux/amd64
 $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/canary/rollout
 ```
 
 **Nothing is offered before that last line.** Everything above stores; the **rollout act** is the
 only thing that distributes, the same act Configurations have. Five platforms' artifacts can be
-uploaded, put in a channel, signed and then released together, and the window in which a
+uploaded, signed, put in a channel and then released together, and the window in which a
 half-described release is already reaching the fleet does not exist. An Agent that enrols — or is
 labelled into the channel — later waits, marked pending on its fleet row, for an act of its own.
 
@@ -864,21 +880,14 @@ second is refused `409` naming the one in the way; `?replace=true` is how you sa
 the version the channel runs. Adding the same one again is the same request arriving twice and
 succeeds.
 
-**The signature belongs to the Deployment**, not to the artifact: what an operator signs off on is
-a release to a set of machines, so the same Package in two channels is signed in each. **The Server
-never offers an unsigned entry**. An entry its
-Deployment holds no signature for is no candidate, and the fleet view says the signature is
-missing. A rollout of a Deployment that lacks a signature for any entry is refused `409`, naming
-each Package and the platforms it is unsigned for, and nothing is released. The deployment view
-reports which platforms are covered (`signed_platforms`), and the UI marks an unsigned package
-`⚠`. Supplying a signature on the artifact upload instead answers `400` naming the route that
-takes it.
+A rollout of a Deployment holding a Package with an unsigned entry is refused `409`, naming each
+Package and the platforms it is unsigned for, and nothing is released. The UI marks such a package
+`⚠` on the channel's row.
 
-**While a Package is rolled out to at least one Agent its entries are frozen** (the fleet is
-installing those bytes; uploads answer `409`); ship a change as the next version, which is a new
-Package. On the channel, the same rule covers exactly what a standing offer travels with: the
-**signature** of a Package it released, and its hold on that Package — removing it would take the
-signature with it and turn a signed rollout unsigned for anyone still downloading. **Swapping the
+**While a Package is rolled out to at least one Agent its entries are frozen**, signatures
+included (the fleet is installing those bytes; uploads and signature writes answer `409`); ship a
+change as the next version, which is a new Package. On the channel, the same rule covers its hold
+on a Package it released: removing it answers `409`. **Swapping the
 version a channel holds is not frozen**, because that is how a rollout proceeds: the hosts already
 released keep what they have, and the new version shows as waiting until the next press. Deleting a Package withdraws it from every Agent it was rolled out to, and **nothing is
 uninstalled** — an Agent keeps running what it installed. Deleting a Deployment does the same.
@@ -983,8 +992,8 @@ stays in the store — but **taking a bad version back is not a rollout**:
 **Deleting.** `DELETE /api/v1/packages/otelcol-contrib/0.109.0` removes the Package — its entries,
 artifacts, metadata, and every per-Agent assignment that referenced it; the entry route with a
 platform removes just that one entry. `DELETE` on a Deployment is refused (`409`) while an Agent's
-assignment still names it, since the offer travels with that channel's signatures: roll those
-Agents out through another Deployment, or delete the Package, first. Nothing is uninstalled by any
+assignment still names it: roll those Agents out through another Deployment, or delete the
+Package, first. Nothing is uninstalled by any
 of them.
 
 **Building and signing**. The helper that ships with the Client writes the
@@ -1022,7 +1031,7 @@ released by a rollout is offered to no one and cannot be fetched by anyone.
 
 Every other request for an artifact is answered `404` with the same status, body and headers as
 a request for an artifact the store does not hold: an artifact released to another host's Agents,
-one released to nobody yet, an entry that is only a reference, and any request over a certificate
+one released to nobody yet, an entry that carries no signature, and any request over a certificate
 that names no host. A malformed type, version or Platform is still answered `400`, and a
 certificate that is not a member's still `401`. Each refused fetch leaves a `download.refused`
 entry in [the audit record](#the-audit-record) with `check` `not offered`, the host, the
@@ -1046,12 +1055,9 @@ as it relays an offer of it, and serves it on the same path only to the hosts wh
 relayed that offer to. So the Gateway's host must be marked as a Gateway, and each artifact costs
 this Server one download, counted against the Gateway's aggregate bucket and recorded under the
 Gateway's host, however many Agents behind it install it. A Client that asks while the Gateway is
-still fetching is answered `503` with `Retry-After: 30` and asks again. **With `advertised_url` set, uploaded
-artifacts are not delivered to Clients behind a Gateway:** the offered URL is absolute and names
-this Server, which is not the Client's own origin, so the Client refuses it as a source not
-allowed, or presents no certificate to it and this Server's handshake refuses it. Leave
-`advertised_url` unset in a fleet with Gateways. Referenced artifacts are always fetched from
-their source directly. How the Gateway holds what it fetches is in
+still fetching is answered `503` with `Retry-After: 30` and asks again. Every artifact is offered
+as a path, which a Client behind a Gateway resolves against the Gateway. How
+the Gateway holds what it fetches is in
 [the Client's manual](client.md#the-package-cache).
 
 ## The REST API
@@ -1074,11 +1080,11 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `PUT /api/v1/configurations/{name}` | Create it, or replace its saved revision. Body: `{"selector": {…}, "body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted. **Distributes nothing**. |
 | `POST /api/v1/configurations/{name}/rollout` | Roll the saved revision out to every Agent it currently fits and aims at — the moment a change starts travelling. Answers how many Agents were assigned. |
 | `DELETE /api/v1/configurations/{name}` | Remove it — from every Agent it was rolled out to as well, which those Agents apply. |
-| `GET /api/v1/packages` | Every stored Package (never the artifact bytes), each with the Deployments that hold it. |
+| `GET /api/v1/packages` | Every stored Package (never the artifact bytes), each with its entries — their hash, size, signature and `signature_state` — and the Deployments that hold it. |
 | `PUT /api/v1/packages/{agent_type}/{version}` | Create a Package. The body has no writable field — `{}`. **Distributes nothing**. |
 | `GET /api/v1/packages/{agent_type}/{version}` | One Package. |
-| `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body). `409` while the Package is rolled out to an Agent. A `?signature=` is refused `400` — it belongs to the Deployment. |
-| `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/source` | Point that entry at an artifact hosted elsewhere. Body: `{"url": "…", "sha256": "…", "headers": {…}}`. |
+| `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body); new bytes remove the entry's signature. `409` while the Package is rolled out to an Agent. A `?signature=` is refused `400` naming the signature route. |
+| `PUT` / `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature` | Record or remove that entry's Ed25519 signature. Body: `{"signature": "<hex>"}`. `404` for an entry that does not exist, `400` for an empty or malformed signature, `409` while the Package is rolled out to an Agent. The answer is the Package, with the entry's `signature_state`. |
 | `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Package is rolled out to an Agent. |
 | `DELETE /api/v1/packages/{agent_type}/{version}` | Remove the Package — and every per-Agent assignment that referenced it. Uninstalls nothing. |
 | `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. It requires a client certificate from the client CA in the handshake; a bootstrap certificate is answered `401`. It serves only an artifact offered to an Agent the host speaks for, and answers every other request `404`, as for an artifact that does not exist. |
@@ -1087,9 +1093,8 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `GET` / `DELETE /api/v1/deployments/{name}` | One Deployment; `DELETE` is `409` while an Agent's assignment names it, and uninstalls nothing. |
 | `PUT /api/v1/deployments/{name}/selector` | Re-aim it. Never distributes. |
 | `PUT /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Put a Package in the channel. `409` on a second of an Agent type it already holds; `?replace=true` swaps it. `404` for a Package nobody uploaded. |
-| `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Take it out, and its signatures with it. |
-| `PUT` / `DELETE /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}` | Record or remove one artifact's Ed25519 signature. Body: `{"signature": "<hex>"}`. |
-| `POST /api/v1/deployments/{name}/rollout` | Roll it out to every Agent it claims and would move — the moment a rollout starts. Agents another Deployment also claims are skipped and reported as conflicts. `409` while the channel holds no Packages, and `409` naming each Package and platform while any entry lacks a signature. |
+| `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}` | Take it out. `409` while an Agent's assignment released through this Deployment pins it. |
+| `POST /api/v1/deployments/{name}/rollout` | Roll it out to every Agent it claims and would move — the moment a rollout starts. Agents another Deployment also claims are skipped and reported as conflicts. `409` while the channel holds no Packages, and `409` naming each Package and platform while any entry of a Package it holds lacks a signature. |
 | `GET` / `POST` / `DELETE /api/v1/enrolment/window` | Read, open or close the enrolment window — see [Enrolment](#enrolment-a-new-host-approved-by-an-operator). `POST` body: `{"open_for_secs": n}`, 1 to 86400. `404` while `[enrolment]` is not configured. |
 | `GET /api/v1/enrolments` | The pending enrolment requests, oldest first, each with its `id` — the fingerprint the enrolling Client logs. |
 | `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. |
@@ -1454,8 +1459,10 @@ The standing offer carries no `tls` and no `proxy`: there is no configuration su
 - **It does not weigh a message by its cost.** Every message and download takes one token of
   `[agent_rate_limit]`, whatever it carries. The Operator plane is not rate-limited; it is
   guarded by `[rest.auth]` and `[admission_throttle]`.
-- **It does not download referenced package artifacts.** A referenced package is a URL plus a hash;
-  the Agents fetch it.
+- **It does not fetch packages from anywhere.** Every artifact is uploaded to it; it makes no
+  outbound request for a package and holds no credential for a source.
+- **It does not refuse an invalid signature.** With `[packages] verification_key` it reports one;
+  each Client's own check decides what is installed.
 - **It does not install itself as a service.** Run it under whatever supervises services on the
   host — the Client is the end that ships its own service integration.
 - **It has no user model and no multi-tenancy.** One Server manages one fleet.

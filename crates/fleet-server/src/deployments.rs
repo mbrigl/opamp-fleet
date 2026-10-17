@@ -1,9 +1,8 @@
 //! Deployments (ADR-0026): what reaches a channel of hosts, and the only thing rolled out.
 //!
-//! A Package is what an Agent type runs at a version and nothing else (ADR-0026) — no aim, no
-//! signature, no act of its own. All three live here. A Deployment carries a **name**, a
-//! **Selector** over the channel it addresses, **one Package per Agent type**, and the **signature**
-//! of each artifact it offers.
+//! A Package is what an Agent type runs at a version, with each artifact's signature on its entry
+//! (ADR-0033) — no aim and no act of its own. Both live here. A Deployment carries a **name**, a
+//! **Selector** over the channel it addresses, and **one Package per Agent type**.
 //!
 //! Two rules give the object its shape, and both are refusals:
 //!
@@ -18,15 +17,15 @@
 //! ADR-0025 exists to prevent. Channels are therefore a *partition*: a Selector cannot express
 //! "not", so disjoint channels come from membership, which is what ADR-0024's labels already are.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::RwLock;
 
 use opamp::proto::AgentDescription;
 
 use crate::configs::{matches, validate_name};
-use crate::packages::{PackageId, Platform};
+use crate::packages::PackageId;
 
-/// A named set of Packages, aimed at a channel and carrying each artifact's signature.
+/// A named set of Packages, aimed at a channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Deployment {
     /// The operator's name for this channel. The one human-chosen label in the model, which is why
@@ -39,20 +38,9 @@ pub struct Deployment {
     /// the wire map key *and* fit the same Agent, so the second is refused at the moment it is
     /// written rather than puzzled over at resolution.
     pub packages: BTreeMap<String, PackageId>,
-    /// The Ed25519 signature of one artifact, per `(Package, Platform)`. Held here rather than on
-    /// the entry because what an operator signs off on is a release to a set of machines, not a
-    /// pile of bytes; the same Package in two Deployments is signed in each.
-    pub signatures: BTreeMap<(PackageId, Platform), Vec<u8>>,
 }
 
 impl Deployment {
-    /// The signature to offer with one Package's artifact, if this Deployment holds one.
-    pub fn signature(&self, id: &PackageId, platform: &Platform) -> Option<&[u8]> {
-        self.signatures
-            .get(&(id.clone(), platform.clone()))
-            .map(Vec::as_slice)
-    }
-
     /// The Package this Deployment holds for an Agent of `agent_type`, if any.
     pub fn package_for(&self, agent_type: &str) -> Option<&PackageId> {
         self.packages.get(agent_type)
@@ -64,7 +52,7 @@ impl Deployment {
 pub enum DeploymentError {
     /// The name, the Selector, or an identity did not pass its grammar — a `400`.
     Invalid(String),
-    /// No Deployment of that name, or it holds no such Package or signature — a `404`.
+    /// No Deployment of that name, or it holds no such Package — a `404`.
     NotFound,
     /// The Deployment already holds a Package for that Agent type — a `409`.
     TypeTaken { agent_type: String, held: PackageId },
@@ -199,18 +187,6 @@ impl DeploymentStore {
             .cloned()
     }
 
-    /// The names of the Deployments that sign the artifact `(id, platform)` — what the download
-    /// route asks once per request rather than once per Agent (ADR-0026 clause 35).
-    pub fn signing(&self, id: &PackageId, platform: &Platform) -> BTreeSet<String> {
-        self.deployments
-            .read()
-            .expect("deployments lock")
-            .values()
-            .filter(|deployment| deployment.signature(id, platform).is_some())
-            .map(|deployment| deployment.name.clone())
-            .collect()
-    }
-
     /// A snapshot of the whole store, for one resolution pass.
     pub fn snapshot(&self) -> BTreeMap<String, Deployment> {
         self.deployments.read().expect("deployments lock").clone()
@@ -243,7 +219,6 @@ impl DeploymentStore {
                 name: name.to_string(),
                 selector,
                 packages: BTreeMap::new(),
-                signatures: BTreeMap::new(),
             },
         };
         self.write(&deployment)?;
@@ -277,8 +252,7 @@ impl DeploymentStore {
         })
     }
 
-    /// Removes a Package from a Deployment, and every signature that named it — a signature over
-    /// an artifact this channel no longer offers has nothing left to say.
+    /// Removes a Package from a Deployment.
     pub fn remove_package(
         &self,
         name: &str,
@@ -289,48 +263,7 @@ impl DeploymentStore {
                 return Err(DeploymentError::NotFound);
             }
             deployment.packages.remove(&id.agent_type);
-            deployment.signatures.retain(|(held, _), _| held != id);
             Ok(())
-        })
-    }
-
-    /// Records the Ed25519 signature of one artifact this Deployment offers.
-    pub fn put_signature(
-        &self,
-        name: &str,
-        id: &PackageId,
-        platform: &Platform,
-        signature: Vec<u8>,
-    ) -> Result<Deployment, DeploymentError> {
-        if signature.is_empty() {
-            return Err(DeploymentError::Invalid(
-                "an empty signature says nothing — omit it, or delete the one held".to_string(),
-            ));
-        }
-        self.amend(name, |deployment| {
-            if deployment.packages.get(&id.agent_type) != Some(id) {
-                return Err(DeploymentError::NotFound);
-            }
-            deployment
-                .signatures
-                .insert((id.clone(), platform.clone()), signature.clone());
-            Ok(())
-        })
-    }
-
-    /// Takes one artifact's signature away. The Package stays; what it is offered with changes.
-    pub fn remove_signature(
-        &self,
-        name: &str,
-        id: &PackageId,
-        platform: &Platform,
-    ) -> Result<Deployment, DeploymentError> {
-        self.amend(name, |deployment| {
-            deployment
-                .signatures
-                .remove(&(id.clone(), platform.clone()))
-                .map(|_| ())
-                .ok_or(DeploymentError::NotFound)
         })
     }
 
@@ -425,10 +358,6 @@ pub(crate) mod tests {
 
     pub(crate) fn id(agent_type: &str, version: &str) -> PackageId {
         PackageId::new(agent_type, version).expect("package id")
-    }
-
-    pub(crate) fn linux() -> Platform {
-        Platform::new("linux", "amd64").expect("platform")
     }
 
     /// An Agent belongs to at most one Deployment. Two claiming it is the conflict, and the
@@ -562,37 +491,27 @@ pub(crate) mod tests {
         );
     }
 
-    /// A signature belongs to an artifact this Deployment actually offers, and it goes when the
-    /// Package does — a signature over something no longer offered has nothing left to say.
-    /// Verifies: ADR-0026
+    /// Removing a Package takes it out of the channel, and only that: the Deployment holds no
+    /// signature of its own to leave behind (ADR-0033). A Package it does not hold is `NotFound`.
+    /// Verifies: ADR-0033
     #[test]
-    fn a_signature_needs_its_package_and_leaves_with_it() {
+    fn removing_a_package_takes_it_out_of_the_channel() {
         let memory = Memory::default();
         let store = DeploymentStore::open(Box::new(memory.clone())).expect("open");
         channel(&store, "stable", &[("channel", "stable")]);
         let telegraf = id("telegraf", "1.30.0");
-
         assert_eq!(
-            store.put_signature("stable", &telegraf, &linux(), vec![7; 64]),
+            store.remove_package("stable", &telegraf),
             Err(DeploymentError::NotFound),
-            "a signature for a package this channel does not hold is refused"
+            "a package this channel does not hold"
         );
-
         store
             .put_package("stable", &telegraf, false)
             .expect("package");
-        let signed = store
-            .put_signature("stable", &telegraf, &linux(), vec![7; 64])
-            .expect("signature");
-        assert_eq!(signed.signature(&telegraf, &linux()), Some(&[7u8; 64][..]));
-
         let stripped = store
             .remove_package("stable", &telegraf)
             .expect("remove the package");
-        assert!(
-            stripped.signatures.is_empty(),
-            "the signature left with the package it was about"
-        );
+        assert!(stripped.packages.is_empty());
     }
 
     /// Editing the Selector is not editing the bytes: a Deployment's aim stays writable, and
@@ -607,13 +526,9 @@ pub(crate) mod tests {
         store
             .put_package("canary", &telegraf, false)
             .expect("package");
-        store
-            .put_signature("canary", &telegraf, &linux(), vec![3; 64])
-            .expect("signature");
 
         let widened = channel(&store, "canary", &[("channel", "stable")]);
         assert_eq!(widened.selector["channel"], "stable");
         assert_eq!(widened.package_for("telegraf"), Some(&telegraf));
-        assert_eq!(widened.signature(&telegraf, &linux()), Some(&[3u8; 64][..]));
     }
 }

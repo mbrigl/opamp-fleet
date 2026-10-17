@@ -218,12 +218,12 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
 
 - **It does not sign.** Signing needs a key, and where that key lives is a decision a tool should
   not make silently — use [`package sign`](#packing-and-signing) and record the
-  signature on the deployment that offers the bytes
-  ([step 5](rollout.md#5-put-it-in-a-deployment-and-sign-it-there)).
+  signature on each entry it uploaded
+  ([step 4](rollout.md#4-give-it-to-the-server)). Until then the entries are offered to nobody.
 - **It does not aim, and it does not roll out.** A Package reaches a host only once a Deployment
   holds it, and which channel that is is not a decision a fetch tool should make. What it stores sits
   in the store, visible as `in no deployment`, until you put it somewhere
-  ([step 5](rollout.md#5-put-it-in-a-deployment-and-sign-it-there)); the tool prints the call.
+  ([step 5](rollout.md#5-put-it-in-a-deployment)); the tool prints the call.
 
 ### Prerequisites and limits
 
@@ -254,12 +254,12 @@ $ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtai
 
 | `package` command | What it prints | Use it for |
 |---|---|---|
-| `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`; the private key goes in the file, ideally not on the Server host |
+| `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`, and optionally the Server's; the private key goes in the file, ideally not on the Server host |
 | `pack <program> --out <file>` | the artifact's SHA-256 (hex) | building a one-file artifact; `--format tar.gz\|7z`, `--program-name <name>`, `--archive-key <key>` |
-| `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the Deployment's signature route, `PUT /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone |
+| `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the entry's signature route, `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone |
 | `public-key --key <file>` | the public key (hex) | recovering it from an existing private key |
-| `sign --key <file> --signing-info <file> [--out <file>]` | the signing file, with every entry signed | a Package's **Signing info** from the Packages tab, signed whole and imported on the Deployment — see [Signing a whole Package at once](#signing-a-whole-package-at-once) |
-| `sha256 <artifact>` | the SHA-256 (hex) | the `sha256` of a *referenced* entry, for an artifact the Server never holds |
+| `sign --key <file> --signing-info <file> [--out <file>]` | the signing file, with every entry signed | a Package's **Signing info** from the Packages tab, signed whole and imported there — see [Signing a whole Package at once](#signing-a-whole-package-at-once) |
+| `sha256 <artifact>` | the SHA-256 (hex) | comparing a file you hold with the `content_hash` the Server shows for its entry, before you sign |
 
 The options of `pack`, and why a `.tar.gz` packed twice gives the same bytes, are in
 [step 2 of the rollout walkthrough](rollout.md#2-build-the-artifact), which runs the whole path
@@ -267,13 +267,15 @@ from packing to a running agent.
 
 **Signing is required, fleet-wide.** A Client takes a package only while `[packages]
 verification_key` is set, and only when the artifact's signature verifies against it. The Server
-offers no entry its Deployment has not signed, and refuses to roll out a Deployment with an
-unsigned entry. Give
-every Client the same public key, and sign every entry of every Deployment.
+offers no entry that carries no signature, and refuses to roll out a Deployment holding a Package
+with an unsigned entry. Give every Client the same public key, and sign every entry of every
+Package you release. Give the Server the same public key too (`[packages] verification_key` in
+`server.toml`) and it reports each signature `valid` or `invalid` before any Client sees it — as
+feedback only: an `invalid` one is stored and offered, and each Client decides.
 
 ### Signing a whole Package at once
 
-A Package of five platforms is five signatures. The Deployment lists every binary of the Package
+A Package of five platforms is five signatures. The Packages tab lists every entry of the Package
 with its own signature field; instead of signing each artifact and typing each signature there,
 carry them in one file:
 
@@ -311,15 +313,14 @@ carry them in one file:
    platform named twice or a field the format does not define signs nothing. Signing a file
    again with the same key gives the same signatures.
 
-4. In the **Deployments** tab, select the Deployment, choose the signed file and press **Import
-   signing file**. Each signature goes to the binary of the Package with its platform and SHA-256;
-   one whose hash is not that binary's is skipped. On a saved Deployment each is recorded at once;
-   on a new one it fills the binary's field and is recorded with **OK**. Each platform's answer is
-   listed. The Server does not check signatures: a wrong key shows when a Client refuses the
-   package.
+4. In the **Packages** tab, select any Package, choose the signed file and press **Import signing
+   file**. Each signature goes to the entry of the Package the file names with its platform and
+   SHA-256, one request each; one whose hash is not that entry's is skipped. Each platform's
+   answer is listed with its `signature_state`: `valid` or `invalid` when the Server holds
+   `[packages] verification_key`, `unchecked` when it does not.
 
-The same signed file serves every Deployment that offers the Package — the signature covers the
-type, the version and the hash, not the Deployment — so import it on each.
+One import serves every Deployment that holds the Package: the signature is the entry's, and it
+covers the type, the version and the hash, not a Deployment.
 
 ## `pki`
 

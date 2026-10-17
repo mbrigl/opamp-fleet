@@ -126,9 +126,9 @@ state_dir = "client-state"
 # Generate a key and sign artifacts with the operator tool (`opamp-fleetctl package keygen`, then
 # `opamp-fleetctl package sign`): its keygen output is this value.
 #
-# A download goes to the Server's own origin, or to a source listed in allowed_sources: https://
-# URL prefixes, checked on every redirect hop. This Client's certificate is shown to its Server
-# alone, and an offered download header only to an allowed source.
+# A download goes to this Client's own Server origin — the scheme, host and port of its endpoint —
+# and nowhere else, every redirect hop included: every artifact is uploaded to the Server. There
+# is no list of other sources; a file still naming allowed_sources fails startup.
 #
 # self_update is the consent for the Server to replace *this Client's own* binary. **Absent — as
 # here — means the consent stands**: a Client the fleet cannot update is the one program
@@ -152,7 +152,6 @@ state_dir = "client-state"
 # [packages]
 # self_update = true                 # the default; false withdraws the consent entirely
 # verification_key = "<hex-encoded Ed25519 public key>"
-# allowed_sources = ["https://mirror.example.com/releases/"]
 # archive_key = "the key an encrypted .7z was packed with"   # opens an encrypted
 #                          # artifact. One secret for the fleet — a single archive serves every
 #                          # Agent. The Server never learns this key; the artifact stays encrypted

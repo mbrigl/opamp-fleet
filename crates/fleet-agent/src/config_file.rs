@@ -37,13 +37,6 @@ impl ClientConfig {
         config.state_dir_as_written = config.state_dir.clone();
         config.state_dir = absolute(&config.state_dir);
         config.supervisor_dir = config.supervisor_dir.as_deref().map(absolute);
-        // Each allowed download source is held to ADR-0026's rules now, not at the first offer.
-        if let Some(packages) = &config.packages {
-            for entry in &packages.allowed_sources {
-                crate::packages::parse_source(entry)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-            }
-        }
         config.checked(path)
     }
 

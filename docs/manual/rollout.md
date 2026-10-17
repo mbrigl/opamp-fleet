@@ -15,7 +15,7 @@ The example is `promtail` — one static binary, which is the requirement (see
 - [2. Build the artifact](#2-build-the-artifact)
 - [3. Sign it](#3-sign-it)
 - [4. Give it to the Server](#4-give-it-to-the-server)
-- [5. Put it in a deployment and sign it there](#5-put-it-in-a-deployment-and-sign-it-there)
+- [5. Put it in a deployment](#5-put-it-in-a-deployment)
 - [6. Roll it out](#6-roll-it-out)
 - [7. Send its configuration](#7-send-its-configuration)
 - [8. Watch it land](#8-watch-it-land)
@@ -174,10 +174,11 @@ $ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtai
       promtail-3.0.0.tar.gz)
 ```
 
-Put the public key in every Client's `[packages] verification_key`. Signing is not optional: a
-Client without the key takes no package, an offer without a signature is refused before anything is
-downloaded, and the Server offers no entry its Deployment has not signed. Keep the private key
-off the Server host.
+Put the public key in every Client's `[packages] verification_key`, and — optionally — in the
+Server's, which then checks each signature you give it and says whether it is valid. Signing is not
+optional: a Client without the key takes no package, an offer without a signature is refused
+before anything is downloaded, and the Server offers no entry that carries no signature. Keep the
+private key off the Server host.
 
 The download route requires the Client's certificate, and the content hash and this signature are
 what protect an installed binary.
@@ -185,9 +186,9 @@ what protect an installed binary.
 ## 4. Give it to the Server
 
 Create the **Package** — its identity is the Agent type and the version, and nothing else — then
-either upload the artifact as an entry, or point the Server at one hosted elsewhere. Nothing in
-this step reaches any host, and nothing in the next one does either: a stored Package aims at
-nobody at all.
+upload the artifact as an entry and sign the entry. Every artifact is uploaded: the Server holds
+what it offers, and a Client fetches from its own Server alone. Nothing in this step reaches any
+host, and nothing in the next one does either: a stored Package aims at nobody at all.
 
 The calls go to the Operator plane over TLS. `--cacert ca.pem` names the CA that signed the
 Server's certificate; off the loopback, add the operator credential with `-u`. Steps 4 to 6 and 9
@@ -214,9 +215,20 @@ $ curl --cacert ca.pem -X PUT --data-binary @promtail-3.0.0.tar.gz \
        "https://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64"
 ```
 
-No signature here — it goes on the deployment in step 5. Passing `?signature=` is refused with a
-`400` naming the route that takes it, rather than dropped, because a signature silently lost is an
-unsigned rollout nobody notices.
+No signature in the upload — passing `?signature=` is refused with a `400` naming the route that
+takes it, rather than dropped, because a signature silently lost is an unsigned entry nobody
+notices. **Sign** the entry on its own route, with the signature from step 3:
+
+```console
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
+       https://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64/signature
+```
+
+The answer shows the entry's `signature_state`: `valid` or `invalid` when the Server holds
+`[packages] verification_key`, `unchecked` when it does not. An `invalid` one is stored and shown as
+a warning, never refused — each Client's own check decides — but a Client with the right key will
+refuse that artifact, so fix it before the rollout. Uploading new bytes to an entry removes its
+signature: it covered the old hash.
 
 Their values are what an Agent reports as `os.type` and `host.arch` — `linux`, `darwin`, `windows`
 and `amd64`, `arm64`. The tokens off an upstream release file name work too (`macos` is `darwin`,
@@ -230,42 +242,24 @@ $ curl --cacert ca.pem -X PUT --data-binary @promtail-3.0.0-linux-arm64.tar.gz \
        "https://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/arm64"
 ```
 
-**Or reference** — the Server stores the address and *your* SHA-256, offers them verbatim, and
-never downloads the artifact. This is where the hash from step 2 is required, because the hash and
-the signature are what stand between the mirror and the fleet. The `url` must be `https://`;
-`http://` is refused unless its host is `127.0.0.1` or `[::1]`:
+Sign every entry the Package holds: the Server offers no unsigned entry, and the rollout in step 6
+is refused while any is left. The Agent type has nothing to do with the member name inside the
+archive — only the *member* has to match the configured program.
 
-```console
-$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
-       -d "{\"url\": \"https://mirror.example/promtail-3.0.0.tar.gz\", \"sha256\": \"$sha\"}" \
-       https://127.0.0.1:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64/source
-```
+For a Package of several platforms, sign them in one go instead: download the Package's
+**Signing info**, sign it with `opamp-fleetctl package sign --signing-info`, and import it on the
+Packages tab — the steps, and the comparison of hashes they depend on, are in
+[Signing a whole Package at once](tools.md#signing-a-whole-package-at-once).
 
-The Agent type has nothing to do with the member name inside the archive — only the *member* has
-to match the configured program.
+## 5. Put it in a deployment
 
-A Client downloads from the mirror only when its `[packages] allowed_sources` lists it:
-
-```toml
-[packages]
-allowed_sources = ["https://mirror.example/"]
-```
-
-Every redirect hop is checked against the same list, and the Client presents its certificate to
-its own Server alone (see
-[Where a download may come from](client.md#where-a-download-may-come-from)).
-
-## 5. Put it in a deployment and sign it there
-
-A **Deployment** is the channel this release goes to: a name, a Selector, the Packages it offers, and
-each artifact's signature. It is the only thing that is rolled out.
+A **Deployment** is the channel this release goes to: a name, a Selector, and the Packages it
+offers. It is the only thing that is rolled out.
 
 ```console
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"selector": {"channel": "beta"}}' \
        https://127.0.0.1:4321/api/v1/deployments/canary
 $ curl --cacert ca.pem -X PUT https://127.0.0.1:4321/api/v1/deployments/canary/packages/promtail/3.0.0
-$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
-       https://127.0.0.1:4321/api/v1/deployments/canary/signatures/promtail/3.0.0/linux/amd64
 ```
 
 Each Selector pair must equal an attribute the Agent reported — `channel` here comes from
@@ -276,15 +270,9 @@ be empty**: an Agent belongs to at most one Deployment, so a channel matching ev
 with every other one. That is the price of the model and it is worth saying out loud — **there is
 no "everyone" shortcut.** A host that carries no such value belongs to no Deployment and waits.
 
-The signature belongs here rather than to the artifact because what you are signing off on is a
-release to a set of machines. The same Package in two channels is signed in each. Sign every
-platform the Package holds: the Server offers no unsigned entry, and the next step's rollout is
-refused while any entry lacks a signature.
-
-For a Package of several platforms, sign them in one go instead: download the Package's
-**Signing info**, sign it with `opamp-fleetctl package sign --signing-info`, and import it on the
-Deployment — the steps, and the comparison of hashes they depend on, are in
-[Signing a whole Package at once](tools.md#signing-a-whole-package-at-once).
+The signature stays with the entry: one signature serves every Deployment that holds the Package,
+because what it covers — the Agent type, the version and the artifact's SHA-256 — names no
+Deployment.
 
 ## 6. Roll it out
 
@@ -295,8 +283,8 @@ $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/canary/
 {"assigned_agents": 3}
 ```
 
-A Deployment that lacks a signature for any entry is refused `409`. The message names each Package
-and the platforms it is unsigned for, and nothing is released.
+A Deployment holding a Package with an unsigned entry is refused `409`. The message names each
+Package and the platforms it is unsigned for, and nothing is released.
 
 Check the channel's counts first — they are on `GET /api/v1/deployments` and on its row in the UI.
 `claiming_agents` is who is in the channel: `0` means the Selector missed. `targeted_agents` is who
@@ -354,7 +342,7 @@ What to look for, in the order it happens:
 |---|---|
 | `capabilities` contains `AcceptsPackages` | The block's program is named the way step 1 describes, and the Client holds `[packages] verification_key`. If it is missing, nothing else below will happen. |
 | `packages[].status` | `Downloading` — with `download_percent` and `download_bytes_per_second`, re-reported every 5 s — then `Installing`, then `Installed` or `InstallFailed`. |
-| `packages[].error` | Why an install failed: a missing member, a hash mismatch, a signature that does not verify, a source not allowed, a wrong archive key. |
+| `packages[].error` | Why an install failed: a missing member, a hash mismatch, a signature that does not verify, a download URL off the Server's origin, a wrong archive key. |
 | `packages[].version` | The version the Agent has installed; empty until the first one lands. |
 | `service_version` | What `version_args` probed from the program — but **probed once, when the Supervisor started**. After an in-place package update it still shows the version that was running then; `packages[].version` above is the field that tracks what was installed. A Collector reporting through its own `opampextension` is the exception: it re-reports for itself. |
 | `healthy`, `health_status` | `no process installed` before the first package; healthy once it runs. |
@@ -366,7 +354,7 @@ on `apply_grace_secs`** — a version that will not stay up is rolled back to it
 
 ## 9. Ship an update
 
-An update is steps 2, 4, 5 and 6 again with a new version — a new version is a new Package, and the
+An update is steps 2 to 6 again with a new version — a new version is a new Package, and the
 old one stays in the store beside it. The channel is the constant; **what it holds is what changes**,
 which is why the swap is explicit:
 
@@ -375,13 +363,13 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{}' \
        https://127.0.0.1:4321/api/v1/packages/promtail/3.1.0
 $ curl --cacert ca.pem -X PUT --data-binary @promtail-3.1.0.tar.gz \
        "https://127.0.0.1:4321/api/v1/packages/promtail/3.1.0/entries/linux/amd64"
-$ curl --cacert ca.pem -X PUT "https://127.0.0.1:4321/api/v1/deployments/canary/packages/promtail/3.1.0?replace=true"
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
-       https://127.0.0.1:4321/api/v1/deployments/canary/signatures/promtail/3.1.0/linux/amd64
+       https://127.0.0.1:4321/api/v1/packages/promtail/3.1.0/entries/linux/amd64/signature
+$ curl --cacert ca.pem -X PUT "https://127.0.0.1:4321/api/v1/deployments/canary/packages/promtail/3.1.0?replace=true"
 $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/canary/rollout
 ```
 
-Without `?replace=true` the third line answers `409` naming 3.0.0 — a channel holds one Package per
+Without `?replace=true` the fourth line answers `409` naming 3.0.0 — a channel holds one Package per
 Agent type, and swapping the version it runs is meant to be something you say rather than
 something that happens.
 
@@ -415,14 +403,15 @@ only moves forward.
 | `InstallFailed`, "holds an encrypted member" | An encrypted `.zip`. Encryption is the `.7z` format's job, where `[packages] archive_key` opens it; repack, or publish the zip unencrypted. |
 | `InstallFailed`, wrong archive key | `[packages] archive_key` is missing or not the one the `.7z` was packed with. |
 | A package is refused naming `[packages] verification_key` | That Client has no key, and a Client without one takes no package. Set the fleet's public key. |
-| `InstallFailed`, the signature does not verify | The Client's `verification_key` is not the key the Deployment's signature was made with, or the signature belongs to another artifact. |
-| `InstallFailed`, naming an origin | The download URL, or a redirect hop, leads outside the Server's own origin and `[packages] allowed_sources`. List the mirror's `https://` prefix. |
-| The rollout answers `409` naming unsigned platforms | Sign each named entry on the Deployment (step 5), then press again. |
+| `InstallFailed`, the signature does not verify | The Client's `verification_key` is not the key the entry's signature was made with, or the signature belongs to another artifact. With the Server's `[packages] verification_key` set, the Packages tab shows such an entry `invalid` before the rollout. |
+| `InstallFailed`, naming an origin | The download URL, or a redirect hop, leads outside the Client's own Server origin. A Client fetches from its Server alone; this Server offers only paths, so look for a redirect off the Server's origin. |
+| The rollout answers `409` naming unsigned platforms | Sign each named entry on the Packages tab (step 4), then press again. |
 | An Agent that accepts packages is offered nothing | Two Deployments claim it, and an Agent belongs to at most one; `package_conflict` on its fleet row names both. Narrow one Selector. |
 | An Agent shows no deployment at all | It carries no attribute any channel's Selector matches. That is the ordinary state right after an enrolment — label it into a channel (`PUT /api/v1/agents/<uid>/labels`) or set `channel` in its `[attributes]`. |
 | A package shows `in no deployment` | Stored and unreachable: nothing aims it. Put it in a channel. |
 | A channel shows `aims at nobody` | Its Selector names an attribute nobody reports, or a value nobody carries. Compare it against the attributes on the Agents tab. |
-| An upload answers `400` about a signature | Signatures belong to the deployment that offers the bytes; the message names the route. |
+| An upload answers `400` about a signature | A signature goes on the entry's own `…/signature` route; the message names it. |
+| A signature answers `409` | The Package is rolled out to an Agent, and its entries — signatures included — are frozen. Ship the next version as a new Package. |
 | The package routes answer `404` | Package delivery is not configured on the Server (`packages_dir`). |
 | An upload answers `400`, "invalid platform" | `os`/`arch` are required and must be file-name-safe: lowercase letters, digits and `_`, at most 16 characters. |
 | An Agent that accepts packages is offered nothing, and there is no conflict | No signed artifact for its platform. Check its `os.type` and `host.arch` on its fleet row against the platforms the package holds — this is the case the whole mechanism exists to make visible rather than fatal. |

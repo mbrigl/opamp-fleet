@@ -76,15 +76,14 @@ impl packages::PackageStore {
 impl PackageOffering {
     /// Opening the package store arms the **Deployments** too, from `deployments/` beneath it
     /// (ADR-0026): a Deployment is meaningless without the artifacts it signs, so the two share a
-    /// directory and a configuration key rather than acquiring one of their own. See
-    /// [`with_deployments`](PackageOffering::with_deployments) for `download_base`.
+    /// directory and a configuration key rather than acquiring one of their own.
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them cannot be read.
-    pub fn new(store: packages::PackageStore, download_base: String) -> Result<Self, String> {
+    pub fn new(store: packages::PackageStore) -> Result<Self, String> {
         let backend = FsDeploymentBackend::open(store.dir().join(packages::DEPLOYMENTS_DIR))?;
         let deployments = DeploymentStore::open(Box::new(backend))?;
-        Ok(Self::with_deployments(store, deployments, download_base))
+        Ok(Self::with_deployments(store, deployments))
     }
 }
 

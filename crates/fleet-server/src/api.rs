@@ -29,7 +29,7 @@ use crate::credentials::Credentials;
 use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
 use crate::fleet::{self, AppState, ForgetError, RestartError, RolloutError, RolloutTarget};
 use crate::labels::LabelError;
-use crate::packages::{PackageId, PackageSummary, Platform, Source};
+use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -215,15 +215,11 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         // refuse every real agent binary, so the upload streams past it and the handler bounds it
         // by `max_package_size_bytes` instead (ADR-0010). No other route is unbounded.
         .routes(routes!(put_package_entry, delete_package_entry).layer(DefaultBodyLimit::disable()))
-        .routes(routes!(put_package_entry_source))
+        .routes(routes!(put_entry_signature, delete_entry_signature))
         .routes(routes!(list_deployments))
         .routes(routes!(get_deployment, put_deployment, delete_deployment))
         .routes(routes!(put_deployment_selector))
         .routes(routes!(put_deployment_package, delete_deployment_package))
-        .routes(routes!(
-            put_deployment_signature,
-            delete_deployment_signature
-        ))
         .routes(routes!(rollout_deployment))
         .routes(routes!(
             get_enrolment_window,
@@ -1194,14 +1190,14 @@ struct PackageSetView {
     deployments: Vec<String>,
 }
 
-/// One platform's entry of a Package: an uploaded artifact or a source reference (ADR-0026).
+/// One platform's entry of a Package: an uploaded artifact and its signature (ADR-0033).
 #[derive(Serialize, ToSchema)]
 struct PackageEntryView {
     /// The operating system, as `os.type` reports it: `linux`, `darwin`, `windows`.
     os: String,
     /// The architecture, as `host.arch` reports it: `amd64`, `arm64`.
     arch: String,
-    /// The artifact's size in bytes; `0` for a referenced one, whose bytes this Server never holds.
+    /// The artifact's size in bytes.
     size: u64,
     /// The artifact's SHA-256, hex — **the exact value the Agent verifies what it downloaded
     /// against** (ADR-0026). Reading it is how an operator answers "did this host take my bytes"
@@ -1212,10 +1208,41 @@ struct PackageEntryView {
     /// sync, and the Server stops re-offering while the two agree — so a rollout that seems not to
     /// travel is answered here rather than by reading logs.
     package_hash: String,
-    /// Where Agents fetch the artifact when this Server does not hold it (ADR-0026). Absent for an
-    /// uploaded one, which is served from here.
+    /// The operator's Ed25519 signature over this entry, hex, as `opamp-fleetctl package sign`
+    /// prints it (ADR-0033); absent while the entry is unsigned. An unsigned entry is offered to
+    /// nobody.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    source_url: Option<String>,
+    signature: Option<String>,
+    /// What the Server found when it checked that signature against `[packages] verification_key`
+    /// (ADR-0033). Feedback only: an `invalid` one is stored and offered, and the Agent's own check
+    /// decides.
+    signature_state: SignatureStateView,
+}
+
+/// What the Server found when it checked an entry's signature (ADR-0033).
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+enum SignatureStateView {
+    /// The entry carries no signature; it is offered to nobody.
+    Missing,
+    /// The signature verifies against the Server's `[packages] verification_key`.
+    Valid,
+    /// The signature does not verify against that key. Stored, shown as a warning, and never
+    /// refused: the Agent's check decides.
+    Invalid,
+    /// The entry carries a signature and the Server holds no key to check it with.
+    Unchecked,
+}
+
+impl From<SignatureState> for SignatureStateView {
+    fn from(state: SignatureState) -> Self {
+        match state {
+            SignatureState::Missing => SignatureStateView::Missing,
+            SignatureState::Valid => SignatureStateView::Valid,
+            SignatureState::Invalid => SignatureStateView::Invalid,
+            SignatureState::Unchecked => SignatureStateView::Unchecked,
+        }
+    }
 }
 
 impl PackageSetView {
@@ -1234,7 +1261,8 @@ impl PackageSetView {
                     size: entry.size,
                     content_hash: entry.content_hash,
                     package_hash: entry.package_hash,
-                    source_url: entry.source_url,
+                    signature: entry.signature,
+                    signature_state: entry.signature_state.into(),
                 })
                 .collect(),
         }
@@ -1263,15 +1291,15 @@ impl PlatformQuery {
 /// the platform, which is the path.
 #[derive(Deserialize, IntoParams)]
 struct EntryUpload {
-    /// Refused when given: a signature belongs to the Deployment that offers these bytes
-    /// (ADR-0026). Accepted as a parameter only so an upload carrying one fails by name.
+    /// Refused when given: a signature is written through the entry's own signature route
+    /// (ADR-0033), and new bytes remove the one held. Accepted as a parameter only so an upload
+    /// carrying one fails by name.
     #[serde(default)]
     signature: Option<String>,
 }
 
 /// The `(Package, Platform)` a route names in its path, or the `400` that says which half of it
-/// does not parse. `platform_prefix` leads the platform half's message: the entry routes name it
-/// `invalid platform: `, the signature routes add nothing.
+/// does not parse. `platform_prefix` leads the platform half's message.
 fn artifact_of(
     agent_type: &str,
     version: &str,
@@ -1304,7 +1332,8 @@ fn set_response(state: &AppState, id: &PackageId) -> Response {
 /// Maps a store refusal onto the status the REST contract names: immutability and emptiness are
 /// conflicts with the Package's current state (`409`), absence is `404`, bad input `400`.
 fn package_error(e: String) -> Response {
-    if e.contains("not configured") || e.starts_with("no package set") {
+    if e.contains("not configured") || e.starts_with("no package set") || e.starts_with("no entry")
+    {
         error(StatusCode::NOT_FOUND, e)
     } else if e.contains("immutable") || e.contains("holds no entries") {
         error(StatusCode::CONFLICT, e)
@@ -1444,10 +1473,11 @@ async fn delete_package_set(
     }
 }
 
-/// Stores one platform's artifact as an entry of a Package (ADR-0026). The artifact is the raw
-/// request body; the Package and the platform are the path. Nothing is distributed: the Package
-/// reaches nobody until a rollout act releases it (ADR-0025). Refused while the Package is
-/// assigned to an Agent — an assigned Package's bytes are immutable.
+/// Stores one platform's artifact as an entry of a Package (ADR-0026, ADR-0033). The artifact is
+/// the raw request body; the Package and the platform are the path. New bytes remove the entry's
+/// signature, which covered the old hash. Nothing is distributed: the Package reaches nobody until
+/// a rollout act releases it (ADR-0025). Refused while the Package is assigned to an Agent — an
+/// assigned Package's bytes are immutable.
 #[utoipa::path(
     put,
     path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}",
@@ -1461,8 +1491,8 @@ async fn delete_package_set(
     ),
     request_body(content = Vec<u8>, description = "The artifact bytes", content_type = "application/octet-stream"),
     responses(
-        (status = 200, description = "The Set, with the stored entry", body = PackageSetView),
-        (status = 400, description = "Invalid identity, platform, empty artifact, or bad signature", body = ErrorBody),
+        (status = 200, description = "The Set, with the stored entry, unsigned", body = PackageSetView),
+        (status = 400, description = "Invalid identity, platform, an empty artifact, or a signature given with the upload", body = ErrorBody),
         (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
         (status = 413, description = "The artifact exceeds max_package_size_bytes", body = ErrorBody),
@@ -1486,9 +1516,9 @@ async fn put_package_entry(
         return error(
             StatusCode::BAD_REQUEST,
             format!(
-                "a signature belongs to the deployment that offers these bytes, not to the \
-                 artifact (ADR-0026) — upload the artifact without it, then \
-                 PUT /api/v1/deployments/<name>/signatures/{agent_type}/{version}/{os}/{arch}"
+                "a signature is not part of the upload — upload the artifact without it, then \
+                 PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature \
+                 (ADR-0033)"
             ),
         );
     }
@@ -1589,41 +1619,17 @@ async fn delete_package_entry(
     }
 }
 
-/// The body of `PUT …/entries/{os}/{arch}/source` (ADR-0026): an entry that is a
-/// reference instead of an upload.
-#[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-struct EntrySourceSpec {
-    /// Where the artifact lives — `http://` or `https://`. Agents fetch it from here; this Server
-    /// never downloads it.
-    url: String,
-    /// The artifact's SHA-256, hex, as published in the release's checksums file. Required: for a
-    /// referenced entry nothing here ever sees the bytes, so this is what protects every Agent.
-    sha256: String,
-    /// Retired (ADR-0026): the signature belongs to the Deployment that offers these bytes.
-    /// Supplying it here is refused by name rather than ignored.
-    #[serde(default)]
-    signature: Option<String>,
-    /// Headers the Agents send with the download — a token for a private source. Two things to know
-    /// before using one: it is stored in cleartext in the package store (owner-only on disk, not
-    /// encrypted), and it is delivered to **every** Agent this artifact is offered to. Prefer a
-    /// narrowly-scoped, rotatable token over a long-lived credential.
-    #[serde(default)]
-    headers: std::collections::BTreeMap<String, String>,
-}
-
-/// Points one entry of a Package at an artifact hosted elsewhere (ADR-0026), instead of
-/// uploading it. Refused while the Package is assigned to an Agent (ADR-0025). The Server stores
-/// the reference and offers it verbatim; it never downloads the artifact, so the `sha256` — and
-/// the signature its Deployment holds, when there is one — is what protects every Agent.
+/// Writes the operator's Ed25519 signature onto one entry of a Package (ADR-0033), as
+/// `opamp-fleetctl package sign` prints it. One signature serves every Deployment that holds the
+/// Package; an entry without one is offered to nobody.
 ///
-/// The URL is probed once, to catch a typo while the operator is still looking at the screen. A
-/// definitive refusal from the source (a 4xx) fails the request; a source this Server simply
-/// cannot reach does not, because the Server is not in the download path and its reachability says
-/// nothing about the Agents'.
+/// With `[packages] verification_key` set the Server checks it and answers the entry's
+/// `signature_state`. An `invalid` signature is stored all the same: the Server only reports, and
+/// the Agent's own verification decides. Refused while the Package is assigned to an Agent, like
+/// any other write to its entries (ADR-0025).
 #[utoipa::path(
     put,
-    path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/source",
+    path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature",
     tag = "packages",
     params(
         ("agent_type" = String, Path, description = "The Agent type"),
@@ -1631,199 +1637,82 @@ struct EntrySourceSpec {
         ("os" = String, Path, description = "The entry's operating system"),
         ("arch" = String, Path, description = "The entry's architecture")
     ),
-    request_body = EntrySourceSpec,
+    request_body = SignatureSpec,
     responses(
-        (status = 200, description = "The Set, with the referenced entry", body = PackageSetView),
-        (status = 400, description = "Invalid identity, url, hash or signature — or the source refused the probe", body = ErrorBody),
-        (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
+        (status = 200, description = "The Set, with the signed entry and its signature_state", body = PackageSetView),
+        (status = 400, description = "Invalid identity or platform, or a signature that is empty, not hex, or not 64 bytes", body = ErrorBody),
+        (status = 404, description = "No such Set or entry, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
-        (status = 500, description = "The reference could not be persisted", body = ErrorBody)
+        (status = 500, description = "The signature could not be persisted", body = ErrorBody)
     )
 )]
-async fn put_package_entry_source(
+async fn put_entry_signature(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
-    Json(spec): Json<EntrySourceSpec>,
+    Json(spec): Json<SignatureSpec>,
 ) -> Response {
     let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "invalid platform: ")
     {
         Ok(pair) => pair,
         Err((status, why)) => return error(status, why),
     };
-    let content_hash = match hex::decode(spec.sha256.trim()) {
+    let signature = match hex::decode(spec.signature.trim()) {
         Ok(bytes) => bytes,
-        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid sha256: {e}")),
-    };
-    if spec.signature.is_some() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "a signature belongs to the deployment that offers these bytes, not to the source \
-             record (ADR-0026) — put it on the deployment instead"
-                .to_string(),
-        );
-    }
-    let source = Source {
-        url: spec.url.clone(),
-        headers: spec.headers.clone(),
-    };
-    // The store's own checks come first, so a URL it would refuse never receives the headers.
-    if let Err(e) = state.check_package_entry_source(&id, &content_hash, &source) {
-        return package_error(e);
-    }
-    if let Err(e) = probe(&spec.url, &spec.headers).await {
-        return error(StatusCode::BAD_REQUEST, e);
-    }
-    match state.set_package_entry_source(&id, &platform, content_hash, source) {
-        Ok(()) => {
-            info!(set = %id, url = %spec.url, "package entry source stored from the API");
-            set_response(&state, &id)
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "the signature must be hex, as `opamp-fleetctl package sign` prints it: {e}"
+                ),
+            );
         }
+    };
+    match state.put_package_entry_signature(&id, &platform, signature) {
+        Ok(_) => set_response(&state, &id),
         Err(e) => package_error(e),
     }
 }
 
-/// Asks the source whether it has the artifact. A refusal is reported; being unable to ask is not,
-/// because this Server never downloads it and the Agents may well reach what it cannot.
-async fn probe(
-    url: &str,
-    headers: &std::collections::BTreeMap<String, String>,
-) -> Result<(), String> {
-    // Refuse to aim the probe at an internal address on the caller's behalf (SSRF): the source URL
-    // and its headers are entirely client-supplied, so without this a caller could read the cloud
-    // metadata endpoint or map internal services by the answers this probe reflects back.
-    if let Some(reason) = ssrf_blocked(url).await {
-        return Err(reason);
-    }
-    let client = match reqwest::Client::builder()
-        .use_rustls_tls()
-        // TLS 1.3 alone, as every connection of this Server (ADR-0013, ADR-0026).
-        .tls_version_min(reqwest::tls::Version::TLS_1_3)
-        .timeout(std::time::Duration::from_secs(10))
-        // Never chase a redirect: a public URL that 3xx-bounces to `169.254.169.254` or an internal
-        // host would otherwise walk the probe straight past the check above.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
+/// Takes one entry's signature away (ADR-0033): the entry is offered to nobody until it is signed
+/// again. Refused while the Package is assigned to an Agent (ADR-0025).
+#[utoipa::path(
+    delete,
+    path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature",
+    tag = "packages",
+    params(
+        ("agent_type" = String, Path, description = "The Agent type"),
+        ("version" = String, Path, description = "The version"),
+        ("os" = String, Path, description = "The entry's operating system"),
+        ("arch" = String, Path, description = "The entry's architecture")
+    ),
+    responses(
+        (status = 200, description = "The Set, with the entry unsigned", body = PackageSetView),
+        (status = 400, description = "Invalid identity or platform", body = ErrorBody),
+        (status = 404, description = "No such Set, entry or signature, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
+        (status = 500, description = "The change could not be persisted", body = ErrorBody)
+    )
+)]
+async fn delete_entry_signature(
+    State(state): State<Arc<AppState>>,
+    Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
+) -> Response {
+    let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "invalid platform: ")
     {
-        Ok(client) => client,
-        Err(e) => {
-            warn!(error = %e, "cannot build the probe client; storing the source unprobed");
-            return Ok(());
-        }
+        Ok(pair) => pair,
+        Err((status, why)) => return error(status, why),
     };
-    let mut request = client.head(url);
-    for (key, value) in headers {
-        request = request.header(key, value);
+    match state.remove_package_entry_signature(&id, &platform) {
+        Ok(true) => set_response(&state, &id),
+        Ok(false) => error(
+            StatusCode::NOT_FOUND,
+            format!(
+                "entry {}-{} of set {id} carries no signature",
+                platform.os, platform.arch
+            ),
+        ),
+        Err(e) => package_error(e),
     }
-    match request.send().await {
-        Ok(response) if response.status().is_client_error() => Err(format!(
-            "the source answered {} — check the url{}",
-            response.status(),
-            if response.status() == reqwest::StatusCode::UNAUTHORIZED
-                || response.status() == reqwest::StatusCode::FORBIDDEN
-            {
-                " and whether it needs headers"
-            } else {
-                ""
-            }
-        )),
-        Ok(_) => Ok(()),
-        Err(e) => {
-            // Not an error: a fleet may reach an address its Server cannot.
-            warn!(url = %url, error = %e, "cannot reach the source from here; storing it anyway");
-            Ok(())
-        }
-    }
-}
-
-/// Whether probing `url` would make the Server reach a non-routable address on the caller's behalf,
-/// and the reason to refuse if so. `None` clears the probe to proceed: a public host, or one this
-/// Server cannot resolve (left to the probe, which treats unreachable as "not an error" — the
-/// Server is not in the download path).
-///
-/// A resolve-then-probe still leaves a DNS-rebinding window in theory; it closes the URLs that
-/// matter (literal internal IPs, the metadata address, internal hostnames) without a custom
-/// resolver, which is proportionate for a probe the Server itself never downloads through.
-async fn ssrf_blocked(url: &str) -> Option<String> {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        // Unparsable here is not this check's error to raise — `PackageStore::set_entry_source`
-        // validates the scheme and rejects a bad URL with its own message.
-        return None;
-    };
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Some(format!(
-            "the source url must be http:// or https://, not {}://",
-            parsed.scheme()
-        ));
-    }
-    let host = parsed.host_str()?;
-    let port = parsed.port_or_known_default().unwrap_or(80);
-    let resolved = tokio::net::lookup_host((host, port)).await.ok()?;
-    for addr in resolved {
-        if is_internal(addr.ip()) {
-            return Some(format!(
-                "the source url resolves to the non-routable address {} — refusing to probe an \
-                 internal endpoint",
-                addr.ip()
-            ));
-        }
-    }
-    None
-}
-
-/// Whether an address is one a client-supplied URL must never steer the Server at.
-///
-/// The line is deliberate. This blocks the cloud-metadata address and the ranges that are never a
-/// legitimate artifact source — link-local (where `169.254.169.254` lives), the shared/CGNAT range
-/// (Alibaba's `100.100.100.200` among it), the unspecified address, broadcast, documentation, and
-/// `0.0.0.0/8` — also where an IPv6 address carries one of them — and AWS's IPv6 metadata address
-/// `fd00:ec2::254`. It does **not** block loopback or the RFC 1918 / unique-local private ranges: an
-/// operator's mirror (ADR-0026) legitimately lives on an internal network, and the URL here is the
-/// operator's, not a stranger's. Redirects are disabled separately, so a public URL cannot bounce
-/// the probe onto a blocked address behind this check.
-fn is_internal(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => is_v4_internal(v4),
-        std::net::IpAddr::V6(v6) => {
-            if let Some(embedded) = embedded_v4(v6) {
-                return is_v4_internal(embedded);
-            }
-            // link-local fe80::/10, the unspecified address, and AWS's IPv6 metadata endpoint.
-            v6.is_unspecified()
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                || v6 == std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
-        }
-    }
-}
-
-/// The IPv4 address an IPv6 one carries and reaches: IPv4-mapped `::ffff:a.b.c.d`,
-/// IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::a.b.c.d` and 6to4 `2002:aabb:ccdd::/48`. The
-/// loopback `::1` and the unspecified `::` are themselves, not IPv4 addresses.
-fn embedded_v4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
-    let s = v6.segments();
-    let low = |hi: u16, lo: u16| {
-        let [a, b] = hi.to_be_bytes();
-        let [c, d] = lo.to_be_bytes();
-        std::net::Ipv4Addr::new(a, b, c, d)
-    };
-    match s {
-        [0, 0, 0, 0, 0, 0xffff, hi, lo] | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => Some(low(hi, lo)),
-        [0, 0, 0, 0, 0, 0, hi, lo] if !v6.is_loopback() && !v6.is_unspecified() => {
-            Some(low(hi, lo))
-        }
-        [0x2002, hi, lo, ..] => Some(low(hi, lo)),
-        _ => None,
-    }
-}
-
-fn is_v4_internal(v4: std::net::Ipv4Addr) -> bool {
-    v4.is_link_local() // 169.254.0.0/16 — the cloud metadata endpoint
-        || v4.is_unspecified()
-        || v4.is_broadcast()
-        || v4.is_documentation()
-        // 0.0.0.0/8 "this network"
-        || v4.octets()[0] == 0
-        // 100.64.0.0/10 shared / carrier-grade NAT — Alibaba's metadata address among it
-        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
 }
 
 /// Serves an entry's artifact bytes — the `download_url` the Agent is offered points here.
@@ -1994,7 +1883,7 @@ fn read_chunks(
 }
 
 // -------------------------------------------------------------------------------------------
-// Deployments (ADR-0026): the aim, the signature, and the act — everything a Package gave up.
+// Deployments (ADR-0026): the aim and the act — what a Package does not have.
 // -------------------------------------------------------------------------------------------
 
 /// One Deployment as the REST API shows it.
@@ -2023,7 +1912,8 @@ struct DeploymentView {
     conflicting_agents: usize,
 }
 
-/// One Package a Deployment holds, and how much of it is signed.
+/// One Package a Deployment holds. Its entries and their signatures are the Package's own
+/// (`GET /api/v1/packages`, ADR-0033).
 #[derive(Serialize, ToSchema)]
 struct DeploymentPackageView {
     /// The Agent type this Package is built for — also the key under which this Deployment holds
@@ -2032,11 +1922,6 @@ struct DeploymentPackageView {
     version: String,
     /// What an operator reads: the Agent type and the version together.
     display_name: String,
-    /// The platforms whose artifact this Deployment holds a signature for, as `os/arch`.
-    ///
-    /// Read it against the Package's own entries: a platform listed there and missing here is one
-    /// no Agent is offered, and it keeps the channel from being rolled out (ADR-0026).
-    signed_platforms: Vec<String>,
 }
 
 impl DeploymentView {
@@ -2048,12 +1933,6 @@ impl DeploymentView {
                 agent_type: id.agent_type.clone(),
                 version: id.version.clone(),
                 display_name: id.display_name(),
-                signed_platforms: deployment
-                    .signatures
-                    .keys()
-                    .filter(|(held, _)| held == id)
-                    .map(|(_, platform)| format!("{}/{}", platform.os, platform.arch))
-                    .collect(),
             })
             .collect();
         packages.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
@@ -2076,12 +1955,12 @@ struct DeploymentSpec {
     selector: std::collections::BTreeMap<String, String>,
 }
 
-/// One artifact's Ed25519 signature, as the operator supplies it.
+/// One artifact's Ed25519 signature, as the operator supplies it (ADR-0033).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct SignatureSpec {
-    /// The signature over the artifact's bytes, hex-encoded — what `opamp-fleetctl package sign`
-    /// prints.
+    /// The signature over the entry's statement — the Agent type, the version and the artifact's
+    /// SHA-256 — hex-encoded, as `opamp-fleetctl package sign` prints it.
     signature: String,
 }
 
@@ -2200,9 +2079,9 @@ async fn put_deployment(
     }
 }
 
-/// Deletes a Deployment — refused with `409` while an Agent's assignment names it, because the
-/// offer travels with the channel's signatures. Rolling those Agents out through another Deployment,
-/// or deleting the Package, ends the offer first. Nothing is uninstalled either way (ADR-0025).
+/// Deletes a Deployment — refused with `409` while an Agent's assignment names it (ADR-0026 point
+/// 31). Rolling those Agents out through another Deployment, or deleting the Package, ends the
+/// offer first. Nothing is uninstalled either way (ADR-0025).
 #[utoipa::path(
     delete,
     path = "/api/v1/deployments/{name}",
@@ -2289,9 +2168,8 @@ async fn put_deployment_package(
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    // A channel cannot offer what the store does not hold: the artifacts are what the Deployment
-    // signs and hands out, so a reference to a Package that is not there is a mistake, not a
-    // reservation for one uploaded later.
+    // A channel cannot offer what the store does not hold, so a reference to a Package that is not
+    // there is a mistake, not a reservation for one uploaded later.
     match state.packages() {
         Some(packages) if packages.summary(&id).is_some() => {}
         _ => {
@@ -2307,7 +2185,8 @@ async fn put_deployment_package(
     }
 }
 
-/// Takes a Package out of a Deployment, and every signature that named it.
+/// Takes a Package out of a Deployment — refused while an Agent's assignment released through this
+/// Deployment pins it (ADR-0026 point 31).
 #[utoipa::path(
     delete,
     path = "/api/v1/deployments/{name}/packages/{agent_type}/{version}",
@@ -2318,9 +2197,10 @@ async fn put_deployment_package(
         ("version" = String, Path, description = "the Package's version")
     ),
     responses(
-        (status = 200, description = "The Deployment, without the Package and its signatures", body = DeploymentView),
+        (status = 200, description = "The Deployment, without the Package", body = DeploymentView),
         (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
-        (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody)
+        (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "An Agent's assignment released through this Deployment pins the Package", body = ErrorBody)
     )
 )]
 async fn delete_deployment_package(
@@ -2332,87 +2212,6 @@ async fn delete_deployment_package(
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     match state.remove_deployment_package(&name, &id) {
-        Ok(deployment) => deployment_response(&state, deployment),
-        Err(e) => deployment_error(e),
-    }
-}
-
-/// Records the Ed25519 signature of one artifact this Deployment offers (ADR-0026 point 28).
-///
-/// The signature lives here rather than on the artifact because what an operator signs off on is a
-/// release to a set of machines. The same Package in two Deployments is therefore signed in each.
-/// Generate it with `opamp-fleetctl package sign`.
-#[utoipa::path(
-    put,
-    path = "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
-    tag = "deployments",
-    params(
-        ("name" = String, Path, description = "the Deployment's name"),
-        ("agent_type" = String, Path, description = "the Package's Agent type"),
-        ("version" = String, Path, description = "the Package's version"),
-        ("os" = String, Path, description = "the artifact's operating system"),
-        ("arch" = String, Path, description = "the artifact's architecture")
-    ),
-    request_body = SignatureSpec,
-    responses(
-        (status = 200, description = "The Deployment, with the signature", body = DeploymentView),
-        (status = 400, description = "Invalid identity or platform, or a signature that is empty or not hex", body = ErrorBody),
-        (status = 404, description = "No such Deployment, the Package is not in it, or package delivery is not configured", body = ErrorBody)
-    )
-)]
-async fn put_deployment_signature(
-    State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
-    Json(spec): Json<SignatureSpec>,
-) -> Response {
-    let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "") {
-        Ok(pair) => pair,
-        Err((status, why)) => return error(status, why),
-    };
-    let signature = match hex::decode(spec.signature.trim()) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return error(
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "the signature must be hex, as `opamp-fleetctl package sign` prints it: {e}"
-                ),
-            );
-        }
-    };
-    match state.put_deployment_signature(&name, &id, &platform, signature) {
-        Ok(deployment) => deployment_response(&state, deployment),
-        Err(e) => deployment_error(e),
-    }
-}
-
-/// Takes one artifact's signature away. The Package stays; what it is offered with changes.
-#[utoipa::path(
-    delete,
-    path = "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
-    tag = "deployments",
-    params(
-        ("name" = String, Path, description = "the Deployment's name"),
-        ("agent_type" = String, Path, description = "the Package's Agent type"),
-        ("version" = String, Path, description = "the Package's version"),
-        ("os" = String, Path, description = "the artifact's operating system"),
-        ("arch" = String, Path, description = "the artifact's architecture")
-    ),
-    responses(
-        (status = 200, description = "The Deployment, without the signature", body = DeploymentView),
-        (status = 400, description = "Invalid identity or platform", body = ErrorBody),
-        (status = 404, description = "No such Deployment or signature, or package delivery is not configured", body = ErrorBody)
-    )
-)]
-async fn delete_deployment_signature(
-    State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
-) -> Response {
-    let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "") {
-        Ok(pair) => pair,
-        Err((status, why)) => return error(status, why),
-    };
-    match state.remove_deployment_signature(&name, &id, &platform) {
         Ok(deployment) => deployment_response(&state, deployment),
         Err(e) => deployment_error(e),
     }
@@ -3402,41 +3201,5 @@ async fn lift_revocation(
         }
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no revocation {id:?}")),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_internal;
-
-    /// The IPv6 forms that carry an IPv4 address — NAT64, 6to4 and IPv4-compatible — are judged by
-    /// that address, so none of them reaches a blocked one, and AWS's IPv6 metadata address is
-    /// blocked by name. Loopback and the unique-local range stay reachable, as their IPv4
-    /// counterparts do.
-    #[test]
-    fn an_ipv4_address_inside_an_ipv6_one_is_judged_as_itself() {
-        for blocked in [
-            "fd00:ec2::254",
-            "64:ff9b::a9fe:a9fe",
-            "2002:a9fe:a9fe::1",
-            "::169.254.169.254",
-            "::ffff:169.254.169.254",
-            "64:ff9b::6464:64c8",
-        ] {
-            let ip: std::net::IpAddr = blocked.parse().expect("an address");
-            assert!(is_internal(ip), "{blocked} must be blocked");
-        }
-        for allowed in [
-            "::1",
-            "fd00::1",
-            "fd00:ec2::253",
-            "64:ff9b::808:808",
-            "2002:808:808::1",
-            "::10.0.0.5",
-            "2606:4700::1111",
-        ] {
-            let ip: std::net::IpAddr = allowed.parse().expect("an address");
-            assert!(!is_internal(ip), "{allowed} must stay allowed");
-        }
     }
 }

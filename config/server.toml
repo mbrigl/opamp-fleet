@@ -53,27 +53,27 @@ stale_after_secs = 90
 #   <packages_dir>/<agent type>@<version>/   a PACKAGE: what an Agent type runs at a version.
 #                                            Its identity is those two tokens and nothing else —
 #                                            no name of its own, no Selector, no kind flag —
-#                                            holding one artifact per platform. It aims at nobody
-#                                            and is never rolled out.
+#                                            holding one uploaded artifact per platform, each with
+#                                            its Ed25519 signature. It aims at nobody and is never
+#                                            rolled out.
 #   <packages_dir>/deployments/<name>.json   a DEPLOYMENT: a name, the channel its Selector aims at,
-#                                            at most one Package per Agent type, and each
-#                                            artifact's Ed25519 signature. The only thing rolled
-#                                            out.
+#                                            and at most one Package per Agent type. The only
+#                                            thing rolled out.
 #
 # The Agent type is compared raw against the `service.name` the Agents report, so spell
 # it exactly — a Client updating itself is typed `supervisor`.
 #
 # Create a Package with PUT /api/v1/packages/{agent_type}/{version} — the body has no writable
-# field, so {} is all of it. Then store one entry per platform: upload an artifact with
-# PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch} (artifact as the body), or point
-# the entry at an artifact hosted elsewhere with PUT .../entries/{os}/{arch}/source
-# (url + sha256, optional headers for a private source); the Server stores only that reference
-# and never downloads it. No two entries share a platform — writing one again replaces it.
+# field, so {} is all of it. Then upload one artifact per platform with
+# PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch} (artifact as the body), and sign
+# each entry with PUT .../entries/{os}/{arch}/signature, body {"signature": "<hex>"}. Every
+# artifact is uploaded: the Server holds what it offers and fetches nothing from anywhere. No two
+# entries share a platform — writing one again replaces it, and its signature with it. One
+# signature serves every Deployment that holds the Package.
 #
-# Then put it in a channel and sign it there:
+# Then put it in a channel:
 #   PUT  /api/v1/deployments/{name}                    body {"selector": {"channel": "stable"}}
 #   PUT  /api/v1/deployments/{name}/packages/{agent_type}/{version}
-#   PUT  /api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}
 #   POST /api/v1/deployments/{name}/rollout               <- THE ONLY CALL THAT DISTRIBUTES
 #
 # SAVING NEVER DISTRIBUTES: everything above the rollout stores. An Agent that enrols, or is
@@ -105,15 +105,18 @@ packages_dir = "fleet-packages"
 # max_message_size_bytes above and applies to the package upload route alone.
 max_package_size_bytes = 1073741824
 
-# The absolute base URL advertised for downloads. Leave unset in the ordinary case: the offered
-# download_url is then a path, which the Client resolves against its own OpAMP endpoint — the
-# Agent plane, which is exactly where the download is served. Set it only when
-# downloads must go through a different host, such as a mirror.
-# advertised_url = "https://fleet.example:4320"
-
 # =============================================================================================
 # Sections — everything below here is a [table]. Nothing but tables may follow.
 # =============================================================================================
+
+# The operator's public package-signing key, hex — the same value as the Clients'
+# [packages] verification_key (`opamp-fleetctl package keygen` prints it). Optional. With it the
+# Server checks each entry's signature when it is written and when the store is loaded, and the
+# Packages tab and GET /api/v1/packages report it valid or invalid; without it every signature is
+# reported unchecked. FEEDBACK ONLY: an invalid signature is stored and offered all the same — each
+# Client's own check is what decides. A malformed key fails startup.
+# [packages]
+# verification_key = "<hex-encoded Ed25519 public key>"
 
 # TLS, REQUIRED: the Agent plane serves HTTPS/WSS with this certificate and key, in TLS 1.3
 # only, and so does the Operator plane unless [rest.tls] below names its own. Without the

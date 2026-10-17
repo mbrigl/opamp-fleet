@@ -240,7 +240,6 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
                 fleet_server::fleet::PackageOffering::new(
                     fleet_server::packages::PackageStore::open(dir.path().join("packages"))
                         .expect("package store"),
-                    String::new(),
                 )
                 .expect("deployments")
             }))
@@ -2859,7 +2858,7 @@ fn linux() -> fleet_server::packages::Platform {
     fleet_server::packages::Platform::new("linux", "amd64").expect("platform")
 }
 
-/// Uploads `artifact` as `otelcol@<version>` for linux/amd64 and puts it, signed, into the
+/// Uploads `artifact` as `otelcol@<version>` for linux/amd64, signs it, and puts it into the
 /// `stable` channel that claims every `otelcol` — saved, released to nobody.
 fn save(served: &Served, version: &str, artifact: &[u8]) {
     let id = fleet_server::packages::PackageId::new(OTELCOL, version).expect("id");
@@ -2877,14 +2876,13 @@ fn save(served: &Served, version: &str, artifact: &[u8]) {
             [("service.name".to_string(), OTELCOL.to_string())].into(),
         )
         .expect("deployment");
+    store
+        .put_signature(&id, &linux(), vec![1; 64])
+        .expect("signature");
     served
         .state
         .put_deployment_package("stable", &id, true)
         .expect("package");
-    served
-        .state
-        .put_deployment_signature("stable", &id, &linux(), vec![1; 64])
-        .expect("signature");
 }
 
 /// `GET` of the download route for `otelcol@<version>`, with a raw query.
@@ -2975,9 +2973,9 @@ async fn answer(response: reqwest::Response) -> (u16, Vec<(String, Vec<u8>)>, Ve
 }
 
 /// The same request is answered byte for byte alike whether the store holds nothing under it,
-/// holds only a referenced entry, holds an artifact released to nobody, or holds one released to
-/// another host's Agent.
-/// Verifies: ADR-0026
+/// holds only an unsigned entry (ADR-0033), holds an artifact released to nobody, or holds one
+/// released to another host's Agent.
+/// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
 async fn an_artifact_not_offered_and_one_not_held_are_answered_alike() {
     let pki = Pki::new();
@@ -2988,23 +2986,15 @@ async fn an_artifact_not_offered_and_one_not_held_are_answered_alike() {
     let not_held = answer(fetch(&served, &other, &artifact_path("1.0.0")).await).await;
     assert_eq!(not_held.0, 404);
 
-    let referenced = fleet_server::packages::PackageId::new(OTELCOL, "1.0.0").expect("id");
+    let unsigned = fleet_server::packages::PackageId::new(OTELCOL, "1.0.0").expect("id");
     let store = served.state.packages().expect("package delivery");
-    store.create(&referenced).expect("create");
+    store.create(&unsigned).expect("create");
     store
-        .set_entry_source(
-            &referenced,
-            &linux(),
-            vec![0; 32],
-            fleet_server::packages::Source {
-                url: "https://example.com/otelcol.tar.gz".to_string(),
-                headers: Default::default(),
-            },
-        )
-        .expect("source");
-    let only_referenced = answer(fetch(&served, &other, &artifact_path("1.0.0")).await).await;
-    assert_eq!(only_referenced, not_held, "a referenced entry");
-    store.delete_set(&referenced).expect("delete");
+        .put_entry(&unsigned, &linux(), b"the-binary".to_vec())
+        .expect("entry");
+    let only_unsigned = answer(fetch(&served, &other, &artifact_path("1.0.0")).await).await;
+    assert_eq!(only_unsigned, not_held, "an unsigned entry");
+    store.delete_set(&unsigned).expect("delete");
 
     let host = host_client(&served, &pki, "h1");
     post(

@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::configs::validate_name;
 use crate::deployments::{check_selector, Deployment, DeploymentBackend};
-use crate::packages::{PackageId, Platform};
+use crate::packages::PackageId;
 
 /// One JSON file per Deployment under `<packages_dir>/deployments/`, owner-only.
 ///
 /// It lives beside the Packages rather than beside the Configurations because a Deployment is
-/// meaningless without the artifacts it signs — one directory is one backup — and it needs no
+/// meaningless without the artifacts it holds — one directory is one backup — and it needs no
 /// configuration key of its own: it is armed by `packages_dir`, exactly as the package store is.
 pub struct FsDeploymentBackend {
     dir: PathBuf,
@@ -82,32 +82,20 @@ impl DeploymentBackend for FsDeploymentBackend {
 
 /// A Deployment as persisted: `<packages_dir>/deployments/<name>.json`.
 ///
-/// The signatures are a **list** rather than a map, because their key is a pair and JSON keys are
-/// strings. Folding them into the in-memory map on load keeps the uniqueness where it belongs
-/// without inventing a composite key nobody would read.
+/// A file an older Server wrote may still list `signatures`; they are not read. A signature lives
+/// on its Package entry now (ADR-0033), and the operator signs each entry again there.
 #[derive(Serialize, Deserialize)]
 struct DeploymentMeta {
     name: String,
     selector: BTreeMap<String, String>,
     #[serde(default)]
     packages: Vec<PackageRefMeta>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    signatures: Vec<SignatureMeta>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PackageRefMeta {
     agent_type: String,
     version: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SignatureMeta {
-    agent_type: String,
-    version: String,
-    os: String,
-    arch: String,
-    signature_hex: String,
 }
 
 impl DeploymentMeta {
@@ -123,17 +111,6 @@ impl DeploymentMeta {
                     version: id.version.clone(),
                 })
                 .collect(),
-            signatures: deployment
-                .signatures
-                .iter()
-                .map(|((id, platform), signature)| SignatureMeta {
-                    agent_type: id.agent_type.clone(),
-                    version: id.version.clone(),
-                    os: platform.os.clone(),
-                    arch: platform.arch.clone(),
-                    signature_hex: hex::encode(signature),
-                })
-                .collect(),
         }
     }
 
@@ -146,19 +123,10 @@ impl DeploymentMeta {
             let id = PackageId::new(&reference.agent_type, &reference.version).map_err(named)?;
             packages.insert(id.agent_type.clone(), id);
         }
-        let mut signatures = BTreeMap::new();
-        for signature in self.signatures {
-            let id = PackageId::new(&signature.agent_type, &signature.version).map_err(named)?;
-            let platform = Platform::new(&signature.os, &signature.arch).map_err(named)?;
-            let bytes = hex::decode(&signature.signature_hex)
-                .map_err(|e| named(format!("signature of {id}: {e}")))?;
-            signatures.insert((id, platform), bytes);
-        }
         Ok(Deployment {
             name: self.name,
             selector: self.selector,
             packages,
-            signatures,
         })
     }
 }
@@ -166,15 +134,14 @@ impl DeploymentMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deployments::tests::{channel, id, linux};
+    use crate::deployments::tests::{channel, id};
     use crate::deployments::DeploymentStore;
 
     fn open(dir: &std::path::Path) -> Result<DeploymentStore, String> {
         DeploymentStore::open(Box::new(FsDeploymentBackend::open(dir.to_path_buf())?))
     }
 
-    /// The whole store survives a reopen — the signatures included, which is the part that had to
-    /// be flattened to be persisted at all.
+    /// The whole store survives a reopen.
     /// Verifies: ADR-0026
     #[test]
     fn a_deployment_survives_a_reopen() {
@@ -186,9 +153,6 @@ mod tests {
             store
                 .put_package("canary", &telegraf, false)
                 .expect("package");
-            store
-                .put_signature("canary", &telegraf, &linux(), vec![9; 64])
-                .expect("signature");
         }
 
         let reopened = open(dir.path()).expect("reopen");
@@ -196,7 +160,6 @@ mod tests {
         assert_eq!(canary.selector["channel"], "canary");
         assert_eq!(canary.selector["env"], "prod");
         assert_eq!(canary.package_for("telegraf"), Some(&telegraf));
-        assert_eq!(canary.signature(&telegraf, &linux()), Some(&[9u8; 64][..]));
 
         assert!(reopened.delete("canary").expect("delete"));
         assert!(!reopened

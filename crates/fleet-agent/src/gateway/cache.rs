@@ -89,8 +89,9 @@ pub struct Artifact {
 
 impl Artifact {
     /// The artifact a relayed file names, when it is one the Server hosts: a path on its download
-    /// route (ADR-0026 clause 43). An absolute URL — a referenced source, or the Server's route under
-    /// `advertised_url` — is `None`, and so is a hash that is no SHA-256 and could never verify.
+    /// route (ADR-0033). The Server offers every artifact as such a path. An absolute URL, which only
+    /// a foreign Server could send, is `None`: a downstream Client refuses it, since its only source
+    /// is its own origin, this Gateway. So is a hash that is no SHA-256 and could never verify.
     #[must_use]
     pub fn of(file: &DownloadableFile) -> Option<Artifact> {
         let url = &file.download_url;
@@ -749,16 +750,14 @@ impl PackageCache {
         let config = self.config.clone();
         let path = artifact.path.clone();
         // This Gateway's own certificate to its Server's origin, as every Client's download
-        // (ADR-0026 clause 53); the offered headers belong to referenced sources, which are not
-        // cached here. The material is read from disk, so off the async workers.
-        let (url, sources, anonymous, identified) = tokio::task::spawn_blocking(move || {
+        // (ADR-0033 clause 11), and no offered headers. The material is read from disk, so off the
+        // async workers.
+        let (url, origin, identified) = tokio::task::spawn_blocking(move || {
             let url = crate::packages::resolve_url(&path, &config.endpoint)?;
-            let sources = crate::packages::Sources::new(&config)?;
-            let anonymous =
-                crate::tls::trust(&config).and_then(crate::packages::download_client)?;
+            let origin = crate::packages::ServerOrigin::new(&config)?;
             let identified =
                 crate::tls::client_tls(&config).and_then(crate::packages::download_client)?;
-            Ok::<_, String>((url, sources, anonymous, identified))
+            Ok::<_, String>((url, origin, identified))
         })
         .await
         .map_err(|e| Failure::Other(e.to_string()))?
@@ -772,12 +771,11 @@ impl PackageCache {
                 .acquire()
                 .await
                 .map_err(|e| Failure::Other(e.to_string()))?;
-            let response =
-                crate::packages::send_download(&sources, &anonymous, &identified, &url, &[])
-                    .await
-                    .map_err(Failure::Other)?;
+            let response = crate::packages::send_download(&origin, &identified, &url, &[])
+                .await
+                .map_err(Failure::Other)?;
             match waits
-                .asked(&sources, &url, &response)
+                .asked(&origin, &url, &response)
                 .map_err(Failure::Other)?
             {
                 Some(wait) => {
@@ -1027,9 +1025,9 @@ mod tests {
         );
     }
 
-    /// Only a path on the Server's own download route with a SHA-256 is an artifact the Gateway
-    /// caches; an absolute URL is not, whichever host it names.
-    /// Verifies: ADR-0026
+    /// Every path on the Server's own download route with a SHA-256 is an artifact the Gateway
+    /// caches; an absolute URL is not, whichever host it names (ADR-0033 clause 9).
+    /// Verifies: ADR-0026, ADR-0033
     #[test]
     fn only_a_path_on_the_servers_route_is_cached() {
         let file = |url: &str, hash: Vec<u8>| DownloadableFile {
@@ -1049,12 +1047,12 @@ mod tests {
         assert_eq!(
             Artifact::of(&file(&format!("https://fleet.example{path}"), vec![7; 32])),
             None,
-            "advertised_url"
+            "an absolute URL naming the Server"
         );
         assert_eq!(
             Artifact::of(&file("https://mirror.example/otelcol.tar.gz", vec![7; 32])),
             None,
-            "referenced"
+            "another host"
         );
         assert_eq!(
             Artifact::of(&file("/api/v1/packages", vec![7; 32])),

@@ -25,9 +25,7 @@ async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
-            )),
+            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
     );
     let (addr, rest_addr) =
         support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
@@ -137,9 +135,7 @@ async fn spawn_with_packages_for_a_host() -> (TestServer, Member) {
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
             .with_revocations(Some(revocations.clone()))
-            .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
-            )),
+            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
     );
     let admission = fleet_server::transport::Admission::new(true)
         .with_enrolment(planes.issuers, None)
@@ -291,14 +287,15 @@ async fn ring_holding(
         .await
         .expect("put package");
     assert_eq!(response.status(), 200, "the channel takes the package");
-    sign_every_entry(server, channel, support::AGENT_TYPE, version).await;
+    sign_every_entry(server, support::AGENT_TYPE, version).await;
     channel.to_string()
 }
 
-/// Records a signature on `channel` for every entry the Package holds, as an operator does before a
-/// rollout: the Server offers nothing unsigned (ADR-0026). The Server stores a signature and never
-/// checks it — the Agent does — so a placeholder serves every test here that is not about it.
-async fn sign_every_entry(server: &TestServer, channel: &str, agent_type: &str, version: &str) {
+/// Signs every entry of the Package that carries no signature yet, as an operator does before a
+/// rollout: the Server offers nothing unsigned (ADR-0033). Without `[packages] verification_key`
+/// the Server checks nothing — the Agent does — so a placeholder serves every test here that is
+/// not about it.
+async fn sign_every_entry(server: &TestServer, agent_type: &str, version: &str) {
     let set: serde_json::Value = reqwest::Client::new()
         .get(set_url(server, agent_type, version))
         .send()
@@ -307,41 +304,40 @@ async fn sign_every_entry(server: &TestServer, channel: &str, agent_type: &str, 
         .json()
         .await
         .expect("json");
-    // What the channel already holds stays as it is: a signature on a released Package is frozen.
-    let signed: Vec<String> = ring_view(server, channel).await["packages"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|p| p["agent_type"] == agent_type && p["version"] == version)
-        .flat_map(|p| {
-            p["signed_platforms"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-        })
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
+    // What is signed already stays as it is: an assigned Package's entries are frozen.
     for entry in set["entries"].as_array().into_iter().flatten() {
+        if entry["signature_state"] != "missing" {
+            continue;
+        }
         let (os, arch) = (
             entry["os"].as_str().unwrap_or(""),
             entry["arch"].as_str().unwrap_or(""),
         );
-        if signed.contains(&format!("{os}/{arch}")) {
-            continue;
-        }
-        let response = reqwest::Client::new()
-            .put(format!(
-                "{}/signatures/{agent_type}/{version}/{os}/{arch}",
-                deployment_url(server, channel)
-            ))
-            .json(&serde_json::json!({ "signature": "01".repeat(64) }))
-            .send()
-            .await
-            .expect("put signature");
+        let response = sign_entry(server, agent_type, version, os, arch, &"01".repeat(64)).await;
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        assert_eq!(status, 200, "the channel takes the signature: {body}");
+        assert_eq!(status, 200, "the entry takes the signature: {body}");
     }
+}
+
+/// `PUT …/entries/{os}/{arch}/signature` with `{signature}` (ADR-0033).
+async fn sign_entry(
+    server: &TestServer,
+    agent_type: &str,
+    version: &str,
+    os: &str,
+    arch: &str,
+    signature_hex: &str,
+) -> reqwest::Response {
+    reqwest::Client::new()
+        .put(format!(
+            "{}/entries/{os}/{arch}/signature",
+            set_url(server, agent_type, version)
+        ))
+        .json(&serde_json::json!({ "signature": signature_hex }))
+        .send()
+        .await
+        .expect("put signature")
 }
 
 /// The channel every test that does not care about aim uses: it claims every Agent of the type this
@@ -492,7 +488,7 @@ async fn an_uploaded_set_is_offered_downloaded_and_gated() {
     let available = &offer.packages[support::AGENT_TYPE];
     assert_eq!(available.version, "1.2.3");
     let file = available.file.as_ref().expect("a downloadable file");
-    // download_base was empty, so the URL is a path the Client resolves against its endpoint —
+    // The URL is a path the Client resolves against its own endpoint (ADR-0033) —
     // and it names the whole identity, so two versions never serve each other's bytes.
     assert_eq!(
         file.download_url,
@@ -645,9 +641,7 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
-            ))
+            .with_packages(Some(PackageOffering::new(store).expect("deployments")))
             .with_max_package_size(4096),
     );
     let (addr, rest_addr) =
@@ -927,145 +921,6 @@ async fn an_agent_two_rings_claim_is_offered_nothing_and_the_view_says_why() {
     );
 }
 
-/// ADR-0026: an entry may live somewhere else. The Server stores the reference, offers that
-/// address verbatim with the operator's checksum and headers, and has nothing of its own to serve.
-/// Verifies: ADR-0026
-#[tokio::test]
-async fn a_referenced_entry_is_offered_from_its_source_and_not_from_here() {
-    let (server, _scratch) = spawn_with_packages().await;
-    let uid = InstanceUid::default();
-    let mut hello = full_report(&uid, "collector", 1);
-    hello.capabilities |= AgentCapabilities::AcceptsPackages as u64;
-    exchange(&server, &hello).await;
-
-    // A source the probe can reach: a tiny server standing in for a release page.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let source_addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut scratch = [0u8; 1024];
-            let _ = stream.read(&mut scratch).await;
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                .await;
-        }
-    });
-
-    let url = format!("http://{source_addr}/releases/otelcol.tar.gz");
-    let digest = sha256(b"the-artifact-we-never-see");
-    create_set(&server, support::AGENT_TYPE, "0.157.0").await;
-    let response = reqwest::Client::new()
-        .put(format!(
-            "{}/entries/{HOST}/source",
-            set_url(&server, support::AGENT_TYPE, "0.157.0")
-        ))
-        .json(&serde_json::json!({
-            "url": url,
-            "sha256": hex::encode(&digest),
-            "headers": { "Authorization": "Bearer release-token" }
-        }))
-        .send()
-        .await
-        .expect("put source");
-    assert_eq!(response.status(), 200);
-    assert_eq!(
-        rollout_ring(&server, &everyone(&server, "0.157.0").await).await["assigned_agents"],
-        1
-    );
-
-    // The offer names the source, carries the operator's hash, and passes the headers on.
-    let mut report = full_report(&uid, "collector", 2);
-    report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
-    let offer = exchange(&server, &report)
-        .await
-        .packages_available
-        .expect("an offer");
-    let file = offer.packages[support::AGENT_TYPE]
-        .file
-        .as_ref()
-        .expect("a downloadable file");
-    assert_eq!(file.download_url, url, "the Agent is sent to the source");
-    assert_eq!(
-        file.content_hash, digest,
-        "the operator's checksum, unaltered"
-    );
-    let headers = file.headers.as_ref().expect("headers ride along");
-    assert_eq!(headers.headers[0].key, "Authorization");
-
-    // And this Server has nothing to hand out: it never downloaded the artifact.
-    let local = reqwest::Client::new()
-        .get(format!(
-            "{}/file?os=linux&arch=amd64",
-            set_url(&server, support::AGENT_TYPE, "0.157.0")
-        ))
-        .send()
-        .await
-        .expect("get");
-    assert_eq!(
-        local.status(),
-        404,
-        "a referenced artifact is not served from here"
-    );
-}
-
-/// The probe is a typo catch, and only a definitive refusal counts as one: a source this Server
-/// cannot reach at all says nothing about whether the Agents can.
-/// Verifies: ADR-0026
-#[tokio::test]
-async fn a_source_that_refuses_the_probe_is_rejected_but_an_unreachable_one_is_not() {
-    let (server, _scratch) = spawn_with_packages().await;
-    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
-
-    // A source that answers 404 — the shape of a mistyped release path.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let refusing = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut scratch = [0u8; 1024];
-            let _ = stream.read(&mut scratch).await;
-            let _ = stream
-                .write_all(
-                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                )
-                .await;
-        }
-    });
-
-    let server_ref = &server;
-    let put_source = |url: String| async move {
-        reqwest::Client::new()
-            .put(format!(
-                "{}/entries/{HOST}/source",
-                set_url(server_ref, support::AGENT_TYPE, "1.0.0")
-            ))
-            .json(&serde_json::json!({
-                "url": url,
-                "sha256": hex::encode(sha256(b"x")),
-            }))
-            .send()
-            .await
-            .expect("put source")
-    };
-
-    let refused = put_source(format!("http://{refusing}/typo.tar.gz")).await;
-    assert_eq!(refused.status(), 400);
-    let body = refused.text().await.expect("body");
-    assert!(
-        body.contains("404"),
-        "the refusal quotes what the source said: {body}"
-    );
-
-    // Port 1 answers nothing at all: stored anyway, because the fleet may reach what we cannot.
-    let unreachable = put_source("http://127.0.0.1:1/otelcol.tar.gz".to_string()).await;
-    assert_eq!(unreachable.status(), 200);
-}
-
 /// ADR-0026, with no late typing: the Agent type is identity, stated at creation —
 /// there is no untyped state — and a Set built for another type fits nobody here: its rollout
 /// act assigns no one, whatever its Selector says.
@@ -1117,7 +972,7 @@ async fn a_set_reaches_only_agents_of_its_type() {
         .await
         .expect("put package");
     assert_eq!(response.status(), 200);
-    sign_every_entry(&server, "stable", "promtail", "1.0.0").await;
+    sign_every_entry(&server, "promtail", "1.0.0").await;
     let outcome = rollout_ring(&server, "stable").await;
     assert_eq!(
         outcome["assigned_agents"], 0,
@@ -1475,8 +1330,8 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
 
     let response = upload_entry(&server, support::AGENT_TYPE, "2.0.0", HOST, b"the-binary").await;
     assert_eq!(response.status(), 200);
-    // An entry uploaded after the rollout reaches nobody until its channel signs it (ADR-0026).
-    sign_every_entry(&server, &channel, support::AGENT_TYPE, "2.0.0").await;
+    // An entry uploaded after the rollout reaches nobody until it is signed (ADR-0033).
+    sign_every_entry(&server, support::AGENT_TYPE, "2.0.0").await;
 
     let staged = view(&server, "2.0.0").await;
     assert!(
@@ -1508,6 +1363,8 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
     )
     .await;
     assert_eq!(editable.status(), 200, "an unassigned set is editable");
+    // New bytes took the old signature with them (ADR-0033), so the entry is signed again.
+    sign_every_entry(&server, support::AGENT_TYPE, "2.0.0").await;
 
     // The act is its own request, and the fleet has the package on the next exchange.
     assert_eq!(rollout_ring(&server, "stable").await["assigned_agents"], 1);
@@ -1557,147 +1414,6 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
     assert_eq!(missing.status(), 404);
 }
 
-/// A source URL that steers the probe at the cloud metadata endpoint — or another never-legitimate
-/// internal address — is refused (SSRF). The URL and its headers are entirely caller-supplied, so
-/// without this the Server could be made to read `169.254.169.254` and reflect the answer back.
-/// Verifies: ADR-0026
-#[tokio::test]
-async fn a_source_url_aimed_at_an_internal_address_is_refused() {
-    let (server, _scratch) = spawn_with_packages().await;
-    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
-
-    let server_ref = &server;
-    let put_source = |url: &str| {
-        let url = url.to_string();
-        async move {
-            reqwest::Client::new()
-                .put(format!(
-                    "{}/entries/{HOST}/source",
-                    set_url(server_ref, support::AGENT_TYPE, "1.0.0")
-                ))
-                .json(&serde_json::json!({
-                    "url": url,
-                    "sha256": hex::encode(sha256(b"x")),
-                }))
-                .send()
-                .await
-                .expect("put source")
-        }
-    };
-
-    // The cloud metadata endpoint (link-local), the shared/CGNAT metadata address, and a scheme the
-    // probe must never follow.
-    for url in [
-        "http://169.254.169.254/latest/meta-data/",
-        "http://100.100.100.200/latest/meta-data/",
-        "file:///etc/passwd",
-    ] {
-        let response = put_source(url).await;
-        assert_eq!(response.status(), 400, "{url} must be refused");
-    }
-}
-
-/// A referenced source is `https://`; plaintext is accepted on a loopback literal alone, and a host
-/// name never counts as one. Each refusal is a `400` that names the rule, before any probe.
-/// Verifies: ADR-0026, ADR-0013
-#[tokio::test]
-async fn a_plaintext_source_off_the_loopback_is_refused() {
-    let (server, _scratch) = spawn_with_packages().await;
-    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
-    let source = |url: &str| {
-        reqwest::Client::new()
-            .put(format!(
-                "{}/entries/{HOST}/source",
-                set_url(&server, support::AGENT_TYPE, "1.0.0")
-            ))
-            .json(&serde_json::json!({ "url": url, "sha256": hex::encode(sha256(b"x")) }))
-            .send()
-    };
-    for url in [
-        "http://mirror.example/otelcol.tar.gz",
-        "http://192.168.10.5/otelcol.tar.gz",
-        "http://localhost:8080/otelcol.tar.gz",
-    ] {
-        let response = source(url).await.expect("put source");
-        assert_eq!(response.status(), 400, "{url} must be refused");
-        let body = response.text().await.expect("body");
-        assert!(
-            body.contains("plaintext"),
-            "the refusal names the rule: {body}"
-        );
-    }
-    // Port 1 answers nothing, so the probe stores it unprobed: the rule alone decides.
-    let loopback = source("http://127.0.0.1:1/otelcol.tar.gz")
-        .await
-        .expect("put source");
-    assert_eq!(loopback.status(), 200, "a loopback literal is accepted");
-    let loopback = source("http://[::1]:1/otelcol.tar.gz")
-        .await
-        .expect("put source");
-    assert_eq!(
-        loopback.status(),
-        200,
-        "the IPv6 loopback literal is accepted"
-    );
-}
-
-/// A source the store refuses is never probed: a plaintext URL off the loopback, or one for a
-/// Package that does not exist, is refused before the Server sends a request — and with it the
-/// operator's headers — anywhere.
-/// Verifies: ADR-0013, ADR-0026
-#[tokio::test]
-async fn a_refused_source_is_never_probed() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let (server, _scratch) = spawn_with_packages().await;
-    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    let reached = Arc::new(AtomicUsize::new(0));
-    let counted = reached.clone();
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            counted.fetch_add(1, Ordering::SeqCst);
-            let mut scratch = [0u8; 1024];
-            let _ = stream.read(&mut scratch).await;
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                .await;
-        }
-    });
-
-    let put = |version: &str, source: String| {
-        reqwest::Client::new()
-            .put(format!(
-                "{}/entries/{HOST}/source",
-                set_url(&server, support::AGENT_TYPE, version)
-            ))
-            .json(&serde_json::json!({
-                "url": source,
-                "headers": { "Authorization": "Bearer mirror-token" },
-                "sha256": hex::encode(sha256(b"x")),
-            }))
-            .send()
-    };
-    // `localhost` is a host name, never the loopback, so plaintext to it is refused.
-    let plaintext = put("1.0.0", format!("http://localhost:{port}/otelcol.tar.gz"))
-        .await
-        .expect("put source");
-    assert_eq!(plaintext.status(), 400);
-    let missing = put("9.9.9", format!("http://127.0.0.1:{port}/otelcol.tar.gz"))
-        .await
-        .expect("put source");
-    assert_eq!(missing.status(), 404);
-    assert_eq!(
-        reached.load(Ordering::SeqCst),
-        0,
-        "a refused source was probed"
-    );
-}
-
 /// The store has a whole-store ceiling, so a caller cannot fill the disk by uploading artifact after
 /// artifact under distinct names: once the store is at its limit, the next upload is refused.
 /// Verifies: ADR-0026
@@ -1709,9 +1425,7 @@ async fn the_package_store_has_a_total_size_ceiling() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
-            ))
+            .with_packages(Some(PackageOffering::new(store).expect("deployments")))
             .with_max_total_package_bytes(10 * 1024),
     );
     let (addr, rest_addr) =
@@ -1892,73 +1606,236 @@ async fn a_deployment_holds_one_uploaded_package_per_agent_type() {
     );
 }
 
-/// The signature belongs to the Deployment, not the artifact (ADR-0026 point 28) — and the view
-/// reports which platforms are covered, because an unsigned artifact is a legitimate policy the
-/// Server cannot refuse, only surface.
-/// Verifies: ADR-0026
+/// The signature belongs to the entry (ADR-0033 clause 4): written and removed through the entry's
+/// own route, shown on the entry with its `signature_state`, and absent from the Deployment's view.
+/// A signature for an entry that does not exist is `404`, an empty or malformed one `400`.
+/// Verifies: ADR-0033
 #[tokio::test]
-async fn a_deployment_carries_the_signature_and_says_what_is_unsigned() {
+async fn an_entry_carries_its_signature_and_says_its_state() {
     let (server, _scratch) = spawn_with_packages().await;
     upload(&server, support::AGENT_TYPE, "1.0.0", b"v1").await;
     put_deployment(&server, "stable", &[("channel", "stable")]).await;
     let base = deployment_url(&server, "stable");
-    reqwest::Client::new()
+    let held = reqwest::Client::new()
         .put(format!("{base}/packages/{}/1.0.0", support::AGENT_TYPE))
         .send()
         .await
         .expect("put package");
+    let view: serde_json::Value = held.json().await.expect("json");
+    assert!(
+        view["packages"][0].get("signed_platforms").is_none(),
+        "a Deployment holds no signature of its own: {view}"
+    );
 
-    let view: serde_json::Value = reqwest::Client::new()
-        .get(&base)
+    let set: serde_json::Value = reqwest::Client::new()
+        .get(set_url(&server, support::AGENT_TYPE, "1.0.0"))
         .send()
         .await
         .expect("get")
         .json()
         .await
         .expect("json");
+    assert_eq!(set["entries"][0]["signature_state"], "missing");
+    assert!(set["entries"][0].get("signature").is_none());
+
+    let signed = sign_entry(
+        &server,
+        support::AGENT_TYPE,
+        "1.0.0",
+        "linux",
+        "amd64",
+        &hex::encode([7u8; 64]),
+    )
+    .await;
+    assert_eq!(signed.status(), 200);
+    let set: serde_json::Value = signed.json().await.expect("json");
+    assert_eq!(set["entries"][0]["signature"], hex::encode([7u8; 64]));
     assert_eq!(
-        view["packages"][0]["signed_platforms"]
-            .as_array()
-            .expect("array")
-            .len(),
-        0,
-        "nothing is signed yet, and the view says so rather than staying silent"
+        set["entries"][0]["signature_state"], "unchecked",
+        "without [packages] verification_key the Server checks nothing"
     );
 
-    let signed = reqwest::Client::new()
-        .put(format!(
-            "{base}/signatures/{}/1.0.0/linux/amd64",
-            support::AGENT_TYPE
-        ))
+    // A signature needs an entry to attach to.
+    for (version, os) in [("9.9.9", "linux"), ("1.0.0", "windows")] {
+        let orphan = sign_entry(
+            &server,
+            support::AGENT_TYPE,
+            version,
+            os,
+            "amd64",
+            &hex::encode([7u8; 64]),
+        )
+        .await;
+        assert_eq!(orphan.status(), 404, "{version} {os}");
+    }
+    // And it has to be one.
+    for malformed in ["", "not-hex", &hex::encode([7u8; 63])] {
+        let refused = sign_entry(
+            &server,
+            support::AGENT_TYPE,
+            "1.0.0",
+            "linux",
+            "amd64",
+            malformed,
+        )
+        .await;
+        assert_eq!(refused.status(), 400, "{malformed:?}");
+    }
+
+    let entry_signature = format!(
+        "{}/entries/linux/amd64/signature",
+        set_url(&server, support::AGENT_TYPE, "1.0.0")
+    );
+    let removed = reqwest::Client::new()
+        .delete(&entry_signature)
+        .send()
+        .await
+        .expect("delete signature");
+    assert_eq!(removed.status(), 200);
+    let set: serde_json::Value = removed.json().await.expect("json");
+    assert_eq!(set["entries"][0]["signature_state"], "missing");
+    let again = reqwest::Client::new()
+        .delete(&entry_signature)
+        .send()
+        .await
+        .expect("delete signature");
+    assert_eq!(again.status(), 404, "there is no signature left to remove");
+}
+
+/// New bytes on an entry remove its signature, because a signature covers the hash (ADR-0033
+/// clause 4): the entry is offered to nobody until it is signed again.
+/// Verifies: ADR-0033
+#[tokio::test]
+async fn new_bytes_on_an_entry_remove_its_signature() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"first").await;
+    sign_every_entry(&server, support::AGENT_TYPE, "1.0.0").await;
+    let replaced = upload_entry(&server, support::AGENT_TYPE, "1.0.0", HOST, b"second").await;
+    assert_eq!(replaced.status(), 200);
+    let set: serde_json::Value = replaced.json().await.expect("json");
+    assert_eq!(set["entries"][0]["signature_state"], "missing");
+    assert!(set["entries"][0].get("signature").is_none());
+}
+
+/// The routes ADR-0033 removed answer `404`, as for anything that does not exist: the entry's
+/// `…/source`, and the Deployment's `…/signatures/…` (ADR-0033 clause 7).
+/// Verifies: ADR-0033
+#[tokio::test]
+async fn the_source_route_and_the_deployment_signature_routes_are_gone() {
+    let (server, _scratch) = spawn_with_packages().await;
+    upload(&server, support::AGENT_TYPE, "1.0.0", b"v1").await;
+    put_deployment(&server, "stable", &[("channel", "stable")]).await;
+    let client = reqwest::Client::new();
+    let source = format!(
+        "{}/entries/{HOST}/source",
+        set_url(&server, support::AGENT_TYPE, "1.0.0")
+    );
+    let response = client
+        .put(&source)
+        .json(&serde_json::json!({
+            "url": "https://example.com/otelcol.tar.gz",
+            "sha256": "00".repeat(32),
+        }))
+        .send()
+        .await
+        .expect("put source");
+    assert_eq!(response.status(), 404, "PUT {source}");
+    let signatures = format!(
+        "{}/signatures/{}/1.0.0/linux/amd64",
+        deployment_url(&server, "stable"),
+        support::AGENT_TYPE
+    );
+    let response = client
+        .put(&signatures)
         .json(&serde_json::json!({ "signature": hex::encode([7u8; 64]) }))
         .send()
         .await
-        .expect("sign");
-    assert_eq!(signed.status(), 200);
-    let view: serde_json::Value = signed.json().await.expect("json");
-    assert_eq!(view["packages"][0]["signed_platforms"][0], "linux/amd64");
-
-    // A signature for a Package this channel does not hold has nothing to attach to.
-    let orphan = reqwest::Client::new()
-        .put(format!(
-            "{base}/signatures/{}/9.9.9/linux/amd64",
-            support::AGENT_TYPE
-        ))
-        .json(&serde_json::json!({ "signature": hex::encode([7u8; 64]) }))
+        .expect("put signature");
+    assert_eq!(response.status(), 404, "PUT {signatures}");
+    let response = client
+        .delete(&signatures)
         .send()
         .await
-        .expect("sign");
-    assert_eq!(orphan.status(), 404);
+        .expect("delete signature");
+    assert_eq!(response.status(), 404, "DELETE {signatures}");
+}
 
-    // And it leaves with the Package it was about.
-    let stripped = reqwest::Client::new()
-        .delete(format!("{base}/packages/{}/1.0.0", support::AGENT_TYPE))
+/// With `[packages] verification_key` armed, the Server reports a signature over the entry's
+/// statement `valid` and a wrong one `invalid` — and stores both, because it only reports
+/// (ADR-0033 clause 5). The wrong one is offered all the same: the Agent's check decides.
+/// Verifies: ADR-0033
+#[tokio::test]
+async fn with_a_verification_key_the_server_reports_valid_and_invalid_and_stores_both() {
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+    let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
+    let public = ring::signature::KeyPair::public_key(&keypair)
+        .as_ref()
+        .to_vec();
+    opamp::tls::install_ring_provider();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = PackageStore::open(dir.path().join("packages"))
+        .expect("store")
+        .with_verifier(Some(Box::new(fleet_server::config::Ed25519Verifier::new(
+            public,
+        ))));
+    let state = Arc::new(
+        AppState::new(dir.path().join("fleet-configs"))
+            .expect("configs")
+            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
+    );
+    let (addr, rest_addr) =
+        support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
+    let server = TestServer {
+        addr,
+        rest_addr,
+        state,
+        _dir: dir,
+    };
+
+    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
+    for (platform, bytes) in [
+        ("linux/amd64", b"linux".as_slice()),
+        ("windows/amd64", b"windows"),
+    ] {
+        let response = upload_entry(&server, support::AGENT_TYPE, "1.0.0", platform, bytes).await;
+        assert_eq!(response.status(), 200);
+    }
+    let statement =
+        |bytes: &[u8]| fleet_core::package::statement(support::AGENT_TYPE, "1.0.0", &sha256(bytes));
+    let good = hex::encode(keypair.sign(&statement(b"linux")));
+    // Signed over the other entry's bytes: a real signature, for something else.
+    let wrong = hex::encode(keypair.sign(&statement(b"linux")));
+    for (os, signature) in [("linux", good), ("windows", wrong)] {
+        let response = sign_entry(
+            &server,
+            support::AGENT_TYPE,
+            "1.0.0",
+            os,
+            "amd64",
+            &signature,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            200,
+            "{os}: an invalid one is not refused"
+        );
+    }
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{}/api/v1/packages", server.rest_addr))
         .send()
         .await
-        .expect("remove");
-    assert_eq!(stripped.status(), 200);
-    let view: serde_json::Value = stripped.json().await.expect("json");
-    assert_eq!(view["packages"].as_array().expect("array").len(), 0);
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    let entries = &listed[0]["entries"];
+    assert_eq!(entries[0]["os"], "linux");
+    assert_eq!(entries[0]["signature_state"], "valid");
+    assert_eq!(entries[1]["os"], "windows");
+    assert_eq!(entries[1]["signature_state"], "invalid");
+    assert!(entries[1]["signature"].is_string(), "and stored");
 }
 
 /// The aim stays editable and the channel keeps what it holds — moving a Deployment between channels is
@@ -2014,11 +1891,10 @@ async fn a_deployments_aim_is_editable_and_deleting_it_is_its_own_act() {
     assert_eq!(again.status(), 404);
 }
 
-/// A Deployment that has released something cannot be deleted. The assignment names the channel,
-/// and the channel is where the offer's signature lives — deleting it under a standing offer
-/// would keep offering the Package, unsigned (ADR-0026 point 31). The refusal says which acts end
-/// the offer first.
-/// Verifies: ADR-0026
+/// A Deployment that has released something cannot be deleted while the assignment names it
+/// (ADR-0026 point 31). The refusal says which acts end the offer first, and the offer stands with
+/// the entry's own signature (ADR-0033).
+/// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
 async fn a_deployment_that_released_a_package_refuses_to_be_deleted() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2028,18 +1904,17 @@ async fn a_deployment_that_released_a_package_refuses_to_be_deleted() {
     exchange(&server, &report).await;
 
     upload(&server, support::AGENT_TYPE, "1.0.0", b"the-binary").await;
-    let channel = everyone(&server, "1.0.0").await;
-    let signed = reqwest::Client::new()
-        .put(format!(
-            "{}/signatures/{}/1.0.0/linux/amd64",
-            deployment_url(&server, &channel),
-            support::AGENT_TYPE
-        ))
-        .json(&serde_json::json!({ "signature": hex::encode([7u8; 64]) }))
-        .send()
-        .await
-        .expect("sign");
+    let signed = sign_entry(
+        &server,
+        support::AGENT_TYPE,
+        "1.0.0",
+        "linux",
+        "amd64",
+        &hex::encode([7u8; 64]),
+    )
+    .await;
     assert_eq!(signed.status(), 200);
+    let channel = everyone(&server, "1.0.0").await;
     assert_eq!(rollout_ring(&server, &channel).await["assigned_agents"], 1);
 
     let refused = reqwest::Client::new()
@@ -2082,15 +1957,25 @@ async fn a_deployment_that_released_a_package_refuses_to_be_deleted() {
     assert_eq!(deleted.status(), 204);
 }
 
-/// The signature an Agent is offered comes from **its** Deployment (ADR-0026 point 28), not from
-/// the artifact record — so the same Package in two channels travels with each channel's own signature.
-/// Verifies: ADR-0026
+/// One Package held by two Deployments is offered with the same signature through both: the
+/// signature is the entry's, and one serves every Deployment that holds it (ADR-0033 clause 4).
+/// Verifies: ADR-0033
 #[tokio::test]
-async fn the_signature_an_agent_is_offered_comes_from_its_deployment() {
+async fn one_package_in_two_deployments_is_offered_with_the_same_signature() {
     let (server, _scratch) = spawn_with_packages().await;
     upload(&server, support::AGENT_TYPE, "1.0.0", b"the-binary").await;
+    let signed = sign_entry(
+        &server,
+        support::AGENT_TYPE,
+        "1.0.0",
+        "linux",
+        "amd64",
+        &hex::encode([3u8; 64]),
+    )
+    .await;
+    assert_eq!(signed.status(), 200);
 
-    // Two hosts, two disjoint channels, one Package — signed differently in each.
+    // Two hosts, two disjoint channels, one Package signed once.
     let a = InstanceUid::default();
     let b = InstanceUid::default();
     for (uid, name) in [(&a, "host-a"), (&b, "host-b")] {
@@ -2098,7 +1983,7 @@ async fn the_signature_an_agent_is_offered_comes_from_its_deployment() {
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
         exchange(&server, &report).await;
     }
-    for (channel, host, byte) in [("channel-a", "host-a", 1u8), ("channel-b", "host-b", 2u8)] {
+    for (channel, host) in [("channel-a", "host-a"), ("channel-b", "host-b")] {
         ring_holding(
             &server,
             channel,
@@ -2106,21 +1991,10 @@ async fn the_signature_an_agent_is_offered_comes_from_its_deployment() {
             "1.0.0",
         )
         .await;
-        let signed = reqwest::Client::new()
-            .put(format!(
-                "{}/signatures/{}/1.0.0/linux/amd64",
-                deployment_url(&server, channel),
-                support::AGENT_TYPE
-            ))
-            .json(&serde_json::json!({ "signature": hex::encode([byte; 64]) }))
-            .send()
-            .await
-            .expect("sign");
-        assert_eq!(signed.status(), 200);
         assert_eq!(rollout_ring(&server, channel).await["assigned_agents"], 1);
     }
 
-    for (uid, name, byte) in [(&a, "host-a", 1u8), (&b, "host-b", 2u8)] {
+    for (uid, name) in [(&a, "host-a"), (&b, "host-b")] {
         let mut report = full_report(uid, name, 2);
         report.capabilities |= AgentCapabilities::AcceptsPackages as u64;
         let offer = exchange(&server, &report)
@@ -2133,15 +2007,16 @@ async fn the_signature_an_agent_is_offered_comes_from_its_deployment() {
                 .as_ref()
                 .expect("a file")
                 .signature,
-            vec![byte; 64],
-            "each host is offered the signature of the channel it belongs to"
+            vec![3u8; 64],
+            "{name} is offered the entry's one signature"
         );
     }
 }
 
-/// The retired upload parameter is refused **by name**, never ignored: a signature dropped on the
-/// floor is an unsigned rollout nobody notices.
-/// Verifies: ADR-0026
+/// A signature given with the upload is refused **by name**, never ignored: a signature dropped on
+/// the floor is an unsigned entry nobody notices. The refusal names the entry's own signature
+/// route (ADR-0033).
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn a_signature_on_the_artifact_upload_is_refused_by_name() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2162,7 +2037,7 @@ async fn a_signature_on_the_artifact_upload_is_refused_by_name() {
         body["error"]
             .as_str()
             .expect("error")
-            .contains("/signatures/"),
+            .contains("/entries/linux/amd64/signature"),
         "the refusal names the route that takes it now: {body}"
     );
 }
@@ -2278,16 +2153,15 @@ async fn the_per_agent_act_refuses_to_pick_a_side() {
     }
 }
 
-/// What a **standing offer travels with** is frozen (ADR-0026 point 31): the signature of a
-/// Package this channel released, and the channel's hold on that Package. What gates re-offering is the
-/// package hash, which does not cover the signature — so a signature changed under a standing
-/// offer would never reach the Agent installing against the old one, and one removed would turn a
-/// signed rollout unsigned for any Agent that has not finished.
+/// What a standing offer travels with is frozen. The entry's signature is a write to an assigned
+/// Package's entries and refused `409` like any other (ADR-0033 clause 4, ADR-0025): the re-offer
+/// gate does not cover the signature, so one changed under a standing offer would never reach the
+/// Agent. The channel's hold on the Package it released is frozen too (ADR-0026 point 31).
 ///
-/// **Swapping the version the channel holds is deliberately not frozen**, and the last assertion here
+/// **Swapping the version the channel holds is deliberately not frozen**, and an assertion here
 /// pins that: it is how a rollout proceeds, it leaves every standing offer exactly as it was, and
 /// a rule that forbade it would forbid updating a fleet at all.
-/// Verifies: ADR-0026
+/// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
 async fn a_ring_freezes_what_it_has_released() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2298,50 +2172,53 @@ async fn a_ring_freezes_what_it_has_released() {
 
     upload(&server, support::AGENT_TYPE, "1.0.0", b"the-binary").await;
     upload(&server, support::AGENT_TYPE, "2.0.0", b"the-next-one").await;
-    let channel = everyone(&server, "1.0.0").await;
-    let sign = |version: &str| {
-        format!(
-            "{}/signatures/{}/{version}/linux/amd64",
-            deployment_url(&server, &channel),
-            support::AGENT_TYPE
-        )
-    };
-    let signed = reqwest::Client::new()
-        .put(sign("1.0.0"))
-        .json(&serde_json::json!({ "signature": hex::encode([7u8; 64]) }))
-        .send()
-        .await
-        .expect("sign");
+    let signed = sign_entry(
+        &server,
+        support::AGENT_TYPE,
+        "1.0.0",
+        "linux",
+        "amd64",
+        &hex::encode([7u8; 64]),
+    )
+    .await;
     assert_eq!(
         signed.status(),
         200,
-        "before the act, the channel is editable"
+        "before the act, the entry is editable"
     );
+    let channel = everyone(&server, "1.0.0").await;
     assert_eq!(rollout_ring(&server, &channel).await["assigned_agents"], 1);
 
     // Now every write against what it released answers 409, and says what to do instead.
-    for (method, url) in [
-        ("PUT", sign("1.0.0")),
-        (
-            "DELETE",
-            format!(
-                "{}/packages/{}/1.0.0",
-                deployment_url(&server, &channel),
-                support::AGENT_TYPE
-            ),
-        ),
-    ] {
-        let client = reqwest::Client::new();
-        let request = if method == "PUT" {
-            client
-                .put(&url)
-                .json(&serde_json::json!({ "signature": hex::encode([9u8; 64]) }))
-        } else {
-            client.delete(&url)
-        };
-        let refused = request.send().await.expect("write");
-        assert_eq!(refused.status(), 409, "{method} {url} must be frozen");
-    }
+    let entry_signature = format!(
+        "{}/entries/linux/amd64/signature",
+        set_url(&server, support::AGENT_TYPE, "1.0.0")
+    );
+    let refused = sign_entry(
+        &server,
+        support::AGENT_TYPE,
+        "1.0.0",
+        "linux",
+        "amd64",
+        &hex::encode([9u8; 64]),
+    )
+    .await;
+    assert_eq!(
+        refused.status(),
+        409,
+        "PUT {entry_signature} must be frozen"
+    );
+    let removal = format!(
+        "{}/packages/{}/1.0.0",
+        deployment_url(&server, &channel),
+        support::AGENT_TYPE
+    );
+    let refused = reqwest::Client::new()
+        .delete(&removal)
+        .send()
+        .await
+        .expect("remove");
+    assert_eq!(refused.status(), 409, "DELETE {removal} must be frozen");
 
     // But pointing the channel at the next version is not frozen — that is the ordinary upgrade.
     let swapped = reqwest::Client::new()
@@ -2361,7 +2238,7 @@ async fn a_ring_freezes_what_it_has_released() {
 
     // Deleting the signature is frozen too, and the offer still carries the one that was released.
     let frozen = reqwest::Client::new()
-        .delete(sign("1.0.0"))
+        .delete(&entry_signature)
         .send()
         .await
         .expect("delete signature");
@@ -2494,9 +2371,9 @@ async fn the_fleet_view_tells_no_ring_apart_from_a_ring_with_nothing_for_this_ag
     assert_eq!(view.pending_packages[0].deployment, "stable");
 }
 
-/// A Deployment that lacks a signature for an entry it holds is not rolled out: `409`, naming the
-/// Package and the platform, and nothing is released (ADR-0026).
-/// Verifies: ADR-0026
+/// A Deployment holding a Package with an unsigned entry is not rolled out: `409`, naming the
+/// Package and the platform, and nothing is released (ADR-0026 clause 29, ADR-0033).
+/// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
 async fn a_rollout_of_a_deployment_with_an_unsigned_package_is_refused_naming_it() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2535,10 +2412,10 @@ async fn a_rollout_of_a_deployment_with_an_unsigned_package_is_refused_naming_it
     );
 }
 
-/// The per-Agent act is refused the same way: naming a Deployment that lacks a signature for an
-/// entry it holds is `409`, naming the Package and the platform, and the Agent is offered nothing.
+/// The per-Agent act is refused the same way: naming a Deployment holding a Package with an
+/// unsigned entry is `409`, naming the Package and the platform, and the Agent is offered nothing.
 /// Once the entry is signed, the same act goes through.
-/// Verifies: ADR-0026
+/// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
 async fn the_per_agent_act_refuses_a_deployment_with_an_unsigned_package() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2595,60 +2472,8 @@ async fn the_per_agent_act_refuses_a_deployment_with_an_unsigned_package() {
         "nothing unsigned is offered"
     );
 
-    sign_every_entry(&server, "unsigned", support::AGENT_TYPE, "3.0.0").await;
+    sign_every_entry(&server, support::AGENT_TYPE, "3.0.0").await;
     assert_eq!(act().await.expect("rollout to agent").status(), 200);
-}
-
-/// Setting a source probes it without following a redirect: a source that bounces the probe to a
-/// path that would answer `404` is stored, because the bounce is not chased, and nothing reaches
-/// the target.
-/// Verifies: ADR-0026
-#[tokio::test]
-async fn the_probe_follows_no_redirect() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let (server, _scratch) = spawn_with_packages().await;
-    create_set(&server, support::AGENT_TYPE, "1.0.0").await;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let bouncing = listener.local_addr().expect("addr");
-    let followed = Arc::new(AtomicUsize::new(0));
-    let counted = followed.clone();
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut scratch = [0u8; 1024];
-            let read = stream.read(&mut scratch).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&scratch[..read]);
-            let answer: &[u8] = if request.contains("/missing") {
-                counted.fetch_add(1, Ordering::SeqCst);
-                b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-            } else {
-                b"HTTP/1.1 302 Found\r\nlocation: /missing\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-            };
-            let _ = stream.write_all(answer).await;
-        }
-    });
-
-    let response = reqwest::Client::new()
-        .put(format!(
-            "{}/entries/{HOST}/source",
-            set_url(&server, support::AGENT_TYPE, "1.0.0")
-        ))
-        .json(&serde_json::json!({
-            "url": format!("http://{bouncing}/otelcol.tar.gz"),
-            "sha256": hex::encode(sha256(b"x")),
-        }))
-        .send()
-        .await
-        .expect("put source");
-    assert_eq!(response.status(), 200, "a redirect is not a refusal");
-    assert_eq!(
-        followed.load(Ordering::SeqCst),
-        0,
-        "the probe followed the redirect"
-    );
 }
 
 /// Every `*.upload` file under `dir` — what an upload in progress stages its artifact into.
@@ -2682,9 +2507,7 @@ async fn an_upload_that_stops_is_answered_408_and_leaves_nothing_staged() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
-            )),
+            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -2746,9 +2569,7 @@ async fn two_uploads_of_one_entry_at_once_do_not_share_a_staging_file() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
-            )),
+            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -2845,9 +2666,7 @@ async fn an_upload_in_progress_counts_against_the_ceiling_and_a_cancelled_one_le
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
-            ))
+            .with_packages(Some(PackageOffering::new(store).expect("deployments")))
             .with_max_total_package_bytes(150),
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -2941,9 +2760,7 @@ async fn a_download_past_the_limit_is_answered_429_after_thirty_seconds() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
-            ))
+            .with_packages(Some(PackageOffering::new(store).expect("deployments")))
             .with_agent_rate(Some(Arc::new(fleet_server::agent_rate::AgentRate::new(
                 limits,
                 100,

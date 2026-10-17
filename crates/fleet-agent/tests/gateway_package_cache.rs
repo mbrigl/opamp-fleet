@@ -117,7 +117,7 @@ fn offer(files: &[(&str, &str, Vec<u8>)]) -> PackagesAvailable {
 struct Upstream {
     offers: Mutex<HashMap<Vec<u8>, PackagesAvailable>>,
     artifacts: Mutex<HashMap<String, Vec<u8>>>,
-    /// The path and query of every request on the download route and the mirror.
+    /// The path and query of every request on the download route and the other path.
     fetched: Mutex<Vec<String>>,
     /// Bumped on every fetch, so a test can wait for one.
     fetches: Option<tokio::sync::watch::Sender<usize>>,
@@ -557,22 +557,23 @@ async fn a_later_offer_replaces_what_an_agent_was_offered() {
     );
 }
 
-/// An offered file with an absolute URL — here a mirror the upstream also serves — is neither
-/// fetched nor served by the Gateway; the Server-hosted artifact beside it is.
-/// Verifies: ADR-0026
+/// The Gateway caches an artifact offered as the Server's path, and an offered file with an
+/// absolute URL — which only a foreign Server would send, here a path the upstream also serves —
+/// is neither fetched nor served (ADR-0033).
+/// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
-async fn a_referenced_artifact_is_neither_fetched_nor_served() {
+async fn the_servers_path_is_cached_and_an_absolute_url_is_neither_fetched_nor_served() {
     let upstream = Arc::new(Upstream::default());
     let bytes = b"the-binary".to_vec();
     upstream.serve(PATH_1, &bytes);
     let server = spawn_upstream(upstream.clone()).await;
-    let mirror = format!("http://{server}/mirror/otelcol.tar.gz");
-    upstream.serve("/mirror/otelcol.tar.gz", b"referenced");
+    let absolute = format!("http://{server}/mirror/otelcol.tar.gz");
+    upstream.serve("/mirror/otelcol.tar.gz", b"absolute");
     let uid = InstanceUid::default();
     upstream.offer(
         &uid,
         offer(&[
-            ("referenced", &mirror, sha256(b"referenced")),
+            ("absolute", &absolute, sha256(b"absolute")),
             ("otelcol", PATH_1, sha256(&bytes)),
         ]),
     );
@@ -589,7 +590,7 @@ async fn a_referenced_artifact_is_neither_fetched_nor_served() {
     assert_eq!(
         upstream.fetched(),
         vec![PATH_1.to_string()],
-        "the mirror was never asked"
+        "the absolute URL was never asked"
     );
 }
 
@@ -1178,8 +1179,7 @@ async fn a_client_behind_a_marked_gateway_receives_an_uploaded_artifact_through_
             .with_client_ca(Some(signer))
             .with_revocations(Some(revocations.clone()))
             .with_packages(Some(
-                fleet_server::fleet::PackageOffering::new(store, String::new())
-                    .expect("deployments"),
+                fleet_server::fleet::PackageOffering::new(store).expect("deployments"),
             )),
     );
     let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
@@ -1300,12 +1300,7 @@ async fn a_client_behind_a_marked_gateway_receives_an_uploaded_artifact_through_
     .expect("key pair");
     let statement = fleet_core::package::statement("otelcol", "1.0.0", &sha256(&bytes));
     state
-        .put_deployment_signature(
-            "stable",
-            &id,
-            &linux,
-            signing.sign(&statement).as_ref().to_vec(),
-        )
+        .put_package_entry_signature(&id, &linux, signing.sign(&statement).as_ref().to_vec())
         .expect("signature");
     assert_eq!(state.rollout_deployment("stable").expect("the press"), 1);
 

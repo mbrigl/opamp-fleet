@@ -359,16 +359,27 @@ async fn main() {
         // ADR-0016.
         info!("offering the fleet somewhere to send its own telemetry");
     }
-    let packages = fleet_server::packages::PackageStore::open(config.packages_dir.clone())
+    let packages = config
+        .packages
+        .verification_key()
+        .and_then(|key| {
+            if key.is_some() {
+                // ADR-0033.
+                info!("checking package signatures against [packages] verification_key");
+            }
+            fleet_server::packages::PackageStore::open(config.packages_dir.clone()).map(|store| {
+                store.with_verifier(key.map(|key| {
+                    Box::new(fleet_server::config::Ed25519Verifier::new(key))
+                        as Box<dyn fleet_server::packages::SignatureVerifier>
+                }))
+            })
+        })
         .and_then(|store| {
             if !store.is_empty() {
                 // ADR-0026.
                 info!("offering software packages to the fleet");
             }
-            fleet_server::fleet::PackageOffering::new(
-                store,
-                config.advertised_url.clone().unwrap_or_default(),
-            )
+            fleet_server::fleet::PackageOffering::new(store)
         });
     let packages = match packages {
         Ok(offering) => Some(offering),

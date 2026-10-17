@@ -359,12 +359,14 @@ pub async fn run(args: Args) -> Result<(), String> {
     }
     if server.is_none() {
         eprintln!(
-            "\nNothing was uploaded. To do it later, create the package, PUT each artifact, and \
-             put it in the deployment that should carry it:\n  \
+            "\nNothing was uploaded. To do it later, create the package, PUT each artifact, sign \
+             each entry, and put it in the deployment that should carry it:\n  \
              curl -X PUT -H 'Content-Type: application/json' -d '{{}}' \\\n       \
              <server>/api/v1/packages/{name}/{version}\n  \
              curl -X PUT --data-binary @<artifact> \\\n       \
              \"<server>/api/v1/packages/{name}/{version}/entries/<os>/<arch>\"\n  \
+             curl -X PUT -H 'Content-Type: application/json' -d '{{\"signature\": \"<hex>\"}}' \\\n       \
+             \"<server>/api/v1/packages/{name}/{version}/entries/<os>/<arch>/signature\"\n  \
              curl -X PUT <server>/api/v1/deployments/<ring>/packages/{name}/{version}",
             name = source.service_name,
             version = version
@@ -1039,8 +1041,9 @@ async fn upload(
     };
     expect_ok(response, &entry).await?;
     eprintln!(
-        "  stored as the {}/{} entry — and it reaches nobody yet: a package aims at nothing by \
-         itself. Put it in a deployment when it should reach hosts:\n    \
+        "  stored as the {}/{} entry — and it reaches nobody yet: it is unsigned, and a package \
+         aims at nothing by itself. Sign the entry on the Packages tab (or PUT its …/signature), \
+         then put it in a deployment when it should reach hosts:\n    \
          curl -X PUT <server>/api/v1/deployments/<ring>/packages/{}/{}",
         plan.os, plan.arch, service_name, version
     );
