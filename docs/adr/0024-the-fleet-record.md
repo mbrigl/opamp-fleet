@@ -1,6 +1,6 @@
 # ADR-0024: The Server keeps a persisted record per Agent, derives its status, forgets it only on request, and labels it
 
-- **Status:** 🟢 accepted · clauses 17, 18, 19 and 20 superseded by [ADR-0035](0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)
+- **Status:** 🟢 accepted · clauses 17, 18, 19 and 20 superseded by [ADR-0035](0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md) · clause 3 superseded by [ADR-0037](0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)
 - **Date:** 2026-08-11
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-server/src/fleet.rs, crates/fleet-server/src/agent_store.rs, crates/fleet-server/src/labels.rs, the /api/v1/agents routes, stale_after_secs in server.toml, the agents/ and labels/ directories under config_dir
