@@ -17,8 +17,11 @@ ones it uses without defining.
 - **Agent type** — the kind of agent an Agent runs, as the `service.name` it reports; a Package is
   built for one, a Configuration may be stated for one.
   _Avoid:_ service type, product.
-- **Effective description** — what a Selector is matched against: an Agent's reported attributes,
-  its Labels, and its Host's subject values as `fleet.host.*`.
+- **Client Agent** — the Agent a Client presents for itself, recognised by the `supervisor.kind.*`
+  attributes it alone reports; its Labels hold for the Client's other Agents, the Supervisor Agents.
+  _Avoid:_ own agent, main agent.
+- **Effective description** — what a Selector is matched against: its Host's subject values as
+  `fleet.host.*`, an Agent's reported attributes, its Labels, and its Client Agent's Labels.
   _Avoid:_ attributes (alone), metadata.
 - **Entry** — one platform's artifact in a Package: operating system and architecture, content hash,
   size and signature.

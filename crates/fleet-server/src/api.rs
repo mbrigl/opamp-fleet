@@ -626,6 +626,26 @@ struct AgentResponse {
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     shadowed_labels: Vec<String>,
+    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0035
+    /// clause 4); empty for the Client Agent itself, for an Agent whose Client the Server cannot
+    /// tell, and for an ambiguous one.
+    inherited_labels: BTreeMap<String, String>,
+    /// The Instance UID of this Agent's Client Agent — its own, for the Client Agent — or empty
+    /// when the Server cannot tell.
+    client_agent: String,
+    /// The group this Agent's Client is recognised in holds more than one Client Agent, so it
+    /// inherits nothing (ADR-0035 clause 4).
+    ambiguous: bool,
+    /// The Host this Agent last arrived over (ADR-0035 clause 2), or empty. Behind a Gateway, the
+    /// Gateway's.
+    host: String,
+    /// The `fleet.host.*` values Selectors match on this Agent, from the certificate of the Host it
+    /// arrived over directly (ADR-0035 clause 3); empty behind a Gateway.
+    host_attributes: BTreeMap<String, String>,
+    /// Reported attributes in the Server's `fleet.` space, left out of what Selectors match
+    /// (ADR-0035 clause 5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ignored_attributes: Vec<String>,
 }
 
 impl From<fleet::AgentView> for AgentResponse {
@@ -670,6 +690,12 @@ impl From<fleet::AgentView> for AgentResponse {
             stale: view.stale,
             labels: view.labels,
             shadowed_labels: view.shadowed_labels,
+            inherited_labels: view.inherited_labels,
+            client_agent: view.client_agent,
+            ambiguous: view.ambiguous,
+            host: view.host,
+            host_attributes: view.host_attributes,
+            ignored_attributes: view.ignored_attributes,
         }
     }
 }
@@ -816,18 +842,22 @@ struct LabelsBody {
     tag = "fleet",
     params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
     request_body = LabelsBody,
-    description = "Replace this Agent's labels (ADR-0024). A label is an operator's key/value pair \
-                   that joins what a Deployment's Selector matches, so a rollout channel is a \
-                   Server-side decision instead of an edit to supervisor.toml on \
-                   the host. An empty map clears them. Labels never travel to the Agent, and they \
-                   outlive it: forgetting an Agent does not clear them. A key the Agent already \
-                   reports is refused, because reported attributes decide which artifact fits the \
-                   machine and a label must never be able to overrule them.",
+    description = "Replace this Agent's labels (ADR-0024, ADR-0035). A label is an operator's \
+                   key/value pair that joins what a Deployment's Selector matches, so a rollout \
+                   channel is a Server-side decision instead of an edit to supervisor.toml on the \
+                   host. An empty map clears them. The labels of a Client's own Agent hold for the \
+                   Client's other Agents, below their own. Labels are part of the Agent's record: \
+                   they follow a re-key, forgetting the Agent removes them, and they never travel \
+                   to the Agent. A key the Agent already reports is refused, because reported \
+                   attributes decide which artifact fits the machine and a label must never be \
+                   able to overrule them; a key starting `fleet.` is refused, because the Server \
+                   fills those from the Host's certificate.",
     responses(
         (status = 200, description = "The Agent, with its new labels", body = AgentResponse),
-        (status = 400, description = "Malformed Instance UID, or an unusable label", body = ErrorBody),
+        (status = 400, description = "Malformed Instance UID, an unusable label, or a key starting `fleet.`", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
-        (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody)
+        (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody),
+        (status = 500, description = "The Agent's record could not be written", body = ErrorBody)
     )
 )]
 async fn set_agent_labels(
@@ -850,7 +880,8 @@ async fn set_agent_labels(
                  comes from, in that host's supervisor.toml, or label it under another key"
             ),
         ),
-        Err(LabelError::Storage(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(LabelError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(LabelError::Storage(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -2918,16 +2949,68 @@ struct CertificateView {
     host: Option<String>,
 }
 
-/// A host the client CA issued to (ADR-0021 clause 7).
+/// A Host: what a client certificate's host id names (ADR-0021 clause 7, ADR-0035).
 #[derive(Serialize, ToSchema)]
 struct HostView {
     host: String,
+    /// What it is shown by: the `host.name` its Client Agent reports, else the host id. Shown
+    /// only; it decides nothing (ADR-0035 clause 7).
+    name: String,
     /// A Gateway speaks for any Agent; any other host only for those it reported first.
     gateway: bool,
     /// The `instance_uid`s it speaks for, hex.
     instance_uids: Vec<String>,
     /// How many valid certificates it holds — at most three.
     certificates: usize,
+    /// The subject values of the client certificate it was issued (ADR-0035 clause 1), which the
+    /// Agents arriving over it directly carry as `fleet.host.*`.
+    subject: HostSubject,
+    /// When its enrolment was approved, in milliseconds since the Unix epoch; absent for a Host a
+    /// provisioned certificate made at its first report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approved_ms: Option<u64>,
+    /// The Agents whose record names it as the Host they last arrived over (ADR-0035 clause 2) —
+    /// for a Gateway, the Agents behind it.
+    agents: Vec<HostAgent>,
+}
+
+/// The subject values a Host carries (ADR-0035 clause 1); an empty one is absent from the
+/// certificate.
+#[derive(Serialize, ToSchema)]
+struct HostSubject {
+    /// `C`, as `fleet.host.country`.
+    country: String,
+    /// `ST`, as `fleet.host.state`.
+    state: String,
+    /// `L`, as `fleet.host.locality`.
+    locality: String,
+    /// `O`, as `fleet.host.organization`.
+    organization: String,
+    /// `OU`, as `fleet.host.site`.
+    organizational_unit: String,
+    /// `organizationIdentifier`, as `fleet.host.organization_id`.
+    organization_identifier: String,
+}
+
+/// One Agent under the Host it arrived over (ADR-0035 clause 7).
+#[derive(Serialize, ToSchema)]
+struct HostAgent {
+    instance_uid: String,
+    service_name: String,
+    service_instance_name: String,
+    /// The `host.name` it reports, or empty.
+    host_name: String,
+    /// Whether it is a Client Agent: it reports `supervisor.kind.*`.
+    client: bool,
+    /// The Instance UID of its Client Agent — its own, for the Client Agent — or empty when the
+    /// Server cannot tell.
+    client_agent: String,
+    /// Behind a Gateway, the machine it is grouped by (`host.id=…`, else `host.name=…`); empty on a
+    /// direct connection.
+    machine: String,
+    /// Its group holds more than one Client Agent, so it inherits nothing.
+    ambiguous: bool,
+    connected: bool,
 }
 
 /// Whether a host is a Gateway.
@@ -3048,13 +3131,13 @@ async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
     Json(issued).into_response()
 }
 
-/// Every host the client CA issued to, by name.
+/// Every Host, by host id, with its subject values and the Agents that arrived over it.
 #[utoipa::path(
     get,
     path = "/api/v1/hosts",
     tag = "revocation",
     responses(
-        (status = 200, description = "Every host the client CA issued to, by name", body = Vec<HostView>),
+        (status = 200, description = "Every Host, by host id, with its subject values and the Agents that arrived over it (ADR-0035)", body = Vec<HostView>),
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
@@ -3062,14 +3145,44 @@ async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
+    let mut carried = state.host_agents();
     let hosts: Vec<HostView> = revocations
         .hosts()
         .into_iter()
-        .map(|(host, entry, certificates)| HostView {
-            host,
-            gateway: entry.gateway,
-            instance_uids: entry.instance_uids.into_iter().collect(),
-            certificates,
+        .map(|(host, entry, certificates)| {
+            let agents = carried.remove(&host).unwrap_or_default();
+            let subject = entry.subject;
+            HostView {
+                name: agents.name.unwrap_or_else(|| host.clone()),
+                host,
+                gateway: entry.gateway,
+                instance_uids: entry.instance_uids.into_iter().collect(),
+                certificates,
+                subject: HostSubject {
+                    country: subject.country,
+                    state: subject.state,
+                    locality: subject.locality,
+                    organization: subject.organization,
+                    organizational_unit: subject.organizational_unit,
+                    organization_identifier: subject.organization_identifier,
+                },
+                approved_ms: entry.approved_ms,
+                agents: agents
+                    .agents
+                    .into_iter()
+                    .map(|agent| HostAgent {
+                        instance_uid: agent.instance_uid,
+                        service_name: agent.service_name,
+                        service_instance_name: agent.service_instance_name,
+                        host_name: agent.host_name,
+                        client: agent.client,
+                        client_agent: agent.client_agent,
+                        machine: agent.machine,
+                        ambiguous: agent.ambiguous,
+                        connected: agent.connected,
+                    })
+                    .collect(),
+            }
         })
         .collect();
     Json(hosts).into_response()
@@ -3094,10 +3207,10 @@ async fn set_gateway(
     Path(host): Path<String>,
     Json(request): Json<GatewayRequest>,
 ) -> Response {
-    let Some(revocations) = state.revocations() else {
+    if state.revocations().is_none() {
         return revocation_off();
-    };
-    match revocations.set_gateway(&host, request.gateway) {
+    }
+    match state.set_gateway(&host, request.gateway) {
         Ok(true) => {
             info!(%host, gateway = request.gateway, "gateway mark set");
             note(

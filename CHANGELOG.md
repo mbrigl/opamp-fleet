@@ -38,7 +38,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   key, `missing` with none). An invalid signature is shown as a warning and kept; each Client's own
   check still decides what is installed. A malformed key fails startup.
 
+- **Hosts, and a Hosts tab** ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). A Host is what a
+  client certificate of this Server names: the Server writes it when you approve its enrolment, or
+  at the first report of a provisioned certificate that names a host id, with the certificate's
+  subject values. The new Hosts tab lists each Host — its name (the `host.name` its Client's own
+  Agent reports, else the host id), its subject values, the Gateway mark, its valid certificates
+  and when each ends, and its Agents — and marks a Gateway or revokes a Host's certificates from
+  its row. Selecting a Host shows its Agents grouped by Client; for a Gateway, the Agents behind
+  it. `GET /api/v1/hosts` adds `name`, `subject`, `approved_ms` and `agents`, and each Agent in
+  `GET /api/v1/agents` names its `host`.
+
+- **Selectors can match the Host's certificate, and a Client's own Agent labels its whole Client**
+  ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). An Agent on a direct
+  connection carries its Host's subject values as `fleet.host.country`, `fleet.host.state`,
+  `fleet.host.locality`, `fleet.host.organization`, `fleet.host.site` (the organizational unit)
+  and `fleet.host.organization_id`, which no Agent can report over; an Agent behind a Gateway
+  carries none. Today's host certificates carry a common name only, so these are empty until the
+  certificate carries more. The labels of a Client's own Agent — the one reporting
+  `supervisor.kind.*` — hold for that Client's Supervisor Agents below their own labels; behind a
+  Gateway the Agents are grouped by the `host.id` (else `host.name`) they report, and a group with
+  two Client Agents inherits nothing and is marked `ambiguous`. The Agents tab marks inherited
+  labels. **What to do:** label a Client's own Agent once instead of each of its Agents.
+
 ### Changed
+
+- **Labels are part of the Agent's record, and forgetting an Agent removes them**
+  ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). Labels follow an Agent
+  the Server re-keys, and are gone with an Agent you forget; one that comes back starts with only
+  what its Client Agent's labels give it. The `labels/` directory under `config_dir` is no longer
+  read or written, and the Agent records under `agents/` are kept in a new shape. A label key
+  starting `fleet.` is refused `400`, and a reported attribute starting `fleet.` is left out of what
+  Selectors match and listed in `ignored_attributes` on the Agent. A label that cannot be written
+  is answered `500`. **What to do:** before upgrading, note the labels you rely on
+  (`GET /api/v1/agents`). A record written by an earlier Server fails the start naming the file:
+  clear `<config_dir>/agents/` — every Agent re-reports on its next message, and what is lost is
+  the rollouts, which a press on each Deployment writes again, and the labels, which you set again
+  on the Agents tab, best on each Client's own Agent. `<config_dir>/labels/` can then be deleted.
 
 - **A Deployment carries Configurations, and is the one thing rolled out** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)). A
   Deployment holds any number of Configurations beside its Packages

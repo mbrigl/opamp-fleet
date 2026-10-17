@@ -2,7 +2,7 @@
 //! connection that carried a message (ADR-0015).
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,7 +28,7 @@ use crate::audit::{Audit, Entry};
 use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::deployments::{self, deployment_for, Deployment, DeploymentError, DeploymentStore};
 use crate::enrolment::{DecisionError, Enrolment};
-use crate::labels::{LabelError, LabelStore};
+use crate::labels::{LabelError, Sources};
 use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, SignatureState};
 use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor};
 
@@ -112,10 +112,14 @@ pub struct AgentRecord {
     /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
     /// report from a *different* live connection is the duplicate the Baseline wants detected.
     pub owner: Option<ConnId>,
-    /// The operator's labels for this Agent (ADR-0024), mirrored from the persisted store so that
-    /// every place a Selector is matched sees them without a second lookup. The store is the
-    /// authority; this copy is written when the labels are and when the record is created.
+    /// The operator's labels for this Agent (ADR-0024), part of its persisted record (ADR-0035
+    /// clause 6): they follow a re-key and leave with a forget.
     pub labels: BTreeMap<String, String>,
+    /// The Host this Agent last arrived over (ADR-0035 clause 2): its own on a direct connection,
+    /// the Gateway's behind one. For the fleet view and label inheritance; it grants nothing.
+    pub host: Option<String>,
+    /// Where the Host and the Client Agent place this Agent — derived, never persisted.
+    pub placement: Placement,
     /// What the operator's last rollout released to this Agent (ADR-0034 clause 5). **Every offer
     /// is composed from this**; matching only proposes. Written by the rollout acts, persisted like
     /// `restart_pending` — operator intent that survives a restart (ADR-0024). `None` is what it
@@ -146,18 +150,54 @@ pub struct Assignment {
 /// The configuration map of an Agent nothing was rolled out to.
 static NO_CONFIGURATIONS: BTreeMap<String, String> = BTreeMap::new();
 
+/// The Agents one Client presents (ADR-0035 clause 4), as far as the Server can tell them apart.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Group {
+    /// On a direct connection: the Agents arriving over the same Host.
+    Host(String),
+    /// Behind a Gateway: the Agents arriving over the same Gateway Host that report the same
+    /// machine — `host.id`, else `host.name` ([`crate::labels::machine`]).
+    Behind { gateway: String, machine: String },
+}
+
+/// What the Host an Agent arrived over and its Client Agent add to its effective description
+/// (ADR-0035 clauses 3 and 4). Derived from the records and the host register whenever either
+/// changes; never persisted.
+#[derive(Clone, Debug, Default)]
+pub struct Placement {
+    /// The `fleet.host.*` values of the Host it arrived over directly; empty behind a Gateway.
+    pub host_values: BTreeMap<String, String>,
+    /// The Client it belongs to, when the Server can tell.
+    pub group: Option<Group>,
+    /// Its Client Agent — itself, for the Client Agent — when its group holds exactly one.
+    pub client_agent: Option<InstanceUid>,
+    /// The labels of its Client Agent; empty for the Client Agent itself.
+    pub inherited: BTreeMap<String, String>,
+    /// Its group holds more than one Client Agent, so nothing is inherited.
+    pub ambiguous: bool,
+}
+
 impl AgentRecord {
-    /// What a Selector is matched against: what the Agent reported, plus the labels that do not
-    /// collide with it (ADR-0024).
+    /// What a Selector is matched against (ADR-0035 clause 3): the Host's values, what the Agent
+    /// reported, its own labels and its Client Agent's, each key from the first that has it.
     ///
-    /// Borrowed when there are no labels, which is the overwhelming majority of Agents — labelling
-    /// should cost the fleet view nothing on the hosts nobody has labelled.
+    /// Borrowed when it adds nothing to the report, which is the overwhelming majority of Agents —
+    /// labelling should cost the fleet view nothing on the hosts nobody has labelled.
     pub fn effective_description(&self) -> Option<Cow<'_, AgentDescription>> {
-        if self.labels.is_empty() {
+        let sources = self.sources();
+        if sources.adds_nothing() {
             return self.description.as_ref().map(Cow::Borrowed);
         }
-        crate::labels::effective_description(self.description.as_ref(), &self.labels)
-            .map(Cow::Owned)
+        crate::labels::effective_description(&sources).map(Cow::Owned)
+    }
+
+    fn sources(&self) -> Sources<'_> {
+        Sources {
+            host: &self.placement.host_values,
+            reported: self.description.as_ref(),
+            own: &self.labels,
+            inherited: &self.placement.inherited,
+        }
     }
 
     /// The Package rolled out to this Agent, if any.
@@ -203,13 +243,15 @@ impl AgentRecord {
             last_seen_ms: self.last_seen_ms,
             restart_pending: self.restart_pending,
             assignment: self.assignment.clone(),
+            labels: self.labels.clone(),
+            host: self.host.clone(),
         }
     }
 
     /// A restored record is **disconnected with no owning connection** until live evidence says
-    /// otherwise — connectedness is runtime-only (ADR-0024). The labels mirror is filled from
-    /// the `LabelStore`, which stays their single authority.
-    fn from_persisted(persisted: PersistedAgent, labels: BTreeMap<String, String>) -> AgentRecord {
+    /// otherwise — connectedness is runtime-only (ADR-0024). Its placement is derived once the
+    /// fleet is whole.
+    fn from_persisted(persisted: PersistedAgent) -> AgentRecord {
         AgentRecord {
             sequence_num: persisted.sequence_num,
             capabilities: persisted.capabilities,
@@ -225,7 +267,9 @@ impl AgentRecord {
             connection_settings_status: persisted.connection_settings_status,
             package_statuses: persisted.package_statuses,
             owner: None,
-            labels,
+            labels: persisted.labels,
+            host: persisted.host,
+            placement: Placement::default(),
             assignment: persisted.assignment,
         }
     }
@@ -466,10 +510,9 @@ pub struct AppState {
     /// heartbeat from reaching any storage backend (ADR-0024). Locked strictly after `fleet`.
     written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
     configs: ConfigStore,
-    /// The operator's labels on Agents (ADR-0024), which join what a Selector matches. Persisted
-    /// beside the Configurations, because they are the same kind of thing: intent about the fleet
-    /// that has to be there after a restart.
-    labels: Box<dyn LabelStore>,
+    /// Which Agents each [`Group`] holds (ADR-0035 clause 4), so placing one Agent touches its
+    /// group alone. Locked strictly after `fleet`, and only while it is held.
+    groups: Mutex<HashMap<Group, HashSet<InstanceUid>>>,
     push: watch::Sender<u64>,
     /// Hands every WebSocket connection its identity for the duplicate detection.
     next_conn: AtomicU64,
@@ -525,13 +568,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Builds the state on any backend for the Agent records, the labels (ADR-0024) and the
-    /// Configurations (ADR-0025). The ports are the only thing the fleet logic knows about that
-    /// persistence, so a database or an external store is an implementation of [`AgentStore`],
-    /// [`LabelStore`] or [`ConfigBackend`] plus one wiring call.
+    /// Builds the state on any backend for the Agent records, their labels included (ADR-0024,
+    /// ADR-0035), and the Configurations (ADR-0025). The ports are the only thing the fleet logic
+    /// knows about that persistence, so a database or an external store is an implementation of
+    /// [`AgentStore`] or [`ConfigBackend`] plus one wiring call.
     pub fn with_stores(
         agent_store: Box<dyn AgentStore>,
-        labels: Box<dyn LabelStore>,
         configs: Box<dyn ConfigBackend>,
         clock: Box<dyn Clock>,
     ) -> Result<Self, String> {
@@ -552,19 +594,18 @@ impl AppState {
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
         for (uid, persisted) in agent_store.load()? {
-            let agent_labels = labels.get(&uid);
             written.insert(uid, persisted.durable_digest());
-            fleet.insert(uid, AgentRecord::from_persisted(persisted, agent_labels));
+            fleet.insert(uid, AgentRecord::from_persisted(persisted));
         }
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
         }
-        Ok(AppState {
+        let state = AppState {
             fleet: Mutex::new(fleet),
             agent_store,
             written: Mutex::new(written),
             configs,
-            labels,
+            groups: Mutex::new(HashMap::new()),
             push: watch::channel(0).0,
             next_conn: AtomicU64::new(1),
             connection_offer: None,
@@ -583,7 +624,9 @@ impl AppState {
             uploading_bytes: AtomicU64::new(0),
             stale_after: DEFAULT_STALE_AFTER,
             max_agents: DEFAULT_MAX_AGENTS,
-        })
+        };
+        state.place_all();
+        Ok(state)
     }
 
     /// Sets the message size limit both transports enforce (the Baseline recommends the default
@@ -733,7 +776,118 @@ impl AppState {
     #[must_use]
     pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
         self.revocations = revocations;
+        // The Hosts the records name are known now: their values and Gateway marks place them.
+        self.place_all();
         self
+    }
+
+    /// Marks `host` as a Gateway, or not (ADR-0021 clause 7); answers whether this Server knows
+    /// the host. The mark decides whether the Agents arriving over it carry its values and how
+    /// they group (ADR-0035 clauses 3 and 4), so every Agent is placed again.
+    ///
+    /// # Errors
+    /// Returns an error when there is no host register or the change cannot be written.
+    pub fn set_gateway(&self, host: &str, gateway: bool) -> Result<bool, String> {
+        let revocations = self
+            .revocations
+            .as_ref()
+            .ok_or_else(|| "revocation is not configured".to_string())?;
+        let known = revocations.set_gateway(host, gateway)?;
+        if known {
+            self.place_all();
+        }
+        Ok(known)
+    }
+
+    /// Where the Host an Agent arrived over places it (ADR-0035 clauses 3 and 4): the
+    /// `fleet.host.*` values of a Host it arrived over directly, and the group its Client is
+    /// recognised in. Nothing without a host register, and nothing for an Agent that names no
+    /// Host.
+    fn locate(&self, record: &AgentRecord) -> (BTreeMap<String, String>, Option<Group>) {
+        let (Some(host), Some(revocations)) = (&record.host, &self.revocations) else {
+            return (BTreeMap::new(), None);
+        };
+        let (gateway, subject) = revocations.placement(host);
+        if gateway {
+            let group =
+                crate::labels::machine(record.description.as_ref()).map(|machine| Group::Behind {
+                    gateway: host.clone(),
+                    machine,
+                });
+            return (BTreeMap::new(), group);
+        }
+        let values = subject
+            .attributes()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        (values, Some(Group::Host(host.clone())))
+    }
+
+    /// Places every Agent again — at startup, once the host register is known, and when a Gateway
+    /// mark changes.
+    fn place_all(&self) {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let mut groups = self.groups.lock().expect("groups lock");
+        groups.clear();
+        for (uid, record) in fleet.iter_mut() {
+            let (host_values, group) = self.locate(record);
+            record.placement = Placement {
+                host_values,
+                group: group.clone(),
+                ..Placement::default()
+            };
+            if let Some(group) = group {
+                groups.entry(group).or_default().insert(*uid);
+            }
+        }
+        for group in groups.keys() {
+            inherit(&mut fleet, &groups, group);
+        }
+    }
+
+    /// Places one Agent again after what places it may have changed — its Host, its report, or
+    /// its identity — and the groups it left and joined with it.
+    fn place(&self, fleet: &mut HashMap<InstanceUid, AgentRecord>, uid: &InstanceUid) {
+        let Some(record) = fleet.get_mut(uid) else {
+            return;
+        };
+        let (host_values, group) = self.locate(record);
+        record.placement.host_values = host_values;
+        let left = std::mem::replace(&mut record.placement.group, group.clone());
+        if group.is_none() {
+            record.placement.client_agent = None;
+            record.placement.inherited.clear();
+            record.placement.ambiguous = false;
+        }
+        let mut groups = self.groups.lock().expect("groups lock");
+        if left != group {
+            if let Some(left) = &left {
+                unindex(&mut groups, left, uid);
+            }
+        }
+        if let Some(joined) = &group {
+            groups.entry(joined.clone()).or_default().insert(*uid);
+            inherit(fleet, &groups, joined);
+        }
+        if let Some(left) = left.filter(|left| Some(left) != group.as_ref()) {
+            inherit(fleet, &groups, &left);
+        }
+    }
+
+    /// Takes an Agent that left the fleet, or its old identity, out of its group, and places what
+    /// is left of the group again.
+    fn unplace(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        uid: &InstanceUid,
+        group: Option<Group>,
+    ) {
+        let Some(group) = group else {
+            return;
+        };
+        let mut groups = self.groups.lock().expect("groups lock");
+        unindex(&mut groups, &group, uid);
+        inherit(fleet, &groups, &group);
     }
 
     /// The register and the revocation list.
@@ -1221,30 +1375,34 @@ impl AppState {
     ///
     /// A label move changes only what the fleet view **proposes** (ADR-0025): the Agent's
     /// candidates follow its new channel, and nothing is distributed until a rollout act says so.
+    ///
+    /// The labels are part of the Agent's record (ADR-0035 clause 6) and are written with it before
+    /// this answers. A Client Agent's labels hold for its Client's other Agents (clause 4), so its
+    /// group is placed again.
     pub fn set_labels(
         &self,
         uid: &InstanceUid,
         set: BTreeMap<String, String>,
     ) -> Result<(), LabelError> {
-        crate::labels::check_pairs(&set).map_err(LabelError::Storage)?;
+        crate::labels::check_pairs(&set).map_err(LabelError::Invalid)?;
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get_mut(uid).ok_or(LabelError::UnknownAgent)?;
         let reported = crate::labels::reported_keys(record.description.as_ref());
         if let Some(clash) = set.keys().find(|key| reported.iter().any(|r| r == *key)) {
             return Err(LabelError::RestatesReported(clash.clone()));
         }
-        self.labels
-            .put(uid, set.clone())
-            .map_err(LabelError::Storage)?;
-        record.labels = set;
+        let previous = std::mem::replace(&mut record.labels, set);
+        if let Err(e) = self.persist(uid, record) {
+            record.labels = previous;
+            return Err(LabelError::Storage(e));
+        }
+        if let Some(group) = record.placement.group.clone() {
+            let groups = self.groups.lock().expect("groups lock");
+            inherit(&mut fleet, &groups, &group);
+        }
         drop(fleet);
         info!(agent = %uid, "labels set — candidates follow, nothing is distributed");
         Ok(())
-    }
-
-    /// This Agent's labels as the store holds them, for the REST view.
-    pub fn labels_of(&self, uid: &InstanceUid) -> BTreeMap<String, String> {
-        self.labels.get(uid)
     }
 
     /// Which Deployments hold each Package, keyed by `<agent type>@<version>` — how a Package
@@ -1356,10 +1514,13 @@ impl AppState {
         }
         let removed = fleet.remove(uid);
         // Forgetting that left a stored record behind would be the "remembering under another
-        // name" ADR-0024 rejected — the record leaves the store with the row (ADR-0024).
+        // name" ADR-0024 rejected — the record leaves the store with the row, its labels with it
+        // (ADR-0024, ADR-0035 clause 6).
         self.unpersist(uid);
-        // A pinned revision only this Agent referenced is unreferenced now (ADR-0025).
         if let Some(record) = removed {
+            // A Client Agent forgotten takes its labels from the Agents that inherited them.
+            self.unplace(&mut fleet, uid, record.placement.group.clone());
+            // A pinned revision only this Agent referenced is unreferenced now (ADR-0025).
             self.collect_revisions(&fleet, record.assigned_configurations().keys().cloned());
         }
         drop(fleet);
@@ -1455,18 +1616,23 @@ impl AppState {
     /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
     /// one that refuses reports.
     fn persist_if_dirty(&self, uid: &InstanceUid, record: &AgentRecord) {
+        if let Err(e) = self.persist(uid, record) {
+            warn!(agent = %uid, error = %e, "cannot persist the agent record");
+        }
+    }
+
+    /// Writes one record when its durable content changed since it was last written, and says
+    /// whether the write failed — for an operator's act that must not be answered unwritten.
+    fn persist(&self, uid: &InstanceUid, record: &AgentRecord) -> Result<(), String> {
         let persisted = record.to_persisted();
         let digest = persisted.durable_digest();
         let mut written = self.written.lock().expect("written lock");
         if written.get(uid) == Some(&digest) {
-            return;
+            return Ok(());
         }
-        match self.agent_store.put(uid, &persisted) {
-            Ok(()) => {
-                written.insert(*uid, digest);
-            }
-            Err(e) => warn!(agent = %uid, error = %e, "cannot persist the agent record"),
-        }
+        self.agent_store.put(uid, &persisted)?;
+        written.insert(*uid, digest);
+        Ok(())
     }
 
     /// Drops one record from the store and the dirty-check ledger — the storage half of
@@ -1588,8 +1754,12 @@ impl AppState {
             && msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0
         {
             let new_uid = InstanceUid::default();
-            if let Some(record) = fleet.remove(&uid) {
+            if let Some(mut record) = fleet.remove(&uid) {
+                // The labels go with it (ADR-0035 clause 6); the old identity leaves its group,
+                // and the new one is placed below.
+                let group = record.placement.group.take();
                 fleet.insert(new_uid, record);
+                self.unplace(&mut fleet, &uid, group);
                 // The persisted record follows the identity (ADR-0024): the old key leaves the
                 // store now, the new one is written by the dirty check at this exchange's end.
                 self.unpersist(&uid);
@@ -1646,7 +1816,10 @@ impl AppState {
         }
         if let Some(revocations) = &self.revocations {
             if let Some((host, bound)) = binding {
-                if let Err(e) = revocations.check_report(host, bound.as_bytes()) {
+                let subject = presented
+                    .map(|p| p.subject_values.clone())
+                    .unwrap_or_default();
+                if let Err(e) = revocations.check_report(host, &subject, bound.as_bytes()) {
                     return Processed {
                         reply: bad_request(&e),
                         uid: None,
@@ -1661,13 +1834,12 @@ impl AppState {
                 }
             }
         }
-        // Labels outlive the record (ADR-0024): a host that was forgotten, or that this Server has
-        // only just restarted into, comes back in the channel the operator put it in.
-        let persisted_labels = self.labels.get(&uid);
         let record = fleet.entry(uid).or_insert_with(|| {
             info!(agent = %uid, transport = transport.as_str(), "new agent");
             AgentRecord {
-                labels: persisted_labels,
+                labels: BTreeMap::new(),
+                host: None,
+                placement: Placement::default(),
                 sequence_num: msg.sequence_num,
                 capabilities: 0,
                 description: None,
@@ -1696,6 +1868,15 @@ impl AppState {
         if compressed && (!known || gap) {
             reply_flags |= ServerToAgentFlags::ReportFullState as u64;
         }
+
+        // The Host it arrived over (ADR-0035 clause 2) — none without a host register.
+        let arrived_over = self
+            .revocations
+            .as_ref()
+            .and(presented.and_then(|p| p.host.clone()));
+        let moved = record.host != arrived_over;
+        record.host = arrived_over;
+        let described = msg.agent_description.is_some();
 
         record.sequence_num = msg.sequence_num;
         record.transport = transport;
@@ -1781,6 +1962,13 @@ impl AppState {
                 record.available_components = Some(incoming);
             }
         }
+
+        // What places it in its Client and under its Host may have changed (ADR-0035): a new
+        // record, a new Host, or a new description.
+        if !known || moved || described {
+            self.place(&mut fleet, &uid);
+        }
+        let record = fleet.get_mut(&uid).expect("the record was just written");
 
         // The Agent asked to be issued a client certificate (ADR-0021). Signing it here, on the
         // connection it arrived over, is the whole of the approval: admission already required
@@ -2336,6 +2524,58 @@ impl AppState {
         }
     }
 
+    /// The Agents each Host carries (ADR-0035 clause 7) — those whose record names it as the Host
+    /// they last arrived over — and the name it is displayed by: the `host.name` its Client Agent
+    /// reports, when it has exactly one on a direct connection. Shown only; it decides nothing.
+    pub fn host_agents(&self) -> BTreeMap<String, HostAgents> {
+        let fleet = self.fleet.lock().expect("fleet lock");
+        let mut hosts: BTreeMap<String, HostAgents> = BTreeMap::new();
+        for (uid, record) in fleet.iter() {
+            let Some(host) = &record.host else { continue };
+            let reported = |key: &str| {
+                record
+                    .description
+                    .as_ref()
+                    .and_then(|d| {
+                        attributes::string_value(&d.identifying_attributes, key).or_else(|| {
+                            attributes::string_value(&d.non_identifying_attributes, key)
+                        })
+                    })
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let entry = hosts.entry(host.clone()).or_default();
+            let is_client_agent = record.placement.client_agent == Some(*uid);
+            if is_client_agent && record.placement.group == Some(Group::Host(host.clone())) {
+                entry.name = Some(reported("host.name")).filter(|name| !name.is_empty());
+            }
+            entry.agents.push(HostAgentView {
+                instance_uid: uid.to_string(),
+                service_name: reported(attributes::SERVICE_NAME),
+                service_instance_name: reported(attributes::SERVICE_INSTANCE_NAME),
+                host_name: reported("host.name"),
+                client: crate::labels::is_client_agent(record.description.as_ref()),
+                client_agent: record
+                    .placement
+                    .client_agent
+                    .map(|uid| uid.to_string())
+                    .unwrap_or_default(),
+                machine: match &record.placement.group {
+                    Some(Group::Behind { machine, .. }) => machine.clone(),
+                    _ => String::new(),
+                },
+                ambiguous: record.placement.ambiguous,
+                connected: record.connected,
+            });
+        }
+        for entry in hosts.values_mut() {
+            entry
+                .agents
+                .sort_by(|a, b| a.instance_uid.cmp(&b.instance_uid));
+        }
+        hosts
+    }
+
     /// The REST view of the fleet (`GET /api/v1/agents`).
     pub fn snapshot(&self) -> Vec<AgentView> {
         let fleet = self.fleet.lock().expect("fleet lock");
@@ -2391,6 +2631,54 @@ impl AppState {
             .collect();
         agents.sort_by(|a, b| a.instance_uid.cmp(&b.instance_uid));
         agents
+    }
+}
+
+/// Takes `uid` out of `group`, and the group out of the index once it holds nobody.
+fn unindex(groups: &mut HashMap<Group, HashSet<InstanceUid>>, group: &Group, uid: &InstanceUid) {
+    if let Some(members) = groups.get_mut(group) {
+        members.remove(uid);
+        if members.is_empty() {
+            groups.remove(group);
+        }
+    }
+}
+
+/// Places the members of one group under their Client Agent (ADR-0035 clause 4): with exactly
+/// one, the others inherit its labels; with more than one, nobody inherits and every member is
+/// marked ambiguous; with none, nobody inherits.
+fn inherit(
+    fleet: &mut HashMap<InstanceUid, AgentRecord>,
+    groups: &HashMap<Group, HashSet<InstanceUid>>,
+    group: &Group,
+) {
+    let Some(members) = groups.get(group) else {
+        return;
+    };
+    let clients: Vec<InstanceUid> = members
+        .iter()
+        .filter(|uid| {
+            fleet
+                .get(uid)
+                .is_some_and(|record| crate::labels::is_client_agent(record.description.as_ref()))
+        })
+        .copied()
+        .collect();
+    let (client_agent, labels) = match clients.as_slice() {
+        [one] => (Some(*one), fleet[one].labels.clone()),
+        _ => (None, BTreeMap::new()),
+    };
+    let ambiguous = clients.len() > 1;
+    for uid in members {
+        if let Some(record) = fleet.get_mut(uid) {
+            record.placement.client_agent = client_agent;
+            record.placement.inherited = if client_agent == Some(*uid) {
+                BTreeMap::new()
+            } else {
+                labels.clone()
+            };
+            record.placement.ambiguous = ambiguous;
+        }
     }
 }
 
@@ -2520,6 +2808,35 @@ fn display_version(reported: &str) -> String {
         .to_string()
 }
 
+/// The Agents one Host carries, and the name it is shown by (ADR-0035 clause 7).
+#[derive(Default)]
+pub struct HostAgents {
+    /// The `host.name` its Client Agent reports; `None` for a Gateway, and while it has no single
+    /// Client Agent.
+    pub name: Option<String>,
+    pub agents: Vec<HostAgentView>,
+}
+
+/// One Agent under the Host it arrived over (ADR-0035 clause 7): enough to group it by its
+/// Client Agent.
+pub struct HostAgentView {
+    pub instance_uid: String,
+    pub service_name: String,
+    pub service_instance_name: String,
+    /// The `host.name` it reports, or empty.
+    pub host_name: String,
+    /// Whether it is a Client Agent: it reports `supervisor.kind.*`.
+    pub client: bool,
+    /// The Instance UID of its Client Agent — its own, for the Client Agent — or empty.
+    pub client_agent: String,
+    /// Behind a Gateway, the machine it is grouped by (`host.id=…` or `host.name=…`); empty on
+    /// a direct connection.
+    pub machine: String,
+    /// Its group holds more than one Client Agent.
+    pub ambiguous: bool,
+    pub connected: bool,
+}
+
 /// One Agent as the REST API and the UI see it.
 #[derive(Serialize)]
 pub struct AgentView {
@@ -2640,6 +2957,26 @@ pub struct AgentView {
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed_labels: Vec<String>,
+    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0035
+    /// clause 4); empty for the Client Agent itself, for an Agent whose Client the Server cannot
+    /// tell, and for an ambiguous one.
+    pub inherited_labels: BTreeMap<String, String>,
+    /// The Instance UID of this Agent's Client Agent — its own, for the Client Agent — or empty
+    /// when the Server cannot tell.
+    pub client_agent: String,
+    /// The group this Agent's Client is recognised in holds more than one Client Agent, so it
+    /// inherits nothing (ADR-0035 clause 4).
+    pub ambiguous: bool,
+    /// The Host this Agent last arrived over (ADR-0035 clause 2), or empty. Behind a Gateway, the
+    /// Gateway's.
+    pub host: String,
+    /// The `fleet.host.*` values its effective description takes from that Host (ADR-0035
+    /// clause 3); empty behind a Gateway.
+    pub host_attributes: BTreeMap<String, String>,
+    /// Reported attributes in the Server's `fleet.` space, left out of what Selectors match
+    /// (ADR-0035 clause 5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored_attributes: Vec<String>,
 }
 
 /// One Configuration waiting for a rollout act toward one Agent (ADR-0025).
@@ -2916,6 +3253,16 @@ impl AgentView {
             stale,
             shadowed_labels: crate::labels::shadowed(record.description.as_ref(), &record.labels),
             labels: record.labels.clone(),
+            inherited_labels: record.placement.inherited.clone(),
+            client_agent: record
+                .placement
+                .client_agent
+                .map(|uid| uid.to_string())
+                .unwrap_or_default(),
+            ambiguous: record.placement.ambiguous,
+            host: record.host.clone().unwrap_or_default(),
+            host_attributes: record.placement.host_values.clone(),
+            ignored_attributes: crate::labels::ignored(record.description.as_ref()),
         }
     }
 }
@@ -3281,6 +3628,8 @@ mod tests {
             package_statuses: None,
             owner: None,
             labels: BTreeMap::new(),
+            host: None,
+            placement: Placement::default(),
             assignment: None,
         }
     }
@@ -3749,6 +4098,7 @@ mod tests {
         let presented = |host: &str, serial: &str| Presented {
             id: CertId::new(b"CA", serial),
             host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
         };
         let victim = InstanceUid::default();
         let own = state.process_presented(
@@ -3839,6 +4189,7 @@ mod tests {
         let presented = |host: &str| Presented {
             id: CertId::new(b"CA", host),
             host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
         };
         let first = InstanceUid::default();
         let accepted = state.process_presented(
@@ -3948,6 +4299,7 @@ mod tests {
             Some(&Presented {
                 id: CertId::new(b"CA", host),
                 host: Some(host.to_string()),
+                subject_values: crate::revocation::SubjectValues::default(),
             }),
         )
     }
@@ -3974,6 +4326,7 @@ mod tests {
             Some(&Presented {
                 id: CertId::new(b"CA", "h2"),
                 host: Some("h2".to_string()),
+                subject_values: crate::revocation::SubjectValues::default(),
             }),
         );
 
@@ -4024,6 +4377,7 @@ mod tests {
             Some(&Presented {
                 id: CertId::new(b"CA", "h1"),
                 host: Some("h1".to_string()),
+                subject_values: crate::revocation::SubjectValues::default(),
             }),
         );
         assert!(reply.reply.packages_available.is_none(), "no offer");
@@ -4118,6 +4472,7 @@ mod tests {
             Some(&Presented {
                 id: CertId::new(b"CA", "h1"),
                 host: Some("h1".to_string()),
+                subject_values: crate::revocation::SubjectValues::default(),
             }),
         )
     }
@@ -4475,5 +4830,302 @@ mod tests {
             .expect("re-aim");
         assert_eq!(state.rollout_deployment("canary").expect("rollout"), 1);
         assert!(state.delete_deployment("stable").expect("deleted"));
+    }
+
+    // ---- Hosts, the effective description and label inheritance (ADR-0035) ----
+
+    /// A fleet whose host register is kept in `dir`, so a reopen restores both.
+    fn hosted_fleet(dir: &std::path::Path) -> AppState {
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir.join("revocation")).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        AppState::new(dir.join("configs"))
+            .expect("state")
+            .with_revocations(Some(revocations))
+    }
+
+    fn organization(name: &str) -> crate::revocation::SubjectValues {
+        crate::revocation::SubjectValues {
+            organization: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// A full report from `uid` describing itself with `pairs`, over a certificate naming `host`
+    /// whose subject carries `subject`.
+    fn report_over(
+        state: &AppState,
+        host: &str,
+        subject: crate::revocation::SubjectValues,
+        uid: InstanceUid,
+        pairs: &[(&str, &str)],
+    ) -> Processed {
+        let mut message = report(&uid, 1);
+        message
+            .agent_description
+            .as_mut()
+            .expect("described")
+            .non_identifying_attributes = pairs
+            .iter()
+            .map(|(key, value)| opamp::attributes::string_attr(key, value))
+            .collect();
+        state.process_presented(
+            message,
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", host),
+                host: Some(host.to_string()),
+                subject_values: subject,
+            }),
+        )
+    }
+
+    /// Whether a Selector of `pairs` matches this Agent — the one test every Selector is decided by.
+    fn selects(state: &AppState, uid: &InstanceUid, pairs: &[(&str, &str)]) -> bool {
+        let selector: BTreeMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        let fleet = state.fleet.lock().expect("fleet lock");
+        let record = fleet.get(uid).expect("known");
+        deployments::matches(&selector, record.effective_description().as_deref())
+    }
+
+    fn view(state: &AppState, uid: &InstanceUid) -> AgentView {
+        state
+            .snapshot()
+            .into_iter()
+            .find(|view| view.instance_uid == uid.to_string())
+            .expect("in the view")
+    }
+
+    fn label(state: &AppState, uid: &InstanceUid, pairs: &[(&str, &str)]) {
+        let set = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        if state.set_labels(uid, set).is_err() {
+            panic!("labels refused");
+        }
+    }
+
+    /// An Agent on a direct connection carries its Host's subject values as `fleet.host.*`; an
+    /// Agent that reports `fleet.host.organization` itself is not selected by it, and the attribute
+    /// is listed as ignored. Without a host register an Agent names no Host.
+    /// Verifies: ADR-0035
+    #[test]
+    fn a_direct_agent_matches_its_hosts_values_and_none_it_reports_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let honest = InstanceUid::default();
+        report_over(&state, "h1", organization("Kunde GmbH"), honest, &[]);
+        assert!(selects(
+            &state,
+            &honest,
+            &[("fleet.host.organization", "Kunde GmbH")]
+        ));
+        assert_eq!(view(&state, &honest).host, "h1");
+        assert_eq!(
+            view(&state, &honest).host_attributes["fleet.host.organization"],
+            "Kunde GmbH"
+        );
+
+        // On a Host of its own whose certificate carries no organization.
+        let claimant = InstanceUid::default();
+        report_over(
+            &state,
+            "h2",
+            crate::revocation::SubjectValues::default(),
+            claimant,
+            &[("fleet.host.organization", "Kunde GmbH")],
+        );
+        assert!(!selects(
+            &state,
+            &claimant,
+            &[("fleet.host.organization", "Kunde GmbH")]
+        ));
+        assert_eq!(
+            view(&state, &claimant).ignored_attributes,
+            ["fleet.host.organization"]
+        );
+
+        // On the Host whose values it would contradict, the Host's value is what matches.
+        let liar = InstanceUid::default();
+        report_over(
+            &state,
+            "h1",
+            organization("Kunde GmbH"),
+            liar,
+            &[("fleet.host.organization", "Mitbewerber AG")],
+        );
+        assert!(selects(
+            &state,
+            &liar,
+            &[("fleet.host.organization", "Kunde GmbH")]
+        ));
+        assert!(!selects(
+            &state,
+            &liar,
+            &[("fleet.host.organization", "Mitbewerber AG")]
+        ));
+
+        // A Server without a host register has no Hosts, and its records name none.
+        let bare = AppState::new(dir.path().join("bare")).expect("state");
+        let uid = InstanceUid::default();
+        report_over(&bare, "h1", organization("Kunde GmbH"), uid, &[]);
+        assert_eq!(view(&bare, &uid).host, "");
+        assert!(!selects(
+            &bare,
+            &uid,
+            &[("fleet.host.organization", "Kunde GmbH")]
+        ));
+    }
+
+    /// A Supervisor Agent matches a Selector on a label set only on its Client Agent, its own label
+    /// of the same key wins, the Agents tab is told which labels are inherited, and all of it
+    /// survives a restart.
+    /// Verifies: ADR-0035
+    #[test]
+    fn a_supervisor_agent_inherits_its_client_agents_labels_below_its_own() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = InstanceUid::default();
+        let supervisor = InstanceUid::default();
+        {
+            let state = hosted_fleet(dir.path());
+            report_over(
+                &state,
+                "h1",
+                organization("Kunde GmbH"),
+                client,
+                &[("supervisor.kind.collector", "true")],
+            );
+            report_over(&state, "h1", organization("Kunde GmbH"), supervisor, &[]);
+            label(&state, &client, &[("ring", "early"), ("site", "wien")]);
+            label(&state, &supervisor, &[("ring", "late")]);
+            assert!(selects(&state, &supervisor, &[("site", "wien")]));
+            assert!(selects(&state, &supervisor, &[("ring", "late")]));
+            assert!(!selects(&state, &supervisor, &[("ring", "early")]));
+            assert!(selects(&state, &client, &[("ring", "early")]));
+        }
+        let state = hosted_fleet(dir.path());
+        assert!(
+            selects(&state, &supervisor, &[("site", "wien"), ("ring", "late")]),
+            "restored with its own labels and its Client Agent's"
+        );
+        let seen = view(&state, &supervisor);
+        assert_eq!(seen.client_agent, client.to_string());
+        assert_eq!(
+            seen.inherited_labels,
+            BTreeMap::from([
+                ("ring".to_string(), "early".to_string()),
+                ("site".to_string(), "wien".to_string())
+            ])
+        );
+        assert!(view(&state, &client).inherited_labels.is_empty());
+
+        // The Client Agent's labels cleared, nothing is inherited any more.
+        label(&state, &client, &[]);
+        assert!(!selects(&state, &supervisor, &[("site", "wien")]));
+    }
+
+    /// Behind a Gateway an Agent carries no `fleet.host.*`; the Agents sharing a `host.id` inherit
+    /// their Client Agent's labels, and two Client Agents with one `host.id` leave every Agent of it
+    /// inheriting nothing and marked ambiguous.
+    /// Verifies: ADR-0035
+    #[test]
+    fn behind_a_gateway_agents_sharing_a_host_id_inherit_unless_ambiguous() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let gateway = InstanceUid::default();
+        report_over(
+            &state,
+            "gw",
+            organization("Gateway GmbH"),
+            gateway,
+            &[("supervisor.kind.collector", "true"), ("host.id", "gw-1")],
+        );
+        assert!(state.set_gateway("gw", true).expect("marked"));
+        assert!(
+            !selects(
+                &state,
+                &gateway,
+                &[("fleet.host.organization", "Gateway GmbH")]
+            ),
+            "nothing arrives over a Gateway directly"
+        );
+
+        let client = InstanceUid::default();
+        let supervisor = InstanceUid::default();
+        let elsewhere = InstanceUid::default();
+        let behind = |uid, pairs: &[(&str, &str)]| {
+            report_over(&state, "gw", organization("Gateway GmbH"), uid, pairs);
+        };
+        behind(
+            client,
+            &[("supervisor.kind.collector", "true"), ("host.id", "m-1")],
+        );
+        behind(supervisor, &[("host.id", "m-1")]);
+        behind(elsewhere, &[("host.id", "m-2")]);
+        label(&state, &client, &[("site", "linz")]);
+        assert!(selects(&state, &supervisor, &[("site", "linz")]));
+        assert!(!selects(&state, &elsewhere, &[("site", "linz")]));
+        let seen = view(&state, &supervisor);
+        assert_eq!(seen.host, "gw");
+        assert!(seen.host_attributes.is_empty());
+        assert!(!seen.ambiguous);
+
+        // A second Client on the same machine: nobody of it can be told apart.
+        let second = InstanceUid::default();
+        behind(
+            second,
+            &[("supervisor.kind.collector", "true"), ("host.id", "m-1")],
+        );
+        assert!(!selects(&state, &supervisor, &[("site", "linz")]));
+        for uid in [client, supervisor, second] {
+            assert!(view(&state, &uid).ambiguous, "{uid}");
+        }
+        assert!(!view(&state, &elsewhere).ambiguous);
+    }
+
+    /// Labels are part of the Agent's record: a re-keyed Agent keeps them, on disk too, and
+    /// forgetting it removes them — it comes back unlabelled.
+    /// Verifies: ADR-0035
+    #[test]
+    fn forgetting_an_agent_removes_its_labels_and_a_rekey_keeps_them() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let state = AppState::new(dir.clone())
+            .expect("state")
+            .with_stale_after(Duration::from_secs(90));
+        let uid = InstanceUid::default();
+        state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+        label(&state, &uid, &[("rollout", "canary")]);
+
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let new_uid = state
+            .process(rekey, Transport::WebSocket, Some(1))
+            .uid
+            .expect("the new identity");
+        assert_eq!(view(&state, &new_uid).labels["rollout"], "canary");
+        let stored = std::fs::read_to_string(dir.join("agents").join(format!("{new_uid}.json")))
+            .expect("stored");
+        assert!(stored.contains("canary"), "{stored}");
+
+        let mut goodbye = report(&new_uid, 3);
+        goodbye.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        state.process(goodbye, Transport::WebSocket, Some(1));
+        assert!(state.forget_agent(&new_uid).is_ok());
+        state.process(report(&new_uid, 4), Transport::WebSocket, Some(2));
+        assert!(
+            view(&state, &new_uid).labels.is_empty(),
+            "it comes back unlabelled"
+        );
+        assert!(!dir.join("labels").exists(), "no label store is written");
     }
 }

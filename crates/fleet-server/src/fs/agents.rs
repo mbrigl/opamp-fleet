@@ -13,9 +13,8 @@ use crate::agent_store::{AgentStore, PersistedAgent};
 use crate::fleet::Transport;
 use crate::packages::PackageId;
 
-/// The default adapter (ADR-0024): one JSON file per Agent under `<config_dir>/agents/`,
-/// following the `LabelStore` pattern — temp file plus atomic rename, loud failure on a file
-/// that does not parse.
+/// The default adapter (ADR-0024): one JSON file per Agent under `<config_dir>/agents/` — temp
+/// file plus atomic rename, loud failure on a file that does not parse.
 pub struct FsAgentStore {
     dir: PathBuf,
 }
@@ -49,6 +48,12 @@ struct Envelope {
     /// What the last rollout released to this Agent (ADR-0034 clause 5). Absent means nothing was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assignment: Option<AssignmentMeta>,
+    /// The operator's labels (ADR-0035 clause 6). Absent means none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    labels: BTreeMap<String, String>,
+    /// The Host the Agent last arrived over (ADR-0035 clause 2). Absent means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
 }
 
 /// One Agent's assignment as persisted: the Deployment, the Package as `<agent type>@<version>`,
@@ -63,10 +68,10 @@ struct AssignmentMeta {
     configurations: BTreeMap<String, String>,
 }
 
-/// Version 3 is ADR-0034's assignment shape — one release per Agent, Package and Configurations
-/// together — and there is **no reader for an earlier version**: no legacy store to support, so an
+/// Version 4 carries the Agent's labels and the Host it last arrived over (ADR-0035 clauses 2 and
+/// 6) beside ADR-0034's assignment shape, and there is **no reader for an earlier version**: an
 /// envelope this Server did not write is named rather than guessed at.
-const ENVELOPE_VERSION: u32 = 3;
+const ENVELOPE_VERSION: u32 = 4;
 
 fn encode<M: Message>(message: &Option<M>) -> Option<String> {
     message
@@ -107,6 +112,8 @@ impl Envelope {
                 package: assignment.package.as_ref().map(PackageId::to_string),
                 configurations: assignment.configurations.clone(),
             }),
+            labels: record.labels.clone(),
+            host: record.host.clone(),
         }
     }
 
@@ -116,10 +123,12 @@ impl Envelope {
             // and one silently skipped would look exactly like a host that never enrolled.
             return Err(format!(
                 "envelope version {} is not the understood {ENVELOPE_VERSION} — this Server reads \
-                 no earlier record format, and since ADR-0034 an assignment is one release per \
+                 no other record format: since ADR-0035 an Agent record carries its labels and \
+                 the Host it arrived over, and since ADR-0034 an assignment is one release per \
                  Agent, its Package and Configurations together. Clear the agents directory; \
                  every Agent re-reports on its next message, and what is lost is the operator's \
-                 rollouts, which a press on each Deployment writes again",
+                 rollouts, which a press on each Deployment writes again, and the labels, which \
+                 are set again on the Agents tab",
                 self.version
             ));
         }
@@ -155,6 +164,8 @@ impl Envelope {
                     })
                 })
                 .transpose()?,
+            labels: self.labels,
+            host: self.host,
         })
     }
 }
@@ -291,6 +302,40 @@ mod tests {
         );
         assert!(
             error.contains("version 2") && error.contains("ADR-0034"),
+            "says why: {error}"
+        );
+    }
+
+    /// An Agent's labels and the Host it arrived over are part of its record on disk, and a record
+    /// written before they were — version 3 — fails the load naming the file and the reason,
+    /// rather than being read as an Agent nobody labelled.
+    /// Verifies: ADR-0035
+    #[test]
+    fn labels_and_host_live_in_the_record_and_an_older_envelope_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let uid = InstanceUid::default();
+        store.put(&uid, &record()).expect("put");
+        let path = dir.path().join("agents").join(format!("{uid}.json"));
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(written["version"], 4);
+        assert_eq!(written["labels"]["rollout"], "canary");
+        assert_eq!(written["host"], "0192f0c4-host");
+
+        let mut old = written;
+        let fields = old.as_object_mut().expect("object");
+        fields.remove("labels");
+        fields.remove("host");
+        fields.insert("version".into(), 3.into());
+        std::fs::write(&path, serde_json::to_vec(&old).expect("json")).expect("write");
+        let error = store.load().expect_err("version 3 is refused");
+        assert!(
+            error.contains(&format!("{uid}.json")),
+            "names the file: {error}"
+        );
+        assert!(
+            error.contains("version 3") && error.contains("ADR-0035"),
             "says why: {error}"
         );
     }

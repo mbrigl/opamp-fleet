@@ -62,6 +62,7 @@
            not only from the one that holds the list. -->
       <nav class="tabs">
         <button class="tab" data-tab="agents">Agents<span class="num" id="count">0</span></button>
+        <button class="tab" data-tab="hosts">Hosts<span class="num" id="host-count">0</span></button>
         <button class="tab" data-tab="deployments">Deployments<span class="num" id="deployment-count">0</span></button>
         <button class="tab" data-tab="packages">Packages<span class="num" id="package-count">0</span></button>
         <button class="tab" data-tab="configurations">Configurations<span class="num" id="config-count">0</span></button>
@@ -359,6 +360,41 @@
       </section>
       </div>
 
+      <!-- Hosts (ADR-0035): what a client certificate names — one Client installation connecting
+           directly, a Gateway included. One table of Hosts; the current one shows its Agents
+           beneath it, grouped by their Client Agent. Nothing on a Host is edited: the Gateway mark
+           and the revocation of its certificates are per-row presses, and labels stay on the
+           Agents tab. -->
+      <div id="panel-hosts" class="tab-panel">
+      <div class="card filters" style="align-items: center; gap: 12px;">
+        <span class="sub">A <b>host</b> is what a client certificate of this Server names: one Client installation that connects directly, a gateway included. The agents arriving over it directly carry its certificate's subject values as <code>fleet.host.*</code>, which a selector can match and no agent can claim. A <b>gateway</b> carries the agents behind it, which carry no <code>fleet.host.*</code>. The labels of a Client's own agent hold for the Client's other agents — label it once on the Agents tab. Select a row to see its agents.</span>
+        <span id="hosts-result" class="sub"></span>
+        <span id="hosts-error" class="err"></span>
+      </div>
+
+      <div class="card table-wrap" style="margin-bottom: 20px;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 20%">Host</th>
+              <th>Subject</th>
+              <th style="width: 100px">Gateway</th>
+              <th style="width: 22%">Valid certificates</th>
+              <th style="width: 80px">Agents</th>
+              <th style="width: 260px"></th>
+            </tr>
+          </thead>
+          <tbody id="hosts"></tbody>
+        </table>
+        <div id="hosts-empty" class="empty">No host yet. A host appears when its enrolment is approved, or at the first report of a certificate that names one.</div>
+      </div>
+
+      <section id="host-detail" class="card config" style="display: none">
+        <h2 id="host-detail-title">Agents</h2>
+        <div id="host-agents"></div>
+      </section>
+      </div>
+
       <div id="panel-agents" class="tab-panel">
       <div class="card filters">
         <span class="dropdown">Filters ▾</span>
@@ -449,7 +485,7 @@
       // rather than in storage — unlike the theme it is a place, not a preference, so a reload
       // comes back to the same tab and a link can point a colleague straight at #packages. An
       // unknown hash falls back to Agents, the tab the fleet is watched from.
-      const TABS = ["agents", "deployments", "packages", "configurations", "enrolments"];
+      const TABS = ["agents", "hosts", "deployments", "packages", "configurations", "enrolments"];
       function showTab(name) {
         if (!TABS.includes(name)) name = "agents";
         document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
@@ -633,7 +669,26 @@
           const dead = (a.shadowed_labels || []).includes(key);
           chips.push(`<span class="chip${dead ? " " : " selected"}" title="${dead ? "the Agent reports this attribute itself, so the label matches nothing" : "a label: Selectors match it like a reported attribute"}">${dead ? "⚠ " : "🏷 "}${esc(key)}=${esc(value)}</span>`);
         }
-        chips.push(`<span class="chip clickable label-btn" data-uid="${esc(a.instance_uid)}" title="Set this Agent's labels — the whole set, as key=value pairs separated by commas. Empty clears them. A key the Agent reports itself is refused.">🏷 labels…</span>`);
+        // Its Client Agent's labels hold for it below its own (ADR-0035 clause 4): set on the Client
+        // Agent's row, marked here as inherited, and dimmed where its own label or a report wins.
+        const own = a.labels || {};
+        const reported = { ...(a.identifying_attributes || {}), ...(a.non_identifying_attributes || {}) };
+        for (const [key, value] of Object.entries(a.inherited_labels || {})) {
+          const over = key in own || key in reported;
+          chips.push(`<span class="chip" title="${over ? "inherited from this agent's client agent, but its own label or report of this key wins" : "inherited from this agent's client agent — change it on that agent's row"}">${over ? "⚠ " : "⤵ "}${esc(key)}=${esc(value)}</span>`);
+        }
+        if (a.ambiguous) {
+          chips.push(`<span class="pill amber" title="more than one client agent arrives over this host for this machine, so no agent of it inherits labels">client: ambiguous</span>`);
+        }
+        // The values of the host's certificate (ADR-0035 clause 3): matched by selectors, and no
+        // agent can report them.
+        for (const [key, value] of Object.entries(a.host_attributes || {})) {
+          chips.push(`<span class="chip" title="from the certificate of host ${esc(a.host)} — selectors match it, and no agent can claim it">🔒 ${esc(key)}=${esc(value)}</span>`);
+        }
+        for (const key of a.ignored_attributes || []) {
+          chips.push(`<span class="pill amber" title="the agent reports this, but fleet.* is the Server's own, so it is left out of what selectors match">⚠ ignored ${esc(key)}</span>`);
+        }
+        chips.push(`<span class="chip clickable label-btn" data-uid="${esc(a.instance_uid)}" title="Set this Agent's labels — the whole set, as key=value pairs separated by commas. Empty clears them. A key the Agent reports itself is refused, and so is a key starting fleet. — the Server's own. A client agent's labels hold for its client's other agents.">🏷 labels…</span>`);
         if (a.package_conflict) {
           chips.push(`<span class="pill red" title="${esc(a.package_conflict)}">deployment: ambiguous target</span>`);
         }
@@ -709,6 +764,8 @@
         // the fleet by (ADR-0024).
         const attrs = Object.entries(a.non_identifying_attributes || {}).concat(Object.entries(a.identifying_attributes || {}))
           .concat(Object.entries(a.labels || {}))
+          .concat(Object.entries(a.inherited_labels || {}))
+          .concat(Object.entries(a.host_attributes || {}))
           .map(([k, v]) => `${k}=${v}`);
         const pkgs = (a.packages || []).flatMap((p) => [p.name, p.version, p.status]);
         const hay = [a.service_name, a.service_instance_name, a.instance_uid, a.os, platformOf(a), a.service_version, a.service_build, a.remote_config_status, a.connected ? "connected" : "disconnected", a.stale ? "stale" : "", a.health_status, a.health_error, a.healthy ? "healthy" : "", a.transport]
@@ -2230,6 +2287,151 @@
         await refreshEnrolments();
       });
 
+      // Hosts (ADR-0035): the table and, for the current Host, its Agents grouped by their Client
+      // Agent. The certificates and the revocation list come from their own routes, so a row shows
+      // which of a Host's certificates are still valid, and when each ends.
+      let hosts = [];
+      let hostCertificates = [];
+      let revokedClient = new Set();
+      let currentHost = null;    // the host id of the current row, or null — no current, no detail
+      const SUBJECT_FIELDS = [
+        ["country", "C", "fleet.host.country"],
+        ["state", "ST", "fleet.host.state"],
+        ["locality", "L", "fleet.host.locality"],
+        ["organization", "O", "fleet.host.organization"],
+        ["organizational_unit", "OU", "fleet.host.site"],
+        ["organization_identifier", "organizationIdentifier", "fleet.host.organization_id"],
+      ];
+      function validCertificates(h) {
+        const now = Date.now();
+        return hostCertificates.filter((c) => c.host === h.host && c.not_after_ms > now && !revokedClient.has(c.serial));
+      }
+      function renderHosts() {
+        $("host-count").textContent = hosts.length;
+        $("hosts-empty").style.display = hosts.length ? "none" : "block";
+        $("hosts").innerHTML = hosts.map((h) => {
+          const subject = SUBJECT_FIELDS.filter(([field]) => h.subject && h.subject[field])
+            .map(([field, short, key]) => `<span class="chip" title="${short} — the agents arriving over it directly carry it as ${key}">${short}=${esc(h.subject[field])}</span>`)
+            .join("");
+          const certs = validCertificates(h)
+            .map((c) => `<div class="sub" title="serial ${esc(c.serial)}">${esc(c.serial.slice(0, 12))}… · until ${esc(when(c.not_after_ms))}</div>`)
+            .join("");
+          return `
+          <tr class="agent${h.host === currentHost ? " current" : ""}" data-host="${esc(h.host)}">
+            <td><a class="name" href="#">${esc(h.name)}</a>${h.name !== h.host ? `<div class="sub">${esc(h.host)}</div>` : ""}</td>
+            <td><div class="chips">${subject || `<span class="chip">none</span>`}</div></td>
+            <td>${h.gateway ? `<span class="pill violet">gateway</span>` : `<span class="pill gray">direct</span>`}</td>
+            <td>${certs || `<span class="pill gray">none in the register</span>`}</td>
+            <td class="num">${(h.agents || []).length}</td>
+            <td>
+              <button class="btn btn-ghost host-gateway" data-host="${esc(h.host)}" data-gateway="${h.gateway ? "false" : "true"}"
+                      title="${h.gateway ? "Take the gateway mark away: its certificate then speaks only for the agents bound to it" : "Mark as a gateway: its certificate then speaks for any agent, and the agents behind it are grouped by the machine they report"}">${h.gateway ? "Unmark gateway" : "Mark gateway"}</button>
+              <button class="btn btn-ghost host-revoke" data-host="${esc(h.host)}"${validCertificates(h).length ? "" : " disabled"}
+                      title="Revoke every valid certificate of this host: its connections end, and it cannot renew">Revoke</button>
+            </td>
+          </tr>`;
+        }).join("");
+        renderHostDetail();
+      }
+      const hostAgentName = (a) => a.service_instance_name || a.service_name || `${a.instance_uid.slice(0, 8)}…`;
+      function hostAgentLine(a) {
+        const status = a.connected ? `<span class="pill green">connected</span>` : `<span class="pill gray">disconnected</span>`;
+        const client = a.client ? ` <span class="pill violet">client</span>` : "";
+        return `<strong>${esc(hostAgentName(a))}</strong>${client} <span class="sub">${esc(a.service_name)} · ${esc(a.instance_uid)}</span> ${status}`;
+      }
+      // Grouped as the Server places the agents (ADR-0035 clause 4): under their client agent, the
+      // ones whose client cannot be told apart under the machine they report. Presentation only.
+      function renderHostDetail() {
+        const h = hosts.find((x) => x.host === currentHost);
+        if (!h) { $("host-detail").style.display = "none"; return; }
+        $("host-detail").style.display = "";
+        $("host-detail-title").textContent = h.gateway
+          ? `${h.name} — the agents behind this gateway, by the client they report`
+          : `${h.name} — its agents, by client`;
+        const groups = new Map();
+        for (const a of h.agents || []) {
+          const key = a.ambiguous ? `ambiguous ${a.machine}` : a.client_agent || `none ${a.machine}`;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(a);
+        }
+        const blocks = [...groups.values()].map((members) => {
+          const first = members[0];
+          const client = first.ambiguous ? null : members.find((a) => a.instance_uid === a.client_agent);
+          const machine = first.machine ? ` <span class="sub">${esc(first.machine)}</span>` : "";
+          let head;
+          if (client) head = `${hostAgentLine(client)}${machine}`;
+          else if (first.ambiguous) head = `<span class="pill amber" title="more than one client agent reports this machine, so no agent of it inherits labels">ambiguous client</span>${machine}`;
+          else head = `<span class="pill gray" title="no agent of this group reports supervisor.kind.*, so nothing is inherited">no client agent</span>${machine}`;
+          const beneath = members.filter((a) => a !== client).map((a) => `<li>${hostAgentLine(a)}</li>`).join("");
+          return `<div style="margin-bottom: 10px">${head}${beneath ? `<ul style="margin: 4px 0 0 18px">${beneath}</ul>` : ""}</div>`;
+        });
+        $("host-agents").innerHTML = blocks.join("") || `<div class="empty">No agent has arrived over this host yet.</div>`;
+      }
+      async function refreshHosts() {
+        try {
+          const res = await fetch("/api/v1/hosts");
+          if (!res.ok) {
+            hosts = [];
+            $("hosts-error").textContent = res.status === 404 ? "This Server keeps no host register." : `HTTP ${res.status}`;
+            renderHosts();
+            return;
+          }
+          hosts = await res.json();
+          const certs = await fetch("/api/v1/certificates");
+          hostCertificates = certs.ok ? await certs.json() : [];
+          const list = await fetch("/api/v1/revocations");
+          revokedClient = new Set(list.ok
+            ? (await list.json()).filter((r) => r.certificate.authority === "client").map((r) => r.certificate.serial)
+            : []);
+        } catch { return; }
+        renderHosts();
+      }
+      $("hosts").addEventListener("click", async (e) => {
+        const mark = e.target.closest(".host-gateway");
+        if (mark) {
+          const gateway = mark.dataset.gateway === "true";
+          if (!confirm(gateway
+            ? `Mark host ${mark.dataset.host} as a gateway? Its certificate then speaks for any agent.`
+            : `Take the gateway mark from host ${mark.dataset.host}?`)) return;
+          $("hosts-error").textContent = "";
+          const res = await fetch(`/api/v1/hosts/${encodeURIComponent(mark.dataset.host)}/gateway`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ gateway }),
+          });
+          if (!res.ok) $("hosts-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+          await refreshHosts();
+          return;
+        }
+        const revoke = e.target.closest(".host-revoke");
+        if (revoke) {
+          const h = hosts.find((x) => x.host === revoke.dataset.host);
+          const serials = h ? validCertificates(h).map((c) => c.serial) : [];
+          if (!serials.length) return;
+          if (!confirm(`Revoke the ${serials.length} valid certificate(s) of host ${revoke.dataset.host}?\n\nIts connections end, and it cannot renew.`)) return;
+          $("hosts-error").textContent = "";
+          $("hosts-result").textContent = "";
+          const refused = [];
+          for (const serial of serials) {
+            const res = await fetch("/api/v1/revocations", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ certificate: { authority: "client", serial } }),
+            });
+            if (!res.ok) refused.push(`${serial.slice(0, 12)}…: ${(await res.json().catch(() => ({}))).error || `HTTP ${res.status}`}`);
+          }
+          if (refused.length) $("hosts-error").textContent = refused.join("; ");
+          else $("hosts-result").textContent = `${revoke.dataset.host}: ${serials.length} certificate(s) revoked`;
+          await refreshHosts();
+          return;
+        }
+        const tr = e.target.closest("tr.agent");
+        if (!tr) return;
+        e.preventDefault();
+        currentHost = currentHost === tr.dataset.host ? null : tr.dataset.host;
+        renderHosts();
+      });
+
       refreshConfigs();
       refreshPackages();
       refreshDeployments();
@@ -2240,6 +2442,8 @@
       setInterval(refreshPackages, 5000);
       setInterval(refreshDeployments, 5000);
       setInterval(refreshEnrolments, 3000);
+      refreshHosts();
+      setInterval(refreshHosts, 5000);
     </script>
   </body>
 </html>

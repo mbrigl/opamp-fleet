@@ -161,8 +161,9 @@ what the process is configured with.
 else, and it holds one artifact per platform, each with the operator's signature. It reaches no
 Agent of another type, and it aims at nobody by itself.
 
-**Selector and Deployment.** A *Selector* is a set of `key=value` pairs that an Agent's reported
-attributes (and its labels) must equal. It aims a *Deployment*: a name, the **channel** its Selector
+**Selector and Deployment.** A *Selector* is a set of `key=value` pairs that an Agent's effective
+description must equal: the `fleet.host.*` values of the Host it connects over, what it reported,
+its labels, and the labels of its Client's own Agent, in that order. It aims a *Deployment*: a name, the **channel** its Selector
 names, at most one Package per Agent type, and any number of Configurations. It is the only thing
 that is rolled out — one press releases its Packages and Configurations together — and an
 Agent belongs to **at most one** — two claiming the same Agent is a conflict the Server reports

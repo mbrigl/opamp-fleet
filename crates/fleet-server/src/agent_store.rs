@@ -13,7 +13,7 @@
 //! ([`FsAgentStore`](crate::fs::FsAgentStore)) answers with an owner-only directory; any other
 //! adapter must answer with its own access control.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use opamp::proto::{
     AgentDescription, AvailableComponents, ComponentHealth, ConnectionSettingsStatus,
@@ -47,6 +47,12 @@ pub struct PersistedAgent {
     /// Deployment, the Package pinned, and each Configuration's pinned revision. `None` — nothing
     /// has been rolled out.
     pub assignment: Option<crate::fleet::Assignment>,
+    /// The operator's labels on this Agent (ADR-0035 clause 6): part of its record, so they follow
+    /// a re-key and leave with a forget.
+    pub labels: BTreeMap<String, String>,
+    /// The Host the Agent last arrived over (ADR-0035 clause 2) — its own on a direct connection,
+    /// the Gateway's behind one; `None` without `[client_ca]`. It grants nothing.
+    pub host: Option<String>,
 }
 
 impl PersistedAgent {
@@ -84,6 +90,8 @@ impl PersistedAgent {
             transport,
             restart_pending,
             assignment,
+            labels,
+            host,
         } = self;
         let mut digest = Sha256::new();
         field(&mut digest, &capabilities.to_le_bytes());
@@ -117,6 +125,13 @@ impl PersistedAgent {
                 field(&mut digest, hash.as_bytes());
             }
         }
+        field(&mut digest, &(labels.len() as u64).to_le_bytes());
+        for (key, value) in labels {
+            field(&mut digest, key.as_bytes());
+            field(&mut digest, value.as_bytes());
+        }
+        field(&mut digest, &[u8::from(host.is_some())]);
+        field(&mut digest, host.as_deref().unwrap_or_default().as_bytes());
         digest.finalize().into()
     }
 }
@@ -152,7 +167,6 @@ pub trait AgentStore: Send + Sync {
 pub(crate) mod tests {
     use super::*;
     use crate::packages::PackageId;
-    use std::collections::BTreeMap;
 
     pub(crate) fn record() -> PersistedAgent {
         PersistedAgent {
@@ -185,6 +199,8 @@ pub(crate) mod tests {
                 package: Some(PackageId::new("otelcol", "1.2.3").expect("package id")),
                 configurations: BTreeMap::from([("base".to_string(), "0123abcd".to_string())]),
             }),
+            labels: BTreeMap::from([("rollout".to_string(), "canary".to_string())]),
+            host: Some("0192f0c4-host".to_string()),
         }
     }
 
@@ -211,12 +227,17 @@ pub(crate) mod tests {
     #[test]
     fn every_durable_change_moves_the_digest() {
         let settled = record().durable_digest();
-        let changes: [fn(&mut PersistedAgent); 9] = [
+        let changes: [fn(&mut PersistedAgent); 12] = [
             |r| r.capabilities ^= 1,
             |r| r.effective_config = Some("x: 1".into()),
             |r| r.transport = Transport::Http,
             |r| r.restart_pending = !r.restart_pending,
             |r| r.assignment = None,
+            |r| r.labels.clear(),
+            |r| {
+                r.labels.insert("rollout".into(), "stable".into());
+            },
+            |r| r.host = None,
             |r| {
                 if let Some(a) = r.assignment.as_mut() {
                     a.configurations.insert("a".into(), "1".into());

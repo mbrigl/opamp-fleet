@@ -907,7 +907,8 @@ one, in its very first message, before the Server has ever seen it.
 
 To tag **one** Agent among several on a host, use a Server **label** instead
 (`PUT /api/v1/agents/<uid>/labels`): it is keyed by that Agent's `instance_uid`, matched by the
-same Selectors, and takes effect at once without editing a file on the host. A block's own
+same Selectors, and takes effect at once without editing a file on the host. A label on the
+Client's own Agent holds for every Agent of that Client, below their own labels. A block's own
 `[supervisor.attributes]` table used to do this and no longer exists; a block carrying one fails at
 startup with that sentence.
 

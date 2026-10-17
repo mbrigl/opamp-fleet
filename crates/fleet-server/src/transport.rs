@@ -71,6 +71,9 @@ pub struct Proofs {
     pub certificate: Option<(CertId, u64)>,
     /// The host the certificate was issued to, when it names one (ADR-0021 clause 7).
     pub host: Option<String>,
+    /// The certificate's subject values, which a Host made at its first report carries
+    /// (ADR-0035 clause 1).
+    pub subject_values: crate::revocation::SubjectValues,
 }
 
 impl Proofs {
@@ -336,6 +339,10 @@ async fn admit_download(
     // only what is offered to an Agent of the host it names (ADR-0026 clause 37).
     let proofs = certificate.map(|_| Proofs {
         host: facts.as_ref().and_then(|facts| facts.host.clone()),
+        subject_values: facts
+            .as_ref()
+            .map(|facts| facts.subject_values.clone())
+            .unwrap_or_default(),
         certificate: facts.map(|facts| (facts.id, facts.not_after_ms)),
     });
     if let Some(agent_rate) = &guard.agent_rate {
@@ -579,6 +586,7 @@ async fn admit(
                 .as_ref()
                 .map(|facts| (facts.id.clone(), facts.not_after_ms)),
             host: None,
+            subject_values: crate::revocation::SubjectValues::default(),
         };
         // That the certificate was revoked is not said (ADR-0021 clause 39).
         if proofs.revoked(revocations) {
@@ -649,6 +657,10 @@ async fn admit(
     request.extensions_mut().insert(classified);
     request.extensions_mut().insert(Proofs {
         host: presented.as_ref().and_then(|facts| facts.host.clone()),
+        subject_values: presented
+            .as_ref()
+            .map(|facts| facts.subject_values.clone())
+            .unwrap_or_default(),
         certificate: presented.map(|facts| (facts.id, facts.not_after_ms)),
     });
     next.run(request).await
@@ -966,6 +978,7 @@ impl Handler for Fleet {
             .map(|(id, _)| Presented {
                 id: id.clone(),
                 host: carrier.proofs.host.clone(),
+                subject_values: carrier.proofs.subject_values.clone(),
             });
         let outcome =
             self.0

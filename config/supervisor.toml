@@ -63,7 +63,8 @@ state_dir = "client-state"
 #
 # To tag one Agent among several on this host, use a Server label instead (PUT
 # /api/v1/agents/<uid>/labels): it is keyed by that Agent's uid, matched by the same Selectors, and
-# takes effect without editing a file here.
+# takes effect without editing a file here. A label on this Client's own Agent holds for all of
+# its Agents.
 # [attributes]
 # env = "prod"
 

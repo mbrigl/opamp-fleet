@@ -17,7 +17,7 @@ use rcgen::{
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::config::ClientCaConfig;
-use crate::revocation::{CertId, Facts, Signed};
+use crate::revocation::{CertId, Facts, Signed, SubjectValues};
 
 /// The SAN URI prefix naming the host a certificate was issued to (ADR-0021 clause 7).
 pub const HOST_URI_PREFIX: &str = "urn:opamp-fleet:host:";
@@ -239,7 +239,28 @@ pub fn facts(der: &[u8]) -> Result<Facts, String> {
         key_fingerprint: hex::encode(Sha256::digest(&cert.public_key().subject_public_key.data)),
         not_after_ms: u64::try_from(not_after).unwrap_or(0).saturating_mul(1000),
         host,
+        subject_values: subject_values(cert.subject()),
     })
+}
+
+/// The values of a subject a Host carries (ADR-0035 clause 1), each the first of its attribute.
+/// A value that is not a string is left out.
+fn subject_values(name: &x509_parser::x509::X509Name<'_>) -> SubjectValues {
+    let first = |oid: &str| {
+        name.iter_attributes()
+            .filter(|attribute| attribute.attr_type().to_id_string() == oid)
+            .find_map(|attribute| attribute.as_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    SubjectValues {
+        country: first("2.5.4.6"),
+        state: first("2.5.4.8"),
+        locality: first("2.5.4.7"),
+        organization: first("2.5.4.10"),
+        organizational_unit: first("2.5.4.11"),
+        organization_identifier: first("2.5.4.97"),
+    }
 }
 
 /// Checks a CSR's claims to an `instance_uid` against its sender's (ADR-0021): every canonical
@@ -670,6 +691,48 @@ mod tests {
             leaf_name: leaf_name(std::path::Path::new("client-ca.pem"), &ca_der).expect("name"),
             ca_der,
         }
+    }
+
+    /// The values a Host carries are read from a certificate's subject, each by its attribute,
+    /// `organizationIdentifier` included; one the subject lacks stays empty.
+    /// Verifies: ADR-0035
+    #[test]
+    fn a_certificates_subject_values_are_read_by_attribute() {
+        let key = KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::default();
+        let name = &mut params.distinguished_name;
+        name.push(rcgen::DnType::CountryName, "AT");
+        name.push(rcgen::DnType::StateOrProvinceName, "Wien");
+        name.push(rcgen::DnType::OrganizationName, "Kunde GmbH");
+        name.push(rcgen::DnType::OrganizationalUnitName, "Werk Nord");
+        name.push(
+            rcgen::DnType::CustomDnType(vec![2, 5, 4, 97]),
+            "VATAT-U12345678",
+        );
+        name.push(rcgen::DnType::CommonName, "edge-01");
+        let cert = params.self_signed(&key).expect("certificate");
+        let values = facts(cert.der()).expect("facts").subject_values;
+        assert_eq!(
+            values,
+            SubjectValues {
+                country: "AT".into(),
+                state: "Wien".into(),
+                locality: String::new(),
+                organization: "Kunde GmbH".into(),
+                organizational_unit: "Werk Nord".into(),
+                organization_identifier: "VATAT-U12345678".into(),
+            }
+        );
+        assert_eq!(
+            values.attributes().collect::<Vec<_>>(),
+            [
+                ("fleet.host.country", "AT"),
+                ("fleet.host.state", "Wien"),
+                ("fleet.host.organization", "Kunde GmbH"),
+                ("fleet.host.site", "Werk Nord"),
+                ("fleet.host.organization_id", "VATAT-U12345678"),
+            ]
+        );
     }
 
     /// A CA named `common_name`, as PEM certificate and key.

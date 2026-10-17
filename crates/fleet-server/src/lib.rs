@@ -35,25 +35,24 @@ use axum::Router;
 
 use deployments::DeploymentStore;
 use fleet::{AppState, PackageOffering};
-use fs::{FsAgentStore, FsConfigBackend, FsDeploymentBackend, FsLabelStore, FsPackageBackend};
+use fs::{FsAgentStore, FsConfigBackend, FsDeploymentBackend, FsPackageBackend};
 
 /// The default wiring of the fleet's state to its storage adapters (ADR-0006): it lives here, in
-/// the composition root, so the fleet logic names the ports — [`AgentStore`](agent_store::AgentStore)
-/// and [`LabelStore`](labels::LabelStore) — and never the filesystem behind them.
+/// the composition root, so the fleet logic names the port — [`AgentStore`](agent_store::AgentStore)
+/// — and never the filesystem behind it.
 impl AppState {
-    /// Builds the state on the default storage adapters — one JSON file per Agent under
-    /// `<config_dir>/agents/` and per labelled Agent under `<config_dir>/labels/` (ADR-0024) — restoring every persisted Configuration and Agent
-    /// record. A store that cannot be opened (or holds an unparsable file) fails startup loudly.
+    /// Builds the state on the default storage adapters — one JSON file per Agent, its labels
+    /// inside, under `<config_dir>/agents/` (ADR-0024, ADR-0035) — restoring every persisted
+    /// Configuration and Agent record. A store that cannot be opened (or holds an unparsable file)
+    /// fails startup loudly.
     ///
     /// # Errors
     /// Returns an error when a store cannot be opened or holds an unparsable record.
     pub fn new(config_dir: std::path::PathBuf) -> Result<Self, String> {
         let agents = FsAgentStore::open(config_dir.join("agents"))?;
-        let labels = FsLabelStore::open(config_dir.join("labels"))?;
         let configs = FsConfigBackend::open(config_dir)?;
         Self::with_stores(
             Box::new(agents),
-            Box::new(labels),
             Box::new(configs),
             Box::new(clock::SystemClock),
         )

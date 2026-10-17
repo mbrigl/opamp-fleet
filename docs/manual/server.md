@@ -382,7 +382,10 @@ revocation list a Gateway refuses by (see
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/hosts
-[{"host":"0192…","gateway":false,"instance_uids":["0192…","0193…"],"certificates":1}]
+[{"host":"0192…","name":"edge-01","gateway":false,"instance_uids":["0192…","0193…"],"certificates":1,
+  "subject":{"country":"","state":"","locality":"","organization":"","organizational_unit":"","organization_identifier":""},
+  "approved_ms":1760000000000,
+  "agents":[{"instance_uid":"0192…","client":true,"client_agent":"0192…","machine":"",…},…]}]
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"gateway": true}' \
        https://127.0.0.1:4321/api/v1/hosts/0192…/gateway
 ```
@@ -390,6 +393,29 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"gateway"
 A Gateway's certificate speaks for any Agent; behind it, fleet membership is all the Server
 proves, and the Gateway's certificate may fetch the artifact offered to any Agent. A third-party
 client that sends no renewal proof renews the certificate it presents.
+
+### Hosts
+
+A **Host** is what a client certificate of this Server names: one Client installation that
+connects directly, a Gateway included. The Server writes it when an operator approves its
+enrolment, with the time of the approval and the subject values of the certificate it was issued —
+country (`C`), state (`ST`), locality (`L`), organization (`O`), organizational unit (`OU`) and
+organization identifier. A certificate an operator provisioned with a host id makes its Host at its
+first report, with the values of that certificate. Today's host certificates carry a common name
+only, so their values are empty. A Host is forgotten when it holds no valid certificate, speaks for
+no Agent and is not marked as a Gateway.
+
+Every Agent record names the Host it last arrived over: its own on a direct connection, the
+Gateway's behind one. This places the Agent in the fleet view and decides which labels it inherits
+(see [Labels](#labels-rollout-channels-without-touching-the-host)). It grants nothing: what a
+certificate may report for and fetch is decided by the host register as above.
+
+**The Hosts tab** of the bundled UI lists every Host: its name — the `host.name` its Client's own
+Agent reports, else the host id — its subject values, whether it is a Gateway, its valid
+certificates and when each ends, and how many Agents arrived over it. Marking a Gateway and revoking
+a Host's valid certificates are presses on its row. Selecting a Host shows its Agents, grouped by
+their Client Agent with that Client's Supervisor Agents beneath it. For a Gateway these are the
+Agents behind it, grouped by the machine they report. `GET /api/v1/hosts` answers the same.
 
 **A certificate lives 30 days by default** and is renewed at two thirds of that; a host is ejected
 sooner by revoking its certificate ([Revocation](#revocation-withdrawing-a-certificate)).
@@ -1167,14 +1193,34 @@ comes from.
 If an Agent *starts* reporting a key that was labelled earlier, the reported value wins and the
 fleet row marks the label as shadowed — set, and matching nothing.
 
-**Labels are yours, not the Agent's.** They never travel to it; the Agent only ever experiences the
-effect, which is the configuration and the software it is offered. They are stored on the Server and
-survive a restart, and **forgetting an Agent does not clear them**: forgetting drops what the Server
-learned, while a label is something you decided, so a host that comes back is in the channel you put it
-in. Clearing them is its own call.
+**A label whose key starts with `fleet.` is refused with `400`.** That space is the Server's own.
 
-One caveat worth knowing: labels are keyed by Instance UID. If the Server re-keys an Agent — which
-it does when two Agents report the same identity — the new identity starts with no labels.
+**Label the Client once.** A Client presents an Agent for itself — the one that reports
+`supervisor.kind.*` — and one per Supervisor. The labels set on the Client's own Agent hold for its
+other Agents too, below their own labels: a Supervisor Agent labelled `ring = late` stays in that
+ring whatever its Client is labelled. The Server tells a Client's Agents apart by the Host they
+arrived over. Behind a Gateway it groups them by the `host.id` they report, or by `host.name`
+where they report no `host.id`. Where such a group holds more than one Client Agent — two Clients
+on one machine behind one Gateway — no Agent of it inherits anything, and the fleet view marks them
+as ambiguous. The Agents tab shows inherited labels on each Agent, marked as such.
+
+**What a Selector matches** is each Agent's effective description, the same for every Deployment.
+For each key it takes the first source that has it:
+
+1. `fleet.host.country`, `fleet.host.state`, `fleet.host.locality`, `fleet.host.organization`,
+   `fleet.host.site` (the organizational unit) and `fleet.host.organization_id` — the subject
+   values of the Host the Agent arrived over directly. An Agent behind a Gateway has none.
+2. What the Agent reported: identifying attributes, then non-identifying ones. A reported
+   attribute whose key starts with `fleet.` is left out and listed in `ignored_attributes` on its
+   fleet row, so no Agent can claim another Host's values.
+3. The Agent's own labels.
+4. The labels of its Client Agent.
+
+**Labels are yours, not the Agent's.** They never travel to it; the Agent only ever experiences the
+effect, which is the configuration and the software it is offered. They are part of the Agent's
+record on the Server and survive a restart. They follow the Agent when the Server re-keys it, and
+**forgetting an Agent removes them**: an Agent that comes back starts with the labels of its Client
+Agent only, so label the Client Agent rather than each Agent where you can.
 
 ### Forgetting an Agent
 
@@ -1200,6 +1246,10 @@ The same applies to one that comes back later: it is offered its configuration, 
 settings, and its packages afresh. The packages cost nothing — the Client re-installs nothing whose
 content hash it already has — but the configuration is applied again, which for a managed agent is
 one restart. That is the price of forgetting something that was not really gone.
+
+**Its labels go with it.** They are part of the Agent's record, so an Agent that comes back is
+labelled only by what its Client Agent's labels give it. The Host it arrived over stays: it is
+forgotten once it holds no valid certificate and speaks for no Agent.
 
 Nothing expires on its own: there is no retention sweep and no inactivity timeout, so a row stays
 until someone forgets it.

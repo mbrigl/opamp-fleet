@@ -86,6 +86,28 @@ impl Pki {
         (cert.pem(), key.serialize_pem())
     }
 
+    /// A certificate and key naming `host` like [`issue_to_host`](Self::issue_to_host), whose
+    /// subject carries `subject` — an operator's provisioned certificate with the values a Host
+    /// carries (ADR-0035 clause 1).
+    fn issue_to_host_with(
+        &self,
+        host: &str,
+        subject: &[(rcgen::DnType, &str)],
+    ) -> (String, String) {
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+        for (kind, value) in subject {
+            params.distinguished_name.push(kind.clone(), *value);
+        }
+        params.subject_alt_names.push(rcgen::SanType::URI(
+            format!("{}{host}", fleet_server::ca::HOST_URI_PREFIX)
+                .try_into()
+                .expect("uri"),
+        ));
+        let cert = params.signed_by(&key, &self.issuer()).expect("signed");
+        (cert.pem(), key.serialize_pem())
+    }
+
     /// A certificate and key signed by this CA, for `name`.
     fn issue(&self, name: &str) -> (String, String) {
         let key = KeyPair::generate().expect("key");
@@ -1546,6 +1568,215 @@ async fn an_operator_sees_each_host_and_can_mark_a_gateway() {
         gateway("nobody").await.expect("send").status(),
         reqwest::StatusCode::NOT_FOUND
     );
+}
+
+// ---- Hosts (ADR-0035) ----
+
+async fn hosts(served: &Served) -> serde_json::Value {
+    client(&served.ca_pem, None)
+        .get(operator(served, "/api/v1/hosts"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json")
+}
+
+/// A report describing itself with `pairs`.
+fn described(uid: &InstanceUid, pairs: &[(&str, &str)]) -> AgentToServer {
+    AgentToServer {
+        agent_description: Some(opamp::proto::AgentDescription {
+            identifying_attributes: vec![opamp::attributes::string_attr("service.name", "otelcol")],
+            non_identifying_attributes: pairs
+                .iter()
+                .map(|(key, value)| opamp::attributes::string_attr(key, value))
+                .collect(),
+        }),
+        ..report(uid)
+    }
+}
+
+/// Approving an enrolment writes the Host before the host has reported once as a member.
+/// Verifies: ADR-0035
+#[tokio::test]
+async fn an_approval_writes_the_host_before_its_first_report() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            revocations: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let opened = operator_client
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+    assert_eq!(opened.status(), 200);
+    let (cert, key) = bootstrap.issue("bootstrap");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    let (csr, _key) = csr_for("edge-01");
+    let _ = decode(post(&enrolling, &served.endpoint, csr_report(csr)).await).await;
+    assert_eq!(hosts(&served).await, serde_json::json!([]), "no Host yet");
+
+    let pending: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/enrolments"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    let id = pending[0]["id"].as_str().expect("id").to_string();
+    let approved = operator_client
+        .post(operator(
+            &served,
+            &format!("/api/v1/enrolments/{id}/approve"),
+        ))
+        .send()
+        .await
+        .expect("approve");
+    assert_eq!(approved.status(), 204);
+
+    let listed = hosts(&served).await;
+    assert_eq!(listed.as_array().expect("a list").len(), 1, "{listed}");
+    assert!(listed[0]["approved_ms"].as_u64().is_some(), "{listed}");
+    assert_eq!(listed[0]["certificates"], 1);
+    assert_eq!(listed[0]["agents"], serde_json::json!([]));
+    assert_eq!(
+        listed[0]["name"], listed[0]["host"],
+        "no Client Agent named it yet"
+    );
+    let written = std::fs::read_to_string(served.config_dir.join("revocation/hosts.json"))
+        .expect("the Host is written");
+    let host = listed[0]["host"].as_str().expect("a host id");
+    assert!(written.contains(host), "{written}");
+}
+
+/// `GET /api/v1/hosts` lists a Host's subject values and its Agents, grouped under their Client
+/// Agent, and an Agent behind a Gateway under the Gateway's Host; the fleet view carries the Host's
+/// values on a direct Agent and none behind a Gateway.
+/// Verifies: ADR-0035
+#[tokio::test]
+async fn the_hosts_list_carries_subject_values_and_the_agents_behind_a_gateway() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (cert, key) = pki.issue_to_host_with(
+        "h-direct",
+        &[
+            (rcgen::DnType::CountryName, "AT"),
+            (rcgen::DnType::OrganizationName, "Kunde GmbH"),
+            (rcgen::DnType::OrganizationalUnitName, "Werk Nord"),
+            (rcgen::DnType::CustomDnType(vec![2, 5, 4, 97]), "VATAT-U1"),
+            (rcgen::DnType::CommonName, "edge-01"),
+        ],
+    );
+    let direct = client(&served.ca_pem, Some((&cert, &key)));
+    let client_agent = InstanceUid::default();
+    let supervisor = InstanceUid::default();
+    for (uid, pairs) in [
+        (
+            client_agent,
+            vec![
+                ("supervisor.kind.collector", "true"),
+                ("host.name", "edge-01.example"),
+            ],
+        ),
+        (supervisor, vec![("host.name", "edge-01.example")]),
+    ] {
+        let _ = decode(post(&direct, &served.endpoint, described(&uid, &pairs)).await).await;
+    }
+
+    let (cert, key) =
+        pki.issue_to_host_with("h-gw", &[(rcgen::DnType::OrganizationName, "Gateway GmbH")]);
+    let gateway = client(&served.ca_pem, Some((&cert, &key)));
+    let own = InstanceUid::default();
+    let _ = decode(post(&gateway, &served.endpoint, described(&own, &[])).await).await;
+    let marked = client(&served.ca_pem, None)
+        .put(operator(&served, "/api/v1/hosts/h-gw/gateway"))
+        .json(&serde_json::json!({"gateway": true}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(marked.status(), reqwest::StatusCode::NO_CONTENT);
+    let downstream = InstanceUid::default();
+    let _ = decode(
+        post(
+            &gateway,
+            &served.endpoint,
+            described(&downstream, &[("host.id", "m-1")]),
+        )
+        .await,
+    )
+    .await;
+
+    let listed = hosts(&served).await;
+    let row = |host: &str| {
+        listed
+            .as_array()
+            .expect("a list")
+            .iter()
+            .find(|row| row["host"] == host)
+            .unwrap_or_else(|| panic!("{host} in {listed}"))
+            .clone()
+    };
+    let direct_row = row("h-direct");
+    assert_eq!(direct_row["name"], "edge-01.example");
+    assert_eq!(direct_row["gateway"], false);
+    assert_eq!(direct_row["subject"]["country"], "AT");
+    assert_eq!(direct_row["subject"]["organization"], "Kunde GmbH");
+    assert_eq!(direct_row["subject"]["organizational_unit"], "Werk Nord");
+    assert_eq!(direct_row["subject"]["organization_identifier"], "VATAT-U1");
+    let agents = direct_row["agents"].as_array().expect("agents");
+    assert_eq!(agents.len(), 2, "{direct_row}");
+    for agent in agents {
+        assert_eq!(agent["client_agent"], client_agent.to_string(), "{agent}");
+    }
+
+    let gateway_row = row("h-gw");
+    assert_eq!(gateway_row["gateway"], true);
+    assert_eq!(gateway_row["name"], "h-gw");
+    let carried: Vec<&str> = gateway_row["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .map(|agent| agent["instance_uid"].as_str().expect("uid"))
+        .collect();
+    assert!(
+        carried.contains(&downstream.to_string().as_str()),
+        "{gateway_row}"
+    );
+
+    let fleet: Vec<serde_json::Value> = client(&served.ca_pem, None)
+        .get(operator(&served, "/api/v1/agents"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let agent = |uid: &InstanceUid| {
+        fleet
+            .iter()
+            .find(|agent| agent["instance_uid"] == uid.to_string())
+            .expect("in the fleet")
+            .clone()
+    };
+    assert_eq!(
+        agent(&supervisor)["host_attributes"]["fleet.host.organization"],
+        "Kunde GmbH"
+    );
+    assert_eq!(agent(&supervisor)["host"], "h-direct");
+    assert_eq!(agent(&downstream)["host"], "h-gw");
+    assert_eq!(agent(&downstream)["host_attributes"], serde_json::json!({}));
 }
 
 // ---- A CSR's claim to an instance_uid (ADR-0021) ----

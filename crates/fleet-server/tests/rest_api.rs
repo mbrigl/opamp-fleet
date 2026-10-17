@@ -1366,10 +1366,11 @@ async fn the_view_carries_the_held_configuration_and_a_refusal_with_its_reason()
     );
 }
 
-/// Labels are the operator's decision, not something the Server learned, so forgetting an Agent
-/// (ADR-0024) does not undo them: a host that comes back is in the ring it was put in.
+/// Labels are part of the Agent's record (ADR-0035 clause 6): forgetting an Agent removes them
+/// with it, and an Agent that comes back starts unlabelled.
+/// Verifies: ADR-0035
 #[tokio::test]
-async fn forgetting_an_agent_keeps_its_labels() {
+async fn forgetting_an_agent_removes_its_labels() {
     let server = support::spawn_with_stale_after(std::time::Duration::ZERO).await;
     let client = reqwest::Client::new();
     let uid = opamp::uid::InstanceUid::default();
@@ -1395,10 +1396,38 @@ async fn forgetting_an_agent_keeps_its_labels() {
     assert_eq!(forgotten.status(), 204);
     assert!(agents(&client, server.rest_addr).await.is_empty());
 
-    // It comes back — still in its ring, without anyone re-labelling it.
+    // It comes back — without the labels it had.
     report(&client, server.addr, &support::full_report(&uid, "host", 2)).await;
     let agents = agents(&client, server.rest_addr).await;
-    assert_eq!(agents[0]["labels"]["rollout"], "canary");
+    assert!(
+        agents[0]["labels"].as_object().expect("labels").is_empty(),
+        "{}",
+        agents[0]
+    );
+}
+
+/// `fleet.*` is the Server's own: a label in it is refused `400`, naming the key, and nothing is
+/// stored.
+/// Verifies: ADR-0035
+#[tokio::test]
+async fn a_label_in_the_fleet_space_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+    let refused = set_labels(
+        &client,
+        server.rest_addr,
+        &uid,
+        serde_json::json!({"fleet.x": "1", "rollout": "canary"}),
+    )
+    .await;
+    assert_eq!(refused.status(), 400);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    let message = body["error"].as_str().expect("message");
+    assert!(message.contains("fleet.x"), "it names the key: {message}");
+    let agents = agents(&client, server.rest_addr).await;
+    assert!(agents[0]["labels"].as_object().expect("labels").is_empty());
 }
 
 /// One Agent's row of the fleet view.
@@ -1503,6 +1532,66 @@ async fn the_ui_edits_configurations_as_content_and_deployments_hold_them() {
         ("AgentView", "assigned_deployment"),
         ("AgentView", "pending_configurations"),
         ("PendingConfigurationView", "change"),
+    ] {
+        assert!(
+            schemas[schema]["properties"][field].is_object(),
+            "{schema} no longer serves {field}"
+        );
+    }
+}
+
+/// The bundled UI's Hosts tab reads what `GET /api/v1/hosts` serves and acts on a row through the
+/// Gateway and revocation routes, and the Agents tab marks inherited labels — the fields the page
+/// reads are the ones the API documents.
+/// Verifies: ADR-0035
+#[tokio::test]
+async fn the_ui_lists_hosts_and_marks_inherited_labels() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let html = client
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    for needle in [
+        "data-tab=\"hosts\"",
+        "fetch(\"/api/v1/hosts\")",
+        "/api/v1/hosts/${encodeURIComponent(mark.dataset.host)}/gateway",
+        "certificate: { authority: \"client\", serial }",
+        "h.subject[field]",
+        "a.client_agent",
+        "a.inherited_labels",
+        "a.ignored_attributes",
+        "a.host_attributes",
+    ] {
+        assert!(
+            html.contains(needle),
+            "the UI no longer contains {needle:?}"
+        );
+    }
+    let document: serde_json::Value = client
+        .get(url(server.rest_addr, "/api/v1/openapi.json"))
+        .send()
+        .await
+        .expect("get the document")
+        .json()
+        .await
+        .expect("json");
+    let schemas = &document["components"]["schemas"];
+    for (schema, field) in [
+        ("HostView", "name"),
+        ("HostView", "subject"),
+        ("HostView", "agents"),
+        ("HostSubject", "organizational_unit"),
+        ("HostAgent", "client_agent"),
+        ("HostAgent", "machine"),
+        ("HostAgent", "ambiguous"),
+        ("AgentView", "inherited_labels"),
+        ("AgentView", "host_attributes"),
+        ("AgentView", "ignored_attributes"),
     ] {
         assert!(
             schemas[schema]["properties"][field].is_object(),

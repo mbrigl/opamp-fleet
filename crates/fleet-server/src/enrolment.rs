@@ -374,6 +374,7 @@ mod tests {
                     key_fingerprint: String::new(),
                     not_after_ms: u64::MAX,
                     host: None,
+                    subject_values: crate::revocation::SubjectValues::default(),
                 },
             })
         }

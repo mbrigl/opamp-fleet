@@ -7,7 +7,6 @@ mod audit;
 mod bootstrap;
 mod configs;
 mod deployments;
-mod labels;
 mod packages;
 mod revocation;
 
@@ -16,7 +15,6 @@ pub use audit::{files_in as audit_files, FsAuditStore};
 pub use bootstrap::FsBootstrapStore;
 pub use configs::FsConfigBackend;
 pub use deployments::FsDeploymentBackend;
-pub use labels::FsLabelStore;
 pub use packages::FsPackageBackend;
 pub use revocation::FsLedgerStore;
 

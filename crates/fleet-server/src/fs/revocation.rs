@@ -149,6 +149,10 @@ mod tests {
                 key_fingerprint: "k".into(),
                 not_after_ms: 9,
                 host: None,
+                subject_values: crate::revocation::SubjectValues {
+                    organization: "Kunde GmbH".into(),
+                    ..Default::default()
+                },
             },
             instance_uid: "00".into(),
             predecessor: None,

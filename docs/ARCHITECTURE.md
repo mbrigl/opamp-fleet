@@ -78,8 +78,8 @@ Five crates in one workspace ([ADR-0010](adr/0010-five-crates-the-whole-opamp-co
   CSR carries, when a certificate counts as ending, and what a certificate is called — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0029).
-- **`fleet-server`** — the Server: the fleet, its Configurations, labels, packages and
-  Deployments, the Agent plane and the Operator plane.
+- **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
+  and Deployments, the Agent plane and the Operator plane.
 - **`fleet-agent`** — the Client in all its modes, the program `supervisor`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
   fetch, pack, hash and sign package artifacts — or sign a Package's signing file from the UI
@@ -94,7 +94,8 @@ module's role is listed in
 core module names an adapter or a technology, and when a module has no role.
 
 - **Server stores** — each store is a port in the core module it serves (`AgentStore` in
-  `agent_store`, `LabelStore` in `labels`, `ConfigBackend` under the `ConfigStore` in `configs`,
+  `agent_store`, which holds each Agent's labels in its record, `ConfigBackend` under the
+  `ConfigStore` in `configs`,
   `DeploymentBackend` under the `DeploymentStore` in `deployments`, `PackageBackend` under the
   `PackageStore` in `packages`, `BootstrapStore` under the `BootstrapCertificates` in
   `bootstrap`), with its filesystem adapter in `fs`. The package port speaks in
@@ -117,8 +118,10 @@ core module names an adapter or a technology, and when a module has no role.
   requests an operator approves through `api`, and `throttle`, the per-address back-off after
   repeated failures, which both planes use
   ([ADR-0021](adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)). `revocation`
-  holds the register of issued certificates, the revocation list and the hosts, behind the
-  `LedgerStore` port ([ADR-0021](adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
+  holds the register of issued certificates, the revocation list and the Hosts — each with the
+  subject values of its certificate, its Gateway mark and the Agents bound to it — behind the
+  `LedgerStore` port ([ADR-0021](adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md),
+  [ADR-0035](adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
   marked Gateway, and the Gateway as a whole are heard; `transport` takes a token for each
   message before the handler does anything else and for each download in the guard
@@ -190,6 +193,15 @@ itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes in
 `supervisor.toml` before it starts or stops anything
 ([ADR-0017](adr/0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md)).
 
+**An Agent is placed under its Host.** Each Agent record names the Host it last arrived over — its
+own, or the Gateway's behind one. `fleet` derives from it, per Agent, what its effective description
+adds to its report: the `fleet.host.*` values of the Host it arrived over directly, and the labels
+of its Client Agent — the Agent reporting `supervisor.kind.*` in the same group, which is the Host,
+or behind a Gateway the machine the Agents report. It keeps that placement per group and places a
+group again when a report, a label, a forget or a Gateway mark changes it, so every Selector match
+reads the same description without a fleet-wide pass
+([ADR-0035](adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)).
+
 **A package reaches an Agent.** An operator uploads an artifact into `packages` and signs its
 entry there — `packages` checks the signature against `[packages] verification_key` when the
 Server holds one, and only reports — then puts the Package into a Deployment with a Selector and
@@ -218,8 +230,8 @@ directory ([ADR-0019](adr/0019-the-client-supervisor-installed-service-releases-
 proving with the old key which certificate it renews. A revocation closes the sessions it
 concerns at once and follows every renewal.
 
-**Where state lives.** The Server keeps its state under `config_dir` — Configurations, `agents/`,
-`labels/`, `revocation/` and `audit/` — and its artifacts under `packages_dir`; a restart restores
+**Where state lives.** The Server keeps its state under `config_dir` — Configurations, `agents/`
+(each Agent's record, its labels inside), `revocation/` and `audit/` — and its artifacts under `packages_dir`; a restart restores
 the fleet from them and shows each Agent disconnected until it reports. The Client keeps its state
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,
 and per Supervisor a directory with `config/` and `program/`. An installed Client runs from
