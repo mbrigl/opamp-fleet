@@ -1,6 +1,6 @@
 # ADR-0027: A signing file carries what a signature covers from the UI to the key and the signatures back, and `package sign` signs the hashes in it without the artifacts
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clause 5 superseded by [ADR-0033](0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)
 - **Date:** 2026-10-12
 - **Deciders:** Markus Brigl
 - **Applies to:** the signing file format `opamp-fleet-signing-v1`, the `package sign` command of `opamp-fleetctl` in `crates/fleet-tools/src/package.rs` and the module that reads the file, the signing-info download of the Packages tab and the signature import of the Deployments tab of the bundled UI in `crates/fleet-server/static/index.html`, and every document that tells an operator how to sign a Deployment
