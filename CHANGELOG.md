@@ -15,6 +15,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ## [0.5.5]
 
+### Changed
+
+- **The enrolment queue names a request's bootstrap certificate by what it was issued for.** The
+  Enrolments tab leads with its customer and site, then its serial and end, and marks a revoked
+  one; the full subject, issue date and fingerprint are in the tooltip, so the only fingerprint
+  beside a request is the key fingerprint you compare. The bootstrap-certificate list counts the
+  requests waiting with each certificate.
+
+### Security
+
+- **Revoking a bootstrap certificate withdraws the enrolment requests waiting with it.** Until
+  now such a request stayed in the queue until the window closed, and approving it still signed a
+  certificate for its key. The revocation now takes it out of the queue, and an approval of a
+  request whose bootstrap certificate is revoked is refused (`409`) with nothing signed. The
+  revocation's audit entry counts the withdrawn requests as `withdrawn_requests`
+  ([ADR-0021](docs/adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
+  clause 35).
+
 ## [0.5.4] - 2026-10-15
 
 ### Added

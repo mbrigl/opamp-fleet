@@ -887,9 +887,18 @@ impl AppState {
         })?;
         // A new host: its identity is minted here and carried by every renewal (ADR-0021 clause 7).
         let host = InstanceUid::default().to_string();
-        enrolment.approve(id, signer, &host, &|signed, instance_uid| {
-            self.record_issued(signed, instance_uid, None)
-        })
+        let revoked = |bootstrap: &CertId| {
+            self.revocations
+                .as_ref()
+                .is_some_and(|revocations| revocations.is_certificate_revoked(bootstrap))
+        };
+        enrolment.approve(
+            id,
+            signer,
+            &host,
+            &|signed, instance_uid| self.record_issued(signed, instance_uid, None),
+            &revoked,
+        )
     }
 
     /// What an enrolment connection is told (ADR-0021 clause 21): the capabilities that say it may

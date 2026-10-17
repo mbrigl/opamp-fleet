@@ -57,8 +57,9 @@ pub enum Peer {
         subject: String,
         /// SHA-256 of the certificate, hex.
         fingerprint: String,
-        /// The serial as the bootstrap record keys it (`ca::facts`).
-        serial: String,
+        /// Its issuer and serial: the serial as the bootstrap record keys it (`ca::facts`), and the
+        /// pair as the revocation list names it.
+        id: CertId,
     },
 }
 
@@ -72,7 +73,10 @@ impl Issuers {
             return Peer::Enrolling {
                 subject: String::new(),
                 fingerprint: hex::encode(Sha256::digest(certificate)),
-                serial: String::new(),
+                id: CertId {
+                    issuer: String::new(),
+                    serial: String::new(),
+                },
             };
         };
         let issuer = parsed.issuer().as_raw();
@@ -88,7 +92,7 @@ impl Issuers {
         Peer::Enrolling {
             subject: parsed.subject().to_string(),
             fingerprint: hex::encode(Sha256::digest(certificate)),
-            serial: CertId::new(issuer, &hex::encode(parsed.raw_serial())).serial,
+            id: CertId::new(issuer, &hex::encode(parsed.raw_serial())),
         }
     }
 }

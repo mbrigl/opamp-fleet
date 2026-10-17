@@ -868,7 +868,7 @@ impl Handler for Fleet {
             Some(Peer::Enrolling {
                 subject,
                 fingerprint,
-                serial,
+                id,
             }),
             Some(enrolment),
         ) = (request.extensions.get::<Peer>(), self.0.enrolment())
@@ -877,7 +877,7 @@ impl Handler for Fleet {
                 requester: Requester {
                     bootstrap_subject: subject.clone(),
                     bootstrap_fingerprint: fingerprint.clone(),
-                    bootstrap_serial: serial.clone(),
+                    bootstrap: id.clone(),
                     peer: request.peer.map(|peer| peer.ip()),
                 },
                 request: Arc::new(Mutex::new(None)),
@@ -1069,6 +1069,13 @@ impl Fleet {
         let Some(enrolment) = self.0.enrolment() else {
             return bad_request("this Server does not enrol");
         };
+        // A session whose bootstrap certificate was revoked a moment ago neither queues a request
+        // nor collects a certificate before its guard closes it (ADR-0021 clause 35).
+        if self.0.revocations().is_some_and(|revocations| {
+            revocations.is_certificate_revoked(&enrolling.requester.bootstrap)
+        }) {
+            return bad_request("this connection is no longer admitted");
+        }
         *enrolling.instance_uid.lock().expect("uid lock") = report.instance_uid.clone();
         let Some(csr) = report
             .connection_settings_request

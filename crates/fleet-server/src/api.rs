@@ -2933,7 +2933,7 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
             key_fingerprint: p.key_fingerprint,
             bootstrap_subject: p.requester.bootstrap_subject,
             bootstrap_fingerprint: p.requester.bootstrap_fingerprint,
-            bootstrap_serial: p.requester.bootstrap_serial,
+            bootstrap_serial: p.requester.bootstrap.serial,
         })
         .collect();
     Json(pending).into_response()
@@ -2949,7 +2949,7 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
         (status = 204, description = "Approved and signed"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
-        (status = 409, description = "The CA could not sign the request", body = ErrorBody)
+        (status = 409, description = "The CA could not sign the request, or its bootstrap certificate is revoked", body = ErrorBody)
     )
 )]
 async fn approve_enrolment(
@@ -2969,6 +2969,13 @@ async fn approve_enrolment(
         Err(crate::enrolment::DecisionError::NotFound) => error(
             StatusCode::NOT_FOUND,
             format!("no pending enrolment request {id:?}"),
+        ),
+        Err(crate::enrolment::DecisionError::Revoked) => error(
+            StatusCode::CONFLICT,
+            format!(
+                "enrolment request {id:?} came with a bootstrap certificate that is revoked; it is \
+                 withdrawn, and nothing was signed"
+            ),
         ),
         Err(crate::enrolment::DecisionError::Sign(e)) => error(StatusCode::CONFLICT, e),
     }
@@ -3301,7 +3308,13 @@ async fn revoke(
             let crate::revocation::Revoked::Certificate {
                 authority, serial, ..
             } = &entry.revoked;
+            let mut withdrawn = 0;
             if authority == "bootstrap" {
+                // The requests it carried wait no longer (ADR-0021 clause 35); approving one is
+                // refused either way.
+                withdrawn = state.enrolment().map_or(0, |enrolment| {
+                    enrolment.withdraw(&|bootstrap| revocations.is_certificate_revoked(bootstrap))
+                });
                 if let Some(Err(e)) = state.bootstrap().map(|b| b.forget_p12(serial)) {
                     // Said, not swallowed: lifting this revocation would make the file
                     // downloadable again.
@@ -3317,7 +3330,8 @@ async fn revoke(
             }
             note(
                 &state,
-                revocation_entry("revocation.revoked", "revoked", &entry),
+                revocation_entry("revocation.revoked", "revoked", &entry)
+                    .with("withdrawn_requests", withdrawn),
             );
             (StatusCode::CREATED, Json(RevocationView::of(entry))).into_response()
         }

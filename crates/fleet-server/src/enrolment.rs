@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 use crate::fleet::{CertificateSigner, Clock};
-use crate::revocation::Signed;
+use crate::revocation::{CertId, Signed};
 
 /// The longest an enrolment window may stay open.
 pub const MAX_WINDOW_SECS: u64 = 86_400;
@@ -43,8 +43,9 @@ pub struct Request {
 pub struct Requester {
     pub bootstrap_subject: String,
     pub bootstrap_fingerprint: String,
-    /// The bootstrap certificate's serial, as `GET /api/v1/bootstrap-certificates` lists it.
-    pub bootstrap_serial: String,
+    /// The bootstrap certificate's issuer and serial; the serial as
+    /// `GET /api/v1/bootstrap-certificates` lists it.
+    pub bootstrap: CertId,
     pub peer: Option<IpAddr>,
 }
 
@@ -81,6 +82,8 @@ pub enum Submitted {
 pub enum DecisionError {
     /// No pending request has that id, or it has expired — a `404`.
     NotFound,
+    /// The bootstrap certificate the request came with is revoked; the request is withdrawn.
+    Revoked,
     /// The CA could not sign the request.
     Sign(String),
 }
@@ -220,17 +223,23 @@ impl Enrolment {
     /// Approves one request: the CA signs it, and the certificate waits for the Agent to collect.
     ///
     /// # Errors
-    /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id, and
+    /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id,
+    /// [`DecisionError::Revoked`] when the request's bootstrap certificate is revoked, and
     /// [`DecisionError::Sign`] when the CA refuses the request.
     /// Answers what was signed, and the `instance_uid` the request arrived under, for the register.
     /// `record` keeps what was signed before the host can collect it (ADR-0021 clause 33); a
     /// failure there leaves the request pending.
+    ///
+    /// The bootstrap certificate the request came with is checked against `revoked` under the same
+    /// lock that signs, so a revocation that lands before the approval always wins (ADR-0021
+    /// clause 35); such a request is withdrawn and answered [`DecisionError::Revoked`].
     pub fn approve(
         &self,
         id: &str,
         signer: &dyn CertificateSigner,
         host: &str,
         record: &Record<'_>,
+        revoked: &dyn Fn(&CertId) -> bool,
     ) -> Result<(), DecisionError> {
         let mut state = self.state.lock().expect("enrolment lock");
         self.expire(&mut state);
@@ -239,6 +248,12 @@ impl Enrolment {
             .get_mut(id)
             .filter(|entry| entry.decision.is_none())
             .ok_or(DecisionError::NotFound)?;
+        if revoked(&entry.pending.requester.bootstrap) {
+            state.entries.remove(id);
+            drop(state);
+            self.changed();
+            return Err(DecisionError::Revoked);
+        }
         let signed = signer
             .sign(&entry.csr_pem, host)
             .map_err(DecisionError::Sign)?;
@@ -265,6 +280,25 @@ impl Enrolment {
         drop(state);
         self.changed();
         Ok(())
+    }
+
+    /// Withdraws every waiting request whose bootstrap certificate `revoked` names, and answers how
+    /// many: a revoked certificate opens nothing, a request it carried included (ADR-0021
+    /// clause 35). A decided request is left: an approved one was signed and recorded already, and
+    /// dropping it would revoke nothing — the connection of this certificate is refused, and only
+    /// one holding the same key can collect it.
+    pub fn withdraw(&self, revoked: &dyn Fn(&CertId) -> bool) -> usize {
+        let mut state = self.state.lock().expect("enrolment lock");
+        let before = state.entries.len();
+        state.entries.retain(|_, entry| {
+            entry.decision.is_some() || !revoked(&entry.pending.requester.bootstrap)
+        });
+        let withdrawn = before - state.entries.len();
+        drop(state);
+        if withdrawn > 0 {
+            self.changed();
+        }
+        withdrawn
     }
 
     /// Whether the request for `key` was rejected — its connection then ends.
@@ -374,7 +408,7 @@ mod tests {
         Requester {
             bootstrap_subject: "CN=bootstrap".to_string(),
             bootstrap_fingerprint: "bf".to_string(),
-            bootstrap_serial: "b5".to_string(),
+            bootstrap: CertId::new(b"bootstrap CA", "b5"),
             peer: None,
         }
     }
@@ -412,7 +446,7 @@ mod tests {
         );
         assert_eq!(enrolment.pending().len(), 1);
         enrolment
-            .approve("a", &Echo, "host", &|_, _| Ok(()))
+            .approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false)
             .expect("approve");
         assert_eq!(
             enrolment.submit(request("a"), requester()),
@@ -423,7 +457,7 @@ mod tests {
             "a decided request is no longer pending"
         );
         assert_eq!(
-            enrolment.approve("a", &Echo, "host", &|_, _| Ok(())),
+            enrolment.approve("a", &Echo, "host", &|_, _| Ok(()), &|_| false),
             Err(DecisionError::NotFound)
         );
 
@@ -448,7 +482,7 @@ mod tests {
         enrolment.submit(request("b"), requester());
         clock.0.fetch_add(61_000, Ordering::SeqCst);
         assert_eq!(
-            enrolment.approve("b", &Echo, "host", &|_, _| Ok(())),
+            enrolment.approve("b", &Echo, "host", &|_, _| Ok(()), &|_| false),
             Err(DecisionError::NotFound)
         );
     }
@@ -467,6 +501,78 @@ mod tests {
         assert_eq!(
             enrolment.submit(request("one more"), requester()),
             Submitted::Full
+        );
+    }
+
+    /// A signer that fails the test if it is ever asked.
+    struct Never;
+
+    impl CertificateSigner for Never {
+        fn sign(&self, _csr_pem: &str, _host: &str) -> Result<Signed, String> {
+            panic!("a request whose bootstrap certificate is revoked reached the signer");
+        }
+
+        fn check_claims(&self, _csr_pem: &str, _sender: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn renewal_proof(
+            &self,
+            _csr_pem: &str,
+        ) -> Result<Option<crate::revocation::Facts>, String> {
+            Ok(None)
+        }
+    }
+
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_request_whose_bootstrap_certificate_is_revoked_is_withdrawn_unsigned() {
+        let (enrolment, _clock) = enrolment();
+        enrolment.open(600).expect("open");
+        enrolment.submit(request("a"), requester());
+        let bootstrap = requester().bootstrap;
+        let revoked = |id: &CertId| *id == bootstrap;
+        assert_eq!(
+            enrolment.approve("a", &Never, "host", &|_, _| Ok(()), &revoked),
+            Err(DecisionError::Revoked)
+        );
+        assert!(enrolment.pending().is_empty(), "the request is withdrawn");
+        assert_eq!(
+            enrolment.approve("a", &Never, "host", &|_, _| Ok(()), &revoked),
+            Err(DecisionError::NotFound),
+            "a second approval finds nothing to sign"
+        );
+    }
+
+    /// Verifies: ADR-0021
+    #[test]
+    fn withdrawing_takes_only_the_waiting_requests_of_a_revoked_certificate() {
+        let (enrolment, _clock) = enrolment();
+        enrolment.open(600).expect("open");
+        let other = Requester {
+            bootstrap: CertId::new(b"bootstrap CA", "c6"),
+            ..requester()
+        };
+        enrolment.submit(request("revoked-waiting"), requester());
+        enrolment.submit(request("revoked-decided"), requester());
+        enrolment.submit(request("other"), other);
+        enrolment
+            .approve("revoked-decided", &Echo, "host", &|_, _| Ok(()), &|_| false)
+            .expect("approve");
+        let bootstrap = requester().bootstrap;
+        assert_eq!(enrolment.withdraw(&|id| *id == bootstrap), 1);
+        let left: Vec<String> = enrolment.pending().into_iter().map(|p| p.id).collect();
+        assert_eq!(
+            left,
+            ["other"],
+            "the other certificate's request still waits"
+        );
+        assert!(
+            matches!(
+                enrolment.submit(request("revoked-decided"), requester()),
+                Submitted::Issued(_)
+            ),
+            "a decided request is left to its connection, which the revocation refuses"
         );
     }
 }

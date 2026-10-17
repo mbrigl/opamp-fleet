@@ -2767,7 +2767,10 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
         let requester = fleet_server::enrolment::Requester {
             bootstrap_subject: String::new(),
             bootstrap_fingerprint: String::new(),
-            bootstrap_serial: String::new(),
+            bootstrap: fleet_server::revocation::CertId {
+                issuer: String::new(),
+                serial: String::new(),
+            },
             peer: None,
         };
         enrolment.submit(request, requester);
@@ -3348,6 +3351,101 @@ async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_ser
         !refused.status().is_success(),
         "a revoked bootstrap certificate opens nothing: {}",
         refused.status()
+    );
+}
+
+/// A request waits only while the bootstrap certificate it came with stands: revoking that
+/// certificate takes its waiting requests out of the queue, and no approval signs one afterwards —
+/// a CSR is signed only once its certificate has been checked again (ADR-0021 clause 35).
+/// Verifies: ADR-0021
+#[tokio::test]
+async fn revoking_a_bootstrap_certificate_withdraws_the_requests_waiting_with_it() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("acme bootstrap CA");
+    let audit_dir = tempfile::tempdir().expect("tempdir");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            issue_bootstrap: true,
+            revocations: true,
+            audit: Some(audit_in(audit_dir.path())),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let issued: serde_json::Value = operator_client
+        .post(operator(&served, "/api/v1/bootstrap-certificates"))
+        .json(&serde_json::json!({ "subject": { "organization": "Kunde GmbH" } }))
+        .send()
+        .await
+        .expect("issue")
+        .json()
+        .await
+        .expect("json");
+    let serial = issued["serial"].as_str().expect("serial");
+    let cert = issued["certificate_pem"].as_str().expect("cert");
+    let key = issued["private_key_pem"].as_str().expect("key");
+    operator_client
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+    let enrolling = client(&served.ca_pem, Some((cert, key)));
+    let (csr, _key) = csr_for("edge-01");
+    decode(post(&enrolling, &served.endpoint, csr_report(csr)).await).await;
+    let pending = |served: &Served| {
+        let operator_client = operator_client.clone();
+        let url = operator(served, "/api/v1/enrolments");
+        async move {
+            operator_client
+                .get(url)
+                .send()
+                .await
+                .expect("pending")
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .expect("json")
+        }
+    };
+    let waiting = pending(&served).await;
+    assert_eq!(waiting.len(), 1, "the request waits: {waiting:?}");
+    let id = waiting[0]["id"].as_str().expect("id").to_string();
+
+    let revoked = operator_client
+        .post(operator(&served, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "bootstrap", "serial": serial }
+        }))
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(revoked.status(), 201);
+    assert!(
+        pending(&served).await.is_empty(),
+        "the revoked certificate's request no longer waits"
+    );
+    let approved = operator_client
+        .post(operator(
+            &served,
+            &format!("/api/v1/enrolments/{id}/approve"),
+        ))
+        .send()
+        .await
+        .expect("approve");
+    assert_eq!(
+        approved.status(),
+        404,
+        "no approval signs a request whose bootstrap certificate is revoked"
+    );
+    let recorded = entries(audit_dir.path(), "revocation.revoked", 1).await;
+    let recorded = named(&recorded, "revocation.revoked");
+    assert_eq!(
+        recorded[0]["withdrawn_requests"], 1,
+        "the revocation's record counts the request it withdrew"
     );
 }
 

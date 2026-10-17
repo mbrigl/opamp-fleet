@@ -509,11 +509,11 @@
         <table>
           <thead>
             <tr>
-              <th style="width: 120px">Arrived</th>
-              <th style="width: 130px">From</th>
-              <th style="width: 16%">Subject</th>
+              <th style="width: 110px">Arrived</th>
+              <th style="width: 120px">From</th>
+              <th style="width: 14%">Subject</th>
               <th>Key fingerprint (SHA-256)</th>
-              <th style="width: 18%">Bootstrap certificate</th>
+              <th style="width: 26%">Bootstrap certificate</th>
               <th style="width: 190px"></th>
             </tr>
           </thead>
@@ -554,7 +554,7 @@
                 <th style="width: 22%">Serial</th>
                 <th style="width: 150px">Issued</th>
                 <th style="width: 150px">Valid until</th>
-                <th style="width: 90px">State</th>
+                <th style="width: 110px">State</th>
                 <th style="width: 190px"></th>
               </tr>
             </thead>
@@ -2059,13 +2059,29 @@
       // closed, the certificate revoked or ended — the Server keeps no key (ADR-0028 clause 21).
       const issuedPairs = new Map();
       const when = (ms) => new Date(ms).toLocaleString();
+      // What an operator issued a bootstrap certificate *for* — its customer and site — without the
+      // common name the Server sets on every one of them. The subject is kept whole as text, not
+      // split into its attributes: a customer's name may hold a comma, and a split that guessed
+      // wrong would put a wrong name in front of an approval. The full subject is in the tooltip.
+      function bootstrapName(subject) {
+        const m = /^(.*?)(?:, )?CN=[^=]*Bootstrap Certificate$/.exec(subject);
+        const named = m ? m[1] : subject;
+        return named || "no customer or site named";
+      }
       function bootstrapCell(e) {
-        const fingerprint = `<br /><span class="fingerprint sub" title="the bootstrap certificate's fingerprint">${esc(e.bootstrap_fingerprint)}</span>`;
         const b = boots.find((b) => b.serial === e.bootstrap_serial);
+        const tip = (lines) => esc(lines.join("\n"));
         if (!b) {
-          return `${esc(e.bootstrap_subject)}<br /><span class="sub" title="not on this Server's record: made elsewhere, under a bootstrap CA since replaced, or deleted from the record after its revocation">serial ${esc(e.bootstrap_serial)} · not issued here</span>${fingerprint}`;
+          const title = tip([e.bootstrap_subject, `serial ${e.bootstrap_serial}`, `fingerprint ${e.bootstrap_fingerprint}`,
+            "Not on this Server's record: made elsewhere, under a bootstrap CA since replaced, or deleted from the record after its revocation."]);
+          return `<div title="${title}"><strong>${esc(bootstrapName(e.bootstrap_subject))}</strong>
+            <div class="sub"><span class="pill amber">not issued here</span> serial ${esc(e.bootstrap_serial)}</div></div>`;
         }
-        return `${esc(b.subject)}<br /><span class="sub">serial ${esc(b.serial)} · issued ${esc(when(b.issued_ms))} · valid until ${esc(when(b.not_after_ms))}</span>${fingerprint}`;
+        const title = tip([b.subject, `serial ${b.serial}`, `issued ${when(b.issued_ms)}`, `valid until ${when(b.not_after_ms)}`,
+          `fingerprint ${e.bootstrap_fingerprint}`]);
+        const state = b.revoked ? `<span class="pill red">revoked</span> ` : "";
+        return `<div title="${title}"><strong>${esc(bootstrapName(b.subject))}</strong>
+          <div class="sub">${state}serial ${esc(b.serial)} · valid until ${esc(when(b.not_after_ms))}</div></div>`;
       }
       function renderEnrolments(win, failed) {
         $("enrolment-count").textContent = enrolments.length;
@@ -2116,7 +2132,10 @@
         $("boots-error").textContent = failed || "";
         $("boots-empty").style.display = boots.length || failed ? "none" : "block";
         $("boot-keys-note").style.display = issuedPairs.size ? "" : "none";
-        const shown = JSON.stringify([boots, [...issuedPairs.keys()]]);
+        // How many requests in the queue carry each certificate, so the two tables point at each other.
+        const waiting = new Map();
+        for (const e of enrolments) waiting.set(e.bootstrap_serial, (waiting.get(e.bootstrap_serial) || 0) + 1);
+        const shown = JSON.stringify([boots, [...issuedPairs.keys()], [...waiting]]);
         if (shown === bootsShown) return;
         bootsShown = shown;
         const p12 = (b) => b.p12 && !b.revoked ? `
@@ -2126,11 +2145,12 @@
               <button class="btn btn-ghost btn-sm boot-save" data-serial="${esc(b.serial)}" data-part="key" title="Save the private key as bootstrap-key.pem — the key_file a host's supervisor.toml names. Offered only while this page stays open.">Save bootstrap-key.pem</button>` : "";
         $("boots").innerHTML = boots.map((b) => `
           <tr>
-            <td>${esc(b.subject)}</td>
+            <td title="${esc(b.subject)}"><strong>${esc(bootstrapName(b.subject))}</strong></td>
             <td><span class="fingerprint">${esc(b.serial)}</span></td>
             <td>${esc(when(b.issued_ms))}</td>
             <td>${esc(when(b.not_after_ms))}</td>
-            <td>${b.revoked ? `<span class="pill red">revoked</span>` : `<span class="pill green">valid</span>`}</td>
+            <td>${b.revoked ? `<span class="pill red">revoked</span>` : `<span class="pill green">valid</span>`}${waiting.get(b.serial) ? `
+              <div style="margin-top: 4px"><span class="pill amber" title="requests in the queue above that enrol with this certificate">${waiting.get(b.serial)} waiting</span></div>` : ""}</td>
             <td><div style="display: flex; flex-direction: column; align-items: flex-start; gap: 4px">${p12(b)}${saves(b)}${b.revoked ? `
               <button class="btn btn-ghost btn-sm boot-delete" data-serial="${esc(b.serial)}" title="Delete this revoked certificate from the list. Its revocation stays: no host can enrol with it.">Delete</button>` : `
               <button class="btn btn-ghost btn-sm boot-revoke" data-serial="${esc(b.serial)}" title="Revoke this certificate: no host can enrol with it any more">Revoke</button>`}</div></td>
@@ -2159,12 +2179,17 @@
             for (const [serial, pair] of issuedPairs) {
               if (pair.not_after_ms <= Date.now() || boots.some((b) => b.serial === serial && b.revoked)) issuedPairs.delete(serial);
             }
-            renderBoots();
           }
-          else renderBoots(`the bootstrap certificates could not be read: HTTP ${certs.status}`);
+          // Drawn after the queue is read, since each row counts the requests waiting with it.
+          const bootsFailed = certs.ok ? undefined : `the bootstrap certificates could not be read: HTTP ${certs.status}`;
           const list = await fetch("/api/v1/enrolments");
-          if (!list.ok) { renderEnrolments(win, `the pending requests could not be read: HTTP ${list.status}`); return; }
+          if (!list.ok) {
+            renderBoots(bootsFailed);
+            renderEnrolments(win, `the pending requests could not be read: HTTP ${list.status}`);
+            return;
+          }
           enrolments = await list.json();
+          renderBoots(bootsFailed);
         } catch { return; }
         renderEnrolments(win);
       }
