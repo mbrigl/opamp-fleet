@@ -61,18 +61,17 @@ fn ring_holding(
     state: &fleet_server::fleet::AppState,
     id: &fleet_server::packages::PackageId,
 ) -> String {
-    let path = state
+    let (sha256, _) = state
         .packages()
         .expect("packages are armed")
-        .artifact_path(id, &this_host())
+        .artifact(id, &this_host())
         .expect("the artifact is stored");
-    let artifact = std::fs::read(path).expect("read the artifact");
     let signature = signing_key()
         .0
         .sign(&fleet_core::package::statement(
             &id.agent_type,
             &id.version,
-            &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+            &sha256,
         ))
         .as_ref()
         .to_vec();
@@ -134,7 +133,9 @@ async fn spawn_server(store: PackageStore) -> (std::net::SocketAddr, Arc<AppStat
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
+            .with_packages(Some(
+                PackageOffering::new(dir.path(), store).expect("deployments"),
+            )),
     );
     // The configuration directory only has to outlive the Server, which outlives the test.
     std::mem::forget(dir);

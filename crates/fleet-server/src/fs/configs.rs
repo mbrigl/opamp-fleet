@@ -1,27 +1,30 @@
 //! Configurations on the filesystem (ADR-0025, ADR-0034): the default adapter behind
-//! [`ConfigBackend`](crate::configs::ConfigBackend) — one JSON file per Configuration, written in
-//! one step.
+//! [`ConfigBackend`](crate::configs::ConfigBackend) — one JSON file per Configuration under
+//! `<data_dir>/configurations/`, owner-only, written in one step (ADR-0037).
 
 use std::path::PathBuf;
 
 use crate::configs::{ConfigBackend, Configuration};
 
-/// One JSON file per Configuration under the configuration directory, named after it.
+/// One JSON file per Configuration under `configurations/`, named after it.
 pub struct FsConfigBackend {
     dir: PathBuf,
 }
 
 impl FsConfigBackend {
-    /// Opens the directory, creating it when it is missing.
-    pub fn open(dir: PathBuf) -> Result<Self, String> {
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    /// Opens the store in the data directory `root`, creating `configurations/` owner-only.
+    pub fn open(root: &std::path::Path) -> Result<Self, String> {
+        let dir = root.join(super::CONFIGURATIONS);
+        super::create_private_dir(&dir)?;
         Ok(FsConfigBackend { dir })
     }
+}
 
-    fn path(&self, name: &str) -> PathBuf {
-        self.dir.join(format!("{name}.json"))
-    }
+/// Writes one Configuration into the `configurations/` directory `dir`, owner-only, in one step —
+/// the write this store and a rollout's revisions (ADR-0037 clause 3) share.
+pub(crate) fn write(dir: &std::path::Path, config: &Configuration) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(config).expect("a Configuration serializes");
+    super::replace(&dir.join(format!("{}.json", config.name)), &json)
 }
 
 impl ConfigBackend for FsConfigBackend {
@@ -30,15 +33,7 @@ impl ConfigBackend for FsConfigBackend {
     /// guessed at.
     fn load(&self) -> Result<Vec<Configuration>, String> {
         let mut configs = Vec::new();
-        let entries = std::fs::read_dir(&self.dir)
-            .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?;
-        for entry in entries {
-            let path = entry
-                .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?
-                .path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
+        for (stem, path) in super::json_files(&self.dir)? {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let value: serde_json::Value = serde_json::from_str(&text)
@@ -50,25 +45,27 @@ impl ConfigBackend for FsConfigBackend {
                 return Err(format!(
                     "{} carries a selector, and a Configuration has none any more (ADR-0034): put \
                      it into a Deployment, whose Selector aims it, and remove the selector from \
-                     the file",
+                     the file; a data directory an older Server wrote is moved by `server migrate` \
+                     (ADR-0037)",
                     path.display()
                 ));
             }
             let config: Configuration = serde_json::from_value(value)
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+            if config.name != stem {
+                return Err(super::misnamed(&path, "name"));
+            }
             configs.push(config);
         }
         Ok(configs)
     }
 
     fn put(&self, config: &Configuration) -> Result<(), String> {
-        let json = serde_json::to_vec_pretty(config).expect("a Configuration serializes");
-        super::replace(&self.path(&config.name), &json)
+        write(&self.dir, config)
     }
 
     fn remove(&self, name: &str) -> Result<(), String> {
-        let path = self.path(name);
-        std::fs::remove_file(&path).map_err(|e| format!("cannot delete {}: {e}", path.display()))
+        super::remove_file(&self.dir.join(format!("{name}.json")))
     }
 }
 
@@ -91,7 +88,7 @@ mod tests {
     use crate::configs::{ConfigStore, ROLE_SUPPLEMENTARY};
 
     fn open(dir: &std::path::Path) -> Result<ConfigStore, String> {
-        ConfigStore::open(Box::new(FsConfigBackend::open(dir.to_path_buf())?))
+        ConfigStore::open(Box::new(FsConfigBackend::open(dir)?))
     }
 
     /// What one store wrote, a store opened on the same directory reads — assignments' pinned
@@ -112,7 +109,7 @@ mod tests {
             "receivers: {}\n"
         );
         assert!(reopened.delete("base").expect("delete"));
-        assert!(!dir.path().join("base.json").exists());
+        assert!(!dir.path().join("configurations/base.json").exists());
         assert_eq!(open(dir.path()).expect("open").list().len(), 1);
     }
 
@@ -142,7 +139,9 @@ mod tests {
             ),
         ] {
             let dir = tempfile::tempdir().expect("tempdir");
-            std::fs::write(dir.path().join(file), body).expect("write the retired shape");
+            std::fs::create_dir_all(dir.path().join("configurations")).expect("dir");
+            std::fs::write(dir.path().join("configurations").join(file), body)
+                .expect("write the retired shape");
 
             let error = open(dir.path())
                 .map(|_| ())

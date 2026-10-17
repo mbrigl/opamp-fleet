@@ -193,7 +193,8 @@ struct Served {
     state: Arc<AppState>,
     revocations: Option<Arc<Revocations>>,
     enrolment: Option<Arc<fleet_server::enrolment::Enrolment>>,
-    /// Where the Server keeps what it persists.
+    /// The directory the Server keeps what it persists in: its data directory is `fleet-configs`
+    /// beneath it.
     config_dir: std::path::PathBuf,
 }
 
@@ -214,7 +215,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
         Arc::new(
             Revocations::open(
                 Box::new(
-                    fleet_server::fs::FsLedgerStore::open(dir.path().join("revocation"))
+                    fleet_server::fs::FsLedgerStore::open(&dir.path().join("fleet-configs"))
                         .expect("ledger"),
                 ),
                 clock.clone(),
@@ -243,7 +244,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
         Arc::new(
             fleet_server::bootstrap::BootstrapCertificates::on_disk(
                 signer,
-                dir.path().join("bootstrap-certificates"),
+                &dir.path().join("fleet-configs"),
                 clock.clone(),
             )
             .expect("bootstrap record"),
@@ -260,6 +261,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
             .with_audit(setup.audit.clone())
             .with_packages(setup.packages.then(|| {
                 fleet_server::fleet::PackageOffering::new(
+                    &dir.path().join("packages"),
                     fleet_server::packages::PackageStore::open(dir.path().join("packages"))
                         .expect("package store"),
                 )
@@ -350,6 +352,26 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
         enrolment,
         config_dir,
     }
+}
+
+/// The files of the bootstrap certificate `serial` in the Server's `bootstrap/`, named
+/// `<issuer>-<serial>.json` and `.p12` (ADR-0037).
+fn bootstrap_files(served: &Served, serial: &str) -> Vec<String> {
+    std::fs::read_dir(served.config_dir.join("fleet-configs/bootstrap"))
+        .expect("bootstrap/")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .into_string()
+                .expect("utf-8")
+        })
+        .filter(|name| {
+            name.strip_suffix(".json")
+                .or_else(|| name.strip_suffix(".p12"))
+                .is_some_and(|stem| stem.ends_with(&format!("-{serial}")))
+        })
+        .collect()
 }
 
 fn client(ca_pem: &str, identity: Option<(&str, &str)>) -> reqwest::Client {
@@ -1658,9 +1680,14 @@ async fn an_approval_writes_the_host_before_its_first_report() {
         listed[0]["name"], listed[0]["host"],
         "no Client Agent named it yet"
     );
-    let written = std::fs::read_to_string(served.config_dir.join("revocation/hosts.json"))
-        .expect("the Host is written");
     let host = listed[0]["host"].as_str().expect("a host id");
+    let written = std::fs::read_to_string(
+        served
+            .config_dir
+            .join("fleet-configs/hosts")
+            .join(format!("{host}.json")),
+    )
+    .expect("the Host is written, one file per Host (ADR-0037)");
     assert!(written.contains(host), "{written}");
 }
 
@@ -2003,7 +2030,7 @@ async fn a_csr_for_another_agent_still_descends_from_the_presented_certificate()
 fn audit_in(dir: &std::path::Path) -> Arc<dyn fleet_server::audit::Audit> {
     Arc::new(
         fleet_server::audit_log::AuditLog::start(
-            Box::new(fleet_server::fs::FsAuditStore::open(dir.to_path_buf()).expect("store")),
+            Box::new(fleet_server::fs::FsAuditStore::open(dir).expect("store")),
             fleet_server::audit_log::Limits::default(),
             Arc::new(fleet_server::clock::SystemClock),
         )
@@ -2016,7 +2043,7 @@ async fn entries(dir: &std::path::Path, until: &str, count: usize) -> Vec<serde_
     // The writer keeps the order the entries were queued in, so once `count` entries named `until`
     // are on disk, everything queued before the last of them is too.
     let read = || -> Vec<serde_json::Value> {
-        fleet_server::fs::audit_files(dir)
+        fleet_server::fs::audit_files(&dir.join("audit"))
             .expect("files")
             .iter()
             .flat_map(|file| {
@@ -2124,7 +2151,7 @@ async fn an_authorization_an_older_client_sends_is_never_written() {
     let all = entries(dir.path(), "admission.admitted", 2).await;
     let admitted = named(&all, "admission.admitted");
     assert_eq!(admitted.len(), 2, "{all:#?}");
-    let text = std::fs::read_dir(dir.path())
+    let text = std::fs::read_dir(dir.path().join("audit"))
         .expect("dir")
         .map(|file| std::fs::read_to_string(file.expect("entry").path()).expect("read"))
         .collect::<String>();
@@ -3030,7 +3057,7 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
     let reply = decode(post(&enrolling, &served.endpoint, with_csr(&uid, csr)).await).await;
     names_its_agent(&reply, &uid, "the full enrolment queue");
 
-    enrolment.close();
+    enrolment.close().expect("close");
     enrolment.open(60).expect("open the window");
     let mut socket = websocket(&served, &bootstrap_cert, &bootstrap_key, None)
         .await
@@ -3834,11 +3861,11 @@ async fn a_bootstrap_certificate_issued_with_a_password_is_a_pkcs12_file_until_r
         .expect("revoke");
     assert_eq!(revoked.status(), 201);
     assert_eq!(download(operator_client.clone()).await.status(), 404);
-    let kept = served
-        .config_dir
-        .join("bootstrap-certificates")
-        .join(format!("{serial}.p12"));
-    assert!(!kept.exists(), "the revocation removed {}", kept.display());
+    let kept = bootstrap_files(&served, &serial);
+    assert!(
+        !kept.iter().any(|name| name.ends_with(".p12")),
+        "the revocation removed {kept:?}"
+    );
     let listed: serde_json::Value = operator_client
         .get(operator(&served, "/api/v1/bootstrap-certificates"))
         .send()
@@ -3987,9 +4014,7 @@ async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refu
         .await
         .expect("json");
     assert_eq!(listed, serde_json::json!([]), "gone from the list");
-    let dir = served.config_dir.join("bootstrap-certificates");
-    assert!(!dir.join(format!("{serial}.json")).exists());
-    assert!(!dir.join(format!("{serial}.p12")).exists());
+    assert_eq!(bootstrap_files(&served, &serial), Vec::<String>::new());
     let recorded = entries(audit_dir.path(), "enrolment.bootstrap_deleted", 1).await;
     let deleted = named(&recorded, "enrolment.bootstrap_deleted");
     assert_eq!(deleted.len(), 1);

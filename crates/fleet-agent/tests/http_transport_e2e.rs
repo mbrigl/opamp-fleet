@@ -210,7 +210,9 @@ async fn a_package_rollout_reaches_a_polling_client() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
+            .with_packages(Some(
+                PackageOffering::new(store_dir.path(), store).expect("deployments"),
+            )),
     );
     let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

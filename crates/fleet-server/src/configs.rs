@@ -236,29 +236,58 @@ impl ConfigStore {
         Ok(config)
     }
 
-    /// Pins the saved revision for an assignment (ADR-0025): copies it into `retained` under its
-    /// content hash — idempotently — and returns that hash. This is the store's half of a rollout
-    /// act; the fleet writes the returned hash into the Agent's assignment.
-    pub fn retain_saved(&self, name: &str) -> Result<String, String> {
+    /// Pins the saved revision of one Configuration and persists it through the store's own
+    /// backend — the tests' shorthand for a rollout's half that [`pin`](Self::pin) is.
+    #[cfg(test)]
+    pub(crate) fn retain_saved(&self, name: &str) -> Result<String, String> {
+        self.pin(&BTreeSet::from([name.to_string()]), |hashes, changed| {
+            for config in changed {
+                self.backend.put(config)?;
+            }
+            Ok(hashes[name].clone())
+        })
+    }
+
+    /// Pins the saved revision of each of `names` for a rollout (ADR-0025 clause 2, ADR-0037
+    /// clause 3): hands `write` each one's hash and the Configurations whose retained revisions
+    /// that changes, under the store's lock, and makes them the store's only once `write` — which
+    /// persists them together with the assignments that pin them — has succeeded. What `write`
+    /// answers is answered.
+    ///
+    /// # Errors
+    /// A name the store does not hold, or whatever `write` fails with; the store is then as it was.
+    pub fn pin<T>(
+        &self,
+        names: &BTreeSet<String>,
+        write: impl FnOnce(&BTreeMap<String, String>, &[Configuration]) -> Result<T, String>,
+    ) -> Result<T, String> {
         let mut configs = self.configs.write().expect("configs lock");
-        let Some(existing) = configs.get(name) else {
-            return Err(format!("no configuration {name:?}"));
-        };
-        let hash = revision_hash(&existing.saved);
-        if existing.retained.contains_key(&hash) {
-            return Ok(hash);
+        let mut hashes = BTreeMap::new();
+        let mut changed = Vec::new();
+        for name in names {
+            let existing = configs
+                .get(name)
+                .ok_or_else(|| format!("no configuration {name:?}"))?;
+            let hash = revision_hash(&existing.saved);
+            if !existing.retained.contains_key(&hash) {
+                let mut config = existing.clone();
+                config.retained.insert(hash.clone(), config.saved.clone());
+                changed.push(config);
+            }
+            hashes.insert(name.clone(), hash);
         }
-        let mut config = existing.clone();
-        config.retained.insert(hash.clone(), config.saved.clone());
-        self.persist(&config)?;
-        configs.insert(config.name.clone(), config);
-        Ok(hash)
+        let written = write(&hashes, &changed)?;
+        for config in changed {
+            configs.insert(config.name.clone(), config);
+        }
+        Ok(written)
     }
 
     /// Drops every retained revision of `name` that `referenced` does not name — the collection
     /// half of ADR-0025's "the store retains every revision an assignment still references". The
-    /// caller computes `referenced` from the fleet's assignments; a revision left behind by a
-    /// failed write is harmless and collected on the next act.
+    /// caller asks the Agent store which revisions its assignments reference (ADR-0037 clause 3);
+    /// a revision left behind by a failed write is harmless and collected on the next act, or when
+    /// the Server next starts.
     pub fn retain_only(&self, name: &str, referenced: &BTreeSet<String>) -> Result<(), String> {
         let mut configs = self.configs.write().expect("configs lock");
         let Some(existing) = configs.get(name) else {

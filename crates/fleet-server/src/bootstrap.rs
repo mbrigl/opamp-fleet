@@ -10,7 +10,7 @@
 //! enrolment window and an operator's approval (ADR-0021 clauses 20, 21).
 //!
 //! The signing is the [`BootstrapSigner`] port, the bootstrap CA in [`crate::ca`] its adapter; the
-//! record is the [`BootstrapStore`] port, a directory under `config_dir` its adapter.
+//! record is the [`BootstrapStore`] port, `bootstrap/` under `data_dir` its adapter (ADR-0037).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -317,7 +317,8 @@ pub struct Entry {
     pub p12: bool,
 }
 
-/// The port the record persists through: one document per certificate.
+/// The port the record persists through: one document per certificate, keyed by its issuer and
+/// serial as every certificate store keys one (ADR-0037 clause 13).
 pub trait BootstrapStore: Send + Sync {
     /// Every entry persisted.
     ///
@@ -335,25 +336,25 @@ pub trait BootstrapStore: Send + Sync {
     ///
     /// # Errors
     /// Returns an error when it cannot be removed.
-    fn remove(&self, serial: &str) -> Result<(), String>;
+    fn remove(&self, id: &CertId) -> Result<(), String>;
 
     /// Keeps the PKCS#12 file of one entry, owner-only.
     ///
     /// # Errors
     /// Returns an error when it cannot be written.
-    fn put_p12(&self, serial: &str, file: &[u8]) -> Result<(), String>;
+    fn put_p12(&self, id: &CertId, file: &[u8]) -> Result<(), String>;
 
     /// The PKCS#12 file of one entry, `None` when there is none.
     ///
     /// # Errors
     /// Returns an error when it cannot be read.
-    fn p12(&self, serial: &str) -> Result<Option<Vec<u8>>, String>;
+    fn p12(&self, id: &CertId) -> Result<Option<Vec<u8>>, String>;
 
     /// Forgets the PKCS#12 file of one entry, keeping the entry.
     ///
     /// # Errors
     /// Returns an error when it cannot be removed.
-    fn remove_p12(&self, serial: &str) -> Result<(), String>;
+    fn remove_p12(&self, id: &CertId) -> Result<(), String>;
 }
 
 /// Why a bootstrap certificate was not issued.
@@ -389,7 +390,8 @@ pub struct BootstrapCertificates {
     signer: Option<Box<dyn BootstrapSigner>>,
     store: Box<dyn BootstrapStore>,
     clock: Arc<dyn Clock>,
-    entries: Mutex<BTreeMap<String, Entry>>,
+    /// Keyed by issuer and serial.
+    entries: Mutex<BTreeMap<CertId, Entry>>,
 }
 
 impl BootstrapCertificates {
@@ -411,9 +413,9 @@ impl BootstrapCertificates {
                 .as_ref()
                 .is_some_and(|ca_key| *ca_key != entry.ca_key)
             {
-                store.remove(&entry.serial)?;
+                store.remove(&entry.id)?;
             } else {
-                entries.insert(entry.serial.clone(), entry);
+                entries.insert(entry.id.clone(), entry);
             }
         }
         let record = BootstrapCertificates {
@@ -485,14 +487,14 @@ impl BootstrapCertificates {
         // when the entry cannot be written: no file is kept that no entry ends.
         if let Some(file) = &pair.pkcs12 {
             self.store
-                .put_p12(&entry.serial, file)
+                .put_p12(&entry.id, file)
                 .map_err(IssueError::Failed)?;
         }
         if let Err(e) = self.store.put(&entry) {
-            let _ = self.store.remove_p12(&entry.serial);
+            let _ = self.store.remove_p12(&entry.id);
             return Err(IssueError::Failed(e));
         }
-        entries.insert(entry.serial.clone(), entry);
+        entries.insert(entry.id.clone(), entry);
         Ok(pair)
     }
 
@@ -532,10 +534,10 @@ impl BootstrapCertificates {
     pub fn p12(&self, serial: &str) -> Result<Option<(Entry, Vec<u8>)>, String> {
         let mut entries = self.entries.lock().expect("bootstrap record lock");
         self.prune(&mut entries)?;
-        let Some(entry) = entries.get(serial).filter(|entry| entry.p12) else {
+        let Some(entry) = self.in_force(&entries, serial).filter(|entry| entry.p12) else {
             return Ok(None);
         };
-        Ok(self.store.p12(serial)?.map(|file| (entry.clone(), file)))
+        Ok(self.store.p12(&entry.id)?.map(|file| (entry.clone(), file)))
     }
 
     /// Deletes a revoked certificate's entry and any PKCS#12 file of it (ADR-0029 clause 15).
@@ -553,15 +555,18 @@ impl BootstrapCertificates {
     ) -> Result<Entry, DeleteError> {
         let mut entries = self.entries.lock().expect("bootstrap record lock");
         self.prune(&mut entries).map_err(DeleteError::Failed)?;
-        let entry = entries.get(serial).cloned().ok_or(DeleteError::NotFound)?;
+        let entry = self
+            .in_force(&entries, serial)
+            .cloned()
+            .ok_or(DeleteError::NotFound)?;
         if !revoked(&entry) {
             return Err(DeleteError::NotRevoked);
         }
         if !recorded(&entry) {
             return Err(DeleteError::Unrecorded);
         }
-        self.store.remove(serial).map_err(DeleteError::Failed)?;
-        entries.remove(serial);
+        self.store.remove(&entry.id).map_err(DeleteError::Failed)?;
+        entries.remove(&entry.id);
         Ok(entry)
     }
 
@@ -572,29 +577,56 @@ impl BootstrapCertificates {
     /// Returns an error when the file or the entry cannot be written.
     pub fn forget_p12(&self, serial: &str) -> Result<(), String> {
         let mut entries = self.entries.lock().expect("bootstrap record lock");
-        let Some(entry) = entries.get_mut(serial).filter(|entry| entry.p12) else {
+        let Some(id) = self
+            .in_force(&entries, serial)
+            .filter(|entry| entry.p12)
+            .map(|entry| entry.id.clone())
+        else {
             return Ok(());
         };
         // The entry first, so it never names a file that is gone — and a file left by a failed
         // removal is never handed out, since the entry no longer says it is there.
-        let mut forgotten = entry.clone();
+        let mut forgotten = entries[&id].clone();
         forgotten.p12 = false;
         self.store.put(&forgotten)?;
-        *entry = forgotten;
-        self.store.remove_p12(serial)
+        entries.insert(id.clone(), forgotten);
+        self.store.remove_p12(&id)
+    }
+
+    /// The entry a REST `{serial}` names: the one of the bootstrap CA in force (ADR-0037
+    /// clause 13). Without the CA's key, the Server holds entries of whichever CA issued them, and
+    /// the newest of that serial is the one meant.
+    fn in_force<'a>(
+        &self,
+        entries: &'a BTreeMap<CertId, Entry>,
+        serial: &str,
+    ) -> Option<&'a Entry> {
+        let current = self
+            .signer
+            .as_ref()
+            .map(|signer| signer.ca_key_fingerprint());
+        entries
+            .values()
+            .filter(|entry| entry.serial == serial)
+            .filter(|entry| {
+                current
+                    .as_ref()
+                    .is_none_or(|ca_key| *ca_key == entry.ca_key)
+            })
+            .max_by_key(|entry| entry.issued_ms)
     }
 
     /// Forgets every certificate that has ended (ADR-0028 clause 24).
-    fn prune(&self, entries: &mut BTreeMap<String, Entry>) -> Result<(), String> {
+    fn prune(&self, entries: &mut BTreeMap<CertId, Entry>) -> Result<(), String> {
         let now = self.clock.now_ms();
-        let ended: Vec<String> = entries
+        let ended: Vec<CertId> = entries
             .values()
             .filter(|entry| entry.not_after_ms <= now)
-            .map(|entry| entry.serial.clone())
+            .map(|entry| entry.id.clone())
             .collect();
-        for serial in ended {
-            self.store.remove(&serial)?;
-            entries.remove(&serial);
+        for id in ended {
+            self.store.remove(&id)?;
+            entries.remove(&id);
         }
         Ok(())
     }
@@ -614,8 +646,8 @@ mod tests {
 
     #[derive(Default)]
     struct MemoryStore(
-        Mutex<BTreeMap<String, Entry>>,
-        Mutex<BTreeMap<String, Vec<u8>>>,
+        Mutex<BTreeMap<CertId, Entry>>,
+        Mutex<BTreeMap<CertId, Vec<u8>>>,
         std::sync::atomic::AtomicBool,
     );
     impl BootstrapStore for Arc<MemoryStore> {
@@ -629,26 +661,23 @@ mod tests {
             self.0
                 .lock()
                 .unwrap()
-                .insert(entry.serial.clone(), entry.clone());
+                .insert(entry.id.clone(), entry.clone());
             Ok(())
         }
-        fn remove(&self, serial: &str) -> Result<(), String> {
-            self.0.lock().unwrap().remove(serial);
-            self.1.lock().unwrap().remove(serial);
+        fn remove(&self, id: &CertId) -> Result<(), String> {
+            self.0.lock().unwrap().remove(id);
+            self.1.lock().unwrap().remove(id);
             Ok(())
         }
-        fn put_p12(&self, serial: &str, file: &[u8]) -> Result<(), String> {
-            self.1
-                .lock()
-                .unwrap()
-                .insert(serial.to_string(), file.to_vec());
+        fn put_p12(&self, id: &CertId, file: &[u8]) -> Result<(), String> {
+            self.1.lock().unwrap().insert(id.clone(), file.to_vec());
             Ok(())
         }
-        fn p12(&self, serial: &str) -> Result<Option<Vec<u8>>, String> {
-            Ok(self.1.lock().unwrap().get(serial).cloned())
+        fn p12(&self, id: &CertId) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.1.lock().unwrap().get(id).cloned())
         }
-        fn remove_p12(&self, serial: &str) -> Result<(), String> {
-            self.1.lock().unwrap().remove(serial);
+        fn remove_p12(&self, id: &CertId) -> Result<(), String> {
+            self.1.lock().unwrap().remove(id);
             Ok(())
         }
     }
@@ -909,10 +938,7 @@ mod tests {
         let (entry, file) = record.p12(&sealed.serial).expect("read").expect("kept");
         assert!(entry.p12);
         assert_eq!(file, b"sealed under twelve chars");
-        assert!(
-            store.0.lock().unwrap()[&sealed.serial].p12,
-            "the entry says so"
-        );
+        assert!(store.0.lock().unwrap()[&sealed.id].p12, "the entry says so");
 
         let other = record
             .issue(&request(serde_json::json!({"password": "twelve chars"})))
@@ -920,15 +946,15 @@ mod tests {
         record.forget_p12(&other.serial).expect("forgotten");
         assert_eq!(record.p12(&other.serial).expect("read"), None);
         assert!(
-            store.1.lock().unwrap().get(&other.serial).is_none(),
+            store.1.lock().unwrap().get(&other.id).is_none(),
             "the file is gone"
         );
-        assert!(!store.0.lock().unwrap()[&other.serial].p12);
+        assert!(!store.0.lock().unwrap()[&other.id].p12);
 
         clock.0.store(1_000 + 2 * DAY_MS, Ordering::SeqCst);
         assert_eq!(record.p12(&sealed.serial).expect("read"), None, "ended");
         assert!(
-            store.1.lock().unwrap().get(&sealed.serial).is_none(),
+            store.1.lock().unwrap().get(&sealed.id).is_none(),
             "removed with its entry"
         );
     }

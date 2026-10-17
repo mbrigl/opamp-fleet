@@ -1,22 +1,30 @@
 //! The Agent-record store on the filesystem (ADR-0024): the default adapter behind
 //! [`AgentStore`](crate::agent_store::AgentStore).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use base64::Engine as _;
 use opamp::uid::InstanceUid;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
-use crate::agent_store::{AgentStore, PersistedAgent};
-use crate::fleet::Transport;
+use crate::agent_store::{AgentStore, PersistedAgent, Pin};
+use crate::configs::Configuration;
+use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
 
-/// The default adapter (ADR-0024): one JSON file per Agent under `<config_dir>/agents/` — temp
-/// file plus atomic rename, loud failure on a file that does not parse.
+/// The default adapter (ADR-0024, ADR-0037): one JSON file per Agent under `<data_dir>/agents/`,
+/// owner-only — temp file plus atomic rename, loud failure on a file that does not parse or a name
+/// that is not an Instance UID. A rollout's revisions go to `<data_dir>/configurations/` first
+/// (ADR-0037 clause 3), and the integrity queries are answered from the assignments this adapter
+/// last read or wrote.
 pub struct FsAgentStore {
     dir: PathBuf,
+    configurations: PathBuf,
+    /// Every stored record's assignment, as on disk.
+    assignments: Mutex<HashMap<InstanceUid, Assignment>>,
 }
 
 /// The on-disk envelope — **this adapter's format, not the port's**. Scalars and the
@@ -125,10 +133,8 @@ impl Envelope {
                 "envelope version {} is not the understood {ENVELOPE_VERSION} — this Server reads \
                  no other record format: since ADR-0035 an Agent record carries its labels and \
                  the Host it arrived over, and since ADR-0034 an assignment is one release per \
-                 Agent, its Package and Configurations together. Clear the agents directory; \
-                 every Agent re-reports on its next message, and what is lost is the operator's \
-                 rollouts, which a press on each Deployment writes again, and the labels, which \
-                 are set again on the Agents tab",
+                 Agent, its Package and Configurations together. A data directory an older \
+                 Server wrote is moved by `server migrate` (ADR-0037)",
                 self.version
             ));
         }
@@ -171,11 +177,28 @@ impl Envelope {
 }
 
 impl FsAgentStore {
-    /// Opens the store, creating its directory owner-only — reported effective configurations may
-    /// hold credentials (ADR-0024), the same reasoning that guards the package store's metadata.
-    pub fn open(dir: PathBuf) -> Result<Self, String> {
+    /// Opens the store in the data directory `root`, creating `agents/` owner-only — reported
+    /// effective configurations may hold credentials (ADR-0024), the same reasoning that guards
+    /// every other store (ADR-0037 clause 1).
+    pub fn open(root: &std::path::Path) -> Result<Self, String> {
+        let dir = root.join(super::AGENTS);
+        let configurations = root.join(super::CONFIGURATIONS);
         super::create_private_dir(&dir)?;
-        Ok(FsAgentStore { dir })
+        super::create_private_dir(&configurations)?;
+        Ok(FsAgentStore {
+            dir,
+            configurations,
+            assignments: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Notes what `uid`'s stored record now pins.
+    fn stored(&self, uid: &InstanceUid, assignment: Option<&Assignment>) {
+        let mut assignments = self.assignments.lock().expect("assignments lock");
+        match assignment {
+            Some(assignment) => assignments.insert(*uid, assignment.clone()),
+            None => assignments.remove(uid),
+        };
     }
 
     fn path(&self, uid: &InstanceUid) -> PathBuf {
@@ -186,20 +209,8 @@ impl FsAgentStore {
 impl AgentStore for FsAgentStore {
     fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
         let mut records = HashMap::new();
-        let entries = std::fs::read_dir(&self.dir)
-            .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?;
-        for entry in entries {
-            let path = entry
-                .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?
-                .path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| format!("cannot read the Agent identity from {}", path.display()))?;
-            let uid = InstanceUid::parse(stem)
+        for (stem, path) in super::json_files(&self.dir)? {
+            let uid = InstanceUid::parse(&stem)
                 .ok_or_else(|| format!("{} is not named after an Instance UID", path.display()))?;
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -210,22 +221,59 @@ impl AgentStore for FsAgentStore {
                 .map_err(|e| format!("cannot restore {}: {e}", path.display()))?;
             records.insert(uid, record);
         }
+        *self.assignments.lock().expect("assignments lock") = records
+            .iter()
+            .filter_map(|(uid, record)| Some((*uid, record.assignment.clone()?)))
+            .collect();
         Ok(records)
     }
 
     fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
         let json =
             serde_json::to_vec_pretty(&Envelope::from_record(record)).expect("agent serialize");
-        super::replace(&self.path(uid), &json)
+        super::replace(&self.path(uid), &json)?;
+        self.stored(uid, record.assignment.as_ref());
+        Ok(())
     }
 
     fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
-        let path = self.path(uid);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("cannot delete {}: {e}", path.display())),
+        super::remove_file(&self.path(uid))?;
+        self.stored(uid, None);
+        Ok(())
+    }
+
+    /// The revisions first, then each record: a crash in between leaves revisions nothing
+    /// references, which the next load collects (ADR-0037 clause 3).
+    fn release(
+        &self,
+        revisions: &[Configuration],
+        agents: &[(InstanceUid, PersistedAgent)],
+    ) -> Result<(), String> {
+        for configuration in revisions {
+            super::configs::write(&self.configurations, configuration)?;
         }
+        for (uid, record) in agents {
+            self.put(uid, record)?;
+        }
+        Ok(())
+    }
+
+    fn pinning(&self, pin: Pin<'_>) -> usize {
+        self.assignments
+            .lock()
+            .expect("assignments lock")
+            .values()
+            .filter(|assignment| pin.pinned_by(assignment))
+            .count()
+    }
+
+    fn referenced_revisions(&self, name: &str) -> BTreeSet<String> {
+        self.assignments
+            .lock()
+            .expect("assignments lock")
+            .values()
+            .filter_map(|assignment| assignment.configurations.get(name).cloned())
+            .collect()
     }
 }
 
@@ -239,11 +287,11 @@ mod tests {
     #[test]
     fn a_record_survives_the_round_trip() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let store = FsAgentStore::open(dir.path()).expect("open");
         let uid = InstanceUid::default();
         store.put(&uid, &record()).expect("put");
 
-        let reopened = FsAgentStore::open(dir.path().join("agents")).expect("reopen");
+        let reopened = FsAgentStore::open(dir.path()).expect("reopen");
         let restored = reopened.load().expect("load");
         assert!(restored[&uid] == record(), "the record round-trips whole");
     }
@@ -254,7 +302,7 @@ mod tests {
     #[test]
     fn a_record_without_an_assignment_restores_with_none() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let store = FsAgentStore::open(dir.path()).expect("open");
         let uid = InstanceUid::default();
         let mut unassigned = record();
         unassigned.assignment = None;
@@ -276,7 +324,7 @@ mod tests {
     #[test]
     fn a_record_with_the_old_assignment_shape_fails_the_load_by_name() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let store = FsAgentStore::open(dir.path()).expect("open");
         let uid = InstanceUid::default();
         store.put(&uid, &record()).expect("put");
         let path = dir.path().join("agents").join(format!("{uid}.json"));
@@ -313,7 +361,7 @@ mod tests {
     #[test]
     fn labels_and_host_live_in_the_record_and_an_older_envelope_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let store = FsAgentStore::open(dir.path()).expect("open");
         let uid = InstanceUid::default();
         store.put(&uid, &record()).expect("put");
         let path = dir.path().join("agents").join(format!("{uid}.json"));
@@ -344,7 +392,7 @@ mod tests {
     #[test]
     fn remove_deletes_and_tolerates_absence() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let store = FsAgentStore::open(dir.path()).expect("open");
         let uid = InstanceUid::default();
         store.put(&uid, &record()).expect("put");
         store.remove(&uid).expect("remove");
@@ -356,7 +404,7 @@ mod tests {
     #[test]
     fn rekey_moves_the_record() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let store = FsAgentStore::open(dir.path()).expect("open");
         let (old, new) = (InstanceUid::default(), InstanceUid::default());
         store.put(&old, &record()).expect("put");
         store.rekey(&old, &new, &record()).expect("rekey");
@@ -364,12 +412,108 @@ mod tests {
         assert!(restored.contains_key(&new) && !restored.contains_key(&old));
     }
 
+    /// The integrity questions are the store's (ADR-0037 clause 3): what the stored assignments
+    /// pin and which revisions they reference, kept as records are written, removed and loaded.
+    /// Verifies: ADR-0037
+    #[test]
+    fn the_store_answers_what_its_assignments_pin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsAgentStore::open(dir.path()).expect("open");
+        let (one, two) = (InstanceUid::default(), InstanceUid::default());
+        store.put(&one, &record()).expect("put");
+        let mut other = record();
+        other.assignment = Some(Assignment {
+            deployment: "canary".to_string(),
+            package: None,
+            configurations: BTreeMap::from([("base".to_string(), "4567cdef".to_string())]),
+        });
+        store.put(&two, &other).expect("put");
+        let otelcol = PackageId::new("otelcol", "1.2.3").expect("id");
+        assert_eq!(store.pinning(Pin::Configuration("base")), 2);
+        assert_eq!(store.pinning(Pin::Package(&otelcol)), 1);
+        assert_eq!(store.pinning(Pin::Deployment("canary")), 1);
+        assert_eq!(store.pinning(Pin::Deployment("gone")), 0);
+        assert_eq!(
+            store.referenced_revisions("base"),
+            BTreeSet::from(["0123abcd".to_string(), "4567cdef".to_string()])
+        );
+
+        let reopened = FsAgentStore::open(dir.path()).expect("reopen");
+        reopened.load().expect("load");
+        assert_eq!(reopened.pinning(Pin::Configuration("base")), 2);
+        reopened.remove(&two).expect("remove");
+        assert_eq!(reopened.pinning(Pin::Deployment("canary")), 0);
+        assert_eq!(
+            reopened.referenced_revisions("base"),
+            BTreeSet::from(["0123abcd".to_string()])
+        );
+    }
+
+    /// A rollout writes its revisions before the assignments that pin them, so one cut short in
+    /// between leaves a revision nothing references and every record as it was. The next load
+    /// accepts that state and collects the orphaned revision, from memory and from disk.
+    /// Verifies: ADR-0037
+    #[test]
+    fn a_rollout_cut_short_after_its_revisions_leaves_a_state_the_next_load_accepts() {
+        use crate::configs::{revision_hash, ConfigBackend as _, Revision};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revision = |body: &str| Revision {
+            body: body.to_string(),
+            role: String::new(),
+            service_name: String::new(),
+        };
+        let (pinned, orphan) = (revision("v1\n"), revision("v2\n"));
+        let uid = InstanceUid::default();
+        let mut agent = record();
+        agent.assignment = Some(Assignment {
+            deployment: "stable".to_string(),
+            package: None,
+            configurations: BTreeMap::from([("base".to_string(), revision_hash(&pinned))]),
+        });
+        {
+            let store = FsAgentStore::open(dir.path()).expect("open");
+            store
+                .put(&uid, &agent)
+                .expect("the Agent as the last rollout left it");
+            // The next rollout's revisions reach the disk; its records never do.
+            let base = Configuration {
+                name: "base".to_string(),
+                saved: orphan.clone(),
+                retained: BTreeMap::from([
+                    (revision_hash(&pinned), pinned.clone()),
+                    (revision_hash(&orphan), orphan.clone()),
+                ]),
+            };
+            store.release(&[base], &[]).expect("the revisions");
+        }
+
+        let state = crate::fleet::AppState::new(dir.path().to_path_buf())
+            .expect("the next load accepts it");
+        let retained = |base: &Configuration| base.retained.keys().cloned().collect::<Vec<_>>();
+        let base = state.configurations().get("base").expect("base");
+        assert_eq!(
+            retained(&base),
+            [revision_hash(&pinned)],
+            "the orphan is collected"
+        );
+        assert_eq!(base.saved, orphan, "the saved revision stays");
+        let on_disk = super::super::FsConfigBackend::open(dir.path())
+            .expect("open")
+            .load()
+            .expect("load");
+        assert_eq!(
+            retained(&on_disk[0]),
+            [revision_hash(&pinned)],
+            "and from disk"
+        );
+    }
+
     /// A file that does not parse fails startup loudly rather than being skipped (ADR-0010's
     /// principle, as every store here applies it).
     #[test]
     fn a_corrupt_record_fails_the_load_by_name() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = FsAgentStore::open(dir.path().join("agents")).expect("open");
+        let store = FsAgentStore::open(dir.path()).expect("open");
         let uid = InstanceUid::default();
         let path = dir.path().join("agents").join(format!("{uid}.json"));
         std::fs::write(&path, "not json").expect("write");

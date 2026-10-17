@@ -206,7 +206,7 @@ The Server decides some uploads before it reads a byte of the artifact, and says
 |---|---|
 | `409 … immutable` | The Package is already rolled out to an Agent, so its entries are fixed. Fetch under a new version. |
 | `507 … max_total_package_bytes` | The package store is at its ceiling. Delete a Package no channel holds, or raise the limit ([the Server's configuration reference](server.md#top-level)). |
-| `404 … not configured` | The Server has no package store: `packages_dir` is unset in `server.toml` ([Packages](server.md#packages-and-deployments-distributing-software)). |
+| `404 … not configured` | The Server has no package store — a Server started from `server.toml` always has one under `data_dir`, so the URL reaches something else than the Server ([Packages](server.md#packages-and-deployments-distributing-software)). |
 | `413 …` | The artifact is past `max_package_size_bytes`. |
 
 Because the refusal arrives while the artifact is still being sent, the connection can reset before

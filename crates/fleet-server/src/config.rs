@@ -32,11 +32,13 @@ pub struct ServerConfig {
     /// (ADR-0013). Absent means the default, which is loopback.
     #[serde(default)]
     pub rest: RestConfig,
-    /// Where Configurations are persisted — one JSON file each (ADR-0023) — so a Server restart
-    /// does not lose what the fleet should be running. An empty or missing directory means: no
-    /// Configuration to offer yet.
-    #[serde(default = "default_config_dir")]
-    pub config_dir: PathBuf,
+    /// Where the Server keeps all of its state, one subdirectory per domain (ADR-0037): created
+    /// owner-only when missing, and holding nothing but its fixed layout.
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    /// Refused at startup: the state lives under `data_dir` (ADR-0037), and `server migrate` moves
+    /// an older installation there. Read only so that a leftover key can be named.
+    pub config_dir: Option<IgnoredAny>,
     /// TLS for the Agent plane, and for the Operator plane unless `[rest.tls]` names its own
     /// (ADR-0013, ADR-0032). Required: a Server without it is refused at startup. It is an
     /// `Option` only so that its absence can be named.
@@ -52,10 +54,9 @@ pub struct ServerConfig {
     /// Optional destinations for the Agents' own telemetry (ADR-0016); absent means none is
     /// offered and no Agent reports any.
     pub telemetry_offer: Option<TelemetryOfferConfig>,
-    /// Where software packages are persisted — artifact + metadata each (ADR-0026). An empty or
-    /// missing directory means: no package to offer, and `OffersPackages` stays undeclared.
-    #[serde(default = "default_packages_dir")]
-    pub packages_dir: PathBuf,
+    /// Refused at startup, like `config_dir` (ADR-0037). Read only so that a leftover key can be
+    /// named.
+    pub packages_dir: Option<IgnoredAny>,
     /// How the Server checks the signatures on its Package entries (ADR-0033).
     #[serde(default)]
     pub packages: PackagesConfig,
@@ -581,12 +582,8 @@ fn default_rest_listen() -> SocketAddr {
         .expect("default REST listen address")
 }
 
-fn default_config_dir() -> PathBuf {
-    PathBuf::from("fleet-configs")
-}
-
-fn default_packages_dir() -> PathBuf {
-    PathBuf::from("fleet-packages")
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("fleet-data")
 }
 
 fn default_max_message_size() -> usize {
@@ -629,13 +626,14 @@ impl Default for ServerConfig {
         ServerConfig {
             listen: default_listen(),
             rest: RestConfig::default(),
-            config_dir: default_config_dir(),
+            data_dir: default_data_dir(),
+            config_dir: None,
             tls: None,
             auth: None,
             connection_offer: None,
             client_ca: None,
             telemetry_offer: None,
-            packages_dir: default_packages_dir(),
+            packages_dir: None,
             packages: PackagesConfig::default(),
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
@@ -681,6 +679,23 @@ impl ServerConfig {
                  remove the section",
                 path.display()
             ));
+        }
+        // One root for all state (ADR-0037 clause 1). A leftover key is refused rather than
+        // ignored: the directory it names holds the fleet's trust data, which this Server would
+        // otherwise start without.
+        for (key, named) in [
+            ("config_dir", config.config_dir.is_some()),
+            ("packages_dir", config.packages_dir.is_some()),
+        ] {
+            if named {
+                return Err(format!(
+                    "{}: {key} is removed — the Server keeps all of its state under data_dir \
+                     (ADR-0037). Stop the Server, run `server migrate --config-dir <old> \
+                     --packages-dir <old> --data-dir <new>`, then replace config_dir and \
+                     packages_dir with data_dir",
+                    path.display()
+                ));
+            }
         }
         if config.advertised_url.is_some() {
             return Err(format!(
@@ -923,7 +938,7 @@ mod tests {
         let cfg: ServerConfig = toml::from_str(
             r#"
             listen = "127.0.0.1:9999"
-            config_dir = "configs"
+            data_dir = "state"
             [tls]
             cert_file = "cert.pem"
             key_file = "key.pem"
@@ -1062,6 +1077,24 @@ mod tests {
         std::fs::write(&path, "advertised_url = \"https://fleet.example:4320\"\n").expect("write");
         let err = ServerConfig::load(&path).expect_err("refused");
         assert!(err.contains("advertised_url is removed"), "{err}");
+    }
+
+    /// All state lives under one `data_dir`, `fleet-data` by default, and a leftover `config_dir`
+    /// or `packages_dir` fails startup naming the key and `server migrate` — the directory it
+    /// names holds trust data this Server would otherwise start without.
+    /// Verifies: ADR-0037
+    #[test]
+    fn a_leftover_config_dir_or_packages_dir_fails_startup_naming_server_migrate() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.data_dir, PathBuf::from("fleet-data"));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        for key in ["config_dir", "packages_dir"] {
+            std::fs::write(&path, format!("{key} = \"old\"\n")).expect("write");
+            let err = ServerConfig::load(&path).expect_err("refused");
+            assert!(err.contains(&format!("{key} is removed")), "{err}");
+            assert!(err.contains("server migrate"), "{err}");
+        }
     }
 
     #[test]

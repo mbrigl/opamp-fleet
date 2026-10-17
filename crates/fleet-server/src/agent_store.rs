@@ -1,9 +1,12 @@
 //! The Agent-record storage port (ADR-0024).
 //!
-//! The fleet is loaded whole at startup and held in memory; at runtime the store only ever
-//! receives writes and deletions for single Agents. That narrow access pattern is what the port
-//! states — `load`, `put`, `remove`, `rekey` — and nothing more. The port speaks the *typed*
-//! record: what bytes or rows a backend turns it into is the adapter's own business.
+//! The fleet is loaded whole at startup and held in memory; at runtime the store receives writes
+//! and deletions for single Agents — `load`, `put`, `remove`, `rekey` — and one operation for a
+//! rollout, which writes the revisions it pins and the assignments that pin them together
+//! (ADR-0037 clause 3). The integrity questions a deletion asks — is this pinned, which revisions
+//! are referenced — are queries of the port too, so an adapter over a database answers them from
+//! its rows rather than the caller from a scan. The port speaks the *typed* record: what bytes or
+//! rows a backend turns it into is the adapter's own business.
 //!
 //! The write discipline (no write on a heartbeat, flush on graceful shutdown) deliberately lives
 //! in the caller ([`crate::fleet::AppState`]), so no backend can get it wrong.
@@ -13,7 +16,7 @@
 //! ([`FsAgentStore`](crate::fs::FsAgentStore)) answers with an owner-only directory; any other
 //! adapter must answer with its own access control.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use opamp::proto::{
     AgentDescription, AvailableComponents, ComponentHealth, ConnectionSettingsStatus,
@@ -23,7 +26,9 @@ use opamp::uid::InstanceUid;
 use prost::Message;
 use sha2::{Digest, Sha256};
 
-use crate::fleet::Transport;
+use crate::configs::Configuration;
+use crate::fleet::{Assignment, Transport};
+use crate::packages::PackageId;
 
 /// Everything about one Agent that survives a restart: what it reported and what an operator
 /// queued for it — never what a live connection knows (`connected`, the owning connection).
@@ -136,8 +141,31 @@ impl PersistedAgent {
     }
 }
 
-/// The storage port (ADR-0024): the only thing the fleet logic knows about persistence. A
-/// database or an external store is a new implementation of these four operations plus one wiring
+/// What an assignment can pin (ADR-0034 clause 8): what a deletion asks about before it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pin<'a> {
+    /// A Configuration, at any of its revisions.
+    Configuration(&'a str),
+    /// A Package.
+    Package(&'a PackageId),
+    /// A Deployment, as the one a release went through.
+    Deployment(&'a str),
+}
+
+impl Pin<'_> {
+    /// Whether `assignment` pins it.
+    #[must_use]
+    pub fn pinned_by(&self, assignment: &Assignment) -> bool {
+        match self {
+            Pin::Configuration(name) => assignment.configurations.contains_key(*name),
+            Pin::Package(id) => assignment.package.as_ref() == Some(*id),
+            Pin::Deployment(name) => assignment.deployment == *name,
+        }
+    }
+}
+
+/// The storage port (ADR-0024, ADR-0037): the only thing the fleet logic knows about persistence. A
+/// database or an external store is a new implementation of these operations plus one wiring
 /// line — the rest of the Server is, by construction, unaffected.
 pub trait AgentStore: Send + Sync {
     /// Every persisted record, once, at startup. A record that cannot be read fails loudly — a
@@ -161,12 +189,32 @@ pub trait AgentStore: Send + Sync {
         self.put(new, record)?;
         self.remove(old)
     }
+
+    /// A rollout (ADR-0037 clause 3): the Configurations whose retained revisions it pins, and
+    /// the records carrying the assignments that pin them, as one operation. An adapter that
+    /// cannot make it one step writes the revisions first, so a failure part-way leaves at most a
+    /// revision nothing references — which the next load collects — and never an assignment
+    /// pinning a revision that was not written.
+    ///
+    /// # Errors
+    /// Returns an error when the revisions or a record cannot be written.
+    fn release(
+        &self,
+        revisions: &[Configuration],
+        agents: &[(InstanceUid, PersistedAgent)],
+    ) -> Result<(), String>;
+
+    /// How many stored assignments pin `pin` (ADR-0034 clause 8).
+    fn pinning(&self, pin: Pin<'_>) -> usize;
+
+    /// The revision hashes of the Configuration `name` that stored assignments reference — what
+    /// its retained revisions are collected down to (ADR-0025).
+    fn referenced_revisions(&self, name: &str) -> BTreeSet<String>;
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::packages::PackageId;
 
     pub(crate) fn record() -> PersistedAgent {
         PersistedAgent {

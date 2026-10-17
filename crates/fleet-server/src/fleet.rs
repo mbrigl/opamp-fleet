@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::agent_store::{AgentStore, PersistedAgent};
+use crate::agent_store::{AgentStore, PersistedAgent, Pin};
 use crate::audit::{Audit, Entry};
 use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
 use crate::deployments::{self, deployment_for, Deployment, DeploymentError, DeploymentStore};
@@ -602,6 +602,14 @@ impl AppState {
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
         }
+        // A rollout cut short leaves at most a revision no assignment references (ADR-0037
+        // clause 3); it is collected here, before anything is offered.
+        for config in configs.list() {
+            configs.retain_only(
+                &config.name,
+                &agent_store.referenced_revisions(&config.name),
+            )?;
+        }
         let state = AppState {
             fleet: Mutex::new(fleet),
             agent_store,
@@ -1110,7 +1118,7 @@ impl AppState {
         self.packages.as_ref().map(PackageOffering::store)
     }
 
-    /// Read access to the Deployment store, armed by the same `packages_dir` (ADR-0026).
+    /// Read access to the Deployment store, armed with the package store (ADR-0026).
     pub fn deployment_store(&self) -> Option<&DeploymentStore> {
         self.packages.as_ref().map(PackageOffering::deployments)
     }
@@ -1225,29 +1233,63 @@ impl AppState {
         })
     }
 
-    /// Pins a release (ADR-0025 clause 2): each Configuration's saved revision is copied into the
-    /// store's retained revisions, and the hash the store answers is the one the assignment keeps.
-    fn pin(&self, release: Option<Assignment>) -> Result<Option<Assignment>, RolloutError> {
-        let Some(mut release) = release else {
-            return Ok(None);
-        };
-        for (name, hash) in release.configurations.iter_mut() {
-            *hash = self
-                .configs
-                .retain_saved(name)
-                .map_err(RolloutError::Storage)?;
+    /// Writes releases (ADR-0025 clause 2, ADR-0037 clause 3): each Configuration's saved revision
+    /// is pinned — copied into the store's retained revisions, its hash the one the assignment
+    /// keeps — and the revisions and the records carrying the new assignments go to the store as
+    /// one operation. Only once it succeeded are they the fleet's; a failure leaves the fleet and
+    /// the Configurations as they were. Answers the Configurations the old and new assignments
+    /// name, whose unreferenced revisions the caller collects.
+    fn write_releases(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        releases: Vec<(InstanceUid, Option<Assignment>)>,
+    ) -> Result<Vec<String>, RolloutError> {
+        let names: BTreeSet<String> = releases
+            .iter()
+            .flat_map(|(_, release)| release.iter())
+            .flat_map(|release| release.configurations.keys().cloned())
+            .collect();
+        let written = self
+            .configs
+            .pin(&names, |hashes, revisions| {
+                let agents: Vec<(InstanceUid, PersistedAgent)> = releases
+                    .into_iter()
+                    .map(|(uid, release)| {
+                        let mut persisted = fleet[&uid].to_persisted();
+                        persisted.assignment = release.map(|mut release| {
+                            for (name, hash) in release.configurations.iter_mut() {
+                                hash.clone_from(&hashes[name]);
+                            }
+                            release
+                        });
+                        (uid, persisted)
+                    })
+                    .collect();
+                self.agent_store.release(revisions, &agents)?;
+                Ok(agents)
+            })
+            .map_err(RolloutError::Storage)?;
+        let mut digests = self.written.lock().expect("written lock");
+        let mut touched = Vec::new();
+        for (uid, persisted) in written {
+            let record = fleet.get_mut(&uid).expect("released to a known Agent");
+            let previous = std::mem::replace(&mut record.assignment, persisted.assignment.clone());
+            touched.extend(
+                previous
+                    .iter()
+                    .chain(record.assignment.iter())
+                    .flat_map(|a| a.configurations.keys().cloned()),
+            );
+            digests.insert(uid, persisted.durable_digest());
         }
-        Ok(Some(release))
+        Ok(touched)
     }
 
-    /// Collects every retained revision of `names` no assignment references any more.
-    fn collect_revisions(
-        &self,
-        fleet: &HashMap<InstanceUid, AgentRecord>,
-        names: impl IntoIterator<Item = String>,
-    ) {
+    /// Collects every retained revision of `names` no stored assignment references any more — a
+    /// question the store answers (ADR-0037 clause 3).
+    fn collect_revisions(&self, names: impl IntoIterator<Item = String>) {
         for name in names.into_iter().collect::<BTreeSet<_>>() {
-            let referenced = referenced_hashes(fleet, &name);
+            let referenced = self.agent_store.referenced_revisions(&name);
             if let Err(e) = self.configs.retain_only(&name, &referenced) {
                 warn!(configuration = %name, error = %e, "cannot collect unreferenced revisions");
             }
@@ -1295,16 +1337,9 @@ impl AppState {
         if release == record.assignment {
             refuse_a_package_left_out(store, &deployment, record, release.as_ref())?;
         }
-        let release = self.pin(release)?;
-        let previous = std::mem::replace(&mut record.assignment, release);
-        self.persist_if_dirty(uid, record);
-        let touched: Vec<String> = previous
-            .iter()
-            .chain(record.assignment.iter())
-            .flat_map(|a| a.configurations.keys().cloned())
-            .collect();
+        let touched = self.write_releases(&mut fleet, vec![(*uid, release)])?;
         // The release may have replaced a pinned revision nothing references any more.
-        self.collect_revisions(&fleet, touched);
+        self.collect_revisions(touched);
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, deployment = %deployment.name, "rollout to agent");
@@ -1328,30 +1363,21 @@ impl AppState {
             .get(name)
             .ok_or_else(|| RolloutError::UnknownResource(format!("no deployment {name:?}")))?;
         refuse_unreleasable(store, deployment)?;
-        let mut assigned = 0usize;
-        let mut touched: Vec<String> = Vec::new();
-        for (uid, record) in fleet.iter_mut() {
+        let mut releases = Vec::new();
+        for (uid, record) in fleet.iter() {
             let claiming = deployment_for(&deployments, record.effective_description().as_deref());
             match claiming {
                 Ok(Some(claimed)) if claimed.name == name => {}
                 _ => continue,
             }
             let release = self.release(store, deployment, record);
-            if release == record.assignment {
-                continue;
+            if release != record.assignment {
+                releases.push((*uid, release));
             }
-            let release = self.pin(release)?;
-            let previous = std::mem::replace(&mut record.assignment, release);
-            touched.extend(
-                previous
-                    .iter()
-                    .chain(record.assignment.iter())
-                    .flat_map(|a| a.configurations.keys().cloned()),
-            );
-            self.persist_if_dirty(uid, record);
-            assigned += 1;
         }
-        self.collect_revisions(&fleet, touched);
+        let assigned = releases.len();
+        let touched = self.write_releases(&mut fleet, releases)?;
+        self.collect_revisions(touched);
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(deployment = %name, agents = assigned, "deployment rolled out to every agent it claims");
@@ -1531,7 +1557,7 @@ impl AppState {
             // A Client Agent forgotten takes its labels from the Agents that inherited them.
             self.unplace(&mut fleet, uid, record.placement.group.clone());
             // A pinned revision only this Agent referenced is unreferenced now (ADR-0025).
-            self.collect_revisions(&fleet, record.assigned_configurations().keys().cloned());
+            self.collect_revisions(record.assigned_configurations().keys().cloned());
         }
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
@@ -1562,10 +1588,7 @@ impl AppState {
     /// between.
     pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
         let fleet = self.fleet.lock().expect("fleet lock");
-        let pinning = fleet
-            .values()
-            .filter(|record| record.assigned_configurations().contains_key(name))
-            .count();
+        let pinning = self.agent_store.pinning(Pin::Configuration(name));
         if pinning > 0 {
             return Err(DeleteError::Pinned(format!(
                 "configuration {name:?} is pinned by the assignment of {pinning} Agent(s) — roll \
@@ -2321,13 +2344,11 @@ impl AppState {
     }
 
     /// Whether any Agent's assignment references this Package — the gate that makes an assigned
-    /// Package's bytes immutable (ADR-0025 point 8). Only the fleet can answer it, which is why the
-    /// store does not try to.
+    /// Package's bytes immutable (ADR-0025 point 8). The Agent store answers it (ADR-0037
+    /// clause 3); the fleet lock keeps a rollout from pinning it meanwhile.
     fn package_set_assigned(&self, id: &PackageId) -> bool {
-        let fleet = self.fleet.lock().expect("fleet lock");
-        fleet
-            .values()
-            .any(|record| record.assigned_package() == Some(id))
+        let _fleet = self.fleet.lock().expect("fleet lock");
+        self.agent_store.pinning(Pin::Package(id)) > 0
     }
 
     /// Puts a Package into a channel (ADR-0026 point 23). Not gated: adding one for an Agent type
@@ -2369,15 +2390,7 @@ impl AppState {
     pub fn delete_deployment(&self, name: &str) -> Result<bool, DeploymentError> {
         let store = self.deployment_store().ok_or(DeploymentError::NotFound)?;
         let fleet = self.fleet.lock().expect("fleet lock");
-        let pinning = fleet
-            .values()
-            .filter(|record| {
-                record
-                    .assignment
-                    .as_ref()
-                    .is_some_and(|a| a.deployment == name)
-            })
-            .count();
+        let pinning = self.agent_store.pinning(Pin::Deployment(name));
         if pinning > 0 {
             return Err(DeploymentError::Conflict(format!(
                 "deployment {name:?} is pinned by the assignment of {pinning} Agent(s) — roll them \
@@ -2412,30 +2425,27 @@ impl AppState {
         Ok(())
     }
 
-    /// Stores one streamed upload as an entry of a Package (ADR-0026). Refused while the Package is
-    /// assigned to an Agent (ADR-0025 point 8); no push, because saving never distributes.
+    /// Stores one streamed upload as an entry of a Package (ADR-0026, ADR-0037). Refused while the
+    /// Package is assigned to an Agent (ADR-0025 point 8); no push, because saving never
+    /// distributes.
     pub fn put_package_entry(
         &self,
         id: &PackageId,
         platform: &Platform,
-        staged: &std::path::Path,
+        bytes: &mut dyn std::io::Read,
     ) -> Result<(), String> {
         self.refuse_if_assigned(id)?;
-        self.package_store()?.put_staged(id, platform, staged)?;
+        self.package_store()?.put_entry_from(id, platform, bytes)?;
         info!(set = %id, platform = %format!("{}-{}", platform.os, platform.arch), "package entry stored");
         Ok(())
     }
 
-    /// Where an upload for one entry is streamed before it becomes an artifact. Refused while
-    /// the Package is assigned to an Agent (ADR-0025 point 8), so a refused upload is refused
-    /// before its bytes are streamed.
-    pub fn package_staging_path(
-        &self,
-        id: &PackageId,
-        platform: &Platform,
-    ) -> Result<std::path::PathBuf, String> {
+    /// Whether an upload for one entry of `id` may begin: the Package exists and is not assigned
+    /// to an Agent (ADR-0025 point 8), so a refused upload is refused before its bytes are
+    /// streamed.
+    pub fn check_package_upload(&self, id: &PackageId) -> Result<(), String> {
         self.refuse_if_assigned(id)?;
-        self.package_store()?.staging_path(id, platform)
+        self.package_store()?.writable(id)
     }
 
     /// Writes the operator's signature onto one entry of a Package (ADR-0033), and answers what the
@@ -2495,10 +2505,7 @@ impl AppState {
     /// between.
     pub fn delete_package_set(&self, id: &PackageId) -> Result<bool, String> {
         let fleet = self.fleet.lock().expect("fleet lock");
-        let pinning = fleet
-            .values()
-            .filter(|record| record.assigned_package() == Some(id))
-            .count();
+        let pinning = self.agent_store.pinning(Pin::Package(id));
         if pinning > 0 {
             return Err(format!(
                 "package {id} is pinned by the assignment of {pinning} Agent(s) — roll them out \
@@ -2691,16 +2698,6 @@ fn inherit(
             record.placement.ambiguous = ambiguous;
         }
     }
-}
-
-/// Every revision hash of `name` that any Agent's assignment still references — what
-/// [`ConfigStore::retain_only`] is told to keep.
-fn referenced_hashes(fleet: &HashMap<InstanceUid, AgentRecord>, name: &str) -> BTreeSet<String> {
-    fleet
-        .values()
-        .filter_map(|record| record.assigned_configurations().get(name))
-        .cloned()
-        .collect()
 }
 
 /// What waits for an Agent's next press (ADR-0025 clause 4, ADR-0034 clause 5): the difference
@@ -3836,7 +3833,9 @@ mod tests {
         let store = PackageStore::open(dir.join("packages")).expect("store");
         let state = AppState::new(dir.join("configs"))
             .expect("state")
-            .with_packages(Some(PackageOffering::new(store).expect("offering")));
+            .with_packages(Some(
+                PackageOffering::new(&dir.join("packages"), store).expect("offering"),
+            ));
         if state.configurations().get("fleet").is_none() {
             state
                 .save_configuration("fleet", body("receivers: {}\n"))
@@ -4095,9 +4094,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let revocations = Arc::new(
             Revocations::open(
-                Box::new(
-                    crate::fs::FsLedgerStore::open(dir.path().join("revocation")).expect("ledger"),
-                ),
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
                 Arc::new(crate::clock::SystemClock),
                 Vec::new(),
             )
@@ -4185,9 +4182,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let revocations = Arc::new(
             Revocations::open(
-                Box::new(
-                    crate::fs::FsLedgerStore::open(dir.path().join("revocation")).expect("ledger"),
-                ),
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
                 Arc::new(crate::clock::SystemClock),
                 Vec::new(),
             )
@@ -4246,7 +4241,7 @@ mod tests {
             .expect("entry");
         let revocations = Arc::new(
             Revocations::open(
-                Box::new(crate::fs::FsLedgerStore::open(dir.join("revocation")).expect("ledger")),
+                Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
                 Arc::new(crate::clock::SystemClock),
                 Vec::new(),
             )
@@ -4254,7 +4249,9 @@ mod tests {
         );
         let state = AppState::new(dir.join("configs"))
             .expect("state")
-            .with_packages(Some(PackageOffering::new(store).expect("offering")))
+            .with_packages(Some(
+                PackageOffering::new(&dir.join("packages"), store).expect("offering"),
+            ))
             .with_revocations(Some(revocations.clone()));
         state
             .deployment_store()
@@ -4849,7 +4846,7 @@ mod tests {
     fn hosted_fleet(dir: &std::path::Path) -> AppState {
         let revocations = Arc::new(
             Revocations::open(
-                Box::new(crate::fs::FsLedgerStore::open(dir.join("revocation")).expect("ledger")),
+                Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
                 Arc::new(crate::clock::SystemClock),
                 Vec::new(),
             )

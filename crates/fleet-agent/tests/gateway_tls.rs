@@ -609,7 +609,8 @@ async fn the_gateway_serves_no_artifact_it_relayed_no_offer_for() {
         AppState::new(dir.path().join("fleet-configs"))
             .expect("state")
             .with_packages(Some(
-                fleet_server::fleet::PackageOffering::new(store).expect("deployments"),
+                fleet_server::fleet::PackageOffering::new(&dir.path().join("packages"), store)
+                    .expect("deployments"),
             )),
     );
     let app = fleet_server::agent_app(state, fleet_server::transport::Admission::open());

@@ -71,7 +71,7 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
     let revocations = Arc::new(
         Revocations::open(
             Box::new(
-                fleet_server::fs::FsLedgerStore::open(dir.path().join("revocation"))
+                fleet_server::fs::FsLedgerStore::open(&dir.path().join("fleet-configs"))
                     .expect("ledger"),
             ),
             clock,
@@ -92,7 +92,7 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
             .expect("pki init gives the Server the bootstrap CA's key");
     let bootstrap = fleet_server::bootstrap::BootstrapCertificates::on_disk(
         Some(Box::new(bootstrap_ca)),
-        dir.path().join("bootstrap-certificates"),
+        &dir.path().join("fleet-configs"),
         Arc::new(fleet_server::clock::SystemClock),
     )
     .expect("bootstrap record");

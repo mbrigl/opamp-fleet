@@ -1553,48 +1553,60 @@ async fn put_package_entry(
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
-    let staged = match state.package_staging_path(&id, &platform) {
-        Ok(path) => path,
-        Err(e) => return package_error(e),
-    };
+    if let Err(e) = state.check_package_upload(&id) {
+        return package_error(e);
+    }
     let mut reservation = match state.admit_upload() {
         Ok(reservation) => reservation,
         Err(full) => return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string()),
     };
-    // Removed however the request ends short of an artifact, a cancelled one included.
-    let staged = Staged(Some(staged));
-    // The artifact is streamed to the store's own directory and bounded as it arrives: taking it
+    // The artifact is streamed into the blob store as it arrives and bounded on the way: taking it
     // as `Bytes` would mean holding a whole program in memory — twice — before writing it out.
-    let written = match stream_to_file(
-        body,
-        staged.path(),
-        state.max_package_size(),
-        &mut reservation,
-    )
-    .await
-    {
-        Ok(written) => written,
-        Err(UploadError::TooLarge(limit)) => {
-            return error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("the artifact exceeds the {limit}-byte package size limit"),
-            );
+    // The store reads on a thread of its own; this side hands it each chunk, and the end only once
+    // every limit has passed, so a refused or cancelled upload stores nothing.
+    let (chunks, receiver) = tokio::sync::mpsc::channel(8);
+    let store = tokio::task::spawn_blocking({
+        let state = state.clone();
+        let (id, platform) = (id.clone(), platform.clone());
+        move || state.put_package_entry(&id, &platform, &mut ChunkReader::new(receiver))
+    });
+    let streamed = stream_upload(body, &chunks, state.max_package_size(), &mut reservation).await;
+    let streamed = streamed.and_then(|written| {
+        reservation
+            .admit_artifact()
+            .map(|()| written)
+            .map_err(UploadError::StoreFull)
+    });
+    let written = match streamed {
+        Ok(written) => {
+            // The end of the artifact: the store may commit it now. A store that has already
+            // given up answers below.
+            let _ = chunks.send(Chunk::End).await;
+            written
         }
-        Err(UploadError::StoreFull(full)) => {
-            return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string());
-        }
-        Err(UploadError::Io(e)) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("the upload could not be stored: {e}"),
-            );
+        Err(e) => {
+            // Without the end, the store's stream fails and nothing is stored.
+            drop(chunks);
+            let _ = store.await;
+            return match e {
+                UploadError::TooLarge(limit) => error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("the artifact exceeds the {limit}-byte package size limit"),
+                ),
+                UploadError::StoreFull(full) => {
+                    error(StatusCode::INSUFFICIENT_STORAGE, full.to_string())
+                }
+                UploadError::Io(e) => error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("the upload could not be stored: {e}"),
+                ),
+            };
         }
     };
-    if let Err(full) = reservation.admit_artifact() {
-        return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string());
-    }
-    // The store takes the staged file from here: it moves it into place or removes it.
-    let committed = state.put_package_entry(&id, &platform, &staged.keep());
+    drop(chunks);
+    let committed = store
+        .await
+        .unwrap_or_else(|e| Err(format!("the upload could not be stored: {e}")));
     // Stored now, or gone: either way the store counts it from here, and the upload no longer.
     drop(reservation);
     match committed {
@@ -1795,17 +1807,21 @@ async fn download_package(
             return not_found();
         }
     }
-    let Some(path) = state
+    let Some((sha256, size)) = state
         .packages()
-        .and_then(|store| store.artifact_path(&id, &platform))
+        .and_then(|store| store.artifact(&id, &platform))
     else {
         return not_found();
     };
-    // Streamed from disk, never buffered: a fleet updating at once means many concurrent
+    // Streamed from the blob store, never buffered: a fleet updating at once means many concurrent
     // downloads of the same artifact, and each one holding a copy of a program in memory is how a
     // rollout takes the Server down with it.
-    let file = match tokio::fs::File::open(&path).await {
-        Ok(file) => file,
+    let opened = state
+        .packages()
+        .map(|store| store.open_artifact(&sha256))
+        .unwrap_or_else(|| Err("package delivery is not configured".to_string()));
+    let bytes = match opened {
+        Ok(bytes) => bytes,
         Err(e) => {
             warn!(package = %id, error = %e, "cannot open the stored artifact");
             return error(
@@ -1814,13 +1830,11 @@ async fn download_package(
             );
         }
     };
-    let mut response = Response::builder().header(header::CONTENT_TYPE, "application/octet-stream");
-    if let Ok(metadata) = file.metadata().await {
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
         // So the Agent can size the download, and a truncated transfer is detectable as one.
-        response = response.header(header::CONTENT_LENGTH, metadata.len());
-    }
-    response
-        .body(Body::from_stream(read_chunks(file)))
+        .header(header::CONTENT_LENGTH, size)
+        .body(Body::from_stream(read_chunks(bytes)))
         .unwrap_or_else(|e| {
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1829,7 +1843,7 @@ async fn download_package(
         })
 }
 
-/// Why a streamed upload did not become a file.
+/// Why a streamed upload did not become an artifact.
 enum UploadError {
     /// The body grew past the configured package limit; the number is that limit.
     TooLarge(usize),
@@ -1838,43 +1852,64 @@ enum UploadError {
     Io(std::io::Error),
 }
 
-/// An upload's staging file, removed when dropped unless the store took it: a request that ends
-/// short of an artifact, or is cancelled mid-body, leaves nothing staged.
-struct Staged(Option<std::path::PathBuf>);
-
-impl Staged {
-    fn path(&self) -> &std::path::Path {
-        self.0.as_deref().expect("held until kept")
-    }
-
-    /// Hands the file to the store, which moves it into place or removes it.
-    fn keep(mut self) -> std::path::PathBuf {
-        self.0.take().expect("held until kept")
-    }
+/// What the request side hands the store's reader: the next chunk of the artifact, or its end.
+enum Chunk {
+    Data(axum::body::Bytes),
+    End,
 }
 
-impl Drop for Staged {
-    fn drop(&mut self) {
-        if let Some(path) = &self.0 {
-            let _ = std::fs::remove_file(path);
+/// The upload as the blob store reads it (ADR-0037 clause 4): the request's chunks, handed over a
+/// channel to the thread the store reads on. A channel that closes before [`Chunk::End`] is a
+/// failed stream — a refused, cut-off or cancelled upload — so the store keeps nothing of it.
+struct ChunkReader {
+    receiver: tokio::sync::mpsc::Receiver<Chunk>,
+    current: axum::body::Bytes,
+    ended: bool,
+}
+
+impl ChunkReader {
+    fn new(receiver: tokio::sync::mpsc::Receiver<Chunk>) -> Self {
+        ChunkReader {
+            receiver,
+            current: axum::body::Bytes::new(),
+            ended: false,
         }
     }
 }
 
-/// Streams a request body into `path`, refusing it the moment it grows past `limit` or takes the
-/// store past its ceiling. Returns how many bytes were written.
-async fn stream_to_file(
+impl std::io::Read for ChunkReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.current.is_empty() {
+            if self.ended {
+                return Ok(0);
+            }
+            match self.receiver.blocking_recv() {
+                Some(Chunk::Data(bytes)) => self.current = bytes,
+                Some(Chunk::End) => self.ended = true,
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the upload ended before its last byte",
+                    ))
+                }
+            }
+        }
+        let n = buf.len().min(self.current.len());
+        buf[..n].copy_from_slice(&self.current.split_to(n));
+        Ok(n)
+    }
+}
+
+/// Streams a request body to the store's reader, refusing it the moment it grows past `limit` or
+/// takes the store past its ceiling. Returns how many bytes were handed over.
+async fn stream_upload(
     body: Body,
-    path: &std::path::Path,
+    chunks: &tokio::sync::mpsc::Sender<Chunk>,
     limit: usize,
     reservation: &mut crate::fleet::UploadReservation<'_>,
 ) -> Result<u64, UploadError> {
     use futures_util::StreamExt;
-    use tokio::io::AsyncWriteExt;
 
-    let mut file = tokio::fs::File::create(path)
-        .await
-        .map_err(UploadError::Io)?;
     let mut stream = body.into_data_stream();
     let mut written = 0u64;
     while let Some(chunk) = stream.next().await {
@@ -1886,26 +1921,38 @@ async fn stream_to_file(
         reservation
             .grow(chunk.len() as u64)
             .map_err(UploadError::StoreFull)?;
-        file.write_all(&chunk).await.map_err(UploadError::Io)?;
+        if chunks.send(Chunk::Data(chunk)).await.is_err() {
+            // The store stopped reading: it failed, and says why when it is awaited.
+            break;
+        }
     }
-    file.flush().await.map_err(UploadError::Io)?;
     Ok(written)
 }
 
-/// A stream of the file's chunks, so a response body never materialises whole.
+/// A stream of an artifact's chunks, read on a thread of its own, so a response body never
+/// materialises whole and a slow disk never holds up the runtime.
 fn read_chunks(
-    file: tokio::fs::File,
+    mut bytes: Box<dyn std::io::Read + Send>,
 ) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> {
-    futures_util::stream::unfold(file, |mut file| async move {
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    tokio::task::spawn_blocking(move || loop {
         let mut buffer = vec![0u8; 64 * 1024];
-        match tokio::io::AsyncReadExt::read(&mut file, &mut buffer).await {
-            Ok(0) => None,
+        let next = match bytes.read(&mut buffer) {
+            Ok(0) => return,
             Ok(read) => {
                 buffer.truncate(read);
-                Some((Ok(buffer), file))
+                Ok(buffer)
             }
-            Err(e) => Some((Err(e), file)),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => Err(e),
+        };
+        let failed = next.is_err();
+        if sender.blocking_send(next).is_err() || failed {
+            return;
         }
+    });
+    futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|chunk| (chunk, receiver))
     })
 }
 
@@ -2014,7 +2061,7 @@ fn deployments(state: &AppState) -> Result<&DeploymentStore, Refusal> {
     state.deployment_store().ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            "package delivery is not configured on this Server (packages_dir)".to_string(),
+            "package delivery is not configured on this Server".to_string(),
         )
     })
 }
@@ -2771,8 +2818,8 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-/// Opens the enrolment window for a bounded time, or moves its end. It is closed by default and
-/// lives in memory only, so a Server restart closes it.
+/// Opens the enrolment window for a bounded time, or moves its end. It is closed by default, and
+/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0037).
 #[utoipa::path(
     post,
     path = "/api/v1/enrolment/window",
@@ -2781,7 +2828,8 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
     responses(
         (status = 200, description = "The window, open until its new end", body = EnrolmentWindow),
         (status = 400, description = "open_for_secs is out of range", body = ErrorBody),
-        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody),
+        (status = 500, description = "The window could not be persisted; it is as it was", body = ErrorBody)
     )
 )]
 async fn open_enrolment_window(
@@ -2800,7 +2848,11 @@ async fn open_enrolment_window(
             );
             window_view(Some(until))
         }
-        Err(e) => error(StatusCode::BAD_REQUEST, e),
+        Err(crate::enrolment::WindowError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(crate::enrolment::WindowError::Store(e)) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the enrolment window could not be persisted: {e}"),
+        ),
     }
 }
 
@@ -2812,7 +2864,8 @@ async fn open_enrolment_window(
     tag = "enrolment",
     responses(
         (status = 204, description = "Closed"),
-        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody),
+        (status = 500, description = "Closed, but not persisted: a restart may find the window open until its end", body = ErrorBody)
     )
 )]
 async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
@@ -2820,13 +2873,22 @@ async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response 
         return enrolment_off();
     };
     let expired = enrolment.pending().len();
-    enrolment.close();
+    let saved = enrolment.close();
     info!("enrolment window closed");
     note(
         &state,
         crate::audit::Entry::new("enrolment.window", "closed").with("expired_requests", expired),
     );
-    StatusCode::NO_CONTENT.into_response()
+    match saved {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "the enrolment window is closed, but that could not be persisted — a restart may \
+                 find it open until its end: {e}"
+            ),
+        ),
+    }
 }
 
 /// The enrolment requests waiting for an operator, oldest first.
@@ -2869,7 +2931,8 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
         (status = 204, description = "Approved and signed"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
-        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, or that certificate's subject breaks the rules of ADR-0036 clause 1 — the message names the attribute, and nothing is signed", body = ErrorBody)
+        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, or that certificate's subject breaks the rules of ADR-0036 clause 1 — the message names the attribute, and nothing is signed", body = ErrorBody),
+        (status = 500, description = "The approval could not be persisted; the request still waits", body = ErrorBody)
     )
 )]
 async fn approve_enrolment(
@@ -2900,6 +2963,10 @@ async fn approve_enrolment(
         Err(
             crate::enrolment::DecisionError::Subject(e) | crate::enrolment::DecisionError::Sign(e),
         ) => error(StatusCode::CONFLICT, e),
+        Err(crate::enrolment::DecisionError::Store(e)) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the approval could not be persisted, and the request still waits: {e}"),
+        ),
     }
 }
 
@@ -2912,7 +2979,8 @@ async fn approve_enrolment(
     responses(
         (status = 204, description = "Rejected"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody)
+        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
+        (status = 500, description = "The rejection could not be persisted; the request still waits", body = ErrorBody)
     )
 )]
 async fn reject_enrolment(
@@ -2932,6 +3000,10 @@ async fn reject_enrolment(
             );
             StatusCode::NO_CONTENT.into_response()
         }
+        Err(crate::enrolment::DecisionError::Store(e)) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the rejection could not be persisted, and the request still waits: {e}"),
+        ),
         Err(_) => error(
             StatusCode::NOT_FOUND,
             format!("no pending enrolment request {id:?}"),

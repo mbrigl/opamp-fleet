@@ -6,8 +6,8 @@
 # HOW THIS FILE IS ORDERED, AND WHY IT MATTERS. Every bare key comes first; every [section] comes
 # after them. That is not tidiness — it is the only layout in which the commented examples below can
 # be switched on safely. A TOML section header captures every bare key that follows it until the
-# next header, so a `[telemetry_offer]` sitting above `packages_dir` would swallow it the moment
-# anyone uncommented it, and the Server would refuse to start with "unknown field `packages_dir`".
+# next header, so a `[telemetry_offer]` sitting above `data_dir` would swallow it the moment
+# anyone uncommented it, and the Server would refuse to start with "unknown field `data_dir`".
 # Add new settings accordingly: a bare key goes in the first half, a section in the second.
 
 # =============================================================================================
@@ -27,13 +27,27 @@ listen = "127.0.0.1:4320"
 # limit for a fleet larger than this.
 max_connections = 10000
 
-# Where Configurations are persisted across Server restarts — one JSON file each, holding the
-# saved revision an operator edits and every revision still rolled out somewhere. A Configuration
-# is content only — {"body", "service_name", "role"}, no Selector — written with
-# PUT /api/v1/configurations/{name}. SAVING NEVER DISTRIBUTES: a Configuration reaches an Agent
-# only through a Deployment that holds it (see packages_dir below), when that Deployment is rolled
-# out, and only the Agents of the type its service_name names (every type when it names none).
-config_dir = "fleet-configs"
+# Where the Server keeps ALL of its state, one directory per domain, created owner-only (0700) when
+# missing, every file in it 0600. The layout is fixed; anything else in it stops the Server, named:
+#
+#   configurations/<name>.json            a Configuration, with every revision still rolled out
+#   deployments/<name>.json               a Deployment
+#   packages/<agent type>@<version>.json  a Package: its identity and entries, no bytes
+#   blobs/<sha256>                        an artifact, named by its SHA-256, stored once
+#   agents/<instance_uid>.json            an Agent: what it reported, its assignment, its labels
+#   hosts/<host>.json                     a Host
+#   certificates/<issuer>-<serial>.json   a certificate the client CA signed (the register)
+#   revocations.json                      the revocation list
+#   bootstrap/<issuer>-<serial>.json      a bootstrap certificate the Server issued, and its
+#                                         PKCS#12 file beside it as .p12
+#   enrolment.json                        the enrolment window and its pending requests
+#   audit/audit-<first seq>.jsonl         the audit record
+#
+# Back it up as one directory, with the Server stopped. A Server before 0.5.5 kept its state under
+# config_dir and packages_dir instead; those keys stop this Server at startup, and
+#   server migrate --config-dir <old> --packages-dir <old> --data-dir <new>
+# moves it here once, while the Server is stopped.
+data_dir = "fleet-data"
 
 # The largest OpAMP message accepted or sent, on either transport and in either direction. The
 # protocol requires the limit and recommends this default; a fleet of small status reports runs
@@ -48,18 +62,21 @@ max_message_size_bytes = 67108864
 # default heartbeat of 30 s, because one missed beat is a lost packet.
 stale_after_secs = 90
 
-# Where software packages are persisted. Two
-# objects share this directory, and the split is the whole of the model:
+# The largest package artifact the REST API accepts on upload. A package is a program, not a
+# message: an otelcol-contrib binary is a few hundred megabytes, so this bound is far larger than
+# max_message_size_bytes above and applies to the package upload route alone.
 #
-#   <packages_dir>/<agent type>@<version>/   a PACKAGE: what an Agent type runs at a version.
-#                                            Its identity is those two tokens and nothing else —
-#                                            no name of its own, no Selector, no kind flag —
-#                                            holding one uploaded artifact per platform, each with
-#                                            its Ed25519 signature. It aims at nobody and is never
-#                                            rolled out.
-#   <packages_dir>/deployments/<name>.json   a DEPLOYMENT: a name, the channel its Selector aims at,
-#                                            at most one Package per Agent type, and any number
-#                                            of Configurations. The only thing rolled out.
+# WHAT IS ROLLED OUT, AND HOW. Three objects, and the split is the whole of the model:
+#
+#   a CONFIGURATION   content only — {"body", "service_name", "role"}, no Selector — written with
+#                     PUT /api/v1/configurations/{name}. It reaches only the Agents of the type its
+#                     service_name names (every type when it names none).
+#   a PACKAGE         what an Agent type runs at a version. Its identity is those two tokens and
+#                     nothing else — no name of its own, no Selector, no kind flag — holding one
+#                     uploaded artifact per platform, each with its Ed25519 signature. It aims at
+#                     nobody and is never rolled out.
+#   a DEPLOYMENT      a name, the channel its Selector aims at, at most one Package per Agent type,
+#                     and any number of Configurations. The only thing rolled out.
 #
 # The Agent type is compared raw against the `service.name` the Agents report, so spell
 # it exactly — a Client updating itself is typed `supervisor`.
@@ -104,11 +121,6 @@ stale_after_secs = 90
 # The download endpoint sits on the Agent plane, behind the same handshake as /v1/opamp: only an
 # Agent holding a certificate of the fleet reaches it. The content hash and the
 # signature are what protect an installed binary, and an unsigned entry is offered to nobody.
-packages_dir = "fleet-packages"
-
-# The largest package artifact the REST API accepts on upload. A package is a program, not a
-# message: an otelcol-contrib binary is a few hundred megabytes, so this bound is far larger than
-# max_message_size_bytes above and applies to the package upload route alone.
 max_package_size_bytes = 1073741824
 
 # =============================================================================================
@@ -197,8 +209,8 @@ client_ca_file = "client-ca.pem"
 
 # The audit record: one JSON line per security decision — admissions and refusals,
 # enrolment, issuance, revocation, operator acts, package outcomes — in
-# <config_dir>/audit/, each line carrying the SHA-256 of the one before. Check it with
-#   server audit-verify <config_dir>/audit
+# <data_dir>/audit/, each line carrying the SHA-256 of the one before. Check it with
+#   server audit-verify <data_dir>/audit
 # A Server that cannot write it admits no one until it can. Bounded by size, never switched off.
 # [audit]
 # max_file_bytes = 67108864   # a file this large is closed and the next one started

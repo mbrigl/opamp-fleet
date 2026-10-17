@@ -380,7 +380,8 @@ impl Served {
         let revocations = Arc::new(
             Revocations::open(
                 Box::new(
-                    fleet_server::fs::FsLedgerStore::open(pki.join("revocation")).expect("ledger"),
+                    fleet_server::fs::FsLedgerStore::open(&pki.join("fleet-configs"))
+                        .expect("ledger"),
                 ),
                 clock,
                 vec![

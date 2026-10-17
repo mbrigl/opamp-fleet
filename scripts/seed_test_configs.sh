@@ -21,11 +21,11 @@
 #       (default server-url: https://127.0.0.1:4321). The Operator plane serves TLS (ADR-0013); the
 #       CA curl trusts is $SEED_CACERT, or .dev-pki/offline/server-ca.pem when scripts/dev-pki.sh
 #       made one.
-#   scripts/seed_test_configs.sh --offline [config-dir]
-#       Writes each Configuration as <config-dir>/<name>.json — the Server's own persistence
-#       format, loaded at its next start; no running Server needed. Default config-dir is
-#       fleet-configs/ in the repository root (the server.toml default). This is what
-#       scripts/install_tools.sh runs after installing the processes. A staged Configuration is
+#   scripts/seed_test_configs.sh --offline [data-dir]
+#       Writes each Configuration as <data-dir>/configurations/<name>.json, owner-only — the
+#       Server's own persistence format (ADR-0037), loaded at its next start; no running Server
+#       needed. Default data-dir is fleet-data/ in the repository root (the server.toml default).
+#       This is what scripts/install_tools.sh runs after installing the processes. A staged Configuration is
 #       stored, not assigned, and held by no Deployment: once the Agents have enrolled, put each
 #       into a Deployment and roll that out
 #       (PUT /api/v1/deployments/<name>/configurations/<configuration>, then
@@ -63,8 +63,11 @@ examples="$(cd "$(dirname "$0")/../config/examples" && pwd)"
 mode=put
 if [ "${1:-}" = "--offline" ]; then
     mode=stage
-    config_dir="${2:-$examples/../../fleet-configs}"
-    mkdir -p "$config_dir"
+    data_dir="${2:-$examples/../../fleet-data}"
+    configurations="$data_dir/configurations"
+    # Owner-only, as the Server keeps everything under data_dir (ADR-0037).
+    umask 077
+    mkdir -p "$configurations"
 elif [ "${1:-}" = "--enrol" ]; then
     mode=enrol
     server="${2:-https://127.0.0.1:4321}"
@@ -120,7 +123,7 @@ seed() {
     local spec
     spec=$(jq -Rs --arg type "$type" '{body: ., service_name: $type}' "$file")
     if [ "$mode" = stage ]; then
-        jq --arg name "$name" '{name: $name, saved: .}' <<<"$spec" >"$config_dir/$name.json"
+        jq --arg name "$name" '{name: $name, saved: .}' <<<"$spec" >"$configurations/$name.json"
         echo "staged $name.json (type $type)"
     else
         curl -fsS "${curl_tls[@]}" -X PUT -H 'Content-Type: application/json' -d @- \

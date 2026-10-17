@@ -1128,7 +1128,7 @@ async fn a_client_behind_a_marked_gateway_receives_an_uploaded_artifact_through_
     let revocations = Arc::new(
         fleet_server::revocation::Revocations::open(
             Box::new(
-                fleet_server::fs::FsLedgerStore::open(pki.join("revocation")).expect("ledger"),
+                fleet_server::fs::FsLedgerStore::open(&pki.join("fleet-configs")).expect("ledger"),
             ),
             clock,
             vec![fleet_server::revocation::Authority {
@@ -1188,7 +1188,8 @@ async fn a_client_behind_a_marked_gateway_receives_an_uploaded_artifact_through_
             .with_client_ca(Some(signer))
             .with_revocations(Some(revocations.clone()))
             .with_packages(Some(
-                fleet_server::fleet::PackageOffering::new(store).expect("deployments"),
+                fleet_server::fleet::PackageOffering::new(&pki.join("packages"), store)
+                    .expect("deployments"),
             )),
     );
     let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(

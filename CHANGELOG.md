@@ -62,6 +62,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Changed
 
+- **All of the Server's state lives under one data directory, and `server migrate` moves an
+  installation there**
+  ([ADR-0037](docs/adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)).
+  `server.toml` names `data_dir` (default `fleet-data`) instead of `config_dir` and `packages_dir`;
+  a file still naming either fails the start, naming `server migrate`. Under it each domain has a
+  directory of its own — `configurations/`, `deployments/`, `packages/`, `blobs/`, `agents/`,
+  `hosts/`, `certificates/`, `bootstrap/`, `audit/` — beside `revocations.json` and
+  `enrolment.json`, every directory `0700` and every file `0600`; anything else in it, or a file
+  whose name disagrees with what it holds, fails the start naming the path. An artifact is kept
+  once by its SHA-256 in `blobs/`, hashed again at every start, and deleted with the last entry
+  naming it; identical artifacts count once against `max_total_package_bytes`. The audit is
+  checked with `server audit-verify <data_dir>/audit`.
+  **What to do**, once, with the Server stopped:
+  1. Run `server migrate --config-dir <config_dir> --packages-dir <packages_dir> --data-dir <new,
+     empty directory>` as the Server's account. It copies — the old directories stay as your
+     backup — and prints what it carried, dropped and listed; it exits non-zero when it could not
+     carry the register, the revocation list, the Hosts, the bootstrap certificates or the audit.
+  2. In `server.toml`, remove `config_dir` and `packages_dir` and set `data_dir` to the new
+     directory. Under systemd's `ProtectSystem=strict`, a `data_dir` outside the unit's
+     `StateDirectory` needs a `ReadWritePaths=` line.
+  3. Start the Server. Put each Configuration the migration listed into a Deployment, sign each
+     entry it named unsigned, upload each artifact it dropped, and roll the Deployments out.
+  4. Keep the old directories until you are satisfied, then delete them.
+  The steps, and what the migration does with each kind of data, are in the Server's manual
+  ([Upgrading to one data directory](docs/manual/server.md#upgrading-to-one-data-directory)).
+
+- **The enrolment window and its queue survive a restart**
+  ([ADR-0037](docs/adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)).
+  They are written to `enrolment.json` before the act that changes them is answered, so an open
+  window stays open until its end and a host whose approval it had not collected yet is handed its
+  certificate after the restart; a window whose end passed while the Server was down is closed
+  when it starts. Opening the window, approving and rejecting answer `500` when that cannot be
+  written, and change nothing.
+
 - **A bootstrap certificate's subject names up to six values, and every host certificate issued
   from it carries them**
   ([ADR-0036](docs/adr/0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md)).
@@ -85,15 +119,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 - **Labels are part of the Agent's record, and forgetting an Agent removes them**
   ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). Labels follow an Agent
   the Server re-keys, and are gone with an Agent you forget; one that comes back starts with only
-  what its Client Agent's labels give it. The `labels/` directory under `config_dir` is no longer
-  read or written, and the Agent records under `agents/` are kept in a new shape. A label key
+  what its Client Agent's labels give it. A label key
   starting `fleet.` is refused `400`, and a reported attribute starting `fleet.` is left out of what
   Selectors match and listed in `ignored_attributes` on the Agent. A label that cannot be written
-  is answered `500`. **What to do:** before upgrading, note the labels you rely on
-  (`GET /api/v1/agents`). A record written by an earlier Server fails the start naming the file:
-  clear `<config_dir>/agents/` — every Agent re-reports on its next message, and what is lost is
-  the rollouts, which a press on each Deployment writes again, and the labels, which you set again
-  on the Agents tab, best on each Client's own Agent. `<config_dir>/labels/` can then be deleted.
+  is answered `500`. **What to do:** nothing beyond `server migrate` (see *All of the Server's
+  state lives under one data directory* below), which moves each Agent's labels into its record.
 
 - **A Deployment carries Configurations, and is the one thing rolled out** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)). A
   Deployment holds any number of Configurations beside its Packages
@@ -108,14 +138,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   is no longer refused. The fleet view shows per Configuration and for the Package what the next
   press would change, including what it drops (`change: "remove"`). The Configurations tab edits
   content only; the Deployments tab holds the Selector, the Packages and the Configurations.
-  **What to do:** before upgrading, note each Configuration's Selector. A stored Configuration that
-  still carries a selector fails the Server's start, naming the file — remove the `selector` from
-  it (and from every revision under `retained`). After the upgrade, put each Configuration into a
-  Deployment whose Selector reaches the Agents it was aimed at — an Agent belongs to at most one
-  Deployment, so a fleet-wide Configuration goes into every channel — and roll the Deployments
-  out. The Agent records are kept in a new shape: a record written by an earlier Server fails the
-  start naming the file; clear `<config_dir>/agents/`, and every Agent re-reports on its next
-  message — what is lost is the rollouts, which the presses above write again.
+  **What to do:** `server migrate` (see *All of the Server's state lives under one data
+  directory* below) drops each Configuration's Selector and lists it with the Selector it had.
+  After the upgrade, put each Configuration into a Deployment whose Selector reaches the Agents it
+  was aimed at — an Agent belongs to at most one Deployment, so a fleet-wide Configuration goes
+  into every channel — and roll the Deployments out. An Agent released through a Deployment keeps
+  its release until then; Configurations an Agent was given without one are listed per Agent by
+  the migration, and the Agent runs them until a Deployment holding them reaches it.
   `opamp-fleetctl package fetch` stores its default Configurations typed for their Collector, and
   `scripts/seed_test_configs.sh` puts each into a Deployment of that Collector's name.
 
@@ -133,10 +162,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   (`409`) like any other change to its entries. The Deployment signature routes
   (`…/deployments/{name}/signatures/…`) answer `404`, the Deployment view no longer reports
   `signed_platforms`, and the Deployments tab only shows each entry's signature state. Signatures
-  stored on a Deployment are not read any more. **What to do:** sign every entry of every Package
-  a Deployment holds again, on the Packages tab (import the signed signing file there) or through
-  the entry route — until then those entries are offered to nobody, and a rollout of such a
-  Deployment is refused naming them.
+  stored on a Deployment are not read any more. **What to do:** `server migrate` moves the
+  signature the Deployments held onto each entry. An entry two Deployments held different
+  signatures for is carried unsigned and named: sign it again, on the Packages tab (import the
+  signed signing file there) or through the entry route — until then it is offered to nobody, and
+  a rollout of a Deployment holding it is refused naming it.
 
 - **A Client downloads packages only from its own Server's origin** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). A path is
   resolved against the origin of its OpAMP endpoint; an absolute URL on any other origin, or a
@@ -165,11 +195,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 - **Referenced package entries** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). An entry is an uploaded artifact and nothing
   else: `PUT …/entries/{os}/{arch}/source`, its `url`, `sha256` and `headers`, and the Server's
   probe of the URL are gone (the route answers `404`), and the Packages tab takes files only. The
-  Server sends no request for a package anywhere. A `package.json` still holding a referenced entry
-  fails the Server's start, naming the file. **What to do:** before upgrading, upload every
-  referenced artifact as a file to its entry (`opamp-fleetctl package fetch` does it for the
-  agents it knows) and sign it; a Server already refusing to start needs that entry removed from
-  the named `package.json`, then the artifact uploaded.
+  Server sends no request for a package anywhere. **What to do:** before upgrading, upload every referenced artifact as a file to its
+  entry (`opamp-fleetctl package fetch` does it for the agents it knows) and sign it; `server
+  migrate` drops a referenced entry it still finds, naming it — upload that artifact afterwards.
 
 - **`[packages] allowed_sources` in `supervisor.toml`** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). There is no other
   download source than the Client's own Server, and a file that still names the key fails the

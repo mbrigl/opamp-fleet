@@ -24,7 +24,9 @@ async fn spawn_guarded() -> TestServer {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            )),
     );
     let auth: RestAuthConfig = toml::from_str(&format!(
         "[basic_users]\nfleet-admin = {:?}\n",

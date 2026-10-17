@@ -10,18 +10,15 @@ use crate::configs::validate_name;
 use crate::deployments::{check_selector, Deployment, DeploymentBackend};
 use crate::packages::PackageId;
 
-/// One JSON file per Deployment under `<packages_dir>/deployments/`, owner-only.
-///
-/// It lives beside the Packages rather than beside the Configurations because a Deployment is
-/// meaningless without the artifacts it holds — one directory is one backup — and it needs no
-/// configuration key of its own: it is armed by `packages_dir`, exactly as the package store is.
+/// One JSON file per Deployment under `<data_dir>/deployments/`, owner-only (ADR-0037).
 pub struct FsDeploymentBackend {
     dir: PathBuf,
 }
 
 impl FsDeploymentBackend {
-    /// Opens the directory, creating it owner-only.
-    pub fn open(dir: PathBuf) -> Result<Self, String> {
+    /// Opens the store in the data directory `root`, creating `deployments/` owner-only.
+    pub fn open(root: &std::path::Path) -> Result<Self, String> {
+        let dir = root.join(super::DEPLOYMENTS);
         super::create_private_dir(&dir)?;
         Ok(FsDeploymentBackend { dir })
     }
@@ -34,15 +31,7 @@ impl FsDeploymentBackend {
 impl DeploymentBackend for FsDeploymentBackend {
     fn load(&self) -> Result<Vec<Deployment>, String> {
         let mut deployments = Vec::new();
-        let listing = std::fs::read_dir(&self.dir)
-            .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?;
-        for entry in listing {
-            let path = entry
-                .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?
-                .path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
+        for (stem, path) in super::json_files(&self.dir)? {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let meta: DeploymentMeta = serde_json::from_str(&text)
@@ -50,12 +39,8 @@ impl DeploymentBackend for FsDeploymentBackend {
             let deployment = meta.into_deployment(&path)?;
             // The file name is derived from the name; a mismatch means a write would land
             // somewhere else, so it is refused rather than silently corrected.
-            if path.file_stem().and_then(|n| n.to_str()) != Some(deployment.name.as_str()) {
-                return Err(format!(
-                    "{} does not match the name {:?} it states — rename the file or fix it",
-                    path.display(),
-                    deployment.name
-                ));
+            if stem != deployment.name {
+                return Err(super::misnamed(&path, "name"));
             }
             deployments.push(deployment);
         }
@@ -71,20 +56,15 @@ impl DeploymentBackend for FsDeploymentBackend {
     }
 
     fn remove(&self, name: &str) -> Result<(), String> {
-        let path = self.path(name);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("cannot delete {}: {e}", path.display())),
-        }
+        super::remove_file(&self.path(name))
     }
 }
 
-/// A Deployment as persisted: `<packages_dir>/deployments/<name>.json`.
-///
-/// A file an older Server wrote may still list `signatures`; they are not read. A signature lives
-/// on its Package entry now (ADR-0033), and the operator signs each entry again there.
+/// A Deployment as persisted: `<data_dir>/deployments/<name>.json`. Unknown fields are refused, so a
+/// file an older Server wrote — with `signatures` beside its Packages — is named rather than read
+/// as something it is not: `server migrate` moves it (ADR-0037).
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeploymentMeta {
     name: String,
     selector: BTreeMap<String, String>,
@@ -149,7 +129,7 @@ mod tests {
     use crate::deployments::DeploymentStore;
 
     fn open(dir: &std::path::Path) -> Result<DeploymentStore, String> {
-        DeploymentStore::open(Box::new(FsDeploymentBackend::open(dir.to_path_buf())?))
+        DeploymentStore::open(Box::new(FsDeploymentBackend::open(dir)?))
     }
 
     /// The whole store survives a reopen.
@@ -193,13 +173,15 @@ mod tests {
     #[test]
     fn an_unreadable_file_fails_the_open_and_names_it() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("broken.json"), "{").expect("write");
+        std::fs::create_dir_all(dir.path().join("deployments")).expect("dir");
+        std::fs::write(dir.path().join("deployments/broken.json"), "{").expect("write");
         let error = open(dir.path()).map(|_| ()).expect_err("refused");
         assert!(error.contains("broken.json"), "{error}");
 
         let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("deployments")).expect("dir");
         std::fs::write(
-            dir.path().join("stable.json"),
+            dir.path().join("deployments/stable.json"),
             r#"{"name":"canary","selector":{"channel":"canary"}}"#,
         )
         .expect("write");
@@ -220,7 +202,7 @@ mod tests {
         let store = open(dir.path()).expect("open");
         channel(&store, "stable", &[("channel", "stable")]);
         assert_eq!(
-            std::fs::metadata(dir.path())
+            std::fs::metadata(dir.path().join("deployments"))
                 .expect("dir")
                 .permissions()
                 .mode()
@@ -228,7 +210,7 @@ mod tests {
             0o700
         );
         assert_eq!(
-            std::fs::metadata(dir.path().join("stable.json"))
+            std::fs::metadata(dir.path().join("deployments/stable.json"))
                 .expect("file")
                 .permissions()
                 .mode()

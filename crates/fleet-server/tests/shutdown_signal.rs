@@ -19,7 +19,7 @@ impl Drop for ServerUnderTest {
     }
 }
 
-// Verifies: ADR-0013, ADR-0024
+// Verifies: ADR-0013, ADR-0024, ADR-0037
 #[test]
 fn sigterm_shuts_the_server_down_gracefully() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -38,8 +38,7 @@ fn sigterm_shuts_the_server_down_gracefully() {
         format!(
             concat!(
                 "listen = \"127.0.0.1:{agent}\"\n",
-                "config_dir = {configs:?}\n",
-                "packages_dir = {packages:?}\n",
+                "data_dir = {data:?}\n",
                 "[tls]\n",
                 "cert_file = {cert:?}\n",
                 "key_file = {key:?}\n",
@@ -49,8 +48,7 @@ fn sigterm_shuts_the_server_down_gracefully() {
             ),
             agent = agent.local_addr().expect("addr").port(),
             operator = operator.local_addr().expect("addr").port(),
-            configs = dir.path().join("configs"),
-            packages = dir.path().join("packages"),
+            data = dir.path().join("data"),
             cert = dir.path().join("cert.pem"),
             key = dir.path().join("key.pem"),
         ),
@@ -113,4 +111,42 @@ fn sigterm_shuts_the_server_down_gracefully() {
         status.success(),
         "the server ended with {status:?} instead of shutting down"
     );
+
+    // Started on an empty data_dir, the Server laid out every directory of ADR-0037 clause 2,
+    // each owner-only, and nothing else.
+    let data = dir.path().join("data");
+    let mut found: Vec<String> = std::fs::read_dir(&data)
+        .expect("the data directory")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .into_string()
+                .expect("utf-8")
+        })
+        .filter(|name| !name.ends_with(".json"))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "agents",
+            "audit",
+            "blobs",
+            "bootstrap",
+            "certificates",
+            "configurations",
+            "deployments",
+            "hosts",
+            "packages"
+        ]
+    );
+    for name in std::iter::once(String::new()).chain(found) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(data.join(&name))
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "{name} is not owner-only");
+    }
 }

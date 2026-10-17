@@ -26,6 +26,12 @@ ones it uses without defining.
 - **Entry** — one platform's artifact in a Package: operating system and architecture, content hash,
   size and signature.
   _Avoid:_ file, asset, build.
+- **Blob** — the bytes of an Entry's artifact as the Server stores them, named by their SHA-256;
+  identical bytes are one blob, whichever Entries name it.
+  _Avoid:_ artifact file, binary.
+- **Data directory** — the one directory, `data_dir`, under which the Server keeps all of its
+  state, one subdirectory per domain.
+  _Avoid:_ config directory, package directory, state directory (that is the Client's).
 - **Bootstrap certificate** — the short-lived certificate a host presents to ask for enrolment; its
   subject values describe the Host it becomes.
   _Avoid:_ join token, enrolment token.

@@ -22,9 +22,9 @@ than anywhere else, and none beats one that has stopped being true.
  operator ── REST / bundled UI ──▶ Operator plane :4321 ─┐
                                                          │  Server (Linux)
  Client ──── OpAMP, mTLS ──────────────▶ Agent plane :4320 ─┘   │
-   │  ▲                                                          ├─▶ config_dir: fleet state,
-   │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients    │   register, audit record
-   │                                                             └─▶ packages_dir: artifacts
+   │  ▲                                                          └─▶ data_dir: fleet state,
+   │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients        register, audit record,
+   │                                                                 artifacts by SHA-256
    ├── Supervisor Endpoint (loopback) ◀── a Collector's opampextension
    ├── Managed Processes: Collector, any command
    ├── package downloads: the Server's own origin, and no other
@@ -93,17 +93,23 @@ module's role is listed in
 [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs), which fails when a
 core module names an adapter or a technology, and when a module has no role.
 
-- **Server stores** — each store is a port in the core module it serves (`AgentStore` in
-  `agent_store`, which holds each Agent's labels in its record, `ConfigBackend` under the
-  `ConfigStore` in `configs`,
-  `DeploymentBackend` under the `DeploymentStore` in `deployments`, `PackageBackend` under the
-  `PackageStore` in `packages`, `BootstrapStore` under the `BootstrapCertificates` in
-  `bootstrap`), with its filesystem adapter in `fs`. The package port speaks in
-  paths, because ADR-0026 makes an artifact a file that is staged, re-hashed and streamed. The
-  core's constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
-  `PackageOffering::with_deployments`, `BootstrapCertificates::open` — and `lib.rs` wires the
-  filesystem adapters in `AppState::new`, `PackageStore::open`, `PackageOffering::new` and
-  `BootstrapCertificates::on_disk`.
+- **Server stores** — one port per domain in the core module it serves, shaped so a database or
+  an object store could implement it, and speaking in domain types, never paths
+  ([ADR-0037](adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)):
+  `AgentStore` in `agent_store`, which holds each Agent's labels in its record, writes a rollout's
+  revisions and assignments as one operation, and answers what an assignment pins;
+  `ConfigBackend` under the `ConfigStore` in `configs`; `DeploymentBackend` under the
+  `DeploymentStore` in `deployments`; `PackageBackend` and `BlobStore` (`blobs`, artifact bytes by
+  SHA-256) under the `PackageStore` in `packages`; `BootstrapStore` under the
+  `BootstrapCertificates` in `bootstrap`; `EnrolmentStore` under the `Enrolment` in `enrolment`;
+  `LedgerStore` in `revocation`; `AuditStore` in `audit_log`. The filesystem adapters are in `fs`,
+  which also opens the data directory and refuses anything its layout does not name. The core's
+  constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
+  `PackageOffering::with_deployments`, `BootstrapCertificates::open`, `Enrolment::open_on` — and
+  `lib.rs` wires the filesystem adapters in `AppState::new`, `PackageStore::open`,
+  `PackageOffering::new` and `BootstrapCertificates::on_disk`. `migrate` is the one module that
+  reads the layout of an older Server, for `server migrate`, and nothing in the running Server
+  calls it.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
@@ -128,7 +134,7 @@ core module names an adapter or a technology, and when a module has no role.
   ([ADR-0013](adr/0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
   `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under
-  `config_dir/audit/` ([ADR-0022](adr/0022-an-append-only-audit-record-chained-by-hash.md)).
+  `data_dir/audit/` ([ADR-0022](adr/0022-an-append-only-audit-record-chained-by-hash.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
   implements for the CSR flow and the renewal proof (ADR-0021), and
   `Clock`, which `clock::SystemClock` implements. The `[connection_offer]` and
@@ -232,9 +238,14 @@ directory ([ADR-0019](adr/0019-the-client-supervisor-installed-service-releases-
 proving with the old key which certificate it renews. A revocation closes the sessions it
 concerns at once and follows every renewal.
 
-**Where state lives.** The Server keeps its state under `config_dir` — Configurations, `agents/`
-(each Agent's record, its labels inside), `revocation/` and `audit/` — and its artifacts under `packages_dir`; a restart restores
-the fleet from them and shows each Agent disconnected until it reports. The Client keeps its state
+**Where state lives.** The Server keeps all of its state under one `data_dir`, one directory per
+domain and owner-only: `configurations/`, `deployments/`, `packages/` (metadata) and `blobs/` (the
+artifacts, named by SHA-256), `agents/` (each Agent's record, its labels inside), `hosts/`,
+`certificates/` (the register), `revocations.json`, `bootstrap/`, `enrolment.json` (the window and
+its queue) and `audit/`
+([ADR-0037](adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)).
+A restart restores the fleet from them and shows each Agent disconnected until it reports; an
+installation an older Server wrote is moved there once by `server migrate`. The Client keeps its state
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,
 and per Supervisor a directory with `config/` and `program/`. An installed Client runs from
 `versions/<version>/` through the `current` pointer

@@ -10,6 +10,8 @@ a service.
 - [What the Server does](#what-the-server-does)
 - [Running it](#running-it)
 - [Configuration reference](#configuration-reference)
+- [Where the Server keeps its state](#where-the-server-keeps-its-state)
+- [Upgrading to one data directory](#upgrading-to-one-data-directory)
 - [Mutual TLS: proving who is on the connection](#mutual-tls-proving-who-is-on-the-connection)
 - [Enrolment: a new host, approved by an operator](#enrolment-a-new-host-approved-by-an-operator)
 - [Configurations: what the fleet runs](#configurations-what-the-fleet-runs)
@@ -122,11 +124,10 @@ optional. An unknown key fails startup rather than being ignored.
 |---|---|---|
 | `listen` | `"127.0.0.1:4320"` | The **Agent plane**, as `address:port`: the OpAMP endpoint and the package downloads. `4320` is the protocol's default port. Serve the fleet with `"0.0.0.0:4320"`. |
 | `max_connections` | `10000` | The connections the Agent plane holds at once. A connection past it is closed on accept. Raise it together with the process's file-descriptor limit for a larger fleet. `0` is refused at startup. |
-| `config_dir` | `"fleet-configs"` | Where Configurations are persisted — one JSON file per Configuration, named after it. Written atomically; read back at startup. |
-| `packages_dir` | `"fleet-packages"` | Where packages are persisted — the artifacts, and each Package's metadata with its entries' signatures. |
+| `data_dir` | `"fleet-data"` | Where the Server keeps **all** of its state, one directory per domain: see [Where the Server keeps its state](#where-the-server-keeps-its-state). Created owner-only when missing. `config_dir` and `packages_dir` are gone: a file naming either fails startup and names `server migrate` ([Upgrading to one data directory](#upgrading-to-one-data-directory)). |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
 | `max_package_size_bytes` | `1073741824` (1 GiB) | The largest artifact the package-upload route accepts. A package is a program, not a message — an `otelcol-contrib` binary is a few hundred megabytes — so this bound is far larger, and it applies to that one route. The upload has no deadline, but like every request body it must deliver 64 KiB in each minute once it has begun, or it is answered `408`. |
-| `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. `0` is refused at startup. |
+| `max_total_package_bytes` | `17179869184` (16 GiB) | The total size of all stored artifacts before a new upload is refused `507`. Where `max_package_size_bytes` bounds one artifact, this bounds the whole store, so no caller fills the disk by uploading many artifacts under distinct names. Identical bytes are stored once and counted once. `0` is refused at startup. |
 | `max_agents` | `100000` | The most Agent records the fleet holds at once. A report bearing a **new** `instance_uid` past this ceiling is answered `Unavailable` rather than admitted, so an admitted peer minting fresh self-asserted UIDs cannot exhaust memory and disk; Agents already known keep reporting. The defence against an anonymous flood is [admission](#authentication) by client certificate; this is the backstop behind it. `0` is refused at startup. |
 | `stale_after_secs` | `90` | How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view marks it **stale**. Ignored when `[connection_offer]` names a heartbeat interval — then the budget is three of those. Only heartbeating Agents can go stale: one that promised no periodic report is never late. |
 
@@ -294,6 +295,90 @@ not an empty section. The `endpoint` is `wss://` or `https://`; `ws://` or `http
 heartbeat_interval_secs = 30
 endpoint = "wss://fleet.example:4320/v1/opamp"
 ```
+
+
+## Where the Server keeps its state
+
+Everything the Server knows survives a restart under one directory, `data_dir`, in a fixed layout:
+
+| Path | One file per | Holds |
+|---|---|---|
+| `configurations/<name>.json` | Configuration | Its saved revision and every revision still rolled out somewhere |
+| `deployments/<name>.json` | Deployment | Its Selector, its Packages and its Configurations |
+| `packages/<agent type>@<version>.json` | Package | Its identity and entries, each naming its artifact by SHA-256 and carrying its signature |
+| `blobs/<sha256>` | artifact | The bytes, named by their SHA-256 — identical bytes are stored once |
+| `agents/<instance_uid>.json` | Agent | What it reported, its assignment, its labels |
+| `hosts/<host>.json` | Host | What its certificate says, and which Agents it speaks for |
+| `certificates/<issuer>-<serial>.json` | certificate | The register of what the client CA signed |
+| `revocations.json` | — | The revocation list |
+| `bootstrap/<issuer>-<serial>.json`, `.p12` | bootstrap certificate | Its record, and its PKCS#12 file when one was made |
+| `enrolment.json` | — | The enrolment window and its pending requests |
+| `audit/audit-<first seq>.jsonl` | audit file | The audit record |
+
+`<issuer>` is the first 16 hex characters of the SHA-256 of the issuer's DER-encoded name, and
+`<serial>` the certificate's serial in lowercase hex. A Host whose name holds a character outside
+letters, digits, `.`, `_` and `-` has it written as `%XX` in its file name.
+
+- **Owner-only.** The Server creates `data_dir` and every directory in it `0700` and writes every
+  file `0600`: an Agent's reported configuration may hold credentials, and nothing here is another
+  local user's business. On Windows the data root's restricted ACL covers it.
+- **One step per write.** Every record is written to a temporary file beside it and renamed into
+  place, so a crash leaves the old document or the new one. The register, the revocation list,
+  the Hosts, the bootstrap records, the enrolment window and the audit reach the disk before the
+  decision they answer is. A temporary file a crash left behind is removed at the next start.
+- **Nothing else is read.** A file or directory the layout does not name, a file that does not
+  parse, or one whose name disagrees with what it holds stops the start, naming the path — a store
+  that merely looked empty would be worse. Every artifact is hashed again at startup, and an artifact
+  no Package entry names is deleted then.
+- **Backup** is a copy of `data_dir` taken while the Server is stopped; restoring it is putting the
+  copy back. A copy taken while it runs may hold an Agent record or an audit line mid-write.
+
+## Upgrading to one data directory
+
+A Server before 0.5.5 kept its state in two directories, `config_dir` (default `fleet-configs`) and
+`packages_dir` (default `fleet-packages`). This Server reads neither: a `server.toml` naming either
+key stops it at startup. `server migrate` moves an installation once, offline:
+
+1. **Stop the Server.** The migration copies files; a Server still writing them would be copied
+   half-way. The older Server takes no lock the migration could test, so this step is yours.
+2. **Run the migration**, naming the two old directories and a new, empty one — it refuses a
+   `data_dir` that is not empty:
+
+   ```text
+   $ server migrate --config-dir /var/lib/opamp-fleet-server/configs \
+       --packages-dir /var/lib/opamp-fleet-server/packages \
+       --data-dir /var/lib/opamp-fleet-server/data
+   ```
+
+   It copies and never moves: the old directories stay as they were, as your backup. It prints one
+   line per thing it carried, dropped or listed:
+
+   - **Trust data** — the certificate register, the revocation list, the Hosts, the bootstrap
+     certificates with their PKCS#12 files, and the audit files — is carried whole. The audit lines
+     are copied, not rewritten, and the migration checks that the chain holds.
+   - **Packages**: each artifact becomes a blob. Each entry takes the signature the Deployments
+     held for it; where two Deployments held different signatures for one entry it is carried
+     **unsigned** and named — sign it again. A referenced entry (one an older Server fetched from a
+     URL) is **dropped** and named; upload that artifact.
+   - **Deployments** keep their name, Selector and Packages; their signatures now live on the
+     entries.
+   - **Configurations** keep their content and every revision still rolled out, and lose their
+     Selector. Each is **listed** with the Selector it had: put it into the Deployment whose
+     Selector aims where that one did.
+   - **Agents** are carried with their labels inside their record. An Agent released through a
+     Deployment keeps that release — its Package and the Configuration revisions it was given,
+     which stay offered until the Deployment is next rolled out. Configuration pins an Agent got
+     without a Deployment are **dropped** and listed per Agent; the Agent keeps running what it
+     has until a Deployment holding those Configurations is rolled out to it.
+
+   When it is done it opens the new directory as the Server will. It exits non-zero when it could
+   not carry trust data or the new directory would not open — then empty the new directory, fix
+   what it named, and run it again.
+3. **Edit `server.toml`**: remove `config_dir` and `packages_dir`, and set
+   `data_dir = "/var/lib/opamp-fleet-server/data"`.
+4. **Start the Server**, put each listed Configuration into its Deployment, sign any entry named
+   unsigned, and roll the Deployments out. Keep the old directories until you are satisfied, then
+   delete them.
 
 ## Mutual TLS: proving who is on the connection
 
@@ -500,8 +585,8 @@ The file holds the certificate and its key and nothing else, not the server CA: 
 `server-ca.pem` from you as before. It is encrypted with AES-256 under a key derived from the
 password (PBKDF2-HMAC-SHA-256, 600 000 iterations) and carries an HMAC-SHA-256 MAC, so OpenSSL 3
 opens it with its defaults (`openssl pkcs12 -in bootstrap.p12 -info`). The Server keeps it beside
-the certificate's record under `config_dir/bootstrap-certificates/`, readable by its own account
-only. **The password is kept nowhere** — not in the file's directory, not in a log, not in the
+the certificate's record under `data_dir/bootstrap/`, as `<issuer>-<serial>.p12`, readable by its
+own account only. **The password is kept nowhere** — not in the file's directory, not in a log, not in the
 audit — so give it to the host by another way than the file. Every download is recorded in the
 audit as `enrolment.bootstrap_p12_downloaded` with the serial; a download is answered `503` while
 the audit record cannot be written, and `404` for a certificate with no file, a revoked one, an
@@ -569,9 +654,13 @@ $ curl --cacert ca.pem -X DELETE https://127.0.0.1:4321/api/v1/enrolment/window
 ```
 
 `POST` opens the window, or moves its end to `open_for_secs` from now. `GET` says whether it is
-open and until when. `DELETE` closes it early. The window and its pending requests live in memory
-only, so a Server restart closes it. When it closes, every enrolling connection is closed and every
-pending request expires.
+open and until when. `DELETE` closes it early. The window's end and its pending requests — an
+approved one with its certificate included — are written to `data_dir/enrolment.json` before the
+act that changes them is answered, so a Server restart keeps an open window open until its end and
+keeps its requests: a host whose approval it had not collected yet is handed its certificate after
+the restart. A window whose end passed while the Server was down is closed when it starts. When it
+closes, every enrolling connection is closed and every pending request expires, an approved one
+whose certificate its host has not collected included; that host enrols again in the next window.
 
 **While it is open, an enrolling host may send a certificate request and nothing else.** The
 Server creates no Agent record for it and offers it nothing but the issued certificate. The request
@@ -629,7 +718,7 @@ stored. Approve only what you can match to a host you are setting up.
 A certificate stays valid until it expires. To shut a host out sooner, revoke its certificate. The Server refuses it from then on, on both
 transports and on the package download, and closes at once every WebSocket session it admitted,
 with close code `1008`. No other session is touched, and no restart is needed. The list lives
-under `config_dir` and survives a restart.
+in `data_dir/revocations.json` and survives a restart.
 
 Every certificate the client CA signs is in a register, with the certificate the host presented
 when it renewed. Its `key_fingerprint` is the one the request was listed and approved by:
@@ -688,7 +777,7 @@ host not marked — answers every downstream peer `503` and closes their session
 
 ## The audit record
 
-Every security decision leaves one line in `config_dir/audit/`: each admission and refusal on the
+Every security decision leaves one line in `data_dir/audit/`: each admission and refusal on the
 Agent plane, each refused operator sign-in, each enrolment request, approval and rejection, each
 certificate issued, each revocation and the session it ended, each request for the Gateways'
 revocation list from a host not marked as a Gateway, each download a host may not fetch, each
@@ -799,8 +888,9 @@ rollout (`POST /api/v1/agents/{instance_uid}/rollout`, with an empty body or
 
 ## Packages and Deployments: distributing software
 
-Package delivery is armed by `packages_dir`; the Server declares the capability only while the
-store holds something. Two objects share that directory, and the split is the whole of the model:
+The Packages live in `data_dir/packages/` and their artifacts in `data_dir/blobs/`; the Server
+declares the capability only while the store holds a Package. Two objects, and the split is the
+whole of the model:
 
 - A **Package** is *what* an Agent type runs at a version. Its identity is the **Agent type and
   the version**, and it holds one entry per platform — the Linux build, the macOS builds, the
@@ -905,10 +995,12 @@ shown on the Packages tab as a warning — **the Server only reports**, and each
 decides. A Client with the right key refuses that artifact, so the warning is the moment to sign
 the entry again.
 
-The store keeps its Deployments in `<packages_dir>/deployments/`; every *other* entry there is a
-Package directory, and one this Server does not recognise **fails the start naming the path**
-rather than being skipped — a store left over from an older layout would otherwise open
-successfully and empty, which reads as "nothing uploaded yet".
+A Package is one file, `data_dir/packages/<agent type>@<version>.json`, naming each entry's
+artifact by its SHA-256; the bytes are `data_dir/blobs/<sha256>`. Two entries with identical bytes
+share one blob, and a blob goes when the last entry naming it does. Every blob is hashed again at
+startup, and one whose content does not match its name **fails the start naming it**, as does a
+file in either directory this Server did not write — a store left over from an older layout would
+otherwise open successfully and empty, which reads as "nothing uploaded yet".
 
 A Package that no Deployment holds reaches nobody, and the package list says so — `in no
 deployment` in the UI, an empty `deployments` array in the API. That is the state a Selector

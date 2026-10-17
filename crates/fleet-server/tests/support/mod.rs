@@ -65,7 +65,8 @@ pub fn state_on(dir: &std::path::Path) -> AppState {
     AppState::new(dir.join("fleet-configs"))
         .expect("open the configuration store")
         .with_packages(Some(
-            fleet_server::fleet::PackageOffering::new(packages).expect("deployments"),
+            fleet_server::fleet::PackageOffering::new(&dir.join("packages"), packages)
+                .expect("deployments"),
         ))
 }
 

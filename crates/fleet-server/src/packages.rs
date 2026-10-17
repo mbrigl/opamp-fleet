@@ -17,9 +17,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use crate::blobs::BlobStore;
 use crate::deployments::Deployment;
 use opamp::proto::{
     AgentDescription, DownloadableFile, PackageAvailable, PackageType, PackagesAvailable,
@@ -143,10 +143,6 @@ pub struct PackageId {
     pub version: String,
 }
 
-/// The subdirectory of `packages_dir` the Deployments live in (ADR-0026) — skipped by the package
-/// loader, which owns every *other* entry in that directory.
-pub const DEPLOYMENTS_DIR: &str = "deployments";
-
 impl PackageId {
     /// Validates both parts; the one gate every write goes through.
     pub fn new(agent_type: &str, version: &str) -> Result<Self, String> {
@@ -194,9 +190,9 @@ impl fmt::Display for PackageId {
 /// there is no Selector here and no kind flag: an Agent's Deployment holds one Package for its
 /// type, and that is the whole of the decision.
 ///
-/// Artifacts stay on disk (`<package>/<os>-<arch>.bin`) and are streamed to whoever asks — a
-/// program weighs hundreds of megabytes, and a fleet server holding every one of them in memory,
-/// plus a copy per download, is the shape this deliberately avoids.
+/// Artifacts stay in the blob store, named by their hash (ADR-0037), and are streamed to whoever
+/// asks — a program weighs hundreds of megabytes, and a fleet server holding every one of them in
+/// memory, plus a copy per download, is the shape this deliberately avoids.
 #[derive(Clone)]
 pub struct Package {
     pub id: PackageId,
@@ -367,66 +363,28 @@ impl PackageSummary {
     }
 }
 
-/// The package store's port (ADR-0006): where Packages and their artifacts persist. ADR-0026
-/// decides that the store is a directory and an artifact a file there — streamed in through a
-/// staging file, re-hashed when the store opens, streamed out to a download — so the port speaks
-/// in paths. The filesystem adapter ([`FsPackageBackend`](crate::fs::FsPackageBackend)) is what
-/// the composition root wires.
+/// The package store's port (ADR-0006, ADR-0037): where Packages persist — each one's identity
+/// and entries, every entry naming its artifact by the hash of its bytes. The bytes are the
+/// [`BlobStore`]'s. The filesystem adapter ([`FsPackageBackend`](crate::fs::FsPackageBackend)) is
+/// what the composition root wires.
 pub trait PackageBackend: Send + Sync {
-    /// Every persisted Package, once, when the store opens — each uploaded artifact re-hashed
-    /// against its recorded content hash. Anything unreadable, unparsable, mismatched, or in a
-    /// layout this Server does not write fails the open and names where it is: a corrupt
-    /// distribution artifact must never ship (ADR-0026).
+    /// Every persisted Package, once, when the store opens. Anything unreadable, unparsable, or in
+    /// a layout this Server does not write fails the open and names where it is (ADR-0026).
     fn load(&self) -> Result<Vec<Package>, String>;
 
-    /// Creates or replaces one Package's metadata, owner-only.
+    /// Creates or replaces one Package's metadata.
     fn put(&self, package: &Package) -> Result<(), String>;
 
-    /// Deletes a whole Package — metadata and artifacts.
+    /// Deletes one Package's metadata; its blobs are the store's to collect.
     fn remove(&self, id: &PackageId) -> Result<(), String>;
-
-    /// The directory the Packages live in; the Deployments sit beneath it (ADR-0026).
-    fn dir(&self) -> &Path;
-
-    /// Where an upload of one entry is streamed before it becomes an artifact.
-    fn staging_path(&self, id: &PackageId, platform: &Platform) -> PathBuf;
-
-    /// The `(size, SHA-256)` of a staged upload, read by streaming.
-    fn hash_staged(&self, staged: &Path) -> Result<(u64, Vec<u8>), String>;
-
-    /// Moves a staged upload into place as one entry's artifact.
-    fn commit_staged(
-        &self,
-        id: &PackageId,
-        platform: &Platform,
-        staged: &Path,
-    ) -> Result<(), String>;
-
-    /// Removes a staged upload that will not become an artifact; best effort.
-    fn discard_staged(&self, staged: &Path);
-
-    /// Writes one entry's artifact from bytes in hand.
-    fn write_artifact(
-        &self,
-        id: &PackageId,
-        platform: &Platform,
-        bytes: &[u8],
-    ) -> Result<(), String>;
-
-    /// Removes one entry's artifact; one that is not there is not an error.
-    fn remove_artifact(&self, id: &PackageId, platform: &Platform) -> Result<(), String>;
-
-    /// Where one entry's artifact lives, for the download to stream from.
-    fn artifact_path(&self, id: &PackageId, platform: &Platform) -> PathBuf;
-
-    /// The total bytes of stored artifacts — best effort, for the ceiling on new uploads.
-    fn total_bytes(&self) -> u64;
 }
 
-/// The package store (ADR-0026): every Package, held in memory for the control loop to read, and
-/// persisted through a [`PackageBackend`].
+/// The package store (ADR-0026, ADR-0037): every Package, held in memory for the control loop to
+/// read, its metadata persisted through a [`PackageBackend`] and its artifacts through a
+/// [`BlobStore`].
 pub struct PackageStore {
     backend: Box<dyn PackageBackend>,
+    blobs: Box<dyn BlobStore>,
     sets: RwLock<BTreeMap<PackageId, Package>>,
     /// The check against the operator's public key, `[packages] verification_key` (ADR-0033).
     /// Each entry's signature is reported by it; `None` reports every signature `unchecked`.
@@ -434,18 +392,60 @@ pub struct PackageStore {
 }
 
 impl PackageStore {
-    /// Opens the store on `backend`, loading every persisted Package.
-    pub fn with_backend(backend: Box<dyn PackageBackend>) -> Result<Self, String> {
-        let sets = backend
-            .load()?
-            .into_iter()
-            .map(|package| (package.id.clone(), package))
-            .collect();
-        Ok(PackageStore {
+    /// Opens the store on `backend` and `blobs`, loading every persisted Package. Every blob is
+    /// read once (and the filesystem adapter hashes it again on the way, ADR-0037 clause 4); an
+    /// entry naming a blob that is not stored, or of another size, fails the open, and a blob no
+    /// entry names is deleted.
+    ///
+    /// # Errors
+    /// Returns an error when a Package cannot be loaded, the blobs cannot be listed, or an entry
+    /// names a blob that is not stored as recorded.
+    pub fn with_backend(
+        backend: Box<dyn PackageBackend>,
+        blobs: Box<dyn BlobStore>,
+    ) -> Result<Self, String> {
+        let stored: BTreeMap<String, u64> = blobs.list()?.into_iter().collect();
+        let mut sets = BTreeMap::new();
+        for package in backend.load()? {
+            for entry in package.entries.values() {
+                let sha256 = hex::encode(&entry.content_hash);
+                match stored.get(&sha256) {
+                    Some(size) if *size == entry.size => {}
+                    Some(size) => {
+                        return Err(format!(
+                        "package {} for {}: blob {sha256} holds {size} bytes, the entry records {}",
+                        package.id,
+                        entry.platform.tag(),
+                        entry.size
+                    ))
+                    }
+                    None => {
+                        return Err(format!(
+                            "package {} for {}: blob {sha256} is not stored — restore it from a \
+                             backup or upload the artifact again",
+                            package.id,
+                            entry.platform.tag()
+                        ))
+                    }
+                }
+            }
+            sets.insert(package.id.clone(), package);
+        }
+        let store = PackageStore {
             backend,
-            sets: RwLock::new(sets),
+            blobs,
+            sets: RwLock::new(BTreeMap::new()),
             key: None,
-        })
+        };
+        // A blob no entry names is deleted at startup (ADR-0037 clause 4): an upload whose entry
+        // was never written, or an entry whose deletion stopped short of its blob.
+        for sha256 in stored.keys() {
+            if !referenced(&sets, sha256) {
+                store.blobs.delete(sha256)?;
+            }
+        }
+        *store.sets.write().expect("sets lock") = sets;
+        Ok(store)
     }
 
     /// Arms the signature check with the operator's public key (ADR-0033), and checks every
@@ -469,12 +469,6 @@ impl PackageStore {
         self
     }
 
-    /// Where this store keeps its Packages — the directory the Deployments sit beneath
-    /// (ADR-0026), so the two are armed by one configuration key.
-    pub fn dir(&self) -> &Path {
-        self.backend.dir()
-    }
-
     /// Every Package, in identity order — the REST list view; never the artifact bytes.
     pub fn list(&self) -> Vec<PackageSummary> {
         self.sets
@@ -494,16 +488,24 @@ impl PackageStore {
             .map(|set| PackageSummary::of(set, self.key.as_deref()))
     }
 
-    /// Where one artifact lives, for the download endpoint to stream from. `None` when no Package
-    /// of that identity holds one for that Platform.
-    pub fn artifact_path(&self, id: &PackageId, platform: &Platform) -> Option<PathBuf> {
+    /// The artifact of one entry, for the download to stream: its SHA-256 and its size. `None`
+    /// when no Package of that identity holds one for that Platform.
+    pub fn artifact(&self, id: &PackageId, platform: &Platform) -> Option<(Vec<u8>, u64)> {
         self.sets
             .read()
             .expect("sets lock")
             .get(id)?
             .entries
             .get(platform)
-            .map(|_| self.backend.artifact_path(id, platform))
+            .map(|entry| (entry.content_hash.clone(), entry.size))
+    }
+
+    /// The bytes of the artifact `sha256` names, as a stream.
+    ///
+    /// # Errors
+    /// Returns an error when the blob is not stored or cannot be read.
+    pub fn open_artifact(&self, sha256: &[u8]) -> Result<Box<dyn std::io::Read + Send>, String> {
+        self.blobs.get(&hex::encode(sha256))
     }
 
     /// `true` when the store holds no Package — the Server then leaves `OffersPackages` undeclared.
@@ -511,10 +513,16 @@ impl PackageStore {
         self.sets.read().expect("sets lock").is_empty()
     }
 
-    /// The total bytes of stored artifacts. An upload still in flight is deliberately not counted
-    /// — it is not yet an artifact, and the per-upload limit already bounds it.
+    /// The total bytes of the stored blobs (ADR-0037 clause 4): bytes two entries share count
+    /// once. An upload still in flight is deliberately not counted — it is not yet an artifact,
+    /// and the per-upload limit already bounds it.
     pub fn total_bytes(&self) -> u64 {
-        self.backend.total_bytes()
+        let sets = self.sets.read().expect("sets lock");
+        let mut blobs = BTreeMap::new();
+        for entry in sets.values().flat_map(|set| set.entries.values()) {
+            blobs.insert(entry.content_hash.as_slice(), entry.size);
+        }
+        blobs.values().sum()
     }
 
     /// Creates a Package. **Saving never distributes** (ADR-0025), and there is nothing to update:
@@ -534,23 +542,12 @@ impl PackageStore {
         Ok(())
     }
 
-    /// Where an upload for one entry is streamed before it becomes an artifact. In the Package's
-    /// own directory, so [`put_staged`](Self::put_staged) can move it into place with a rename —
-    /// and named per Platform and per upload, so neither a release's five artifacts uploaded at
-    /// once nor two uploads of one entry can overwrite each other while they are still in flight.
-    ///
-    /// # Errors
-    /// Returns an error when no Package of that identity exists. The fleet refuses the upload
-    /// before this when the Package is assigned to an Agent — an assigned Package's bytes are
-    /// immutable (ADR-0025), so there would be nothing an upload could become.
-    pub fn staging_path(&self, id: &PackageId, platform: &Platform) -> Result<PathBuf, String> {
-        self.writable(id)?;
-        Ok(self.backend.staging_path(id, platform))
-    }
-
     /// The gate every entry write passes: the Package must exist. The immutability of an
     /// assigned Package (ADR-0025) is the fleet's to enforce — only it knows the assignments.
-    fn writable(&self, id: &PackageId) -> Result<(), String> {
+    ///
+    /// # Errors
+    /// Returns an error when no Package of that identity exists.
+    pub fn writable(&self, id: &PackageId) -> Result<(), String> {
         if self.sets.read().expect("sets lock").contains_key(id) {
             Ok(())
         } else {
@@ -558,74 +555,48 @@ impl PackageStore {
         }
     }
 
-    /// Turns a streamed upload into an entry: hashed by streaming, moved into place with a rename,
-    /// then visible to the control loop. The artifact never passes through memory — an agent
-    /// binary is far too big to buffer twice just to store it once.
-    ///
-    /// The staged file is consumed on success and removed on failure, so a rejected upload leaves
-    /// nothing behind.
-    pub fn put_staged(
+    /// Turns a streamed upload into an entry: the bytes go to the blob store, hashed on the way —
+    /// the artifact never passes through memory, an agent binary is far too big to buffer twice
+    /// just to store it once — and the entry naming them is written, then visible to the control
+    /// loop. A failed stream stores nothing; an entry that cannot be written leaves no blob behind.
+    pub fn put_entry_from(
         &self,
         id: &PackageId,
         platform: &Platform,
-        staged: &Path,
+        bytes: &mut dyn std::io::Read,
     ) -> Result<(), String> {
-        let result = self.store_staged(id, platform, staged);
+        self.writable(id)?;
+        let (sha256, size) = self.blobs.put(bytes)?;
+        let result = if size == 0 {
+            Err("the package artifact is empty; refusing to distribute it".to_string())
+        } else {
+            self.put_entry_record(
+                id,
+                Entry {
+                    platform: platform.clone(),
+                    content_hash: hex::decode(&sha256).expect("a blob's hash is hex"),
+                    size,
+                    // New bytes take the old signature with them: it covered the old hash
+                    // (ADR-0033).
+                    signature: None,
+                },
+            )
+        };
         if result.is_err() {
-            self.backend.discard_staged(staged);
+            self.collect(&self.sets.read().expect("sets lock"), &sha256);
         }
         result
     }
 
-    fn store_staged(
-        &self,
-        id: &PackageId,
-        platform: &Platform,
-        staged: &Path,
-    ) -> Result<(), String> {
-        self.writable(id)?;
-        let (size, content_hash) = self.backend.hash_staged(staged)?;
-        if size == 0 {
-            return Err("the package artifact is empty; refusing to distribute it".to_string());
-        }
-        self.backend.commit_staged(id, platform, staged)?;
-        self.put_entry_record(
-            id,
-            Entry {
-                platform: platform.clone(),
-                content_hash,
-                size,
-                // New bytes take the old signature with them: it covered the old hash (ADR-0033).
-                signature: None,
-            },
-        )
-    }
-
     /// Creates or replaces one entry from bytes already in hand — the shape the tests and any
-    /// small artifact use. A real upload takes [`put_staged`](Self::put_staged) instead.
+    /// small artifact use. A real upload takes [`put_entry_from`](Self::put_entry_from) instead.
     pub fn put_entry(
         &self,
         id: &PackageId,
         platform: &Platform,
         artifact: Vec<u8>,
     ) -> Result<(), String> {
-        self.writable(id)?;
-        if artifact.is_empty() {
-            return Err("the package artifact is empty; refusing to distribute it".to_string());
-        }
-        let content_hash = Sha256::digest(&artifact).to_vec();
-        let size = artifact.len() as u64;
-        self.backend.write_artifact(id, platform, &artifact)?;
-        self.put_entry_record(
-            id,
-            Entry {
-                platform: platform.clone(),
-                content_hash,
-                size,
-                // New bytes take the old signature with them: it covered the old hash (ADR-0033).
-                signature: None,
-            },
-        )
+        self.put_entry_from(id, platform, &mut artifact.as_slice())
     }
 
     /// Writes the operator's signature onto one entry (ADR-0033), and answers what the Server found
@@ -697,45 +668,82 @@ impl PackageStore {
         Ok(true)
     }
 
-    /// Writes one entry into the Package's map and its `package.json` — the single path every
-    /// entry write converges on. Replacing the entry for a Platform the Package already holds is
-    /// what "no duplicate entries" means in a map: the combination stays unique by construction.
+    /// Writes one entry into the Package's map and its metadata — the single path every entry
+    /// write converges on. Replacing the entry for a Platform the Package already holds is what
+    /// "no duplicate entries" means in a map: the combination stays unique by construction. The
+    /// blob it names must still be stored — a deletion that collected it while the upload was
+    /// streaming is refused here rather than recorded — and a blob the replaced entry named is
+    /// deleted when no other entry names it.
     fn put_entry_record(&self, id: &PackageId, entry: Entry) -> Result<(), String> {
         let mut sets = self.sets.write().expect("sets lock");
+        if !self.blobs.exists(&hex::encode(&entry.content_hash)) {
+            return Err("the artifact was removed while it was uploaded; upload it again".into());
+        }
         let set = sets
             .get_mut(id)
             .ok_or_else(|| format!("no package set {id}"))?;
-        set.entries.insert(entry.platform.clone(), entry);
-        self.persist(set)
+        let platform = entry.platform.clone();
+        let previous = set.entries.insert(platform.clone(), entry);
+        if let Err(e) = self.backend.put(set) {
+            match previous {
+                Some(previous) => set.entries.insert(platform, previous),
+                None => set.entries.remove(&platform),
+            };
+            return Err(e);
+        }
+        if let Some(previous) = previous {
+            self.collect(&sets, &hex::encode(previous.content_hash));
+        }
+        Ok(())
     }
 
     /// Deletes one entry; `Ok(false)` when the Package or the entry does not exist. The fleet
     /// refuses this before calling here when the Package is assigned to an Agent (ADR-0025). The
     /// last entry taken away leaves an **empty Package**, kept: a Package being reassembled is a
-    /// normal state, and deleting the Package is its own act.
+    /// normal state, and deleting the Package is its own act. Its blob goes with the last entry
+    /// that names it (ADR-0037 clause 4).
     pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
         let mut sets = self.sets.write().expect("sets lock");
         let Some(set) = sets.get_mut(id) else {
             return Ok(false);
         };
-        if set.entries.remove(platform).is_none() {
+        let Some(removed) = set.entries.remove(platform) else {
             return Ok(false);
+        };
+        if let Err(e) = self.backend.put(set) {
+            set.entries.insert(platform.clone(), removed);
+            return Err(e);
         }
-        self.backend.remove_artifact(id, platform)?;
-        self.persist(set)?;
+        self.collect(&sets, &hex::encode(removed.content_hash));
         Ok(true)
     }
 
-    /// Deletes a whole Package — entries, artifacts, and metadata; `Ok(false)` when none of that
-    /// identity exists. The fleet removes every assignment that referenced it, which withdraws
-    /// the offer; Agents that installed it keep running it (ADR-0026).
+    /// Deletes a whole Package — entries, metadata, and every blob no other entry names;
+    /// `Ok(false)` when none of that identity exists. The fleet removes every assignment that
+    /// referenced it, which withdraws the offer; Agents that installed it keep running it
+    /// (ADR-0026).
     pub fn delete_set(&self, id: &PackageId) -> Result<bool, String> {
         let mut sets = self.sets.write().expect("sets lock");
-        if sets.remove(id).is_none() {
+        if !sets.contains_key(id) {
             return Ok(false);
         }
         self.backend.remove(id)?;
+        let removed = sets.remove(id).expect("checked above");
+        for entry in removed.entries.values() {
+            self.collect(&sets, &hex::encode(&entry.content_hash));
+        }
         Ok(true)
+    }
+
+    /// Deletes the blob `sha256` when no entry of `sets` names it (ADR-0037 clause 4). A failure
+    /// is logged and left to the next startup, which deletes every blob no entry names.
+    fn collect(&self, sets: &BTreeMap<PackageId, Package>, sha256: &str) {
+        if referenced(sets, sha256) {
+            return;
+        }
+        if let Err(e) = self.blobs.delete(sha256) {
+            tracing::warn!(blob = %sha256, error = %e, "cannot delete an artifact no entry names");
+        }
     }
 
     /// Every entry of every Package `deployment` holds that carries no signature, as
@@ -946,6 +954,13 @@ fn offered_entry<'a>(
 fn fits(description: Option<&AgentDescription>, id: &PackageId, platform: &Platform) -> bool {
     reported_agent_type(description) == Some(id.agent_type.as_str())
         && Platform::reported(description).as_ref() == Some(platform)
+}
+
+/// Whether any entry of `sets` names the blob `sha256`.
+fn referenced(sets: &BTreeMap<PackageId, Package>, sha256: &str) -> bool {
+    sets.values()
+        .flat_map(|set| set.entries.values())
+        .any(|entry| hex::encode(&entry.content_hash) == sha256)
 }
 
 /// The refusal for an entry a Package does not hold.
@@ -1948,7 +1963,7 @@ mod tests {
         assert_ne!(before, after, "a new assigned version moves the aggregate");
     }
 
-    /// Deleting an entry frees its artifact; deleting the Set takes the directory with it.
+    /// Deleting an entry frees its artifact; deleting the Set takes its metadata with it.
     /// Verifies: ADR-0026
     #[test]
     fn deletion_frees_entries_and_sets() {
@@ -1965,13 +1980,73 @@ mod tests {
         assert!(!store.delete_entry(&set, &linux()).expect("gone already"));
         assert!(store.delete_set(&set).expect("delete set"));
         assert!(store.summary(&set).is_none());
-        assert!(!dir.path().join(set.to_string()).exists());
+        assert!(!dir.path().join("packages/otelcol@1.0.0.json").exists());
         assert!(!store.delete_set(&set).expect("gone already"));
     }
 
-    /// A corrupt artifact fails the reopen loudly — a corrupt distribution artifact must never
-    /// ship (ADR-0026 clause 12).
-    /// Verifies: ADR-0026
+    /// The blobs under one entry's bytes (ADR-0037 clause 4): two entries with identical bytes
+    /// store one blob, counted once against the store's size; it stays while an entry names it and
+    /// goes with the last one — replaced or deleted — and a blob no entry names is deleted when
+    /// the store opens.
+    /// Verifies: ADR-0037
+    #[test]
+    fn identical_bytes_are_one_blob_that_goes_with_its_last_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blobs = || {
+            std::fs::read_dir(dir.path().join("blobs"))
+                .expect("blobs")
+                .map(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .into_string()
+                        .expect("utf-8")
+                })
+                .collect::<Vec<_>>()
+        };
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let (one, two) = (id("otelcol", "1.0.0"), id("otelcol", "1.0.1"));
+        for set in [&one, &two] {
+            store.create(set).expect("create");
+            store
+                .put_entry(set, &linux(), b"same bytes".to_vec())
+                .expect("entry");
+        }
+        let sha256 = hex::encode(Sha256::digest(b"same bytes"));
+        assert_eq!(blobs(), std::slice::from_ref(&sha256), "stored once");
+        assert_eq!(store.total_bytes(), 10, "and counted once");
+        let metadata =
+            std::fs::read_to_string(dir.path().join("packages/otelcol@1.0.0.json")).expect("meta");
+        assert!(metadata.contains(&sha256), "named by its hash: {metadata}");
+
+        assert!(store.delete_entry(&one, &linux()).expect("delete"));
+        assert_eq!(
+            blobs(),
+            std::slice::from_ref(&sha256),
+            "another entry still names it"
+        );
+        store
+            .put_entry(&two, &linux(), b"new bytes".to_vec())
+            .expect("replace");
+        assert_eq!(
+            blobs(),
+            [hex::encode(Sha256::digest(b"new bytes"))],
+            "the replaced entry was the last to name it"
+        );
+        assert!(store.delete_set(&two).expect("delete"));
+        assert!(blobs().is_empty(), "the last entry took its blob with it");
+
+        std::fs::write(dir.path().join("blobs").join(&sha256), b"same bytes").expect("orphan");
+        PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert!(
+            blobs().is_empty(),
+            "a blob no entry names is deleted at startup"
+        );
+    }
+
+    /// A corrupt artifact fails the reopen loudly, naming its blob — a corrupt distribution
+    /// artifact must never ship (ADR-0026 clause 12, ADR-0037 clause 4).
+    /// Verifies: ADR-0026, ADR-0037
     #[test]
     fn a_corrupt_artifact_fails_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1983,18 +2058,25 @@ mod tests {
                 .put_entry(&set, &linux(), b"good bytes".to_vec())
                 .expect("entry");
         }
-        std::fs::write(
-            dir.path().join(set.to_string()).join("linux-amd64.bin"),
-            b"tampered",
-        )
-        .expect("tamper");
+        let sha256 = hex::encode(Sha256::digest(b"good bytes"));
+        std::fs::write(dir.path().join("blobs").join(&sha256), b"tampered").expect("tamper");
         let err = PackageStore::open(dir.path().to_path_buf())
             .map(|_| ())
             .expect_err("must refuse");
-        assert!(err.contains("does not match"), "{err}");
+        assert!(
+            err.contains("does not match") && err.contains(&sha256),
+            "{err}"
+        );
+
+        std::fs::remove_file(dir.path().join("blobs").join(&sha256)).expect("lose it");
+        let err = PackageStore::open(dir.path().to_path_buf())
+            .map(|_| ())
+            .expect_err("an entry whose blob is gone is refused");
+        assert!(err.contains("not stored"), "{err}");
     }
 
-    /// The store directory and each Set's metadata are owner-only (ADR-0026).
+    /// The store's directories, each Package's metadata and each blob are owner-only (ADR-0026,
+    /// ADR-0037 clause 1).
     /// Verifies: ADR-0026
     #[cfg(unix)]
     #[test]
@@ -2004,66 +2086,56 @@ mod tests {
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = id("otelcol", "1.0.0");
         store.create(&set).expect("create");
+        store
+            .put_entry(&set, &linux(), b"bytes".to_vec())
+            .expect("entry");
+        let mode = |path: std::path::PathBuf| {
+            std::fs::metadata(path).expect("meta").permissions().mode() & 0o777
+        };
+        assert_eq!(mode(dir.path().join("packages")), 0o700);
+        assert_eq!(mode(dir.path().join("blobs")), 0o700);
+        assert_eq!(mode(dir.path().join("packages/otelcol@1.0.0.json")), 0o600);
         assert_eq!(
-            std::fs::metadata(dir.path())
-                .expect("meta")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(dir.path().join(set.to_string()).join("package.json"))
-                .expect("meta")
-                .permissions()
-                .mode()
-                & 0o777,
+            mode(
+                dir.path()
+                    .join("blobs")
+                    .join(hex::encode(Sha256::digest(b"bytes")))
+            ),
             0o600
         );
     }
 
-    /// There is no migration and no legacy reader: a store holding what an older layout wrote is
-    /// **named at startup**, never skipped (ADR-0026 point 19). Skipping is the dangerous half — a
-    /// store that merely looks empty offers nothing and says nothing about why, which an operator
-    /// reads as "nothing uploaded yet".
+    /// There is no legacy reader: a store holding what an older layout wrote is **named at
+    /// startup**, never skipped (ADR-0026 point 19, ADR-0037 clause 6). Skipping is the dangerous
+    /// half — a store that merely looks empty offers nothing and says nothing about why, which an
+    /// operator reads as "nothing uploaded yet".
     ///
-    /// Both shapes an older Server left behind are covered: loose files in the store root, and
-    /// `<name>@<version>@<type>/set.json` directories.
-    /// Verifies: ADR-0026
+    /// The shapes an older Server left behind are covered: a loose file, a
+    /// `<name>@<version>@<type>/set.json` directory, and the `<type>@<version>/package.json`
+    /// directory of the layout before ADR-0037.
+    /// Verifies: ADR-0026, ADR-0037
     #[test]
     fn a_store_in_an_older_layout_refuses_to_open_and_names_what_is_in_the_way() {
-        // Loose files in the store root.
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join("otelcol.json"),
-            serde_json::json!({"name": "otelcol", "service_name": "otelcol"}).to_string(),
-        )
-        .expect("write a loose rollout file");
-        let error = PackageStore::open(dir.path().to_path_buf())
-            .map(|_| ())
-            .expect_err("an older layout is refused, never read as an empty store");
-        assert!(
-            error.contains("otelcol.json"),
-            "the error must name what an operator has to move aside, got: {error}"
+        let older = |relative: &str, contents: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("packages").join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            std::fs::write(&path, contents).expect("write");
+            let error = PackageStore::open(dir.path().to_path_buf())
+                .map(|_| ())
+                .expect_err("an older layout is refused, never read as an empty store");
+            let named = relative.split('/').next().expect("first segment");
+            assert!(
+                error.contains(named),
+                "the error must name what an operator has to move aside, got: {error}"
+            );
+        };
+        older("otelcol@linux-amd64.bin", "bytes");
+        older("otelcol@1.0.0@otelcol/set.json", "{}");
+        older(
+            "otelcol@1.0.0/package.json",
+            r#"{"agent_type":"otelcol","version":"1.0.0","entries":[]}"#,
         );
-
-        // ADR-0026: a Set directory holding `set.json`.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let set = dir.path().join("otelcol@1.0.0@otelcol");
-        std::fs::create_dir_all(&set).expect("set dir");
-        std::fs::write(set.join("set.json"), "{}").expect("set.json");
-        let error = PackageStore::open(dir.path().to_path_buf())
-            .map(|_| ())
-            .expect_err("a Set directory is refused too");
-        assert!(
-            error.contains("otelcol@1.0.0@otelcol"),
-            "the error must name the directory, got: {error}"
-        );
-
-        // But the Deployments live here on purpose, and the loader steps over them.
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join(DEPLOYMENTS_DIR)).expect("deployments dir");
-        PackageStore::open(dir.path().to_path_buf()).expect("the channel store is not a stray");
     }
 
     /// Every artifact is uploaded (ADR-0033 clause 1): an entry an older Server stored as a
@@ -2072,28 +2144,28 @@ mod tests {
     #[test]
     fn a_referenced_entry_from_an_older_server_fails_the_open_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let set = dir.path().join("otelcol@1.0.0");
-        std::fs::create_dir_all(&set).expect("set dir");
+        std::fs::create_dir_all(dir.path().join("packages")).expect("dir");
         std::fs::write(
-            set.join("package.json"),
+            dir.path().join("packages/otelcol@1.0.0.json"),
             serde_json::json!({
                 "agent_type": "otelcol",
                 "version": "1.0.0",
                 "entries": [{
                     "os": "linux",
                     "arch": "amd64",
-                    "content_hash_hex": "00".repeat(32),
+                    "sha256": "00".repeat(32),
+                    "size": 1,
                     "source_url": "https://example.com/otelcol.tar.gz"
                 }]
             })
             .to_string(),
         )
-        .expect("package.json");
+        .expect("metadata");
         let error = PackageStore::open(dir.path().to_path_buf())
             .map(|_| ())
             .expect_err("a referenced entry is refused");
         assert!(
-            error.contains("package.json") && error.contains("source_url"),
+            error.contains("otelcol@1.0.0.json") && error.contains("source_url"),
             "the error names the file and the field: {error}"
         );
     }

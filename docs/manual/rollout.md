@@ -421,6 +421,6 @@ only moves forward.
 | A channel shows `aims at nobody` | Its Selector names an attribute nobody reports, or a value nobody carries. Compare it against the attributes on the Agents tab. |
 | An upload answers `400` about a signature | A signature goes on the entry's own `…/signature` route; the message names it. |
 | A signature answers `409` | The Package is rolled out to an Agent, and its entries — signatures included — are frozen. Ship the next version as a new Package. |
-| The package routes answer `404` | Package delivery is not configured on the Server (`packages_dir`). |
+| The package routes answer `404` | The Package or entry the path names does not exist — check the Agent type and version against `GET /api/v1/packages`. |
 | An upload answers `400`, "invalid platform" | `os`/`arch` are required and must be file-name-safe: lowercase letters, digits and `_`, at most 16 characters. |
 | An Agent that accepts packages is offered nothing, and there is no conflict | No signed artifact for its platform. Check its `os.type` and `host.arch` on its fleet row against the platforms the package holds — this is the case the whole mechanism exists to make visible rather than fatal. |

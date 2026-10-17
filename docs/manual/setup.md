@@ -137,8 +137,8 @@ write `/etc/opamp-fleet-server/server.toml`: `server.toml.fragment` holds its `[
 # The Agent plane: where the fleet connects. 4320 is the protocol's default port.
 listen = "0.0.0.0:4320"
 
-config_dir = "/var/lib/opamp-fleet-server/configs"
-packages_dir = "/var/lib/opamp-fleet-server/packages"
+# All of the Server's state, owner-only (see the Server's manual, "Where the Server keeps its state").
+data_dir = "/var/lib/opamp-fleet-server/data"
 
 [tls]
 cert_file = "/etc/opamp-fleet-server/tls/server.pem"
@@ -211,7 +211,7 @@ StateDirectory=opamp-fleet-server
 UMask=0077
 Restart=on-failure
 
-# The Server writes under config_dir and packages_dir and nowhere else, binds ports above 1024,
+# The Server writes under data_dir and nowhere else, binds ports above 1024,
 # and needs no privilege, device or kernel interface.
 NoNewPrivileges=true
 CapabilityBoundingSet=
@@ -240,9 +240,8 @@ WantedBy=multi-user.target
 ```
 
 `ProtectSystem=strict` leaves the whole file system read-only to the Server except its
-`StateDirectory`, `/var/lib/opamp-fleet-server`, which holds `config_dir` and `packages_dir` in the
-configuration above. A `config_dir` or `packages_dir` anywhere else needs a `ReadWritePaths=` line
-naming it. A `listen` or `[rest] listen` port below 1024 needs
+`StateDirectory`, `/var/lib/opamp-fleet-server`, which holds `data_dir` in the configuration above.
+A `data_dir` anywhere else needs a `ReadWritePaths=` line naming it. A `listen` or `[rest] listen` port below 1024 needs
 `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and `AmbientCapabilities=CAP_NET_BIND_SERVICE` instead
 of the empty lines. `systemd-analyze security opamp-fleet-server` rates what the unit leaves open.
 

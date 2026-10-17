@@ -25,7 +25,9 @@ async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            )),
     );
     let (addr, rest_addr) =
         support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
@@ -122,7 +124,7 @@ async fn spawn_with_packages_for_a_host() -> (TestServer, Member) {
     let revocations = Arc::new(
         fleet_server::revocation::Revocations::open(
             Box::new(
-                fleet_server::fs::FsLedgerStore::open(dir.path().join("revocation"))
+                fleet_server::fs::FsLedgerStore::open(&dir.path().join("fleet-configs"))
                     .expect("ledger"),
             ),
             Arc::new(fleet_server::clock::SystemClock),
@@ -135,7 +137,9 @@ async fn spawn_with_packages_for_a_host() -> (TestServer, Member) {
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
             .with_revocations(Some(revocations.clone()))
-            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            )),
     );
     let admission = fleet_server::transport::Admission::new(true)
         .with_enrolment(planes.issuers, None)
@@ -641,7 +645,9 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments")))
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            ))
             .with_max_package_size(4096),
     );
     let (addr, rest_addr) =
@@ -1425,7 +1431,9 @@ async fn the_package_store_has_a_total_size_ceiling() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments")))
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            ))
             .with_max_total_package_bytes(10 * 1024),
     );
     let (addr, rest_addr) =
@@ -1782,7 +1790,9 @@ async fn with_a_verification_key_the_server_reports_valid_and_invalid_and_stores
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            )),
     );
     let (addr, rest_addr) =
         support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
@@ -2506,7 +2516,7 @@ async fn the_per_agent_act_refuses_a_deployment_with_an_unsigned_package() {
     assert_eq!(act().await.expect("rollout to agent").status(), 200);
 }
 
-/// Every `*.upload` file under `dir` — what an upload in progress stages its artifact into.
+/// Every `upload-*.tmp` file under `dir` — what an upload in progress stages its artifact into.
 fn staged_uploads(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
@@ -2515,7 +2525,11 @@ fn staged_uploads(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 pending.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "upload") {
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("upload-") && name.ends_with(".tmp"))
+            {
                 found.push(path);
             }
         }
@@ -2537,7 +2551,9 @@ async fn an_upload_that_stops_is_answered_408_and_leaves_nothing_staged() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            )),
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -2599,7 +2615,9 @@ async fn two_uploads_of_one_entry_at_once_do_not_share_a_staging_file() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments"))),
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            )),
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -2658,21 +2676,12 @@ async fn two_uploads_of_one_entry_at_once_do_not_share_a_staging_file() {
     let answer = String::from_utf8_lossy(&answer);
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
 
-    let stored: Vec<_> = {
-        let mut found = Vec::new();
-        let mut pending = vec![dir.path().join("packages")];
-        while let Some(dir) = pending.pop() {
-            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    pending.push(path);
-                } else if path.extension().is_some_and(|ext| ext == "bin") {
-                    found.push(path);
-                }
-            }
-        }
-        found
-    };
+    // The blobs: the second upload's went with the entry the first one replaced (ADR-0037).
+    let stored: Vec<_> = std::fs::read_dir(dir.path().join("packages/blobs"))
+        .expect("blobs")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| !path.to_string_lossy().ends_with(".tmp"))
+        .collect();
     assert_eq!(stored.len(), 1, "{stored:?}");
     assert_eq!(
         std::fs::read(&stored[0]).expect("artifact"),
@@ -2696,7 +2705,9 @@ async fn an_upload_in_progress_counts_against_the_ceiling_and_a_cancelled_one_le
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments")))
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            ))
             .with_max_total_package_bytes(150),
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -2790,7 +2801,9 @@ async fn a_download_past_the_limit_is_answered_429_after_thirty_seconds() {
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
-            .with_packages(Some(PackageOffering::new(store).expect("deployments")))
+            .with_packages(Some(
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
+            ))
             .with_agent_rate(Some(Arc::new(fleet_server::agent_rate::AgentRate::new(
                 limits,
                 100,
