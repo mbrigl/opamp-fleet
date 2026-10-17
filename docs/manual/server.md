@@ -365,7 +365,10 @@ key stops it at startup. `server migrate` moves an installation once, offline:
    - **Deployments** keep their name, Selector and the Packages that were carried; their
      signatures now live on the entries. A Package that was not carried leaves them, named.
    - **Configurations** keep their content and lose their Selector. Each is **listed** with the
-     Selector it had: put it into the Deployment whose Selector aims where that one did.
+     Selector it had: put it into the Deployment whose Selector aims where that one did. A
+     Configuration without an Agent type is **not carried**, because the Server refuses it at
+     startup: it is listed by name, and its file stays in the old directory — save it again with
+     its `service_name`.
    - **Agents** are carried with their labels inside their record. An Agent whose Package was
      released through a Deployment keeps that Package assigned through it. An older Server rolled
      every Configuration out by itself, never through a Deployment, so every Agent's Configuration
@@ -530,8 +533,10 @@ Without `[enrolment]` no bootstrap certificate passes the handshake.
 
 ### Bootstrap certificates, issued by the Server
 
-With `bootstrap_ca_key_file` set, ask the Server for a bootstrap certificate and name whom it is
-for. The subject takes six attributes, each optional and each at most once:
+With `bootstrap_ca_key_file` set, ask the Server for a bootstrap certificate, name whom it is
+for, and name the password its PKCS#12 file is encrypted under. The subject takes six
+attributes, each at most once; `organization` and `organizational_unit` are required, so every
+Host names a customer and a site its Selectors can rely on, and the others are optional:
 
 | Key | Attribute | Value |
 | --- | --- | --- |
@@ -542,30 +547,21 @@ for. The subject takes six attributes, each optional and each at most once:
 | `organizational_unit` | `OU` | likewise; typically the site |
 | `organization_identifier` | `organizationIdentifier` (2.5.4.97) | likewise, in any format; a customer or contract number, a UUID for instance |
 
-Any other key is answered `400`. The certificate lists them in that order, the country as a
-`PrintableString` and every other value as a `UTF8String`. The Server sets the common name: the
-bootstrap CA's name with ` CA` turned into ` Certificate`. `validity_days` runs from 1 to 90,
-10 by default, and never past the bootstrap CA's end:
+A request without `organization`, without `organizational_unit` or without `password` is
+answered `400` naming it, as is any other key. The certificate lists them in that order, the
+country as a `PrintableString` and every other value as a `UTF8String`. The Server sets the common
+name: the bootstrap CA's name with ` CA` turned into ` Certificate`. `validity_days` runs from 1
+to 90, 10 by default, and never past the bootstrap CA's end.
 
-```console
-$ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
-       -d '{"subject": {"country": "AT", "organization": "Example Customer", "organizational_unit": "Vienna", "organization_identifier": "K-4711"}, "validity_days": 14}' \
-       https://127.0.0.1:4321/api/v1/bootstrap-certificates
-{"serial":"6723…","subject":"C=AT, O=Example Customer, OU=Vienna, organizationIdentifier=K-4711, CN=OpAMP Fleet Bootstrap Certificate",
- "not_before_ms":…,"not_after_ms":…,"certificate_pem":"-----BEGIN CERTIFICATE-----…",
- "private_key_pem":"-----BEGIN PRIVATE KEY-----…"}
-```
+#### The PKCS#12 file: `bootstrap.p12`
 
-**The private key is in this answer and nowhere else.** The Server makes the key, signs the
-certificate, keeps the serial, subject, key fingerprint and end, and forgets the key. A lost key is
-not fetched again; issue another certificate. The answer carries `Cache-Control: no-store`.
-
-#### With a password: `bootstrap.p12`
-
-Name a `password`, 4 to 128 characters without a control character, and the key is in no answer
-at all. The Server puts the certificate and its key into one PKCS#12 file encrypted under that
-password, keeps the file, and hands it out as often as it is asked, until the certificate ends or
-is revoked. The answer carries no `private_key_pem`.
+The `password`, 4 to 128 characters without a control character, is required, and the key is in
+no answer at all. The Server makes the key, signs the certificate, puts both into one PKCS#12 file
+encrypted under that password, keeps the file, and hands it out as often as it is asked, until
+the certificate ends or is revoked. It keeps the certificate's serial, subject, key fingerprint
+and end beside it. The answer carries the certificate and no `private_key_pem`, with
+`Cache-Control: no-store`. A host or a tool that needs the pair as PEM takes it out of the file
+with `opamp-fleetctl pki p12-extract` ([`pki`](tools.md#pki)).
 
 A short password is quick to break offline: should the file leak, four characters fall to a GPU
 within hours. Whoever opens it can file enrolment requests while the window is open, so your
@@ -574,10 +570,12 @@ and check each host before you approve it.
 
 ```console
 $ cat request.json        # written with an editor, so the password stays out of the shell's history
-{"subject": {"organization": "Example Customer"}, "password": "correct horse battery staple"}
+{"subject": {"country": "AT", "organization": "Example Customer", "organizational_unit": "Vienna",
+             "organization_identifier": "K-4711"},
+ "validity_days": 14, "password": "correct horse battery staple"}
 $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' -d @request.json \
        https://127.0.0.1:4321/api/v1/bootstrap-certificates
-{"serial":"6723…","subject":"O=Example Customer, CN=OpAMP Fleet Bootstrap Certificate",
+{"serial":"6723…","subject":"C=AT, O=Example Customer, OU=Vienna, organizationIdentifier=K-4711, CN=OpAMP Fleet Bootstrap Certificate",
  "not_before_ms":…,"not_after_ms":…,"certificate_pem":"-----BEGIN CERTIFICATE-----…"}
 $ curl --cacert ca.pem -o bootstrap.p12 \
        https://127.0.0.1:4321/api/v1/bootstrap-certificates/6723…/p12
@@ -592,8 +590,8 @@ own account only. **The password is kept nowhere** — not in the file's directo
 audit — so give it to the host by another way than the file. Every download is recorded in the
 audit as `enrolment.bootstrap_p12_downloaded` with the serial; a download is answered `503` while
 the audit record cannot be written, and `404` for a certificate with no file, a revoked one, an
-ended one or an unknown serial. A revocation removes the file before it is answered; lifting the
-revocation does not bring it back.
+ended one, an unknown serial, or a certificate an older Server issued without a file. A
+revocation removes the file before it is answered; lifting the revocation does not bring it back.
 
 **Every host certificate issued from it carries its subject values.** Approving an enrolment
 copies the six values from the bootstrap certificate the host enrolled with into the host
@@ -604,23 +602,24 @@ says whom the host belongs to into the subject, and nothing that changes. The va
 select; they authorize nothing. They show on every enrolment request the certificate carries, as
 `bootstrap_subject` with its `bootstrap_serial`, so the approver sees whose request it is and what
 the host certificate will carry. A bootstrap certificate of your own PKI whose subject breaks these
-rules — an attribute twice, a value of the wrong string type or length — lists no
-`bootstrap_subject` but a `subject_refusal` naming the attribute: approving it is refused, so
-reject it and give the host a certificate that follows them. Every issuance is recorded in the audit as `enrolment.bootstrap_issued`,
-with `p12` saying whether a file was made.
+rules — an attribute twice, a value of the wrong string type or length, no organization or no
+organizational unit — lists no `bootstrap_subject` but a `subject_refusal` naming the attribute:
+approving it is refused `409`, so reject it and give the host a certificate that follows them. A
+renewal carries the values of the certificate it renews as they are, without checking them again.
+Every issuance is recorded in the audit as `enrolment.bootstrap_issued`, with `p12` saying a
+file was made.
 
 The UI's **Enrolments** tab does the same: it issues a certificate with the values you type, the
-country chosen from a list, and lists the valid ones with a **Revoke** press. Without a password, the row of each
-certificate issued in the open page offers **Save bootstrap.pem** and **Save bootstrap-key.pem**.
-The page holds those keys only until it is reloaded or closed, and asks before either: save both
-files first. A certificate issued earlier or elsewhere offers no pair. With a password, typed twice,
-the row offers **Save bootstrap.p12** in this page and in every later one, until the certificate
-ends or is revoked.
+customer, the site and the password required and the country chosen from a list, and lists the
+valid ones with a **Revoke** press. The password is typed twice. The row of each certificate
+offers **Save bootstrap.p12** in this page and in every later one, until the certificate ends or
+is revoked; the page never holds a private key. A certificate issued elsewhere offers nothing to
+save.
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/bootstrap-certificates
 [{"serial":"6723…","subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
-  "key_fingerprint":"…","issued_ms":…,"not_after_ms":…,"revoked":false,"p12":false}]
+  "key_fingerprint":"…","issued_ms":…,"not_after_ms":…,"revoked":false,"p12":true}]
 ```
 
 The list holds every valid bootstrap certificate the Server issued, oldest first; an ended one is
@@ -815,8 +814,8 @@ Agent asks again. Refusals past ten a second from one address are counted into o
 
 ## Configurations: what the fleet runs
 
-A **Configuration** is content: a name, a body of text, an optional **Agent type**, and an
-optional **role**. It has no Selector and is never rolled out by itself — a
+A **Configuration** is content: a name, a body of text, the **Agent type** it is written for, and
+an optional **role**. It has no Selector and is never rolled out by itself — a
 [Deployment](#packages-and-deployments-distributing-software) holds it, and the Deployment's
 Selector aims it. One Configuration may sit in several Deployments.
 
@@ -839,11 +838,12 @@ refused `409`, and the answer says how many Agents pin it. Roll those Agents out
 Deployment that no longer holds it — they apply their config map without the entry — or forget
 them, and then delete it. A deleted Configuration leaves every Deployment that held it.
 
-**The type decides which Agents of the Deployment receive it**. `service_name`, when set, must
-equal the `service.name` the Agent reports — compared raw. Unset means every Agent the Deployment
-claims, which for a Collector body is rarely what you want: every Agent a Client presents accepts
-remote configuration, so an untyped body reaches Foreign Agents and the Client's own Agent too.
-That is how one Deployment serves several Agent types.
+**The type decides which Agents of the Deployment receive it**. `service_name` is required, and
+must equal the `service.name` the Agent reports — compared raw. A `PUT` without it is refused
+`400`, and a stored Configuration without it stops the Server at startup, naming the file. An
+Agent that reports no `service.name` receives no Configuration. Content for several Agent types,
+a certificate bundle for instance, is one Configuration per type. That is how one Deployment
+serves several Agent types.
 
 The examples on this page call the Operator plane on the loopback, over TLS. `--cacert ca.pem`
 names the CA that signed the Server's certificate. Off the loopback, add the
@@ -870,7 +870,7 @@ like `supplementary`.
 
 ```console
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
-       -d '{"body": "rules: []", "role": "supplementary"}' \
+       -d '{"service_name": "otelcol-contrib", "body": "rules: []", "role": "supplementary"}' \
        https://127.0.0.1:4321/api/v1/configurations/ruleset
 ```
 
@@ -1243,7 +1243,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `POST /api/v1/agents/{instance_uid}/rollout` | The per-Agent rollout act: releases the Deployment that claims this Agent to it, replacing its assignment. Empty body, or `{"deployment": "…"}` naming that Deployment. `409` when the Agent is in no Deployment, in a conflict, or in another one than named, when the Deployment holds nothing or a Package with an unsigned entry, and when the press would change nothing because the Package it holds is no upgrade (the reason names the version). |
 | `GET /api/v1/configurations` | Every Configuration — the saved revision each, with the Deployments that hold it. |
 | `GET /api/v1/configurations/{name}` | One Configuration. |
-| `PUT /api/v1/configurations/{name}` | Create it, or replace its saved revision. Body: `{"body": "…", "role": "…", "service_name": "…"}` — everything but `body` may be omitted; a `selector` is refused `400`. **Distributes nothing**. |
+| `PUT /api/v1/configurations/{name}` | Create it, or replace its saved revision. Body: `{"body": "…", "service_name": "…", "role": "…"}` — `role` may be omitted; without `service_name` it is refused `400`, as is a `selector`. **Distributes nothing**. |
 | `DELETE /api/v1/configurations/{name}` | Remove it, and take it out of every Deployment that holds it. `409` while an Agent's assignment pins it, saying how many. |
 | `GET /api/v1/packages` | Every stored Package (never the artifact bytes), each with its entries — their hash, size, signature and `signature_state` — and the Deployments that hold it. |
 | `PUT /api/v1/packages/{agent_type}/{version}` | Create a Package. The body has no writable field — `{}`. **Distributes nothing**. |
@@ -1265,7 +1265,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `GET /api/v1/enrolments` | The pending enrolment requests, oldest first, each with its `id` — the fingerprint the enrolling Client logs. |
 | `POST /api/v1/enrolments/{id}/approve` | Sign that request and hand the host its certificate. `404` for an unknown or expired id. |
 | `POST /api/v1/enrolments/{id}/reject` | Refuse that request and close its connection. `404` for an unknown or expired id. |
-| `GET` / `POST /api/v1/bootstrap-certificates` | List the valid bootstrap certificates the Server issued, or issue one — see [Bootstrap certificates](#bootstrap-certificates-issued-by-the-server). `POST` body: `{"subject": {…}, "validity_days": n}`; the answer carries the private key, this once. `409` without `[enrolment] bootstrap_ca_key_file`. |
+| `GET` / `POST /api/v1/bootstrap-certificates` | List the valid bootstrap certificates the Server issued, or issue one — see [Bootstrap certificates](#bootstrap-certificates-issued-by-the-server). `POST` body: `{"subject": {…}, "validity_days": n, "password": "…"}`, `subject.organization`, `subject.organizational_unit` and `password` required (`400` naming the one missing); the answer carries the certificate and never its key, which is in the PKCS#12 file. `409` without `[enrolment] bootstrap_ca_key_file`. |
 
 The package routes answer `404` while package delivery is not configured on this Server.
 

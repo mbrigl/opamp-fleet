@@ -116,21 +116,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   ([ADR-0036](docs/adr/0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md)).
   `subject` in `POST /api/v1/bootstrap-certificates` takes `country` (two upper-case letters, ISO
   3166-1 alpha-2), `state`, `locality`, `organization`, `organizational_unit` and
-  `organization_identifier` (a customer or contract number), each optional; the Enrolments tab has
-  a field for each and offers the countries as a list. Approving an enrolment copies these values
+  `organization_identifier` (a customer or contract number); `organization` and
+  `organizational_unit` are required, and a request without either is answered `400` naming it, so
+  every Host names a customer and a site. The Enrolments tab has a field for each, marks the two
+  required and offers the countries as a list. Approving an enrolment copies these values
   from the bootstrap certificate the host enrolled with into its host certificate, and every
   renewal carries them on, so its Agents carry them as `fleet.host.*`; the CSR's subject is never
   copied. `GET /api/v1/enrolments` lists the bootstrap certificate's values as the object
   `bootstrap_subject` and no longer lists the request's `subject`. An approval whose bootstrap
   certificate has a malformed subject — an attribute twice, a value of the wrong string type or
-  length, a country that is not two upper-case letters — is answered `409` naming the attribute,
+  length, a country that is not two upper-case letters, no organization or no organizational
+  unit — is answered `409` naming the attribute,
   and nothing is signed; the queue lists such a request with `subject_refusal` giving that reason
   instead of `bootstrap_subject`, and the Enrolments tab shows it on the row. **What to do:** a script that reads `subject` or the text
   `bootstrap_subject` of `GET /api/v1/enrolments` reads the `bootstrap_subject` object instead.
   Host certificates issued before carry no values, and their Hosts have none until the host enrols
   again with a bootstrap certificate that names them. A bootstrap CA of your own PKI must write
-  the country as a `PrintableString` and every other value as a `UTF8String` or a
-  `PrintableString`, each at most once; replace a bootstrap certificate that does not.
+  an organization and an organizational unit, the country as a `PrintableString` and every other
+  value as a `UTF8String` or a `PrintableString`, each at most once; replace a bootstrap
+  certificate that does not. A script that issues bootstrap certificates names `organization` and
+  `organizational_unit` in every request.
 
 - **Labels are part of the Agent's record, and forgetting an Agent removes them**
   ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). Labels follow an Agent
@@ -174,6 +179,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   A deleted Configuration or Package leaves every Deployment that held it. **What to do:** roll the
   Agents out through a Deployment without it — or forget them — and delete it then.
 
+- **Every Configuration names its Agent type** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)).
+  `service_name` is required: a `PUT /api/v1/configurations/{name}` without it, or with an empty
+  one, is answered `400` naming it, and the Configurations tab marks the Agent type required. A
+  Configuration reaches only the Agents of its Deployment that report that `service.name`; one
+  without a type no longer reaches every Agent, and an Agent that reports no `service.name`
+  receives no Configuration. A stored Configuration without a type stops the Server at startup,
+  naming its file, and `server migrate` does not carry one: it lists it by name and leaves its file
+  in the old directory. **What to do:** give every Configuration a type before the upgrade — save
+  it again with `service_name` — and split content meant for several Agent types, a certificate
+  bundle for instance, into one Configuration per type; one the migration listed, save again from
+  its old file with a type.
+
 - **A package's signature lives on its entry, not on the Deployment** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). Sign each
   entry once, with `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature`
   (`{"signature": "<hex>"}`) or on the Packages tab, where the signing-file import now lives too;
@@ -204,6 +221,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   requests waiting with each certificate.
 
 ### Removed
+
+- **Issuing a bootstrap certificate without a password, and its key as PEM**
+  ([ADR-0036](docs/adr/0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md)).
+  `password` is required in `POST /api/v1/bootstrap-certificates`: a request without it is
+  answered `400` naming it, every bootstrap certificate is kept as a PKCS#12 file for download, and
+  the answer never carries `private_key_pem`. The Enrolments tab requires the password, typed
+  twice, and offers **Save bootstrap.p12** on every certificate; its **Save bootstrap.pem** and
+  **Save bootstrap-key.pem** are gone, and the page holds no private key. **What to do:** issue
+  bootstrap certificates with an organization, an organizational unit and a password, and download
+  `bootstrap.p12`; where a host needs the pair as PEM, take it out of the file with
+  `opamp-fleetctl pki p12-extract bootstrap.p12 --out <dir>`. A script that read
+  `private_key_pem` downloads `GET /api/v1/bootstrap-certificates/{serial}/p12` instead;
+  `scripts/seed_test_configs.sh --enrol` does so.
 
 - **A Configuration's own Selector and its rollout route** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)).
   `POST /api/v1/configurations/{name}/rollout` answers `404`, and the Configurations tab has no

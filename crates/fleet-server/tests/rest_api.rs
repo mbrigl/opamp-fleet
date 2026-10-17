@@ -31,13 +31,14 @@ async fn configurations_crud_round_trips() {
     // only, held by no Deployment yet (ADR-0034).
     let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/base"))
-        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .json(&serde_json::json!({ "body": "receivers: {}", "service_name": AGENT_TYPE }))
         .send()
         .await
         .expect("put");
     assert_eq!(put.status(), 200);
     let stored: serde_json::Value = put.json().await.expect("json");
     assert_eq!(stored["name"], "base");
+    assert_eq!(stored["service_name"], AGENT_TYPE);
     assert!(stored.get("selector").is_none(), "no Selector: {stored}");
     assert_eq!(stored["deployments"], serde_json::json!([]));
     assert_eq!(stored["body"], "receivers: {}\n");
@@ -97,7 +98,7 @@ async fn a_configuration_carries_an_optional_role() {
     // Omitted: accepted, and absent from the response.
     let stored: serde_json::Value = client
         .put(url(server.rest_addr, "/api/v1/configurations/base"))
-        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .json(&serde_json::json!({ "body": "receivers: {}", "service_name": AGENT_TYPE }))
         .send()
         .await
         .expect("put")
@@ -112,7 +113,11 @@ async fn a_configuration_carries_an_optional_role() {
     // Set: stored verbatim and returned.
     let stored: serde_json::Value = client
         .put(url(server.rest_addr, "/api/v1/configurations/ruleset"))
-        .json(&serde_json::json!({ "body": "rules: []", "role": "supplementary" }))
+        .json(&serde_json::json!({
+            "body": "rules: []",
+            "role": "supplementary",
+            "service_name": AGENT_TYPE
+        }))
         .send()
         .await
         .expect("put")
@@ -135,7 +140,11 @@ async fn a_configuration_carries_an_optional_role() {
     // Agent-type-specific and the Server never guesses at one.
     let stored: serde_json::Value = client
         .put(url(server.rest_addr, "/api/v1/configurations/other"))
-        .json(&serde_json::json!({ "body": "x", "role": "some-agents-own-word" }))
+        .json(&serde_json::json!({
+            "body": "x",
+            "role": "some-agents-own-word",
+            "service_name": AGENT_TYPE
+        }))
         .send()
         .await
         .expect("put")
@@ -154,7 +163,11 @@ async fn a_configuration_takes_no_selector_and_has_no_rollout_of_its_own() {
     let client = reqwest::Client::new();
     let refused = client
         .put(url(server.rest_addr, "/api/v1/configurations/base"))
-        .json(&serde_json::json!({ "selector": { "os.type": "linux" }, "body": "receivers: {}" }))
+        .json(&serde_json::json!({
+            "selector": { "os.type": "linux" },
+            "body": "receivers: {}",
+            "service_name": AGENT_TYPE
+        }))
         .send()
         .await
         .expect("put");
@@ -262,7 +275,10 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
     // Edited: the Agent keeps its pinned revision; the edit waits as an update.
     let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
-        .json(&serde_json::json!({ "body": "receivers: {}\nexporters: {}" }))
+        .json(&serde_json::json!({
+            "body": "receivers: {}\nexporters: {}",
+            "service_name": AGENT_TYPE
+        }))
         .send()
         .await
         .expect("edit");
@@ -569,13 +585,64 @@ async fn invalid_configurations_are_rejected_loudly() {
                 server.rest_addr,
                 &format!("/api/v1/configurations/{}", urlencoding(name)),
             ))
-            .json(&serde_json::json!({ "body": body }))
+            .json(&serde_json::json!({ "body": body, "service_name": AGENT_TYPE }))
             .send()
             .await
             .expect("put");
         assert_eq!(response.status(), 400, "{name:?} must be rejected");
         let error: serde_json::Value = response.json().await.expect("an error body");
         assert!(error["error"].is_string());
+    }
+}
+
+/// A Configuration is written for one Agent type (ADR-0034 clause 1): a `PUT` without
+/// `service_name`, or with an empty one, is `400` naming the field, and nothing is stored.
+/// Verifies: ADR-0034
+#[tokio::test]
+async fn a_configuration_without_an_agent_type_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    for spec in [
+        serde_json::json!({ "body": "receivers: {}" }),
+        serde_json::json!({ "body": "receivers: {}", "service_name": "" }),
+    ] {
+        let response = client
+            .put(url(server.rest_addr, "/api/v1/configurations/base"))
+            .json(&spec)
+            .send()
+            .await
+            .expect("put");
+        assert_eq!(response.status(), 400, "{spec}");
+        let error: serde_json::Value = response.json().await.expect("an error body");
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|why| why.contains("service_name")),
+            "the refusal names the field: {error}"
+        );
+    }
+    let gone = client
+        .get(url(server.rest_addr, "/api/v1/configurations/base"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(gone.status(), 404, "nothing was stored");
+
+    let document: serde_json::Value = client
+        .get(url(server.rest_addr, "/api/v1/openapi.json"))
+        .send()
+        .await
+        .expect("get the document")
+        .json()
+        .await
+        .expect("json");
+    for schema in ["ConfigurationSpec", "ConfigurationView"] {
+        assert!(
+            document["components"]["schemas"][schema]["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|f| f == "service_name")),
+            "the document marks service_name required in {schema}"
+        );
     }
 }
 
@@ -752,7 +819,7 @@ async fn configurations_survive_a_server_restart() {
                 fleet_server::configs::Revision {
                     body: "receivers: {}\n".to_string(),
                     role: String::new(),
-                    service_name: String::new(),
+                    service_name: AGENT_TYPE.to_string(),
                 },
             )
             .expect("put");
@@ -1765,6 +1832,7 @@ async fn the_forms_mark_every_field_required_or_optional() {
     };
     for id in [
         "config-name",
+        "config-type",
         "set-type",
         "set-version",
         "entry-os",
@@ -1772,6 +1840,10 @@ async fn the_forms_mark_every_field_required_or_optional() {
         "entry-file",
         "dep-name",
         "dep-selector",
+        "boot-org",
+        "boot-unit",
+        "boot-pass",
+        "boot-pass2",
     ] {
         let caption = caption(id);
         assert!(caption.contains(">required<"), "{id}: {caption}");
@@ -1781,7 +1853,6 @@ async fn the_forms_mark_every_field_required_or_optional() {
         );
     }
     for id in [
-        "config-type",
         "config-role",
         "set-sig-file",
         "dep-package-pick",
@@ -1789,15 +1860,11 @@ async fn the_forms_mark_every_field_required_or_optional() {
         "boot-country",
         "boot-state",
         "boot-locality",
-        "boot-org",
-        "boot-unit",
         "boot-org-id",
         "boot-days",
-        "boot-pass",
     ] {
         assert!(caption(id).contains(">optional<"), "{id}: {}", caption(id));
     }
-    assert!(caption("boot-pass2").contains(">required with a password<"));
     assert!(html.contains(
         "<label class=\"field-cap\" for=\"config\">Body <b class=\"need req\">required</b></label>"
     ));
@@ -1934,7 +2001,8 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no
 /// frontend toolchain to run it in. The queue lists the bootstrap certificate's subject values and
-/// not the request's own subject, and the issue form sends all six attributes (ADR-0036).
+/// not the request's own subject, the issue form sends all six attributes and the password, and
+/// the page never handles a private key: every certificate offers its PKCS#12 file (ADR-0036).
 /// Verifies: ADR-0023, ADR-0028, ADR-0036
 #[tokio::test]
 async fn the_ui_and_the_enrolment_api_share_their_names() {
@@ -1968,8 +2036,9 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         "e.bootstrap_subject[field]",
         "e.subject_refusal",
         "validity_days:",
-        ".certificate_pem",
-        ".private_key_pem",
+        "password };",
+        "/p12`",
+        "download = \"bootstrap.p12\"",
         ".issued_ms",
         ".not_after_ms",
         ".revoked",
@@ -1980,6 +2049,12 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         assert!(
             html.contains(needle),
             "the UI no longer contains {needle:?}"
+        );
+    }
+    for gone in ["private_key_pem", "bootstrap-key.pem", "beforeunload"] {
+        assert!(
+            !html.contains(gone),
+            "the page handles no private key, yet contains {gone:?}"
         );
     }
 
@@ -2024,13 +2099,7 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         ),
         (
             "IssuedBootstrap",
-            &[
-                "serial",
-                "subject",
-                "not_after_ms",
-                "certificate_pem",
-                "private_key_pem",
-            ][..],
+            &["serial", "subject", "not_after_ms", "certificate_pem"][..],
         ),
     ] {
         for field in fields {
@@ -2039,6 +2108,25 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
                 "{schema} no longer has {field}"
             );
         }
+    }
+    assert!(
+        schemas["IssuedBootstrap"]["properties"]
+            .get("private_key_pem")
+            .is_none(),
+        "an issue never answers a private key"
+    );
+    for (schema, field) in [
+        ("IssueBootstrapRequest", "subject"),
+        ("IssueBootstrapRequest", "password"),
+        ("BootstrapSubject", "organization"),
+        ("BootstrapSubject", "organizational_unit"),
+    ] {
+        assert!(
+            schemas[schema]["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|f| f == field)),
+            "{schema} marks {field} required"
+        );
     }
     assert!(
         schemas["PendingEnrolment"]["properties"]

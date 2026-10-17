@@ -59,6 +59,25 @@ impl Ca {
         std::fs::write(dir.join(format!("{name}-key.pem")), key.serialize_pem()).expect("write");
     }
 
+    /// A bootstrap certificate and its key like [`issue`](Self::issue), naming the customer and
+    /// the site an approval requires of every bootstrap certificate (ADR-0036 clause 3).
+    fn issue_bootstrap(&self, dir: &Path, name: &str) {
+        let issuer =
+            Issuer::from_ca_cert_pem(&self.pem, KeyPair::from_pem(&self.key_pem).expect("ca key"))
+                .expect("issuer");
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::new(vec![name.to_string()]).expect("params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationName, "Kunde GmbH");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationalUnitName, "Werk Nord");
+        let cert = params.signed_by(&key, &issuer).expect("signed");
+        std::fs::write(dir.join(format!("{name}.pem")), cert.pem()).expect("write");
+        std::fs::write(dir.join(format!("{name}-key.pem")), key.serialize_pem()).expect("write");
+    }
+
     fn authority(&self, role: &str) -> fleet_server::revocation::Authority {
         let der = opamp::tls::certificates(self.pem.as_bytes()).expect("pem");
         let facts = fleet_server::ca::facts(der[0].as_ref()).expect("facts");
@@ -373,7 +392,7 @@ impl Served {
         let client_ca = Ca::new(pki, "client-ca");
         let bootstrap_ca = Ca::new(pki, "bootstrap-ca");
         client_ca.issue(pki, "localhost");
-        bootstrap_ca.issue(pki, "bootstrap");
+        bootstrap_ca.issue_bootstrap(pki, "bootstrap");
 
         let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
         let enrolment = Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone()));

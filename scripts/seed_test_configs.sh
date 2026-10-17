@@ -32,8 +32,11 @@
 #       POST /api/v1/deployments/<name>/rollout, or the Deployments tab).
 #   scripts/seed_test_configs.sh --enrol [server-url]
 #       For the development set of scripts/dev-pki.sh, whose Client enrols like any other host
-#       (ADR-0028): asks the Server for a fresh bootstrap pair and writes it where the
-#       development supervisor.toml names it ($SEED_BOOTSTRAP_DIR, default .dev-pki/offline/),
+#       (ADR-0028): asks the Server for a fresh bootstrap certificate for the customer and site
+#       "Development" under a throwaway password, downloads its bootstrap.p12 — the Server hands
+#       the key out in no other form (ADR-0036) — and extracts the pair with
+#       `opamp-fleetctl pki p12-extract` where the development supervisor.toml names it
+#       ($SEED_BOOTSTRAP_DIR, default .dev-pki/offline/), replacing a pair already there,
 #       opens the enrolment window for ten minutes, waits up to two minutes for
 #       requests — start the Client then — and approves every one it finds, printing each key
 #       fingerprint. Development only — on a real fleet an operator compares each fingerprint with
@@ -82,18 +85,29 @@ if [ -f "$cacert" ]; then
 fi
 
 if [ "$mode" = enrol ]; then
-    bootstrap_dir="${SEED_BOOTSTRAP_DIR:-$(dirname "$0")/../.dev-pki/offline}"
-    # A fresh pair every time, so a pair that has ended since the last run is never reused. The
-    # Server issues it and hands out its key this once (ADR-0028).
-    issued=$(curl -fsS "${curl_tls[@]}" -X POST -H 'Content-Type: application/json' \
-        -d '{"subject": {"organization": "Development"}}' \
-        "$server/api/v1/bootstrap-certificates")
+    root="$(cd "$(dirname "$0")/.." && pwd)"
+    bootstrap_dir="$(cd "${SEED_BOOTSTRAP_DIR:-$root/.dev-pki/offline}" && pwd)"
+    # A fresh certificate every time, so one that has ended since the last run is never reused.
+    # The Server keeps its key only in a PKCS#12 file under the password the request names
+    # (ADR-0036): a throwaway one opens the file once, and nothing keeps it.
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
     (
         umask 077
-        jq -r .private_key_pem <<<"$issued" >"$bootstrap_dir/bootstrap-key.pem"
+        head -c 18 /dev/urandom | base64 >"$work/password"
     )
-    jq -r .certificate_pem <<<"$issued" >"$bootstrap_dir/bootstrap.pem"
-    echo "wrote the bootstrap pair, serial $(jq -r .serial <<<"$issued"), to $bootstrap_dir"
+    issued=$(jq -n --rawfile password "$work/password" \
+        '{subject: {organization: "Development", organizational_unit: "Development"},
+          password: ($password | rtrimstr("\n"))}' |
+        curl -fsS "${curl_tls[@]}" -X POST -H 'Content-Type: application/json' -d @- \
+            "$server/api/v1/bootstrap-certificates")
+    serial=$(jq -r .serial <<<"$issued")
+    curl -fsS "${curl_tls[@]}" -o "$work/bootstrap.p12" \
+        "$server/api/v1/bootstrap-certificates/$serial/p12"
+    rm -f "$bootstrap_dir/bootstrap.pem" "$bootstrap_dir/bootstrap-key.pem"
+    (cd "$root" && cargo run -q -p fleet-tools -- pki p12-extract "$work/bootstrap.p12" \
+        --out "$bootstrap_dir" --password-file "$work/password")
+    echo "wrote the bootstrap pair, serial $serial, to $bootstrap_dir"
     curl -fsS "${curl_tls[@]}" -X POST -H 'Content-Type: application/json' \
         -d '{"open_for_secs": 600}' "$server/api/v1/enrolment/window" >/dev/null
     echo "the enrolment window is open; start the Client now"

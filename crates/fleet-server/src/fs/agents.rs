@@ -504,7 +504,7 @@ mod tests {
         let revision = |body: &str| Revision {
             body: body.to_string(),
             role: String::new(),
-            service_name: String::new(),
+            service_name: "otelcol".to_string(),
         };
         let (pinned, orphan) = (revision("v1\n"), revision("v2\n"));
         let uid = InstanceUid::default();

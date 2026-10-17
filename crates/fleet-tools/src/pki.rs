@@ -344,7 +344,8 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
         quoted(&server_path, "bootstrap-ca.pem"),
         quoted(&server_path, "bootstrap-ca-key.pem"),
     );
-    // The bootstrap pair is the Server's to issue; the fragment names where a host keeps it, and
+    // The bootstrap certificate is the Server's to issue, as a PKCS#12 file `pki p12-extract`
+    // takes the pair out of; the fragment names where a host keeps the pair, and
     // the key a package it installs must be signed with.
     let supervisor_toml = format!(
         "[tls]\nca_file = {}\ncert_file = {}\nkey_file = {}\n\n\
@@ -392,9 +393,10 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
         ),
         format!(
             "{}: keep offline — the server CA's key and the package signing key; give every new \
-             host server-ca.pem, and the bootstrap pair the Server issues (POST \
-             /api/v1/bootstrap-certificates) as bootstrap.pem and bootstrap-key.pem, as \
-             supervisor.toml.fragment names them with the package verification key",
+             host server-ca.pem, and the bootstrap.p12 the Server issues (POST \
+             /api/v1/bootstrap-certificates), or its pair as bootstrap.pem and \
+             bootstrap-key.pem (pki p12-extract), as supervisor.toml.fragment names them with \
+             the package verification key",
             options.offline_dir.display()
         ),
     ];

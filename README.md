@@ -241,8 +241,8 @@ The same operations are available to any portal through the REST API — the Ope
 $ curl http://127.0.0.1:4321/api/v1/agents                   # the fleet, with reported attributes
 $ curl http://127.0.0.1:4321/api/v1/configurations           # every Configuration
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"body": "receivers: {}"}' \
-       http://127.0.0.1:4321/api/v1/configurations/linux-base  # content only
+       -d '{"service_name": "otelcol", "body": "receivers: {}"}' \
+       http://127.0.0.1:4321/api/v1/configurations/linux-base  # content for one Agent type
 $ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"os.type": "linux"}}' \
        http://127.0.0.1:4321/api/v1/deployments/linux       # aimed at a subset
 $ curl -X PUT http://127.0.0.1:4321/api/v1/deployments/linux/configurations/linux-base
@@ -251,7 +251,7 @@ $ curl -X POST http://127.0.0.1:4321/api/v1/deployments/linux/rollout  # distrib
 # Content the agent reads by path rather than is configured with (ADR-0023): written next to the
 # configuration under its own name, never passed to the process as configuration.
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"body": "rules: []", "role": "supplementary"}' \
+       -d '{"service_name": "otelcol", "body": "rules: []", "role": "supplementary"}' \
        http://127.0.0.1:4321/api/v1/configurations/ruleset
 
 # A package defines a Set (ADR-0026), identified by name, Agent type, and version, with one entry

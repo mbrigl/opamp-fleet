@@ -212,17 +212,19 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(!otelcol.healthy);
     assert_eq!(otelcol.health_status, "awaiting configuration");
 
-    // The operator distributes a Configuration to every Agent — saved, put into a Deployment
-    // claiming all three, then rolled out, because saving alone distributes nothing (ADR-0025,
-    // ADR-0034); the act assigns every Agent the Deployment claims and the Server pushes the
+    // The operator distributes a Configuration for the supervised type, and a YAML one typed for
+    // the Client itself — saved, put into a Deployment claiming all three, then rolled out,
+    // because saving alone distributes nothing (ADR-0025, ADR-0034); the act assigns every Agent
+    // the Deployment claims, fits each Configuration to its type, and the Server pushes the
     // release over the socket.
-    common::save(&state, "fleet", "receivers: {}\n", "");
-    common::release_to_every_agent(&state, &["fleet"]);
+    common::save(&state, "fleet", "receivers: {}\n", otelcol_type);
+    common::save(&state, "client-yaml", "receivers: {}\n", "supervisor");
+    common::release_to_every_agent(&state, &["fleet", "client-yaml"]);
 
     // Both Supervisors acknowledge APPLIED and are in sync; the processes restarted on the
-    // files. The Configuration is untyped, so it reaches the Client's own Agent too — whose
-    // configuration is its Supervisor set (ADR-0017), and a YAML body is not one: the Client
-    // refuses it loudly rather than pretend it took effect.
+    // files. The Client's own Agent receives the one typed for it — its configuration is its
+    // Supervisor set (ADR-0017), and a YAML body is not one: the Client refuses it loudly rather
+    // than pretend it took effect.
     wait_until("the supervised agents in sync, the client refusing", || {
         let snapshot = state.snapshot();
         let supervised = ["otelcol", "stub"].iter().all(|name| {
@@ -327,7 +329,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // …and a Deployment aimed at it reaches that Agent and no other. The label replaced the
     // Agent's labels, so the stub has left the fleet-wide channel: an Agent belongs to one
     // Deployment, and this one holds both Configurations (ADR-0034).
-    common::save(&state, "edge-extra", "processors: {}\n", "");
+    common::save(&state, "edge-extra", "processors: {}\n", otelcol_type);
     assert_eq!(
         common::release(
             &state,
@@ -391,28 +393,24 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // ——— The Server manages the Client's own Supervisor set (ADR-0017) ———
 
-    // The untyped fleet Configuration keeps poisoning the Client's composed map (its body is YAML).
-    // A retype does not withdraw what was already rolled out (ADR-0025) — the Client keeps its
-    // pinned assignment until the next press — and a pinned Configuration cannot be deleted
-    // (ADR-0034). So the recovery is to state it for the type both Supervisors report and press
-    // the Deployments again: the Client's release drops it, while the Supervisors' revision — body
-    // and role unchanged — keeps its hash.
-    let snapshot = state.snapshot();
-    let supervised_type = view(&snapshot, "otelcol")
-        .expect("otelcol view")
-        .service_name
-        .clone();
+    // The YAML Configuration typed for the Client keeps poisoning its composed map. A pinned
+    // Configuration cannot be deleted (ADR-0034), and taking it out of the Deployment withdraws
+    // nothing already rolled out (ADR-0025) — the Client keeps its pinned assignment until the
+    // next press. So the recovery is to take it out and press the Deployments again: the Client's
+    // release drops it, while the Supervisors' revision — body and role unchanged — keeps its hash.
     assert!(
-        state.delete_configuration("fleet").is_err(),
+        state.delete_configuration("client-yaml").is_err(),
         "a pinned Configuration is not deleted"
     );
-    common::save(&state, "fleet", "receivers: {}\n", &supervised_type);
+    state
+        .remove_deployment_configuration(common::FLEET_DEPLOYMENT, "client-yaml")
+        .expect("take it out of the Deployment");
     for deployment in [common::FLEET_DEPLOYMENT, "edge"] {
         state
             .rollout_deployment(deployment)
-            .expect("roll out the retyped configuration");
+            .expect("roll out without it");
     }
-    wait_until("the supervised agents to settle on the retyped map", || {
+    wait_until("the supervised agents to settle on the fleet map", || {
         let snapshot = state.snapshot();
         ["otelcol", "stub"]
             .iter()
@@ -663,7 +661,12 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
     }
     assert!(declares("closed", "ReportsEffectiveConfig"));
 
-    common::save(&state, "fleet", "receivers: {}\n", "");
+    // Both run the same program, so they report one Agent type, which the Configuration is for.
+    let supervised_type = view(&state.snapshot(), "open")
+        .expect("open view")
+        .service_name
+        .clone();
+    common::save(&state, "fleet", "receivers: {}\n", &supervised_type);
     common::release_to_every_agent(&state, &["fleet"]);
     wait_until("the unlisted Supervisor in sync", || {
         view(&state.snapshot(), "open")

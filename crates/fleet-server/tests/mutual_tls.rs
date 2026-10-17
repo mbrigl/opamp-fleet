@@ -115,6 +115,21 @@ impl Pki {
         let cert = params.signed_by(&key, &self.issuer()).expect("signed");
         (cert.pem(), key.serialize_pem())
     }
+
+    /// A bootstrap certificate and key signed by this CA, for `name`, naming the customer and the
+    /// site an approval requires of every bootstrap certificate (ADR-0036 clause 3).
+    fn issue_bootstrap(&self, name: &str) -> (String, String) {
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::new(vec![name.to_string()]).expect("params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationName, "Kunde GmbH");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationalUnitName, "Werk Nord");
+        let cert = params.signed_by(&key, &self.issuer()).expect("signed");
+        (cert.pem(), key.serialize_pem())
+    }
 }
 
 fn report(uid: &InstanceUid) -> AgentToServer {
@@ -372,6 +387,35 @@ fn bootstrap_files(served: &Served, serial: &str) -> Vec<String> {
                 .is_some_and(|stem| stem.ends_with(&format!("-{serial}")))
         })
         .collect()
+}
+
+/// The password the tests issue bootstrap certificates under.
+const BOOTSTRAP_PASSWORD: &str = "a password of the operator";
+
+/// The customer and the site every bootstrap certificate names (ADR-0036 clause 1).
+fn customer_and_site() -> serde_json::Value {
+    serde_json::json!({ "organization": "Kunde GmbH", "organizational_unit": "Werk Nord" })
+}
+
+/// The key of the bootstrap certificate `serial`, as PEM, out of the PKCS#12 file the Server keeps
+/// for it under [`BOOTSTRAP_PASSWORD`] — the only place the key leaves the Server (ADR-0036
+/// clause 8).
+async fn bootstrap_key(served: &Served, operator_client: &reqwest::Client, serial: &str) -> String {
+    let file = operator_client
+        .get(operator(
+            served,
+            &format!("/api/v1/bootstrap-certificates/{serial}/p12"),
+        ))
+        .send()
+        .await
+        .expect("download")
+        .bytes()
+        .await
+        .expect("body");
+    let opened = fleet_core::pkcs12::file::open(&file, BOOTSTRAP_PASSWORD).expect("opens");
+    KeyPair::try_from(opened.private_key_der.as_slice())
+        .expect("key")
+        .serialize_pem()
 }
 
 fn client(ca_pem: &str, identity: Option<(&str, &str)>) -> reqwest::Client {
@@ -729,7 +773,7 @@ async fn a_bootstrap_certificate_is_refused_outside_an_enrolment_window() {
         },
     )
     .await;
-    let (cert, key) = bootstrap.issue("bootstrap");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap");
     let enrolling = client(&served.ca_pem, Some((&cert, &key)));
     let response = post(
         &enrolling,
@@ -772,7 +816,7 @@ async fn an_enrolment_request_waits_for_an_operator_and_is_issued_on_approval() 
         .expect("open window");
     assert_eq!(opened.status(), 200);
 
-    let (cert, key) = bootstrap.issue("bootstrap");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap");
     let enrolling = client(&served.ca_pem, Some((&cert, &key)));
     // A first report without a CSR is told the Server signs, and nothing else.
     let hello = decode(
@@ -870,7 +914,7 @@ async fn a_rejected_request_is_refused_and_closing_the_window_shuts_enrolment() 
         .send()
         .await
         .expect("open window");
-    let (cert, key) = bootstrap.issue("bootstrap");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap");
     let enrolling = client(&served.ca_pem, Some((&cert, &key)));
     let (csr, _key) = csr_for("edge-02");
     decode(post(&enrolling, &served.endpoint, csr_report(csr.clone())).await).await;
@@ -1646,7 +1690,7 @@ async fn an_approval_writes_the_host_before_its_first_report() {
         .await
         .expect("open window");
     assert_eq!(opened.status(), 200);
-    let (cert, key) = bootstrap.issue("bootstrap");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap");
     let enrolling = client(&served.ca_pem, Some((&cert, &key)));
     let (csr, _key) = csr_for("edge-01");
     let _ = decode(post(&enrolling, &served.endpoint, csr_report(csr)).await).await;
@@ -1922,7 +1966,7 @@ async fn an_enrolment_csr_claiming_another_instance_uid_never_reaches_the_queue(
     .await;
     let enrolment = served.state.enrolment().expect("enrolment").clone();
     enrolment.open(60).expect("open");
-    let (cert, key) = bootstrap.issue("bootstrap");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap");
     let enrolling = client(&served.ca_pem, Some((&cert, &key)));
     let other = InstanceUid::default();
     let reply = decode(
@@ -2641,7 +2685,7 @@ async fn a_bootstrap_certificate_is_not_handed_the_list() {
         .await
         .expect("open window");
     assert_eq!(opened.status(), 200);
-    let (cert, key) = bootstrap.issue("bootstrap");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap");
     let enrolling = client(&served.ca_pem, Some((&cert, &key)));
     assert_eq!(
         fetch_list(&served, &enrolling, None).await.status(),
@@ -2778,7 +2822,7 @@ async fn a_bootstrap_certificate_shared_by_two_addresses_is_two_buckets() {
         .expect("enrolment")
         .open(600)
         .expect("open the window");
-    let (cert, key) = bootstrap.issue("bootstrap");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap");
     let from = |address: &str| {
         let mut pem = key.as_bytes().to_vec();
         pem.extend_from_slice(cert.as_bytes());
@@ -3049,7 +3093,7 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
         };
         enrolment.submit(request, requester);
     }
-    let (bootstrap_cert, bootstrap_key) = bootstrap.issue("bootstrap");
+    let (bootstrap_cert, bootstrap_key) = bootstrap.issue_bootstrap("bootstrap");
     let enrolling = client(&served.ca_pem, Some((&bootstrap_cert, &bootstrap_key)));
     let uid = InstanceUid::default();
     let (csr, _) = csr_for("edge-03");
@@ -3515,7 +3559,8 @@ async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_ser
         .post(operator(&served, "/api/v1/bootstrap-certificates"))
         .json(&serde_json::json!({
             "subject": { "organization": "Kunde GmbH", "organizational_unit": "Wien" },
-            "validity_days": 3
+            "validity_days": 3,
+            "password": BOOTSTRAP_PASSWORD
         }))
         .send()
         .await
@@ -3524,9 +3569,13 @@ async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_ser
     assert_eq!(
         response.headers()["cache-control"],
         "no-store",
-        "the private key is not kept on the way"
+        "the answer is not kept on the way"
     );
     let issued: serde_json::Value = response.json().await.expect("json");
+    assert!(
+        issued.get("private_key_pem").is_none(),
+        "an issue never answers the key: {issued}"
+    );
     let serial = issued["serial"].as_str().expect("serial").to_string();
     let subject = issued["subject"].as_str().expect("subject");
     assert!(
@@ -3534,12 +3583,12 @@ async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_ser
         "{subject}"
     );
     let cert = issued["certificate_pem"].as_str().expect("cert");
-    let key = issued["private_key_pem"].as_str().expect("key");
+    let key = &bootstrap_key(&served, &operator_client, &serial).await;
     let recorded = entries(audit_dir.path(), "enrolment.bootstrap_issued", 1).await;
     let recorded = named(&recorded, "enrolment.bootstrap_issued");
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0]["serial"], serial.as_str());
-    // The key is in the answer and nowhere the Server writes (ADR-0028 clause 21).
+    // The key is in no file the Server writes in the clear (ADR-0036 clause 8).
     let key_body = key
         .lines()
         .find(|line| !line.starts_with("-----"))
@@ -3648,7 +3697,10 @@ async fn revoking_a_bootstrap_certificate_withdraws_the_requests_waiting_with_it
     let operator_client = client(&served.ca_pem, None);
     let issued: serde_json::Value = operator_client
         .post(operator(&served, "/api/v1/bootstrap-certificates"))
-        .json(&serde_json::json!({ "subject": { "organization": "Kunde GmbH" } }))
+        .json(&serde_json::json!({
+            "subject": customer_and_site(),
+            "password": BOOTSTRAP_PASSWORD
+        }))
         .send()
         .await
         .expect("issue")
@@ -3657,7 +3709,7 @@ async fn revoking_a_bootstrap_certificate_withdraws_the_requests_waiting_with_it
         .expect("json");
     let serial = issued["serial"].as_str().expect("serial");
     let cert = issued["certificate_pem"].as_str().expect("cert");
-    let key = issued["private_key_pem"].as_str().expect("key");
+    let key = &bootstrap_key(&served, &operator_client, serial).await;
     operator_client
         .post(operator(&served, "/api/v1/enrolment/window"))
         .json(&serde_json::json!({ "open_for_secs": 600 }))
@@ -3746,7 +3798,7 @@ async fn a_bootstrap_certificate_issued_with_a_password_is_a_pkcs12_file_until_r
     for short in ["abc", "tab\tin a long password"] {
         let refused = operator_client
             .post(operator(&served, "/api/v1/bootstrap-certificates"))
-            .json(&serde_json::json!({ "password": short }))
+            .json(&serde_json::json!({ "subject": customer_and_site(), "password": short }))
             .send()
             .await
             .expect("issue");
@@ -3755,7 +3807,7 @@ async fn a_bootstrap_certificate_issued_with_a_password_is_a_pkcs12_file_until_r
     let response = operator_client
         .post(operator(&served, "/api/v1/bootstrap-certificates"))
         .json(&serde_json::json!({
-            "subject": { "organization": "Kunde GmbH" },
+            "subject": customer_and_site(),
             "password": PASSWORD
         }))
         .send()
@@ -3931,7 +3983,10 @@ async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refu
     let operator_client = client(&served.ca_pem, None);
     let issued: serde_json::Value = operator_client
         .post(operator(&served, "/api/v1/bootstrap-certificates"))
-        .json(&serde_json::json!({ "password": "a password of the operator" }))
+        .json(&serde_json::json!({
+            "subject": customer_and_site(),
+            "password": "a password of the operator"
+        }))
         .send()
         .await
         .expect("issue")
@@ -4050,7 +4105,8 @@ async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refu
 }
 
 /// Without the bootstrap CA's key the Server issues nothing and says why, a request outside the
-/// bounds is refused, and an empty one is issued (ADR-0028 clauses 22 and 23 and ADR-0021 clause 19).
+/// bounds is refused, and one naming only a customer, a site and a password is issued (ADR-0028
+/// clauses 22 and 23, ADR-0021 clause 19 and ADR-0036 clauses 1 and 8).
 /// Verifies: ADR-0028
 #[tokio::test]
 async fn issuing_needs_the_key_and_a_request_within_bounds() {
@@ -4066,9 +4122,13 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
     )
     .await;
     let operator_client = client(&without_key.ca_pem, None);
+    let smallest = serde_json::json!({
+        "subject": customer_and_site(),
+        "password": BOOTSTRAP_PASSWORD
+    });
     let response = operator_client
         .post(operator(&without_key, "/api/v1/bootstrap-certificates"))
-        .json(&serde_json::json!({}))
+        .json(&smallest)
         .send()
         .await
         .expect("issue");
@@ -4091,11 +4151,20 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
         },
     )
     .await;
+    let with_subject = |extra: serde_json::Value| {
+        let mut subject = customer_and_site();
+        for (key, value) in extra.as_object().expect("an object") {
+            subject[key] = value.clone();
+        }
+        serde_json::json!({ "subject": subject, "password": BOOTSTRAP_PASSWORD })
+    };
+    let mut too_long = smallest.clone();
+    too_long["validity_days"] = 91.into();
     for refused in [
-        serde_json::json!({ "validity_days": 91 }),
-        serde_json::json!({ "subject": { "common_name": "anything" } }),
-        serde_json::json!({ "subject": { "email": "ops@example.org" } }),
-        serde_json::json!({ "subject": { "organization": "" } }),
+        too_long,
+        with_subject(serde_json::json!({ "common_name": "anything" })),
+        with_subject(serde_json::json!({ "email": "ops@example.org" })),
+        with_subject(serde_json::json!({ "organization": "" })),
     ] {
         let response = operator_client
             .post(operator(&with_key, "/api/v1/bootstrap-certificates"))
@@ -4105,18 +4174,89 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
             .expect("issue");
         assert_eq!(response.status(), 400, "{refused}");
     }
-    let empty = operator_client
+    let issued = operator_client
         .post(operator(&with_key, "/api/v1/bootstrap-certificates"))
-        .json(&serde_json::json!({}))
+        .json(&smallest)
         .send()
         .await
         .expect("issue");
-    assert_eq!(empty.status(), 201);
-    let issued: serde_json::Value = empty.json().await.expect("json");
+    assert_eq!(issued.status(), 201);
+    let issued: serde_json::Value = issued.json().await.expect("json");
     assert_eq!(
-        issued["subject"], "CN=acme bootstrap Certificate",
+        issued["subject"], "O=Kunde GmbH, OU=Werk Nord, CN=acme bootstrap Certificate",
         "the Server sets the common name from the CA's (ADR-0028 clause 28)"
     );
+}
+
+/// A bootstrap certificate names a customer and a site and is issued under a password: a
+/// request without `organization`, without `organizational_unit` or without `password` is `400`
+/// naming the field, issues nothing, and no answer ever carries a private key (ADR-0036 clauses
+/// 1 and 8).
+/// Verifies: ADR-0036
+#[tokio::test]
+async fn issuing_without_a_customer_a_site_or_a_password_is_refused_naming_it() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("acme bootstrap CA");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            issue_bootstrap: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    for (request, field) in [
+        (
+            serde_json::json!({
+                "subject": { "organizational_unit": "Werk Nord" },
+                "password": BOOTSTRAP_PASSWORD
+            }),
+            "subject.organization ",
+        ),
+        (
+            serde_json::json!({
+                "subject": { "organization": "Kunde GmbH" },
+                "password": BOOTSTRAP_PASSWORD
+            }),
+            "subject.organizational_unit ",
+        ),
+        (
+            serde_json::json!({ "password": BOOTSTRAP_PASSWORD }),
+            "subject.organization ",
+        ),
+        (
+            serde_json::json!({ "subject": customer_and_site() }),
+            "password ",
+        ),
+    ] {
+        let response = operator_client
+            .post(operator(&served, "/api/v1/bootstrap-certificates"))
+            .json(&request)
+            .send()
+            .await
+            .expect("issue");
+        assert_eq!(response.status(), 400, "{request}");
+        let body: serde_json::Value = response.json().await.expect("json");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.starts_with(field) && e.contains("required")),
+            "the refusal names {field}: {body}"
+        );
+        assert!(body.get("private_key_pem").is_none(), "{body}");
+    }
+    let listed: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/bootstrap-certificates"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed, serde_json::json!([]), "nothing was issued");
 }
 
 /// Each rule a subject value is issued by is answered `400` over the API, naming the attribute:
@@ -4138,10 +4278,14 @@ async fn a_subject_value_outside_the_rules_is_refused_400() {
     )
     .await;
     let operator_client = client(&served.ca_pem, None);
-    let issue = |subject: serde_json::Value| {
+    let issue = |extra: serde_json::Value| {
+        let mut subject = customer_and_site();
+        for (key, value) in extra.as_object().expect("an object") {
+            subject[key] = value.clone();
+        }
         let request = operator_client
             .post(operator(&served, "/api/v1/bootstrap-certificates"))
-            .json(&serde_json::json!({ "subject": subject }));
+            .json(&serde_json::json!({ "subject": subject, "password": BOOTSTRAP_PASSWORD }));
         async move { request.send().await.expect("issue") }
     };
     for (subject, attribute) in [
@@ -4369,14 +4513,15 @@ async fn an_enrolment_carries_the_bootstrap_subject_into_the_host_and_its_agents
     let operator_client = client(&served.ca_pem, None);
     let response = operator_client
         .post(operator(&served, "/api/v1/bootstrap-certificates"))
-        .json(&serde_json::json!({ "subject": six_values() }))
+        .json(&serde_json::json!({ "subject": six_values(), "password": BOOTSTRAP_PASSWORD }))
         .send()
         .await
         .expect("issue");
     assert_eq!(response.status(), 201);
     let issued: serde_json::Value = response.json().await.expect("json");
     let cert = issued["certificate_pem"].as_str().expect("cert");
-    let key = issued["private_key_pem"].as_str().expect("key");
+    let serial = issued["serial"].as_str().expect("serial");
+    let key = &bootstrap_key(&served, &operator_client, serial).await;
     operator_client
         .post(operator(&served, "/api/v1/enrolment/window"))
         .json(&serde_json::json!({ "open_for_secs": 600 }))
@@ -4560,6 +4705,96 @@ async fn a_foreign_bootstrap_certificate_with_ou_twice_is_refused_at_approval() 
         waiting.connection_settings.is_none(),
         "no certificate is handed out"
     );
+}
+
+/// A bootstrap certificate from another CA that names a customer but no site enrols, but the queue
+/// says why it cannot be carried and its approval is refused with `409` naming
+/// `organizational_unit`; nothing is signed and no Host is written.
+/// Verifies: ADR-0036
+#[tokio::test]
+async fn a_foreign_bootstrap_certificate_without_ou_is_refused_at_approval() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("foreign bootstrap CA");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            revocations: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationName, "Kunde GmbH");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "foreign bootstrap");
+    let cert = params
+        .signed_by(&key, &bootstrap.issuer())
+        .expect("signed")
+        .pem();
+    let operator_client = client(&served.ca_pem, None);
+    operator_client
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key.serialize_pem())));
+    let (csr, _) = csr_for("edge-01");
+    decode(post(&enrolling, &served.endpoint, csr_report(csr)).await).await;
+    let pending: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/enrolments"))
+        .send()
+        .await
+        .expect("pending")
+        .json()
+        .await
+        .expect("json");
+    let id = pending[0]["id"].as_str().expect("id").to_string();
+    assert!(
+        pending[0].get("bootstrap_subject").is_none(),
+        "no values are listed that the approval would not carry: {pending}"
+    );
+    let listed = pending[0]["subject_refusal"]
+        .as_str()
+        .expect("the queue says why before the operator approves")
+        .to_string();
+    assert!(
+        listed.contains("organizational_unit is missing"),
+        "{listed}"
+    );
+
+    let refused = operator_client
+        .post(operator(
+            &served,
+            &format!("/api/v1/enrolments/{id}/approve"),
+        ))
+        .send()
+        .await
+        .expect("approve");
+    assert_eq!(refused.status(), 409);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("organizational_unit is missing")),
+        "the approval names the missing attribute: {body}"
+    );
+    assert_eq!(hosts(&served).await, serde_json::json!([]), "no Host");
+    let register: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/certificates"))
+        .send()
+        .await
+        .expect("register")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(register, serde_json::json!([]), "nothing was signed");
 }
 
 /// A renewal carries the values of the certificate it renews, and only those: neither the CSR's

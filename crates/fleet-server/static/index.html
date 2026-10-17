@@ -113,9 +113,9 @@
             <input required aria-required="true" id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
                    title="The configuration's name — the file name its entry gets on the agent. Frozen once created." />
           </label>
-          <label class="field"><span class="field-cap">Agent type <b class="need opt">optional</b></span>
-            <input id="config-type" list="config-type-options" placeholder="agent type: the service.name it is for (empty: every type)" autocomplete="off"
-                   title="Compared raw for equality against the service.name the agents report (ADR-0034): of the agents a deployment holding it claims, only those of this type receive it. Empty means every type — which for a collector body is rarely what you want." />
+          <label class="field"><span class="field-cap">Agent type <b class="need req">required</b></span>
+            <input required aria-required="true" id="config-type" list="config-type-options" placeholder="agent type: the service.name it is for" autocomplete="off"
+                   title="Compared raw for equality against the service.name the agents report (ADR-0034): of the agents a deployment holding it claims, only those of this type receive it. Content for several types is one configuration per type." />
           </label>
           <datalist id="config-type-options"></datalist>
           <label class="field"><span class="field-cap">Role <b class="need opt">optional</b></span>
@@ -353,10 +353,10 @@
       </div>
 
       <!-- Bootstrap certificates (ADR-0028, ADR-0036): issued by this Server with the subject values
-           an operator names, which every host certificate issued from one carries. Without a password the private key is in the issuing answer only,
-           so the UI holds it in memory until the operator has saved it and never stores it. With
-           one, the Server keeps a PKCS#12 file of the pair under it, which any later page offers
-           for download; the typed password is sent once and kept nowhere (ADR-0029). -->
+           an operator names, which every host certificate issued from one carries. The Server keeps
+           a PKCS#12 file of the pair under the password the operator types, which any page offers
+           for download; the page never holds a private key, and the typed password is sent once
+           and kept nowhere (ADR-0029, ADR-0036 clause 6). -->
       <section id="boot-section" class="card config" style="display: none">
         <h2>Bootstrap certificates — one per customer, site or batch; each opens nothing without an open window and an approval</h2>
         <div class="config-fields">
@@ -374,13 +374,13 @@
             <input id="boot-locality" placeholder="locality (L)" maxlength="64" autocomplete="off"
                    title="The locality, a town for instance. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.locality." />
           </label>
-          <label class="field quarter"><span class="field-cap">Customer (O) <b class="need opt">optional</b></span>
-            <input id="boot-org" placeholder="customer (O)" maxlength="64" autocomplete="off"
-                   title="The organization the certificate is issued to, typically the customer. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.organization; it describes and selects, and authorizes nothing." />
+          <label class="field quarter"><span class="field-cap">Customer (O) <b class="need req">required</b></span>
+            <input required aria-required="true" id="boot-org" placeholder="customer (O)" maxlength="64" autocomplete="off"
+                   title="The organization the certificate is issued to, typically the customer. 1 to 64 characters. Host certificates carry it as fleet.host.organization; it describes and selects, and authorizes nothing." />
           </label>
-          <label class="field quarter"><span class="field-cap">Site (OU) <b class="need opt">optional</b></span>
-            <input id="boot-unit" placeholder="site (OU)" maxlength="64" autocomplete="off"
-                   title="The organizational unit, typically the site. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.site." />
+          <label class="field quarter"><span class="field-cap">Site (OU) <b class="need req">required</b></span>
+            <input required aria-required="true" id="boot-unit" placeholder="site (OU)" maxlength="64" autocomplete="off"
+                   title="The organizational unit, typically the site. 1 to 64 characters. Host certificates carry it as fleet.host.site." />
           </label>
           <label class="field quarter"><span class="field-cap">Customer number (organizationIdentifier) <b class="need opt">optional</b></span>
             <input id="boot-org-id" placeholder="customer number (organizationIdentifier)" maxlength="64" autocomplete="off"
@@ -390,18 +390,17 @@
             <input id="boot-days" type="number" min="1" max="90" value="10"
                    title="How many days the certificate is valid: 1 to 90, cut to the bootstrap CA's end." />
           </label>
-          <label class="field quarter"><span class="field-cap">Password <b class="need opt">optional</b></span>
-            <input id="boot-pass" type="password" placeholder="password (optional)" autocomplete="new-password"
-                   title="With a password the Server keeps the certificate and its key as bootstrap.p12, encrypted under it, for download until the certificate ends or is revoked. 4 to 128 characters; a short one is quick to break if the file leaks. The Server keeps the password nowhere: give it to the host by another way than the file." />
+          <label class="field quarter"><span class="field-cap">Password <b class="need req">required</b></span>
+            <input required aria-required="true" id="boot-pass" type="password" placeholder="password" autocomplete="new-password"
+                   title="The Server keeps the certificate and its key as bootstrap.p12, encrypted under this password, for download until the certificate ends or is revoked. 4 to 128 characters; a short one is quick to break if the file leaks. The Server keeps the password nowhere: give it to the host by another way than the file. A host that needs the pair as PEM takes it out with opamp-fleetctl pki p12-extract." />
           </label>
-          <label class="field quarter"><span class="field-cap">Password again <b class="need req">required with a password</b></span>
-            <input id="boot-pass2" type="password" placeholder="password again" autocomplete="new-password"
+          <label class="field quarter"><span class="field-cap">Password again <b class="need req">required</b></span>
+            <input required aria-required="true" id="boot-pass2" type="password" placeholder="password again" autocomplete="new-password"
                    title="The same password once more." />
           </label>
           <button id="boot-issue" class="btn btn-primary"
-                  title="Issue a bootstrap certificate with a fresh key. Without a password its row offers the pair for saving while this page stays open, and the Server does not keep the key; with one, its row offers bootstrap.p12 in any page.">Issue</button>
+                  title="Issue a bootstrap certificate with a fresh key. Its row offers bootstrap.p12 in any page until it ends or is revoked.">Issue</button>
         </div>
-        <div id="boot-keys-note" class="err" style="display: none; margin-bottom: 6px">This page holds the private keys of the certificates issued in it until it is reloaded or closed: the Server does not keep them. Save both files from the row; a lost key is replaced by issuing again.</div>
         <span id="boot-result" class="sub"></span>
         <span id="boot-error" class="err"></span>
         <div class="table-wrap" style="margin-top: 10px">
@@ -1192,7 +1191,7 @@
           return `
           <tr class="agent${c.name === currentConfig ? " current" : ""}" data-name="${esc(c.name)}">
             <td><a class="name" href="#">${esc(c.name)}</a></td>
-            <td>${c.service_name ? esc(c.service_name) : `<span class="sub">every type</span>`}</td>
+            <td>${esc(c.service_name)}</td>
             <td>${c.role ? esc(c.role) : `<span class="sub">configuration</span>`}</td>
             <td><div class="chips">${held}</div></td>
           </tr>`;
@@ -1251,13 +1250,14 @@
         const name = $("config-name").value.trim();
         if (!name) { $("config-error").textContent = "a configuration needs a name"; return; }
         const type = $("config-type").value.trim();
+        if (!type) { $("config-error").textContent = "a configuration needs the agent type it is for"; return; }
         const role = $("config-role").value.trim();
         const res = await fetch(configPath(name), {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          // An empty role or type is left out entirely rather than sent as "": absent is what
-          // the resource means by top-level configuration and by every-type.
-          body: JSON.stringify({ body: $("config").value, ...(role ? { role } : {}), ...(type ? { service_name: type } : {}) }),
+          // An empty role is left out entirely rather than sent as "": absent is what the
+          // resource means by top-level configuration.
+          body: JSON.stringify({ body: $("config").value, service_name: type, ...(role ? { role } : {}) }),
         });
         if (!res.ok) {
           $("config-error").textContent = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
@@ -1879,12 +1879,12 @@
         const held = d ? d.configurations || [] : depConfigPending;
         $("dep-configs").innerHTML = held.map((name) => {
           const c = configurations.find((x) => x.name === name);
-          const type = c && c.service_name ? ` · ${esc(c.service_name)}` : "";
-          return `<span class="chip" title="${c && c.service_name ? `reaches the agents of this channel that report ${esc(c.service_name)}` : "reaches every agent of this channel"}">${esc(name)}${type} <span class="dep-config-del" data-name="${esc(name)}" style="cursor: pointer; font-weight: 700;" title="Take this configuration out of the channel. Agents keep the revision they were given until the next press, which drops it from their map.">✕</span></span>`;
+          const type = c ? ` · ${esc(c.service_name)}` : "";
+          return `<span class="chip" title="${c ? `reaches the agents of this channel that report ${esc(c.service_name)}` : ""}">${esc(name)}${type} <span class="dep-config-del" data-name="${esc(name)}" style="cursor: pointer; font-weight: 700;" title="Take this configuration out of the channel. Agents keep the revision they were given until the next press, which drops it from their map.">✕</span></span>`;
         }).join("") || `<span class="chip">no configurations</span>`;
         $("dep-config-pick").innerHTML = configurations
           .filter((c) => !held.includes(c.name))
-          .map((c) => `<option value="${esc(c.name)}">${esc(c.name)}${c.service_name ? " · " + esc(c.service_name) : ""}</option>`)
+          .map((c) => `<option value="${esc(c.name)}">${esc(c.name)} · ${esc(c.service_name)}</option>`)
           .join("") || `<option value="">no other configuration saved</option>`;
       }
 
@@ -2152,9 +2152,6 @@
       // by serial, since the record keeps the key's fingerprint and the request the certificate's.
       let boots = [];
       let bootsShown = null;
-      // The pairs issued in this page, by serial: held in memory only, until the page is reloaded or
-      // closed, the certificate revoked or ended — the Server keeps no key (ADR-0028 clause 21).
-      const issuedPairs = new Map();
       const when = (ms) => new Date(ms).toLocaleString();
       // What an operator issued a bootstrap certificate *for* — its customer and site — without the
       // common name the Server sets on every one of them. The subject is kept whole as text, not
@@ -2234,18 +2231,14 @@
       function renderBoots(failed) {
         $("boots-error").textContent = failed || "";
         $("boots-empty").style.display = boots.length || failed ? "none" : "block";
-        $("boot-keys-note").style.display = issuedPairs.size ? "" : "none";
         // How many requests in the queue carry each certificate, so the two tables point at each other.
         const waiting = new Map();
         for (const e of enrolments) waiting.set(e.bootstrap_serial, (waiting.get(e.bootstrap_serial) || 0) + 1);
-        const shown = JSON.stringify([boots, [...issuedPairs.keys()], [...waiting]]);
+        const shown = JSON.stringify([boots, [...waiting]]);
         if (shown === bootsShown) return;
         bootsShown = shown;
         const p12 = (b) => b.p12 && !b.revoked ? `
               <button class="btn btn-ghost btn-sm boot-p12" data-serial="${esc(b.serial)}" title="Save the certificate and its key as bootstrap.p12, encrypted under the password it was issued with. Offered until the certificate ends or is revoked.">Save bootstrap.p12</button>` : "";
-        const saves = (b) => issuedPairs.has(b.serial) && !b.revoked ? `
-              <button class="btn btn-ghost btn-sm boot-save" data-serial="${esc(b.serial)}" data-part="certificate" title="Save the certificate as bootstrap.pem — the cert_file a host's supervisor.toml names">Save bootstrap.pem</button>
-              <button class="btn btn-ghost btn-sm boot-save" data-serial="${esc(b.serial)}" data-part="key" title="Save the private key as bootstrap-key.pem — the key_file a host's supervisor.toml names. Offered only while this page stays open.">Save bootstrap-key.pem</button>` : "";
         $("boots").innerHTML = boots.map((b) => `
           <tr>
             <td title="${esc(b.subject)}"><strong>${esc(bootstrapName(b.subject))}</strong></td>
@@ -2254,7 +2247,7 @@
             <td>${esc(when(b.not_after_ms))}</td>
             <td>${b.revoked ? `<span class="pill red">revoked</span>` : `<span class="pill green">valid</span>`}${waiting.get(b.serial) ? `
               <div style="margin-top: 4px"><span class="pill amber" title="requests in the queue above that enrol with this certificate">${waiting.get(b.serial)} waiting</span></div>` : ""}</td>
-            <td><div style="display: flex; flex-direction: column; align-items: flex-start; gap: 4px">${p12(b)}${saves(b)}${b.revoked ? `
+            <td><div style="display: flex; flex-direction: column; align-items: flex-start; gap: 4px">${p12(b)}${b.revoked ? `
               <button class="btn btn-ghost btn-sm boot-delete" data-serial="${esc(b.serial)}" title="Delete this revoked certificate from the list. Its revocation stays: no host can enrol with it.">Delete</button>` : `
               <button class="btn btn-ghost btn-sm boot-revoke" data-serial="${esc(b.serial)}" title="Revoke this certificate: no host can enrol with it any more">Revoke</button>`}</div></td>
           </tr>`).join("");
@@ -2275,14 +2268,7 @@
           win = await res.json();
           $("boot-section").style.display = "";
           const certs = await fetch("/api/v1/bootstrap-certificates");
-          if (certs.ok) {
-            boots = await certs.json();
-            // A key whose certificate has ended or been revoked has nothing left to save. Absence from
-            // the list proves neither: a refresh that began before the issue does not list it yet.
-            for (const [serial, pair] of issuedPairs) {
-              if (pair.not_after_ms <= Date.now() || boots.some((b) => b.serial === serial && b.revoked)) issuedPairs.delete(serial);
-            }
-          }
+          if (certs.ok) boots = await certs.json();
           // Drawn after the queue is read, since each row counts the requests waiting with it.
           const bootsFailed = certs.ok ? undefined : `the bootstrap certificates could not be read: HTTP ${certs.status}`;
           const list = await fetch("/api/v1/enrolments");
@@ -2370,15 +2356,15 @@
           const value = $(id).value.trim();
           if (value) subject[field] = value;
         }
-        const request = { subject, validity_days: Number($("boot-days").value) };
+        if (!subject.organization) { $("boot-error").textContent = "a bootstrap certificate needs a customer (O)"; return; }
+        if (!subject.organizational_unit) { $("boot-error").textContent = "a bootstrap certificate needs a site (OU)"; return; }
         const password = $("boot-pass").value;
-        if (password || $("boot-pass2").value) {
-          if (password !== $("boot-pass2").value) {
-            $("boot-error").textContent = "the two passwords differ";
-            return;
-          }
-          request.password = password;
+        if (!password) { $("boot-error").textContent = "a bootstrap certificate needs a password"; return; }
+        if (password !== $("boot-pass2").value) {
+          $("boot-error").textContent = "the two passwords differ";
+          return;
         }
+        const request = { subject, validity_days: Number($("boot-days").value), password };
         // Disabled while the request runs, so a double click issues one certificate.
         $("boot-issue").disabled = true;
         const res = await fetch("/api/v1/bootstrap-certificates", {
@@ -2395,24 +2381,10 @@
         // The page keeps no password once it is sent (ADR-0029 clause 5).
         $("boot-pass").value = "";
         $("boot-pass2").value = "";
-        if (body.private_key_pem) {
-          issuedPairs.set(body.serial, { certificate_pem: body.certificate_pem, private_key_pem: body.private_key_pem, not_after_ms: body.not_after_ms });
-          $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save its pair from its row.`;
-        } else {
-          $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save bootstrap.p12 from its row, now or later.`;
-        }
+        $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save bootstrap.p12 from its row, now or later.`;
         await refreshEnrolments();
       });
 
-      function saveText(text, name) {
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(new Blob([text], { type: "application/x-pem-file" }));
-        link.download = name;
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(link.href), 0);
-      }
-      // Leaving the page drops every key it holds, so it asks first.
-      window.addEventListener("beforeunload", (e) => { if (issuedPairs.size) e.preventDefault(); });
 
       $("boots").addEventListener("click", async (e) => {
         const p12 = e.target.closest(".boot-p12");
@@ -2430,14 +2402,6 @@
           link.download = "bootstrap.p12";
           link.click();
           setTimeout(() => URL.revokeObjectURL(link.href), 0);
-          return;
-        }
-        const save = e.target.closest(".boot-save");
-        if (save) {
-          const pair = issuedPairs.get(save.dataset.serial);
-          if (!pair) return;
-          if (save.dataset.part === "key") saveText(pair.private_key_pem, "bootstrap-key.pem");
-          else saveText(pair.certificate_pem, "bootstrap.pem");
           return;
         }
         const del = e.target.closest(".boot-delete");

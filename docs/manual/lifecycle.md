@@ -39,27 +39,23 @@ In the UI, open the **Enrolments** tab and go to **Bootstrap certificates**:
 
 1. Fill in what the hosts' certificates are to carry: the **country** (C, chosen from a list), the
    **state** (ST), the **locality** (L), the **customer** (O), the **site** (OU) and a **customer
-   number** (organizationIdentifier). Each is optional. The approver sees them on every request
+   number** (organizationIdentifier). The customer and the site are required, so every host names
+   both and a Selector on them reaches it; the others are optional. The approver sees them on every request
    this certificate carries, every host certificate issued from it carries them, and its Agents
    carry them as `fleet.host.*` for Selectors to match. They grant nothing. A value stays until a
    host enrols again, so name only what is stable.
 2. Set how many **days** it is valid: 10 by default, 90 at most. Choose the time it takes to set the
    hosts up.
-3. Optionally type a **password**, twice. With it, the certificate and its key come as one file,
+3. Type a **password**, twice; it is required. The certificate and its key come as one file,
    `bootstrap.p12`, encrypted under that password.
 4. Press **Issue**. The new certificate appears in the list with its serial and end.
-5. In its row, press **Save bootstrap.p12** — or, without a password, **Save bootstrap.pem** and
-   **Save bootstrap-key.pem**.
+5. In its row, press **Save bootstrap.p12**.
 
-**With a password, the file stays available.** The Server keeps `bootstrap.p12` and offers it in
-every later visit to the page, until the certificate ends or is revoked. It does not keep the
-password: hand that to whoever installs the hosts by another way than the file, a phone call
-rather than the same mail.
-
-**Without one, save both files before you leave the page.** The Server does not keep the private
-key. The page holds it only while it stays open, and asks before it is reloaded or closed. A
-certificate issued earlier, or from a script, shows no save buttons. A lost key is not a problem:
-issue another certificate.
+**The file stays available.** The Server keeps `bootstrap.p12` and offers it in every later visit
+to the page, until the certificate ends or is revoked; the private key never leaves the Server in
+any other form. It does not keep the password: hand that to whoever installs the hosts by another
+way than the file, a phone call rather than the same mail. A host that needs the pair as PEM
+takes it out of the file with `opamp-fleetctl pki p12-extract` ([`pki`](tools.md#pki)).
 
 One pair may go to every host of that customer or site. It opens nothing on its own: a host that
 holds it can ask for a certificate only while the enrolment window is open, and gets one only
@@ -76,9 +72,9 @@ Each host needs the server CA and the bootstrap certificate, best kept in one di
 | File | From | Notes |
 |---|---|---|
 | `server-ca.pem` | the offline directory `pki init` made | The Client trusts this CA, and only it. |
-| `bootstrap.p12` | step 1, with a password | Or the two files below. The install asks for its password, or reads it from a file. |
-| `bootstrap.pem` | step 1, without a password | |
-| `bootstrap-key.pem` | step 1, without a password | Readable by root only. |
+| `bootstrap.p12` | step 1 | Or the two files below. The install asks for its password, or reads it from a file. |
+| `bootstrap.pem` | `opamp-fleetctl pki p12-extract` from `bootstrap.p12` | |
+| `bootstrap-key.pem` | `opamp-fleetctl pki p12-extract` from `bootstrap.p12` | Readable by root only. |
 
 Install the Client from the release's `.deb`, `.rpm` or `.msi`. The package registers the service
 and leaves it stopped. Then configure it in one of two ways:

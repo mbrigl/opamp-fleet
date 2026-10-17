@@ -302,7 +302,7 @@ async fn go_client_against_our_server(scheme: &str) {
     }
 
     // Remote config: offered, acknowledged as APPLIED with its hash, and not offered again.
-    common::save(&server.state, "interop", "interop: true\n", "");
+    common::save(&server.state, "interop", "interop: true\n", GO_AGENT_TYPE);
     common::release_to_every_agent(&server.state, &["interop"]);
     wait_until("the Configuration to be assigned to the Go Client", || {
         server
@@ -817,7 +817,7 @@ async fn go_client_against_our_tls_server(scheme: &str) {
         agent(&uid).filter(|a| a.service_name == GO_AGENT_TYPE)
     })
     .await;
-    common::save(&state, "interop-tls", "interop: tls\n", "");
+    common::save(&state, "interop-tls", "interop: tls\n", GO_AGENT_TYPE);
     common::release_to_every_agent(&state, &["interop-tls"]);
     wait_until("the configuration APPLIED over TLS", || {
         agent(&uid).filter(|a| a.remote_config_status == "APPLIED" && a.in_sync)

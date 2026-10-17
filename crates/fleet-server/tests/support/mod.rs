@@ -229,10 +229,11 @@ pub async fn distribute_with_role(rest_addr: SocketAddr, name: &str, body: &str,
     .await;
 }
 
-/// Saves a Configuration through the REST API — content only, distributed to nobody.
+/// Saves a Configuration for [`AGENT_TYPE`] through the REST API — content only, distributed to
+/// nobody.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn save_configuration(rest_addr: SocketAddr, name: &str, body: &str, role: &str) {
-    let mut spec = serde_json::json!({ "body": body });
+    let mut spec = serde_json::json!({ "body": body, "service_name": AGENT_TYPE });
     if !role.is_empty() {
         spec["role"] = role.into();
     }

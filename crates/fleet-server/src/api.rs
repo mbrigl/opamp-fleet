@@ -1009,8 +1009,11 @@ struct ConfigurationSpec {
     /// See [`Revision::role`]. Absent means top-level configuration.
     #[serde(default)]
     role: String,
-    /// See [`Revision::service_name`]. Absent means every Agent type.
+    /// The Agent type this Configuration is written for, compared raw against the `service.name`
+    /// an Agent reports (ADR-0034 clauses 1 and 3). Required: absent or empty is refused `400`.
+    /// Read as empty when absent, so the refusal names it.
     #[serde(default)]
+    #[schema(required = true)]
     service_name: String,
     /// Read only to refuse it by name: a Configuration has no Selector (ADR-0034 clauses 1 and 9).
     #[serde(default)]
@@ -1029,8 +1032,7 @@ struct ConfigurationView {
     /// The Baseline's `AgentConfigObject.role` (ADR-0023); absent means top-level configuration.
     #[serde(skip_serializing_if = "String::is_empty")]
     role: String,
-    /// The Agent type this Configuration is for (ADR-0034 clause 3); absent means every type.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    /// The Agent type this Configuration is written for (ADR-0034 clauses 1 and 3).
     service_name: String,
     /// The Deployments that hold this Configuration, in name order — where "whom does it reach"
     /// is answered. Empty means it is saved and no rollout act can release it.
@@ -1123,7 +1125,7 @@ async fn get_configuration(
     request_body = ConfigurationSpec,
     responses(
         (status = 200, description = "The stored Configuration — distributed to nobody until a Deployment holding it is rolled out", body = ConfigurationView),
-        (status = 400, description = "Invalid name, an empty body, or a selector", body = ErrorBody),
+        (status = 400, description = "Invalid name, an empty body, no service_name, or a selector", body = ErrorBody),
         (status = 500, description = "The Configuration could not be persisted", body = ErrorBody)
     )
 )]
@@ -1160,11 +1162,13 @@ async fn put_configuration(
         // Carried verbatim (ADR-0023): the values are Agent-type-specific, so the Server never
         // validates one against a vocabulary of its own. Empty is top-level configuration.
         role: spec.role,
-        // Compared raw against the reported `service.name` (ADR-0034 clause 3); empty is every
-        // type. Not validated against the fleet, because a Configuration may precede its first
-        // Agent.
+        // Compared raw against the reported `service.name` (ADR-0034 clause 3). Required, and not
+        // validated against the fleet, because a Configuration may precede its first Agent.
         service_name: spec.service_name,
     };
+    if let Err(e) = configs::check_type(&revision) {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
     match state.save_configuration(&name, revision) {
         Ok(config) => {
             info!(configuration = %config.name, role = %config.saved.role, service_name = %config.saved.service_name, bytes = config.saved.body.len(), "configuration saved from the API");
@@ -2451,22 +2455,26 @@ struct PendingEnrolment {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct IssueBootstrapRequest {
+    /// Required, with `organization` and `organizational_unit`.
     #[serde(default)]
+    #[schema(required = true)]
     subject: Option<BootstrapSubject>,
     /// 1 to 90; 10 when absent. Cut to the bootstrap CA's end.
     #[serde(default)]
     validity_days: Option<u32>,
-    /// 4 to 128 characters without a control character. With it the key is not answered in PEM:
-    /// the Server keeps a PKCS#12 file of the certificate and its key under this password, to be
-    /// downloaded until the certificate ends or is revoked. The password is kept nowhere.
+    /// 4 to 128 characters without a control character. Required: the Server keeps a PKCS#12
+    /// file of the certificate and its key under this password, to be downloaded until the
+    /// certificate ends or is revoked; the key is never answered in PEM. The password is kept
+    /// nowhere. Read as absent when it is missing, so the refusal names it.
     #[serde(default)]
-    #[schema(format = Password)]
+    #[schema(format = Password, required = true)]
     password: Option<String>,
 }
 
-/// The subject of a bootstrap certificate: these attributes only, each optional; the Server sets
-/// the common name. Every host certificate issued from it carries them, and they describe and
-/// select the Host through `fleet.host.*`; they authorize nothing (ADR-0036 clause 1).
+/// The subject of a bootstrap certificate: these attributes only, `organization` and
+/// `organizational_unit` required and the others optional; the Server sets the common name. Every
+/// host certificate issued from it carries them, and they describe and select the Host through
+/// `fleet.host.*`; they authorize nothing (ADR-0036 clause 1).
 #[derive(Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct BootstrapSubject {
@@ -2476,17 +2484,18 @@ struct BootstrapSubject {
     state: Option<String>,
     /// L.
     locality: Option<String>,
-    /// O — the customer, typically.
+    /// O — the customer, typically. Required; absent is refused `400` naming it.
+    #[schema(required = true)]
     organization: Option<String>,
-    /// OU — the site, typically.
+    /// OU — the site, typically. Required; absent is refused `400` naming it.
+    #[schema(required = true)]
     organizational_unit: Option<String>,
     /// organizationIdentifier (2.5.4.97) — a customer or contract number, a UUID for instance.
     organization_identifier: Option<String>,
 }
 
-/// An issued bootstrap certificate with its private key — the one time the key is handed out
-/// (ADR-0028 clause 21) — or, issued with a password, without it: the key is then in the PKCS#12
-/// file of `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0029 clause 3).
+/// An issued bootstrap certificate, never with its private key: the key is in the PKCS#12 file of
+/// `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0036 clause 8).
 #[derive(Serialize, ToSchema)]
 struct IssuedBootstrap {
     /// What a revocation names, with the authority `bootstrap`.
@@ -2495,9 +2504,6 @@ struct IssuedBootstrap {
     not_before_ms: u64,
     not_after_ms: u64,
     certificate_pem: String,
-    /// Absent when a password was named.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    private_key_pem: Option<String>,
 }
 
 /// A bootstrap certificate on record (ADR-0028 clause 24).
@@ -2549,19 +2555,19 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
     Json(list).into_response()
 }
 
-/// Issues a bootstrap certificate with the subject an operator names. Without a password the
-/// private key is in this answer and nowhere else: the Server keeps the certificate's facts, never
-/// its key. With one, the key is in no answer: the Server keeps it, encrypted under that password
-/// in a PKCS#12 file, for download (ADR-0029). A host with it may only ask to enrol, inside an open
-/// window, and an operator approves (ADR-0028).
+/// Issues a bootstrap certificate with the subject an operator names, which holds at least an
+/// organization and an organizational unit, under the password the request names. The key is in no
+/// answer: the Server keeps it, encrypted under that password in a PKCS#12 file, for download
+/// (ADR-0029, ADR-0036 clause 8). A host with it may only ask to enrol, inside an open window, and
+/// an operator approves (ADR-0028).
 #[utoipa::path(
     post,
     path = "/api/v1/bootstrap-certificates",
     tag = "enrolment",
     request_body = IssueBootstrapRequest,
     responses(
-        (status = 201, description = "Issued; the certificate and, without a password, its private key, this once", body = IssuedBootstrap),
-        (status = 400, description = "A subject attribute this route does not know, a country that is not two upper-case letters, another value out of bounds, validity_days outside 1 to 90, or a password outside 4 to 128 characters", body = ErrorBody),
+        (status = 201, description = "Issued; the certificate, its key kept in the PKCS#12 file only", body = IssuedBootstrap),
+        (status = 400, description = "No organization, organizational_unit or password, a subject attribute this route does not know, a country that is not two upper-case letters, another value out of bounds, validity_days outside 1 to 90, or a password outside 4 to 128 characters", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody),
         (status = 409, description = "No bootstrap_ca_key_file is configured, the bootstrap CA has ended, or the record is full", body = ErrorBody),
@@ -2612,13 +2618,11 @@ async fn issue_bootstrap_certificate(
                         .with("serial", pair.serial.clone())
                         .with("subject", pair.subject.clone())
                         .with("not_after_ms", pair.not_after_ms)
-                        .with("p12", pair.pkcs12.is_some().to_string()),
+                        .with("p12", "true"),
                 );
                 if recorded.is_err() {
                     // Nor later: an issuance that is not on the record keeps no file to download.
-                    if pair.pkcs12.is_some() {
-                        let _ = bootstrap.forget_p12(&pair.serial);
-                    }
+                    let _ = bootstrap.forget_p12(&pair.serial);
                     return error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "the audit record cannot be written now; nothing was handed out",
@@ -2635,7 +2639,6 @@ async fn issue_bootstrap_certificate(
                     not_before_ms: pair.not_before_ms,
                     not_after_ms: pair.not_after_ms,
                     certificate_pem: pair.certificate_pem,
-                    private_key_pem: pair.private_key_pem,
                 }),
             )
                 .into_response()
@@ -2661,7 +2664,7 @@ async fn issue_bootstrap_certificate(
     }
 }
 
-/// The PKCS#12 file of a bootstrap certificate issued with a password, as often as it is asked,
+/// The PKCS#12 file of a bootstrap certificate, as often as it is asked,
 /// until the certificate ends or is revoked (ADR-0029 clause 4). Each download is on the record.
 #[utoipa::path(
     get,
@@ -2670,7 +2673,7 @@ async fn issue_bootstrap_certificate(
     params(("serial" = String, Path, description = "the serial, as the list names it")),
     responses(
         (status = 200, description = "The PKCS#12 file, `bootstrap.p12`", content_type = "application/x-pkcs12", body = Vec<u8>),
-        (status = 404, description = "No such certificate, none issued with a password, revoked or ended — or enrolment is not configured", body = ErrorBody),
+        (status = 404, description = "No such certificate, no file kept for it, revoked or ended — or enrolment is not configured", body = ErrorBody),
         (status = 503, description = "The audit record cannot be written; nothing was handed out", body = ErrorBody)
     )
 )]

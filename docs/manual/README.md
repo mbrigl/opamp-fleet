@@ -92,8 +92,11 @@ development set of them.
    the attributes it reported.
 
 5. **Create a Configuration and roll it out through a Deployment.** In the UI, press
-   **Configurations**, then **＋ Create**, give it a name, enter the configuration text and press
-   **OK**. A Configuration aims at nobody by itself: on **Deployments**, press **＋ Create**, name
+   **Configurations**, then **＋ Create**, give it a name and the Agent type it is for —
+   `supervisor`, the type the Client's own Agent reports — enter the configuration text and press
+   **OK**. The Client's own Agent is configured with its Supervisor set, and with no Managed
+   Process yet a comment is the whole of it: `# no [[supervisor]] block yet`. A Configuration
+   aims at nobody by itself: on **Deployments**, press **＋ Create**, name
    the deployment, give it a selector every Agent of this host matches — `os.type=linux` on Linux —
    add the Configuration and press **OK**. Then press the row's **Roll out**, because saving only
    stores; the rollout act is what reaches the fleet. The same steps over the API, with `--cacert`
@@ -101,7 +104,7 @@ development set of them.
 
    ```console
    $ curl --cacert .dev-pki/offline/server-ca.pem -X PUT -H 'Content-Type: application/json' \
-          -d '{"body": "receivers: {}"}' \
+          -d '{"service_name": "supervisor", "body": "# no [[supervisor]] block yet\n"}' \
           https://127.0.0.1:4321/api/v1/configurations/base
    $ curl --cacert .dev-pki/offline/server-ca.pem -X PUT -H 'Content-Type: application/json' \
           -d '{"selector": {"os.type": "linux"}}' \
@@ -117,9 +120,9 @@ development set of them.
    changed by the earlier act: its row on the Agents tab shows the Configuration waiting, with a
    **roll out** control of its own.
 
-   The Configuration is untyped, so it reaches every Agent the Deployment claims — the Client's own
-   Agent included, which refuses a body that is not a Supervisor set. Give it the `service_name`
-   of the Agents it is for, and they alone receive it.
+   A Configuration reaches only the Agents of the Deployment that report its `service_name`. A
+   Collector put under the Client later reports a type of its own and needs a Configuration of
+   its own: content for several Agent types is one Configuration per type.
 
 For a deployment that crosses a network, with certificates of your own, follow
 [Setting up a fleet](setup.md). From here, [Server](server.md) covers targeting a subset of the

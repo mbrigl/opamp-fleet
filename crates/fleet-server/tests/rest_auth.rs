@@ -114,7 +114,7 @@ async fn the_configured_operator_reaches_the_api() {
             server.rest_addr
         ))
         .header("authorization", &credential)
-        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .json(&serde_json::json!({ "body": "receivers: {}", "service_name": "otelcol" }))
         .send()
         .await
         .expect("put");

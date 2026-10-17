@@ -1223,8 +1223,7 @@ as its new set:
   once the file is written and the starts are issued — or `FAILED` with the reason when the
   offer does not parse, a block does not validate against this host's globals, or the write
   fails (then nothing is applied and the running set stays in force). A body that is not TOML —
-  say, a Collector YAML rolled out fleet-wide with no type — is refused the same way, which is
-  one more reason to state whom a Configuration is for.
+  say, a Collector YAML typed for the Client by mistake — is refused the same way.
 
 A Client whose Server never rolls such a Configuration out runs its locally written blocks
 exactly as before. Note that once one applied, the Server's set is authoritative, unless

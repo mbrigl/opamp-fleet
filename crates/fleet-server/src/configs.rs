@@ -1,6 +1,6 @@
 //! Named Configurations (ADR-0034): the persistent store, the type fit, and the composition of
-//! each Agent's Remote configuration. A Configuration is content only — a body, an optional Agent
-//! type and an optional role — and aims at nobody: a Deployment holds it, and the Deployment's
+//! each Agent's Remote configuration. A Configuration is content only — a body, the Agent type it
+//! is written for and an optional role — and aims at nobody: a Deployment holds it, and the Deployment's
 //! Selector aims (ADR-0034). Saving is the only content state (ADR-0025) — **a saved Configuration
 //! reaches nobody by itself**. What an Agent is offered is composed from the assignment the
 //! operator's rollout act wrote; the store's part is to keep the saved revision, and to retain
@@ -31,11 +31,11 @@ pub struct Revision {
     /// Agent type, so nothing here guesses at one it does not know.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
-    /// The Agent type this Configuration is for (ADR-0034 clause 3), compared raw for equality
-    /// against the `service.name` the Agent reports. It fits the Configuration to the Agents of
-    /// the Deployment that holds it; it never aims. Empty — the default, and absent from the JSON
-    /// — means every Agent of that Deployment, so cross-type `supplementary` content stays
-    /// expressible.
+    /// The Agent type this Configuration is written for (ADR-0034 clauses 1 and 3), compared raw
+    /// for equality against the `service.name` the Agent reports. It fits the Configuration to the
+    /// Agents of the Deployment that holds it; it never aims. Required: the store refuses a saved
+    /// revision without one ([`check_type`]). It is read as empty when a stored file lacks it, so
+    /// the refusal names the file rather than a parse error.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub service_name: String,
 }
@@ -130,13 +130,29 @@ impl DesiredConfig {
     }
 }
 
-/// Does this revision fit this Agent (ADR-0034 clause 3)? A set `service_name` must equal the
+/// Refuses a revision without an Agent type (ADR-0034 clause 1): a Configuration is written for
+/// one type, and content for several is one Configuration per type.
+///
+/// # Errors
+/// The refusal, naming `service_name`.
+pub fn check_type(revision: &Revision) -> Result<(), String> {
+    if revision.service_name.trim().is_empty() {
+        return Err(
+            "service_name is required: a Configuration is written for one Agent type (ADR-0034)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Does this revision fit this Agent (ADR-0034 clause 3)? Its `service_name` must equal the
 /// `service.name` the Agent reports — compared raw, no canonicalisation, because there is no
-/// canonical set of Agent types. An Agent that reports no `service.name` fits only untyped
-/// revisions. Whom a Configuration aims at is not asked here: the Deployment holding it decides.
+/// canonical set of Agent types. An Agent that reports no `service.name` fits no revision, and a
+/// revision without a type fits no Agent. Whom a Configuration aims at is not asked here: the
+/// Deployment holding it decides.
 pub fn fits(revision: &Revision, description: Option<&AgentDescription>) -> bool {
     if revision.service_name.is_empty() {
-        return true;
+        return false;
     }
     let Some(description) = description else {
         return false;
@@ -219,6 +235,7 @@ impl ConfigStore {
         if revision.body.trim().is_empty() {
             return Err("the configuration body is empty; refusing to store it".to_string());
         }
+        check_type(&revision)?;
         let mut configs = self.configs.write().expect("configs lock");
         let config = match configs.get(name) {
             Some(existing) => Configuration {
@@ -436,12 +453,21 @@ pub(crate) mod tests {
         }
     }
 
+    /// The Agent type [`revision`] is written for, and the one [`otelcol`] reports.
+    pub(crate) const TYPE: &str = "otelcol";
+
+    /// A top-level revision of `body` for [`TYPE`].
     pub(crate) fn revision(body: &str) -> Revision {
         Revision {
             body: body.to_string(),
             role: String::new(),
-            service_name: String::new(),
+            service_name: TYPE.to_string(),
         }
+    }
+
+    /// An Agent of [`TYPE`].
+    fn otelcol() -> AgentDescription {
+        description(&[("service.name", TYPE)])
     }
 
     fn typed(mut revision: Revision, service_name: &str) -> Revision {
@@ -472,11 +498,11 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// ADR-0034 clause 3: a typed revision fits only the Agents of its type; an untyped one fits
-    /// every Agent of the Deployment holding it.
+    /// ADR-0034 clause 3: a revision fits only the Agents of its type. One without a type, which
+    /// the store never holds, fits no Agent at all.
     /// Verifies: ADR-0034
     #[test]
-    fn a_typed_revision_reaches_only_agents_of_its_type() {
+    fn a_revision_reaches_only_agents_of_its_type() {
         let otelcol = description(&[("service.name", "otelcol"), ("os.type", "linux")]);
         let client = description(&[("service.name", "supervisor")]);
 
@@ -485,25 +511,41 @@ pub(crate) mod tests {
         assert!(!fits(&for_otelcol, Some(&client)));
         assert!(
             !fits(&for_otelcol, None),
-            "an undescribed agent matches only untyped revisions"
+            "an undescribed agent receives no Configuration"
         );
 
-        // Untyped means every type.
-        assert!(fits(&revision("b"), Some(&otelcol)));
-        assert!(fits(&revision("b"), Some(&client)));
-        assert!(fits(&revision("b"), None));
+        let untyped = typed(revision("b"), "");
+        assert!(!fits(&untyped, Some(&otelcol)));
+        assert!(!fits(&untyped, Some(&client)));
+        assert!(!fits(&untyped, None));
     }
 
     /// ADR-0034 clause 3: equality against a missing attribute fails, so an Agent that reports no
-    /// `service.name` matches only untyped revisions.
+    /// `service.name` receives no Configuration.
+    /// Verifies: ADR-0034
     #[test]
-    fn an_agent_without_a_type_matches_only_untyped_revisions() {
+    fn an_agent_without_a_type_receives_no_configuration() {
         let untyped_agent = description(&[("os.type", "linux")]);
         assert!(!fits(
             &typed(revision("b"), "otelcol"),
             Some(&untyped_agent)
         ));
-        assert!(fits(&revision("b"), Some(&untyped_agent)));
+        assert!(!fits(&typed(revision("b"), ""), Some(&untyped_agent)));
+    }
+
+    /// ADR-0034 clause 1: the store refuses a revision without an Agent type, naming
+    /// `service_name`, and keeps nothing of it.
+    /// Verifies: ADR-0034
+    #[test]
+    fn the_store_refuses_a_revision_without_a_type() {
+        let store = ConfigStore::open(Box::new(Memory::default())).expect("open");
+        for missing in ["", "  "] {
+            let refused = store
+                .put_saved("base", typed(revision("b\n"), missing))
+                .expect_err("a Configuration is written for one Agent type");
+            assert!(refused.contains("service_name"), "{refused}");
+        }
+        assert!(store.get("base").is_none(), "nothing was saved");
     }
 
     /// ADR-0025: saving only saves. A saved Configuration is composed for nobody until an
@@ -522,7 +564,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             store
-                .candidates_in(&BTreeSet::from(["base".to_string()]), None)
+                .candidates_in(&BTreeSet::from(["base".to_string()]), Some(&otelcol()))
                 .into_keys()
                 .collect::<Vec<_>>(),
             ["base"],
@@ -561,7 +603,8 @@ pub(crate) mod tests {
             released.hash,
             "the Agent keeps its pinned revision"
         );
-        let candidates = store.candidates_in(&BTreeSet::from(["base".to_string()]), None);
+        let candidates =
+            store.candidates_in(&BTreeSet::from(["base".to_string()]), Some(&otelcol()));
         assert_eq!(candidates.len(), 1);
         assert_ne!(
             candidates["base"], assignments["base"],
@@ -743,17 +786,19 @@ pub(crate) mod tests {
         );
     }
 
-    /// The JSON contract of ADR-0023, on the stored revision: unset fields are
-    /// absent on the way in and absent on the way out, so every stored file stays minimal.
+    /// The JSON contract of ADR-0023, on the stored revision: an unset role is absent on the way
+    /// in and absent on the way out, so every stored file stays minimal; the type, which every
+    /// saved revision has (ADR-0034 clause 1), is always written.
     #[test]
-    fn unset_role_and_type_are_absent_from_the_stored_json() {
+    fn an_unset_role_is_absent_from_the_stored_json() {
         let json = serde_json::to_string(&revision("b")).expect("serialize");
         assert!(!json.contains("role"), "{json}");
-        assert!(!json.contains("service_name"), "{json}");
+        assert!(json.contains(r#""service_name":"otelcol""#), "{json}");
 
-        let restored: Revision = serde_json::from_str(r#"{"body":"b"}"#).expect("deserialize");
+        let restored: Revision =
+            serde_json::from_str(r#"{"body":"b","service_name":"otelcol"}"#).expect("deserialize");
         assert_eq!(restored.role, "");
-        assert_eq!(restored.service_name, "");
+        assert_eq!(restored.service_name, "otelcol");
 
         let json =
             serde_json::to_string(&typed(with_role(revision("b"), "supplementary"), "otelcol"))
@@ -764,7 +809,7 @@ pub(crate) mod tests {
 
     /// The candidates are the held Configurations that exist and fit the Agent's type, each at
     /// its saved revision (ADR-0034 clauses 3 and 6). A name the store does not hold proposes
-    /// nothing.
+    /// nothing, and an Agent that reports no type is proposed nothing.
     /// Verifies: ADR-0034
     #[test]
     fn candidates_are_the_held_configurations_that_fit() {
@@ -795,13 +840,8 @@ pub(crate) mod tests {
         );
 
         let untyped = description(&[("os.type", "linux")]);
-        assert_eq!(
-            store
-                .candidates_in(&held, Some(&untyped))
-                .into_keys()
-                .collect::<Vec<_>>(),
-            ["base"]
-        );
+        assert!(store.candidates_in(&held, Some(&untyped)).is_empty());
+        assert!(store.candidates_in(&held, None).is_empty());
         assert!(store
             .candidates_in(&BTreeSet::new(), Some(&otelcol))
             .is_empty());

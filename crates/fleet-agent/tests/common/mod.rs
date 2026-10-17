@@ -40,8 +40,8 @@ pub fn fleet_state(dir: &Path) -> fleet_server::fleet::AppState {
         ))
 }
 
-/// Saves a top-level Configuration — content only, distributed to nobody. An empty `service_name`
-/// fits every Agent type.
+/// Saves a top-level Configuration for the Agent type `service_name` — content only, distributed
+/// to nobody (ADR-0034).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this support
 pub fn save(state: &fleet_server::fleet::AppState, name: &str, body: &str, service_name: &str) {
     state

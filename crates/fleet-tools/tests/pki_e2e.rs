@@ -1,7 +1,8 @@
 //! The certificates `opamp-fleetctl pki init` makes are all a fleet needs (ADR-0028):
-//! a Server configured from `server.toml.fragment` issues the bootstrap pair, and admits the real
-//! Client configured from `supervisor.toml.fragment` with it once its enrolment is approved, with
-//! no certificate made by anything else. The program is run as an operator runs it; the Server and the Client run in this process.
+//! a Server configured from `server.toml.fragment` issues the bootstrap certificate as a PKCS#12
+//! file, `opamp-fleetctl pki p12-extract` writes its pair where `supervisor.toml.fragment` names
+//! it, and the Server admits the real Client configured from that fragment with it once its
+//! enrolment is approved, with no certificate made by anything else. The program is run as an operator runs it; the Server and the Client run in this process.
 
 use std::path::Path;
 use std::process::Command;
@@ -84,8 +85,9 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
     );
     let signer = fleet_server::ca::ClientCa::from_config(&fragment.client_ca)
         .expect("the client CA pki init made loads");
-    // The Server issues the host's bootstrap pair from the bootstrap CA key pki init gave it, and
-    // the operator puts it where supervisor.toml.fragment names it (ADR-0028).
+    // The Server issues the host's bootstrap certificate from the bootstrap CA key pki init gave
+    // it, as a PKCS#12 file only (ADR-0036 clause 8), and the operator extracts its pair where
+    // supervisor.toml.fragment names it (ADR-0031).
     let bootstrap_ca =
         fleet_server::ca::BootstrapCa::from_config(&fragment.enrolment, Some(&fragment.client_ca))
             .expect("the bootstrap CA pki init made loads")
@@ -96,17 +98,31 @@ async fn a_fleet_made_by_pki_init_admits_an_enrolled_host() {
         Arc::new(fleet_server::clock::SystemClock),
     )
     .expect("bootstrap record");
-    let pair = bootstrap
-        .issue(&fleet_server::bootstrap::IssueRequest::default())
-        .expect("a bootstrap pair");
-    std::fs::write(offline_dir.join("bootstrap.pem"), &pair.certificate_pem).expect("write");
-    std::fs::write(
-        offline_dir.join("bootstrap-key.pem"),
-        pair.private_key_pem
-            .as_deref()
-            .expect("issued without a password"),
-    )
-    .expect("write");
+    let request: fleet_server::bootstrap::IssueRequest =
+        serde_json::from_value(serde_json::json!({
+            "subject": { "organization": "Kunde GmbH", "organizational_unit": "Werk Nord" },
+            "password": "a password of the operator"
+        }))
+        .expect("request");
+    let issued = bootstrap.issue(&request).expect("a bootstrap certificate");
+    let files = dir.path().join("files");
+    std::fs::create_dir_all(&files).expect("files");
+    std::fs::write(files.join("bootstrap.p12"), &issued.pkcs12).expect("write");
+    std::fs::write(files.join("password"), "a password of the operator\n").expect("write");
+    let extracted = Command::new(env!("CARGO_BIN_EXE_opamp-fleetctl"))
+        .args(["pki", "p12-extract"])
+        .arg(files.join("bootstrap.p12"))
+        .arg("--out")
+        .arg(&offline_dir)
+        .arg("--password-file")
+        .arg(files.join("password"))
+        .output()
+        .expect("run opamp-fleetctl");
+    assert!(
+        extracted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.stderr)
+    );
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("state")

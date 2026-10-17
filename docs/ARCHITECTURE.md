@@ -225,7 +225,8 @@ probation that commits or rolls back.
 
 **A host joins and stays.** The Server issues bootstrap certificates on an operator's request:
 `bootstrap` checks the subject and the life, records what was issued, and asks its
-`BootstrapSigner` port — the bootstrap CA with its key in `ca` — to make the key and sign
+`BootstrapSigner` port — the bootstrap CA with its key in `ca` — to make the key, sign, and
+seal both into the PKCS#12 file it keeps, the key's only way out
 ([ADR-0028](adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
 A fresh host presents a bootstrap certificate while an operator has
 the enrolment window open; its CSR waits until an operator approves it, and the certificate it

@@ -15,7 +15,9 @@
 //! - **Deployments** keep their name, Selector and the Packages that were carried; their
 //!   signatures moved onto the entries, and a Package that was not carried leaves them, named.
 //! - **Configurations** keep their content; each loses its Selector, and is listed with the
-//!   Selector it had, for the operator to place in a Deployment.
+//!   Selector it had, for the operator to place in a Deployment. One without an Agent type is not
+//!   carried, because the Server refuses it at startup (ADR-0034 clause 1): it is listed, and its
+//!   file stays in the old directory for the operator to save again with a type.
 //! - **Agents** are carried with their labels moved into the record. A Package released through a
 //!   Deployment stays assigned through it, while both were carried. A 0.5 Server released every
 //!   Configuration by itself, never through a Deployment, so no Configuration pin has a place in
@@ -544,7 +546,8 @@ fn carry_packages(
     Ok(carried)
 }
 
-/// The Configurations: `config_dir/<name>.json`, each Selector dropped and listed.
+/// The Configurations: `config_dir/<name>.json`, each Selector dropped and listed; one without an
+/// Agent type is listed and not carried.
 fn carry_configurations(
     config_dir: &Path,
     data_dir: &Path,
@@ -598,6 +601,15 @@ fn carry_configurations(
         };
         if let Err(e) = crate::configs::validate_name(&config.name) {
             report.line(format!("dropped: {} — {e}", path.display()));
+            continue;
+        }
+        if crate::configs::check_type(&config.saved).is_err() {
+            report.line(format!(
+                "listed: Configuration {} was not carried — it has no Agent type (service_name),                  which every Configuration needs (ADR-0034); save it again with a type from {},                  which stays where it is; it had the Selector {}",
+                config.name,
+                path.display(),
+                selector_text(&selector)
+            ));
             continue;
         }
         backend.put(&config)?;
@@ -801,13 +813,14 @@ mod tests {
         Revision {
             body: body.to_string(),
             role: String::new(),
-            service_name: String::new(),
+            service_name: "otelcol".to_string(),
         }
     }
 
     /// The layout a 0.5 Server wrote, file by file, in the shapes it wrote them: the register, a
     /// revocation list still holding a credential entry, the hosts, a bootstrap entry with its
-    /// PKCS#12 file, a chained audit file, Configurations with Selectors, a Deployment with its
+    /// PKCS#12 file, a chained audit file, Configurations with Selectors (one of them without an
+    /// Agent type), a Deployment with its
     /// signatures, a Package with an uploaded and a referenced entry, Agents in envelope version
     /// 2 and their labels beside them.
     struct Old {
@@ -900,16 +913,29 @@ mod tests {
             &config_dir.join("base.json"),
             json(serde_json::json!({
                 "name": "base",
-                "saved": {"selector": {"os.type": "linux"}, "body": v2.body},
+                "saved": {"selector": {"os.type": "linux"}, "body": v2.body,
+                          "service_name": "otelcol"},
                 "retained": {
-                    revision_hash(&v1): {"selector": {"os.type": "linux"}, "body": v1.body},
-                    revision_hash(&v2): {"selector": {"os.type": "linux"}, "body": v2.body}
+                    revision_hash(&v1): {"selector": {"os.type": "linux"}, "body": v1.body,
+                                         "service_name": "otelcol"},
+                    revision_hash(&v2): {"selector": {"os.type": "linux"}, "body": v2.body,
+                                         "service_name": "otelcol"}
                 }
             })),
         );
         write(
             &config_dir.join("extra.json"),
-            json(serde_json::json!({"name": "extra", "saved": {"body": "x: 1\n"}})),
+            json(serde_json::json!({
+                "name": "extra",
+                "saved": {"body": "x: 1\n", "service_name": "telegraf"}
+            })),
+        );
+        write(
+            &config_dir.join("untyped.json"),
+            json(serde_json::json!({
+                "name": "untyped",
+                "saved": {"selector": {"os.type": "linux"}, "body": "u: 1\n"}
+            })),
         );
 
         let uploaded = b"otelcol 1.0.0 for linux".to_vec();
@@ -992,7 +1018,8 @@ mod tests {
     /// `server migrate` over the layout a 0.5 Server wrote carries the register, the revocation
     /// list, the hosts, the bootstrap entries, the audit files, the Agents with their labels, and
     /// the artifacts with their signatures; it drops a referenced entry and lists every
-    /// Configuration's old Selector — and the new data directory opens as the Server opens it.
+    /// Configuration's old Selector, and a Configuration without an Agent type it lists and does
+    /// not carry, leaving its file — and the new data directory opens as the Server opens it.
     /// Verifies: ADR-0037
     #[test]
     fn migrate_carries_an_old_layout_into_a_data_directory() {
@@ -1070,6 +1097,24 @@ mod tests {
         assert!(
             text.contains("listed: Configuration extra had the Selector {}"),
             "{text}"
+        );
+        assert!(
+            text.contains("listed: Configuration untyped was not carried")
+                && text.contains("service_name")
+                && text.contains(&old.config_dir.join("untyped.json").display().to_string()),
+            "{text}"
+        );
+        assert!(
+            !data_dir.join("configurations/untyped.json").exists(),
+            "an untyped Configuration is not carried"
+        );
+        assert!(
+            old.config_dir.join("untyped.json").is_file(),
+            "its file stays in the old directory"
+        );
+        assert!(
+            text.contains("opened: "),
+            "the data directory opens without it: {text}"
         );
 
         // Agents: labels inside; the release through a Deployment keeps its Package, and every

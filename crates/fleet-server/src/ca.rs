@@ -298,9 +298,10 @@ pub(crate) fn subject_values(name: &x509_parser::x509::X509Name<'_>) -> SubjectV
 /// The six values a bootstrap certificate's subject carries into a host certificate, read under
 /// the rules they were issued by (ADR-0036 clauses 1 and 3): each attribute at most once, a
 /// country of two upper-case letters as a `PrintableString`, every other value of 1 to 64
-/// characters without a control character as a `UTF8String` or a `PrintableString`. Every other
-/// attribute, the common name included, is passed over. The certificate may come from a foreign
-/// PKI, so nothing in it is taken on trust.
+/// characters without a control character as a `UTF8String` or a `PrintableString`, and an
+/// organization and an organizational unit present. Every other attribute, the common name
+/// included, is passed over. The certificate may come from a foreign PKI, so nothing in it is
+/// taken on trust.
 ///
 /// # Errors
 /// Returns why the subject cannot be carried, naming the attribute.
@@ -344,6 +345,12 @@ pub(crate) fn carried_subject(
             .map_err(|_| format!("{key} is not a {encoding}"))?;
         attribute.check(value)?;
         attribute.set(&mut values, value.to_string());
+    }
+    // Every Host names a customer and a site its Selectors can rely on (ADR-0036 clause 1).
+    for attribute in [Attribute::Organization, Attribute::OrganizationalUnit] {
+        if attribute.of(&values).is_empty() {
+            return Err(format!("{} is missing", attribute.key()));
+        }
     }
     Ok(values)
 }
@@ -672,7 +679,7 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         subject: &[(crate::bootstrap::Attribute, String)],
         now_ms: u64,
         not_after_ms: u64,
-        password: Option<&str>,
+        password: &str,
     ) -> Result<crate::bootstrap::Pair, String> {
         use crate::bootstrap::Pair;
         let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
@@ -691,18 +698,9 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         let (_, parsed) = X509Certificate::from_der(certificate.der())
             .map_err(|e| format!("the bootstrap certificate does not parse: {e}"))?;
         let facts = facts(certificate.der())?;
-        // With a password the key leaves only sealed with its certificate (ADR-0029 clause 3).
-        let (private_key_pem, pkcs12) = match password {
-            Some(password) => (
-                None,
-                Some(fleet_core::pkcs12::file::seal(
-                    certificate.der(),
-                    &key.serialize_der(),
-                    password,
-                )?),
-            ),
-            None => (Some(key.serialize_pem()), None),
-        };
+        // The key leaves only sealed with its certificate (ADR-0036 clause 8).
+        let pkcs12 =
+            fleet_core::pkcs12::file::seal(certificate.der(), &key.serialize_der(), password)?;
         Ok(Pair {
             serial: facts.id.serial.clone(),
             id: facts.id,
@@ -713,7 +711,6 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
                 .saturating_mul(1000),
             not_after_ms: facts.not_after_ms,
             certificate_pem: certificate.pem(),
-            private_key_pem,
             pkcs12,
         })
     }
@@ -1348,7 +1345,7 @@ mod tests {
                 ],
                 now,
                 now + 86_400_000,
-                None,
+                "twelve chars",
             )
             .expect("signed");
         let der = opamp::tls::certificates(pair.certificate_pem.as_bytes()).expect("pem");
@@ -1368,17 +1365,17 @@ mod tests {
             cert.validity().not_after.timestamp() * 1000,
             (now + 86_400_000) as i64
         );
-        let key = KeyPair::from_pem(pair.private_key_pem.as_deref().expect("PEM")).expect("key");
+        let opened = fleet_core::pkcs12::file::open(&pair.pkcs12, "twelve chars").expect("opens");
+        let key = KeyPair::try_from(opened.private_key_der.as_slice()).expect("key");
         assert_eq!(
             cert.public_key().raw,
             key.subject_public_key_info().as_slice()
         );
-        assert!(pair.pkcs12.is_none(), "no file without a password");
     }
 
-    /// With a password the key is not handed back in PEM: it is in a PKCS#12 file with its
-    /// certificate, which opens under that password to exactly the two (ADR-0029 clause 3).
-    /// Verifies: ADR-0029
+    /// The key is not handed back in PEM: it is in a PKCS#12 file with its certificate, which
+    /// opens under the password to exactly the two (ADR-0036 clause 8).
+    /// Verifies: ADR-0029, ADR-0036
     #[test]
     fn a_password_seals_the_key_with_its_certificate() {
         use crate::bootstrap::{Attribute, BootstrapSigner as _};
@@ -1394,12 +1391,10 @@ mod tests {
                 &[(Attribute::CommonName, "fleet bootstrap".to_string())],
                 now,
                 now + 86_400_000,
-                Some("twelve chars"),
+                "twelve chars",
             )
             .expect("signed");
-        assert!(pair.private_key_pem.is_none(), "no PEM key");
-        let opened = fleet_core::pkcs12::file::open(&pair.pkcs12.expect("a file"), "twelve chars")
-            .expect("opens");
+        let opened = fleet_core::pkcs12::file::open(&pair.pkcs12, "twelve chars").expect("opens");
         let der = opamp::tls::certificates(pair.certificate_pem.as_bytes()).expect("pem");
         assert_eq!(
             opened.certificate_der,
@@ -1420,11 +1415,10 @@ mod tests {
                 &[(Attribute::CommonName, "fleet bootstrap".to_string())],
                 now,
                 now + 86_400_000,
-                Some("twelve chars"),
+                "twelve chars",
             )
             .expect("signed")
             .pkcs12
-            .expect("a file")
     }
 
     fn six_values() -> SubjectValues {
@@ -1483,7 +1477,7 @@ mod tests {
                 &subject.attributes("fleet bootstrap").expect("valid"),
                 now,
                 now + 86_400_000,
-                None,
+                "twelve chars",
             )
             .expect("signed");
         assert_eq!(
@@ -1564,9 +1558,9 @@ mod tests {
     }
 
     /// The subject a bootstrap certificate from any CA carries is read under the rules it is
-    /// issued by: an attribute twice, a wrong string type, a malformed country or a value out of
-    /// bounds is refused, naming the attribute; other attributes and the common name are passed
-    /// over.
+    /// issued by: an attribute twice, a wrong string type, a malformed country, a value out of
+    /// bounds and a missing organization or organizational unit are refused, naming the
+    /// attribute; other attributes and the common name are passed over.
     /// Verifies: ADR-0036
     #[test]
     fn a_bootstrap_subject_is_carried_only_when_well_formed() {
@@ -1646,6 +1640,22 @@ mod tests {
         ] {
             let refused = read(entries).expect_err("refused");
             assert!(refused.starts_with(named), "{refused} names {named}");
+        }
+        for (entries, refusal) in [
+            (
+                vec![(rcgen::DnType::OrganizationName, utf8("Kunde GmbH"))],
+                "organizational_unit is missing",
+            ),
+            (
+                vec![(rcgen::DnType::OrganizationalUnitName, utf8("Wien"))],
+                "organization is missing",
+            ),
+            (
+                vec![(rcgen::DnType::CommonName, utf8("bootstrap"))],
+                "organization is missing",
+            ),
+        ] {
+            assert_eq!(read(entries).expect_err("refused"), refusal);
         }
     }
 }

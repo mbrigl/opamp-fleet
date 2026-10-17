@@ -3896,12 +3896,12 @@ mod tests {
         state
     }
 
-    /// An untyped, top-level revision of `text`.
+    /// A top-level revision of `text` for the Agent type `report` describes.
     fn body(text: &str) -> Revision {
         Revision {
             body: text.to_string(),
             role: String::new(),
-            service_name: String::new(),
+            service_name: "otelcol".to_string(),
         }
     }
 
@@ -4607,8 +4607,8 @@ mod tests {
         names
     }
 
-    /// `delivering_fleet` with two Configurations in `stable`: `base`, untyped, and `telegraf-conf`,
-    /// typed for another Agent type.
+    /// `delivering_fleet` with two Configurations in `stable`: `base`, for the Agent's type, and
+    /// `telegraf-conf`, typed for another Agent type.
     fn mixed_fleet(dir: &std::path::Path) -> (AppState, PackageId) {
         let (state, _, id) = delivering_fleet(dir);
         state

@@ -70,7 +70,7 @@ stale_after_secs = 90
 #
 #   a CONFIGURATION   content only — {"body", "service_name", "role"}, no Selector — written with
 #                     PUT /api/v1/configurations/{name}. It reaches only the Agents of the type its
-#                     service_name names (every type when it names none).
+#                     service_name names, which every Configuration states.
 #   a PACKAGE         what an Agent type runs at a version. Its identity is those two tokens and
 #                     nothing else — no name of its own, no Selector, no kind flag — holding one
 #                     uploaded artifact per platform, each with its Ed25519 signature. It aims at

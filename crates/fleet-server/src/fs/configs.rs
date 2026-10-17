@@ -55,6 +55,14 @@ impl ConfigBackend for FsConfigBackend {
             if config.name != stem {
                 return Err(super::misnamed(&path, "name"));
             }
+            // A Configuration is written for one Agent type (ADR-0034 clause 1); one without it
+            // would reach no Agent, so the operator saves it again with a type.
+            crate::configs::check_type(&config.saved).map_err(|e| {
+                format!(
+                    "{}: {e} — save it again with the Agent type it is written for",
+                    path.display()
+                )
+            })?;
             configs.push(config);
         }
         Ok(configs)
@@ -156,6 +164,29 @@ mod tests {
                     "the refusal says where the aim went: {error}"
                 );
             }
+        }
+    }
+
+    /// A stored Configuration without an Agent type fails the start, naming its file
+    /// (ADR-0034 clause 1).
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_stored_configuration_without_a_type_refuses_to_open_and_names_it() {
+        for body in [
+            r#"{"name":"untyped","saved":{"body":"receivers: {}\n"}}"#,
+            r#"{"name":"untyped","saved":{"body":"receivers: {}\n","service_name":""}}"#,
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::create_dir_all(dir.path().join("configurations")).expect("dir");
+            std::fs::write(dir.path().join("configurations/untyped.json"), body).expect("write");
+
+            let error = open(dir.path())
+                .map(|_| ())
+                .expect_err("an untyped Configuration is refused");
+            assert!(
+                error.contains("untyped.json") && error.contains("service_name"),
+                "the error names the file and the field: {error}"
+            );
         }
     }
 

@@ -164,7 +164,11 @@ async fn a_configuration_rollout_reaches_a_polling_client() {
     })
     .await;
 
-    common::save(&state, "fleet", "receivers: {}\n", "");
+    let agent_type = view(&state.snapshot(), "otelcol")
+        .expect("otelcol view")
+        .service_name
+        .clone();
+    common::save(&state, "fleet", "receivers: {}\n", &agent_type);
     common::release_to_every_agent(&state, &["fleet"]);
 
     wait_until("the polling agent to apply the configuration", || {
