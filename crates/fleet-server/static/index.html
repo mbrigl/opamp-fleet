@@ -106,14 +106,21 @@
       <section id="config-detail" class="card config" style="display: none">
         <h2 id="config-detail-title">Configuration</h2>
         <div class="config-fields">
-          <input id="config-name" class="quarter" placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
-                 title="The configuration's name — the file name its entry gets on the agent. Frozen once created." />
-          <input id="config-type" list="config-type-options" placeholder="agent type: the service.name it is for (empty: every type)" autocomplete="off"
-                 title="Compared raw for equality against the service.name the agents report (ADR-0034): of the agents a deployment holding it claims, only those of this type receive it. Empty means every type — which for a collector body is rarely what you want." />
+          <label class="field quarter"><span class="field-cap">Name <b class="need req">required</b></span>
+            <input required aria-required="true" id="config-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
+                   title="The configuration's name — the file name its entry gets on the agent. Frozen once created." />
+          </label>
+          <label class="field"><span class="field-cap">Agent type <b class="need opt">optional</b></span>
+            <input id="config-type" list="config-type-options" placeholder="agent type: the service.name it is for (empty: every type)" autocomplete="off"
+                   title="Compared raw for equality against the service.name the agents report (ADR-0034): of the agents a deployment holding it claims, only those of this type receive it. Empty means every type — which for a collector body is rarely what you want." />
+          </label>
           <datalist id="config-type-options"></datalist>
-          <input id="config-role" placeholder="role (empty = configuration; 'supplementary' = a file the agent reads by path)" autocomplete="off" title="The Baseline's AgentConfigFile.role, sent to the agent verbatim. Empty means top-level configuration. 'supplementary' means the content is written next to the configuration but never passed as configuration — a fragment, a certificate, a rule file." />
+          <label class="field"><span class="field-cap">Role <b class="need opt">optional</b></span>
+            <input id="config-role" placeholder="role (empty = configuration; 'supplementary' = a file the agent reads by path)" autocomplete="off" title="The Baseline's AgentConfigFile.role, sent to the agent verbatim. Empty means top-level configuration. 'supplementary' means the content is written next to the configuration but never passed as configuration — a fragment, a certificate, a rule file." />
+          </label>
         </div>
-        <textarea id="config" placeholder="The configuration body — saved only; released by the rollout press of a deployment that holds it…"></textarea>
+        <label class="field-cap" for="config">Body <b class="need req">required</b></label>
+        <textarea id="config" required aria-required="true" placeholder="The configuration body — saved only; released by the rollout press of a deployment that holds it…"></textarea>
         <div class="config-actions">
           <button id="config-delete" class="btn btn-ghost"
                   title="Delete this configuration — refused while an agent's assignment pins it. It leaves every deployment that holds it.">Delete</button>
@@ -164,10 +171,14 @@
       <section id="set-detail" class="card config" style="display: none">
         <h2 id="set-detail-title">Package set</h2>
         <div class="config-fields">
-          <input id="set-type" class="required" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib)" autocomplete="off"
-                 title="Matched for equality against the service.name an agent reports (ADR-0026), and half this package's identity together with the version (ADR-0026) — frozen once created. It is also the name the package carries on the wire, which is why it never holds the version. While it is empty, choosing an artifact file fills it from the file's name." />
-          <input id="set-version" class="narrow" placeholder="version (e.g. 1.2.3)" autocomplete="off"
-                 title="The version every entry of this Set shares. Part of the Set's identity — a new version is a new Set." />
+          <label class="field"><span class="field-cap">Agent type <b class="need req">required</b></span>
+            <input required aria-required="true" id="set-type" class="required" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib)" autocomplete="off"
+                   title="Matched for equality against the service.name an agent reports (ADR-0026), and half this package's identity together with the version (ADR-0026) — frozen once created. It is also the name the package carries on the wire, which is why it never holds the version. While it is empty, choosing an artifact file fills it from the file's name." />
+          </label>
+          <label class="field narrow"><span class="field-cap">Version <b class="need req">required</b></span>
+            <input required aria-required="true" id="set-version" placeholder="version (e.g. 1.2.3)" autocomplete="off"
+                   title="The version every entry of this Set shares. Part of the Set's identity — a new version is a new Set." />
+          </label>
         </div>
         <div class="config-fields">
         </div>
@@ -178,13 +189,19 @@
         <div id="set-entries" class="chips entry-list" style="margin-bottom: 10px"></div>
         <div id="entry-editor">
         <div class="config-fields">
-          <input id="entry-os" class="narrow" placeholder="os: linux, darwin, windows" autocomplete="off"
-                 title="The operating system this entry is built for, as the agent reports os.type. Other spellings (macos) are accepted and stored canonically." />
-          <input id="entry-arch" class="narrow" placeholder="arch: amd64, arm64" autocomplete="off"
-                 title="The architecture, as the agent reports host.arch. Other spellings (x86_64, aarch64) are accepted and stored canonically." />
+          <label class="field narrow"><span class="field-cap">OS <b class="need req">required</b></span>
+            <input required aria-required="true" id="entry-os" placeholder="os: linux, darwin, windows" autocomplete="off"
+                   title="The operating system this entry is built for, as the agent reports os.type. Other spellings (macos) are accepted and stored canonically." />
+          </label>
+          <label class="field narrow"><span class="field-cap">Arch <b class="need req">required</b></span>
+            <input required aria-required="true" id="entry-arch" placeholder="arch: amd64, arm64" autocomplete="off"
+                   title="The architecture, as the agent reports host.arch. Other spellings (x86_64, aarch64) are accepted and stored canonically." />
+          </label>
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
-          <input id="entry-file" type="file" style="color: var(--muted); font-size: 13px;" />
+          <label class="field"><span class="field-cap">Artifact file <b class="need req">required</b></span>
+            <input required aria-required="true" id="entry-file" type="file" style="color: var(--muted); font-size: 13px;" />
+          </label>
           <button id="entry-add" class="btn btn-ghost btn-sm"
                   title="Store the chosen file as this set's entry for the platform named above, now. Replaces the entry already held for that platform, and its signature with it. While a new set is being created, OK is what saves the set and this entry together.">＋ Add entry</button>
           <span class="sub">a file named <code>&lt;name&gt;_&lt;version&gt;_&lt;os&gt;_&lt;arch&gt;.7z</code> fills the platform — and, while creating, whatever of the name, agent type, and version is still empty (<code>-</code> or <code>_</code>)</span>
@@ -199,7 +216,9 @@
                   title="Delete this Set — entries, artifacts and metadata — refused while an agent's assignment pins it. It leaves every deployment that holds it. Nothing is uninstalled: an agent keeps running what it took.">Delete</button>
           <button id="set-signing" class="btn btn-ghost"
                   title="Download what a signature covers, as JSON: the Agent type, the version, and each entry's platform and SHA-256. The platform is not signed; it says which entry the signature goes to. Sign it with opamp-fleetctl package sign --signing-info and import it here.">Signing info</button>
-          <input id="set-sig-file" type="file" accept=".json,application/json" style="color: var(--muted); font-size: 13px;" />
+          <label class="field"><span class="field-cap">Signing file to import <b class="need opt">optional</b></span>
+            <input id="set-sig-file" type="file" accept=".json,application/json" style="color: var(--muted); font-size: 13px;" />
+          </label>
           <button id="set-sig-import" class="btn btn-ghost"
                   title="Put the signatures of a signed signing file onto the package it names, one request per entry. Each goes to the entry with its platform and SHA-256; one for other bytes is not taken. The Server's answer is reported per entry, its signature check included.">Import signing file</button>
           <span id="set-error" class="err" style="flex: 1"></span>
@@ -245,10 +264,14 @@
       <section id="dep-detail" class="card config" style="display: none">
         <h2 id="dep-detail-title">Deployment</h2>
         <div class="config-fields">
-          <input id="dep-name" class="quarter" placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
-                 title="The operator's name for this channel, and the path segment that addresses it. Frozen once created." />
-          <input id="dep-selector" placeholder="selector: channel=stable — required, and never empty" autocomplete="off"
-                 title="Equality pairs that must all match an attribute the agent reported, labels included. It may not be empty: an empty selector matches every agent, so it would collide with every other channel. Always editable — re-aiming distributes nothing by itself." />
+          <label class="field quarter"><span class="field-cap">Name <b class="need req">required</b></span>
+            <input required aria-required="true" id="dep-name" placeholder="name (lowercase letters, digits, '-')" autocomplete="off"
+                   title="The operator's name for this channel, and the path segment that addresses it. Frozen once created." />
+          </label>
+          <label class="field"><span class="field-cap">Selector <b class="need req">required</b></span>
+            <input required aria-required="true" id="dep-selector" placeholder="selector: channel=stable — required, and never empty" autocomplete="off"
+                   title="Equality pairs that must all match an attribute the agent reported, labels included. It may not be empty: an empty selector matches every agent, so it would collide with every other channel. Always editable — re-aiming distributes nothing by itself." />
+          </label>
         </div>
         <div id="selector-options" class="chips" style="margin-bottom: 10px" title="Attributes the fleet currently reports — click one to add it to the selector"></div>
         <div class="config-actions" style="margin: 0 0 10px">
@@ -256,7 +279,9 @@
         </div>
         <h2>Packages — at most one per agent type. Every entry of each must be signed, on the Packages tab, before the channel is rolled out.</h2>
         <div class="config-fields">
-          <select id="dep-package-pick" style="flex: 1"></select>
+          <label class="field"><span class="field-cap">Package to add <b class="need opt">optional</b></span>
+            <select id="dep-package-pick"></select>
+          </label>
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
           <button id="dep-package-add" class="btn btn-ghost btn-sm"
@@ -265,7 +290,9 @@
         <div id="dep-packages" style="margin-bottom: 10px"></div>
         <h2>Configurations — any number. Each reaches the agents of this channel whose type it fits.</h2>
         <div class="config-fields">
-          <select id="dep-config-pick" style="flex: 1"></select>
+          <label class="field"><span class="field-cap">Configuration to add <b class="need opt">optional</b></span>
+            <select id="dep-config-pick"></select>
+          </label>
         </div>
         <div class="config-actions" style="margin: 0 0 10px">
           <button id="dep-config-add" class="btn btn-ghost btn-sm"
@@ -330,26 +357,44 @@
       <section id="boot-section" class="card config" style="display: none">
         <h2>Bootstrap certificates — one per customer, site or batch; each opens nothing without an open window and an approval</h2>
         <div class="config-fields">
-          <select id="boot-country" class="quarter"
-                  title="The country (C), an ISO 3166-1 alpha-2 code. Optional. Every host certificate issued from this one carries it as fleet.host.country.">
-            <option value="">country (C)</option>
-          </select>
-          <input id="boot-state" class="quarter" placeholder="state (ST)" maxlength="64" autocomplete="off"
-                 title="The state or province. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.state." />
-          <input id="boot-locality" class="quarter" placeholder="locality (L)" maxlength="64" autocomplete="off"
-                 title="The locality, a town for instance. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.locality." />
-          <input id="boot-org" class="quarter" placeholder="customer (O)" maxlength="64" autocomplete="off"
-                 title="The organization the certificate is issued to, typically the customer. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.organization; it describes and selects, and authorizes nothing." />
-          <input id="boot-unit" class="quarter" placeholder="site (OU)" maxlength="64" autocomplete="off"
-                 title="The organizational unit, typically the site. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.site." />
-          <input id="boot-org-id" class="quarter" placeholder="customer number (organizationIdentifier)" maxlength="64" autocomplete="off"
-                 title="A customer or contract number, a UUID for instance, in any format. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.organization_id." />
-          <input id="boot-days" class="narrow" type="number" min="1" max="90" value="10"
-                 title="How many days the certificate is valid: 1 to 90, cut to the bootstrap CA's end." />
-          <input id="boot-pass" class="quarter" type="password" placeholder="password (optional)" autocomplete="new-password"
-                 title="With a password the Server keeps the certificate and its key as bootstrap.p12, encrypted under it, for download until the certificate ends or is revoked. 4 to 128 characters; a short one is quick to break if the file leaks. The Server keeps the password nowhere: give it to the host by another way than the file." />
-          <input id="boot-pass2" class="quarter" type="password" placeholder="password again" autocomplete="new-password"
-                 title="The same password once more." />
+          <label class="field quarter"><span class="field-cap">Country (C) <b class="need opt">optional</b></span>
+            <select id="boot-country"
+                    title="The country (C), an ISO 3166-1 alpha-2 code. Optional. Every host certificate issued from this one carries it as fleet.host.country.">
+              <option value="">country (C)</option>
+            </select>
+          </label>
+          <label class="field quarter"><span class="field-cap">State (ST) <b class="need opt">optional</b></span>
+            <input id="boot-state" placeholder="state (ST)" maxlength="64" autocomplete="off"
+                   title="The state or province. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.state." />
+          </label>
+          <label class="field quarter"><span class="field-cap">Locality (L) <b class="need opt">optional</b></span>
+            <input id="boot-locality" placeholder="locality (L)" maxlength="64" autocomplete="off"
+                   title="The locality, a town for instance. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.locality." />
+          </label>
+          <label class="field quarter"><span class="field-cap">Customer (O) <b class="need opt">optional</b></span>
+            <input id="boot-org" placeholder="customer (O)" maxlength="64" autocomplete="off"
+                   title="The organization the certificate is issued to, typically the customer. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.organization; it describes and selects, and authorizes nothing." />
+          </label>
+          <label class="field quarter"><span class="field-cap">Site (OU) <b class="need opt">optional</b></span>
+            <input id="boot-unit" placeholder="site (OU)" maxlength="64" autocomplete="off"
+                   title="The organizational unit, typically the site. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.site." />
+          </label>
+          <label class="field quarter"><span class="field-cap">Customer number (organizationIdentifier) <b class="need opt">optional</b></span>
+            <input id="boot-org-id" placeholder="customer number (organizationIdentifier)" maxlength="64" autocomplete="off"
+                   title="A customer or contract number, a UUID for instance, in any format. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.organization_id." />
+          </label>
+          <label class="field narrow"><span class="field-cap">Valid for days <b class="need opt">optional</b></span>
+            <input id="boot-days" type="number" min="1" max="90" value="10"
+                   title="How many days the certificate is valid: 1 to 90, cut to the bootstrap CA's end." />
+          </label>
+          <label class="field quarter"><span class="field-cap">Password <b class="need opt">optional</b></span>
+            <input id="boot-pass" type="password" placeholder="password (optional)" autocomplete="new-password"
+                   title="With a password the Server keeps the certificate and its key as bootstrap.p12, encrypted under it, for download until the certificate ends or is revoked. 4 to 128 characters; a short one is quick to break if the file leaks. The Server keeps the password nowhere: give it to the host by another way than the file." />
+          </label>
+          <label class="field quarter"><span class="field-cap">Password again <b class="need req">required with a password</b></span>
+            <input id="boot-pass2" type="password" placeholder="password again" autocomplete="new-password"
+                   title="The same password once more." />
+          </label>
           <button id="boot-issue" class="btn btn-primary"
                   title="Issue a bootstrap certificate with a fresh key. Without a password its row offers the pair for saving while this page stays open, and the Server does not keep the key; with one, its row offers bootstrap.p12 in any page.">Issue</button>
         </div>

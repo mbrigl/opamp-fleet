@@ -1582,6 +1582,70 @@ async fn the_ui_edits_configurations_as_content_and_deployments_hold_them() {
     }
 }
 
+/// Every field of the UI's forms says, in words beside it, whether the action needs it, and a
+/// field the action refuses to run without carries `required` for assistive technology too — the
+/// placeholder alone vanishes the moment the field is typed into.
+#[tokio::test]
+async fn the_forms_mark_every_field_required_or_optional() {
+    let server = spawn().await;
+    let html = reqwest::Client::new()
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    // The caption that labels the control with this id: the `<label class="field…">` it sits in.
+    let caption = |id: &str| -> String {
+        let at = html
+            .find(&format!("id=\"{id}\""))
+            .unwrap_or_else(|| panic!("the UI has no field {id}"));
+        let label = html[..at]
+            .rfind("<label class=\"field")
+            .unwrap_or_else(|| panic!("{id} has no caption"));
+        html[label..at].to_string()
+    };
+    for id in [
+        "config-name",
+        "set-type",
+        "set-version",
+        "entry-os",
+        "entry-arch",
+        "entry-file",
+        "dep-name",
+        "dep-selector",
+    ] {
+        let caption = caption(id);
+        assert!(caption.contains(">required<"), "{id}: {caption}");
+        assert!(
+            caption.ends_with("required aria-required=\"true\" "),
+            "{id} does not carry `required`: {caption}"
+        );
+    }
+    for id in [
+        "config-type",
+        "config-role",
+        "set-sig-file",
+        "dep-package-pick",
+        "dep-config-pick",
+        "boot-country",
+        "boot-state",
+        "boot-locality",
+        "boot-org",
+        "boot-unit",
+        "boot-org-id",
+        "boot-days",
+        "boot-pass",
+    ] {
+        assert!(caption(id).contains(">optional<"), "{id}: {}", caption(id));
+    }
+    assert!(caption("boot-pass2").contains(">required with a password<"));
+    assert!(html.contains(
+        "<label class=\"field-cap\" for=\"config\">Body <b class=\"need req\">required</b></label>"
+    ));
+}
+
 /// The bundled UI's Hosts tab reads what `GET /api/v1/hosts` serves and acts on a row through the
 /// Gateway and revocation routes, and the Agents tab marks inherited labels — the fields the page
 /// reads are the ones the API documents.

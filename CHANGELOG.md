@@ -63,6 +63,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Changed
 
+- **Every field of the UI's forms says whether it is required or optional.** A caption above
+  each field names it and says *required* or *optional* in words — the placeholder that said it
+  before vanished as soon as something was typed — and a required field is announced as such to
+  screen readers. Nothing about what the Server accepts changed.
+
 - **All of the Server's state lives under one data directory, and `server migrate` moves an
   installation there**
   ([ADR-0037](docs/adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)).

@@ -321,3 +321,16 @@ th.status, td.status { width: 180px; min-width: 180px; }
 .num { font-variant-numeric: tabular-nums; color: var(--muted); }
 .empty { padding: 40px 0; text-align: center; color: var(--muted); }
 .err { color: var(--soft-red-fg); font-size: 12px; margin-top: 3px; }
+
+/* A form field with its caption: what the field is, and whether the action needs it. The words
+   "required" and "optional" say it, so the marking does not rest on colour alone; the required
+   one takes the warning's hue. The field's width class sits on the label, which is the flex
+   item; the control inside fills it. */
+.config-fields .field, .config-actions .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 220px; }
+.config-fields .field.quarter { flex: 0 1 25%; min-width: 180px; }
+.config-fields .field.narrow { flex: 0 1 190px; min-width: 150px; }
+.config-fields .field > input, .config-fields .field > select, .config-actions .field > input { flex: none; width: 100%; min-width: 0; box-sizing: border-box; }
+.field-cap { display: block; font-size: 11px; color: var(--muted); }
+label.field-cap { margin-bottom: 4px; }
+.need { margin-left: 4px; font-weight: 400; }
+.need.req { font-weight: 600; color: var(--soft-amber-fg); }
