@@ -6,17 +6,20 @@
     <title>OpAMP Fleet</title>
     <link id="ui-style" rel="stylesheet" href="/ui.css" />
     <script>
-      // The looks the UI can wear: each a stylesheet from this origin, with the theme it opens in
-      // and the key its theme is remembered under. The default's key is the one the UI has always
-      // used, so a browser's earlier choice of light or dark still holds.
+      // The looks the UI can wear: each a stylesheet from this origin.
       const UI_STYLES = {
-        default: { label: "GitKraken", href: "/ui.css", ground: "dark", themeKey: "opamp-fleet-theme" },
-        carbon: { label: "Carbon", href: "/ui-carbon.css", ground: "dark", themeKey: "opamp-fleet-theme-carbon" },
-        quiet: { label: "Quiet", href: "/ui-quiet.css", ground: "light", themeKey: "opamp-fleet-theme-quiet" },
+        default: { label: "GitKraken", href: "/ui.css" },
+        carbon: { label: "Carbon", href: "/ui-carbon.css" },
+        quiet: { label: "Quiet", href: "/ui-quiet.css" },
       };
       const UI_STYLE_KEY = "opamp-fleet-style";
-      // Storage can be denied outright (private mode, a locked-down profile). The default style in
-      // its ground state is then the answer every time.
+      // Light, dark, or whichever the operating system prefers: one choice, whatever the look. Its
+      // key is the one the UI has always used, so a browser's earlier light or dark still holds.
+      const UI_THEMES = ["system", "light", "dark"];
+      const UI_THEME_KEY = "opamp-fleet-theme";
+      const SYSTEM_DARK = window.matchMedia("(prefers-color-scheme: dark)");
+      // Storage can be denied outright (private mode, a locked-down profile). The default style,
+      // following the system, is then the answer every time.
       function storedStyle() {
         try {
           const style = localStorage.getItem(UI_STYLE_KEY);
@@ -25,23 +28,27 @@
           return "default";
         }
       }
-      function storedTheme(style) {
+      function storedTheme() {
         try {
-          const theme = localStorage.getItem(UI_STYLES[style].themeKey);
-          return theme === "dark" || theme === "light" ? theme : UI_STYLES[style].ground;
+          const theme = localStorage.getItem(UI_THEME_KEY);
+          return UI_THEMES.includes(theme) ? theme : "system";
         } catch (e) {
-          return UI_STYLES[style].ground;
+          return "system";
         }
       }
-      function applyStylesheet(style) {
+      // The theme the page shows: the choice itself, or for "system" the one the system prefers.
+      function shownTheme(theme) {
+        return theme === "system" ? (SYSTEM_DARK.matches ? "dark" : "light") : theme;
+      }
+      function applyStylesheet(style, theme) {
         const link = document.getElementById("ui-style");
         if (link.getAttribute("href") !== UI_STYLES[style].href) link.href = UI_STYLES[style].href;
-        document.documentElement.dataset.theme = storedTheme(style);
+        document.documentElement.dataset.theme = shownTheme(theme);
       }
       // Before the first paint, or a stored choice would show the default look for a frame and then
-      // swap. The theme is always set outright, because the two stylesheets open in opposite ones.
+      // swap. The theme is always set outright, because the stylesheets open in different ones.
       // The controls below re-apply the same values once the page is up.
-      applyStylesheet(storedStyle());
+      applyStylesheet(storedStyle(), storedTheme());
     </script>
   </head>
   <body>
@@ -53,7 +60,7 @@
         </div>
         <div style="display: flex; gap: 10px;">
           <select id="style-select" title="Style" aria-label="Style"></select>
-          <button id="theme-toggle" class="btn btn-ghost" title="Theme">☾ Dark</button>
+          <div id="theme-switch" class="theme-switch" role="group" aria-label="Theme"></div>
         </div>
       </div>
 
@@ -457,38 +464,56 @@
     <script>
       const $ = (id) => document.getElementById(id);
 
-      // Style and theme: which look, and light or dark within it. Both are remembered per
-      // browser — there is nothing per-operator on the server to keep them in — and the system
-      // preference is never consulted. Each style remembers its own theme, so a first visit opens
-      // each in its ground state (UI_STYLES, in the head).
-      const THEME_LABEL = { dark: "☾ Dark", light: "☀ Light" };
-      // The combo's options are UI_STYLES, in its order, so a look is added in one place.
+      // Style and theme: which look, and light, dark or the system's within it. The two are
+      // independent — a look shows in whichever theme is chosen — and both are remembered per
+      // browser, since there is nothing per-operator on the server to keep them in.
+      // The buttons show only their sign; the name is the screen reader's and the tooltip's.
+      const THEME_ICON = { system: "◐", light: "☀", dark: "☾" };
+      // Held here as well as stored, so the controls still switch where storage is denied.
+      let currentStyle = storedStyle();
+      let currentTheme = storedTheme();
+      // The combo's options and the theme's buttons are UI_STYLES and UI_THEMES, in their order
+      // (in the head). The pressed button is the theme chosen.
       for (const [style, { label }] of Object.entries(UI_STYLES)) {
         $("style-select").add(new Option(label, style));
       }
-      function applyLook(style, theme) {
-        try {
-          localStorage.setItem(UI_STYLE_KEY, style);
-          localStorage.setItem(UI_STYLES[style].themeKey, theme);
-        } catch (e) { /* not remembered, still applied */ }
-        applyStylesheet(style);
-        document.documentElement.dataset.theme = theme;
-        const otherTheme = theme === "light" ? "dark" : "light";
-        $("theme-toggle").textContent = THEME_LABEL[theme];
-        $("theme-toggle").title = `Showing ${theme} — click for ${otherTheme}`;
-        $("style-select").value = style;
+      for (const theme of UI_THEMES) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "btn btn-ghost";
+        button.dataset.themeChoice = theme;
+        button.textContent = THEME_ICON[theme];
+        button.setAttribute("aria-label", theme[0].toUpperCase() + theme.slice(1));
+        button.addEventListener("click", () => {
+          currentTheme = theme;
+          applyLook();
+        });
+        $("theme-switch").append(button);
       }
-      // Held here as well as stored, so the buttons still switch where storage is denied.
-      let currentStyle = storedStyle();
-      $("theme-toggle").addEventListener("click", () => {
-        const theme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
-        applyLook(currentStyle, theme);
-      });
+      function applyLook() {
+        try {
+          localStorage.setItem(UI_STYLE_KEY, currentStyle);
+          localStorage.setItem(UI_THEME_KEY, currentTheme);
+        } catch (e) { /* not remembered, still applied */ }
+        applyStylesheet(currentStyle, currentTheme);
+        $("style-select").value = currentStyle;
+        for (const button of $("theme-switch").children) {
+          const theme = button.dataset.themeChoice;
+          button.setAttribute("aria-pressed", String(theme === currentTheme));
+          button.title = theme === "system"
+            ? `Follow the system, now ${shownTheme("system")}`
+            : `Always ${theme}`;
+        }
+      }
       $("style-select").addEventListener("change", (event) => {
         currentStyle = event.target.value;
-        applyLook(currentStyle, storedTheme(currentStyle));
+        applyLook();
       });
-      applyLook(currentStyle, storedTheme(currentStyle));
+      // A system that switches between light and dark, on a schedule or by hand, is followed live.
+      SYSTEM_DARK.addEventListener("change", () => {
+        if (currentTheme === "system") applyLook();
+      });
+      applyLook();
 
       // Tabs: which management is on screen. The choice lives in the URL's hash
       // rather than in storage — unlike the theme it is a place, not a preference, so a reload
@@ -636,6 +661,22 @@
         const title = [ips.length ? `IP: ${ips.join(", ")}` : "", macs.length ? `MAC: ${macs.join(", ")}` : ""].filter(Boolean).join("\n");
         return `<span title="${esc(title)}">${esc(ips[0]) || "—"}${more(ips)}</span><div class="sub" title="${esc(title)}">${esc(macs[0]) || ""}${more(macs)}</div>`;
       }
+      // A reported attribute's chip takes the hue of the namespace its key starts with, so a row's
+      // host, OS and service facts read as groups; a namespace not named here keeps the neutral
+      // chip. The stylesheets know the hues, this list what they mean. A list value — the Server
+      // joins an array with ", " — shows its first entry and a count of the rest, and the whole
+      // list on hover, so a host with many addresses keeps its chip one line high.
+      const ATTR_HUE = { host: "blue", os: "teal", service: "pink", supervisor: "slate" };
+      function attrChipClass(key) {
+        const hue = ATTR_HUE[key.split(".")[0]];
+        return hue ? `chip hue-${hue}` : "chip";
+      }
+      function attrChip(key, value) {
+        const cls = attrChipClass(key);
+        const entries = String(value).split(", ");
+        if (entries.length < 2) return `<span class="${cls}">${esc(key)}: ${esc(value)}</span>`;
+        return `<span class="${cls}" title="${esc(entries.join("\n"))}">${esc(key)}: ${esc(entries[0])}<span class="chip-count">+${entries.length - 1}</span></span>`;
+      }
       // Everything about an agent that is a set rather than a value: reported attributes, the
       // operator's labels (ADR-0024), the per-row actions, and its package pills. Not named
       // `labels` — that word means the 🏷 chips alone (ADR-0024), and a row headed with it
@@ -653,7 +694,7 @@
         // straight to it. Sorted here rather than trusted from the server, which orders them by a
         // map it is free to change.
         for (const [k, v] of Object.entries(a.non_identifying_attributes || {}).sort(([x], [y]) => x.localeCompare(y))) {
-          chips.push(`<span class="chip">${esc(k)}: ${esc(v)}</span>`);
+          chips.push(attrChip(k, v));
         }
         const caps = a.capabilities || [];
         if (caps.length) {
@@ -1152,16 +1193,20 @@
       });
 
       // Every attribute the fleet currently reports, as clickable key=value suggestions for a
-      // deployment's selector — what a Selector can actually match on.
+      // deployment's selector — what a Selector can actually match on, in the hue of its
+      // namespace as on the Agents tab. A list value is left out: a Selector matches string values
+      // only, and its ", " would split the pair in the selector's text.
       function renderSelectorOptions() {
-        const pairs = new Set();
+        const pairs = new Map();
         for (const a of agents) {
           for (const list of [a.identifying_attributes, a.non_identifying_attributes]) {
-            for (const [k, v] of Object.entries(list || {})) pairs.add(`${k}=${v}`);
+            for (const [k, v] of Object.entries(list || {})) {
+              if (!String(v).includes(", ")) pairs.set(`${k}=${v}`, k);
+            }
           }
         }
-        $("selector-options").innerHTML = [...pairs].sort().map((p) =>
-          `<span class="chip clickable" data-pair="${esc(p)}">${esc(p)}</span>`
+        $("selector-options").innerHTML = [...pairs].sort(([x], [y]) => x.localeCompare(y)).map(([p, k]) =>
+          `<span class="${attrChipClass(k)} clickable" data-pair="${esc(p)}">${esc(p)}</span>`
         ).join("") || `<span class="chip">no agents reporting yet</span>`;
         // The types the fleet currently reports, as suggestions for a configuration's type
         // (ADR-0034) — so stating the type is a pick, not a remembered spelling.

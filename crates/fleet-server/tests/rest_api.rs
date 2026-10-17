@@ -1074,7 +1074,8 @@ async fn the_policy_names_every_inline_script_of_the_ui() {
 
 /// The bundled UI's look lives in its own stylesheets: the page links the default, carries no
 /// `<style>` of its own, names every look its style combo offers, and each is served as CSS from
-/// the plane's origin, which the policy admits.
+/// the plane's origin, which the policy admits. Light, dark or the system's is a choice of its
+/// own, the same for every look.
 #[tokio::test]
 async fn the_ui_takes_its_look_from_its_own_stylesheet() {
     let server = spawn().await;
@@ -1104,6 +1105,31 @@ async fn the_ui_takes_its_look_from_its_own_stylesheet() {
     );
     assert!(!html.contains("<style"), "the page carries a <style> again");
 
+    // The theme is one choice for every look — light, dark, or the system's — remembered under
+    // one key, not one per look.
+    assert!(
+        html.contains(r#"const ui_themes = ["system", "light", "dark"];"#),
+        "the theme's buttons do not offer system, light and dark"
+    );
+    assert!(
+        html.contains(
+            r#"<div id="theme-switch" class="theme-switch" role="group" aria-label="theme">"#
+        ),
+        "the theme is not chosen by a group of buttons"
+    );
+    assert!(
+        html.contains(r#"matchmedia("(prefers-color-scheme: dark)")"#),
+        "the system theme does not follow the system's preference"
+    );
+    assert!(
+        !html.contains("themekey"),
+        "a look remembers its own theme again"
+    );
+    assert!(
+        html.contains(r#"const attr_hue = { host: "blue", os: "teal", service: "pink", supervisor: "slate" };"#),
+        "the attribute namespaces lost their hues"
+    );
+
     // Each look defines the theme it does not open in, since the page always sets one outright.
     for (path, other_theme) in [
         ("/ui.css", r#":root[data-theme="light"]"#),
@@ -1130,6 +1156,22 @@ async fn the_ui_takes_its_look_from_its_own_stylesheet() {
         let css = css.text().await.expect("css");
         assert!(css.contains(":root"), "{path}");
         assert!(css.contains(other_theme), "{path} lacks {other_theme}");
+        // Every hue the page gives an attribute namespace is one the look defines, and a list
+        // value's count of further entries has its rule.
+        for hue in ["blue", "teal", "pink", "slate"] {
+            assert!(
+                html.contains(&format!(r#": "{hue}""#)),
+                "the page gives no namespace {hue}"
+            );
+            assert!(
+                css.contains(&format!(".chip.hue-{hue} ")),
+                "{path} lacks {hue}"
+            );
+        }
+        assert!(
+            css.contains(".chip-count "),
+            "{path} lacks the list value's count"
+        );
     }
 }
 

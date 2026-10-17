@@ -3,8 +3,8 @@
    lighter each, hairline borders of white at 8%, body text at 75% white so only what is
    selected or headed is full white, and GitKraken's blue for what you press — outlined and
    tinted rather than filled — and for the selected row. Its purple panel accent marks what is
-   selected within a section. Dark is the ground state, as GitKraken's is; light is a deliberate
-   switch away, below, and the system preference is not consulted.
+   selected within a section. Dark is the ground state, as GitKraken's is; light is the other,
+   below. Which one shows is the page's choice: the operator's, or the system's.
 
    GitKraken's values are taken where they carry no text. Where one does — a state colour on its
    own 20% tint, which GitKraken uses for borders rather than words — the badge takes the
@@ -34,9 +34,14 @@
   --accent: #bc7eff;
   --accent-fg: #1c1e23;
   --row-hover: #2b3346;
-  --row-selected: #2f3d5a;
+  --row-selected: #2b303c;
   --chip-bg: #32363f;
   --chip-fg: #c9cacc;
+  /* Attribute namespaces: hues no state uses, tinted, their text at 7:1. */
+  --hue-blue-bg: #24456f;  --hue-blue-fg: #c3dcfb;
+  --hue-teal-bg: #1b4d47;  --hue-teal-fg: #a5ebe0;
+  --hue-pink-bg: #5c2443;  --hue-pink-fg: #f9c8e1;
+  --hue-slate-bg: #3b465b; --hue-slate-fg: #d3dbe9;
   --ok-bg: #5cb85c;
   --ok-fg: #1c1e23;
   --soft-green-bg: #32463a;
@@ -73,9 +78,14 @@
   --accent: #7600f6;
   --accent-fg: #ffffff;
   --row-hover: #ecf1fa;
-  --row-selected: #dde6f9;
+  --row-selected: #eef1f8;
   --chip-bg: #e8e8e8;
   --chip-fg: #3d3d3d;
+  /* Attribute namespaces: hues no state uses, tinted, their text at 7:1. */
+  --hue-blue-bg: #c4d9f7;  --hue-blue-fg: #123a6e;
+  --hue-teal-bg: #b9e6de;  --hue-teal-fg: #0a4f46;
+  --hue-pink-bg: #f4c8de;  --hue-pink-fg: #7c1449;
+  --hue-slate-bg: #cdd5e2; --hue-slate-fg: #273449;
   --ok-bg: #007a3f;
   --ok-fg: #ffffff;
   --soft-green-bg: #d6efe3;
@@ -118,6 +128,16 @@ body {
   border-radius: 999px; padding: 3px 10px; font-size: 12px;
 }
 .btn-ok:hover { background: var(--soft-green-fg); color: var(--soft-green-bg); }
+/* The theme's three buttons, joined into one outlined bar; the pressed one wears the primary
+   button's tint. */
+.theme-switch { display: inline-flex; }
+.theme-switch .btn { border-radius: 0; }
+.theme-switch .btn + .btn { margin-left: -1px; }
+.theme-switch .btn:first-child { border-radius: 3px 0 0 3px; }
+.theme-switch .btn:last-child { border-radius: 0 3px 3px 0; }
+.theme-switch .btn[aria-pressed="true"] {
+  position: relative; background: var(--primary-bg); color: var(--primary-fg); border-color: var(--primary);
+}
 /* A button sized to sit inside a form line rather than to head one. */
 .btn-sm { padding: 3px 12px; font-size: 12px; }
 /* A key fingerprint is compared character by character with the Client's log, so it is shown
@@ -225,9 +245,9 @@ tbody tr:last-child td { border-bottom: 0; }
 tbody tr.agent { cursor: pointer; }
 tbody tr.agent.current td, tbody tr.detail td { border-bottom: 0; }
 tbody tr.detail.last td { border-bottom: 1px solid var(--border); }
-/* The current Agent: GitKraken's selected row, its blue at 20%, with the purple accent as a
-   bar on the row's edge — what is being looked at, not what is pressed — so no cell content
-   has to change color. */
+/* The current Agent: the purple accent as a bar on the row's edge — what is being looked at,
+   not what is pressed — over a wash of GitKraken's blue barely off the panel, so no cell
+   content has to change color and the chips on it keep their own. */
 tbody tr.agent.current td { background: var(--row-selected); color: var(--text-strong); }
 tbody tr.agent.current td:first-child { box-shadow: inset 3px 0 var(--accent); }
 tbody tr.detail td { padding-top: 0; padding-bottom: 4px; }
@@ -287,6 +307,17 @@ th.status, td.status { width: 180px; min-width: 180px; }
 .entry-list .sig input { width: 22ch; font-family: var(--mono); font-size: 12px; }
 .dep-pkg-head { display: flex; gap: 10px; align-items: center; margin: 8px 0 4px; }
 .chip { background: var(--chip-bg); color: var(--chip-fg); border-radius: 3px; padding: 2px 8px; font-size: 12px; white-space: nowrap; }
+.chip.hue-blue { background: var(--hue-blue-bg); color: var(--hue-blue-fg); }
+.chip.hue-teal { background: var(--hue-teal-bg); color: var(--hue-teal-fg); }
+.chip.hue-pink { background: var(--hue-pink-bg); color: var(--hue-pink-fg); }
+.chip.hue-slate { background: var(--hue-slate-bg); color: var(--hue-slate-fg); }
+/* Outlined in their own ink, since the detail row they sit on is itself tinted. */
+.chip[class*="hue-"] { box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 40%, transparent); }
+/* The count of a list value's further entries: a disc in the chip's own ink. */
+.chip-count {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
+  background: color-mix(in srgb, currentColor 18%, transparent); font-weight: 600;
+}
 .num { font-variant-numeric: tabular-nums; color: var(--muted); }
 .empty { padding: 40px 0; text-align: center; color: var(--muted); }
 .err { color: var(--soft-red-fg); font-size: 12px; margin-top: 3px; }

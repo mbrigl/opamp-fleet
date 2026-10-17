@@ -7,8 +7,8 @@
    links and focus keep Carbon's own blue and white; badges are Carbon's tag colour pairs.
 
    Dark (Gray 100) is the ground state, as the products ship; light (Gray 10, with the same
-   purple and chips) is a deliberate switch away, below, and the system preference is not
-   consulted. The faces are IBM Plex where the operator's machine has it installed; the plane's
+   purple and chips) is the other, below. Which one shows is the page's choice: the operator's,
+   or the system's. The faces are IBM Plex where the operator's machine has it installed; the plane's
    policy loads nothing from another origin, so the stacks fall back as Carbon's own do. */
 :root {
   color-scheme: dark;
@@ -49,11 +49,16 @@
   --row-hover: #333333;        /* layer-hover-01 */
   --head-bg: #393939;          /* layer-accent-01 */
   --head-hover: #474747;
-  --selected: #353535;
-  --selected-hover: #3d3d3d;
+  --selected: #2c2c2c;
+  --selected-hover: #333333;
   /* The filter chips: an outline until the filter holds a value, then filled. */
   --chip-line: #424a6c;
   --chip-fg: #c6daff;
+  /* Attribute namespaces: Carbon's blue, teal, magenta and cool-gray tag pairs. */
+  --hue-blue-bg: #0043ce;  --hue-blue-fg: #d0e2ff;
+  --hue-teal-bg: #005d5d;  --hue-teal-fg: #9ef0f0;
+  --hue-pink-bg: #9f1853;  --hue-pink-fg: #ffd6e8;
+  --hue-slate-bg: #4d5358; --hue-slate-fg: #dde1e6;
   --chip-on-bg: #424a6c;
   --chip-on-fg: #c6daff;
   --code-bg: #262626;
@@ -101,10 +106,15 @@
   --row-hover: #e8e8e8;
   --head-bg: #e0e0e0;
   --head-hover: #d1d1d1;
-  --selected: #e0e0e0;
-  --selected-hover: #d1d1d1;
+  --selected: #f2f2f2;
+  --selected-hover: #e8e8e8;
   --chip-line: #424a6c;
   --chip-fg: #424a6c;
+  /* Attribute namespaces: Carbon's blue, teal, magenta and cool-gray tag pairs. */
+  --hue-blue-bg: #d0e2ff;  --hue-blue-fg: #0043ce;
+  --hue-teal-bg: #9ef0f0;  --hue-teal-fg: #005d5d;
+  --hue-pink-bg: #ffd6e8;  --hue-pink-fg: #9f1853;
+  --hue-slate-bg: #dde1e6; --hue-slate-fg: #343a3f;
   --chip-on-bg: #424a6c;
   --chip-on-fg: #ffffff;
   --code-bg: #f4f4f4;
@@ -146,6 +156,10 @@ body {
 .page-head .btn-ghost { border-color: transparent; color: var(--muted); padding: 0 15px; }
 .page-head .btn-ghost:hover { background: #262626; color: var(--text); }
 .page-head select { height: 32px; }
+/* The theme's three buttons sit side by side as the header's other actions do; the pressed one
+   carries the purple line the active tab does, under it. */
+.theme-switch { display: inline-flex; }
+.theme-switch .btn[aria-pressed="true"] { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
 
 /* Carbon's button, medium (40px): text set left, the right side kept for the icon slot. */
 .btn {
@@ -286,8 +300,8 @@ tbody tr.detail.last td { border-bottom: 1px solid var(--border); }
 tbody tr.detail td { padding-top: 0; padding-bottom: 8px; }
 tbody tr.detail:hover { background: transparent; }
 tbody tr:hover { background: var(--row-hover); }
-/* The current Agent: the opened row's layer, with the purple bar on its edge so no cell
-   content has to change color. */
+/* The current Agent: the purple bar on its edge, over a layer barely off the table's own, so
+   no cell content has to change color and the chips on it keep their own. */
 tbody tr.agent.current td { background: var(--selected); }
 tbody tr.agent.current:hover td { background: var(--selected-hover); }
 tbody tr.agent.current td:first-child { box-shadow: inset 3px 0 var(--accent); }
@@ -351,6 +365,15 @@ th.status, td.status { width: 180px; min-width: 180px; }
 .dep-pkg-head { display: flex; gap: 16px; align-items: center; margin: 8px 0 4px; }
 /* Carbon's gray tag. */
 .chip { display: inline-flex; align-items: center; min-height: 24px; background: var(--tag-gray-bg); color: var(--tag-gray-fg); border-radius: 12px; padding: 0 8px; font-size: 12px; letter-spacing: 0.32px; white-space: nowrap; }
+.chip.hue-blue { background: var(--hue-blue-bg); color: var(--hue-blue-fg); }
+.chip.hue-teal { background: var(--hue-teal-bg); color: var(--hue-teal-fg); }
+.chip.hue-pink { background: var(--hue-pink-bg); color: var(--hue-pink-fg); }
+.chip.hue-slate { background: var(--hue-slate-bg); color: var(--hue-slate-fg); }
+/* The count of a list value's further entries: a disc in the chip's own ink. */
+.chip-count {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
+  background: color-mix(in srgb, currentColor 18%, transparent); font-weight: 600;
+}
 code { font-family: var(--mono); font-size: 0.92em; }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); }
 .empty { padding: 48px 0; text-align: center; color: var(--muted); }

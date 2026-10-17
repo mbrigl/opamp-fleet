@@ -17,11 +17,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Added
 
-- **Two more looks for the UI:** a style combo beside the theme button chooses between the
-  GitKraken look, a Carbon look — IBM's Carbon Design System as Würth Phoenix's NetEye wears it,
-  Gray 100 with its purple — or a quiet look where colour says only state and selection. Each look
-  remembers its own light or dark; a first visit opens the GitKraken and Carbon looks in dark, the
-  GitKraken one as before, and the quiet one in light.
+- **Two more looks for the UI:** a style combo chooses between the GitKraken look, a Carbon look —
+  IBM's Carbon Design System as Würth Phoenix's NetEye wears it, Gray 100 with its purple — or a
+  quiet look where colour says only state and selection. Beside it, three buttons choose light,
+  dark or System, which follows the operating system's preference as it changes. The two are
+  independent: a theme holds across every look. A first visit follows the system; a light or dark
+  chosen before in this browser still holds.
 
 - **The UI can present a certificate of its own**
   ([ADR-0032](docs/adr/0032-the-operator-plane-may-serve-a-certificate-of-its-own.md)). An optional
