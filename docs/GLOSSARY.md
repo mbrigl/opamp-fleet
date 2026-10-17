@@ -1,4 +1,4 @@
-# Glossary — <Project Name>
+# Glossary — OpAMP Fleet
 
 > The **vocabulary** of this project: the terms everyone, humans and agents alike, uses in code,
 > comments, documentation, and ADRs. It defines words and decides nothing. Whoever resolves a term
@@ -9,5 +9,25 @@ sentences, and list under _Avoid:_ the synonyms it displaces, where there are an
 specification, an ADR, or the code uses without an entry here is a gap to close, not a convention
 to invent.
 
-- **<Term>** — what it is, in one or two sentences.
-  _Avoid:_ <the synonyms not used here>.
+The core vocabulary — Agent, Host, Fleet, Selector, Label, Configuration, Parameter, Package,
+Deployment and the rest — is defined in the specification's
+[Core Concepts & Vocabulary](SPECIFICATION.md#core-concepts--vocabulary). The terms below are the
+ones it uses without defining.
+
+- **Agent type** — the kind of agent an Agent runs, as the `service.name` it reports; a Package is
+  built for one, a Configuration may be stated for one.
+  _Avoid:_ service type, product.
+- **Effective description** — what a Selector is matched against: an Agent's reported attributes,
+  its Labels, and its Host's subject values as `fleet.host.*`.
+  _Avoid:_ attributes (alone), metadata.
+- **Entry** — one platform's artifact in a Package: operating system and architecture, content hash,
+  size and signature.
+  _Avoid:_ file, asset, build.
+- **Bootstrap certificate** — the short-lived certificate a host presents to ask for enrolment; its
+  subject values describe the Host it becomes.
+  _Avoid:_ join token, enrolment token.
+- **Enrolment** — the time-limited, operator-approved exchange in which a host holding a bootstrap
+  certificate obtains its client certificate and becomes a Host.
+  _Avoid:_ registration, onboarding, enrollment.
+- **Rollout** — the explicit act that releases a Deployment to Agents and pins what each receives.
+  _Avoid:_ publish, push, deploy.
