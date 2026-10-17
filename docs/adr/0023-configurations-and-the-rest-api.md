@@ -1,6 +1,6 @@
 # ADR-0023: Configurations are named, Selector-targeted resources of an OpenAPI-described REST API
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clauses 1, 3, 4, 12 and 13 superseded by [ADR-0034](0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)
 - **Date:** 2026-08-12
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-server/src/configs.rs, crates/fleet-server/src/api.rs, the Configuration routes and the OpenAPI document under /api/v1, config_dir in server.toml, role handling in crates/fleet-agent/src/storage.rs and the Supervisor plugins
