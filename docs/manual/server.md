@@ -400,9 +400,11 @@ A **Host** is what a client certificate of this Server names: one Client install
 connects directly, a Gateway included. The Server writes it when an operator approves its
 enrolment, with the time of the approval and the subject values of the certificate it was issued —
 country (`C`), state (`ST`), locality (`L`), organization (`O`), organizational unit (`OU`) and
-organization identifier. A certificate an operator provisioned with a host id makes its Host at its
-first report, with the values of that certificate. Today's host certificates carry a common name
-only, so their values are empty. A Host is forgotten when it holds no valid certificate, speaks for
+organization identifier. A host certificate the Server issues carries the values of the bootstrap
+certificate the host enrolled with, and every renewal carries them on unchanged (see
+[Bootstrap certificates](#bootstrap-certificates-issued-by-the-server)); a Host's values change
+only when it enrols again. A certificate an operator provisioned with a host id makes its Host at
+its first report, with the values of that certificate. A Host is forgotten when it holds no valid certificate, speaks for
 no Agent and is not marked as a Gateway.
 
 Every Agent record names the Host it last arrived over: its own on a direct connection, the
@@ -442,16 +444,27 @@ Without `[enrolment]` no bootstrap certificate passes the handshake.
 ### Bootstrap certificates, issued by the Server
 
 With `bootstrap_ca_key_file` set, ask the Server for a bootstrap certificate and name whom it is
-for. The subject takes `organization` and `organizational_unit`, typically the customer and the
-site, each optional and 1 to 64 characters. The Server sets the common name: the bootstrap CA's
-name with ` CA` turned into ` Certificate`. `validity_days` runs from 1 to 90,
+for. The subject takes six attributes, each optional and each at most once:
+
+| Key | Attribute | Value |
+| --- | --- | --- |
+| `country` | `C` | two upper-case letters, an ISO 3166-1 alpha-2 code such as `AT` |
+| `state` | `ST` | 1 to 64 characters without a control character |
+| `locality` | `L` | likewise |
+| `organization` | `O` | likewise; typically the customer |
+| `organizational_unit` | `OU` | likewise; typically the site |
+| `organization_identifier` | `organizationIdentifier` (2.5.4.97) | likewise, in any format; a customer or contract number, a UUID for instance |
+
+Any other key is answered `400`. The certificate lists them in that order, the country as a
+`PrintableString` and every other value as a `UTF8String`. The Server sets the common name: the
+bootstrap CA's name with ` CA` turned into ` Certificate`. `validity_days` runs from 1 to 90,
 10 by default, and never past the bootstrap CA's end:
 
 ```console
 $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
-       -d '{"subject": {"organization": "Example Customer", "organizational_unit": "Vienna"}, "validity_days": 14}' \
+       -d '{"subject": {"country": "AT", "organization": "Example Customer", "organizational_unit": "Vienna", "organization_identifier": "K-4711"}, "validity_days": 14}' \
        https://127.0.0.1:4321/api/v1/bootstrap-certificates
-{"serial":"6723…","subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
+{"serial":"6723…","subject":"C=AT, O=Example Customer, OU=Vienna, organizationIdentifier=K-4711, CN=OpAMP Fleet Bootstrap Certificate",
  "not_before_ms":…,"not_after_ms":…,"certificate_pem":"-----BEGIN CERTIFICATE-----…",
  "private_key_pem":"-----BEGIN PRIVATE KEY-----…"}
 ```
@@ -495,13 +508,19 @@ the audit record cannot be written, and `404` for a certificate with no file, a 
 ended one or an unknown serial. A revocation removes the file before it is answered; lifting the
 revocation does not bring it back.
 
-The subject labels the certificate and authorizes nothing. It shows on every enrolment request
-the certificate carries, as `bootstrap_subject` with its `bootstrap_serial`, so the approver sees
-whose request it is. Every issuance is recorded in the audit as `enrolment.bootstrap_issued`,
+**Every host certificate issued from it carries its subject values.** Approving an enrolment
+copies the six values from the bootstrap certificate the host enrolled with into the host
+certificate, and every renewal carries them on unchanged, so the Host and its Agents carry them as
+`fleet.host.*` (see [Hosts](#hosts)). The common name is never copied, nor anything the host's own
+request names. A value fixed at issue stays until the host enrols again: put what is stable and
+says whom the host belongs to into the subject, and nothing that changes. The values describe and
+select; they authorize nothing. They show on every enrolment request the certificate carries, as
+`bootstrap_subject` with its `bootstrap_serial`, so the approver sees whose request it is and what
+the host certificate will carry. Every issuance is recorded in the audit as `enrolment.bootstrap_issued`,
 with `p12` saying whether a file was made.
 
-The UI's **Enrolments** tab does the same: it issues a certificate for the customer and site you
-type and lists the valid ones with a **Revoke** press. Without a password, the row of each
+The UI's **Enrolments** tab does the same: it issues a certificate with the values you type, the
+country chosen from a list, and lists the valid ones with a **Revoke** press. Without a password, the row of each
 certificate issued in the open page offers **Save bootstrap.pem** and **Save bootstrap-key.pem**.
 The page holds those keys only until it is reloaded or closed, and asks before either: save both
 files first. A certificate issued earlier or elsewhere offers no pair. With a password, typed twice,
@@ -567,28 +586,33 @@ INFO certificate request generated; an enrolling host waits for an operator's ap
 ```
 
 The Server lists each pending request with that fingerprint as its `id`, beside its arrival time,
-the peer address, the subject it asks for, and the bootstrap certificate's subject and fingerprint.
+the peer address, and the bootstrap certificate's six subject values, fingerprint and serial. The
+request's own subject is not listed: the host chose it, and nothing copies it.
 The Client sends its request as soon as the Server's first answer says it signs certificates,
 so the request is listed moments after the host connects:
 
 ```console
 $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/enrolments
-[{"id":"3f9a…","arrived_ms":1789996400000,"peer":"10.0.4.17","subject":"CN=host-01",
-  "key_fingerprint":"3f9a…",
-  "bootstrap_subject":"O=Example Customer, OU=Vienna, CN=OpAMP Fleet Bootstrap Certificate",
+[{"id":"3f9a…","arrived_ms":1789996400000,"peer":"10.0.4.17","key_fingerprint":"3f9a…",
+  "bootstrap_subject":{"country":"AT","state":"","locality":"","organization":"Example Customer",
+                       "organizational_unit":"Vienna","organization_identifier":"K-4711"},
   "bootstrap_fingerprint":"…","bootstrap_serial":"6723…"}]
 $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/approve
 $ curl --cacert ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/reject
 ```
 
 The UI's **Enrolments** tab shows the same queue: each request with its full key fingerprint, the
-bootstrap certificate it carries — customer, site, serial and end when the Server issued it — and
-an **Approve** and a **Reject** press on its row. Approving asks once more, quoting the fingerprint
-to compare with the Client's log. The tab also says whether the window is open, and opens and
-closes it.
+bootstrap certificate it carries — its subject values, and its serial and end when the Server
+issued it — and an **Approve** and a **Reject** press on its row. Approving asks once more,
+quoting the fingerprint to compare with the Client's log. The tab also says whether the window is
+open, and opens and closes it.
 
-Approving signs the request with `[client_ca]` and offers the certificate on that host's
-connection. The host stores it as `client-cert.pem` in its state directory and reconnects with it
+Approving signs the request with `[client_ca]`, with the bootstrap certificate's subject values,
+and offers the certificate on that host's connection. A bootstrap certificate from another PKI is
+read under the same rules as one the Server issues: an attribute that appears twice, a value of the
+wrong string type or length, or a country that is not two upper-case letters makes the approval
+fail with `409` naming the attribute, and nothing is signed. Issue the host a bootstrap certificate
+that fits, and reject the request. The host stores it as `client-cert.pem` in its state directory and reconnects with it
 as a member; from then on it renews by itself. Rejecting answers the request `BadRequest` and
 closes the connection. An unknown or expired id is answered `404`, and every enrolment route
 answers `404` while `[enrolment]` is not configured. A bootstrap certificate that arrives while

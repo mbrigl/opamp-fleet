@@ -294,7 +294,7 @@
           <button id="enrolment-window-close" class="btn btn-ghost" style="display: none"
                   title="Close the window now: every enrolling connection ends and every waiting request expires">Close window</button>
         </span>
-        <span class="sub">A host enrols with a bootstrap certificate while the enrolment window is open, and waits here until an operator approves it. The <b>bootstrap certificate</b> column names the customer and site it was issued to. Before approving, compare the <b>key fingerprint</b> with the <code>key_fingerprint</code> the Client logged on that host: only a match is the host you mean.</span>
+        <span class="sub">A host enrols with a bootstrap certificate while the enrolment window is open, and waits here until an operator approves it. The <b>bootstrap certificate</b> column shows the subject values it was issued with — what the host certificate carries once approved; the request's own subject is not shown, since the host chose it. Before approving, compare the <b>key fingerprint</b> with the <code>key_fingerprint</code> the Client logged on that host: only a match is the host you mean.</span>
         <span id="enrolment-result" class="sub"></span>
         <span id="enrolments-error" class="err"></span>
       </div>
@@ -305,9 +305,8 @@
             <tr>
               <th style="width: 110px">Arrived</th>
               <th style="width: 120px">From</th>
-              <th style="width: 14%">Subject</th>
               <th>Key fingerprint (SHA-256)</th>
-              <th style="width: 26%">Bootstrap certificate</th>
+              <th style="width: 36%">Bootstrap certificate</th>
               <th style="width: 190px"></th>
             </tr>
           </thead>
@@ -316,18 +315,28 @@
         <div id="enrolments-empty" class="empty">No host is waiting.</div>
       </div>
 
-      <!-- Bootstrap certificates (ADR-0028): issued by this Server with the customer (O) and site
-           (OU) an operator names. Without a password the private key is in the issuing answer only,
+      <!-- Bootstrap certificates (ADR-0028, ADR-0036): issued by this Server with the subject values
+           an operator names, which every host certificate issued from one carries. Without a password the private key is in the issuing answer only,
            so the UI holds it in memory until the operator has saved it and never stores it. With
            one, the Server keeps a PKCS#12 file of the pair under it, which any later page offers
            for download; the typed password is sent once and kept nowhere (ADR-0029). -->
       <section id="boot-section" class="card config" style="display: none">
         <h2>Bootstrap certificates — one per customer, site or batch; each opens nothing without an open window and an approval</h2>
         <div class="config-fields">
+          <select id="boot-country" class="quarter"
+                  title="The country (C), an ISO 3166-1 alpha-2 code. Optional. Every host certificate issued from this one carries it as fleet.host.country.">
+            <option value="">country (C)</option>
+          </select>
+          <input id="boot-state" class="quarter" placeholder="state (ST)" maxlength="64" autocomplete="off"
+                 title="The state or province. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.state." />
+          <input id="boot-locality" class="quarter" placeholder="locality (L)" maxlength="64" autocomplete="off"
+                 title="The locality, a town for instance. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.locality." />
           <input id="boot-org" class="quarter" placeholder="customer (O)" maxlength="64" autocomplete="off"
-                 title="The organization the certificate is issued to, typically the customer. Optional; 1 to 64 characters. It labels the certificate and authorizes nothing." />
+                 title="The organization the certificate is issued to, typically the customer. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.organization; it describes and selects, and authorizes nothing." />
           <input id="boot-unit" class="quarter" placeholder="site (OU)" maxlength="64" autocomplete="off"
-                 title="The organizational unit, typically the site. Optional; 1 to 64 characters." />
+                 title="The organizational unit, typically the site. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.site." />
+          <input id="boot-org-id" class="quarter" placeholder="customer number (organizationIdentifier)" maxlength="64" autocomplete="off"
+                 title="A customer or contract number, a UUID for instance, in any format. Optional; 1 to 64 characters. Host certificates carry it as fleet.host.organization_id." />
           <input id="boot-days" class="narrow" type="number" min="1" max="90" value="10"
                  title="How many days the certificate is valid: 1 to 90, cut to the bootstrap CA's end." />
           <input id="boot-pass" class="quarter" type="password" placeholder="password (optional)" autocomplete="new-password"
@@ -2006,16 +2015,20 @@
       function bootstrapCell(e) {
         const b = boots.find((b) => b.serial === e.bootstrap_serial);
         const tip = (lines) => esc(lines.join("\n"));
+        // The values the approval carries into the host certificate (ADR-0036 clause 5).
+        const values = SUBJECT_FIELDS.filter(([field]) => e.bootstrap_subject && e.bootstrap_subject[field])
+          .map(([field, short, key]) => `<span class="chip" title="${short} — the host certificate carries it, and its agents as ${key}">${short}=${esc(e.bootstrap_subject[field])}</span>`)
+          .join("") || `<span class="sub">no subject values</span>`;
         if (!b) {
-          const title = tip([e.bootstrap_subject, `serial ${e.bootstrap_serial}`, `fingerprint ${e.bootstrap_fingerprint}`,
+          const title = tip([`serial ${e.bootstrap_serial}`, `fingerprint ${e.bootstrap_fingerprint}`,
             "Not on this Server's record: made elsewhere, under a bootstrap CA since replaced, or deleted from the record after its revocation."]);
-          return `<div title="${title}"><strong>${esc(bootstrapName(e.bootstrap_subject))}</strong>
+          return `<div title="${title}">${values}
             <div class="sub"><span class="pill amber">not issued here</span> serial ${esc(e.bootstrap_serial)}</div></div>`;
         }
         const title = tip([b.subject, `serial ${b.serial}`, `issued ${when(b.issued_ms)}`, `valid until ${when(b.not_after_ms)}`,
           `fingerprint ${e.bootstrap_fingerprint}`]);
         const state = b.revoked ? `<span class="pill red">revoked</span> ` : "";
-        return `<div title="${title}"><strong>${esc(bootstrapName(b.subject))}</strong>
+        return `<div title="${title}">${values}
           <div class="sub">${state}serial ${esc(b.serial)} · valid until ${esc(when(b.not_after_ms))}</div></div>`;
       }
       function renderEnrolments(win, failed) {
@@ -2053,7 +2066,6 @@
           <tr>
             <td>${esc(when(e.arrived_ms))}</td>
             <td>${esc(e.peer || "—")}</td>
-            <td>${esc(e.subject)}</td>
             <td><span class="fingerprint">${esc(e.key_fingerprint)}</span></td>
             <td>${bootstrapCell(e)}</td>
             <td>
@@ -2174,14 +2186,34 @@
         await refreshEnrolments();
       });
 
+      // The ISO 3166-1 alpha-2 codes a bootstrap certificate's country is chosen from (ADR-0036
+      // clause 6), each named in the browser's language where it knows the name.
+      const COUNTRIES = ("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS "
+        + "BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET "
+        + "FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO "
+        + "IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH "
+        + "MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM "
+        + "PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG "
+        + "TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW").split(" ");
+      {
+        let names = null;
+        try { names = new Intl.DisplayNames(undefined, { type: "region" }); } catch (_) { /* codes alone */ }
+        $("boot-country").insertAdjacentHTML("beforeend", COUNTRIES.map((code) => {
+          let name = "";
+          try { name = names ? names.of(code) : ""; } catch (_) { name = ""; }
+          return `<option value="${code}">${code}${name && name !== code ? ` — ${esc(name)}` : ""}</option>`;
+        }).join(""));
+      }
+
       $("boot-issue").addEventListener("click", async () => {
         $("boot-error").textContent = "";
         $("boot-result").textContent = "";
         const subject = {};
-        const organization = $("boot-org").value.trim();
-        const unit = $("boot-unit").value.trim();
-        if (organization) subject.organization = organization;
-        if (unit) subject.organizational_unit = unit;
+        for (const [field, id] of [["country", "boot-country"], ["state", "boot-state"], ["locality", "boot-locality"],
+          ["organization", "boot-org"], ["organizational_unit", "boot-unit"], ["organization_identifier", "boot-org-id"]]) {
+          const value = $(id).value.trim();
+          if (value) subject[field] = value;
+        }
         const request = { subject, validity_days: Number($("boot-days").value) };
         const password = $("boot-pass").value;
         if (password || $("boot-pass2").value) {

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 use crate::fleet::{CertificateSigner, Clock};
-use crate::revocation::{CertId, Signed};
+use crate::revocation::{CertId, Signed, SubjectValues};
 
 /// The longest an enrolment window may stay open.
 pub const MAX_WINDOW_SECS: u64 = 86_400;
@@ -29,7 +29,8 @@ pub const MAX_PENDING: usize = 1024;
 pub struct Request {
     /// The PEM the Agent sent, signed as it is on approval.
     pub csr_pem: String,
-    /// The CSR's subject, for the operator to read.
+    /// The CSR's subject, for the audit record only: the host chose it, so it is neither listed
+    /// nor carried (ADR-0036 clause 5).
     pub subject: String,
     /// The SHA-256 fingerprint of the requested public key, hex — the key of the queue, and what the
     /// Client logs so an operator can match a request to a host.
@@ -41,7 +42,13 @@ pub struct Request {
 /// Who asked: the bootstrap certificate the connection carried, and from where.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Requester {
+    /// The bootstrap certificate's subject as text, for the audit record.
     pub bootstrap_subject: String,
+    /// Its six subject values as they read, for the operator (ADR-0036 clause 5).
+    pub bootstrap_values: SubjectValues,
+    /// The values an approval carries into the host certificate, or why the subject breaks the
+    /// rules of ADR-0036 clause 1 — read from the certificate verified in the handshake.
+    pub carried: Result<SubjectValues, String>,
     pub bootstrap_fingerprint: String,
     /// The bootstrap certificate's issuer and serial; the serial as
     /// `GET /api/v1/bootstrap-certificates` lists it.
@@ -54,7 +61,6 @@ pub struct Requester {
 pub struct Pending {
     pub id: String,
     pub arrived_ms: u64,
-    pub subject: String,
     pub key_fingerprint: String,
     pub requester: Requester,
 }
@@ -84,6 +90,9 @@ pub enum DecisionError {
     NotFound,
     /// The bootstrap certificate the request came with is revoked; the request is withdrawn.
     Revoked,
+    /// The bootstrap certificate's subject cannot be carried into a host certificate (ADR-0036
+    /// clause 3); the text names the attribute. Nothing is signed.
+    Subject(String),
     /// The CA could not sign the request.
     Sign(String),
 }
@@ -188,7 +197,6 @@ impl Enrolment {
         let pending = Pending {
             id: id.clone(),
             arrived_ms: self.clock.now_ms(),
-            subject: request.subject,
             key_fingerprint: request.key_fingerprint,
             requester,
         };
@@ -224,8 +232,9 @@ impl Enrolment {
     ///
     /// # Errors
     /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id,
-    /// [`DecisionError::Revoked`] when the request's bootstrap certificate is revoked, and
-    /// [`DecisionError::Sign`] when the CA refuses the request.
+    /// [`DecisionError::Revoked`] when the request's bootstrap certificate is revoked,
+    /// [`DecisionError::Subject`] when its subject cannot be carried into the host certificate
+    /// (ADR-0036 clause 3), and [`DecisionError::Sign`] when the CA refuses the request.
     /// Answers what was signed, and the `instance_uid` the request arrived under, for the register.
     /// `record` keeps what was signed before the host can collect it (ADR-0021 clause 33); a
     /// failure there leaves the request pending.
@@ -254,8 +263,16 @@ impl Enrolment {
             self.changed();
             return Err(DecisionError::Revoked);
         }
+        // The bootstrap certificate's values, under the rules they were issued by, and never the
+        // request's (ADR-0036 clauses 2 and 3).
+        let subject = entry.pending.requester.carried.clone().map_err(|e| {
+            DecisionError::Subject(format!(
+                "the bootstrap certificate's subject cannot be carried into a host \
+                     certificate: {e}"
+            ))
+        })?;
         let signed = signer
-            .sign(&entry.csr_pem, host)
+            .sign(&entry.csr_pem, host, &subject)
             .map_err(DecisionError::Sign)?;
         record(&signed, &entry.instance_uid).map_err(DecisionError::Sign)?;
         entry.decision = Some(Decision::Approved(signed.pem));
@@ -364,7 +381,12 @@ mod tests {
     struct Echo;
 
     impl CertificateSigner for Echo {
-        fn sign(&self, csr_pem: &str, _host: &str) -> Result<Signed, String> {
+        fn sign(
+            &self,
+            csr_pem: &str,
+            _host: &str,
+            subject: &SubjectValues,
+        ) -> Result<Signed, String> {
             Ok(Signed {
                 pem: format!("issued for {csr_pem}"),
                 facts: crate::revocation::Facts {
@@ -374,7 +396,7 @@ mod tests {
                     key_fingerprint: String::new(),
                     not_after_ms: u64::MAX,
                     host: None,
-                    subject_values: crate::revocation::SubjectValues::default(),
+                    subject_values: subject.clone(),
                 },
             })
         }
@@ -408,6 +430,8 @@ mod tests {
     fn requester() -> Requester {
         Requester {
             bootstrap_subject: "CN=bootstrap".to_string(),
+            bootstrap_values: SubjectValues::default(),
+            carried: Ok(SubjectValues::default()),
             bootstrap_fingerprint: "bf".to_string(),
             bootstrap: CertId::new(b"bootstrap CA", "b5"),
             peer: None,
@@ -509,8 +533,13 @@ mod tests {
     struct Never;
 
     impl CertificateSigner for Never {
-        fn sign(&self, _csr_pem: &str, _host: &str) -> Result<Signed, String> {
-            panic!("a request whose bootstrap certificate is revoked reached the signer");
+        fn sign(
+            &self,
+            _csr_pem: &str,
+            _host: &str,
+            _subject: &SubjectValues,
+        ) -> Result<Signed, String> {
+            panic!("a request that must not be signed reached the signer");
         }
 
         fn check_claims(&self, _csr_pem: &str, _sender: &[u8]) -> Result<(), String> {
@@ -543,6 +572,52 @@ mod tests {
             Err(DecisionError::NotFound),
             "a second approval finds nothing to sign"
         );
+    }
+
+    /// An approval signs the values the bootstrap certificate carries, and one whose subject breaks
+    /// the rules signs nothing, says why, and leaves the request for the operator to reject.
+    /// Verifies: ADR-0036
+    #[test]
+    fn an_approval_carries_the_bootstrap_values_or_signs_nothing() {
+        let (enrolment, _clock) = enrolment();
+        enrolment.open(600).expect("open");
+        let values = SubjectValues {
+            country: "AT".to_string(),
+            organization: "Kunde GmbH".to_string(),
+            ..SubjectValues::default()
+        };
+        let carrying = Requester {
+            bootstrap_values: values.clone(),
+            carried: Ok(values.clone()),
+            ..requester()
+        };
+        enrolment.submit(request("good"), carrying);
+        let signed = std::cell::RefCell::new(None);
+        enrolment
+            .approve(
+                "good",
+                &Echo,
+                "host",
+                &|issued, _| {
+                    *signed.borrow_mut() = Some(issued.facts.subject_values.clone());
+                    Ok(())
+                },
+                &|_| false,
+            )
+            .expect("approve");
+        assert_eq!(signed.into_inner(), Some(values));
+
+        let malformed = Requester {
+            carried: Err("organizational_unit appears more than once".to_string()),
+            ..requester()
+        };
+        enrolment.submit(request("bad"), malformed);
+        let refused = enrolment.approve("bad", &Never, "host", &|_, _| Ok(()), &|_| false);
+        assert!(
+            matches!(&refused, Err(DecisionError::Subject(e)) if e.contains("organizational_unit")),
+            "{refused:?}"
+        );
+        assert_eq!(enrolment.pending().len(), 1, "the request still waits");
     }
 
     /// Verifies: ADR-0021

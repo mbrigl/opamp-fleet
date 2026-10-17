@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::fleet::Clock;
-use crate::revocation::CertId;
+use crate::revocation::{CertId, SubjectValues};
 
 /// A bootstrap certificate's life when the request names none (ADR-0028 clause 23).
 pub const DEFAULT_VALIDITY_DAYS: u32 = 10;
@@ -34,54 +34,180 @@ pub const MAX_VALUE_CHARS: usize = 64;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// The subject an operator names (ADR-0028 clause 22): the organization and its unit, each
-/// optional. The Server sets the common name.
+/// The subject an operator names (ADR-0036 clause 1): six attributes, each optional. The Server
+/// sets the common name. The values describe and select; they authorize nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Subject {
+    /// C — two upper-case letters, ISO 3166-1 alpha-2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    /// ST.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// L.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locality: Option<String>,
     /// O — the customer, typically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
     /// OU — the site, typically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organizational_unit: Option<String>,
+    /// organizationIdentifier (2.5.4.97) — a customer or contract number, in no format of the
+    /// Server's choosing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_identifier: Option<String>,
 }
 
-/// An attribute of a bootstrap certificate's subject, in the order a certificate lists them.
+/// An attribute of a bootstrap certificate's subject, in the order a certificate lists them
+/// (ADR-0036 clause 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attribute {
+    Country,
+    State,
+    Locality,
     Organization,
     OrganizationalUnit,
+    OrganizationIdentifier,
     CommonName,
+}
+
+impl Attribute {
+    /// The six attributes a host certificate carries over from its bootstrap certificate, in
+    /// certificate order (ADR-0036 clauses 1 to 4).
+    pub const CARRIED: [Attribute; 6] = [
+        Attribute::Country,
+        Attribute::State,
+        Attribute::Locality,
+        Attribute::Organization,
+        Attribute::OrganizationalUnit,
+        Attribute::OrganizationIdentifier,
+    ];
+
+    /// The name a request, a list and a refusal give it.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Attribute::Country => "country",
+            Attribute::State => "state",
+            Attribute::Locality => "locality",
+            Attribute::Organization => "organization",
+            Attribute::OrganizationalUnit => "organizational_unit",
+            Attribute::OrganizationIdentifier => "organization_identifier",
+            Attribute::CommonName => "common_name",
+        }
+    }
+
+    /// Its object identifier, X.520.
+    #[must_use]
+    pub fn oid(self) -> &'static str {
+        match self {
+            Attribute::Country => "2.5.4.6",
+            Attribute::State => "2.5.4.8",
+            Attribute::Locality => "2.5.4.7",
+            Attribute::Organization => "2.5.4.10",
+            Attribute::OrganizationalUnit => "2.5.4.11",
+            Attribute::OrganizationIdentifier => "2.5.4.97",
+            Attribute::CommonName => "2.5.4.3",
+        }
+    }
+
+    /// Whether a certificate carries it as a `PrintableString`; every other attribute is a
+    /// `UTF8String`.
+    #[must_use]
+    pub fn printable(self) -> bool {
+        self == Attribute::Country
+    }
+
+    /// Checks a value against ADR-0036 clause 1: a country of exactly two upper-case letters,
+    /// any other value 1 to [`MAX_VALUE_CHARS`] characters without a control character.
+    ///
+    /// # Errors
+    /// Returns why the value is refused, naming the attribute.
+    pub fn check(self, value: &str) -> Result<(), String> {
+        let name = self.key();
+        if self == Attribute::Country {
+            if value.len() == 2 && value.bytes().all(|b| b.is_ascii_uppercase()) {
+                return Ok(());
+            }
+            return Err(format!(
+                "{name} must be two upper-case letters, an ISO 3166-1 alpha-2 code"
+            ));
+        }
+        let chars = value.chars().count();
+        if chars == 0 || chars > MAX_VALUE_CHARS {
+            return Err(format!("{name} must be 1 to {MAX_VALUE_CHARS} characters"));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(format!("{name} must not carry a control character"));
+        }
+        Ok(())
+    }
+
+    /// Its value in `values`; empty when they hold none.
+    #[must_use]
+    pub fn of(self, values: &SubjectValues) -> &str {
+        match self {
+            Attribute::Country => &values.country,
+            Attribute::State => &values.state,
+            Attribute::Locality => &values.locality,
+            Attribute::Organization => &values.organization,
+            Attribute::OrganizationalUnit => &values.organizational_unit,
+            Attribute::OrganizationIdentifier => &values.organization_identifier,
+            Attribute::CommonName => "",
+        }
+    }
+
+    /// Puts `value` into `values` as this attribute's; a common name has no place there.
+    pub fn set(self, values: &mut SubjectValues, value: String) {
+        let slot = match self {
+            Attribute::Country => &mut values.country,
+            Attribute::State => &mut values.state,
+            Attribute::Locality => &mut values.locality,
+            Attribute::Organization => &mut values.organization,
+            Attribute::OrganizationalUnit => &mut values.organizational_unit,
+            Attribute::OrganizationIdentifier => &mut values.organization_identifier,
+            Attribute::CommonName => return,
+        };
+        *slot = value;
+    }
+}
+
+/// The attributes `values` hold, in certificate order, ending with `common_name`: the subject of
+/// a host certificate (ADR-0036 clause 2).
+#[must_use]
+pub fn carried_attributes(values: &SubjectValues, common_name: &str) -> Vec<(Attribute, String)> {
+    let mut attributes: Vec<(Attribute, String)> = Attribute::CARRIED
+        .into_iter()
+        .filter(|attribute| !attribute.of(values).is_empty())
+        .map(|attribute| (attribute, attribute.of(values).to_string()))
+        .collect();
+    attributes.push((Attribute::CommonName, common_name.to_string()));
+    attributes
 }
 
 impl Subject {
     /// The attributes to sign, in certificate order, ending with the common name the Server sets.
     ///
     /// # Errors
-    /// Returns the `400` text for a value that is empty, longer than [`MAX_VALUE_CHARS`], or
-    /// carries a control character.
+    /// Returns the `400` text for a value that breaks ADR-0036 clause 1.
     pub fn attributes(&self, common_name: &str) -> Result<Vec<(Attribute, String)>, String> {
         let named = [
-            (Attribute::Organization, "organization", &self.organization),
+            (Attribute::Country, &self.country),
+            (Attribute::State, &self.state),
+            (Attribute::Locality, &self.locality),
+            (Attribute::Organization, &self.organization),
+            (Attribute::OrganizationalUnit, &self.organizational_unit),
             (
-                Attribute::OrganizationalUnit,
-                "organizational_unit",
-                &self.organizational_unit,
+                Attribute::OrganizationIdentifier,
+                &self.organization_identifier,
             ),
         ];
         let mut attributes = Vec::new();
-        for (attribute, name, value) in named {
+        for (attribute, value) in named {
             let Some(value) = value else { continue };
-            let chars = value.chars().count();
-            if chars == 0 || chars > MAX_VALUE_CHARS {
-                return Err(format!(
-                    "subject.{name} must be 1 to {MAX_VALUE_CHARS} characters"
-                ));
-            }
-            if value.chars().any(char::is_control) {
-                return Err(format!("subject.{name} must not carry a control character"));
-            }
+            attribute.check(value).map_err(|e| format!("subject.{e}"))?;
             attributes.push((attribute, value.clone()));
         }
         attributes.push((Attribute::CommonName, common_name.to_string()));
@@ -587,32 +713,55 @@ mod tests {
         serde_json::from_value(json).expect("request")
     }
 
-    /// Verifies: ADR-0028
+    /// A subject takes the six attributes of ADR-0036 clause 1 and nothing else, each within its
+    /// bounds, and lists them in certificate order before the common name the Server sets.
+    /// Verifies: ADR-0036
     #[test]
-    fn a_subject_takes_only_the_organization_and_its_unit_within_bounds() {
-        for unknown in ["common_name", "country", "email"] {
+    fn a_subject_takes_six_attributes_within_bounds() {
+        for unknown in ["common_name", "email", "serial_number", "street"] {
             let refused = serde_json::from_value::<IssueRequest>(
                 serde_json::json!({"subject": {unknown: "x"}}),
             );
             assert!(refused.is_err(), "{unknown} is refused");
         }
+        let twice = serde_json::from_str::<IssueRequest>(
+            r#"{"subject": {"organization": "a", "organization": "b"}}"#,
+        );
+        assert!(twice.is_err(), "an attribute named twice is refused");
         for bad in [
+            serde_json::json!({"country": "at"}),
+            serde_json::json!({"country": "AUT"}),
+            serde_json::json!({"country": ""}),
+            serde_json::json!({"country": "Ö1"}),
             serde_json::json!({"organization": ""}),
-            serde_json::json!({"organization": "x".repeat(65)}),
+            serde_json::json!({"state": "x".repeat(65)}),
             serde_json::json!({"organizational_unit": "a\nb"}),
+            serde_json::json!({"organization_identifier": "a\u{7}b"}),
         ] {
             let subject: Subject = serde_json::from_value(bad.clone()).expect("subject");
             assert!(subject.attributes("cn").is_err(), "{bad} is refused");
         }
         let subject: Subject = serde_json::from_value(serde_json::json!({
-            "organization": "Kunde GmbH", "organizational_unit": "Wien"
+            "organization_identifier": "6f1c0b9e-2a4d-4c55-9b1e-0d2f3a4b5c6d",
+            "organizational_unit": "Werk Nord",
+            "organization": "Kunde GmbH",
+            "locality": "Linz",
+            "state": "Oberösterreich",
+            "country": "AT",
         }))
         .expect("subject");
         assert_eq!(
             subject.attributes("acme bootstrap").expect("valid"),
             vec![
+                (Attribute::Country, "AT".to_string()),
+                (Attribute::State, "Oberösterreich".to_string()),
+                (Attribute::Locality, "Linz".to_string()),
                 (Attribute::Organization, "Kunde GmbH".to_string()),
-                (Attribute::OrganizationalUnit, "Wien".to_string()),
+                (Attribute::OrganizationalUnit, "Werk Nord".to_string()),
+                (
+                    Attribute::OrganizationIdentifier,
+                    "6f1c0b9e-2a4d-4c55-9b1e-0d2f3a4b5c6d".to_string()
+                ),
                 (Attribute::CommonName, "acme bootstrap".to_string()),
             ]
         );

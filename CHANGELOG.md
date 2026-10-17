@@ -53,14 +53,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   connection carries its Host's subject values as `fleet.host.country`, `fleet.host.state`,
   `fleet.host.locality`, `fleet.host.organization`, `fleet.host.site` (the organizational unit)
   and `fleet.host.organization_id`, which no Agent can report over; an Agent behind a Gateway
-  carries none. Today's host certificates carry a common name only, so these are empty until the
-  certificate carries more. The labels of a Client's own Agent — the one reporting
+  carries none. A host certificate carries the values of the bootstrap certificate it enrolled
+  with (see *A bootstrap certificate's subject* below). The labels of a Client's own Agent — the one reporting
   `supervisor.kind.*` — hold for that Client's Supervisor Agents below their own labels; behind a
   Gateway the Agents are grouped by the `host.id` (else `host.name`) they report, and a group with
   two Client Agents inherits nothing and is marked `ambiguous`. The Agents tab marks inherited
   labels. **What to do:** label a Client's own Agent once instead of each of its Agents.
 
 ### Changed
+
+- **A bootstrap certificate's subject names up to six values, and every host certificate issued
+  from it carries them**
+  ([ADR-0036](docs/adr/0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md)).
+  `subject` in `POST /api/v1/bootstrap-certificates` takes `country` (two upper-case letters, ISO
+  3166-1 alpha-2), `state`, `locality`, `organization`, `organizational_unit` and
+  `organization_identifier` (a customer or contract number), each optional; the Enrolments tab has
+  a field for each and offers the countries as a list. Approving an enrolment copies these values
+  from the bootstrap certificate the host enrolled with into its host certificate, and every
+  renewal carries them on, so its Agents carry them as `fleet.host.*`; the CSR's subject is never
+  copied. `GET /api/v1/enrolments` lists the bootstrap certificate's values as the object
+  `bootstrap_subject` and no longer lists the request's `subject`. An approval whose bootstrap
+  certificate has a malformed subject — an attribute twice, a value of the wrong string type or
+  length, a country that is not two upper-case letters — is answered `409` naming the attribute,
+  and nothing is signed. **What to do:** a script that reads `subject` or the text
+  `bootstrap_subject` of `GET /api/v1/enrolments` reads the `bootstrap_subject` object instead.
+  Host certificates issued before carry no values, and their Hosts have none until the host enrols
+  again with a bootstrap certificate that names them. A bootstrap CA of your own PKI must write
+  the country as a `PrintableString` and every other value as a `UTF8String`, each at most once;
+  replace a bootstrap certificate that does not.
 
 - **Labels are part of the Agent's record, and forgetting an Agent removes them**
   ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). Labels follow an Agent

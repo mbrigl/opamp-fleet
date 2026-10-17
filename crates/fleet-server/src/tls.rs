@@ -14,7 +14,7 @@ use opamp::tls::Identity;
 use x509_parser::prelude::{FromDer, SubjectPublicKeyInfo, X509Certificate};
 
 use crate::config::{EnrolmentConfig, RestTlsConfig, TlsConfig};
-use crate::revocation::{name_hash, Authority, CertId};
+use crate::revocation::{name_hash, Authority, CertId, SubjectValues};
 
 /// The material each plane serves with, and who issued what the Agent plane admits.
 pub struct PlaneTls {
@@ -55,6 +55,11 @@ pub enum Peer {
     /// A bootstrap certificate: it may only enrol.
     Enrolling {
         subject: String,
+        /// Its six subject values as they read, for the operator (ADR-0036 clause 5).
+        values: Box<SubjectValues>,
+        /// The values an approval carries into the host certificate, or why its subject breaks
+        /// the rules they are issued by (ADR-0036 clause 3).
+        carried: Box<Result<SubjectValues, String>>,
         /// SHA-256 of the certificate, hex.
         fingerprint: String,
         /// Its issuer and serial: the serial as the bootstrap record keys it (`ca::facts`), and the
@@ -72,6 +77,8 @@ impl Issuers {
             // The handshake verified it, so it parses; a certificate that does not is no member.
             return Peer::Enrolling {
                 subject: String::new(),
+                values: Box::default(),
+                carried: Box::new(Err("the certificate does not parse".to_string())),
                 fingerprint: hex::encode(Sha256::digest(certificate)),
                 id: CertId {
                     issuer: String::new(),
@@ -90,7 +97,9 @@ impl Issuers {
             return Peer::Member;
         }
         Peer::Enrolling {
-            subject: parsed.subject().to_string(),
+            subject: crate::ca::name_text(parsed.subject()),
+            values: Box::new(crate::ca::subject_values(parsed.subject())),
+            carried: Box::new(crate::ca::carried_subject(parsed.subject())),
             fingerprint: hex::encode(Sha256::digest(certificate)),
             id: CertId::new(issuer, &hex::encode(parsed.raw_serial())),
         }

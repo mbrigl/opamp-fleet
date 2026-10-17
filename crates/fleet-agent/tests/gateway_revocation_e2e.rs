@@ -121,7 +121,13 @@ impl Fleet {
             .expect("csr")
             .pem()
             .expect("pem");
-        let signed = signer.sign(&csr, "gateway-host").expect("sign");
+        let signed = signer
+            .sign(
+                &csr,
+                "gateway-host",
+                &fleet_server::revocation::SubjectValues::default(),
+            )
+            .expect("sign");
         std::fs::write(pki.join("gateway-cert.pem"), &signed.pem).expect("write");
         std::fs::write(pki.join("gateway-cert-key.pem"), key.serialize_pem()).expect("write");
         let gateway_host = signed.facts.host.clone().expect("a host");

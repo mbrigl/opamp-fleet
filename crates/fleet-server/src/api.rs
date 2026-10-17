@@ -2382,13 +2382,14 @@ struct PendingEnrolment {
     /// The address the request came from.
     #[serde(skip_serializing_if = "Option::is_none")]
     peer: Option<String>,
-    /// The subject the request asks for.
-    subject: String,
     /// The SHA-256 fingerprint of the requested public key, hex — the Client logs the same value,
     /// so an operator can match a request to a host.
     key_fingerprint: String,
-    /// The bootstrap certificate the connection carried.
-    bootstrap_subject: String,
+    /// The six subject values of the bootstrap certificate the connection carried: what an
+    /// approval carries into the host certificate (ADR-0036 clause 5). The request's own subject
+    /// is not listed, because it is neither trusted nor carried.
+    bootstrap_subject: HostSubject,
+    /// The SHA-256 fingerprint of that bootstrap certificate, hex.
     bootstrap_fingerprint: String,
     /// Its serial, lowercase hex: the `serial` of `GET /api/v1/bootstrap-certificates` when this
     /// Server issued it.
@@ -2412,16 +2413,24 @@ struct IssueBootstrapRequest {
     password: Option<String>,
 }
 
-/// The subject of a bootstrap certificate: these attributes only, each optional and 1 to 64
-/// characters without a control character; the Server sets the common name. It labels the
-/// certificate and authorizes nothing (ADR-0028 clause 22).
+/// The subject of a bootstrap certificate: these attributes only, each optional; the Server sets
+/// the common name. Every host certificate issued from it carries them, and they describe and
+/// select the Host through `fleet.host.*`; they authorize nothing (ADR-0036 clause 1).
 #[derive(Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct BootstrapSubject {
+    /// C — exactly two upper-case letters, an ISO 3166-1 alpha-2 code.
+    country: Option<String>,
+    /// ST — 1 to 64 characters without a control character, as are the others.
+    state: Option<String>,
+    /// L.
+    locality: Option<String>,
     /// O — the customer, typically.
     organization: Option<String>,
     /// OU — the site, typically.
     organizational_unit: Option<String>,
+    /// organizationIdentifier (2.5.4.97) — a customer or contract number, a UUID for instance.
+    organization_identifier: Option<String>,
 }
 
 /// An issued bootstrap certificate with its private key — the one time the key is handed out
@@ -2501,7 +2510,7 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
     request_body = IssueBootstrapRequest,
     responses(
         (status = 201, description = "Issued; the certificate and, without a password, its private key, this once", body = IssuedBootstrap),
-        (status = 400, description = "A subject attribute this route does not know, a value out of bounds, validity_days outside 1 to 90, or a password outside 4 to 128 characters", body = ErrorBody),
+        (status = 400, description = "A subject attribute this route does not know, a country that is not two upper-case letters, another value out of bounds, validity_days outside 1 to 90, or a password outside 4 to 128 characters", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody),
         (status = 409, description = "No bootstrap_ca_key_file is configured, the bootstrap CA has ended, or the record is full", body = ErrorBody),
@@ -2522,8 +2531,12 @@ async fn issue_bootstrap_certificate(
             let subject = request.subject.unwrap_or_default();
             crate::bootstrap::IssueRequest {
                 subject: crate::bootstrap::Subject {
+                    country: subject.country,
+                    state: subject.state,
+                    locality: subject.locality,
                     organization: subject.organization,
                     organizational_unit: subject.organizational_unit,
+                    organization_identifier: subject.organization_identifier,
                 },
                 validity_days: request.validity_days,
                 password: request.password.map(crate::bootstrap::Password),
@@ -2837,9 +2850,8 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
             id: p.id,
             arrived_ms: p.arrived_ms,
             peer: p.requester.peer.map(|ip| ip.to_string()),
-            subject: p.subject,
             key_fingerprint: p.key_fingerprint,
-            bootstrap_subject: p.requester.bootstrap_subject,
+            bootstrap_subject: p.requester.bootstrap_values.into(),
             bootstrap_fingerprint: p.requester.bootstrap_fingerprint,
             bootstrap_serial: p.requester.bootstrap.serial,
         })
@@ -2857,7 +2869,7 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
         (status = 204, description = "Approved and signed"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
-        (status = 409, description = "The CA could not sign the request, or its bootstrap certificate is revoked", body = ErrorBody)
+        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, or that certificate's subject breaks the rules of ADR-0036 clause 1 — the message names the attribute, and nothing is signed", body = ErrorBody)
     )
 )]
 async fn approve_enrolment(
@@ -2885,7 +2897,9 @@ async fn approve_enrolment(
                  withdrawn, and nothing was signed"
             ),
         ),
-        Err(crate::enrolment::DecisionError::Sign(e)) => error(StatusCode::CONFLICT, e),
+        Err(
+            crate::enrolment::DecisionError::Subject(e) | crate::enrolment::DecisionError::Sign(e),
+        ) => error(StatusCode::CONFLICT, e),
     }
 }
 
@@ -2974,7 +2988,8 @@ struct HostView {
     agents: Vec<HostAgent>,
 }
 
-/// The subject values a Host carries (ADR-0035 clause 1); an empty one is absent from the
+/// The subject values a Host carries (ADR-0035 clause 1), or a bootstrap certificate carries into
+/// the host certificate an approval issues (ADR-0036 clause 5); an empty one is absent from the
 /// certificate.
 #[derive(Serialize, ToSchema)]
 struct HostSubject {
@@ -2990,6 +3005,19 @@ struct HostSubject {
     organizational_unit: String,
     /// `organizationIdentifier`, as `fleet.host.organization_id`.
     organization_identifier: String,
+}
+
+impl From<crate::revocation::SubjectValues> for HostSubject {
+    fn from(values: crate::revocation::SubjectValues) -> Self {
+        HostSubject {
+            country: values.country,
+            state: values.state,
+            locality: values.locality,
+            organization: values.organization,
+            organizational_unit: values.organizational_unit,
+            organization_identifier: values.organization_identifier,
+        }
+    }
 }
 
 /// One Agent under the Host it arrived over (ADR-0035 clause 7).
@@ -3151,21 +3179,13 @@ async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
         .into_iter()
         .map(|(host, entry, certificates)| {
             let agents = carried.remove(&host).unwrap_or_default();
-            let subject = entry.subject;
             HostView {
                 name: agents.name.unwrap_or_else(|| host.clone()),
                 host,
                 gateway: entry.gateway,
                 instance_uids: entry.instance_uids.into_iter().collect(),
                 certificates,
-                subject: HostSubject {
-                    country: subject.country,
-                    state: subject.state,
-                    locality: subject.locality,
-                    organization: subject.organization,
-                    organizational_unit: subject.organizational_unit,
-                    organization_identifier: subject.organization_identifier,
-                },
+                subject: entry.subject.into(),
                 approved_ms: entry.approved_ms,
                 agents: agents
                     .agents

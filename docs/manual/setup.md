@@ -290,8 +290,9 @@ customer and the site; both are optional, and the approver sees them on every re
 carries.
 
 **In the UI**, through the tunnel: open the **Enrolments** tab and fill in **Bootstrap
-certificates** with the customer (O), the site (OU) and the days it is valid (10 by default, at
-most 90). Press **Issue**, then **Save bootstrap.pem** and **Save bootstrap-key.pem** in the new
+certificates** with what the host certificates are to carry — the country, chosen from a list,
+the state, the locality, the customer (O), the site (OU) and a customer number
+(organizationIdentifier), each optional — and the days it is valid (10 by default, at most 90). Press **Issue**, then **Save bootstrap.pem** and **Save bootstrap-key.pem** in the new
 certificate's row. The page holds the private key only while it stays open, and asks before it is
 reloaded or closed, so save both files first.
 
@@ -299,7 +300,7 @@ reloaded or closed, so save both files first.
 
 ```console
 $ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' \
-       -d '{"subject": {"organization": "Example Customer", "organizational_unit": "Vienna"}, "validity_days": 14}' \
+       -d '{"subject": {"country": "AT", "organization": "Example Customer", "organizational_unit": "Vienna"}, "validity_days": 14}' \
        https://127.0.0.1:4321/api/v1/bootstrap-certificates > issued.json
 $ jq -r .certificate_pem issued.json > bootstrap.pem
 $ (umask 077; jq -r .private_key_pem issued.json > bootstrap-key.pem) && rm issued.json
@@ -307,7 +308,9 @@ $ (umask 077; jq -r .private_key_pem issued.json > bootstrap-key.pem) && rm issu
 
 The answer is the only place the private key ever appears: the Server keeps the certificate's
 serial, subject and end, never the key. Lost, it is not fetched again but issued anew. One pair
-may go to every host of that customer.
+may go to every host of that customer. Every host that enrols with it is issued a certificate
+carrying the same subject values, which its Agents carry as `fleet.host.*` for Selectors to match
+([Bootstrap certificates](server.md#bootstrap-certificates-issued-by-the-server)).
 
 **Or as one file under a password.** Type a password, twice, in the UI, or name `"password"` in
 the request, and the Server hands out no PEM key: it keeps `bootstrap.p12`, the certificate and its
@@ -418,14 +421,15 @@ INFO certificate request generated; an enrolling host waits for an operator's ap
 ```
 
 **Approve it.** Open the UI's **Enrolments** tab: it lists each waiting host with its full key
-fingerprint, its peer address, the name it asked for, and the bootstrap certificate it carries:
-the customer, site, serial and end it was issued with, or *not issued here* for one the Server did
-not issue. Compare the fingerprint with the one the host logged, check that the bootstrap
+fingerprint, its peer address, and the bootstrap certificate it carries: the subject values its
+host certificate will carry, and the serial and end it was issued with, or *not issued here* for
+one the Server did not issue. Compare the fingerprint with the one the host logged, check that the bootstrap
 certificate is the one you gave that host, then press **Approve**. The same over the API:
 
 ```console
 $ curl --cacert server-ca.pem https://127.0.0.1:4321/api/v1/enrolments
-[{"id":"3f9a…","arrived_ms":…,"peer":"10.0.4.17","subject":"CN=host-01","key_fingerprint":"3f9a…",…}]
+[{"id":"3f9a…","arrived_ms":…,"peer":"10.0.4.17","key_fingerprint":"3f9a…",
+  "bootstrap_subject":{"country":"AT","organization":"Example Customer","organizational_unit":"Vienna",…},…}]
 $ curl --cacert server-ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/approve
 ```
 

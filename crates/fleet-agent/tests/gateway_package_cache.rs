@@ -1158,7 +1158,16 @@ async fn a_client_behind_a_marked_gateway_receives_an_uploaded_artifact_through_
             .expect("csr")
             .pem()
             .expect("pem");
-        (signer.sign(&csr, host).expect("sign"), key.serialize_pem())
+        (
+            signer
+                .sign(
+                    &csr,
+                    host,
+                    &fleet_server::revocation::SubjectValues::default(),
+                )
+                .expect("sign"),
+            key.serialize_pem(),
+        )
     };
     let (gateway_cert, gateway_key) = issue("gateway-host");
     std::fs::write(pki.join("gateway-cert.pem"), &gateway_cert.pem).expect("write");

@@ -1670,8 +1670,9 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
 /// so an operator can match a request to the Client's log. The page asks for them, and the OpenAPI
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no
-/// frontend toolchain to run it in.
-/// Verifies: ADR-0023, ADR-0028
+/// frontend toolchain to run it in. The queue lists the bootstrap certificate's subject values and
+/// not the request's own subject, and the issue form sends all six attributes (ADR-0036).
+/// Verifies: ADR-0023, ADR-0028, ADR-0036
 #[tokio::test]
 async fn the_ui_and_the_enrolment_api_share_their_names() {
     let server = spawn().await;
@@ -1695,7 +1696,13 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         "\"/api/v1/bootstrap-certificates\"",
         "\"/api/v1/revocations\"",
         "authority: \"bootstrap\"",
-        "organizational_unit",
+        "[\"country\", \"boot-country\"]",
+        "[\"state\", \"boot-state\"]",
+        "[\"locality\", \"boot-locality\"]",
+        "[\"organization\", \"boot-org\"]",
+        "[\"organizational_unit\", \"boot-unit\"]",
+        "[\"organization_identifier\", \"boot-org-id\"]",
+        "e.bootstrap_subject[field]",
         "validity_days:",
         ".certificate_pem",
         ".private_key_pem",
@@ -1728,7 +1735,6 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
                 "id",
                 "arrived_ms",
                 "peer",
-                "subject",
                 "key_fingerprint",
                 "bootstrap_subject",
                 "bootstrap_fingerprint",
@@ -1736,6 +1742,17 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
             ][..],
         ),
         ("EnrolmentWindow", &["open", "until_ms"][..]),
+        (
+            "BootstrapSubject",
+            &[
+                "country",
+                "state",
+                "locality",
+                "organization",
+                "organizational_unit",
+                "organization_identifier",
+            ][..],
+        ),
         (
             "BootstrapView",
             &["serial", "subject", "issued_ms", "not_after_ms", "revoked"][..],
@@ -1758,6 +1775,18 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
             );
         }
     }
+    assert!(
+        schemas["PendingEnrolment"]["properties"]
+            .get("subject")
+            .is_none(),
+        "a pending request lists no subject of its own"
+    );
+    assert!(
+        schemas["PendingEnrolment"]["properties"]["bootstrap_subject"]["$ref"]
+            .as_str()
+            .is_some_and(|r| r.ends_with("/HostSubject")),
+        "the bootstrap certificate's subject is listed by its values"
+    );
     for path in [
         "/api/v1/enrolment/window",
         "/api/v1/enrolments",

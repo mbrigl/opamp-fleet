@@ -37,8 +37,12 @@ Server issues it on your request.
 
 In the UI, open the **Enrolments** tab and go to **Bootstrap certificates**:
 
-1. Fill in the **customer (O)** and the **site (OU)**. Both are optional. They are a label: the
-   approver sees them on every request this certificate carries, and they grant nothing.
+1. Fill in what the hosts' certificates are to carry: the **country** (C, chosen from a list), the
+   **state** (ST), the **locality** (L), the **customer** (O), the **site** (OU) and a **customer
+   number** (organizationIdentifier). Each is optional. The approver sees them on every request
+   this certificate carries, every host certificate issued from it carries them, and its Agents
+   carry them as `fleet.host.*` for Selectors to match. They grant nothing. A value stays until a
+   host enrols again, so name only what is stable.
 2. Set how many **days** it is valid: 10 by default, 90 at most. Choose the time it takes to set the
    hosts up.
 3. Optionally type a **password**, twice. With it, the certificate and its key come as one file,

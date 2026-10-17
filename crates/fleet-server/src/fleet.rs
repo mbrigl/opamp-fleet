@@ -30,7 +30,7 @@ use crate::deployments::{self, deployment_for, Deployment, DeploymentError, Depl
 use crate::enrolment::{DecisionError, Enrolment};
 use crate::labels::{LabelError, Sources};
 use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, SignatureState};
-use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor};
+use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor, SubjectValues};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
 /// binary is (see `server.toml`, `max_package_size_bytes`).
@@ -377,11 +377,13 @@ pub trait Clock: Send + Sync {
 /// CA ([`ClientCa`](crate::ca::ClientCa)) is the adapter the composition root wires when
 /// `[client_ca]` is configured.
 pub trait CertificateSigner: Send + Sync {
-    /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself.
+    /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself. Its subject
+    /// carries `subject` — the values copied from the bootstrap certificate or the predecessor
+    /// (ADR-0036 clauses 3 and 4) — and never the request's.
     ///
     /// # Errors
     /// Returns an error when the request does not parse or cannot be signed.
-    fn sign(&self, csr_pem: &str, host: &str) -> Result<Signed, String>;
+    fn sign(&self, csr_pem: &str, host: &str, subject: &SubjectValues) -> Result<Signed, String>;
 
     /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0021
     /// clause 27); `Ok(None)` when it carries none.
@@ -984,17 +986,18 @@ impl AppState {
         }
     }
 
-    /// What a CSR renews, and the host the new certificate is for (ADR-0021 clause 27). A renewal
-    /// proof names the certificate whose key signed the new one — through a Gateway too — and the
-    /// host carries on from it; without one, the certificate the connection presented is renewed.
-    /// A certificate that names no host — one an operator provisioned — gets a host derived from
+    /// What a CSR renews, the host the new certificate is for (ADR-0021 clause 27), and the
+    /// subject values it carries on (ADR-0036 clause 4). A renewal proof names the certificate
+    /// whose key signed the new one — through a Gateway too — and the host and the values carry
+    /// on from it; without one, the certificate the connection presented is renewed. A
+    /// certificate that names no host — one an operator provisioned — gets a host derived from
     /// its issuer and serial, the same on every retry.
     fn renews(
         &self,
         ca: &dyn CertificateSigner,
         csr: &str,
         presented: Option<&Presented>,
-    ) -> Result<(Option<CertId>, String), String> {
+    ) -> Result<(Option<CertId>, String, SubjectValues), String> {
         let derived = |id: &CertId| {
             use sha2::Digest as _;
             let digest = sha2::Sha256::digest(format!("{}\n{}", id.issuer, id.serial));
@@ -1010,7 +1013,7 @@ impl AppState {
                 return Err("the certificate this request renews is revoked".to_string());
             }
             let host = old.host.clone().unwrap_or_else(|| derived(&old.id));
-            return Ok((Some(old.id), host));
+            return Ok((Some(old.id), host, old.subject_values));
         }
         Ok(match presented {
             Some(presented) => (
@@ -1019,8 +1022,13 @@ impl AppState {
                     .host
                     .clone()
                     .unwrap_or_else(|| derived(&presented.id)),
+                presented.subject_values.clone(),
             ),
-            None => (None, InstanceUid::default().to_string()),
+            None => (
+                None,
+                InstanceUid::default().to_string(),
+                SubjectValues::default(),
+            ),
         })
     }
 
@@ -1029,10 +1037,12 @@ impl AppState {
         self.enrolment.as_ref()
     }
 
-    /// Approves one pending enrolment request: the client CA signs it (ADR-0021 clause 22).
+    /// Approves one pending enrolment request: the client CA signs it (ADR-0021 clause 22), with
+    /// the subject values of the bootstrap certificate the request came with (ADR-0036 clause 3).
     ///
     /// # Errors
-    /// Returns [`DecisionError::NotFound`] when enrolment is off or the id is unknown, and
+    /// Returns [`DecisionError::NotFound`] when enrolment is off or the id is unknown,
+    /// [`DecisionError::Subject`] when the bootstrap certificate's subject cannot be carried, and
     /// [`DecisionError::Sign`] when no CA is configured or it refuses the request.
     pub fn approve_enrolment(&self, id: &str) -> Result<(), DecisionError> {
         let enrolment = self.enrolment.as_ref().ok_or(DecisionError::NotFound)?;
@@ -1993,8 +2003,9 @@ impl AppState {
                         .and_then(|csr| {
                             // The message's own instance_uid, before any re-key (ADR-0021).
                             ca.check_claims(&csr, &sender)?;
-                            let (predecessor, host) = self.renews(ca.as_ref(), &csr, presented)?;
-                            Ok((ca.sign(&csr, &host)?, predecessor))
+                            let (predecessor, host, subject) =
+                                self.renews(ca.as_ref(), &csr, presented)?;
+                            Ok((ca.sign(&csr, &host, &subject)?, predecessor))
                         }) {
                         Err(e) => Ok(Err(e)),
                         Ok((signed, predecessor)) => self

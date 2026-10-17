@@ -794,7 +794,10 @@ async fn an_enrolment_request_waits_for_an_operator_and_is_issued_on_approval() 
     let pending = pending.as_array().expect("array");
     assert_eq!(pending.len(), 1, "{pending:?}");
     let id = pending[0]["id"].as_str().expect("id").to_string();
-    assert_eq!(pending[0]["subject"], "CN=edge-01");
+    assert!(
+        pending[0].get("subject").is_none(),
+        "the request's own subject is neither trusted nor listed: {pending:?}"
+    );
 
     let download = served.endpoint.replace(
         "/v1/opamp",
@@ -3009,6 +3012,8 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
         };
         let requester = fleet_server::enrolment::Requester {
             bootstrap_subject: String::new(),
+            bootstrap_values: fleet_server::revocation::SubjectValues::default(),
+            carried: Ok(fleet_server::revocation::SubjectValues::default()),
             bootstrap_fingerprint: String::new(),
             bootstrap: fleet_server::revocation::CertId {
                 issuer: String::new(),
@@ -3553,7 +3558,12 @@ async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_ser
         .await
         .expect("json");
     assert_eq!(
-        pending[0]["bootstrap_subject"], subject,
+        pending[0]["bootstrap_subject"],
+        serde_json::json!({
+            "country": "", "state": "", "locality": "",
+            "organization": "Kunde GmbH", "organizational_unit": "Wien",
+            "organization_identifier": ""
+        }),
         "the approver sees whose certificate the request carries"
     );
     assert_eq!(
@@ -4060,7 +4070,7 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
     for refused in [
         serde_json::json!({ "validity_days": 91 }),
         serde_json::json!({ "subject": { "common_name": "anything" } }),
-        serde_json::json!({ "subject": { "country": "AT" } }),
+        serde_json::json!({ "subject": { "email": "ops@example.org" } }),
         serde_json::json!({ "subject": { "organization": "" } }),
     ] {
         let response = operator_client
@@ -4152,4 +4162,282 @@ async fn the_operator_plane_serves_its_own_certificate_and_the_agent_plane_keeps
         .await
         .expect("without [rest.tls] the Operator plane serves [tls]'s certificate");
     assert!(answered.status().is_success(), "{}", answered.status());
+}
+
+// ---- A bootstrap certificate's subject, carried into the host certificate (ADR-0036) ----
+
+/// The six subject values of a certificate in PEM.
+fn values_of(pem: &str) -> fleet_server::revocation::SubjectValues {
+    let der = opamp::tls::certificates(pem.as_bytes()).expect("pem");
+    fleet_server::ca::facts(der[0].as_ref())
+        .expect("facts")
+        .subject_values
+}
+
+/// A CSR whose own subject names a customer, which nothing may copy.
+fn csr_naming_another_customer() -> (Vec<u8>, KeyPair) {
+    let key = KeyPair::generate().expect("client key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    for (kind, value) in [
+        (rcgen::DnType::CountryName, "DE"),
+        (rcgen::DnType::OrganizationName, "Another Customer"),
+        (rcgen::DnType::CommonName, "edge-01"),
+    ] {
+        params.distinguished_name.push(kind, value);
+    }
+    let csr = params
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("csr pem");
+    (csr.into_bytes(), key)
+}
+
+/// The values every test below issues a bootstrap certificate with.
+fn six_values() -> serde_json::Value {
+    serde_json::json!({
+        "country": "AT",
+        "state": "Oberösterreich",
+        "locality": "Linz",
+        "organization": "Kunde GmbH",
+        "organizational_unit": "Werk Nord",
+        "organization_identifier": "6f1c0b9e-2a4d-4c55-9b1e-0d2f3a4b5c6d"
+    })
+}
+
+/// End to end: a bootstrap certificate issued with all six values enrols; the queue lists those
+/// values and not the request's subject; the approval signs them into the host certificate and
+/// ignores the CSR's; the Host carries them, and an Agent arriving with the issued certificate is
+/// described by them as `fleet.host.*`.
+/// Verifies: ADR-0036
+#[tokio::test]
+async fn an_enrolment_carries_the_bootstrap_subject_into_the_host_and_its_agents() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("acme bootstrap CA");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            issue_bootstrap: true,
+            revocations: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let response = operator_client
+        .post(operator(&served, "/api/v1/bootstrap-certificates"))
+        .json(&serde_json::json!({ "subject": six_values() }))
+        .send()
+        .await
+        .expect("issue");
+    assert_eq!(response.status(), 201);
+    let issued: serde_json::Value = response.json().await.expect("json");
+    let cert = issued["certificate_pem"].as_str().expect("cert");
+    let key = issued["private_key_pem"].as_str().expect("key");
+    operator_client
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+
+    let enrolling = client(&served.ca_pem, Some((cert, key)));
+    let (csr, host_key) = csr_naming_another_customer();
+    decode(post(&enrolling, &served.endpoint, csr_report(csr.clone())).await).await;
+    let pending: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/enrolments"))
+        .send()
+        .await
+        .expect("pending")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(pending[0]["bootstrap_subject"], six_values(), "{pending}");
+    assert!(pending[0].get("subject").is_none(), "{pending}");
+    assert!(
+        !pending.to_string().contains("Another Customer"),
+        "the CSR's subject is not listed: {pending}"
+    );
+    let id = pending[0]["id"].as_str().expect("id").to_string();
+    let approved = operator_client
+        .post(operator(
+            &served,
+            &format!("/api/v1/enrolments/{id}/approve"),
+        ))
+        .send()
+        .await
+        .expect("approve");
+    assert_eq!(approved.status(), 204);
+
+    let collected = decode(post(&enrolling, &served.endpoint, csr_report(csr)).await).await;
+    let host_cert = String::from_utf8(
+        collected
+            .connection_settings
+            .and_then(|offer| offer.opamp)
+            .and_then(|opamp| opamp.certificate)
+            .expect("the issued certificate")
+            .cert,
+    )
+    .expect("pem");
+    let values = values_of(&host_cert);
+    assert_eq!(
+        serde_json::to_value(&values).expect("json"),
+        six_values(),
+        "the host certificate carries the bootstrap certificate's values"
+    );
+    let listed = hosts(&served).await;
+    assert_eq!(listed[0]["subject"], six_values(), "{listed}");
+
+    let member = client(
+        &served.ca_pem,
+        Some((&host_cert, &host_key.serialize_pem())),
+    );
+    let uid = InstanceUid::default();
+    let _ = decode(post(&member, &served.endpoint, described(&uid, &[])).await).await;
+    let fleet: Vec<serde_json::Value> = operator_client
+        .get(operator(&served, "/api/v1/agents"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let agent = fleet
+        .iter()
+        .find(|agent| agent["instance_uid"] == uid.to_string())
+        .expect("in the fleet");
+    assert_eq!(
+        agent["host_attributes"],
+        serde_json::json!({
+            "fleet.host.country": "AT",
+            "fleet.host.state": "Oberösterreich",
+            "fleet.host.locality": "Linz",
+            "fleet.host.organization": "Kunde GmbH",
+            "fleet.host.site": "Werk Nord",
+            "fleet.host.organization_id": "6f1c0b9e-2a4d-4c55-9b1e-0d2f3a4b5c6d"
+        }),
+        "{agent}"
+    );
+}
+
+/// A bootstrap certificate from another CA whose subject names OU twice enrols, but its approval
+/// is refused with `409` naming the attribute, and nothing is signed.
+/// Verifies: ADR-0036
+#[tokio::test]
+async fn a_foreign_bootstrap_certificate_with_ou_twice_is_refused_at_approval() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("foreign bootstrap CA");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            revocations: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    // rcgen keeps one value per type, so the second OU goes in under its OID.
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationalUnitName, "Wien");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CustomDnType(vec![2, 5, 4, 11]), "Linz");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "foreign bootstrap");
+    let cert = params
+        .signed_by(&key, &bootstrap.issuer())
+        .expect("signed")
+        .pem();
+    let operator_client = client(&served.ca_pem, None);
+    operator_client
+        .post(operator(&served, "/api/v1/enrolment/window"))
+        .json(&serde_json::json!({ "open_for_secs": 600 }))
+        .send()
+        .await
+        .expect("open window");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key.serialize_pem())));
+    let (csr, _) = csr_for("edge-01");
+    decode(post(&enrolling, &served.endpoint, csr_report(csr.clone())).await).await;
+    let pending: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/enrolments"))
+        .send()
+        .await
+        .expect("pending")
+        .json()
+        .await
+        .expect("json");
+    let id = pending[0]["id"].as_str().expect("id").to_string();
+
+    let refused = operator_client
+        .post(operator(
+            &served,
+            &format!("/api/v1/enrolments/{id}/approve"),
+        ))
+        .send()
+        .await
+        .expect("approve");
+    assert_eq!(refused.status(), 409);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("organizational_unit")),
+        "{body}"
+    );
+    assert_eq!(hosts(&served).await, serde_json::json!([]), "no Host");
+    let register: serde_json::Value = operator_client
+        .get(operator(&served, "/api/v1/certificates"))
+        .send()
+        .await
+        .expect("register")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(register, serde_json::json!([]), "nothing was signed");
+    let waiting = decode(post(&enrolling, &served.endpoint, csr_report(csr)).await).await;
+    assert!(
+        waiting.connection_settings.is_none(),
+        "no certificate is handed out"
+    );
+}
+
+/// A renewal carries the values of the certificate it renews, and only those: neither the CSR's
+/// nor anything else.
+/// Verifies: ADR-0036
+#[tokio::test]
+async fn a_renewal_carries_the_predecessors_values_unchanged() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (old_cert, old_key) = pki.issue_to_host_with(
+        "h-1",
+        &[
+            (rcgen::DnType::CountryName, "AT"),
+            (rcgen::DnType::OrganizationName, "Kunde GmbH"),
+            (rcgen::DnType::OrganizationalUnitName, "Werk Nord"),
+            (rcgen::DnType::CustomDnType(vec![2, 5, 4, 97]), "K-4711"),
+            (rcgen::DnType::CommonName, "edge-01"),
+        ],
+    );
+    let http = client(&served.ca_pem, Some((&old_cert, &old_key)));
+    let uid = InstanceUid::default();
+    let (csr, _) = csr_naming_another_customer();
+    let reply = decode(post(&http, &served.endpoint, with_csr(&uid, csr)).await).await;
+    let new_cert = String::from_utf8(
+        reply
+            .connection_settings
+            .and_then(|s| s.opamp)
+            .and_then(|o| o.certificate)
+            .expect("renewed")
+            .cert,
+    )
+    .expect("pem");
+    assert_eq!(values_of(&new_cert), values_of(&old_cert));
+    assert_eq!(values_of(&new_cert).organization_identifier, "K-4711");
 }

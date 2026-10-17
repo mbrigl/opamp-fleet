@@ -223,7 +223,9 @@ probation that commits or rolls back.
 ([ADR-0028](adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
 A fresh host presents a bootstrap certificate while an operator has
 the enrolment window open; its CSR waits until an operator approves it, and the certificate it
-gets names a new host. The questionnaire of `service install --interactive` and `service config`
+gets names a new host and carries the subject values `tls` read from the bootstrap certificate
+and `ca` checked again, never the CSR's; every renewal carries the predecessor's
+([ADR-0036](adr/0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md)). The questionnaire of `service install --interactive` and `service config`
 does this before the service is registered: `service::enrol` runs the Client's own Agent over the
 ordinary `transport` with the bootstrap pair until the issued certificate is in the state
 directory ([ADR-0019](adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)). From then on the Client renews at two thirds of the certificate's life,
