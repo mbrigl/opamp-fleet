@@ -340,6 +340,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // What the Server serves, trusts and signs with until it restarts, read right after the files
+    // above were: the warnings below judge these, not whatever the files hold later
+    // (ADR-0028 clause 11).
+    let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
         // ADR-0026 clause 37.
         info!("{notice}");
@@ -408,7 +412,6 @@ async fn main() {
     }
     // Before a certificate the Server depends on ends, say so: at startup and once a day
     // (ADR-0028 clause 11). Nothing stops; the hosts decide for themselves.
-    let watched = fleet_server::pki::depended_on(&config);
     fleet_server::pki::warn_endings(
         &watched,
         Some(audit.as_ref()),

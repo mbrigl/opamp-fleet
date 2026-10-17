@@ -23,6 +23,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   beside a request is the key fingerprint you compare. The bootstrap-certificate list counts the
   requests waiting with each certificate.
 
+### Fixed
+
+- **The expiry warnings follow the certificate the Server serves.** The daily check read each
+  certificate file anew, so a file replaced without a restart silenced the warning while the
+  Server still served the old, ending certificate. It now judges what the Server read at startup,
+  and says when a file holds another certificate than the one served: restart the Server to serve
+  it ([ADR-0028](docs/adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)
+  clause 11).
+
 ### Security
 
 - **Revoking a bootstrap certificate withdraws the enrolment requests waiting with it.** Until

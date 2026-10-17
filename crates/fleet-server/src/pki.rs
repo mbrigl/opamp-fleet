@@ -103,22 +103,53 @@ pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> i32 {
     fleet_core::ending::exit_code(endings.iter().map(|ending| ending.standing(now)))
 }
 
+/// The certificates a running Server depends on as it read them at startup, which is what it
+/// serves and trusts until it restarts. A file that cannot be read is said once, here.
+#[must_use]
+pub fn loaded(files: &[PathBuf]) -> Vec<Ending> {
+    files
+        .iter()
+        .filter_map(|file| match read_ending(file) {
+            Ok(ending) => Some(ending),
+            Err(e) => {
+                tracing::warn!("cannot read when a certificate ends: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
 /// The running Server's look at what it depends on (ADR-0028 clause 11): a certificate that is
 /// ending is a warning and `pki.expiring`, one that has ended an error and `pki.expired`.
 /// Nothing stops: the hosts decide for themselves.
+///
+/// It judges the certificates as [`loaded`] read them, since those are what the Server serves
+/// until it restarts. A file that now holds another certificate is said too, as one a restart
+/// would take, and answered, so a replaced file neither silences the warning for the certificate
+/// still served nor goes unnoticed.
 pub fn warn_endings(
-    files: &[PathBuf],
+    loaded: &[Ending],
     audit: Option<&dyn crate::audit::Audit>,
     now: OffsetDateTime,
-) {
-    for file in files {
-        let ending = match read_ending(file) {
-            Ok(ending) => ending,
-            Err(e) => {
-                tracing::warn!("cannot read when a certificate ends: {e}");
-                continue;
+) -> Vec<PathBuf> {
+    let mut replaced = Vec::new();
+    for ending in loaded {
+        match read_ending(&ending.file) {
+            Ok(on_disk)
+                if on_disk.serial != ending.serial || on_disk.not_after != ending.not_after =>
+            {
+                tracing::warn!(
+                    file = %ending.file.display(),
+                    serving_until = %ending.not_after.date(),
+                    file_until = %on_disk.not_after.date(),
+                    "the file holds another certificate than the Server serves; restart the Server to serve it"
+                );
+                replaced.push(ending.file.clone());
             }
-        };
+            Ok(_) => {}
+            // Said every day, as before: the next start reads this file and would fail on it.
+            Err(e) => tracing::warn!("cannot read when a certificate ends: {e}"),
+        }
         let (event, outcome) = match ending.standing(now) {
             Standing::Fine => continue,
             Standing::Ending => {
@@ -154,6 +185,7 @@ pub fn warn_endings(
             );
         }
     }
+    replaced
 }
 
 #[cfg(test)]
@@ -197,11 +229,12 @@ mod tests {
         aged_ca(&ending, 3600, 10);
         aged_ca(&ended, 3650, -1);
         let audit = Recorded::default();
-        warn_endings(
-            &[fine, ending.clone(), ended.clone()],
+        let replaced = warn_endings(
+            &loaded(&[fine, ending.clone(), ended.clone()]),
             Some(&audit),
             OffsetDateTime::now_utc(),
         );
+        assert!(replaced.is_empty(), "an unchanged file is no replacement");
         let recorded = audit.0.lock().expect("lock");
         let seen: Vec<(String, String)> = recorded
             .iter()
@@ -217,6 +250,35 @@ mod tests {
         assert_eq!(
             recorded[0].fields.get("file"),
             Some(&crate::audit::Field::Text(ending.display().to_string()))
+        );
+    }
+
+    /// The running Server judges the certificate it serves, read at startup, not whatever the
+    /// file holds a day later: a file replaced without a restart neither silences the warning
+    /// for the certificate still served nor goes unsaid (ADR-0028 clause 11).
+    /// Verifies: ADR-0028
+    #[test]
+    fn a_file_replaced_without_a_restart_neither_silences_the_warning_nor_goes_unsaid() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let served = root.path().join("server.pem");
+        aged_ca(&served, 3600, 10);
+        let loaded = loaded(std::slice::from_ref(&served));
+        aged_ca(&served, 1, 3000);
+        let audit = Recorded::default();
+        let replaced = warn_endings(&loaded, Some(&audit), OffsetDateTime::now_utc());
+        let recorded = audit.0.lock().expect("lock");
+        assert_eq!(
+            recorded
+                .iter()
+                .map(|entry| entry.event.as_str())
+                .collect::<Vec<_>>(),
+            ["pki.expiring"],
+            "the certificate still served is ending, whatever the file holds now"
+        );
+        assert_eq!(
+            replaced,
+            [served],
+            "the replaced file is named for a restart"
         );
     }
 
