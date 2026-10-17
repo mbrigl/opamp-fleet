@@ -109,7 +109,7 @@ only as the protocol and its agents actually allow.
   done with the protocol's own means — client certificates, the CSR flow, and the
   `ConnectionSettings` offers that let the Server renew a Client's certificate — never through a
   private side channel. Software is installed only when it is signed with a key the operator holds
-  and fetched from a source the operator allowed. No vulnerability can be ruled out, so the project
+  and fetched from the fleet itself — the Server, or a Gateway relaying it. No vulnerability can be ruled out, so the project
   shrinks the chance of one and the damage it can do: every input from the network is bounded before
   it is parsed, the parsers are fuzzed, and the dependencies are checked before they are merged.
 - **Close the loop before widening it.** A working control loop — configure, apply, report back — for
@@ -121,6 +121,9 @@ only as the protocol and its agents actually allow.
 - **Configure the whole fleet or a part of it.** A configuration can be directed at the whole fleet or
   at a selected subset, so a change can be rolled out gradually; an Agent outside a target is left
   running what it already runs.
+- **One configuration, many hosts.** A Configuration is written once and serves every host it
+  reaches: what differs between them is a parameter, filled in from what the Server knows about an
+  Agent and its Host, or from what only the host knows. Secrets stay on the host.
 
 ## Core Concepts & Vocabulary
 
@@ -160,6 +163,13 @@ Use these exact words in code, comments, documentation, and ADRs.
   configured participant in the fleet. The Server does not distinguish an Agent backed by a Supervisor
   from one backed by a Collector's own OpAMP client, nor one reaching it directly from one arriving
   through a Gateway.
+- **Host** — what a client certificate the Server issued identifies: one Client installation that
+  connects to the Server directly, a Gateway included. It is named by the host id its certificate
+  carries and described by the subject values — country, state, locality, organization,
+  organizational unit, organization identifier — carried over from the bootstrap certificate it
+  enrolled with. Every Agent reaching the Server over that certificate belongs to it, the Agents
+  behind a Gateway to the Gateway's Host: the Server does not see the hosts behind a Gateway. Trust
+  and revocation act on a Host; a Deployment aims at Agents.
 - **REST API** — the Server's stable HTTP interface for reading fleet state and reading and changing
   configuration, described by an **OpenAPI** specification so clients and portals can be generated from
   it rather than hand-written. It is the integration contract any UI or portal builds on.
@@ -246,20 +256,35 @@ Use these exact words in code, comments, documentation, and ADRs.
   differ from the remote configuration (it may merge in local configuration, or have rejected the
   remote one).
 - **Health** — an Agent's self-reported liveness and status.
-- **Selector** — the rule by which the Server addresses a **subset** of the fleet for a Configuration
-  or a Deployment, so a change reaches the matching Agents and leaves the rest running what they
-  already run. One mechanism with two subjects, not two mechanisms.
+- **Selector** — the rule by which the Server addresses a **subset** of the fleet: equality pairs over
+  an Agent's effective description, which is what the Agent reports, the Labels an operator set, and
+  its Host's subject values. It aims a Deployment, so a change reaches the matching Agents and leaves
+  the rest running what they already run, and it chooses which blocks of a Configuration an Agent
+  receives. One mechanism, not two.
+- **Label** — a key and value an operator sets on an Agent, part of its effective description. The
+  Labels set on a Client's own Agent hold for every Agent of that Client unless an Agent sets the
+  key itself. A Label never overrides what an Agent reports or what its Host's certificate says.
+- **Configuration** — a named piece of an agent's own configuration language, written for one Agent
+  type, with the parameters it declares. It is content only: it reaches Agents through the
+  Deployments that hold it.
+- **Parameter** — a named value a Configuration leaves open. A Server-side parameter is filled in
+  per Agent from what the Server knows — the Deployment, the Agent's effective description — and is
+  validated against its declared type before a rollout releases it. A host-side parameter is filled
+  in on the host and never reported back in clear; a secret is always one.
 - **Package** — a versioned, downloadable software artifact an Agent installs, identified by the
-  **Agent type it is built for and its version**; its display name is derived from the two. It is
-  verified against a content hash and against a signature, and an Agent installs nothing that fails
-  either — the signature travelling with the Deployment that offers it rather than with the
-  artifact record. The Server
-  offers Packages; an Agent reports the status of each. This is how the Server updates an agent's
-  software, not only its configuration.
-- **Deployment** — a named set of Packages, aimed at a subset of the Fleet by a Selector and
-  carrying the signature of each Package's artifact. It is the only thing that is rolled out. An
-  Agent belongs to **at most one**: two Deployments matching one Agent is a conflict, and that
-  Agent is offered nothing new until it is resolved.
+  **Agent type it is built for and its version**; its display name is derived from the two. It holds
+  one entry per platform: the artifact's content hash, its size and the operator's signature. Every
+  artifact is uploaded to the Server, which offers only what it holds. An Agent verifies the content
+  hash and the signature and installs nothing that fails either; the Server checks a signature
+  against the operator's public key when it has one and reports a failed check, but the Agent's
+  check decides. An Agent reports the status of each Package. This is how the Server updates an
+  agent's software, not only its configuration.
+- **Deployment** — a named release: Packages, at most one per Agent type, and Configurations, aimed
+  at a subset of the Fleet by a Selector. It is the only thing that is rolled out; a rollout pins
+  for each Agent the Package and the Configuration revisions it releases, so editing the Deployment
+  afterwards changes nothing an Agent runs. An Agent belongs to **at most one**: two Deployments
+  matching one Agent is a conflict, and that Agent is offered nothing new until it is resolved. An
+  Agent in no Deployment is offered nothing.
 - **Updater** — the separate process that applies a Package: it stops the target (the Managed Process,
   or the Client itself), replaces its binary, restarts it, and rolls back on failure. A running process
   cannot reliably replace its own binary, so this work is handed off across a process boundary.
@@ -287,7 +312,7 @@ Use these exact words in code, comments, documentation, and ADRs.
    Process is done by writing a Plugin against the existing ports, without changing the supervision
    domain core.
 9. **G-9** — **A configuration can target a subset of the fleet.** The Server can direct a
-   configuration at a selected subset of Agents via a Selector; the matching Agents apply it and
+   configuration at a selected subset of Agents via a Deployment's Selector; the matching Agents apply it and
    every Agent outside the target keeps running what it already runs, so a change can be rolled out
    gradually rather than all at once.
 10. **G-10** — **The Server updates an agent's software, not only its configuration.** Via OpAMP
@@ -320,6 +345,11 @@ Use these exact words in code, comments, documentation, and ADRs.
 17. **G-17** — **The connection is secured and the Agent is identified.** Client-to-Server traffic
     is TLS-protected on both ends, mutual TLS is required, and the Server accepts only
     authenticated Agent identities.
+18. **G-18** — **One Configuration serves many hosts.** A Configuration declares parameters and
+    blocks. The Server fills in its Server-side parameters per Agent and validates every value
+    against its declared type, so a value that does not fit stops the rollout for that Agent and
+    says why; it chooses the blocks an Agent receives by their Selectors. Host-side parameters,
+    secrets among them, are filled in on the host and reach the Server only masked.
 
 ## Quality Goals
 
@@ -340,6 +370,8 @@ Use these exact words in code, comments, documentation, and ADRs.
   telemetry they produce.
 - **Replacing an agent's configuration language.** The Server distributes each Managed Process's own
   configuration; it does not invent an abstraction over the Collector's or a Foreign Agent's format.
+  Parameters and blocks (G-18) are a text layer over that language — substitution and selection —
+  not a model of it.
 - **Forking or extending the protocol.** This project implements OpAMP as upstream defines it. Where
   it falls short of the Baseline the gap is recorded in [`CONFORMANCE.md`](CONFORMANCE.md) as a
   deviation; it is never resolved by inventing protocol semantics of this project's own.

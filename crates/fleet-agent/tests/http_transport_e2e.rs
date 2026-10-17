@@ -44,10 +44,13 @@ fn ring_holding_signed(
     deployments
         .put_package("stable", id, true)
         .expect("package into the ring");
+    // The signature is the entry's own (ADR-0033).
     if let Some((platform, bytes)) = signature {
-        deployments
-            .put_signature("stable", id, platform, bytes)
-            .expect("signature onto the ring");
+        state
+            .packages()
+            .expect("package delivery")
+            .put_signature(id, platform, bytes)
+            .expect("signature onto the entry");
     }
     "stable".to_string()
 }
@@ -121,7 +124,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
 #[tokio::test]
 async fn a_configuration_rollout_reaches_a_polling_client() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(AppState::new(dir.path().join("fleet-configs")).expect("store"));
+    let state = Arc::new(common::fleet_state(dir.path()));
     let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -161,18 +164,12 @@ async fn a_configuration_rollout_reaches_a_polling_client() {
     })
     .await;
 
-    state
-        .save_configuration(
-            "fleet",
-            fleet_server::configs::Revision {
-                selector: Default::default(),
-                body: "receivers: {}\n".to_string(),
-                role: String::new(),
-                service_name: String::new(),
-            },
-        )
-        .expect("save");
-    state.rollout_configuration("fleet").expect("rollout");
+    let agent_type = view(&state.snapshot(), "otelcol")
+        .expect("otelcol view")
+        .service_name
+        .clone();
+    common::save(&state, "fleet", "receivers: {}\n", &agent_type);
+    common::release_to_every_agent(&state, &["fleet"]);
 
     wait_until("the polling agent to apply the configuration", || {
         let s = state.snapshot();
@@ -218,7 +215,7 @@ async fn a_package_rollout_reaches_a_polling_client() {
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
             .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
+                PackageOffering::new(store_dir.path(), store).expect("deployments"),
             )),
     );
     let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());

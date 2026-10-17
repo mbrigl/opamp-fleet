@@ -1134,7 +1134,8 @@ mod tests {
     }
 
     /// A delivered set reaches no key of `supervisor.toml` but the `[[supervisor]]` array: whatever
-    /// else it names — an `[auth]` section, trust, the verification key, the allowed sources, the
+    /// else it names — an `[auth]` section, trust, the verification key, a removed key such as
+    /// `allowed_sources`, the
     /// operator's consent in `[supervisors]`, self-update, Gateway Mode — the file keeps the
     /// operator's values and gains none of the offered ones.
     /// Verifies: ADR-0017

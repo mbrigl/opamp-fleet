@@ -1,9 +1,10 @@
-//! The REST API v1 as the integration contract (ADR-0023): Configuration CRUD, loud rejection of
-//! invalid input, and the OpenAPI document any portal generates a client from.
+//! The REST API v1 as the integration contract (ADR-0023, ADR-0034): Configuration CRUD, the
+//! Deployments that hold and release Configurations, loud rejection of invalid input, and the
+//! OpenAPI document any portal generates a client from.
 
 mod support;
 
-use support::spawn;
+use support::{deploy, save_configuration, spawn, AGENT_TYPE, FLEET_DEPLOYMENT};
 
 fn url(addr: std::net::SocketAddr, path: &str) -> String {
     format!("http://{addr}{path}")
@@ -26,17 +27,20 @@ async fn configurations_crud_round_trips() {
         .expect("json");
     assert_eq!(list.as_array().expect("array").len(), 0);
 
-    // Create; the stored resource comes back, body normalized to a trailing newline.
+    // Create; the stored resource comes back, body normalized to a trailing newline — content
+    // only, held by no Deployment yet (ADR-0034).
     let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/base"))
-        .json(&serde_json::json!({ "selector": { "os.type": "linux" }, "body": "receivers: {}" }))
+        .json(&serde_json::json!({ "body": "receivers: {}", "service_name": AGENT_TYPE }))
         .send()
         .await
         .expect("put");
     assert_eq!(put.status(), 200);
     let stored: serde_json::Value = put.json().await.expect("json");
     assert_eq!(stored["name"], "base");
-    assert_eq!(stored["selector"]["os.type"], "linux");
+    assert_eq!(stored["service_name"], AGENT_TYPE);
+    assert!(stored.get("selector").is_none(), "no Selector: {stored}");
+    assert_eq!(stored["deployments"], serde_json::json!([]));
     assert_eq!(stored["body"], "receivers: {}\n");
     assert!(
         stored.get("published").is_none() && stored.get("pending_changes").is_none(),
@@ -94,7 +98,7 @@ async fn a_configuration_carries_an_optional_role() {
     // Omitted: accepted, and absent from the response.
     let stored: serde_json::Value = client
         .put(url(server.rest_addr, "/api/v1/configurations/base"))
-        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .json(&serde_json::json!({ "body": "receivers: {}", "service_name": AGENT_TYPE }))
         .send()
         .await
         .expect("put")
@@ -109,7 +113,11 @@ async fn a_configuration_carries_an_optional_role() {
     // Set: stored verbatim and returned.
     let stored: serde_json::Value = client
         .put(url(server.rest_addr, "/api/v1/configurations/ruleset"))
-        .json(&serde_json::json!({ "body": "rules: []", "role": "supplementary" }))
+        .json(&serde_json::json!({
+            "body": "rules: []",
+            "role": "supplementary",
+            "service_name": AGENT_TYPE
+        }))
         .send()
         .await
         .expect("put")
@@ -132,7 +140,11 @@ async fn a_configuration_carries_an_optional_role() {
     // Agent-type-specific and the Server never guesses at one.
     let stored: serde_json::Value = client
         .put(url(server.rest_addr, "/api/v1/configurations/other"))
-        .json(&serde_json::json!({ "body": "x", "role": "some-agents-own-word" }))
+        .json(&serde_json::json!({
+            "body": "x",
+            "role": "some-agents-own-word",
+            "service_name": AGENT_TYPE
+        }))
         .send()
         .await
         .expect("put")
@@ -142,8 +154,55 @@ async fn a_configuration_carries_an_optional_role() {
     assert_eq!(stored["role"], "some-agents-own-word");
 }
 
-/// ADR-0025 over the wire: saving proposes, the rollout act distributes — resource-wide or per
-/// Agent — and a later edit waits as `update` until the next act pins it.
+/// A Configuration has no Selector (ADR-0034 clauses 1 and 9): a `PUT` naming one is `400` and says the
+/// Deployment is where to aim, and the Configuration's own rollout route is gone (`404`).
+/// Verifies: ADR-0034
+#[tokio::test]
+async fn a_configuration_takes_no_selector_and_has_no_rollout_of_its_own() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let refused = client
+        .put(url(server.rest_addr, "/api/v1/configurations/base"))
+        .json(&serde_json::json!({
+            "selector": { "os.type": "linux" },
+            "body": "receivers: {}",
+            "service_name": AGENT_TYPE
+        }))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(refused.status(), 400);
+    let error: serde_json::Value = refused.json().await.expect("an error body");
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|why| why.contains("selector") && why.contains("Deployment")),
+        "the refusal names where to aim: {error}"
+    );
+    let gone = client
+        .get(url(server.rest_addr, "/api/v1/configurations/base"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(gone.status(), 404, "nothing was stored");
+
+    save_configuration(server.rest_addr, "base", "receivers: {}", "").await;
+    let rollout = client
+        .post(url(server.rest_addr, "/api/v1/configurations/base/rollout"))
+        .send()
+        .await
+        .expect("rollout");
+    assert_eq!(
+        rollout.status(),
+        404,
+        "a Configuration is rolled out only through a Deployment"
+    );
+}
+
+/// ADR-0025 and ADR-0034 over the wire: saving proposes, the Deployment's rollout act
+/// distributes — for the channel or per Agent — and a later edit waits as `update` until the next
+/// act pins it.
+/// Verifies: ADR-0034
 #[tokio::test]
 async fn a_configuration_waits_until_it_is_rolled_out() {
     let server = spawn().await;
@@ -151,14 +210,29 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // Saved: complete, aimed at everybody — a visible candidate, assigned to nobody.
+    // Saved and put into the Deployment that claims the Agent: a visible candidate, assigned to
+    // nobody.
+    save_configuration(server.rest_addr, "fleet", "receivers: {}", "").await;
     let put = client
-        .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
-        .json(&serde_json::json!({ "body": "receivers: {}" }))
+        .put(url(server.rest_addr, "/api/v1/deployments/fleet"))
+        .json(&serde_json::json!({ "selector": { "service.name": AGENT_TYPE } }))
         .send()
         .await
-        .expect("put");
+        .expect("put the deployment");
     assert_eq!(put.status(), 200);
+    let held: serde_json::Value = client
+        .put(url(
+            server.rest_addr,
+            "/api/v1/deployments/fleet/configurations/fleet",
+        ))
+        .send()
+        .await
+        .expect("hold")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(held["configurations"], serde_json::json!(["fleet"]));
+    assert_eq!(held["targeted_agents"], 1);
     let view = agent_view(&client, server.rest_addr, &uid).await;
     assert_eq!(view["matched_configurations"][0], "fleet", "a candidate");
     assert!(
@@ -170,13 +244,19 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
     );
     assert_eq!(view["pending_configurations"][0]["name"], "fleet");
     assert_eq!(view["pending_configurations"][0]["change"], "new");
+    let config: serde_json::Value = client
+        .get(url(server.rest_addr, "/api/v1/configurations/fleet"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(config["deployments"], serde_json::json!(["fleet"]));
 
-    // The resource-level act: rolled out to every currently matching Agent.
+    // The Deployment's act: released to every Agent it claims.
     let rollout: serde_json::Value = client
-        .post(url(
-            server.rest_addr,
-            "/api/v1/configurations/fleet/rollout",
-        ))
+        .post(url(server.rest_addr, "/api/v1/deployments/fleet/rollout"))
         .send()
         .await
         .expect("rollout")
@@ -186,6 +266,7 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
     assert_eq!(rollout["assigned_agents"], 1);
     let view = agent_view(&client, server.rest_addr, &uid).await;
     assert_eq!(view["assigned_configurations"][0], "fleet");
+    assert_eq!(view["assigned_deployment"], "fleet");
     assert!(view["pending_configurations"]
         .as_array()
         .expect("array")
@@ -194,7 +275,10 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
     // Edited: the Agent keeps its pinned revision; the edit waits as an update.
     let put = client
         .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
-        .json(&serde_json::json!({ "body": "receivers: {}\nexporters: {}" }))
+        .json(&serde_json::json!({
+            "body": "receivers: {}\nexporters: {}",
+            "service_name": AGENT_TYPE
+        }))
         .send()
         .await
         .expect("edit");
@@ -205,13 +289,13 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
         "the edit is saved, waiting, not in force: {view}"
     );
 
-    // The per-Agent act releases the edit to this one Agent.
+    // The per-Agent act releases the edit to this one Agent, naming its Deployment.
     let per_agent = client
         .post(url(
             server.rest_addr,
             &format!("/api/v1/agents/{uid}/rollout"),
         ))
-        .json(&serde_json::json!({ "configuration": "fleet" }))
+        .json(&serde_json::json!({ "deployment": "fleet" }))
         .send()
         .await
         .expect("rollout to agent");
@@ -222,31 +306,43 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
         .expect("array")
         .is_empty());
 
-    // A rollout of a name the store does not hold is 404, never a silent create.
-    let missing = client
-        .post(url(
-            server.rest_addr,
-            "/api/v1/configurations/missing/rollout",
-        ))
-        .send()
-        .await
-        .expect("rollout missing");
-    assert_eq!(missing.status(), 404);
-    let missing = client
+    // Naming another Deployment is a conflict, and a bare Configuration cannot be named at all.
+    let other = client
         .post(url(
             server.rest_addr,
             &format!("/api/v1/agents/{uid}/rollout"),
         ))
-        .json(&serde_json::json!({ "configuration": "missing" }))
+        .json(&serde_json::json!({ "deployment": "missing" }))
         .send()
         .await
-        .expect("rollout missing to agent");
+        .expect("rollout another to agent");
+    assert_eq!(other.status(), 409);
+    let named = client
+        .post(url(
+            server.rest_addr,
+            &format!("/api/v1/agents/{uid}/rollout"),
+        ))
+        .json(&serde_json::json!({ "configuration": "fleet" }))
+        .send()
+        .await
+        .expect("rollout a configuration to agent");
+    assert!(
+        named.status().is_client_error() && named.status() != 404,
+        "a configuration is not a field of the act: {}",
+        named.status()
+    );
+    // A Deployment the Server does not hold is 404, never a silent create.
+    let missing = client
+        .post(url(server.rest_addr, "/api/v1/deployments/missing/rollout"))
+        .send()
+        .await
+        .expect("rollout missing");
     assert_eq!(missing.status(), 404);
 }
 
 /// ADR-0025 point 6: an Agent that appears after the rollout act waits — it surfaces as pending
-/// and receives nothing until an act of its own. The bulk act must be repeated (or the per-Agent
-/// one pressed) for latecomers.
+/// and receives nothing until an act of its own. The Deployment's act must be repeated (or the
+/// per-Agent one pressed) for latecomers.
 #[tokio::test]
 async fn an_agent_that_appears_later_waits() {
     let server = spawn().await;
@@ -258,25 +354,18 @@ async fn an_agent_that_appears_later_waits() {
         &support::full_report(&early, "early", 1),
     )
     .await;
-
-    client
-        .put(url(server.rest_addr, "/api/v1/configurations/fleet"))
-        .json(&serde_json::json!({ "body": "receivers: {}" }))
-        .send()
-        .await
-        .expect("put");
-    let rollout: serde_json::Value = client
-        .post(url(
-            server.rest_addr,
-            "/api/v1/configurations/fleet/rollout",
-        ))
-        .send()
-        .await
-        .expect("rollout")
-        .json()
-        .await
-        .expect("json");
-    assert_eq!(rollout["assigned_agents"], 1);
+    save_configuration(server.rest_addr, "fleet", "receivers: {}", "").await;
+    deploy(
+        server.rest_addr,
+        FLEET_DEPLOYMENT,
+        &[("service.name", AGENT_TYPE)],
+        &["fleet"],
+    )
+    .await;
+    assert_eq!(
+        agent_view(&client, server.rest_addr, &early).await["assigned_configurations"][0],
+        "fleet"
+    );
 
     // The latecomer enrols: a candidate, pending, assigned nothing.
     let late = opamp::uid::InstanceUid::default();
@@ -296,7 +385,7 @@ async fn an_agent_that_appears_later_waits() {
     );
     assert_eq!(view["pending_configurations"][0]["change"], "new");
 
-    // Its own act — the empty body releases everything waiting.
+    // Its own act — the empty body releases the Deployment that claims it.
     let rolled = client
         .post(url(
             server.rest_addr,
@@ -310,8 +399,9 @@ async fn an_agent_that_appears_later_waits() {
     assert_eq!(view["assigned_configurations"][0], "fleet");
 }
 
-/// ADR-0023 over the wire: a Configuration stating an Agent type reaches only Agents reporting
-/// that `service.name`, whatever its Selector says.
+/// ADR-0034 clause 3 over the wire: of the Configurations a Deployment holds, one stating an
+/// Agent type reaches only Agents reporting that `service.name`.
+/// Verifies: ADR-0034
 #[tokio::test]
 async fn a_typed_configuration_reaches_only_agents_of_its_type() {
     let server = spawn().await;
@@ -334,27 +424,149 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
             .expect("put");
         assert_eq!(put.status(), 200);
     }
+    deploy(
+        server.rest_addr,
+        FLEET_DEPLOYMENT,
+        &[("service.name", AGENT_TYPE)],
+        &["for-collectors", "for-clients"],
+    )
+    .await;
 
     assert_eq!(
         matched_configurations(&client, server.rest_addr, &uid).await,
         ["for-collectors"],
         "the type is a fit, not an aim: the other type's Configuration is no candidate"
     );
+    assert_eq!(
+        agent_view(&client, server.rest_addr, &uid).await["assigned_configurations"],
+        serde_json::json!(["for-collectors"]),
+        "the press released only what fits"
+    );
+}
 
-    // And the per-Agent act refuses the one that does not fit (ADR-0025).
-    let refused = client
-        .post(url(
+/// Nothing an assignment pins can be deleted (ADR-0034 clause 8): a pinned Configuration and a
+/// pinned Deployment answer `409` saying how many Agents pin them. After a press without the
+/// Configuration it is deleted, and it leaves every Deployment that held it.
+/// Verifies: ADR-0034
+#[tokio::test]
+async fn a_pinned_configuration_or_deployment_is_not_deleted() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+    save_configuration(server.rest_addr, "base", "receivers: {}", "").await;
+    save_configuration(server.rest_addr, "extra", "exporters: {}", "").await;
+    deploy(
+        server.rest_addr,
+        FLEET_DEPLOYMENT,
+        &[("service.name", AGENT_TYPE)],
+        &["base", "extra"],
+    )
+    .await;
+    // A second Deployment holds `extra` too, and claims nobody.
+    deploy(
+        server.rest_addr,
+        "canary",
+        &[("channel", "canary")],
+        &["extra"],
+    )
+    .await;
+
+    for path in ["/api/v1/configurations/extra", "/api/v1/deployments/fleet"] {
+        let refused = client
+            .delete(url(server.rest_addr, path))
+            .send()
+            .await
+            .expect("delete");
+        assert_eq!(refused.status(), 409, "{path}");
+        let error: serde_json::Value = refused.json().await.expect("an error body");
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|why| why.contains("1 Agent")),
+            "{path}: {error}"
+        );
+    }
+
+    let dropped = client
+        .delete(url(
             server.rest_addr,
-            &format!("/api/v1/agents/{uid}/rollout"),
+            "/api/v1/deployments/fleet/configurations/extra",
         ))
-        .json(&serde_json::json!({ "configuration": "for-clients" }))
         .send()
         .await
-        .expect("rollout");
+        .expect("drop");
     assert_eq!(
-        refused.status(),
-        409,
-        "a non-candidate is refused, not assigned"
+        dropped.status(),
+        200,
+        "nothing a Deployment holds is frozen"
+    );
+    deploy(
+        server.rest_addr,
+        FLEET_DEPLOYMENT,
+        &[("service.name", AGENT_TYPE)],
+        &[],
+    )
+    .await;
+    let deleted = client
+        .delete(url(server.rest_addr, "/api/v1/configurations/extra"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(deleted.status(), 204);
+    let canary: serde_json::Value = client
+        .get(url(server.rest_addr, "/api/v1/deployments/canary"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(canary["configurations"], serde_json::json!([]));
+}
+
+/// The per-Agent act on an Agent no Deployment claims, or two claim, is `409` (ADR-0034 clause 6).
+/// Verifies: ADR-0034
+#[tokio::test]
+async fn the_per_agent_act_without_one_claiming_deployment_is_a_conflict() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+    let press = || {
+        client
+            .post(url(
+                server.rest_addr,
+                &format!("/api/v1/agents/{uid}/rollout"),
+            ))
+            .send()
+    };
+    let refused = press().await.expect("rollout");
+    assert_eq!(refused.status(), 409, "in no deployment");
+
+    save_configuration(server.rest_addr, "base", "receivers: {}", "").await;
+    deploy(
+        server.rest_addr,
+        FLEET_DEPLOYMENT,
+        &[("service.name", AGENT_TYPE)],
+        &["base"],
+    )
+    .await;
+    deploy(
+        server.rest_addr,
+        "hosts",
+        &[("service.instance.name", "host")],
+        &["base"],
+    )
+    .await;
+    let refused = press().await.expect("rollout");
+    assert_eq!(refused.status(), 409, "in conflict");
+    let view = agent_view(&client, server.rest_addr, &uid).await;
+    assert!(
+        view["package_conflict"]
+            .as_str()
+            .is_some_and(|why| why.contains("hosts") && why.contains(FLEET_DEPLOYMENT)),
+        "the view says why: {view}"
     );
 }
 
@@ -373,7 +585,7 @@ async fn invalid_configurations_are_rejected_loudly() {
                 server.rest_addr,
                 &format!("/api/v1/configurations/{}", urlencoding(name)),
             ))
-            .json(&serde_json::json!({ "body": body }))
+            .json(&serde_json::json!({ "body": body, "service_name": AGENT_TYPE }))
             .send()
             .await
             .expect("put");
@@ -383,11 +595,62 @@ async fn invalid_configurations_are_rejected_loudly() {
     }
 }
 
+/// A Configuration is written for one Agent type (ADR-0034 clause 1): a `PUT` without
+/// `service_name`, or with an empty one, is `400` naming the field, and nothing is stored.
+/// Verifies: ADR-0034
+#[tokio::test]
+async fn a_configuration_without_an_agent_type_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    for spec in [
+        serde_json::json!({ "body": "receivers: {}" }),
+        serde_json::json!({ "body": "receivers: {}", "service_name": "" }),
+    ] {
+        let response = client
+            .put(url(server.rest_addr, "/api/v1/configurations/base"))
+            .json(&spec)
+            .send()
+            .await
+            .expect("put");
+        assert_eq!(response.status(), 400, "{spec}");
+        let error: serde_json::Value = response.json().await.expect("an error body");
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|why| why.contains("service_name")),
+            "the refusal names the field: {error}"
+        );
+    }
+    let gone = client
+        .get(url(server.rest_addr, "/api/v1/configurations/base"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(gone.status(), 404, "nothing was stored");
+
+    let document: serde_json::Value = client
+        .get(url(server.rest_addr, "/api/v1/openapi.json"))
+        .send()
+        .await
+        .expect("get the document")
+        .json()
+        .await
+        .expect("json");
+    for schema in ["ConfigurationSpec", "ConfigurationView"] {
+        assert!(
+            document["components"]["schemas"][schema]["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|f| f == "service_name")),
+            "the document marks service_name required in {schema}"
+        );
+    }
+}
+
 fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
 }
 
-/// Verifies: ADR-0023, ADR-0026, G-5
+/// Verifies: ADR-0023, ADR-0026, ADR-0033, ADR-0034, G-5
 #[tokio::test]
 async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
@@ -432,16 +695,24 @@ async fn the_openapi_document_describes_the_contract() {
         silent.is_empty(),
         "responses without a description: {silent:?}"
     );
-    // Deployments are part of the contract from the moment they exist (ADR-0026) — a portal
+    // Deployments and entry signatures are part of the contract (ADR-0026, ADR-0033) — a portal
     // generates against this document, and a route it cannot see is a route it cannot call.
     for route in [
         "/api/v1/deployments",
         "/api/v1/deployments/{name}",
         "/api/v1/deployments/{name}/selector",
         "/api/v1/deployments/{name}/packages/{agent_type}/{version}",
-        "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
+        "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature",
     ] {
         assert!(paths.contains_key(route), "{route} is described");
+    }
+    // A signature lives on the entry, and every artifact is uploaded (ADR-0033 clause 9): the
+    // Deployment signature routes and the entry's source route are not in the contract.
+    for gone in [
+        "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
+        "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/source",
+    ] {
+        assert!(!paths.contains_key(gone), "{gone} is still described");
     }
     // And the retired package paths are gone rather than lingering as a promise (ADR-0026).
     assert!(
@@ -465,9 +736,14 @@ async fn the_openapi_document_describes_the_contract() {
     assert!(paths.contains_key("/api/v1/configurations"));
     assert!(paths.contains_key("/api/v1/configurations/{name}"));
     assert!(
-        paths.contains_key("/api/v1/configurations/{name}/rollout"),
-        "the rollout act is part of the contract (ADR-0025)"
+        paths.contains_key("/api/v1/deployments/{name}/configurations/{configuration}"),
+        "a Deployment holds Configurations (ADR-0034)"
     );
+    assert!(
+        !paths.contains_key("/api/v1/configurations/{name}/rollout"),
+        "a Configuration is rolled out only through a Deployment (ADR-0034)"
+    );
+    assert!(paths.contains_key("/api/v1/deployments/{name}/rollout"));
     assert!(paths.contains_key("/api/v1/agents/{instance_uid}/rollout"));
     assert!(
         !paths.contains_key("/api/v1/configurations/{name}/publication"),
@@ -476,6 +752,12 @@ async fn the_openapi_document_describes_the_contract() {
     // The resource schemas ride along, so a client can be generated without the source.
     assert!(document["components"]["schemas"]["ConfigurationView"].is_object());
     assert!(document["components"]["schemas"]["ConfigurationSpec"].is_object());
+    assert!(
+        document["components"]["schemas"]["ConfigurationSpec"]["properties"]
+            .get("selector")
+            .is_none(),
+        "a Configuration takes no Selector (ADR-0034)"
+    );
     assert!(document["components"]["schemas"]["AgentView"].is_object());
 }
 
@@ -535,10 +817,9 @@ async fn configurations_survive_a_server_restart() {
             .save_configuration(
                 "keeper",
                 fleet_server::configs::Revision {
-                    selector: std::collections::BTreeMap::new(),
                     body: "receivers: {}\n".to_string(),
                     role: String::new(),
-                    service_name: String::new(),
+                    service_name: AGENT_TYPE.to_string(),
                 },
             )
             .expect("put");
@@ -762,6 +1043,10 @@ async fn every_operator_response_carries_the_security_headers() {
     let client = reqwest::Client::new();
     for path in [
         "/",
+        "/ui.css",
+        "/ui-carbon.css",
+        "/ui-quiet.css",
+        "/shiki.js",
         "/api/v1/agents",
         "/api/v1/docs",
         "/api/v1/openapi.json",
@@ -855,6 +1140,265 @@ async fn the_policy_names_every_inline_script_of_the_ui() {
     assert!(inline > 0, "the page has inline scripts to name");
 }
 
+/// The bundled UI's look lives in its own stylesheets: the page links the default, carries no
+/// `<style>` of its own, names every look its style combo offers, and each is served as CSS from
+/// the plane's origin, which the policy admits. Light, dark or the system's is a choice of its
+/// own, the same for every look.
+#[tokio::test]
+async fn the_ui_takes_its_look_from_its_own_stylesheet() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let page = client
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI");
+    let policy = page
+        .headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .expect("a policy")
+        .to_string();
+    assert!(
+        policy
+            .split(';')
+            .map(str::trim)
+            .any(|d| d.starts_with("style-src ") && d.contains("'self'")),
+        "{policy}"
+    );
+    let html = page.text().await.expect("html").to_ascii_lowercase();
+    assert!(
+        html.contains(r#"<link id="ui-style" rel="stylesheet" href="/ui.css" />"#),
+        "the page no longer links /ui.css"
+    );
+    assert!(!html.contains("<style"), "the page carries a <style> again");
+
+    // The theme is one choice for every look — light, dark, or the system's — remembered under
+    // one key, not one per look.
+    assert!(
+        html.contains(r#"const ui_themes = ["system", "light", "dark"];"#),
+        "the theme's buttons do not offer system, light and dark"
+    );
+    assert!(
+        html.contains(
+            r#"<div id="theme-switch" class="theme-switch" role="group" aria-label="theme">"#
+        ),
+        "the theme is not chosen by a group of buttons"
+    );
+    assert!(
+        html.contains(r#"matchmedia("(prefers-color-scheme: dark)")"#),
+        "the system theme does not follow the system's preference"
+    );
+    assert!(
+        !html.contains("themekey"),
+        "a look remembers its own theme again"
+    );
+    assert!(
+        html.contains(r#"const attr_hue = { host: "blue", os: "teal", service: "pink", supervisor: "slate" };"#),
+        "the attribute namespaces lost their hues"
+    );
+
+    // Each look defines the theme it does not open in, since the page always sets one outright.
+    for (path, other_theme) in [
+        ("/ui.css", r#":root[data-theme="light"]"#),
+        ("/ui-carbon.css", r#":root[data-theme="light"]"#),
+        ("/ui-quiet.css", r#":root[data-theme="dark"]"#),
+    ] {
+        assert!(
+            html.contains(&format!(r#"href: "{path}""#)),
+            "the style combo does not offer {path}"
+        );
+        let css = client
+            .get(url(server.rest_addr, path))
+            .send()
+            .await
+            .expect("get the stylesheet");
+        assert_eq!(css.status(), 200, "{path}");
+        assert_eq!(
+            css.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/css; charset=utf-8"),
+            "{path}"
+        );
+        let css = css.text().await.expect("css");
+        assert!(css.contains(":root"), "{path}");
+        assert!(css.contains(other_theme), "{path} lacks {other_theme}");
+        // Every hue the page gives an attribute namespace is one the look defines, and a list
+        // value's count of further entries has its rule.
+        for hue in ["blue", "teal", "pink", "slate"] {
+            assert!(
+                html.contains(&format!(r#": "{hue}""#)),
+                "the page gives no namespace {hue}"
+            );
+            assert!(
+                css.contains(&format!(".chip.hue-{hue} ")),
+                "{path} lacks {hue}"
+            );
+        }
+        assert!(
+            css.contains(".chip-count "),
+            "{path} lacks the list value's count"
+        );
+    }
+}
+
+/// The vendored Shiki bundle is served from the plane's own origin as JavaScript, under the same
+/// policy as every page, and it is the file the pin names: the bundle cannot change without
+/// `scripts/vendor-shiki.lock` changing in the same commit.
+/// Verifies: ADR-0038
+#[tokio::test]
+async fn the_ui_serves_the_pinned_shiki_bundle() {
+    use sha2::Digest as _;
+    let server = spawn().await;
+    let response = reqwest::get(url(server.rest_addr, "/shiki.js"))
+        .await
+        .expect("get the bundle");
+    assert_eq!(response.status(), 200);
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        header("content-type").starts_with("text/javascript"),
+        "{}",
+        header("content-type")
+    );
+    let policy = header("content-security-policy");
+    assert!(
+        policy.contains("script-src 'self'")
+            && !policy.contains("'unsafe-eval'")
+            && !policy.contains("'wasm-unsafe-eval'"),
+        "{policy}"
+    );
+    let body = response.bytes().await.expect("the bundle");
+    let digest: String = sha2::Sha256::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let lock = include_str!("../../../scripts/vendor-shiki.lock");
+    let pinned = lock
+        .lines()
+        .find_map(|line| line.strip_prefix("sha256 "))
+        .expect("the lock pins a sha256");
+    assert_eq!(
+        digest, pinned,
+        "static/shiki.js differs from the bundle scripts/vendor-shiki.lock pins"
+    );
+    assert!(
+        lock.lines().any(|line| line == "shiki 4.5.0"),
+        "the lock pins another Shiki than ADR-0038 names"
+    );
+    let text = std::str::from_utf8(&body).expect("utf-8");
+    assert!(
+        text.starts_with("/*\n * Shiki 4.5.0") && text.contains("window.fleetHighlight"),
+        "the bundle lost its header or its one function"
+    );
+    let header_end = text.find("*/").expect("the header ends");
+    assert!(
+        text[..header_end]
+            .contains("the CSS-variables theme with this project's TOML and\n * INI token rules"),
+        "the header does not name the project's TOML and INI token rules"
+    );
+}
+
+/// The UI loads the vendored Shiki bundle without waiting for it, chooses the grammar of an
+/// Agent's effective configuration by the type the Agent reports — `otelcol*` YAML, the fleet's
+/// own Client and Telegraf TOML, Fluent Bit INI, anything else none — and each look defines the
+/// CSS-variables theme's colours in its light and its dark theme. The project's TOML and INI token
+/// rules in the bundle name only those colours, so no look needs a variable of its own for them.
+/// Verifies: ADR-0038
+#[tokio::test]
+async fn the_ui_colours_an_effective_configuration_by_the_agents_type() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let html = client
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    assert!(
+        html.contains(r#"<script id="shiki" src="/shiki.js" defer></script>"#),
+        "the page does not load /shiki.js deferred"
+    );
+    assert!(
+        html.contains(
+            r#"const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["telegraf", "toml"], ["fluent-bit", "ini"]]);"#
+        ),
+        "supervisor and telegraf are not TOML, or fluent-bit is not INI"
+    );
+    assert!(
+        html.contains(
+            r#"const configGrammar = (type) => ((type || "").startsWith("otelcol") ? "yaml" : CONFIG_GRAMMARS.get(type) || null);"#
+        ),
+        "otelcol* is not YAML, or another type is not left plain"
+    );
+    // Both places the configuration shows are coloured: the cell and the dialog.
+    assert!(
+        html.contains("colourConfigs(rows);"),
+        "the cell is not coloured"
+    );
+    assert!(
+        html.contains("agent.effective_config, configGrammar(agent.service_name));"),
+        "the dialog is not coloured"
+    );
+
+    const NAMES: [&str; 11] = [
+        "foreground",
+        "background",
+        "token-keyword",
+        "token-string",
+        "token-string-expression",
+        "token-constant",
+        "token-comment",
+        "token-parameter",
+        "token-function",
+        "token-punctuation",
+        "token-link",
+    ];
+    let bundle = include_str!("../static/shiki.js");
+    let mut named = 0;
+    for (at, _) in bundle.match_indices("var(--shiki-") {
+        let rest = &bundle[at + "var(--shiki-".len()..];
+        let name = &rest[..rest.find(')').expect("the var() closes")];
+        assert!(
+            NAMES.contains(&name),
+            "the bundle's token rules name --shiki-{name}, which no look defines"
+        );
+        named += 1;
+    }
+    assert!(
+        named > 0,
+        "the bundle carries no token rules of the project's"
+    );
+
+    for path in ["/ui.css", "/ui-carbon.css", "/ui-quiet.css"] {
+        let css = client
+            .get(url(server.rest_addr, path))
+            .send()
+            .await
+            .expect("get the stylesheet")
+            .text()
+            .await
+            .expect("css");
+        for name in NAMES {
+            // Once in the theme the look opens in, once in the other.
+            assert_eq!(
+                css.matches(&format!("--shiki-{name}:")).count(),
+                2,
+                "{path} does not define --shiki-{name} for light and dark"
+            );
+        }
+    }
+}
+
 /// The fleet as the REST API shows it.
 async fn agents(client: &reqwest::Client, addr: std::net::SocketAddr) -> Vec<serde_json::Value> {
     client
@@ -887,7 +1431,7 @@ async fn report(
 }
 
 /// ADR-0024, and the whole point of it: a rollout ring becomes a Server-side decision. The Agent
-/// reports nothing about `rollout`, so before the label the canary Configuration cannot reach it —
+/// reports nothing about `rollout`, so before the label the canary Deployment cannot claim it —
 /// and moving it into the ring is one API call rather than an edit and a restart on that host.
 #[tokio::test]
 async fn a_label_moves_an_agent_into_a_rollout_ring() {
@@ -896,15 +1440,16 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // A Configuration aimed at the canary ring. Nothing reports `rollout`, so it proposes itself to
-    // nobody — and even a match only proposes (ADR-0025).
-    let put = client
-        .put(url(server.rest_addr, "/api/v1/configurations/canary"))
-        .json(&serde_json::json!({ "selector": { "rollout": "canary" }, "body": "receivers: {}" }))
-        .send()
-        .await
-        .expect("put");
-    assert_eq!(put.status(), 200);
+    // A Deployment aimed at the canary ring, holding a Configuration. Nothing reports `rollout`,
+    // so it proposes itself to nobody — and even a match only proposes (ADR-0025).
+    save_configuration(server.rest_addr, "canary", "receivers: {}", "").await;
+    deploy(
+        server.rest_addr,
+        "canary",
+        &[("rollout", "canary")],
+        &["canary"],
+    )
+    .await;
     assert!(
         matched_configurations(&client, server.rest_addr, &uid)
             .await
@@ -923,6 +1468,7 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
     assert_eq!(labelled.status(), 200);
     let view: serde_json::Value = labelled.json().await.expect("json");
     assert_eq!(view["labels"]["rollout"], "canary");
+    assert_eq!(view["deployment"], "canary");
     assert_eq!(
         matched_configurations(&client, server.rest_addr, &uid).await,
         ["canary"],
@@ -1086,10 +1632,11 @@ async fn the_view_carries_the_held_configuration_and_a_refusal_with_its_reason()
     );
 }
 
-/// Labels are the operator's decision, not something the Server learned, so forgetting an Agent
-/// (ADR-0024) does not undo them: a host that comes back is in the ring it was put in.
+/// Labels are part of the Agent's record (ADR-0035 clause 6): forgetting an Agent removes them
+/// with it, and an Agent that comes back starts unlabelled.
+/// Verifies: ADR-0035
 #[tokio::test]
-async fn forgetting_an_agent_keeps_its_labels() {
+async fn forgetting_an_agent_removes_its_labels() {
     let server = support::spawn_with_stale_after(std::time::Duration::ZERO).await;
     let client = reqwest::Client::new();
     let uid = opamp::uid::InstanceUid::default();
@@ -1115,10 +1662,38 @@ async fn forgetting_an_agent_keeps_its_labels() {
     assert_eq!(forgotten.status(), 204);
     assert!(agents(&client, server.rest_addr).await.is_empty());
 
-    // It comes back — still in its ring, without anyone re-labelling it.
+    // It comes back — without the labels it had.
     report(&client, server.addr, &support::full_report(&uid, "host", 2)).await;
     let agents = agents(&client, server.rest_addr).await;
-    assert_eq!(agents[0]["labels"]["rollout"], "canary");
+    assert!(
+        agents[0]["labels"].as_object().expect("labels").is_empty(),
+        "{}",
+        agents[0]
+    );
+}
+
+/// `fleet.*` is the Server's own: a label in it is refused `400`, naming the key, and nothing is
+/// stored.
+/// Verifies: ADR-0035
+#[tokio::test]
+async fn a_label_in_the_fleet_space_is_refused() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let uid = opamp::uid::InstanceUid::default();
+    report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
+    let refused = set_labels(
+        &client,
+        server.rest_addr,
+        &uid,
+        serde_json::json!({"fleet.x": "1", "rollout": "canary"}),
+    )
+    .await;
+    assert_eq!(refused.status(), 400);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    let message = body["error"].as_str().expect("message");
+    assert!(message.contains("fleet.x"), "it names the key: {message}");
+    let agents = agents(&client, server.rest_addr).await;
+    assert!(agents[0]["labels"].as_object().expect("labels").is_empty());
 }
 
 /// One Agent's row of the fleet view.
@@ -1134,8 +1709,8 @@ async fn agent_view(
         .expect("the agent is in the fleet")
 }
 
-/// The Configurations currently matching one Agent — the candidates — as the fleet view reports
-/// them.
+/// The Configurations the Deployment claiming one Agent would release to it — the candidates — as
+/// the fleet view reports them.
 async fn matched_configurations(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
@@ -1167,12 +1742,200 @@ async fn set_labels(
         .expect("put labels")
 }
 
-/// The Packages tab shows each entry's SHA-256 and offers what a signature covers as a signing
-/// file, and the Deployments tab imports a signed one through the signature route — so the page
-/// writes the one format `opamp-fleetctl package sign --signing-info` reads, and the fields it
-/// reads must be the ones the API serves. A rename on either side breaks here rather than in an
-/// empty column or a signing file with a hole in it.
-/// Verifies: ADR-0023, ADR-0027
+/// The bundled UI splits along ADR-0034's seam: the Configurations tab edits content with no
+/// Selector and no rollout press, the Deployments form holds Configurations in place through the
+/// Deployment's own route, and the fields the page reads are the ones the API serves. A rename on
+/// either side breaks here rather than in an empty column.
+/// Verifies: ADR-0034
+#[tokio::test]
+async fn the_ui_edits_configurations_as_content_and_deployments_hold_them() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let html = client
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    for needle in [
+        "c.deployments",
+        "d.configurations",
+        "${depPath(name)}/configurations/${encodeURIComponent(configuration)}",
+        "${depPath(d.name)}/configurations/${encodeURIComponent(pick)}",
+        "${depPath(d.name)}/configurations/${encodeURIComponent(del.dataset.name)}",
+        "${depPath(act.dataset.name)}/rollout",
+        "a.assigned_deployment",
+        "p.change",
+    ] {
+        assert!(
+            html.contains(needle),
+            "the UI no longer contains {needle:?}"
+        );
+    }
+    for gone in ["config-selector", "config-rollout"] {
+        assert!(!html.contains(gone), "the UI still contains {gone:?}");
+    }
+    assert!(
+        !html.contains("configurations/${encodeURIComponent(config.name)}/rollout"),
+        "a Configuration has no rollout press of its own"
+    );
+
+    let document: serde_json::Value = client
+        .get(url(server.rest_addr, "/api/v1/openapi.json"))
+        .send()
+        .await
+        .expect("get the document")
+        .json()
+        .await
+        .expect("json");
+    let schemas = &document["components"]["schemas"];
+    for (schema, field) in [
+        ("ConfigurationView", "deployments"),
+        ("ConfigurationView", "service_name"),
+        ("DeploymentView", "configurations"),
+        ("AgentView", "assigned_deployment"),
+        ("AgentView", "pending_configurations"),
+        ("PendingConfigurationView", "change"),
+    ] {
+        assert!(
+            schemas[schema]["properties"][field].is_object(),
+            "{schema} no longer serves {field}"
+        );
+    }
+}
+
+/// Every field of the UI's forms says, in words beside it, whether the action needs it, and a
+/// field the action refuses to run without carries `required` for assistive technology too — the
+/// placeholder alone vanishes the moment the field is typed into.
+#[tokio::test]
+async fn the_forms_mark_every_field_required_or_optional() {
+    let server = spawn().await;
+    let html = reqwest::Client::new()
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    // The caption that labels the control with this id: the `<label class="field…">` it sits in.
+    let caption = |id: &str| -> String {
+        let at = html
+            .find(&format!("id=\"{id}\""))
+            .unwrap_or_else(|| panic!("the UI has no field {id}"));
+        let label = html[..at]
+            .rfind("<label class=\"field")
+            .unwrap_or_else(|| panic!("{id} has no caption"));
+        html[label..at].to_string()
+    };
+    for id in [
+        "config-name",
+        "config-type",
+        "set-type",
+        "set-version",
+        "entry-os",
+        "entry-arch",
+        "entry-file",
+        "dep-name",
+        "dep-selector",
+        "boot-org",
+        "boot-unit",
+        "boot-pass",
+        "boot-pass2",
+    ] {
+        let caption = caption(id);
+        assert!(caption.contains(">required<"), "{id}: {caption}");
+        assert!(
+            caption.ends_with("required aria-required=\"true\" "),
+            "{id} does not carry `required`: {caption}"
+        );
+    }
+    for id in [
+        "config-role",
+        "set-sig-file",
+        "dep-package-pick",
+        "dep-config-pick",
+        "boot-country",
+        "boot-state",
+        "boot-locality",
+        "boot-org-id",
+        "boot-days",
+    ] {
+        assert!(caption(id).contains(">optional<"), "{id}: {}", caption(id));
+    }
+    assert!(html.contains(
+        "<label class=\"field-cap\" for=\"config\">Body <b class=\"need req\">required</b></label>"
+    ));
+}
+
+/// The bundled UI's Hosts tab reads what `GET /api/v1/hosts` serves and acts on a row through the
+/// Gateway and revocation routes, and the Agents tab marks inherited labels — the fields the page
+/// reads are the ones the API documents.
+/// Verifies: ADR-0035
+#[tokio::test]
+async fn the_ui_lists_hosts_and_marks_inherited_labels() {
+    let server = spawn().await;
+    let client = reqwest::Client::new();
+    let html = client
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    for needle in [
+        "data-tab=\"hosts\"",
+        "fetch(\"/api/v1/hosts\")",
+        "/api/v1/hosts/${encodeURIComponent(mark.dataset.host)}/gateway",
+        "certificate: { authority: \"client\", serial }",
+        "h.subject[field]",
+        "a.client_agent",
+        "a.inherited_labels",
+        "a.ignored_attributes",
+        "a.host_attributes",
+    ] {
+        assert!(
+            html.contains(needle),
+            "the UI no longer contains {needle:?}"
+        );
+    }
+    let document: serde_json::Value = client
+        .get(url(server.rest_addr, "/api/v1/openapi.json"))
+        .send()
+        .await
+        .expect("get the document")
+        .json()
+        .await
+        .expect("json");
+    let schemas = &document["components"]["schemas"];
+    for (schema, field) in [
+        ("HostView", "name"),
+        ("HostView", "subject"),
+        ("HostView", "agents"),
+        ("HostSubject", "organizational_unit"),
+        ("HostAgent", "client_agent"),
+        ("HostAgent", "machine"),
+        ("HostAgent", "ambiguous"),
+        ("AgentView", "inherited_labels"),
+        ("AgentView", "host_attributes"),
+        ("AgentView", "ignored_attributes"),
+    ] {
+        assert!(
+            schemas[schema]["properties"][field].is_object(),
+            "{schema} no longer serves {field}"
+        );
+    }
+}
+
+/// The Packages tab shows each entry's SHA-256 and signature state, offers what a signature covers
+/// as a signing file, and imports a signed one through the entry's signature route (ADR-0033) — so
+/// the page writes the one format `opamp-fleetctl package sign --signing-info` reads, and the
+/// fields it reads must be the ones the API serves. A rename on either side breaks here rather than
+/// in an empty column or a signing file with a hole in it.
+/// Verifies: ADR-0023, ADR-0027, ADR-0033
 #[tokio::test]
 async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
     let server = spawn().await;
@@ -1193,10 +1956,12 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
         "e.arch",
         "\"opamp-fleet-signing-v1\"",
         "format: SIGNING_FORMAT",
-        "/signatures/${encodeURIComponent(type)}",
-        "depSigPath(d.name, info.agent_type, info.version, e.os, e.arch)",
+        "/entries/${encodeURIComponent(os)}/${encodeURIComponent(arch)}/signature",
+        "entrySigPath(info.agent_type, info.version, e.os, e.arch)",
         "e.sha256 !== entry.content_hash",
-        "{ signature: e.signature }",
+        "JSON.stringify({ signature: e.signature })",
+        "e.signature_state",
+        "stored.signature_state",
     ] {
         assert!(
             html.contains(needle),
@@ -1219,6 +1984,7 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
         ("PackageEntryView", "os"),
         ("PackageEntryView", "arch"),
         ("PackageEntryView", "content_hash"),
+        ("PackageEntryView", "signature_state"),
         ("SignatureSpec", "signature"),
     ] {
         assert!(
@@ -1234,8 +2000,10 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
 /// so an operator can match a request to the Client's log. The page asks for them, and the OpenAPI
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no
-/// frontend toolchain to run it in.
-/// Verifies: ADR-0023, ADR-0028
+/// frontend toolchain to run it in. The queue lists the bootstrap certificate's subject values and
+/// not the request's own subject, the issue form sends all six attributes and the password, and
+/// the page never handles a private key: every certificate offers its PKCS#12 file (ADR-0036).
+/// Verifies: ADR-0023, ADR-0028, ADR-0036
 #[tokio::test]
 async fn the_ui_and_the_enrolment_api_share_their_names() {
     let server = spawn().await;
@@ -1259,10 +2027,18 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         "\"/api/v1/bootstrap-certificates\"",
         "\"/api/v1/revocations\"",
         "authority: \"bootstrap\"",
-        "organizational_unit",
+        "[\"country\", \"boot-country\"]",
+        "[\"state\", \"boot-state\"]",
+        "[\"locality\", \"boot-locality\"]",
+        "[\"organization\", \"boot-org\"]",
+        "[\"organizational_unit\", \"boot-unit\"]",
+        "[\"organization_identifier\", \"boot-org-id\"]",
+        "e.bootstrap_subject[field]",
+        "e.subject_refusal",
         "validity_days:",
-        ".certificate_pem",
-        ".private_key_pem",
+        "password };",
+        "/p12`",
+        "download = \"bootstrap.p12\"",
         ".issued_ms",
         ".not_after_ms",
         ".revoked",
@@ -1273,6 +2049,12 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
         assert!(
             html.contains(needle),
             "the UI no longer contains {needle:?}"
+        );
+    }
+    for gone in ["private_key_pem", "bootstrap-key.pem", "beforeunload"] {
+        assert!(
+            !html.contains(gone),
+            "the page handles no private key, yet contains {gone:?}"
         );
     }
 
@@ -1292,27 +2074,32 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
                 "id",
                 "arrived_ms",
                 "peer",
-                "subject",
                 "key_fingerprint",
                 "bootstrap_subject",
+                "subject_refusal",
                 "bootstrap_fingerprint",
                 "bootstrap_serial",
             ][..],
         ),
         ("EnrolmentWindow", &["open", "until_ms"][..]),
         (
+            "BootstrapSubject",
+            &[
+                "country",
+                "state",
+                "locality",
+                "organization",
+                "organizational_unit",
+                "organization_identifier",
+            ][..],
+        ),
+        (
             "BootstrapView",
             &["serial", "subject", "issued_ms", "not_after_ms", "revoked"][..],
         ),
         (
             "IssuedBootstrap",
-            &[
-                "serial",
-                "subject",
-                "not_after_ms",
-                "certificate_pem",
-                "private_key_pem",
-            ][..],
+            &["serial", "subject", "not_after_ms", "certificate_pem"][..],
         ),
     ] {
         for field in fields {
@@ -1322,6 +2109,38 @@ async fn the_ui_and_the_enrolment_api_share_their_names() {
             );
         }
     }
+    assert!(
+        schemas["IssuedBootstrap"]["properties"]
+            .get("private_key_pem")
+            .is_none(),
+        "an issue never answers a private key"
+    );
+    for (schema, field) in [
+        ("IssueBootstrapRequest", "subject"),
+        ("IssueBootstrapRequest", "password"),
+        ("BootstrapSubject", "organization"),
+        ("BootstrapSubject", "organizational_unit"),
+    ] {
+        assert!(
+            schemas[schema]["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|f| f == field)),
+            "{schema} marks {field} required"
+        );
+    }
+    assert!(
+        schemas["PendingEnrolment"]["properties"]
+            .get("subject")
+            .is_none(),
+        "a pending request lists no subject of its own"
+    );
+    assert!(
+        // Optional, so the reference sits beside `null` in a `oneOf`.
+        schemas["PendingEnrolment"]["properties"]["bootstrap_subject"]
+            .to_string()
+            .contains("\"#/components/schemas/HostSubject\""),
+        "the bootstrap certificate's subject is listed by its values"
+    );
     for path in [
         "/api/v1/enrolment/window",
         "/api/v1/enrolments",

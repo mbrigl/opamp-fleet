@@ -32,13 +32,16 @@ pub struct ServerConfig {
     /// (ADR-0013). Absent means the default, which is loopback.
     #[serde(default)]
     pub rest: RestConfig,
-    /// Where Configurations are persisted — one JSON file each (ADR-0023) — so a Server restart
-    /// does not lose what the fleet should be running. An empty or missing directory means: no
-    /// Configuration to offer yet.
-    #[serde(default = "default_config_dir")]
-    pub config_dir: PathBuf,
-    /// TLS for both listeners, with one certificate and key (ADR-0013). Required: a Server without
-    /// it is refused at startup. It is an `Option` only so that its absence can be named.
+    /// Where the Server keeps all of its state, one subdirectory per domain (ADR-0037): created
+    /// owner-only when missing, and holding nothing but its fixed layout.
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    /// Refused at startup: the state lives under `data_dir` (ADR-0037), and `server migrate` moves
+    /// an older installation there. Read only so that a leftover key can be named.
+    pub config_dir: Option<IgnoredAny>,
+    /// TLS for the Agent plane, and for the Operator plane unless `[rest.tls]` names its own
+    /// (ADR-0013, ADR-0032). Required: a Server without it is refused at startup. It is an
+    /// `Option` only so that its absence can be named.
     pub tls: Option<TlsConfig>,
     /// Refused at startup: the Agent plane admits by client certificate alone and has no credential
     /// of its own (ADR-0021 clause 1). Read only so that a leftover section can be named.
@@ -51,15 +54,16 @@ pub struct ServerConfig {
     /// Optional destinations for the Agents' own telemetry (ADR-0016); absent means none is
     /// offered and no Agent reports any.
     pub telemetry_offer: Option<TelemetryOfferConfig>,
-    /// Where software packages are persisted — artifact + metadata each (ADR-0026). An empty or
-    /// missing directory means: no package to offer, and `OffersPackages` stays undeclared.
-    #[serde(default = "default_packages_dir")]
-    pub packages_dir: PathBuf,
-    /// The absolute base URL the Server advertises for package downloads (ADR-0026), e.g.
-    /// `https://fleet.example:4320`. When unset, the Server offers a path-only `download_url`
-    /// that the Client resolves against its own OpAMP endpoint — the Agent plane, which is where
-    /// the download is served (ADR-0013); set it when downloads must go through a different host.
-    pub advertised_url: Option<String>,
+    /// Refused at startup, like `config_dir` (ADR-0037). Read only so that a leftover key can be
+    /// named.
+    pub packages_dir: Option<IgnoredAny>,
+    /// How the Server checks the signatures on its Package entries (ADR-0033).
+    #[serde(default)]
+    pub packages: PackagesConfig,
+    /// Refused at startup: every package is offered as a path the Client resolves against its own
+    /// endpoint, and a Client downloads from no other host (ADR-0033). Read only so that a leftover
+    /// key can be named.
+    pub advertised_url: Option<IgnoredAny>,
     /// The largest OpAMP message the Server accepts or sends, on either transport and in either
     /// direction. The Baseline requires the limit, recommends this default, and asks that it be
     /// configurable — a fleet of small status reports can be served with far less.
@@ -202,6 +206,62 @@ impl AuditConfig {
     }
 }
 
+/// The `[packages]` section (ADR-0033): the operator's public key, against which the Server checks
+/// every entry's signature — as feedback only. The Agent's own check decides what is installed.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackagesConfig {
+    /// The hex-encoded Ed25519 public key, in the format the Client's `[packages]
+    /// verification_key` uses. Absent, every signature is reported `unchecked`.
+    pub verification_key: Option<String>,
+}
+
+impl PackagesConfig {
+    /// The decoded key, or `None` when none is set.
+    ///
+    /// # Errors
+    /// Returns an error naming the key when it is not hex or not the 32 bytes of an Ed25519
+    /// public key.
+    pub fn verification_key(&self) -> Result<Option<Vec<u8>>, String> {
+        let Some(text) = &self.verification_key else {
+            return Ok(None);
+        };
+        let key = hex::decode(text.trim())
+            .map_err(|e| format!("[packages] verification_key is not valid hex: {e}"))?;
+        if key.len() != ring::signature::ED25519_PUBLIC_KEY_LEN {
+            return Err(format!(
+                "[packages] verification_key must be the {} bytes of an Ed25519 public key \
+                 ({} hex characters), not {} bytes",
+                ring::signature::ED25519_PUBLIC_KEY_LEN,
+                ring::signature::ED25519_PUBLIC_KEY_LEN * 2,
+                key.len()
+            ));
+        }
+        Ok(Some(key))
+    }
+}
+
+/// The Ed25519 adapter behind [`SignatureVerifier`](crate::packages::SignatureVerifier): the
+/// operator's public key from `[packages] verification_key`, checked with `ring`, the provider the
+/// Client verifies with (ADR-0033).
+pub struct Ed25519Verifier(Vec<u8>);
+
+impl Ed25519Verifier {
+    /// `key` is the raw public key, as [`PackagesConfig::verification_key`] decodes it.
+    #[must_use]
+    pub fn new(key: Vec<u8>) -> Self {
+        Ed25519Verifier(key)
+    }
+}
+
+impl crate::packages::SignatureVerifier for Ed25519Verifier {
+    fn verifies(&self, statement: &[u8], signature: &[u8]) -> bool {
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &self.0)
+            .verify(statement, signature)
+            .is_ok()
+    }
+}
+
 /// The `[enrolment]` section (ADR-0021 clause 19).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -264,6 +324,20 @@ pub struct RestConfig {
     /// The connections the Operator plane holds at once (ADR-0013). `0` is refused at load.
     #[serde(default = "default_rest_max_connections")]
     pub max_connections: usize,
+    /// The Operator plane's own certificate and key (ADR-0032); without it, `[tls]`'s.
+    pub tls: Option<RestTlsConfig>,
+}
+
+/// The `[rest.tls]` section (ADR-0032): the certificate the Operator plane serves in place of
+/// `[tls]`'s, typically from the operator's own PKI so that browsers trust it as they are. Nothing
+/// else: the Operator plane asks for no client certificate, so a `client_ca_file` here is refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestTlsConfig {
+    /// PEM certificate chain, the leaf first.
+    pub cert_file: PathBuf,
+    /// PEM private key of the leaf.
+    pub key_file: PathBuf,
 }
 
 impl Default for RestConfig {
@@ -272,6 +346,7 @@ impl Default for RestConfig {
             listen: default_rest_listen(),
             auth: None,
             max_connections: default_rest_max_connections(),
+            tls: None,
         }
     }
 }
@@ -507,12 +582,8 @@ fn default_rest_listen() -> SocketAddr {
         .expect("default REST listen address")
 }
 
-fn default_config_dir() -> PathBuf {
-    PathBuf::from("fleet-configs")
-}
-
-fn default_packages_dir() -> PathBuf {
-    PathBuf::from("fleet-packages")
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("fleet-data")
 }
 
 fn default_max_message_size() -> usize {
@@ -555,13 +626,15 @@ impl Default for ServerConfig {
         ServerConfig {
             listen: default_listen(),
             rest: RestConfig::default(),
-            config_dir: default_config_dir(),
+            data_dir: default_data_dir(),
+            config_dir: None,
             tls: None,
             auth: None,
             connection_offer: None,
             client_ca: None,
             telemetry_offer: None,
-            packages_dir: default_packages_dir(),
+            packages_dir: None,
+            packages: PackagesConfig::default(),
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
             max_package_size_bytes: default_max_package_size(),
@@ -607,6 +680,31 @@ impl ServerConfig {
                 path.display()
             ));
         }
+        // One root for all state (ADR-0037 clause 1). A leftover key is refused rather than
+        // ignored: the directory it names holds the fleet's trust data, which this Server would
+        // otherwise start without.
+        for (key, named) in [
+            ("config_dir", config.config_dir.is_some()),
+            ("packages_dir", config.packages_dir.is_some()),
+        ] {
+            if named {
+                return Err(format!(
+                    "{}: {key} is removed — the Server keeps all of its state under data_dir \
+                     (ADR-0037). Stop the Server, run `server migrate --config-dir <old> \
+                     --packages-dir <old> --data-dir <new>`, then replace config_dir and \
+                     packages_dir with data_dir",
+                    path.display()
+                ));
+            }
+        }
+        if config.advertised_url.is_some() {
+            return Err(format!(
+                "{}: advertised_url is removed — every package is offered as a path the Client \
+                 resolves against its own Server, and a Client downloads from no other host \
+                 (ADR-0033); remove the key",
+                path.display()
+            ));
+        }
         if let Some(offer) = &config.connection_offer {
             offer
                 .check()
@@ -626,6 +724,11 @@ impl ServerConfig {
             auth.check()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
+        // A malformed key fails startup, not the first signature it would have checked (ADR-0033).
+        config
+            .packages
+            .verification_key()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         // The two planes are two listeners (ADR-0013). Addresses that collide would surface as the
         // second bind failing with "address already in use" — a message about sockets for what is
         // really a configuration mistake, so it is refused here, by name.
@@ -835,7 +938,7 @@ mod tests {
         let cfg: ServerConfig = toml::from_str(
             r#"
             listen = "127.0.0.1:9999"
-            config_dir = "configs"
+            data_dir = "state"
             [tls]
             cert_file = "cert.pem"
             key_file = "key.pem"
@@ -867,6 +970,29 @@ mod tests {
         let opened: ServerConfig =
             toml::from_str("[rest]\nlisten = \"0.0.0.0:8080\"").expect("parse");
         assert_eq!(opened.rest.listen.to_string(), "0.0.0.0:8080");
+    }
+
+    /// `[rest.tls]` takes a certificate and its key and nothing else: the Operator plane asks for
+    /// no client certificate, so a `client_ca_file` there is refused, and so is a missing key.
+    /// Verifies: ADR-0032
+    #[test]
+    fn rest_tls_takes_a_certificate_and_its_key_and_nothing_else() {
+        let cfg: ServerConfig =
+            toml::from_str("[rest.tls]\ncert_file = \"ui.pem\"\nkey_file = \"ui-key.pem\"\n")
+                .expect("parse");
+        let tls = cfg.rest.tls.expect("[rest.tls]");
+        assert_eq!(tls.cert_file, PathBuf::from("ui.pem"));
+        assert_eq!(tls.key_file, PathBuf::from("ui-key.pem"));
+        let refused = toml::from_str::<ServerConfig>(
+            "[rest.tls]\ncert_file = \"ui.pem\"\nkey_file = \"ui-key.pem\"\nclient_ca_file = \"ca.pem\"\n",
+        )
+        .expect_err("a client CA on the Operator plane");
+        assert!(refused.to_string().contains("client_ca_file"), "{refused}");
+        let refused = toml::from_str::<ServerConfig>("[rest.tls]\ncert_file = \"ui.pem\"\n")
+            .expect_err("a certificate without its key");
+        assert!(refused.to_string().contains("key_file"), "{refused}");
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert!(cfg.rest.tls.is_none(), "the section is optional");
     }
 
     /// Two planes, two sockets: an address that cannot be bound twice is a configuration mistake,
@@ -910,6 +1036,65 @@ mod tests {
         std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
         let err = ServerConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_message_size_bytes"), "{err}");
+    }
+
+    /// `[packages] verification_key` is the operator's public key, hex, as the Client's key of the
+    /// same name: absent by default, decoded when given, and a malformed one fails startup naming
+    /// it (ADR-0033 clause 7).
+    /// Verifies: ADR-0033
+    #[test]
+    fn a_malformed_verification_key_fails_startup() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.packages.verification_key(), Ok(None));
+        let key = "ab".repeat(32);
+        let cfg: ServerConfig =
+            toml::from_str(&format!("[packages]\nverification_key = \"{key}\"\n")).expect("parse");
+        assert_eq!(cfg.packages.verification_key(), Ok(Some(vec![0xab; 32])));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        for malformed in ["not-hex", "abcd"] {
+            std::fs::write(
+                &path,
+                format!("[packages]\nverification_key = \"{malformed}\"\n"),
+            )
+            .expect("write");
+            let err = ServerConfig::load(&path).expect_err("a malformed key fails startup");
+            assert!(err.contains("[packages] verification_key"), "{err}");
+        }
+        let refused = toml::from_str::<ServerConfig>("[packages]\nallowed_sources = []\n")
+            .expect_err("the section takes nothing else");
+        assert!(refused.to_string().contains("allowed_sources"), "{refused}");
+    }
+
+    /// Every package is offered as a path, so a leftover `advertised_url` is named and refused
+    /// rather than ignored: it would tell the operator a mirror is in use that no Client reaches.
+    /// Verifies: ADR-0033
+    #[test]
+    fn a_leftover_advertised_url_fails_startup_naming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(&path, "advertised_url = \"https://fleet.example:4320\"\n").expect("write");
+        let err = ServerConfig::load(&path).expect_err("refused");
+        assert!(err.contains("advertised_url is removed"), "{err}");
+    }
+
+    /// All state lives under one `data_dir`, `fleet-data` by default, and a leftover `config_dir`
+    /// or `packages_dir` fails startup naming the key and `server migrate` — the directory it
+    /// names holds trust data this Server would otherwise start without.
+    /// Verifies: ADR-0037
+    #[test]
+    fn a_leftover_config_dir_or_packages_dir_fails_startup_naming_server_migrate() {
+        let cfg: ServerConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.data_dir, PathBuf::from("fleet-data"));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        for key in ["config_dir", "packages_dir"] {
+            std::fs::write(&path, format!("{key} = \"old\"\n")).expect("write");
+            let err = ServerConfig::load(&path).expect_err("refused");
+            assert!(err.contains(&format!("{key} is removed")), "{err}");
+            assert!(err.contains("server migrate"), "{err}");
+        }
     }
 
     #[test]

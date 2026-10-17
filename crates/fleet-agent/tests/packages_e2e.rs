@@ -33,10 +33,13 @@ fn ring_holding_signed(
     deployments
         .put_package("stable", id, true)
         .expect("package into the ring");
+    // The signature is the entry's own (ADR-0033).
     if let Some((platform, bytes)) = signature {
-        deployments
-            .put_signature("stable", id, platform, bytes)
-            .expect("signature onto the ring");
+        state
+            .packages()
+            .expect("package delivery")
+            .put_signature(id, platform, bytes)
+            .expect("signature onto the entry");
     }
     "stable".to_string()
 }
@@ -76,7 +79,7 @@ async fn spawn_server(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
             .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
+                PackageOffering::new(dir.path(), store).expect("deployments"),
             )),
     );
     let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());

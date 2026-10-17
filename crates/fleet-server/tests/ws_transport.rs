@@ -10,7 +10,10 @@ use futures_util::{SinkExt, StreamExt};
 use opamp::frame;
 use opamp::proto::{AgentDisconnect, RemoteConfigStatus, RemoteConfigStatuses, ServerToAgent};
 use opamp::uid::InstanceUid;
-use support::{compressed_report, distribute, distribute_with_role, full_report, spawn};
+use support::{
+    compressed_report, deploy, distribute, distribute_with_role, full_report, save_configuration,
+    spawn,
+};
 use tokio_tungstenite::tungstenite::Message;
 
 type Socket =
@@ -80,7 +83,7 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
     assert!(first.remote_config.is_none());
 
     // The operator distributes a configuration; the connected Agent hears about it immediately.
-    distribute(server.rest_addr, "fleet", &[], "exporters: {}\n").await;
+    distribute(server.rest_addr, "fleet", "exporters: {}\n").await;
 
     let pushed = recv(&mut socket).await;
     let offer = pushed.remote_config.expect("a pushed offer");
@@ -97,7 +100,7 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
     let reply = recv(&mut socket).await;
     assert!(reply.remote_config.is_none());
 
-    distribute(server.rest_addr, "fleet", &[], "exporters: {}\n").await;
+    distribute(server.rest_addr, "fleet", "exporters: {}\n").await;
     let nothing = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
     assert!(nothing.is_err(), "no redundant reconfiguration is pushed");
 }
@@ -113,16 +116,9 @@ async fn a_configuration_role_reaches_the_agent_verbatim() {
     send(&mut socket, &full_report(&uid, "collector", 1)).await;
     recv(&mut socket).await;
 
-    distribute(server.rest_addr, "base", &[], "receivers: {}\n").await;
+    distribute(server.rest_addr, "base", "receivers: {}\n").await;
     recv(&mut socket).await;
-    distribute_with_role(
-        server.rest_addr,
-        "ruleset",
-        &[],
-        "rules: []\n",
-        "supplementary",
-    )
-    .await;
+    distribute_with_role(server.rest_addr, "ruleset", "rules: []\n", "supplementary").await;
 
     let map = recv(&mut socket)
         .await
@@ -140,10 +136,12 @@ async fn a_configuration_role_reaches_the_agent_verbatim() {
     );
 }
 
+/// Each Deployment's Selector aims at a subset; every Configuration a Deployment holds is one named
+/// entry of the offered config map, and one Configuration may sit in several Deployments. An Agent
+/// whose Deployment did not change is left alone.
+/// Verifies: ADR-0034, G-9
 #[tokio::test]
 async fn selectors_target_a_subset_and_compose_named_entries() {
-    // ADR-0023: every matching Configuration is one named entry of the offered config map; an
-    // Agent outside every Selector is left alone.
     let server = spawn().await;
     let mut socket = connect(server.addr).await;
     let left = InstanceUid::default();
@@ -153,8 +151,15 @@ async fn selectors_target_a_subset_and_compose_named_entries() {
     send(&mut socket, &full_report(&right, "right", 1)).await;
     recv(&mut socket).await;
 
-    // A fleet-wide Configuration (empty Selector) reaches both Agents.
-    distribute(server.rest_addr, "base", &[], "receivers: {}\n").await;
+    // A Deployment claiming the whole fleet reaches both Agents with its Configuration.
+    save_configuration(server.rest_addr, "base", "receivers: {}\n", "").await;
+    deploy(
+        server.rest_addr,
+        "fleet",
+        &[("service.name", support::AGENT_TYPE)],
+        &["base"],
+    )
+    .await;
     let mut offered = std::collections::HashMap::new();
     for _ in 0..2 {
         let pushed = recv(&mut socket).await;
@@ -177,13 +182,22 @@ async fn selectors_target_a_subset_and_compose_named_entries() {
         recv(&mut socket).await;
     }
 
-    // A Configuration selecting `service.name = left` reaches only that Agent, composed with the
-    // fleet-wide one as two named entries.
-    distribute(
+    // Narrowed to the right Agent, that Deployment moves nobody: what it releases is unchanged.
+    // A second Deployment for the left Agent holds the same Configuration and one more, and its
+    // press reaches only that Agent, the two composed as two named entries.
+    deploy(
         server.rest_addr,
-        "left-only",
+        "fleet",
+        &[("service.instance.name", "right")],
+        &[],
+    )
+    .await;
+    save_configuration(server.rest_addr, "left-only", "exporters: {}\n", "").await;
+    deploy(
+        server.rest_addr,
+        "left",
         &[("service.instance.name", "left")],
-        "exporters: {}\n",
+        &["base", "left-only"],
     )
     .await;
     let pushed = recv(&mut socket).await;
@@ -197,9 +211,9 @@ async fn selectors_target_a_subset_and_compose_named_entries() {
     names.sort_unstable();
     assert_eq!(names, ["base", "left-only"]);
 
-    // The unmatched Agent hears nothing — it keeps running what it already runs (goal 9).
+    // The other Agent hears nothing — it keeps running what it already runs (goal 9).
     let nothing = tokio::time::timeout(Duration::from_millis(500), socket.next()).await;
-    assert!(nothing.is_err(), "no push toward the unmatched agent");
+    assert!(nothing.is_err(), "no push toward the other agent");
 
     let views = server.state.snapshot();
     let view = |name: &str| {

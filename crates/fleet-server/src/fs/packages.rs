@@ -1,262 +1,102 @@
-//! The package store on the filesystem (ADR-0026): the default adapter behind
-//! [`PackageBackend`](crate::packages::PackageBackend) — one directory per Package under
-//! `packages_dir`, holding `package.json` and one `<os>-<arch>.bin` per uploaded entry.
+//! The package store's metadata on the filesystem (ADR-0026, ADR-0037): the default adapter behind
+//! [`PackageBackend`](crate::packages::PackageBackend) — one JSON file per Package under
+//! `<data_dir>/packages/`, its entries inside, each naming its artifact by hash. The bytes are the
+//! blob store's.
 
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
-use crate::packages::{
-    Entry, Package, PackageBackend, PackageId, Platform, Source, DEPLOYMENTS_DIR,
-};
+use crate::packages::{Entry, Package, PackageBackend, PackageId, Platform};
 
-/// One directory per Package, owner-only, with its metadata and its uploaded artifacts.
+/// One file per Package, `<agent_type>@<version>.json`, owner-only.
 pub struct FsPackageBackend {
     dir: PathBuf,
-    /// Numbers each upload's staging file, so two uploads of one entry never share one.
-    next_upload: std::sync::atomic::AtomicU64,
 }
 
 impl FsPackageBackend {
-    /// Opens the directory, creating it owner-only: a referenced entry's metadata carries the
-    /// private source's headers — a bearer token (ADR-0026) — so the store must not be readable by
-    /// other local users on the Server host. The metadata files are written `0600` as well.
-    pub fn open(dir: PathBuf) -> Result<Self, String> {
+    /// Opens the store in the data directory `root`, creating `packages/` owner-only: what the
+    /// fleet installs is not another local user's business on the Server host.
+    pub fn open(root: &Path) -> Result<Self, String> {
+        let dir = root.join(super::PACKAGES);
         super::create_private_dir(&dir)?;
-        Ok(FsPackageBackend {
-            dir,
-            next_upload: std::sync::atomic::AtomicU64::new(0),
-        })
+        Ok(FsPackageBackend { dir })
     }
 
-    fn set_dir(&self, id: &PackageId) -> PathBuf {
-        self.dir.join(id.to_string())
+    fn path(&self, id: &PackageId) -> PathBuf {
+        self.dir.join(format!("{id}.json"))
     }
 }
 
 impl PackageBackend for FsPackageBackend {
-    /// A metadata or artifact file that cannot be read, does not parse, or whose artifact no longer
-    /// matches its recorded hash fails the open — a corrupt distribution artifact must never ship.
-    /// There is **no migration**: a directory in a shape this Server does not write is named in
-    /// that error rather than skipped, so a store left over from an older layout is reported
-    /// instead of quietly appearing empty.
+    /// A file that cannot be read, does not parse, or whose name disagrees with the identity it
+    /// holds fails the open naming it; so does anything else in the directory (ADR-0037 clause 6).
     fn load(&self) -> Result<Vec<Package>, String> {
-        let mut sets = Vec::new();
-        let listing = std::fs::read_dir(&self.dir)
-            .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?;
-        for entry in listing {
-            let path = entry
-                .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?
-                .path();
-            if !path.is_dir() {
-                // A Package is a directory. A loose file at the top level (`<name>.json`,
-                // `<name>@<os>-<arch>.json`/`.bin`) is an older layout this Server has no reader
-                // for — so it is named rather than skipped. Skipping would turn such a store into
-                // one that merely looks empty, which is the failure an operator cannot see
-                // (ADR-0010: loud, never silently ignored).
-                return Err(format!(
-                    "{} is not a Package directory — this Server reads no other package store \
-                     layout. \
-                     Move it aside or delete it; nothing here will be migrated.",
-                    path.display()
-                ));
-            }
-            // The one directory here that is deliberately not a Package: the channel store the
-            // Deployments live in (ADR-0026), armed by this same `packages_dir`.
-            if path.file_name().and_then(|n| n.to_str()) == Some(DEPLOYMENTS_DIR) {
-                continue;
-            }
-            let meta_path = path.join("package.json");
-            if !meta_path.exists() {
-                // Skipping is the dangerous half. A store written by an older layout —
-                // `<name>@<version>@<type>/set.json` — would open *successfully and empty*: no
-                // offer, no error, and a package list an operator reads as "nothing uploaded yet"
-                // (ADR-0026 point 19). So the directory is named instead.
-                return Err(format!(
-                    "{} holds no package.json — this Server reads no other package store layout. \
-                     Move it aside or delete it; nothing here will be migrated.",
-                    path.display()
-                ));
-            }
-            let text = std::fs::read_to_string(&meta_path)
-                .map_err(|e| format!("cannot read {}: {e}", meta_path.display()))?;
+        let mut packages = Vec::new();
+        for (stem, path) in super::json_files(&self.dir)? {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let meta: PackageMeta = serde_json::from_str(&text)
-                .map_err(|e| format!("cannot parse {}: {e}", meta_path.display()))?;
+                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
             let id = PackageId::new(&meta.agent_type, &meta.version)
-                .map_err(|e| format!("invalid identity in {}: {e}", meta_path.display()))?;
-            // The directory name is derived from the identity; a mismatch means the artifacts
-            // will not be found where the store looks for them, so it is refused by name.
-            if path.file_name().and_then(|n| n.to_str()) != Some(id.to_string().as_str()) {
-                return Err(format!(
-                    "{} does not match the identity {} its package.json states — rename \
-                     the directory or fix the file",
-                    path.display(),
-                    id
-                ));
+                .map_err(|e| format!("invalid identity in {}: {e}", path.display()))?;
+            if id.to_string() != stem {
+                return Err(super::misnamed(&path, "identity"));
             }
             let mut entries = BTreeMap::new();
-            for entry_meta in meta.entries {
-                let platform = Platform::new(&entry_meta.os, &entry_meta.arch)
-                    .map_err(|e| format!("invalid platform in {}: {e}", meta_path.display()))?;
-                let content_hash = hex::decode(&entry_meta.content_hash_hex)
-                    .map_err(|e| format!("invalid content hash in {}: {e}", meta_path.display()))?;
-                let source = entry_meta.source_url.map(|url| Source {
-                    url,
-                    headers: entry_meta.source_headers,
-                });
-                // An uploaded artifact is re-hashed by streaming, so a corrupt one never ships. A
-                // referenced one has nothing here to check: its hash is the operator's word,
-                // verified by every Agent that downloads it (ADR-0026).
-                let size = match &source {
-                    Some(_) => 0,
-                    None => {
-                        let artifact = path.join(format!("{}.bin", platform.tag()));
-                        let (size, actual) = hash_file(&artifact)?;
-                        if actual != content_hash {
-                            return Err(format!(
-                                "set {id} for {}: artifact does not match its recorded content hash",
-                                platform.tag()
-                            ));
-                        }
-                        size
+            for entry in meta.entries {
+                let platform = Platform::new(&entry.os, &entry.arch)
+                    .map_err(|e| format!("invalid platform in {}: {e}", path.display()))?;
+                let content_hash = hex::decode(&entry.sha256)
+                    .ok()
+                    .filter(|_| crate::blobs::is_hash(&entry.sha256))
+                    .ok_or_else(|| format!("invalid sha256 in {}", path.display()))?;
+                let signature = entry
+                    .signature_hex
+                    .map(hex::decode)
+                    .transpose()
+                    .map_err(|e| format!("invalid signature in {}: {e}", path.display()))?;
+                // Held to the length a write is held to (ADR-0033 clause 6).
+                if let Some(signature) = &signature {
+                    if signature.len() != crate::packages::ED25519_SIGNATURE_LEN {
+                        return Err(format!(
+                            "invalid signature in {}: {} bytes, not {}",
+                            path.display(),
+                            signature.len(),
+                            crate::packages::ED25519_SIGNATURE_LEN
+                        ));
                     }
-                };
+                }
                 entries.insert(
                     platform.clone(),
                     Entry {
                         platform,
                         content_hash,
-                        size,
-                        source,
+                        size: entry.size,
+                        signature,
                     },
                 );
             }
-            sets.push(Package { id, entries });
+            packages.push(Package { id, entries });
         }
-        Ok(sets)
+        Ok(packages)
     }
 
     fn put(&self, package: &Package) -> Result<(), String> {
-        let dir = self.set_dir(&package.id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let meta =
             serde_json::to_vec_pretty(&PackageMeta::of(package)).expect("package serializes");
-        super::replace_owner_only(&dir.join("package.json"), &meta)
+        super::replace_owner_only(&self.path(&package.id), &meta)
     }
 
     fn remove(&self, id: &PackageId) -> Result<(), String> {
-        let dir = self.set_dir(id);
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("cannot delete {}: {e}", dir.display()))
-    }
-
-    fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// In the Package's own directory, so the commit is a rename — and named per Platform and
-    /// per upload, so neither a release's five artifacts uploaded at once nor two uploads of one
-    /// entry can overwrite each other while they are still in flight.
-    fn staging_path(&self, id: &PackageId, platform: &Platform) -> PathBuf {
-        let n = self
-            .next_upload
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.set_dir(id)
-            .join(format!("{}.{n}.upload", platform.tag()))
-    }
-
-    fn hash_staged(&self, staged: &Path) -> Result<(u64, Vec<u8>), String> {
-        hash_file(staged)
-    }
-
-    fn commit_staged(
-        &self,
-        id: &PackageId,
-        platform: &Platform,
-        staged: &Path,
-    ) -> Result<(), String> {
-        let artifact = self.artifact_path(id, platform);
-        std::fs::rename(staged, &artifact)
-            .map_err(|e| format!("cannot persist {}: {e}", artifact.display()))
-    }
-
-    fn discard_staged(&self, staged: &Path) {
-        let _ = std::fs::remove_file(staged);
-    }
-
-    fn write_artifact(
-        &self,
-        id: &PackageId,
-        platform: &Platform,
-        bytes: &[u8],
-    ) -> Result<(), String> {
-        let path = self.artifact_path(id, platform);
-        std::fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
-    }
-
-    fn remove_artifact(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
-        let path = self.artifact_path(id, platform);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("cannot delete {}: {e}", path.display())),
-        }
-    }
-
-    /// `<package>/<os>-<arch>.bin`.
-    fn artifact_path(&self, id: &PackageId, platform: &Platform) -> PathBuf {
-        self.set_dir(id).join(format!("{}.bin", platform.tag()))
-    }
-
-    /// Every `.bin` in every Package's directory; the `.upload` staging file is not one. A best-effort
-    /// walk: a file racing deletion simply is not counted, which is the safe direction for a
-    /// ceiling that gates *new* uploads.
-    fn total_bytes(&self) -> u64 {
-        let Ok(dirs) = std::fs::read_dir(&self.dir) else {
-            return 0;
-        };
-        dirs.flatten()
-            .filter(|entry| entry.path().is_dir())
-            .filter_map(|entry| std::fs::read_dir(entry.path()).ok())
-            .flat_map(|files| files.flatten())
-            .filter(|file| {
-                file.file_name()
-                    .to_str()
-                    .is_some_and(|name| name.ends_with(".bin"))
-            })
-            .filter_map(|file| file.metadata().ok().map(|m| m.len()))
-            .sum()
+        super::remove_file(&self.path(id))
     }
 }
 
-/// Hashes a file by streaming it, returning `(size, sha256)`. Used where an artifact's integrity
-/// must be checked without the artifact having to fit in memory.
-fn hash_file(path: &Path) -> Result<(u64, Vec<u8>), String> {
-    let mut file =
-        std::fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut size = 0u64;
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = match file.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-        };
-        hasher.update(&buf[..n]);
-        size += n as u64;
-    }
-    Ok((size, hasher.finalize().to_vec()))
-}
-
-/// A Package as persisted: `<agent_type>@<version>/package.json`, entries inline. One document per
-/// Package — what ADR-0026 kept secretly (other versions), this store keeps openly, as more
-/// Packages.
+/// A Package as persisted: `packages/<agent_type>@<version>.json`, entries inline.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PackageMeta {
     agent_type: String,
     version: String,
@@ -264,42 +104,41 @@ struct PackageMeta {
     entries: Vec<EntryMeta>,
 }
 
-/// One entry as persisted inside `package.json`; an uploaded entry's bytes are `<os>-<arch>.bin`
-/// beside it.
+/// One entry as persisted: its platform, the blob that holds its bytes, named by hash only
+/// (ADR-0037 clause 4), their size, and the operator's signature.
+///
+/// Unknown fields are refused, so an entry an older Server wrote — a reference to a source, or a
+/// `content_hash_hex` beside an artifact file — fails the open naming the file rather than loading
+/// as something it is not.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EntryMeta {
     os: String,
     arch: String,
-    content_hash_hex: String,
-    /// The source of a referenced entry (ADR-0026); absent for an uploaded one.
+    /// The SHA-256 of the artifact, lowercase hex: the blob's name, and what the Agent verifies.
+    sha256: String,
+    size: u64,
+    /// The operator's Ed25519 signature over this entry, hex (ADR-0033); absent while unsigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    source_url: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    source_headers: BTreeMap<String, String>,
-}
-
-impl EntryMeta {
-    fn of(entry: &Entry) -> Self {
-        EntryMeta {
-            os: entry.platform.os.clone(),
-            arch: entry.platform.arch.clone(),
-            content_hash_hex: hex::encode(&entry.content_hash),
-            source_url: entry.source.as_ref().map(|s| s.url.clone()),
-            source_headers: entry
-                .source
-                .as_ref()
-                .map(|s| s.headers.clone())
-                .unwrap_or_default(),
-        }
-    }
+    signature_hex: Option<String>,
 }
 
 impl PackageMeta {
-    fn of(set: &Package) -> Self {
+    fn of(package: &Package) -> Self {
         PackageMeta {
-            agent_type: set.id.agent_type.clone(),
-            version: set.id.version.clone(),
-            entries: set.entries.values().map(EntryMeta::of).collect(),
+            agent_type: package.id.agent_type.clone(),
+            version: package.id.version.clone(),
+            entries: package
+                .entries
+                .values()
+                .map(|entry| EntryMeta {
+                    os: entry.platform.os.clone(),
+                    arch: entry.platform.arch.clone(),
+                    sha256: hex::encode(&entry.content_hash),
+                    size: entry.size,
+                    signature_hex: entry.signature.as_ref().map(hex::encode),
+                })
+                .collect(),
         }
     }
 }

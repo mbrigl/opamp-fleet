@@ -11,17 +11,19 @@
 #                  with their keys, and server.toml.fragment naming them
 #   offline/       what stays with the operator: the server CA with its key, the package signing
 #                  key (package-signing-key.pk8, its public half in package-signing-key.pub), and
-#                  supervisor.toml.fragment naming where the Client keeps the bootstrap pair the
-#                  Server issues and the package verification key
+#                  supervisor.toml.fragment naming where the Client keeps the bootstrap pair
+#                  extracted from the bootstrap.p12 the Server issues, and the package
+#                  verification key
 #   server.toml / supervisor.toml
 #                  a Server and a Client configuration that use the set, every other key at its
 #                  default but one: server.toml serves the Agent plane on every interface, so
 #                  Clients on other machines reach it; it carries the offer of the fleet's own
 #                  telemetry to the observability stack in observability/ commented out
 #
-# The development Client enrols like any other host, with a bootstrap pair the Server issues
-# (ADR-0028): start the Server, run `scripts/seed_test_configs.sh --enrol`, which writes the pair
-# into offline/ and approves the request, and start the Client while it waits.
+# The development Client enrols like any other host, with a bootstrap certificate the Server issues
+# (ADR-0028): start the Server, run `scripts/seed_test_configs.sh --enrol`, which issues it,
+# extracts its pair from the bootstrap.p12 into offline/ and approves the request, and start the
+# Client while it waits.
 # Trust the server CA, offline/server-ca.pem, in curl and in the browser.
 #
 # Usage:
@@ -68,6 +70,6 @@ cat <<EOF
 Created in $OUT, with a server.toml and a supervisor.toml that use the set:
 
   cargo run -p fleet-server -- --config $OUT/server.toml
-  scripts/seed_test_configs.sh --enrol     # issues the bootstrap pair, approves the enrolment
+  scripts/seed_test_configs.sh --enrol     # issues the bootstrap certificate, approves the enrolment
   cargo run -p fleet-agent -- --config $OUT/supervisor.toml   # while --enrol waits
 EOF

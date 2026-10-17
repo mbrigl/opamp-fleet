@@ -64,11 +64,11 @@ has:
   failures from one address are answered `429` before admission checks anything else, on both
   planes. On the Agent plane the TLS handshake and its client-certificate verification come
   before that, and a failed handshake is not counted as an admission failure.
-- **Nothing installed unsigned, and downloads only from allowed sources** (ADR-0026):
-  a Client without the verification key takes no package, the Server offers no entry its
-  Deployment has not signed, and every download hop is held to `https://` and the Server's origin
-  or `[packages] allowed_sources` before a request is sent. The Client's certificate goes to its
-  Server alone, an offered header only to an allowed source.
+- **Nothing installed unsigned, and downloads only from the Client's own Server** (ADR-0026,
+  ADR-0033): a Client without the verification key takes no package, the Server offers no entry
+  that carries no signature, and every download hop is held to `https://` and the Client's own
+  Server origin before a request is sent. Every artifact is uploaded: the Server sends no request
+  for a package anywhere and holds no source credential.
 - **A connection cap per plane and bounded HTTP/2** (ADR-0013): `max_connections` closes a
   connection past the cap on accept, before any handshake, while the held ones keep working; HTTP/2
   allows 100 concurrent streams per connection and drops a peer that leaves a ping unanswered.
@@ -227,9 +227,9 @@ It **cannot**: write outside a Supervisor's `config/` (entry names are sanitized
 entry Windows cannot hold or two entries in one file (such an offer is refused); name a program
 outside a Supervisor's `program/`, by absolute, rooted or escaping path, or a wrapped kind's program
 at all; start a kind that is not compiled in; change any key of `supervisor.toml` but the
-`[[supervisor]]` array — not the endpoint, `state_dir`, `[tls]`, the verification key,
-`allowed_sources` or `self_update`; apply a set with one bad block; purge outside the Supervisors'
-root; install anything unsigned, from a source not allowed, or with an archive member that climbs
+`[[supervisor]]` array — not the endpoint, `state_dir`, `[tls]`, the verification key or
+`self_update`; apply a set with one bad block; purge outside the Supervisors'
+root; install anything unsigned, from another origin than its own Server, or with an archive member that climbs
 out; serve a host from its download route an artifact that is not offered to an Agent the host
 speaks for, or serve a host behind a Gateway an artifact the Gateway did not relay to one of
 that host's Agents — within the residual that the Gateway binds an `instance_uid` to the host of

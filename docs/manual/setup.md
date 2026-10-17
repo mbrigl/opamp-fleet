@@ -31,7 +31,7 @@ with one job:
 
 | CA | Signs | Its key lives | Its certificate is named in |
 |---|---|---|---|
-| **Server CA** | the Server's own certificate | offline, with you | the Client's `[tls] ca_file`, and your browser's trust store |
+| **Server CA** | the Server's own certificate | offline, with you | the Client's `[tls] ca_file`, and your browser's trust store — unless the UI presents a certificate of its own ([below](#the-uis-own-certificate)) |
 | **Client CA** | every host's certificate, by the Server, automatically | on the Server | the Server's `[tls] client_ca_file` and `[client_ca]` |
 | **Bootstrap CA** | bootstrap certificates, which new hosts enrol with, by the Server, on your request | on the Server | the Server's `[enrolment] bootstrap_ca_file` and `bootstrap_ca_key_file` |
 
@@ -75,7 +75,7 @@ $ opamp-fleetctl pki init --server-dir fleet-server --offline-dir fleet-offline 
                          --name fleet.example.com --name 10.0.0.5 \
                          --server-path /etc/opamp-fleet-server/tls --host-path /etc/opamp
 fleet-server: for the Server host — merge server.toml.fragment into its server.toml
-fleet-offline: keep offline — the server CA's key; give every new host server-ca.pem, and the bootstrap pair the Server issues (POST /api/v1/bootstrap-certificates) as bootstrap.pem and bootstrap-key.pem, as supervisor.toml.fragment names them
+fleet-offline: keep offline — the server CA's key; give every new host server-ca.pem, and the bootstrap.p12 the Server issues (POST /api/v1/bootstrap-certificates), or its pair as bootstrap.pem and bootstrap-key.pem (pki p12-extract), as supervisor.toml.fragment names them
 ```
 
 `--server-path` and `--host-path` are where the files will live on the Server host and on a
@@ -92,7 +92,7 @@ managed host; the two `.fragment` files name them there. Left out, they name the
 | | `server-ca-key.pem` | nowhere: keep it offline, to sign the next server certificate | **yes** |
 | | `package-signing-key.pk8` | nowhere: keep it offline, to sign every package ([step 3](#3-make-the-package-signing-key)) | **yes** |
 | | `package-signing-key.pub` | the public half in hex: every Client's `[packages] verification_key` | no |
-| | `supervisor.toml.fragment` | every new Client's `supervisor.toml`, merged in; it names `bootstrap.pem` and `bootstrap-key.pem`, the pair the Server issues ([step 4](#4-configure-and-install-a-client)), and the package verification key | no |
+| | `supervisor.toml.fragment` | every new Client's `supervisor.toml`, merged in; it names `bootstrap.pem` and `bootstrap-key.pem`, the pair `pki p12-extract` takes out of the `bootstrap.p12` the Server issues ([step 4](#4-configure-and-install-a-client)), and the package verification key | no |
 
 The directories are created `0700` and every key `0600`. `pki init` refuses to write over a file
 that exists, and writes nothing at all then. Run on the Server host, it says so: move the offline
@@ -137,8 +137,8 @@ write `/etc/opamp-fleet-server/server.toml`: `server.toml.fragment` holds its `[
 # The Agent plane: where the fleet connects. 4320 is the protocol's default port.
 listen = "0.0.0.0:4320"
 
-config_dir = "/var/lib/opamp-fleet-server/configs"
-packages_dir = "/var/lib/opamp-fleet-server/packages"
+# All of the Server's state, owner-only (see the Server's manual, "Where the Server keeps its state").
+data_dir = "/var/lib/opamp-fleet-server/data"
 
 [tls]
 cert_file = "/etc/opamp-fleet-server/tls/server.pem"
@@ -211,7 +211,7 @@ StateDirectory=opamp-fleet-server
 UMask=0077
 Restart=on-failure
 
-# The Server writes under config_dir and packages_dir and nowhere else, binds ports above 1024,
+# The Server writes under data_dir and nowhere else, binds ports above 1024,
 # and needs no privilege, device or kernel interface.
 NoNewPrivileges=true
 CapabilityBoundingSet=
@@ -240,9 +240,8 @@ WantedBy=multi-user.target
 ```
 
 `ProtectSystem=strict` leaves the whole file system read-only to the Server except its
-`StateDirectory`, `/var/lib/opamp-fleet-server`, which holds `config_dir` and `packages_dir` in the
-configuration above. A `config_dir` or `packages_dir` anywhere else needs a `ReadWritePaths=` line
-naming it. A `listen` or `[rest] listen` port below 1024 needs
+`StateDirectory`, `/var/lib/opamp-fleet-server`, which holds `data_dir` in the configuration above.
+A `data_dir` anywhere else needs a `ReadWritePaths=` line naming it. A `listen` or `[rest] listen` port below 1024 needs
 `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and `AmbientCapabilities=CAP_NET_BIND_SERVICE` instead
 of the empty lines. `systemd-analyze security opamp-fleet-server` rates what the unit leaves open.
 
@@ -284,43 +283,44 @@ $ opamp-fleetctl package keygen --out fleet-signing.pk8
 
 ## 4. Configure and install a Client
 
-Each managed host needs three files: `server-ca.pem` from `--offline-dir`, and a bootstrap pair,
-`bootstrap.pem` and `bootstrap-key.pem`, which the Server issues. Name whom the pair is for, the
-customer and the site; both are optional, and the approver sees them on every request the pair
-carries.
+Each managed host needs `server-ca.pem` from `--offline-dir` and a bootstrap certificate with its
+key, which the Server issues as one file, `bootstrap.p12`, under a password you name. Name whom
+the certificate is for, the customer and the site; both are required, and the approver sees them
+on every request it carries.
 
 **In the UI**, through the tunnel: open the **Enrolments** tab and fill in **Bootstrap
-certificates** with the customer (O), the site (OU) and the days it is valid (10 by default, at
-most 90). Press **Issue**, then **Save bootstrap.pem** and **Save bootstrap-key.pem** in the new
-certificate's row. The page holds the private key only while it stays open, and asks before it is
-reloaded or closed, so save both files first.
+certificates** with what the host certificates are to carry — the customer (O) and the site (OU),
+required, and the country, chosen from a list, the state, the locality and a customer number
+(organizationIdentifier), optional — the days it is valid (10 by default, at most 90), and a
+password, twice. Press **Issue**, then **Save bootstrap.p12** in the new certificate's row, now or
+on any later day, until the certificate ends or is revoked.
 
-**Over the API**, the same request:
+**Over the API**, the same request, written with an editor so the password stays out of the
+shell's history:
 
 ```console
-$ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' \
-       -d '{"subject": {"organization": "Example Customer", "organizational_unit": "Vienna"}, "validity_days": 14}' \
+$ cat request.json
+{"subject": {"country": "AT", "organization": "Example Customer", "organizational_unit": "Vienna"},
+ "validity_days": 14, "password": "correct horse battery staple"}
+$ curl --cacert server-ca.pem -X POST -H 'Content-Type: application/json' -d @request.json \
        https://127.0.0.1:4321/api/v1/bootstrap-certificates > issued.json
-$ jq -r .certificate_pem issued.json > bootstrap.pem
-$ (umask 077; jq -r .private_key_pem issued.json > bootstrap-key.pem) && rm issued.json
+$ curl --cacert server-ca.pem -o bootstrap.p12 \
+       https://127.0.0.1:4321/api/v1/bootstrap-certificates/$(jq -r .serial issued.json)/p12
 ```
 
-The answer is the only place the private key ever appears: the Server keeps the certificate's
-serial, subject and end, never the key. Lost, it is not fetched again but issued anew. One pair
-may go to every host of that customer.
-
-**Or as one file under a password.** Type a password, twice, in the UI, or name `"password"` in
-the request, and the Server hands out no PEM key: it keeps `bootstrap.p12`, the certificate and its
-key encrypted under that password, which **Save bootstrap.p12** in the row — or
-`GET /api/v1/bootstrap-certificates/<serial>/p12` — downloads now or on any later day, until the
-certificate ends or is revoked. The Server keeps the password nowhere; give it to the host's
-installer by another way than the file
-([With a password](server.md#with-a-password-bootstrapp12)). Where a host or a tool needs the PEM
-pair instead, `opamp-fleetctl pki p12-extract bootstrap.p12 --out <dir>` writes it
+The private key leaves the Server only inside that file, encrypted under the password; no answer
+carries it. The Server keeps the password nowhere: give it to the host's installer by another way
+than the file ([The PKCS#12 file](server.md#the-pkcs12-file-bootstrapp12)). One certificate may
+go to every host of that customer and site. Every host that enrols with it is issued a certificate
+carrying the same subject values, which its Agents carry as `fleet.host.*` for Selectors to match
+([Bootstrap certificates](server.md#bootstrap-certificates-issued-by-the-server)). Where a host or
+a tool needs the PEM pair, `bootstrap.pem` and `bootstrap-key.pem`, as `supervisor.toml.fragment`
+names them, `opamp-fleetctl pki p12-extract bootstrap.p12 --out <dir>` writes it
 ([`pki`](tools.md#pki)).
 
-Copy the three files to the host, with the key readable by root only, together with
-`package-signing-key.pub` from the offline directory. The simplest place is the directory you run
+Copy `server-ca.pem` and `bootstrap.p12` — or `server-ca.pem` and the extracted pair, the key
+readable by root only — to the host, together with `package-signing-key.pub` from the offline
+directory. The simplest place is the directory you run
 the Client's program from: the install looks there first, offers what it finds as its answers, and
 takes it without a question when it is not interactive
 ([Files beside the program](client.md#files-beside-the-program)). Anywhere else, such as the
@@ -418,14 +418,15 @@ INFO certificate request generated; an enrolling host waits for an operator's ap
 ```
 
 **Approve it.** Open the UI's **Enrolments** tab: it lists each waiting host with its full key
-fingerprint, its peer address, the name it asked for, and the bootstrap certificate it carries:
-the customer, site, serial and end it was issued with, or *not issued here* for one the Server did
-not issue. Compare the fingerprint with the one the host logged, check that the bootstrap
+fingerprint, its peer address, and the bootstrap certificate it carries: the subject values its
+host certificate will carry, and the serial and end it was issued with, or *not issued here* for
+one the Server did not issue. Compare the fingerprint with the one the host logged, check that the bootstrap
 certificate is the one you gave that host, then press **Approve**. The same over the API:
 
 ```console
 $ curl --cacert server-ca.pem https://127.0.0.1:4321/api/v1/enrolments
-[{"id":"3f9a…","arrived_ms":…,"peer":"10.0.4.17","subject":"CN=host-01","key_fingerprint":"3f9a…",…}]
+[{"id":"3f9a…","arrived_ms":…,"peer":"10.0.4.17","key_fingerprint":"3f9a…",
+  "bootstrap_subject":{"country":"AT","organization":"Example Customer","organizational_unit":"Vienna",…},…}]
 $ curl --cacert server-ca.pem -X POST https://127.0.0.1:4321/api/v1/enrolments/3f9a…/approve
 ```
 
@@ -497,6 +498,26 @@ restart it; the Clients reconnect on their own. They trust the server CA, not on
 certificate, so nothing changes on the hosts. `server-cert` also makes a **Gateway's**
 certificate: give it the Gateway's names and use the pair as its `[gateway.tls] cert_file` and
 `key_file`.
+
+### The UI's own certificate
+
+The Operator plane — the UI, the REST API and its docs — presents the server certificate unless
+`server.toml` names one of its own. Name one when your organization has a PKI whose root its
+browsers already trust, so nobody imports the fleet's server CA:
+
+```toml
+[rest.tls]
+cert_file = "/etc/opamp-fleet-server/tls/ui.pem"       # the leaf first, then any intermediates
+key_file = "/etc/opamp-fleet-server/tls/ui-key.pem"
+```
+
+The Agent plane keeps the server certificate, and the Clients notice nothing. A key that does not
+match its certificate stops the Server at startup, naming both files. Renew this certificate
+through your PKI, replace the two files, and restart the Server; `server pki status` lists it
+beside the others. A PKI certificate seldom names `127.0.0.1`, so through an SSH tunnel to a
+loopback Operator plane dial the name the certificate carries, for example through an entry in
+`/etc/hosts`. `opamp-fleetctl package fetch --cacert` then names your PKI's CA, or nothing when
+the system's roots hold it.
 
 **The bootstrap CA is yours to replace once a year**, when the Server warns that it is ending:
 

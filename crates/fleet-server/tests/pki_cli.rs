@@ -159,10 +159,9 @@ fn the_server_warns_at_startup_about_a_ca_that_is_ending_and_serves_on() {
     std::fs::write(
         &config,
         format!(
-            "listen = \"127.0.0.1:{}\"\nconfig_dir = {:?}\npackages_dir = {:?}\n{}\n[rest]\nlisten = \"127.0.0.1:{}\"\n",
+            "listen = \"127.0.0.1:{}\"\ndata_dir = {:?}\n{}\n[rest]\nlisten = \"127.0.0.1:{}\"\n",
             agent.local_addr().expect("addr").port(),
-            dir.path().join("configs").display().to_string(),
-            dir.path().join("packages").display().to_string(),
+            dir.path().join("data").display().to_string(),
             sections,
             operator.local_addr().expect("addr").port(),
         ),
@@ -208,7 +207,7 @@ fn the_server_warns_at_startup_about_a_ca_that_is_ending_and_serves_on() {
     // The audit writer runs on its own; give it a moment to reach the file.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let audit = std::fs::read_dir(dir.path().join("configs/audit"))
+        let audit = std::fs::read_dir(dir.path().join("data/audit"))
             .map(|entries| {
                 entries
                     .filter_map(Result::ok)

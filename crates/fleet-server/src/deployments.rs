@@ -1,9 +1,10 @@
-//! Deployments (ADR-0026): what reaches a channel of hosts, and the only thing rolled out.
+//! Deployments (ADR-0026, ADR-0034): what reaches a channel of hosts, and the only thing rolled out.
 //!
-//! A Package is what an Agent type runs at a version and nothing else (ADR-0026) — no aim, no
-//! signature, no act of its own. All three live here. A Deployment carries a **name**, a
-//! **Selector** over the channel it addresses, **one Package per Agent type**, and the **signature**
-//! of each artifact it offers.
+//! A Package is what an Agent type runs at a version, with each artifact's signature on its entry
+//! (ADR-0033), and a Configuration is content (ADR-0034) — neither has an aim or an act of its
+//! own. A Deployment carries a **name**, a **Selector** over the channel it addresses, **one
+//! Package per Agent type**, and **any number of Configurations**. The Selector matching lives
+//! here, because a Deployment is the one thing a Selector aims.
 //!
 //! Two rules give the object its shape, and both are refusals:
 //!
@@ -21,41 +22,61 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
 
+use opamp::attributes;
 use opamp::proto::AgentDescription;
 
-use crate::configs::{matches, validate_name};
-use crate::packages::{PackageId, Platform};
+use crate::configs::validate_name;
+use crate::packages::PackageId;
 
-/// A named set of Packages, aimed at a channel and carrying each artifact's signature.
+/// Does this Selector match this Agent (ADR-0034 clause 2)? Equality, AND, over every string
+/// attribute of the effective description — identifying and non-identifying alike. An array-valued
+/// attribute never matches, and an Agent that has not described itself yet matches only the empty
+/// Selector, which no Deployment carries.
+pub fn matches(
+    selector: &BTreeMap<String, String>,
+    description: Option<&AgentDescription>,
+) -> bool {
+    if selector.is_empty() {
+        return true;
+    }
+    let Some(description) = description else {
+        return false;
+    };
+    selector.iter().all(|(key, value)| {
+        attributes::string_value(&description.identifying_attributes, key)
+            .or_else(|| attributes::string_value(&description.non_identifying_attributes, key))
+            .is_some_and(|reported| reported == *value)
+    })
+}
+
+/// A named release of Packages and Configurations, aimed at a channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Deployment {
     /// The operator's name for this channel. The one human-chosen label in the model, which is why
     /// it keeps the ADR-0019 grammar a Package gave up (ADR-0026).
     pub name: String,
     /// Equality pairs that must all match an attribute the Agent reported, labels included
-    /// (ADR-0023 semantics). **Never empty** — see the module note.
+    /// (ADR-0034 clause 2). **Never empty** — see the module note.
     pub selector: BTreeMap<String, String>,
     /// At most one Package per Agent type, keyed by that type. Two of one type would collide on
     /// the wire map key *and* fit the same Agent, so the second is refused at the moment it is
     /// written rather than puzzled over at resolution.
     pub packages: BTreeMap<String, PackageId>,
-    /// The Ed25519 signature of one artifact, per `(Package, Platform)`. Held here rather than on
-    /// the entry because what an operator signs off on is a release to a set of machines, not a
-    /// pile of bytes; the same Package in two Deployments is signed in each.
-    pub signatures: BTreeMap<(PackageId, Platform), Vec<u8>>,
+    /// The Configurations it holds, by name, in any number (ADR-0034 clause 4). A Configuration
+    /// may sit in several Deployments, as a Package may; each fits the Agents of its type.
+    pub configurations: BTreeSet<String>,
 }
 
 impl Deployment {
-    /// The signature to offer with one Package's artifact, if this Deployment holds one.
-    pub fn signature(&self, id: &PackageId, platform: &Platform) -> Option<&[u8]> {
-        self.signatures
-            .get(&(id.clone(), platform.clone()))
-            .map(Vec::as_slice)
-    }
-
     /// The Package this Deployment holds for an Agent of `agent_type`, if any.
     pub fn package_for(&self, agent_type: &str) -> Option<&PackageId> {
         self.packages.get(agent_type)
+    }
+
+    /// Whether it holds nothing to release — no Package and no Configuration — which a rollout
+    /// act refuses (ADR-0034 clause 6).
+    pub fn holds_nothing(&self) -> bool {
+        self.packages.is_empty() && self.configurations.is_empty()
     }
 }
 
@@ -64,8 +85,11 @@ impl Deployment {
 pub enum DeploymentError {
     /// The name, the Selector, or an identity did not pass its grammar — a `400`.
     Invalid(String),
-    /// No Deployment of that name, or it holds no such Package or signature — a `404`.
+    /// No Deployment of that name, or it holds no such Package — a `404`.
     NotFound,
+    /// Something the write names does not exist, or the Deployment does not hold it — also a
+    /// `404`, saying which.
+    Missing(String),
     /// The Deployment already holds a Package for that Agent type — a `409`.
     TypeTaken { agent_type: String, held: PackageId },
     /// The write collides with what this channel has already released — also a `409`.
@@ -78,6 +102,7 @@ impl std::fmt::Display for DeploymentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeploymentError::Invalid(why)
+            | DeploymentError::Missing(why)
             | DeploymentError::Conflict(why)
             | DeploymentError::Storage(why) => write!(f, "{why}"),
             DeploymentError::NotFound => write!(f, "no such deployment"),
@@ -199,18 +224,6 @@ impl DeploymentStore {
             .cloned()
     }
 
-    /// The names of the Deployments that sign the artifact `(id, platform)` — what the download
-    /// route asks once per request rather than once per Agent (ADR-0026 clause 35).
-    pub fn signing(&self, id: &PackageId, platform: &Platform) -> BTreeSet<String> {
-        self.deployments
-            .read()
-            .expect("deployments lock")
-            .values()
-            .filter(|deployment| deployment.signature(id, platform).is_some())
-            .map(|deployment| deployment.name.clone())
-            .collect()
-    }
-
     /// A snapshot of the whole store, for one resolution pass.
     pub fn snapshot(&self) -> BTreeMap<String, Deployment> {
         self.deployments.read().expect("deployments lock").clone()
@@ -243,7 +256,7 @@ impl DeploymentStore {
                 name: name.to_string(),
                 selector,
                 packages: BTreeMap::new(),
-                signatures: BTreeMap::new(),
+                configurations: BTreeSet::new(),
             },
         };
         self.write(&deployment)?;
@@ -277,8 +290,7 @@ impl DeploymentStore {
         })
     }
 
-    /// Removes a Package from a Deployment, and every signature that named it — a signature over
-    /// an artifact this channel no longer offers has nothing left to say.
+    /// Removes a Package from a Deployment.
     pub fn remove_package(
         &self,
         name: &str,
@@ -289,49 +301,74 @@ impl DeploymentStore {
                 return Err(DeploymentError::NotFound);
             }
             deployment.packages.remove(&id.agent_type);
-            deployment.signatures.retain(|(held, _), _| held != id);
             Ok(())
         })
     }
 
-    /// Records the Ed25519 signature of one artifact this Deployment offers.
-    pub fn put_signature(
+    /// Puts a Configuration into a Deployment; holding it already is the request arriving twice.
+    /// Whether the Configuration exists is the caller's question — the fleet asks it.
+    pub fn put_configuration(
         &self,
         name: &str,
-        id: &PackageId,
-        platform: &Platform,
-        signature: Vec<u8>,
+        configuration: &str,
     ) -> Result<Deployment, DeploymentError> {
-        if signature.is_empty() {
-            return Err(DeploymentError::Invalid(
-                "an empty signature says nothing — omit it, or delete the one held".to_string(),
-            ));
-        }
         self.amend(name, |deployment| {
-            if deployment.packages.get(&id.agent_type) != Some(id) {
-                return Err(DeploymentError::NotFound);
+            deployment.configurations.insert(configuration.to_string());
+            Ok(())
+        })
+    }
+
+    /// Takes a Configuration out of a Deployment; one it does not hold is `Missing`.
+    pub fn remove_configuration(
+        &self,
+        name: &str,
+        configuration: &str,
+    ) -> Result<Deployment, DeploymentError> {
+        self.amend(name, |deployment| {
+            if !deployment.configurations.remove(configuration) {
+                return Err(DeploymentError::Missing(format!(
+                    "deployment {name:?} does not hold configuration {configuration:?}"
+                )));
             }
-            deployment
-                .signatures
-                .insert((id.clone(), platform.clone()), signature.clone());
             Ok(())
         })
     }
 
-    /// Takes one artifact's signature away. The Package stays; what it is offered with changes.
-    pub fn remove_signature(
-        &self,
-        name: &str,
-        id: &PackageId,
-        platform: &Platform,
-    ) -> Result<Deployment, DeploymentError> {
-        self.amend(name, |deployment| {
-            deployment
-                .signatures
-                .remove(&(id.clone(), platform.clone()))
-                .map(|_| ())
-                .ok_or(DeploymentError::NotFound)
+    /// Takes a deleted Configuration out of every Deployment that held it (ADR-0034 clause 8),
+    /// and answers which those were.
+    pub fn drop_configuration(&self, configuration: &str) -> Result<Vec<String>, DeploymentError> {
+        self.drop_everywhere(|deployment| deployment.configurations.remove(configuration))
+    }
+
+    /// Takes a deleted Package out of every Deployment that held it (ADR-0034 clause 8), and
+    /// answers which those were.
+    pub fn drop_package(&self, id: &PackageId) -> Result<Vec<String>, DeploymentError> {
+        self.drop_everywhere(|deployment| {
+            if deployment.packages.get(&id.agent_type) == Some(id) {
+                deployment.packages.remove(&id.agent_type);
+                true
+            } else {
+                false
+            }
         })
+    }
+
+    /// Applies `drop` to every Deployment and persists each one it changed.
+    fn drop_everywhere(
+        &self,
+        mut drop: impl FnMut(&mut Deployment) -> bool,
+    ) -> Result<Vec<String>, DeploymentError> {
+        let mut deployments = self.deployments.write().expect("deployments lock");
+        let mut changed = Vec::new();
+        for deployment in deployments.values_mut() {
+            let mut edited = deployment.clone();
+            if drop(&mut edited) {
+                self.write(&edited)?;
+                *deployment = edited;
+                changed.push(deployment.name.clone());
+            }
+        }
+        Ok(changed)
     }
 
     /// Deletes a Deployment. Whether anything still names it is the fleet's business, not the
@@ -425,10 +462,6 @@ pub(crate) mod tests {
 
     pub(crate) fn id(agent_type: &str, version: &str) -> PackageId {
         PackageId::new(agent_type, version).expect("package id")
-    }
-
-    pub(crate) fn linux() -> Platform {
-        Platform::new("linux", "amd64").expect("platform")
     }
 
     /// An Agent belongs to at most one Deployment. Two claiming it is the conflict, and the
@@ -562,37 +595,27 @@ pub(crate) mod tests {
         );
     }
 
-    /// A signature belongs to an artifact this Deployment actually offers, and it goes when the
-    /// Package does — a signature over something no longer offered has nothing left to say.
-    /// Verifies: ADR-0026
+    /// Removing a Package takes it out of the channel, and only that: the Deployment holds no
+    /// signature of its own to leave behind (ADR-0033). A Package it does not hold is `NotFound`.
+    /// Verifies: ADR-0033
     #[test]
-    fn a_signature_needs_its_package_and_leaves_with_it() {
+    fn removing_a_package_takes_it_out_of_the_channel() {
         let memory = Memory::default();
         let store = DeploymentStore::open(Box::new(memory.clone())).expect("open");
         channel(&store, "stable", &[("channel", "stable")]);
         let telegraf = id("telegraf", "1.30.0");
-
         assert_eq!(
-            store.put_signature("stable", &telegraf, &linux(), vec![7; 64]),
+            store.remove_package("stable", &telegraf),
             Err(DeploymentError::NotFound),
-            "a signature for a package this channel does not hold is refused"
+            "a package this channel does not hold"
         );
-
         store
             .put_package("stable", &telegraf, false)
             .expect("package");
-        let signed = store
-            .put_signature("stable", &telegraf, &linux(), vec![7; 64])
-            .expect("signature");
-        assert_eq!(signed.signature(&telegraf, &linux()), Some(&[7u8; 64][..]));
-
         let stripped = store
             .remove_package("stable", &telegraf)
             .expect("remove the package");
-        assert!(
-            stripped.signatures.is_empty(),
-            "the signature left with the package it was about"
-        );
+        assert!(stripped.packages.is_empty());
     }
 
     /// Editing the Selector is not editing the bytes: a Deployment's aim stays writable, and
@@ -607,13 +630,122 @@ pub(crate) mod tests {
         store
             .put_package("canary", &telegraf, false)
             .expect("package");
-        store
-            .put_signature("canary", &telegraf, &linux(), vec![3; 64])
-            .expect("signature");
 
         let widened = channel(&store, "canary", &[("channel", "stable")]);
         assert_eq!(widened.selector["channel"], "stable");
         assert_eq!(widened.package_for("telegraf"), Some(&telegraf));
-        assert_eq!(widened.signature(&telegraf, &linux()), Some(&[3u8; 64][..]));
+    }
+
+    fn described(pairs: &[(&str, &str)]) -> AgentDescription {
+        AgentDescription {
+            identifying_attributes: pairs
+                .iter()
+                .map(|(k, v)| attributes::string_attr(k, v))
+                .collect(),
+            non_identifying_attributes: vec![],
+        }
+    }
+
+    fn selector(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_selector_matches_everything_even_an_undescribed_agent() {
+        assert!(matches(&BTreeMap::new(), None));
+        assert!(matches(&BTreeMap::new(), Some(&described(&[]))));
+    }
+
+    /// ADR-0034 clause 2: equality, AND, over the effective description.
+    /// Verifies: ADR-0034
+    #[test]
+    fn every_selector_pair_must_equal_a_reported_attribute() {
+        let desc = described(&[("service.name", "otelcol"), ("os.type", "linux")]);
+        let one = selector(&[("os.type", "linux")]);
+        let both = selector(&[("os.type", "linux"), ("service.name", "otelcol")]);
+        let wrong = selector(&[("os.type", "windows")]);
+        let extra = selector(&[("os.type", "linux"), ("env", "prod")]);
+        assert!(matches(&one, Some(&desc)));
+        assert!(matches(&both, Some(&desc)));
+        assert!(!matches(&wrong, Some(&desc)));
+        assert!(
+            !matches(&extra, Some(&desc)),
+            "an unreported key never matches"
+        );
+        assert!(
+            !matches(&one, None),
+            "no description matches only the empty Selector"
+        );
+    }
+
+    #[test]
+    fn non_identifying_attributes_match_too() {
+        let desc = AgentDescription {
+            identifying_attributes: vec![],
+            non_identifying_attributes: described(&[("env", "prod")]).identifying_attributes,
+        };
+        assert!(matches(&selector(&[("env", "prod")]), Some(&desc)));
+    }
+
+    /// A Deployment holds Configurations by name beside its Packages, in any number, and one
+    /// Configuration may sit in several Deployments (ADR-0034 clause 4). Taking out one it does not
+    /// hold says so; a deleted Configuration or Package leaves every Deployment that held it
+    /// (clause 8).
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_deployment_holds_configurations_beside_its_packages() {
+        let memory = Memory::default();
+        let store = DeploymentStore::open(Box::new(memory.clone())).expect("open");
+        channel(&store, "stable", &[("channel", "stable")]);
+        channel(&store, "canary", &[("channel", "canary")]);
+        let telegraf = id("telegraf", "1.30.0");
+        store
+            .put_package("stable", &telegraf, false)
+            .expect("package");
+        assert!(!store.get("stable").expect("stable").holds_nothing());
+        assert!(store.get("canary").expect("canary").holds_nothing());
+
+        for name in ["stable", "canary"] {
+            store.put_configuration(name, "base").expect("hold base");
+        }
+        store
+            .put_configuration("stable", "base")
+            .expect("holding it twice is the request arriving twice");
+        store.put_configuration("stable", "extra").expect("extra");
+        assert_eq!(
+            store
+                .get("stable")
+                .expect("stable")
+                .configurations
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["base", "extra"]
+        );
+        assert!(matches!(
+            store.put_configuration("missing", "base"),
+            Err(DeploymentError::NotFound)
+        ));
+        assert!(matches!(
+            store.remove_configuration("canary", "extra"),
+            Err(DeploymentError::Missing(why)) if why.contains("extra")
+        ));
+
+        assert_eq!(
+            store.drop_configuration("base").expect("drop"),
+            ["canary", "stable"],
+            "a deleted Configuration leaves every Deployment that held it"
+        );
+        assert_eq!(store.drop_package(&telegraf).expect("drop"), ["stable"]);
+        let stable = store.get("stable").expect("stable");
+        assert!(stable.packages.is_empty());
+        assert_eq!(
+            stable.configurations.into_iter().collect::<Vec<_>>(),
+            ["extra"]
+        );
+        let reopened = DeploymentStore::open(Box::new(memory)).expect("reopen");
+        assert!(reopened.get("canary").expect("canary").holds_nothing());
     }
 }

@@ -1,7 +1,8 @@
-//! The artifact-download size ceiling (ADR-0026): a Server cannot make the Client fill its staging
+//! The artifact download (ADR-0026, ADR-0033): a Server cannot make the Client fill its staging
 //! filesystem before the content hash — which comes only after the whole stream lands — can reject
 //! the body. The cap is enforced both from an over-large `Content-Length` up front and, for a
-//! chunked response that advertises none, while the bytes stream in.
+//! chunked response that advertises none, while the bytes stream in. And the download goes to this
+//! Client's own Server origin and nowhere else (ADR-0033 clause 13).
 
 use std::net::SocketAddr;
 
@@ -18,8 +19,9 @@ use futures_util::stream;
 ///
 /// The listener is bound first so the routes can name the address they redirect to: the
 /// cross-origin case needs a second origin on the same process, and `127.0.0.1` versus `[::1]` is
-/// one — one dual-stack socket, a different host in the URL, which is exactly what the header rule
-/// compares. Both are loopback literals, the one place a download may be plaintext (ADR-0026).
+/// one — one port, a different host in the URL, which is exactly what the origin rule compares.
+/// Both are loopback literals, the one place a download may be plaintext (ADR-0026). The Client's
+/// Server origin is `127.0.0.1`.
 async fn spawn() -> SocketAddr {
     // What main() does at startup: without a process provider, reqwest refuses to build a client.
     opamp::tls::install_ring_provider();
@@ -46,11 +48,10 @@ async fn spawn() -> SocketAddr {
                 Body::from_stream(stream::iter(chunks))
             }),
         )
-        // A mirror that redirects the download to where the bytes actually live (the CDN pattern).
+        // A redirect within the origin, to where the bytes actually live.
         .route("/redirect", get(|| async { Redirect::to("/artifact") }))
         .route("/artifact", get(|| async { vec![0u8; 4096] }))
-        // A source that will not serve the artifact without the credential the operator configured
-        // for it (ADR-0026) — what a private mirror looks like.
+        // A route that will not serve the artifact without the header the offer names.
         .route(
             "/guarded",
             get(|headers: axum::http::HeaderMap| async move {
@@ -64,12 +65,10 @@ async fn spawn() -> SocketAddr {
         )
         // A redirect that stays on this origin, to the source that needs the credential.
         .route("/to-guarded", get(|| async { Redirect::to("/guarded") }))
-        // A mirror that bounces the download to a *different* origin — the harvesting shape.
+        // A redirect that bounces the download to a *different* origin — the harvesting shape.
         .route("/leaks", get(|| async move { Redirect::to(&elsewhere) }))
-        // The other origin, which refuses anything carrying someone else's credential. Inverted on
-        // purpose: it makes a leaked header show up as a `401` and a withheld one as a body that
-        // reaches the hash check, so the two outcomes are told apart by the error and no hashing is
-        // needed in the test.
+        // The other origin, which refuses anything carrying someone else's credential: a request
+        // that reached it with the header would show up as a `401`.
         .route(
             "/refuses-credentials",
             get(|headers: axum::http::HeaderMap| async move {
@@ -90,17 +89,14 @@ async fn spawn() -> SocketAddr {
     addr
 }
 
-/// A Client that may download from both test origins, holding a verification key. The key never
-/// verifies anything here: every test stops at the size ceiling, the hash, or a refusal before it.
+/// A Client whose Server origin is `addr`, holding a verification key. The key never verifies
+/// anything here: every test stops at the size ceiling, the hash, or a refusal before it.
 fn small_cap_config(max_artifact_size_bytes: u64, addr: SocketAddr) -> ClientConfig {
     ClientConfig {
+        endpoint: format!("ws://{addr}/v1/opamp"),
         max_artifact_size_bytes,
         packages: Some(fleet_agent::config::PackagesConfig {
             verification_key: Some(hex::encode([7u8; 32])),
-            allowed_sources: vec![
-                format!("http://127.0.0.1:{}/", addr.port()),
-                format!("http://[::1]:{}/", addr.port()),
-            ],
             ..Default::default()
         }),
         package_key: Some(vec![7u8; 32]),
@@ -201,12 +197,12 @@ async fn a_body_within_the_ceiling_streams_through_to_verification() {
     );
 }
 
-/// An artifact URL may legitimately redirect — a mirror (ADR-0026) is often a CDN that bounces the
-/// download to signed storage — so the download follows it. Reaching the artifact (and then failing
-/// only on the deliberately wrong content hash) proves the redirect was followed, not refused.
-/// Verifies: ADR-0026
+/// A redirect that stays on the Server's origin is followed (ADR-0033 clause 13). Reaching the
+/// artifact (and then failing only on the deliberately wrong content hash) proves the redirect was
+/// followed, not refused.
+/// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
-async fn a_download_follows_a_redirect_to_the_mirror() {
+async fn a_download_follows_a_redirect_within_the_servers_origin() {
     let addr = spawn().await;
     let staging = tempfile::tempdir().expect("tempdir");
 
@@ -225,12 +221,10 @@ async fn a_download_follows_a_redirect_to_the_mirror() {
 }
 
 /// The Baseline: *"The Agent SHOULD include the HTTP headers provided in the headers field for the
-/// GET request."* A referenced source (ADR-0026) may be a private mirror, and the Server fills those
-/// headers from what the operator configured — so a download that drops them cannot fetch the
-/// artifact at all. Reaching the content-hash check (which then fails on the deliberately wrong
-/// hash) is what proves the credential travelled; before this was implemented the same call failed
-/// with `401 Unauthorized`.
-/// Verifies: ADR-0026
+/// GET request."* They go to the Server's own origin, the only place a download goes (ADR-0033).
+/// Reaching the content-hash check (which then fails on the deliberately wrong hash) is what proves
+/// the header travelled; without it the same call fails with `401 Unauthorized`.
+/// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
 async fn a_download_carries_the_headers_the_offer_named() {
     let addr = spawn().await;
@@ -253,7 +247,7 @@ async fn a_download_carries_the_headers_the_offer_named() {
     );
 }
 
-/// And without them the same source refuses — the guard is real, not a route that always answers.
+/// And without them the same route refuses — the guard is real, not a route that always answers.
 #[tokio::test]
 async fn a_download_without_the_headers_is_refused_by_a_guarded_source() {
     let addr = spawn().await;
@@ -270,14 +264,13 @@ async fn a_download_without_the_headers_is_refused_by_a_guarded_source() {
     assert!(err.contains("401"), "got {err}");
 }
 
-/// A header the operator named for one host must not follow a redirect to another. `reqwest` strips
-/// only `Authorization`, `Cookie` and `Proxy-Authorization` across origins, so a custom credential
-/// would otherwise be handed to wherever a mirror points — which is how a mirror harvests it. The
-/// second origin here refuses anything carrying the token, so a leak surfaces as `401` and the
-/// correct behaviour reaches the hash check.
-/// Verifies: ADR-0026
+/// A redirect to another origin is refused before that origin is asked, so neither the offered
+/// header nor anything else reaches it: the download fails naming the origin it pointed at
+/// (ADR-0033 clause 13). The other origin here refuses anything carrying the header, so a leak
+/// would surface as `401` rather than as this refusal.
+/// Verifies: ADR-0026, ADR-0033
 #[tokio::test]
-async fn an_offered_header_does_not_follow_a_redirect_to_another_origin() {
+async fn a_redirect_to_another_origin_is_refused_and_carries_no_header_there() {
     let addr = spawn().await;
     let staging = tempfile::tempdir().expect("tempdir");
 
@@ -291,15 +284,22 @@ async fn an_offered_header_does_not_follow_a_redirect_to_another_origin() {
         &Progress::default(),
     )
     .await
-    .expect_err("the wrong content hash still fails — but only after the redirect was followed");
+    .expect_err("the hop off the origin is refused");
     assert!(
-        err.contains("content hash"),
-        "the credential must not travel to the redirect target: {err}"
+        err.contains("[::1]") && err.contains("own Server origin"),
+        "the refusal names the origin it pointed at: {err}"
+    );
+    // The refusal is the one made before any request, not an answer the other origin gave: a `401`
+    // from it would read differently. (A plain "no 401 in the text" test is no test here — the
+    // random port of the origin may itself contain those digits.)
+    assert!(
+        err.starts_with("refusing a download from"),
+        "nothing reached the other origin: {err}"
     );
 }
 
-/// Following the chain by hand must not break the ordinary mirror: a same-origin redirect still
-/// carries the credential, because that is the host it was given for.
+/// Following the chain by hand must not break an ordinary redirect: a same-origin one still carries
+/// the header, because that is the origin it was given for.
 #[tokio::test]
 async fn an_offered_header_survives_a_redirect_within_the_same_origin() {
     let addr = spawn().await;
@@ -384,7 +384,7 @@ async fn the_staging_directory_is_kept_owner_only() {
     );
 }
 
-/// A source that counts the requests it receives, so a test can show that none was sent.
+/// An origin that counts the requests it receives, so a test can show that none was sent.
 async fn counted_source() -> (SocketAddr, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -406,28 +406,32 @@ async fn counted_source() -> (SocketAddr, std::sync::Arc<std::sync::atomic::Atom
     (addr, hits)
 }
 
-/// A source outside `[packages] allowed_sources` is refused before a request is sent: the check is
-/// on the absence of the request, not on the outcome of the download.
-/// Verifies: ADR-0026
+/// An absolute `download_url` on another origin than the Client's own Server is refused before a
+/// request is sent, naming that origin: the check is on the absence of the request, not on the
+/// outcome of the download (ADR-0033 clause 13).
+/// Verifies: ADR-0033
 #[tokio::test]
-async fn a_source_that_is_not_allowed_is_refused_without_a_request() {
-    let (unlisted, hits) = counted_source().await;
-    // Allowed: the test origins of `spawn`, not this one.
-    let allowed = spawn().await;
+async fn an_absolute_url_on_another_origin_is_refused_without_a_request() {
+    let (elsewhere, hits) = counted_source().await;
+    // The Server origin: the test origins of `spawn`, not this one.
+    let server = spawn().await;
     let staging = tempfile::tempdir().expect("tempdir");
     let err = download_and_verify(
-        &download(format!("http://{unlisted}/artifact")),
-        &small_cap_config(8192, allowed),
+        &download(format!("http://{elsewhere}/artifact")),
+        &small_cap_config(8192, server),
         staging.path(),
         &Progress::default(),
     )
     .await
-    .expect_err("an unlisted source is refused");
-    assert!(err.contains("allowed_sources"), "got {err}");
+    .expect_err("another origin is refused");
+    assert!(
+        err.contains(&format!("http://{elsewhere}")) && err.contains("own Server origin"),
+        "got {err}"
+    );
     assert_eq!(
         hits.load(std::sync::atomic::Ordering::SeqCst),
         0,
-        "a request reached the unlisted source"
+        "a request reached the other origin"
     );
 }
 
@@ -473,32 +477,6 @@ async fn an_unsigned_offer_or_an_unkeyed_client_fetches_nothing() {
         hits.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "a request reached the source"
-    );
-}
-
-/// Every redirect hop is checked: an allowed mirror that bounces the download to a host the
-/// operator did not list fails the download, naming that origin.
-/// Verifies: ADR-0026
-#[tokio::test]
-async fn a_redirect_to_a_source_that_is_not_allowed_fails_the_download() {
-    let addr = spawn().await;
-    let staging = tempfile::tempdir().expect("tempdir");
-    let mut config = small_cap_config(8192, addr);
-    // Only the 127.0.0.1 origin is allowed; `/leaks` redirects to [::1].
-    if let Some(packages) = config.packages.as_mut() {
-        packages.allowed_sources.truncate(1);
-    }
-    let err = download_and_verify(
-        &download(format!("http://{addr}/leaks")),
-        &config,
-        staging.path(),
-        &Progress::default(),
-    )
-    .await
-    .expect_err("the hop outside the list is refused");
-    assert!(
-        err.contains("[::1]") && err.contains("allowed_sources"),
-        "got {err}"
     );
 }
 
@@ -566,9 +544,10 @@ async fn tls_origin(
     (addr, presented)
 }
 
-/// This Client's certificate goes to its own Server's origin and to no other: a download the
-/// Server redirects to a mirror reaches the mirror without it.
-/// Verifies: ADR-0021, ADR-0026
+/// This Client's certificate goes to its own Server's origin and to no other: the download from it
+/// presents the certificate, and a redirect to another host is refused before that host is reached
+/// (ADR-0033 clause 13).
+/// Verifies: ADR-0021, ADR-0026, ADR-0033
 #[tokio::test]
 async fn the_client_certificate_goes_to_the_servers_origin_alone() {
     opamp::tls::install_ring_provider();
@@ -608,7 +587,6 @@ async fn the_client_certificate_goes_to_the_servers_origin_alone() {
         }),
         packages: Some(fleet_agent::config::PackagesConfig {
             verification_key: Some(hex::encode([7u8; 32])),
-            allowed_sources: vec![format!("https://{mirror}/")],
             ..Default::default()
         }),
         package_key: Some(vec![7u8; 32]),
@@ -617,7 +595,7 @@ async fn the_client_certificate_goes_to_the_servers_origin_alone() {
     };
 
     let err = download_and_verify(
-        &download(format!("https://{server}/redirect")),
+        &download(format!("https://{server}/artifact")),
         &config,
         &dir.path().join("staging"),
         &Progress::default(),
@@ -629,6 +607,16 @@ async fn the_client_certificate_goes_to_the_servers_origin_alone() {
         server_saw.load(std::sync::atomic::Ordering::SeqCst),
         "the Server's origin is shown the certificate"
     );
+
+    let err = download_and_verify(
+        &download(format!("https://{server}/redirect")),
+        &config,
+        &dir.path().join("staging"),
+        &Progress::default(),
+    )
+    .await
+    .expect_err("the redirect off the origin is refused");
+    assert!(err.contains(&mirror.to_string()), "{err}");
     assert!(
         !mirror_saw.load(std::sync::atomic::Ordering::SeqCst),
         "the mirror was shown the Client's certificate"

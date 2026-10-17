@@ -19,8 +19,9 @@ fn usage() -> ! {
     eprintln!(
         "Usage: server [--config <server.toml>] [--version]\n       \
          server hash-credential --basic   (reads the password from standard input)\n       \
-         server audit-verify <config_dir>/audit\n       \
-         server pki status --config <server.toml>"
+         server audit-verify <data_dir>/audit\n       \
+         server pki status --config <server.toml>\n       \
+         server migrate --config-dir <old> --packages-dir <old> --data-dir <new>"
     );
     std::process::exit(2);
 }
@@ -102,6 +103,58 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
         );
     }
     std::process::exit(pki::exit_code(&endings, now));
+}
+
+/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0037 clause 14):
+/// moves the state an older Server kept under `config_dir` and `packages_dir` into a new, empty
+/// `data_dir`, copying, so the old directories stay as the backup. It is run while the Server is
+/// stopped — a Server still writing the old directories would be copied half-way — and that is the
+/// operator's to ensure: the older Server takes no lock this could test. Prints what it carried,
+/// dropped and listed, and exits non-zero when trust data could not be carried.
+fn migrate(mut args: impl Iterator<Item = String>) -> ! {
+    let (mut config_dir, mut packages_dir, mut data_dir) = (None, None, None);
+    while let Some(flag) = args.next() {
+        let slot = match flag.as_str() {
+            "--config-dir" => &mut config_dir,
+            "--packages-dir" => &mut packages_dir,
+            "--data-dir" => &mut data_dir,
+            _ => usage(),
+        };
+        match args.next() {
+            Some(path) if slot.is_none() => *slot = Some(PathBuf::from(path)),
+            _ => usage(),
+        }
+    }
+    let (Some(config_dir), Some(packages_dir), Some(data_dir)) =
+        (config_dir, packages_dir, data_dir)
+    else {
+        usage()
+    };
+    match fleet_server::migrate::run(&config_dir, &packages_dir, &data_dir) {
+        Ok(report) => {
+            for line in &report.lines {
+                println!("{line}");
+            }
+            if report.trust_failed {
+                eprintln!(
+                    "the trust data was not carried whole — do not start a Server on {}; fix what \
+                     is named above, empty it, and migrate again",
+                    data_dir.display()
+                );
+                std::process::exit(1);
+            }
+            println!(
+                "migrated into {} — set data_dir to it in server.toml, remove config_dir and \
+                 packages_dir, and start the Server",
+                data_dir.display()
+            );
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// What makes the entry `server.toml` keeps from a secret.
@@ -205,6 +258,7 @@ fn parse_args() -> PathBuf {
             "hash-credential" => hash_credential(args.next()),
             "audit-verify" => audit_verify(args.next()),
             "pki" => pki(args),
+            "migrate" => migrate(args),
             "--config" => match args.next() {
                 Some(path) => config = PathBuf::from(path),
                 None => usage(),
@@ -267,7 +321,9 @@ async fn main() {
         .tls
         .as_ref()
         .ok_or_else(|| "[tls] is required".to_string())
-        .and_then(|tls| fleet_server::tls::server_tls(tls, config.enrolment.as_ref()))
+        .and_then(|tls| {
+            fleet_server::tls::server_tls(tls, config.rest.tls.as_ref(), config.enrolment.as_ref())
+        })
         .and_then(|planes| {
             let agent = planes.agent.rustls_config()?;
             let operator = planes.operator.rustls_config()?;
@@ -279,12 +335,29 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // One root for all state, its layout created owner-only and checked before any store opens
+    // (ADR-0037).
+    if let Err(e) = fleet_server::fs::open_data_dir(&config.data_dir) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
-    let enrolment = config.enrolment.as_ref().map(|_| {
-        // ADR-0021: closed until an operator opens it.
+    // ADR-0021: closed until an operator opens it; the window and its queue survive a restart
+    // (ADR-0037 clause 9).
+    let enrolment = match config.enrolment.as_ref().map(|_| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
-        Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone()))
-    });
+        fleet_server::enrolment::Enrolment::open_on(
+            clock.clone(),
+            Box::new(fleet_server::fs::FsEnrolmentStore::open(&config.data_dir)),
+        )
+    }) {
+        None => None,
+        Some(Ok(enrolment)) => Some(Arc::new(enrolment)),
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let limits = config.admission_throttle.limits();
 
     let connection_offer = config
@@ -327,7 +400,7 @@ async fn main() {
                     signer.map(|ca| {
                         Box::new(ca) as Box<dyn fleet_server::bootstrap::BootstrapSigner>
                     }),
-                    config.config_dir.join("bootstrap-certificates"),
+                    &config.data_dir,
                     clock.clone(),
                 )
             },
@@ -340,6 +413,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // What the Server serves, trusts and signs with until it restarts, read right after the files
+    // above were: the warnings below judge these, not whatever the files hold later
+    // (ADR-0028 clause 11).
+    let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
         // ADR-0026 clause 37.
         info!("{notice}");
@@ -353,16 +430,27 @@ async fn main() {
         // ADR-0016.
         info!("offering the fleet somewhere to send its own telemetry");
     }
-    let packages = fleet_server::packages::PackageStore::open(config.packages_dir.clone())
+    let packages = config
+        .packages
+        .verification_key()
+        .and_then(|key| {
+            if key.is_some() {
+                // ADR-0033.
+                info!("checking package signatures against [packages] verification_key");
+            }
+            fleet_server::packages::PackageStore::open(config.data_dir.clone()).map(|store| {
+                store.with_verifier(key.map(|key| {
+                    Box::new(fleet_server::config::Ed25519Verifier::new(key))
+                        as Box<dyn fleet_server::packages::SignatureVerifier>
+                }))
+            })
+        })
         .and_then(|store| {
             if !store.is_empty() {
                 // ADR-0026.
                 info!("offering software packages to the fleet");
             }
-            fleet_server::fleet::PackageOffering::new(
-                store,
-                config.advertised_url.clone().unwrap_or_default(),
-            )
+            fleet_server::fleet::PackageOffering::new(&config.data_dir, store)
         });
     let packages = match packages {
         Ok(offering) => Some(offering),
@@ -372,31 +460,28 @@ async fn main() {
         }
     };
     // What the client CA signed and what is revoked (ADR-0021), kept beside the fleet's records.
-    let revocations = match fleet_server::fs::FsLedgerStore::open(
-        config.config_dir.join("revocation"),
-    )
-    .and_then(|store| {
-        fleet_server::revocation::Revocations::open(
-            Box::new(store),
-            clock.clone(),
-            planes.3.clone(),
-        )
-    }) {
-        Ok(revocations) => Arc::new(revocations),
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
-    // The audit record (ADR-0022), opened before anything is decided.
-    let audit = match fleet_server::fs::FsAuditStore::open(config.config_dir.join("audit"))
-        .and_then(|store| {
-            fleet_server::audit_log::AuditLog::start(
+    let revocations =
+        match fleet_server::fs::FsLedgerStore::open(&config.data_dir).and_then(|store| {
+            fleet_server::revocation::Revocations::open(
                 Box::new(store),
-                config.audit.limits(),
                 clock.clone(),
+                planes.3.clone(),
             )
         }) {
+            Ok(revocations) => Arc::new(revocations),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        };
+    // The audit record (ADR-0022), opened before anything is decided.
+    let audit = match fleet_server::fs::FsAuditStore::open(&config.data_dir).and_then(|store| {
+        fleet_server::audit_log::AuditLog::start(
+            Box::new(store),
+            config.audit.limits(),
+            clock.clone(),
+        )
+    }) {
         Ok(audit) => Arc::new(audit) as Arc<dyn fleet_server::audit::Audit>,
         Err(e) => {
             eprintln!("{e}");
@@ -408,7 +493,6 @@ async fn main() {
     }
     // Before a certificate the Server depends on ends, say so: at startup and once a day
     // (ADR-0028 clause 11). Nothing stops; the hosts decide for themselves.
-    let watched = fleet_server::pki::depended_on(&config);
     fleet_server::pki::warn_endings(
         &watched,
         Some(audit.as_ref()),
@@ -438,7 +522,7 @@ async fn main() {
         config.max_agents,
         clock.clone(),
     ));
-    let state = match AppState::new(config.config_dir.clone()) {
+    let state = match AppState::new(config.data_dir.clone()) {
         Ok(state) => Arc::new(
             state
                 .with_agent_rate(Some(agent_rate))

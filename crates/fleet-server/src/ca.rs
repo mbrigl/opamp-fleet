@@ -17,7 +17,7 @@ use rcgen::{
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::config::ClientCaConfig;
-use crate::revocation::{CertId, Facts, Signed};
+use crate::revocation::{CertId, Facts, Signed, SubjectValues};
 
 /// The SAN URI prefix naming the host a certificate was issued to (ADR-0021 clause 7).
 pub const HOST_URI_PREFIX: &str = "urn:opamp-fleet:host:";
@@ -67,8 +67,11 @@ impl ClientCa {
 
     /// Signs an Agent's CSR and returns the issued certificate as PEM.
     ///
-    /// The subject is the Server's, not the request's: the common name derived from the CA's and
-    /// nothing else (ADR-0021 clause 7), so no self-asserted text reaches a signed certificate.
+    /// The subject is the Server's, not the request's: the six values `subject` names — copied by
+    /// the caller from the bootstrap certificate an approval reads or the certificate a renewal
+    /// renews (ADR-0036 clauses 3 and 4) — and the common name derived from the CA's (ADR-0021
+    /// clause 7), so no self-asserted text reaches a signed certificate. The signed certificate
+    /// must carry exactly those values, or nothing is handed out.
     /// Nor is it bound to anything the Agent reports. Binding a certificate to an `instance_uid`
     /// would mean it dies the moment the Server re-keys that Agent through `AgentIdentification` —
     /// an outage of the Server's own making (ADR-0021).
@@ -84,7 +87,12 @@ impl ClientCa {
     /// # Errors
     /// A request that cannot be parsed, or that this CA cannot sign, is an error the caller turns
     /// into the Baseline's `ServerErrorResponse` of type `BadRequest`.
-    pub fn sign(&self, csr_pem: &str, host: &str) -> Result<Signed, String> {
+    pub fn sign(
+        &self,
+        csr_pem: &str,
+        host: &str,
+        subject: &SubjectValues,
+    ) -> Result<Signed, String> {
         let mut request = CertificateSigningRequestParams::from_pem(csr_pem)
             .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
         // The life starts now, less a few minutes for clocks that disagree: a start in the past
@@ -104,12 +112,11 @@ impl ClientCa {
             Some(validity) => time::OffsetDateTime::now_utc() + validity,
             None => not_after(self.validity_days)?,
         };
-        // Never trust the request for the certificate's name: its role, as the CA names it.
-        request.params.distinguished_name = rcgen::DistinguishedName::new();
-        request
-            .params
-            .distinguished_name
-            .push(rcgen::DnType::CommonName, self.leaf_name.as_str());
+        // Never trust the request for the certificate's name: the values carried over, and its
+        // role as the CA names it.
+        request.params.distinguished_name = distinguished_name(
+            &crate::bootstrap::carried_attributes(subject, &self.leaf_name),
+        )?;
         // Never trust the request for the certificate's powers: force a client-auth leaf.
         request.params.is_ca = IsCa::ExplicitNoCa;
         request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -129,8 +136,17 @@ impl ClientCa {
         let certificate = request
             .signed_by(&self.issuer)
             .map_err(|e| format!("cannot sign the certificate signing request: {e}"))?;
+        let facts = facts(certificate.der())?;
+        // Exactly the values carried over, and no others (ADR-0036 clause 4).
+        if facts.subject_values != *subject {
+            return Err(
+                "the signed certificate does not carry the subject values it was \
+                        issued with"
+                    .to_string(),
+            );
+        }
         Ok(Signed {
-            facts: facts(certificate.der())?,
+            facts,
             pem: certificate.pem(),
         })
     }
@@ -232,14 +248,143 @@ pub fn facts(der: &[u8]) -> Result<Facts, String> {
         });
     Ok(Facts {
         id: CertId::new(cert.issuer().as_raw(), &hex::encode(cert.raw_serial())),
-        issuer_name: cert.issuer().to_string(),
-        subject: cert.subject().to_string(),
+        issuer_name: name_text(cert.issuer()),
+        subject: name_text(cert.subject()),
         // The key itself, not its SubjectPublicKeyInfo: the fingerprint an enrolment request is
         // listed by and the Client logs.
         key_fingerprint: hex::encode(Sha256::digest(&cert.public_key().subject_public_key.data)),
         not_after_ms: u64::try_from(not_after).unwrap_or(0).saturating_mul(1000),
         host,
+        subject_values: subject_values(cert.subject()),
     })
+}
+
+/// A name as text, for the operator to read: `C=AT, O=…, organizationIdentifier=…, CN=…`. The
+/// parser's own registry knows no `organizationIdentifier` and would print its OID.
+pub(crate) fn name_text(name: &x509_parser::x509::X509Name<'_>) -> String {
+    use x509_parser::oid_registry::{OidEntry, OidRegistry};
+    static REGISTRY: std::sync::LazyLock<OidRegistry<'static>> = std::sync::LazyLock::new(|| {
+        let mut registry = OidRegistry::default().with_all_crypto().with_x509();
+        registry.insert(
+            x509_parser::oid_registry::asn1_rs::oid!(2.5.4 .97),
+            OidEntry::new("organizationIdentifier", "X.520 organizationIdentifier"),
+        );
+        registry
+    });
+    name.to_string_with_registry(&REGISTRY)
+        .unwrap_or_else(|_| name.to_string())
+}
+
+/// The values of a subject a Host carries (ADR-0035 clause 1), each the first of its attribute.
+/// A value that is not a string is left out.
+pub(crate) fn subject_values(name: &x509_parser::x509::X509Name<'_>) -> SubjectValues {
+    let first = |oid: &str| {
+        name.iter_attributes()
+            .filter(|attribute| attribute.attr_type().to_id_string() == oid)
+            .find_map(|attribute| attribute.as_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    SubjectValues {
+        country: first("2.5.4.6"),
+        state: first("2.5.4.8"),
+        locality: first("2.5.4.7"),
+        organization: first("2.5.4.10"),
+        organizational_unit: first("2.5.4.11"),
+        organization_identifier: first("2.5.4.97"),
+    }
+}
+
+/// The six values a bootstrap certificate's subject carries into a host certificate, read under
+/// the rules they were issued by (ADR-0036 clauses 1 and 3): each attribute at most once, a
+/// country of two upper-case letters as a `PrintableString`, every other value of 1 to 64
+/// characters without a control character as a `UTF8String` or a `PrintableString`, and an
+/// organization and an organizational unit present. Every other attribute, the common name
+/// included, is passed over. The certificate may come from a foreign PKI, so nothing in it is
+/// taken on trust.
+///
+/// # Errors
+/// Returns why the subject cannot be carried, naming the attribute.
+pub(crate) fn carried_subject(
+    name: &x509_parser::x509::X509Name<'_>,
+) -> Result<SubjectValues, String> {
+    use crate::bootstrap::Attribute;
+    use x509_parser::der_parser::asn1_rs::Tag;
+    let mut values = SubjectValues::default();
+    let mut seen = Vec::new();
+    for entry in name.iter_attributes() {
+        let oid = entry.attr_type().to_id_string();
+        let Some(attribute) = Attribute::CARRIED
+            .into_iter()
+            .find(|attribute| attribute.oid() == oid)
+        else {
+            continue;
+        };
+        let key = attribute.key();
+        if seen.contains(&attribute) {
+            return Err(format!("{key} appears more than once"));
+        }
+        seen.push(attribute);
+        // The country is a PrintableString. Every other value may be a UTF8String or the
+        // PrintableString older PKIs write, a subset of it; it is carried as a UTF8String
+        // (ADR-0036 clause 3).
+        let tag = entry.attr_value().tag();
+        let (fits, encoding) = if attribute.printable() {
+            (tag == Tag::PrintableString, "PrintableString")
+        } else {
+            (
+                tag == Tag::Utf8String || tag == Tag::PrintableString,
+                "UTF8String or PrintableString",
+            )
+        };
+        if !fits {
+            return Err(format!("{key} is not encoded as a {encoding}"));
+        }
+        let value = entry
+            .as_str()
+            .map_err(|_| format!("{key} is not a {encoding}"))?;
+        attribute.check(value)?;
+        attribute.set(&mut values, value.to_string());
+    }
+    // Every Host names a customer and a site its Selectors can rely on (ADR-0036 clause 1).
+    for attribute in [Attribute::Organization, Attribute::OrganizationalUnit] {
+        if attribute.of(&values).is_empty() {
+            return Err(format!("{} is missing", attribute.key()));
+        }
+    }
+    Ok(values)
+}
+
+/// A subject of `attributes` in their order, each in the encoding ADR-0036 clause 1 gives it.
+///
+/// # Errors
+/// Returns an error for a country that a `PrintableString` cannot hold.
+fn distinguished_name(
+    attributes: &[(crate::bootstrap::Attribute, String)],
+) -> Result<rcgen::DistinguishedName, String> {
+    use crate::bootstrap::Attribute;
+    let mut name = rcgen::DistinguishedName::new();
+    for (attribute, value) in attributes {
+        let kind = match attribute {
+            Attribute::Country => rcgen::DnType::CountryName,
+            Attribute::State => rcgen::DnType::StateOrProvinceName,
+            Attribute::Locality => rcgen::DnType::LocalityName,
+            Attribute::Organization => rcgen::DnType::OrganizationName,
+            Attribute::OrganizationalUnit => rcgen::DnType::OrganizationalUnitName,
+            Attribute::OrganizationIdentifier => rcgen::DnType::CustomDnType(vec![2, 5, 4, 97]),
+            Attribute::CommonName => rcgen::DnType::CommonName,
+        };
+        let value = if attribute.printable() {
+            rcgen::DnValue::PrintableString(
+                rcgen::string::PrintableString::try_from(value.as_str())
+                    .map_err(|_| format!("{} {value:?} is no PrintableString", attribute.key()))?,
+            )
+        } else {
+            rcgen::DnValue::Utf8String(value.clone())
+        };
+        name.push(kind, value);
+    }
+    Ok(name)
 }
 
 /// Checks a CSR's claims to an `instance_uid` against its sender's (ADR-0021): every canonical
@@ -427,8 +572,8 @@ fn dn_text(value: &rcgen::DnValue) -> String {
 }
 
 impl crate::fleet::CertificateSigner for ClientCa {
-    fn sign(&self, csr_pem: &str, host: &str) -> Result<Signed, String> {
-        ClientCa::sign(self, csr_pem, host)
+    fn sign(&self, csr_pem: &str, host: &str, subject: &SubjectValues) -> Result<Signed, String> {
+        ClientCa::sign(self, csr_pem, host, subject)
     }
 
     fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String> {
@@ -534,20 +679,12 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         subject: &[(crate::bootstrap::Attribute, String)],
         now_ms: u64,
         not_after_ms: u64,
-        password: Option<&str>,
+        password: &str,
     ) -> Result<crate::bootstrap::Pair, String> {
-        use crate::bootstrap::{Attribute, Pair};
+        use crate::bootstrap::Pair;
         let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
         let mut params = rcgen::CertificateParams::default();
-        params.distinguished_name = rcgen::DistinguishedName::new();
-        for (attribute, value) in subject {
-            let kind = match attribute {
-                Attribute::Organization => rcgen::DnType::OrganizationName,
-                Attribute::OrganizationalUnit => rcgen::DnType::OrganizationalUnitName,
-                Attribute::CommonName => rcgen::DnType::CommonName,
-            };
-            params.distinguished_name.push(kind, value.as_str());
-        }
+        params.distinguished_name = distinguished_name(subject)?;
         // A client-authentication leaf and nothing more (ADR-0028 clause 21).
         params.is_ca = IsCa::ExplicitNoCa;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -561,18 +698,9 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         let (_, parsed) = X509Certificate::from_der(certificate.der())
             .map_err(|e| format!("the bootstrap certificate does not parse: {e}"))?;
         let facts = facts(certificate.der())?;
-        // With a password the key leaves only sealed with its certificate (ADR-0029 clause 3).
-        let (private_key_pem, pkcs12) = match password {
-            Some(password) => (
-                None,
-                Some(fleet_core::pkcs12::file::seal(
-                    certificate.der(),
-                    &key.serialize_der(),
-                    password,
-                )?),
-            ),
-            None => (Some(key.serialize_pem()), None),
-        };
+        // The key leaves only sealed with its certificate (ADR-0036 clause 8).
+        let pkcs12 =
+            fleet_core::pkcs12::file::seal(certificate.der(), &key.serialize_der(), password)?;
         Ok(Pair {
             serial: facts.id.serial.clone(),
             id: facts.id,
@@ -583,7 +711,6 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
                 .saturating_mul(1000),
             not_after_ms: facts.not_after_ms,
             certificate_pem: certificate.pem(),
-            private_key_pem,
             pkcs12,
         })
     }
@@ -672,6 +799,48 @@ mod tests {
         }
     }
 
+    /// The values a Host carries are read from a certificate's subject, each by its attribute,
+    /// `organizationIdentifier` included; one the subject lacks stays empty.
+    /// Verifies: ADR-0035
+    #[test]
+    fn a_certificates_subject_values_are_read_by_attribute() {
+        let key = KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::default();
+        let name = &mut params.distinguished_name;
+        name.push(rcgen::DnType::CountryName, "AT");
+        name.push(rcgen::DnType::StateOrProvinceName, "Wien");
+        name.push(rcgen::DnType::OrganizationName, "Kunde GmbH");
+        name.push(rcgen::DnType::OrganizationalUnitName, "Werk Nord");
+        name.push(
+            rcgen::DnType::CustomDnType(vec![2, 5, 4, 97]),
+            "VATAT-U12345678",
+        );
+        name.push(rcgen::DnType::CommonName, "edge-01");
+        let cert = params.self_signed(&key).expect("certificate");
+        let values = facts(cert.der()).expect("facts").subject_values;
+        assert_eq!(
+            values,
+            SubjectValues {
+                country: "AT".into(),
+                state: "Wien".into(),
+                locality: String::new(),
+                organization: "Kunde GmbH".into(),
+                organizational_unit: "Werk Nord".into(),
+                organization_identifier: "VATAT-U12345678".into(),
+            }
+        );
+        assert_eq!(
+            values.attributes().collect::<Vec<_>>(),
+            [
+                ("fleet.host.country", "AT"),
+                ("fleet.host.state", "Wien"),
+                ("fleet.host.organization", "Kunde GmbH"),
+                ("fleet.host.site", "Werk Nord"),
+                ("fleet.host.organization_id", "VATAT-U12345678"),
+            ]
+        );
+    }
+
     /// A CA named `common_name`, as PEM certificate and key.
     fn named_ca(common_name: &str) -> (String, String) {
         let key = KeyPair::generate().expect("ca key");
@@ -706,7 +875,10 @@ mod tests {
         let (cert_pem, key_pem) = named_ca("Acme Fleet Client CA");
         let ca = ClientCa::from_config(&client_ca_config(dir.path(), &cert_pem, &key_pem))
             .expect("loads");
-        let issued = ca.sign(&hostile_csr(), "host-1").expect("issued").pem;
+        let issued = ca
+            .sign(&hostile_csr(), "host-1", &SubjectValues::default())
+            .expect("issued")
+            .pem;
         let der = opamp::tls::certificates(issued.as_bytes()).expect("pem");
         let (_, cert) = X509Certificate::from_der(der[0].as_ref()).expect("parse");
         assert_eq!(
@@ -777,7 +949,7 @@ mod tests {
     #[test]
     fn signs_a_request_into_a_certificate() {
         let issued = client_ca(90)
-            .sign(&csr("edge-01"), "host-1")
+            .sign(&csr("edge-01"), "host-1", &SubjectValues::default())
             .expect("issued")
             .pem;
         assert!(issued.starts_with("-----BEGIN CERTIFICATE-----"));
@@ -793,7 +965,7 @@ mod tests {
     #[test]
     fn the_request_cannot_dictate_the_certificates_powers() {
         let issued = client_ca(90)
-            .sign(&hostile_csr(), "host-1")
+            .sign(&hostile_csr(), "host-1", &SubjectValues::default())
             .expect("issued")
             .pem;
         let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
@@ -836,7 +1008,7 @@ mod tests {
     #[test]
     fn an_issued_certificate_lives_validity_days_from_now() {
         let issued = client_ca(90)
-            .sign(&csr("edge-01"), "host-1")
+            .sign(&csr("edge-01"), "host-1", &SubjectValues::default())
             .expect("issued")
             .pem;
         let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
@@ -865,6 +1037,7 @@ mod tests {
             .sign(
                 "-----BEGIN CERTIFICATE REQUEST-----\nnot base64\n-----END CERTIFICATE REQUEST-----",
                 "host-1",
+                &SubjectValues::default(),
             )
             .expect_err("refused");
         assert!(error.contains("does not parse"), "{error}");
@@ -875,8 +1048,12 @@ mod tests {
     fn two_certificates_from_one_key_have_two_serials() {
         let ca = client_ca(90);
         let request = csr("edge-01");
-        let first = ca.sign(&request, "host-1").expect("first");
-        let second = ca.sign(&request, "host-1").expect("second");
+        let first = ca
+            .sign(&request, "host-1", &SubjectValues::default())
+            .expect("first");
+        let second = ca
+            .sign(&request, "host-1", &SubjectValues::default())
+            .expect("second");
         assert_ne!(first.facts.id.serial, second.facts.id.serial);
         assert_eq!(first.facts.key_fingerprint, second.facts.key_fingerprint);
         assert_eq!(first.facts.id.issuer, second.facts.id.issuer);
@@ -893,7 +1070,9 @@ mod tests {
     #[test]
     fn a_certificate_carries_the_key_fingerprint_of_its_request() {
         let request = csr("edge-01");
-        let signed = client_ca(90).sign(&request, "host-1").expect("signed");
+        let signed = client_ca(90)
+            .sign(&request, "host-1", &SubjectValues::default())
+            .expect("signed");
         let enrolling = enrolment_request(&request, &[]).expect("request");
         assert_eq!(signed.facts.key_fingerprint, enrolling.key_fingerprint);
     }
@@ -1029,7 +1208,9 @@ mod tests {
             .expect("csr")
             .pem()
             .expect("pem");
-        let old = ca.sign(&old_csr, "host-7").expect("sign");
+        let old = ca
+            .sign(&old_csr, "host-7", &SubjectValues::default())
+            .expect("sign");
         assert_eq!(old.facts.host.as_deref(), Some("host-7"));
 
         assert_eq!(ca.renewal_proof(&csr("edge-01")).expect("no proof"), None);
@@ -1040,7 +1221,11 @@ mod tests {
         assert_eq!(proven.id, old.facts.id);
         assert_eq!(proven.host.as_deref(), Some("host-7"));
         let renewed = ca
-            .sign(&renewing(&old.pem, &old_key), "host-7")
+            .sign(
+                &renewing(&old.pem, &old_key),
+                "host-7",
+                &SubjectValues::default(),
+            )
             .expect("sign");
         let renewed_der = pem_der(&renewed.pem).expect("der");
         let (_, cert) = X509Certificate::from_der(&renewed_der).expect("parse");
@@ -1064,7 +1249,7 @@ mod tests {
             .pem()
             .expect("pem");
         assert_eq!(
-            ca.sign(&forged, "host-7")
+            ca.sign(&forged, "host-7", &SubjectValues::default())
                 .expect("sign")
                 .facts
                 .host
@@ -1076,7 +1261,9 @@ mod tests {
         let stranger = KeyPair::generate().expect("stranger");
         assert!(ca.renewal_proof(&renewing(&old.pem, &stranger)).is_err());
         let other = client_ca(30);
-        let foreign = other.sign(&old_csr, "host-7").expect("sign");
+        let foreign = other
+            .sign(&old_csr, "host-7", &SubjectValues::default())
+            .expect("sign");
         assert!(ca.renewal_proof(&renewing(&foreign.pem, &old_key)).is_err());
     }
 
@@ -1158,7 +1345,7 @@ mod tests {
                 ],
                 now,
                 now + 86_400_000,
-                None,
+                "twelve chars",
             )
             .expect("signed");
         let der = opamp::tls::certificates(pair.certificate_pem.as_bytes()).expect("pem");
@@ -1178,17 +1365,17 @@ mod tests {
             cert.validity().not_after.timestamp() * 1000,
             (now + 86_400_000) as i64
         );
-        let key = KeyPair::from_pem(pair.private_key_pem.as_deref().expect("PEM")).expect("key");
+        let opened = fleet_core::pkcs12::file::open(&pair.pkcs12, "twelve chars").expect("opens");
+        let key = KeyPair::try_from(opened.private_key_der.as_slice()).expect("key");
         assert_eq!(
             cert.public_key().raw,
             key.subject_public_key_info().as_slice()
         );
-        assert!(pair.pkcs12.is_none(), "no file without a password");
     }
 
-    /// With a password the key is not handed back in PEM: it is in a PKCS#12 file with its
-    /// certificate, which opens under that password to exactly the two (ADR-0029 clause 3).
-    /// Verifies: ADR-0029
+    /// The key is not handed back in PEM: it is in a PKCS#12 file with its certificate, which
+    /// opens under the password to exactly the two (ADR-0036 clause 8).
+    /// Verifies: ADR-0029, ADR-0036
     #[test]
     fn a_password_seals_the_key_with_its_certificate() {
         use crate::bootstrap::{Attribute, BootstrapSigner as _};
@@ -1204,12 +1391,10 @@ mod tests {
                 &[(Attribute::CommonName, "fleet bootstrap".to_string())],
                 now,
                 now + 86_400_000,
-                Some("twelve chars"),
+                "twelve chars",
             )
             .expect("signed");
-        assert!(pair.private_key_pem.is_none(), "no PEM key");
-        let opened = fleet_core::pkcs12::file::open(&pair.pkcs12.expect("a file"), "twelve chars")
-            .expect("opens");
+        let opened = fleet_core::pkcs12::file::open(&pair.pkcs12, "twelve chars").expect("opens");
         let der = opamp::tls::certificates(pair.certificate_pem.as_bytes()).expect("pem");
         assert_eq!(
             opened.certificate_der,
@@ -1230,10 +1415,247 @@ mod tests {
                 &[(Attribute::CommonName, "fleet bootstrap".to_string())],
                 now,
                 now + 86_400_000,
-                Some("twelve chars"),
+                "twelve chars",
             )
             .expect("signed")
             .pkcs12
-            .expect("a file")
+    }
+
+    fn six_values() -> SubjectValues {
+        SubjectValues {
+            country: "AT".to_string(),
+            state: "Oberösterreich".to_string(),
+            locality: "Linz".to_string(),
+            organization: "Kunde GmbH".to_string(),
+            organizational_unit: "Werk Nord".to_string(),
+            organization_identifier: "6f1c0b9e-2a4d-4c55-9b1e-0d2f3a4b5c6d".to_string(),
+        }
+    }
+
+    /// Each attribute of a subject with its OID and the tag of its string type, in order.
+    fn attributes_of(pem: &str) -> Vec<(String, x509_parser::der_parser::asn1_rs::Tag, String)> {
+        let der = opamp::tls::certificates(pem.as_bytes()).expect("pem");
+        let (_, cert) = X509Certificate::from_der(der[0].as_ref()).expect("parse");
+        cert.subject()
+            .iter_attributes()
+            .map(|attribute| {
+                (
+                    attribute.attr_type().to_id_string(),
+                    attribute.attr_value().tag(),
+                    attribute.as_str().expect("a string").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Issued with all six attributes, a bootstrap certificate's subject holds them in the order
+    /// C, ST, L, O, OU, organizationIdentifier, CN, the country as a `PrintableString` and every
+    /// other value as a `UTF8String`.
+    /// Verifies: ADR-0036
+    #[test]
+    fn a_bootstrap_certificate_holds_the_six_attributes_in_order_and_encoding() {
+        use crate::bootstrap::{BootstrapSigner as _, Subject};
+        use x509_parser::der_parser::asn1_rs::Tag;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (cert_pem, key_pem) = ca();
+        let signer =
+            BootstrapCa::from_config(&enrolment_with(dir.path(), &cert_pem, &key_pem), None)
+                .expect("loads")
+                .expect("a key");
+        let values = six_values();
+        let subject = Subject {
+            country: Some(values.country.clone()),
+            state: Some(values.state.clone()),
+            locality: Some(values.locality.clone()),
+            organization: Some(values.organization.clone()),
+            organizational_unit: Some(values.organizational_unit.clone()),
+            organization_identifier: Some(values.organization_identifier.clone()),
+        };
+        let now = 1_800_000_000_000;
+        let pair = signer
+            .sign(
+                &subject.attributes("fleet bootstrap").expect("valid"),
+                now,
+                now + 86_400_000,
+                "twelve chars",
+            )
+            .expect("signed");
+        assert_eq!(
+            pair.subject,
+            "C=AT, ST=Oberösterreich, L=Linz, O=Kunde GmbH, OU=Werk Nord, \
+             organizationIdentifier=6f1c0b9e-2a4d-4c55-9b1e-0d2f3a4b5c6d, CN=fleet bootstrap",
+            "the subject as the record and the list show it"
+        );
+        let utf8 = Tag::Utf8String;
+        assert_eq!(
+            attributes_of(&pair.certificate_pem),
+            vec![
+                (
+                    "2.5.4.6".to_string(),
+                    Tag::PrintableString,
+                    "AT".to_string()
+                ),
+                ("2.5.4.8".to_string(), utf8, values.state.clone()),
+                ("2.5.4.7".to_string(), utf8, values.locality.clone()),
+                ("2.5.4.10".to_string(), utf8, values.organization.clone()),
+                (
+                    "2.5.4.11".to_string(),
+                    utf8,
+                    values.organizational_unit.clone()
+                ),
+                (
+                    "2.5.4.97".to_string(),
+                    utf8,
+                    values.organization_identifier.clone()
+                ),
+                ("2.5.4.3".to_string(), utf8, "fleet bootstrap".to_string()),
+            ]
+        );
+    }
+
+    /// The host certificate carries the values it is signed with — the bootstrap certificate's
+    /// — in the same order and encoding, and nothing of the request's subject.
+    /// Verifies: ADR-0036
+    #[test]
+    fn a_host_certificate_carries_the_values_and_ignores_the_requests_subject() {
+        use x509_parser::der_parser::asn1_rs::Tag;
+        let key = KeyPair::generate().expect("client key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        for (kind, value) in [
+            (rcgen::DnType::CountryName, "DE"),
+            (rcgen::DnType::OrganizationName, "Another Customer"),
+            (rcgen::DnType::OrganizationalUnitName, "Elsewhere"),
+            (rcgen::DnType::CommonName, "edge-01"),
+        ] {
+            params.distinguished_name.push(kind, value);
+        }
+        let csr = params
+            .serialize_request(&key)
+            .expect("csr")
+            .pem()
+            .expect("pem");
+        let values = six_values();
+        let signed = client_ca(90).sign(&csr, "host-1", &values).expect("signed");
+        assert_eq!(signed.facts.subject_values, values);
+        let attributes = attributes_of(&signed.pem);
+        let oids: Vec<&str> = attributes.iter().map(|(oid, _, _)| oid.as_str()).collect();
+        assert_eq!(
+            oids,
+            ["2.5.4.6", "2.5.4.8", "2.5.4.7", "2.5.4.10", "2.5.4.11", "2.5.4.97", "2.5.4.3"]
+        );
+        assert_eq!(attributes[0].1, Tag::PrintableString);
+        assert!(
+            attributes[6].2.ends_with(" Certificate"),
+            "the common name is the CA's: {}",
+            attributes[6].2
+        );
+        for (_, _, value) in &attributes {
+            assert!(
+                !["DE", "Another Customer", "Elsewhere", "edge-01"].contains(&value.as_str()),
+                "the request's {value:?} was copied"
+            );
+        }
+    }
+
+    /// The subject a bootstrap certificate from any CA carries is read under the rules it is
+    /// issued by: an attribute twice, a wrong string type, a malformed country, a value out of
+    /// bounds and a missing organization or organizational unit are refused, naming the
+    /// attribute; other attributes and the common name are passed over.
+    /// Verifies: ADR-0036
+    #[test]
+    fn a_bootstrap_subject_is_carried_only_when_well_formed() {
+        let read = |entries: Vec<(rcgen::DnType, rcgen::DnValue)>| {
+            let key = KeyPair::generate().expect("key");
+            let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+            for (kind, value) in entries {
+                params.distinguished_name.push(kind, value);
+            }
+            let cert = params.self_signed(&key).expect("signed");
+            let (_, parsed) = X509Certificate::from_der(cert.der()).expect("parse");
+            carried_subject(parsed.subject())
+        };
+        let utf8 = |value: &str| rcgen::DnValue::Utf8String(value.to_string());
+        let printable = |value: &str| {
+            rcgen::DnValue::PrintableString(
+                rcgen::string::PrintableString::try_from(value).expect("printable"),
+            )
+        };
+        let carried = read(vec![
+            (rcgen::DnType::CountryName, printable("AT")),
+            (rcgen::DnType::OrganizationName, utf8("Kunde GmbH")),
+            // An older PKI's PrintableString is taken for a value that is not the country.
+            (rcgen::DnType::OrganizationalUnitName, printable("Wien")),
+            (rcgen::DnType::CustomDnType(vec![2, 5, 4, 5]), utf8("SN-1")),
+            (rcgen::DnType::CommonName, utf8("bootstrap of Kunde")),
+        ])
+        .expect("well-formed");
+        assert_eq!(
+            carried,
+            SubjectValues {
+                country: "AT".to_string(),
+                organization: "Kunde GmbH".to_string(),
+                organizational_unit: "Wien".to_string(),
+                ..SubjectValues::default()
+            },
+            "serialNumber and the common name are not carried; a PrintableString OU is"
+        );
+        for (entries, named) in [
+            (
+                // rcgen keeps one value per type, so the second OU goes in under its OID.
+                vec![
+                    (rcgen::DnType::OrganizationalUnitName, utf8("Wien")),
+                    (rcgen::DnType::CustomDnType(vec![2, 5, 4, 11]), utf8("Linz")),
+                ],
+                "organizational_unit",
+            ),
+            (vec![(rcgen::DnType::CountryName, utf8("AT"))], "country"),
+            (
+                vec![(rcgen::DnType::CountryName, printable("at"))],
+                "country",
+            ),
+            (
+                vec![(rcgen::DnType::CountryName, printable("AUT"))],
+                "country",
+            ),
+            (
+                vec![(
+                    rcgen::DnType::OrganizationName,
+                    rcgen::DnValue::BmpString(
+                        rcgen::string::BmpString::try_from("Kunde GmbH").expect("bmp"),
+                    ),
+                )],
+                "organization",
+            ),
+            (
+                vec![(rcgen::DnType::LocalityName, utf8(&"x".repeat(65)))],
+                "locality",
+            ),
+            (
+                vec![(
+                    rcgen::DnType::CustomDnType(vec![2, 5, 4, 97]),
+                    utf8("a\u{1b}b"),
+                )],
+                "organization_identifier",
+            ),
+        ] {
+            let refused = read(entries).expect_err("refused");
+            assert!(refused.starts_with(named), "{refused} names {named}");
+        }
+        for (entries, refusal) in [
+            (
+                vec![(rcgen::DnType::OrganizationName, utf8("Kunde GmbH"))],
+                "organizational_unit is missing",
+            ),
+            (
+                vec![(rcgen::DnType::OrganizationalUnitName, utf8("Wien"))],
+                "organization is missing",
+            ),
+            (
+                vec![(rcgen::DnType::CommonName, utf8("bootstrap"))],
+                "organization is missing",
+            ),
+        ] {
+            assert_eq!(read(entries).expect_err("refused"), refusal);
+        }
     }
 }

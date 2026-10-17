@@ -25,7 +25,7 @@ async fn spawn_guarded() -> TestServer {
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
             .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
+                PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
             )),
     );
     let auth: RestAuthConfig = toml::from_str(&format!(
@@ -114,7 +114,7 @@ async fn the_configured_operator_reaches_the_api() {
             server.rest_addr
         ))
         .header("authorization", &credential)
-        .json(&serde_json::json!({ "selector": {}, "body": "receivers: {}" }))
+        .json(&serde_json::json!({ "body": "receivers: {}", "service_name": "otelcol" }))
         .send()
         .await
         .expect("put");
@@ -146,7 +146,15 @@ async fn the_ui_and_the_api_docs_are_guarded_too() {
     let server = spawn_guarded().await;
     let credential = basic("fleet-admin", "secret");
 
-    for path in ["/", "/api/v1/docs", "/api/v1/openapi.json"] {
+    for path in [
+        "/",
+        "/ui.css",
+        "/ui-carbon.css",
+        "/ui-quiet.css",
+        "/shiki.js",
+        "/api/v1/docs",
+        "/api/v1/openapi.json",
+    ] {
         assert_eq!(
             get(&server, path, None).await.status(),
             401,

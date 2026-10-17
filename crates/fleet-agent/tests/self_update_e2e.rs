@@ -61,18 +61,17 @@ fn ring_holding(
     state: &fleet_server::fleet::AppState,
     id: &fleet_server::packages::PackageId,
 ) -> String {
-    let path = state
+    let (sha256, _) = state
         .packages()
         .expect("packages are armed")
-        .artifact_path(id, &this_host())
+        .artifact(id, &this_host())
         .expect("the artifact is stored");
-    let artifact = std::fs::read(path).expect("read the artifact");
     let signature = signing_key()
         .0
         .sign(&fleet_core::package::statement(
             &id.agent_type,
             &id.version,
-            &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+            &sha256,
         ))
         .as_ref()
         .to_vec();
@@ -94,10 +93,13 @@ fn ring_holding_signed(
     deployments
         .put_package("stable", id, true)
         .expect("package into the ring");
+    // The signature is the entry's own (ADR-0033).
     if let Some((platform, bytes)) = signature {
-        deployments
-            .put_signature("stable", id, platform, bytes)
-            .expect("signature onto the ring");
+        state
+            .packages()
+            .expect("package delivery")
+            .put_signature(id, platform, bytes)
+            .expect("signature onto the entry");
     }
     "stable".to_string()
 }
@@ -132,7 +134,7 @@ async fn spawn_server(store: PackageStore) -> (std::net::SocketAddr, Arc<AppStat
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
             .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("deployments"),
+                PackageOffering::new(dir.path(), store).expect("deployments"),
             )),
     );
     // The configuration directory only has to outlive the Server, which outlives the test.

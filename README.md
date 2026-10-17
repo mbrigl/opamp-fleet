@@ -221,15 +221,18 @@ A minimal closed control loop on one machine:
    appears in the fleet. Point `endpoint` at an `http(s)://` URL to use the polling transport
    instead.
 3. **Open the UI** at <http://127.0.0.1:4321/> — the Agent is listed as *Connected*. Press
-   **Configurations**, name a Configuration, optionally give it a Selector (`key=value` pairs an
-   Agent's reported attributes must equal; empty targets every Agent), enter the configuration
-   text, and save.
-4. **Watch the loop close:** a WebSocket Client whose attributes match receives the configuration
+   **Configurations**, create a Configuration with its configuration text, and press **OK**. Then
+   press **Deployments**, create a deployment whose Selector (`key=value` pairs an Agent's reported
+   attributes must equal, never empty) matches the Agent, add the Configuration, press **OK**, and
+   press the row's **Roll out** — a Configuration reaches Agents only through a Deployment
+   ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)).
+4. **Watch the loop close:** a WebSocket Client the Deployment claims receives the configuration
    within a second, an HTTP Client on its next poll. The Agent stores it (under its `state_dir`),
    reports it **Applied** with the matching hash, and its effective configuration shows up in the
    table. Distributing the same configuration again sends nothing — the config-hash comparison
-   gates every push. An Agent matching several Configurations receives all of them as named
-   entries and merges them itself; an Agent matching none is left running what it already runs.
+   gates every push. An Agent receives every Configuration its Deployment holds for its type as
+   named entries and merges them itself; an Agent in no Deployment is left running what it already
+   runs.
 
 The same operations are available to any portal through the REST API — the OpenAPI document at
 `/api/v1/openapi.json` is the contract to generate a client from:
@@ -238,14 +241,17 @@ The same operations are available to any portal through the REST API — the Ope
 $ curl http://127.0.0.1:4321/api/v1/agents                   # the fleet, with reported attributes
 $ curl http://127.0.0.1:4321/api/v1/configurations           # every Configuration
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"selector": {"os.type": "linux"}, "body": "receivers: {}"}' \
-       http://127.0.0.1:4321/api/v1/configurations/linux-base  # distribute to a subset
-$ curl -X DELETE http://127.0.0.1:4321/api/v1/configurations/linux-base
+       -d '{"service_name": "otelcol", "body": "receivers: {}"}' \
+       http://127.0.0.1:4321/api/v1/configurations/linux-base  # content for one Agent type
+$ curl -X PUT -H 'Content-Type: application/json' -d '{"selector": {"os.type": "linux"}}' \
+       http://127.0.0.1:4321/api/v1/deployments/linux       # aimed at a subset
+$ curl -X PUT http://127.0.0.1:4321/api/v1/deployments/linux/configurations/linux-base
+$ curl -X POST http://127.0.0.1:4321/api/v1/deployments/linux/rollout  # distribute
 
 # Content the agent reads by path rather than is configured with (ADR-0023): written next to the
 # configuration under its own name, never passed to the process as configuration.
 $ curl -X PUT -H 'Content-Type: application/json' \
-       -d '{"body": "rules: []", "role": "supplementary"}' \
+       -d '{"service_name": "otelcol", "body": "rules: []", "role": "supplementary"}' \
        http://127.0.0.1:4321/api/v1/configurations/ruleset
 
 # A package defines a Set (ADR-0026), identified by name, Agent type, and version, with one entry
@@ -266,6 +272,8 @@ $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": false}' \
 
 For TLS, give the Server a certificate (`[tls]` in `server.toml`) and the Client a `wss://` or
 `https://` endpoint — plus `ca_file` under `[tls]` when the certificate comes from a private CA.
+The UI and the REST API can present a certificate of their own, for example from your
+organization's PKI, under `[rest.tls]`; without it they present `[tls]`'s.
 
 ### Running as an OS service
 
