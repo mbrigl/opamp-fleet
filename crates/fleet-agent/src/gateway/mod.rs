@@ -144,7 +144,10 @@ fn not_an_enrolment(report: &AgentToServer) -> Option<&'static str> {
     if *report != only {
         return Some("an enrolling peer sends a certificate signing request and nothing else");
     }
-    match fleet_core::csr::requested_uri(&csr.csr, fleet_core::bootstrap_proof::URI_PREFIX) {
+    // Read as the Server reads it: one PEM block, nothing around it (ADR-0039).
+    match fleet_core::csr::der(&csr.csr).and_then(|der| {
+        fleet_core::csr::requested_uri(&der, fleet_core::bootstrap_proof::URI_PREFIX)
+    }) {
         Ok(Some(_)) => None,
         _ => Some("an enrolling peer's certificate signing request carries no bootstrap proof"),
     }
@@ -997,6 +1000,27 @@ mod tests {
             .pem()
             .expect("pem")
             .into_bytes()
+    }
+
+    /// A request with a bootstrap proof is an enrolment only as exactly one PEM block, the rule
+    /// the Server reads it by: behind a prefix, beside a second block, or after another request it
+    /// is not forwarded.
+    /// Verifies: ADR-0039
+    #[test]
+    fn an_enrolment_request_is_exactly_one_pem_block() {
+        let uid = InstanceUid::default();
+        let proof = || csr_with_uri(&format!("{}AAAA", fleet_core::bootstrap_proof::URI_PREFIX));
+        let other = csr_with_uri("urn:example:other");
+        assert_eq!(not_an_enrolment(&enrolment(uid, proof())), None);
+        for crafted in [
+            [b"x".to_vec(), proof()].concat(),
+            [b"x".to_vec(), other.clone(), proof()].concat(),
+            [proof(), other.clone()].concat(),
+            [other, proof()].concat(),
+        ] {
+            let why = not_an_enrolment(&enrolment(uid, crafted)).expect("forwarded");
+            assert!(why.contains("bootstrap proof"), "{why}");
+        }
     }
 
     /// A report of `uid` carrying `csr` and nothing else.

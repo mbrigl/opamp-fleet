@@ -446,8 +446,11 @@ request from a host that holds only a bootstrap certificate waits for an operato
 section describes. The Server signs a client-authentication certificate only, and drops any
 alternative names the request asks for.
 
-A request that does not parse, or one arriving at a Server with no `[client_ca]`, is answered with
-the protocol's `BadRequest` error response.
+A request is exactly one PEM block labelled `CERTIFICATE REQUEST`, with nothing but whitespace
+around it. Anything else — text before or after the block, a second block, another label — is
+answered with the protocol's `BadRequest` error response naming that rule, as is a request that
+does not parse or one arriving at a Server with no `[client_ca]`. A Gateway forwards no enrolment
+request that breaks the rule.
 
 ### The first certificate on a host
 

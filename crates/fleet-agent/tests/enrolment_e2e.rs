@@ -337,9 +337,12 @@ async fn enrol_and_renew(scheme: &str) {
     // The request proves the bootstrap certificate it was queued under (ADR-0039).
     let csr = std::fs::read(state_dir.join(fleet_agent::tls::PENDING_CSR_FILE)).expect("csr");
     assert!(
-        fleet_core::csr::requested_uri(&csr, fleet_core::bootstrap_proof::URI_PREFIX)
-            .expect("a request")
-            .is_some(),
+        fleet_core::csr::requested_uri(
+            &fleet_core::csr::der(&csr).expect("one PEM block"),
+            fleet_core::bootstrap_proof::URI_PREFIX
+        )
+        .expect("a request")
+        .is_some(),
         "the enrolment request carries no bootstrap proof"
     );
     assert_eq!(

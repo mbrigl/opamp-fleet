@@ -34,6 +34,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Security
 
+- **A signing request is read from exactly one PEM block**
+  ([ADR-0021](docs/adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 27,
+  [ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)). The Server read
+  one signing request with two PEM readers that can pick different blocks out of one crafted
+  input: the proof was checked against one request and the key of another was signed. In released
+  versions this affected renewal: whoever held any client certificate and a renewal request
+  another host had sent, while that host's certificate was still valid, obtained a certificate for
+  that host over a key of their own, without approval. Enrolment requests could be queued under a
+  key their proof did not cover. A request is now exactly one `CERTIFICATE REQUEST` block with
+  nothing but whitespace around it, and everything is read from that one block; anything else is
+  answered `BadRequest` and nothing is signed or queued. **What to do:** upgrade.
+
 - **Through a Gateway a certificate is renewed only with a renewal proof**
   ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
   Behind a Gateway the Server sees the Gateway's certificate. A signing request without a renewal

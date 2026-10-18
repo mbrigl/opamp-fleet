@@ -1167,7 +1167,7 @@ impl Fleet {
             .as_ref()?
             .certificate_request
             .as_ref()?;
-        let named = crate::ca::bootstrap_proof_id(std::str::from_utf8(&csr.csr).ok()?)?;
+        let named = crate::ca::bootstrap_proof_id(std::str::from_utf8(&csr.csr).ok()?).ok()??;
         let own = carrier
             .proofs
             .certificate

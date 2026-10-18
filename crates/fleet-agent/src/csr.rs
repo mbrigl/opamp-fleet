@@ -577,15 +577,15 @@ mod tests {
     fn bootstrap_proof_of(csr: &[u8]) -> Option<(Vec<u8>, bool)> {
         use base64::Engine as _;
         use sha2::{Digest as _, Sha256};
-        let encoded = fleet_core::csr::requested_uri(csr, fleet_core::bootstrap_proof::URI_PREFIX)
+        let der = fleet_core::csr::der(csr).expect("one PEM block");
+        let encoded = fleet_core::csr::requested_uri(&der, fleet_core::bootstrap_proof::URI_PREFIX)
             .expect("a request")?;
         let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
             .expect("base64url");
         let (cert, signature) = fleet_core::bootstrap_proof::decode(&content).expect("a proof");
-        let (_, block) = x509_parser::pem::parse_x509_pem(csr).expect("pem");
         let (_, request) = <x509_parser::certification_request::X509CertificationRequest as
-            x509_parser::prelude::FromDer<'_, _>>::from_der(&block.contents)
+            x509_parser::prelude::FromDer<'_, _>>::from_der(&der)
         .expect("csr");
         let new_key = Sha256::digest(request.certification_request_info.subject_pki.raw);
         let (_, parsed) =
@@ -653,9 +653,12 @@ mod tests {
             "a renewal is no enrolment"
         );
         assert!(
-            fleet_core::csr::requested_uri(&renewal, fleet_core::renewal::URI_PREFIX)
-                .expect("a request")
-                .is_some(),
+            fleet_core::csr::requested_uri(
+                &fleet_core::csr::der(&renewal).expect("one PEM block"),
+                fleet_core::renewal::URI_PREFIX
+            )
+            .expect("a request")
+            .is_some(),
             "it carries the renewal proof"
         );
     }

@@ -5545,3 +5545,134 @@ async fn two_bootstrap_certificates_through_one_gateway_are_two_buckets() {
         "the other bootstrap certificate was throttled"
     );
 }
+
+// ---- One request, one PEM block (ADR-0021 clause 27, ADR-0039) ----
+
+/// `victim`'s proofs, copied into a request of a key of the attacker's own — and the attacker's
+/// key.
+fn grafted(victim: &[u8]) -> (String, KeyPair) {
+    let proofs = rcgen::CertificateSigningRequestParams::from_pem(
+        std::str::from_utf8(victim).expect("utf-8"),
+    )
+    .expect("victim")
+    .params
+    .subject_alt_names;
+    let key = KeyPair::generate().expect("attacker key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params.subject_alt_names = proofs;
+    let csr = params
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+    (csr, key)
+}
+
+/// The two inputs two PEM readers can read differently: the attacker's request behind a prefix
+/// one reader skips the line of and the other does not, the victim's after it; and the two as two
+/// blocks.
+fn crafted(attacker: &str, victim: &[u8]) -> [(Vec<u8>, &'static str); 2] {
+    let victim = std::str::from_utf8(victim).expect("utf-8");
+    [
+        (format!("x{attacker}{victim}").into_bytes(), "prefixed"),
+        (format!("{attacker}{victim}").into_bytes(), "two blocks"),
+    ]
+}
+
+/// What a reply that should have refused handed out instead, for the failure message.
+fn handed_out(reply: &ServerToAgent, attacker: &KeyPair) -> String {
+    use rcgen::PublicKeyData as _;
+    let Some(pem) = issued(reply.clone()) else {
+        return format!("no certificate, {:?}", reply.error_response);
+    };
+    let der = opamp::tls::certificates(pem.as_bytes()).expect("pem")[0].to_vec();
+    let facts = fleet_server::ca::facts(&der).expect("facts");
+    let attackers = {
+        use sha2::{Digest as _, Sha256};
+        hex::encode(Sha256::digest(attacker.der_bytes()))
+    };
+    format!(
+        "a certificate for host {:?} over {} key",
+        facts.host,
+        if facts.key_fingerprint == attackers {
+            "the attacker's"
+        } else {
+            "another"
+        }
+    )
+}
+
+/// Another host's renewal proof cannot be carried over to a key of the sender's: a renewal
+/// request read from anything but exactly one PEM block — the attacker's request with the proof
+/// copied into it, behind a prefix or as the first of two blocks, the victim's request after it —
+/// is answered `BadRequest` naming it, and nothing is signed.
+/// Verifies: ADR-0021
+#[tokio::test]
+async fn a_renewal_request_is_read_from_exactly_one_pem_block() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let revocations = served.revocations.clone().expect("armed");
+    let (victim_cert, victim_key) = pki.issue_to_host("h-1");
+    let (attacker_cert, attacker_key) = pki.issue_to_host("h-2");
+    let sender = client(&served.ca_pem, Some((&attacker_cert, &attacker_key)));
+    let uid = InstanceUid::default();
+    assert!(post(&sender, &served.endpoint, report(&uid))
+        .await
+        .status()
+        .is_success());
+    let before = revocations.issued().len();
+    let victim = renewal_csr(&victim_cert, &victim_key);
+    let (attacker, key) = grafted(&victim);
+    for (csr, what) in crafted(&attacker, &victim) {
+        let reply = decode(post(&sender, &served.endpoint, with_csr(&uid, csr)).await).await;
+        let refused = error_of(&reply);
+        assert!(
+            refused.as_ref().is_some_and(|(kind, message)| *kind
+                == ServerErrorResponseType::BadRequest as i32
+                && message.contains("exactly one PEM block")),
+            "{what}: {}",
+            handed_out(&reply, &key)
+        );
+    }
+    assert_eq!(
+        revocations.issued().len(),
+        before,
+        "a certificate was signed"
+    );
+}
+
+/// An enrolment request read from anything but exactly one PEM block — on an enrolment connection
+/// and through a Gateway — is answered `BadRequest` naming it and queued nowhere.
+/// Verifies: ADR-0039
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn an_enrolment_request_is_read_from_exactly_one_pem_block() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let (served, gateway) = behind_a_gateway(&pki, &bootstrap, None, None).await;
+    let enrolment = served.enrolment.clone().expect("enrolment");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap-a");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    let uid = InstanceUid::default();
+    let victim = bootstrap_csr(&cert, &key, None);
+    let (attacker, attacker_key) = grafted(&victim);
+    for (csr, what) in crafted(&attacker, &victim) {
+        for (sender, path) in [(&enrolling, "directly"), (&gateway, "through a Gateway")] {
+            let reply =
+                decode(post(sender, &served.endpoint, with_csr(&uid, csr.clone())).await).await;
+            let refused = error_of(&reply);
+            assert!(
+                refused.as_ref().is_some_and(|(kind, message)| *kind
+                    == ServerErrorResponseType::BadRequest as i32
+                    && message.contains("exactly one PEM block")),
+                "{what}, {path}: {refused:?}, {}",
+                handed_out(&reply, &attacker_key)
+            );
+        }
+    }
+    assert!(
+        enrolment.pending().is_empty(),
+        "queued: {:?}",
+        enrolment.pending()
+    );
+}
