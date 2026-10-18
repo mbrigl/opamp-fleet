@@ -233,6 +233,12 @@ pub fn facts(der: &[u8]) -> Result<Facts, String> {
     use sha2::{Digest, Sha256};
     let (_, cert) = X509Certificate::from_der(der)
         .map_err(|e| format!("the certificate does not parse: {e}"))?;
+    // RFC 5280 4.1.2.2: at most 20 octets, the length the register and every Gateway's list are
+    // bounded on (Q-2). A certificate with a longer serial — only a foreign CA could issue one —
+    // is not taken.
+    if cert.raw_serial().len() > crate::revocation::MAX_SERIAL_HEX / 2 {
+        return Err("the certificate's serial is longer than 20 octets".to_string());
+    }
     let not_after = cert.validity().not_after.timestamp();
     let host = cert
         .subject_alternative_name()
@@ -771,6 +777,24 @@ mod tests {
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let cert = params.self_signed(&key).expect("self-signed ca");
         (cert.pem(), key.serialize_pem())
+    }
+
+    /// A certificate whose serial is longer than RFC 5280's 20 octets is not taken; one of 20 is.
+    /// Verifies: Q-2
+    #[test]
+    fn a_certificate_with_a_serial_past_twenty_octets_is_not_taken() {
+        let with_serial = |octets: usize| {
+            let key = KeyPair::generate().expect("key");
+            let mut params =
+                rcgen::CertificateParams::new(vec!["edge".to_string()]).expect("params");
+            let mut serial = vec![0x11; octets];
+            serial[0] = 0x01;
+            params.serial_number = Some(rcgen::SerialNumber::from(serial));
+            params.self_signed(&key).expect("cert").der().to_vec()
+        };
+        assert!(facts(&with_serial(20)).is_ok());
+        let refused = facts(&with_serial(21)).expect_err("21 octets");
+        assert!(refused.contains("20 octets"), "{refused}");
     }
 
     fn csr(common_name: &str) -> String {

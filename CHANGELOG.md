@@ -52,6 +52,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   name never tries `http://` for it again, where an attacker on the network could answer and ask for the
   Basic credentials. **What to do:** nothing; the plane serves TLS on every address already.
 
+- **A certificate serial is at most 20 octets.** `POST /api/v1/revocations` answers a longer serial
+  `400`, and a certificate whose serial is longer is neither admitted nor registered, as RFC 5280
+  allows no more. Every Gateway reads the revocation list within a bound that assumes this length,
+  so megabyte-long serials could have pushed the list past it and left every Gateway admitting
+  nobody. **What to do:** nothing; no certificate this Server or `opamp-fleetctl` makes has a
+  longer serial.
+
 ### Fixed
 
 - **The audit record is written out before the Server exits.** Entries still queued for the audit

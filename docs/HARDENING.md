@@ -82,8 +82,9 @@ has:
   verification key, or for an offer without a signature, nothing is downloaded. Archive members are
   validated before anything is written.
 - **Revocation that ends sessions** (ADR-0021): the Server keeps a persisted
-  list of revoked certificates, by issuing CA and serial and extended along every renewal it
-  signed. Admission refuses them on both transports and on the
+  list of revoked certificates, by issuing CA and serial — at most 20 octets, as RFC 5280 allows,
+  so the list stays within what a Gateway reads — and extended along every renewal it signed.
+  Admission refuses them on both transports and on the
   download, a revocation closes exactly the WebSocket sessions it concerns with `1008`, every
   session ends when the certificate that admitted it expires, and a kept-alive connection is
   refused on both transports and on the download once its certificate has expired.

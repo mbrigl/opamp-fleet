@@ -745,7 +745,8 @@ bootstrap CA of `[enrolment]` — and its serial. A revocation reaches every ren
 certificate too, so revoking the one a host enrolled with is enough even after it renewed, and it
 stays in force until the last of those renewals has expired. `GET /api/v1/bootstrap-certificates`
 lists the serial of every bootstrap certificate the Server issued; colons, case and leading zeros
-do not matter. A renewal
+do not matter. A serial is at most 20 octets, 40 hex digits, as RFC 5280 allows; a longer one is
+answered `400`, and a certificate with one is not admitted. A renewal
 descends from the certificate its renewal proof names, through a Gateway too; a client that sends
 no proof renews from the certificate its connection presented. Behind a Gateway that would be the
 Gateway's certificate, with the Gateway's powers, so such a request is refused there: through a

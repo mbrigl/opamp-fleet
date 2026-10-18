@@ -56,6 +56,9 @@ pub fn name_hash(der: &[u8]) -> String {
     hex::encode(Sha256::digest(der))
 }
 
+/// The most hex digits a serial has: RFC 5280's 20 octets.
+pub const MAX_SERIAL_HEX: usize = 40;
+
 /// `00:0A:1b` and `a1b` are one serial.
 #[must_use]
 pub fn normalize_serial(serial: &str) -> String {
@@ -851,6 +854,14 @@ impl Revocations {
         if serial.trim().is_empty() || !serial_text.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(RevokeError::Invalid(format!(
                 "the serial {serial:?} is not hexadecimal"
+            )));
+        }
+        // RFC 5280 4.1.2.2: a serial is at most 20 octets. The list every Gateway reads is bounded
+        // on that length, so a longer one would push it past what a Gateway accepts and leave
+        // every Gateway admitting nobody (Q-2).
+        if serial_text.len() > MAX_SERIAL_HEX {
+            return Err(RevokeError::Invalid(format!(
+                "the serial {serial:?} is longer than the 20 octets a certificate serial may have"
             )));
         }
         self.add(Revoked::Certificate {
@@ -1936,6 +1947,21 @@ mod tests {
         let left = revocations.list();
         assert_eq!(left.len(), 1);
         assert!(matches!(&left[0].revoked, Revoked::Certificate { serial, .. } if serial == "bb"));
+    }
+
+    /// A serial longer than RFC 5280's 20 octets is refused, so the list every Gateway reads stays
+    /// within what a Gateway accepts; 20 octets, leading zeros and separators aside, are taken.
+    /// Verifies: Q-2
+    #[test]
+    fn a_serial_longer_than_twenty_octets_is_refused() {
+        let (revocations, _) = open(&Memory::default());
+        assert!(matches!(
+            revocations.revoke_certificate("client", &"ab".repeat(21)),
+            Err(RevokeError::Invalid(_))
+        ));
+        revocations
+            .revoke_certificate("client", &format!("00:{}", "ab".repeat(20)))
+            .expect("20 octets");
     }
 
     #[test]
