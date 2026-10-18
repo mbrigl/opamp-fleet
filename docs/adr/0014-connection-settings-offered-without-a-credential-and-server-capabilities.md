@@ -1,6 +1,6 @@
 # ADR-0014: The Server offers connection settings in the Baseline's classes under one hash, no credential and a plaintext endpoint only on the loopback, the Client proves over TLS 1.3 only what it can, applies no offered header and acknowledges the whole offer, and a Server's capabilities bind what the Client reports
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clauses 1, 5 and 9 superseded by [ADR-0040](0040-a-connection-settings-offer-never-moves-the-client-to-plaintext.md)
 - **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
 - **Applies to:** the `[connection_offer]` section of `server.toml`, the offer composition and capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb`, and every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs`
