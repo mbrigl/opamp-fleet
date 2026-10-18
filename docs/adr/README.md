@@ -71,9 +71,9 @@ Inherited from the template: the document set, the procedures, and the way of wo
 | [0004](0004-feature-layer.md) | Work larger than one session is planned on the issue tracker: a feature spec cut into tracer-bullet tickets | every change larger than one agent session, the issue templates, the pull request template, and the `Last design revision` line of `docs/ARCHITECTURE.md` | 🟢 accepted |
 | [0005](0005-procedures-as-skills.md) | The procedures of the rule file are Agent Skills under `.agents/skills/`, each carrying a how and no rule of its own | `.agents/skills/`, the pointers under `.claude/skills/`, and every document that describes how a procedure of `AGENTS.md` is carried out | 🟢 accepted |
 | [0006](0006-architecture-style.md) | Application code is structured as ports and adapters, with every dependency pointing at the core | every module of the system's code, the golden path, and the structural test that decides the dependency direction | 🟢 accepted |
-| [0007](0007-action-references.md) | GitHub Actions are referenced by their major version tag and kept current by Dependabot | every `uses:` reference in `.github/workflows/`, and `.github/dependabot.yml` | 🟢 accepted |
 | [0008](0008-template-releases.md) | The template is released as SemVer tags on `main`, and every repository names the release it carries | the tags of the template repository, the **Template** section of `README.md`, and the pull request that lands a release | 🟢 accepted |
 | [0009](0009-an-adr-may-supersede-named-clauses-of-another.md) | An ADR may supersede named clauses of another, which stays accepted for the rest | the supersession mechanics of `docs/adr/README.md` and `docs/adr/template.md`, the `Supersedes` field and `Status` line of every ADR, and the supersession check of `scripts/check-docs.sh` | 🟢 accepted |
+| [0044](0044-third-party-actions-are-pinned-to-a-commit-sha.md) | A third-party GitHub Action is pinned to a commit SHA with its version in a comment, a first-party one to its major tag, and Dependabot keeps both current | every `uses:` reference in `.github/workflows/`, `.github/dependabot.yml`, `scripts/check-action-refs.sh` and `scripts/test-check-action-refs.sh`, the `actions` job of `.github/workflows/checks.yml`, and the section *Actions in the workflows* of `SECURITY.md` | 🟡 proposed |
 
 #### OpAMP API
 
@@ -142,3 +142,4 @@ flips its status.
 
 | ADR | Title | Applies to | Status |
 |-----|-------|------------|--------|
+| [0007](0007-action-references.md) | GitHub Actions are referenced by their major version tag and kept current by Dependabot | every `uses:` reference in `.github/workflows/`, and `.github/dependabot.yml` | ⚪ superseded by [ADR-0044](0044-third-party-actions-are-pinned-to-a-commit-sha.md) |

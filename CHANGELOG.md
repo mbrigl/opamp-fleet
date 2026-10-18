@@ -112,6 +112,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   it in a drop-in under `/etc/systemd/system/opamp-fleet.service.d/`, which no install touches. An
   archive install that only self-updates gets the new unit at its next `service install`.
 
+- **A third-party GitHub Action is pinned to a commit SHA**
+  ([ADR-0044](docs/adr/0044-third-party-actions-are-pinned-to-a-commit-sha.md)). The workflows
+  that build, test and release the project ran `Swatinem/rust-cache` and `taiki-e/install-action`
+  on their mutable `v2` tag, so whoever could move that tag chose what the next run executed,
+  including the `cargo-deny` that gates every release. Both are now pinned to the commit of a named
+  release, `# vX.Y.Z` beside it, and every pull request checks that the named tag still points to
+  that commit. GitHub's own `actions/*` stay on their major tag. **What to do:** nothing; the
+  release assets are unchanged by this.
+
 ### Fixed
 
 - **The audit record is written out before the Server exits.** Entries still queued for the audit

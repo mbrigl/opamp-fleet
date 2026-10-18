@@ -1,6 +1,6 @@
 # ADR-0007: GitHub Actions are referenced by their major version tag and kept current by Dependabot
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0044](0044-third-party-actions-are-pinned-to-a-commit-sha.md)
 - **Date:** 2026-09-20
 - **Deciders:** NUC maintainer
 - **Applies to:** every `uses:` reference in `.github/workflows/`, and `.github/dependabot.yml`

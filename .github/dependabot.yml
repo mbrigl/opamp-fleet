@@ -36,7 +36,10 @@ updates:
         patterns:
           - "*"
 
-  # The Actions the CI and release workflows pin (checkout, rust-cache, install-action, …).
+  # The Actions the CI and release workflows use (ADR-0044). For a first-party action (actions/*,
+  # on its major tag) it raises the pull request for a new major; for a third-party action, pinned
+  # to a commit SHA with '# vX.Y.Z' beside it, it raises one for every release and rewrites the SHA
+  # and the comment together.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

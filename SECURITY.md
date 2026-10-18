@@ -74,9 +74,12 @@ credentials the built-in patterns miss.
 
 ## Actions in the workflows
 
-The actions the workflows run are referenced by major version tag, a mutable reference accepted
-with its risk in [ADR-0007](docs/adr/0007-action-references.md) and held by
-[`scripts/check-action-refs.sh`](scripts/check-action-refs.sh).
+A third-party action the workflows run is pinned to a full commit SHA, with the release it was
+taken from in a `# vX.Y.Z` comment on the same line, and CI resolves that release's tag to check it
+still points to the pinned commit. A first-party action (`actions/*`) stays on its major version
+tag, a mutable reference accepted with its risk in
+[ADR-0044](docs/adr/0044-third-party-actions-are-pinned-to-a-commit-sha.md). Both are held by
+[`scripts/check-action-refs.sh`](scripts/check-action-refs.sh), and Dependabot raises both.
 
 ## Fleet trust model
 
