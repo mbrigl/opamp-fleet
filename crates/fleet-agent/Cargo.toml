@@ -110,8 +110,9 @@ packages the Server offers.
 
 The package delivers the binary only. `supervisor service install`, which the post-install \
 runs, lays out the versioned install root and registers the systemd service."""
-# Derived from what the binary actually links, rather than a floor somebody typed.
-depends = "$auto"
+# Derived from what the binary actually links, rather than a floor somebody typed — and `passwd`,
+# which ships the `useradd` the post-install creates the account with (ADR-0042 clause 5).
+depends = "$auto, passwd"
 # Always spelled `target/release/`, whatever the real target directory is: cargo-deb rewrites the
 # prefix itself for a cross build, and a hand-adjusted path defeats that.
 #
@@ -143,6 +144,12 @@ post_install_script = "../../packaging/linux/postinst"
 pre_uninstall_script = "../../packaging/linux/prerm"
 post_uninstall_script = "../../packaging/linux/postrm"
 post_trans_script = "../../packaging/linux/posttrans"
+
+# The post-install creates the account `opamp-fleet` with `useradd` (ADR-0042 clause 5). A file
+# dependency, because the package that ships it is `shadow-utils` on Fedora and RHEL and `shadow`
+# on SUSE. cargo-generate-rpm writes a plain `Requires:`; it has no `Requires(post):` form.
+[package.metadata.generate-rpm.requires]
+"/usr/sbin/useradd" = "*"
 
 [dev-dependencies]
 # Virtual time, so a bound measured in minutes is tested in milliseconds.

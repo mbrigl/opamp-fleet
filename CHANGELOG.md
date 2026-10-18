@@ -73,6 +73,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   own `host.name` no longer do. **What to do:** if a Selector matched an attribute that only a
   Collector reported, move that tag to a Server label, or to `[attributes]` for the whole host.
 
+- **The Linux packages run the Client under its own account, and an upgrade keeps the account it
+  finds** ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
+  Every packaged Linux host ran the Client, and every command a Server-delivered configuration
+  names, as root. A host installed with `--run-as` went back to root at its next package upgrade,
+  without a word, because the post-install re-registered without the flag. The `.deb` and the
+  `.rpm` now create the system account `opamp-fleet` where it is missing (no password,
+  `/usr/sbin/nologin`, home `/var/lib/opamp-fleet`) and run a first installation under it. A
+  `service install` without `--run-as` keeps the account its unit or plist names; a unit that lost
+  its account, on a data root an account owns, gets that owner back. A kept account that no longer
+  exists stops the install before it writes anything, naming the unit. No package removal deletes
+  the account. **What to do:** an existing root install stays root, and the account is created on
+  it but unused. Move such a host with
+  `sudo opamp-fleet service install --run-as opamp-fleet` and
+  `sudo systemctl restart opamp-fleet`, after checking that its Agents work without root (GLPI
+  Agent's inventory and Deploy, Telegraf inputs that need `sudo`, ports below 1024, logs readable
+  only by `adm`). A file the service reads outside the data root must be readable by the account.
+
+### Changed
+
+- **A plain `service install` no longer returns a host to root**
+  ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
+  Without `--run-as` a re-registration keeps the account the registration names. Root is chosen
+  with `--run-as root`, which the unit records as `User=root`. The install prints the account and
+  where it came from, and on every system registration under Linux and macOS, root included, hands
+  both roots over to that account. **What to do:** a host you returned to root with a plain
+  re-install while its data root still belonged to the account comes back up under the account at
+  its next re-registration; run `sudo opamp-fleet service install --run-as root` to keep it root.
+  Windows is unchanged: the SCM keeps the logon account it holds.
+
+- **The Client writes its systemd unit itself**
+  ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
+  `ExecStart=` now quotes every word, so a root holding a space, a `%` or a `$` names the right
+  program. Every system unit carries `ProtectControlGroups=yes`; a unit running as root also
+  carries `ProtectKernelTunables=yes`, `LockPersonality=yes` and `RestrictRealtime=yes`. Nothing
+  that sets `no_new_privs` under an account is added, so `sudo` and setuid helpers keep working.
+  **What to do:** nothing, the next upgrade rewrites the unit. A host that needs more or less puts
+  it in a drop-in under `/etc/systemd/system/opamp-fleet.service.d/`, which no install touches. An
+  archive install that only self-updates gets the new unit at its next `service install`.
+
 ### Fixed
 
 - **The audit record is written out before the Server exits.** Entries still queued for the audit

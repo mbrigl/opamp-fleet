@@ -2,8 +2,10 @@
 #
 # Shell lint for this repository.
 #
-# Runs ShellCheck over every shell script in the repository: every '*.sh' file, and the git hooks
-# under .githooks/, which git requires to be named without an extension. The scripts under
+# Runs ShellCheck over every shell script in the repository: every '*.sh' file, the git hooks
+# under .githooks/, which git requires to be named without an extension, and the Linux packages'
+# maintainer scripts under packaging/linux/, which run as root inside every `apt` and `dnf`
+# transaction. Their `#!/bin/sh` line makes ShellCheck hold them to POSIX sh. The scripts under
 # scripts/ and the hooks are the repository's entire enforcement layer, so they are held to a
 # lint gate themselves.
 #
@@ -32,7 +34,7 @@ fi
 
 scripts=()
 while IFS= read -r f; do scripts+=("$f"); done \
-  < <(find "$ROOT" -type f \( -name '*.sh' -o -path "$ROOT/.githooks/*" \) -not -path '*/.git/*' | sort)
+  < <(find "$ROOT" -type f \( -name '*.sh' -o -path "$ROOT/.githooks/*" -o -path "$ROOT/packaging/linux/*" \) -not -path '*/.git/*' | sort)
 
 if ((${#scripts[@]} == 0)); then
   echo "No shell scripts found."

@@ -343,6 +343,11 @@ jobs:
           # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
           grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
           grep -qF 'rm -rf "$data_root"' <<<"$scripts"
+          # ADR-0042 clause 5: the account is created, a first registration names it, and the
+          # package requires what creates it.
+          grep -q 'useradd --system' <<<"$scripts"
+          grep -q -- '--run-as opamp-fleet' <<<"$scripts"
+          rpm -qp --requires "$STEM.rpm" | grep -q '^/usr/sbin/useradd'
           # And the arch inside the package is the ecosystem's, not the file name's (ADR-0019).
           test "$(rpm -qp --qf '%{ARCH}' "$STEM.rpm")" = "$([ '${{ matrix.arch }}' = amd64 ] && echo x86_64 || echo aarch64)"
 

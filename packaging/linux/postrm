@@ -23,6 +23,10 @@
 # crates/fleet-agent/src/service/manager.rs) — the only roots a packaged install ever uses. An install
 # rooted elsewhere with `--root` is a manual one and is deliberately not touched.
 #
+# No hook removes the account `opamp-fleet` or its group, on removal or on purge (ADR-0042 clause
+# 4): files it owns outside the two roots, such as a Managed Process's output, would pass to
+# whichever account is later given the same uid.
+#
 # `-L` guards the symlink removal: only a symlink is ours to delete. A regular file at that path
 # is an operator's (or an older package's) binary, and deleting somebody else's file on the way
 # out is how uninstalls earn distrust.

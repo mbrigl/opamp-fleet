@@ -292,3 +292,147 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
         || (service().state().ok()? == ServiceState::NotInstalled).then_some(()),
     );
 }
+
+/// A temporary system account for one test, removed however the test ends.
+#[cfg(target_os = "linux")]
+struct TemporaryAccount(&'static str);
+
+#[cfg(target_os = "linux")]
+impl TemporaryAccount {
+    fn create(name: &'static str) -> Self {
+        let status = Command::new("useradd")
+            .args([
+                "--system",
+                "--user-group",
+                "--no-create-home",
+                "--shell",
+                "/usr/sbin/nologin",
+                name,
+            ])
+            .status()
+            .expect("run useradd");
+        assert!(status.success(), "cannot create the account {name}");
+        Self(name)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for TemporaryAccount {
+    fn drop(&mut self) {
+        let _ = Command::new("userdel").arg(self.0).status();
+    }
+}
+
+/// Install under an account, then re-install without `--run-as`, as every package upgrade does:
+/// the service still runs as the account, and the unit the Client wrote leaves it the privileges
+/// a Managed Process needs for `sudo` and setuid helpers — no `no_new_privs`, and `/` not mounted
+/// `nosuid`. `systemd-analyze verify` accepts the unit.
+/// Verifies: ADR-0042
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
+fn a_reregistration_keeps_the_account_and_the_service_keeps_its_privileges() {
+    use std::os::unix::fs::PermissionsExt as _;
+    assert_eq!(
+        service().state().expect("query the service"),
+        ServiceState::NotInstalled,
+        "a leftover {} service from an earlier run — remove it before running this",
+        service_name()
+    );
+    let account = TemporaryAccount::create("opamp-fleet-smoke");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("install");
+    let (addr, state, _server) = spawn_server();
+    let config = dir.path().join("supervisor.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n{}",
+            common::client_identity(dir.path())
+        ),
+    )
+    .expect("write supervisor.toml");
+    // The account must reach its program and read the identity beside the configuration, which
+    // lie outside the roots the install hands over.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod the temporary directory");
+    for file in ["test-client.pem", "test-client-key.pem"] {
+        let status = Command::new("chown")
+            .arg(account.0)
+            .arg(dir.path().join(file))
+            .status()
+            .expect("run chown");
+        assert!(status.success(), "cannot give {file} to the account");
+    }
+
+    let root_arg = root.to_string_lossy().into_owned();
+    client(
+        &[
+            "service", "install", "--root", &root_arg, "--run-as", account.0,
+        ],
+        &config,
+    )
+    .expect("install the service under the account");
+    let _registered = Registered;
+    let again = client(&["service", "install", "--root", &root_arg], &config)
+        .expect("re-install without --run-as");
+    assert!(
+        again.contains(&format!("runs as:   {} (kept from", account.0)),
+        "{again}"
+    );
+
+    client(&["service", "start"], &config).expect("start the service");
+    wait_for(
+        "the Agent to appear in the fleet",
+        Duration::from_secs(60),
+        || agent(&state).filter(|a| a.connected).map(|_| ()),
+    );
+    let pid = wait_for(
+        "the service's process id",
+        Duration::from_secs(30),
+        service_pid,
+    );
+
+    let user = Command::new("systemctl")
+        .args(["show", "-p", "User", &format!("{}.service", service_name())])
+        .output()
+        .expect("run systemctl show");
+    assert_eq!(
+        String::from_utf8_lossy(&user.stdout).trim(),
+        format!("User={}", account.0)
+    );
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("status");
+    let no_new_privs = status
+        .lines()
+        .find(|l| l.starts_with("NoNewPrivs:"))
+        .expect("NoNewPrivs line");
+    assert_eq!(
+        no_new_privs.split_whitespace().nth(1),
+        Some("0"),
+        "{status}"
+    );
+    let mounts = std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).expect("mountinfo");
+    let slash = mounts
+        .lines()
+        .rev()
+        .find(|l| l.split_whitespace().nth(4) == Some("/"))
+        .expect("the mount of /");
+    let options = slash.split_whitespace().nth(5).expect("mount options");
+    assert!(!options.split(',').any(|o| o == "nosuid"), "{slash}");
+    let verify = Command::new("systemd-analyze")
+        .args([
+            "verify",
+            &format!("/etc/systemd/system/{}.service", service_name()),
+        ])
+        .output()
+        .expect("run systemd-analyze verify");
+    assert!(
+        verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    client(&["service", "stop"], &config).expect("stop the service");
+    client(&["service", "uninstall"], &config).expect("uninstall the service");
+}

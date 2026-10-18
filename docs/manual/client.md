@@ -306,24 +306,53 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 | `--data-root <dir>` | `service install`, `service config` | The data root — `supervisor.toml` and `state/` — when it is to differ from the layout root. A packaged install, the MSI included, passes neither flag and takes the platform defaults. |
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess, write or edit the configuration file, and enrol a host that holds no certificate yet, before registering the service. See below. |
 | `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file untouched. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: it takes them from [beside the program](#files-beside-the-program), or they are files the operator names in the file. |
-| `--run-as <account>` | `service install` | Run the service as this account instead of root/`LocalSystem`, and hand its files over to it. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
+| `--run-as <account>` | `service install` | Run the service as this account, and hand its files over to it. Without it, a re-registration keeps the account the existing registration names. `--run-as root` chooses root. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
 
 ### Running it under its own account
 
-By default the system service runs as root (systemd, launchd) or `LocalSystem` (Windows).
-`--run-as` drops that:
-the service — and every Managed Process its Supervisors spawn — runs as the account you name, and
-the install hands its files over to it: the configuration file, the state directory, **and the
-executable layout**. The layout too because
-the self-update runs *inside* the service — a layout the account cannot write would silently end
-[server-driven updates](#updating-the-client-itself) for that host.
+The system service — and every Managed Process its Supervisors spawn — runs as one account, and the
+install hands its files over to it: the configuration file, the state directory, **and the
+executable layout**. The layout too because the self-update runs *inside* the service — a layout the
+account cannot write would silently end [server-driven updates](#updating-the-client-itself) for
+that host. The account is the most a Server-delivered command, such as a Telegraf `inputs.exec`,
+reaches on the host.
 
-On Linux and macOS the account must already exist; the install refuses early if it does not:
+Which account it is:
+
+| `service install` … | runs as |
+|---|---|
+| `--run-as <account>` | that account |
+| `--run-as root` (Linux, macOS) | root, written as `User=root` / `UserName` `root`, so the next re-registration keeps root |
+| no flag, the unit or plist names an account | that account, kept |
+| no flag, the unit names none, the data root belongs to an account | the data root's owner, and the install says so |
+| no flag, first registration | root (systemd, launchd), `LocalSystem` (Windows) |
+
+The Linux packages create the account `opamp-fleet` and name it on a first installation — see
+[Installing from a native package](#installing-from-a-native-package). A re-registration reads the
+account from the file the Client wrote, `/etc/systemd/system/opamp-fleet.service` or
+`/Library/LaunchDaemons/opamp-fleet.plist`, not from a drop-in. Windows keeps the logon account the
+SCM holds. The install prints the account and where it came from:
 
 ```console
-# useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin opamp-fleet
+# opamp-fleet service install
+installed opamp-fleet
+  …
+  runs as:   opamp-fleet (kept from /etc/systemd/system/opamp-fleet.service)
+```
+
+On Linux and macOS the account must already exist, named or kept; the install refuses before it
+writes anything if it does not, and names the file a kept account came from. The binary never
+creates an account:
+
+```console
+# useradd --system --user-group --no-create-home --home-dir /var/lib/opamp-fleet \
+    --shell /usr/sbin/nologin opamp-fleet
 # opamp-fleet service install --run-as opamp-fleet
 ```
+
+The hand-over never follows a link: each directory is opened as itself and re-owned through that
+handle, a symbolic link is re-owned as a link, and a file with a second hard link is left as it is
+and named in a warning.
 
 On Windows only **passwordless** account forms are accepted — there is deliberately no password
 flag: a flag stands in the shell history and the process list. The recommended form is the service's
@@ -345,11 +374,51 @@ Two consequences to weigh before using it:
 - **The account is a trust boundary.** Whoever holds it can replace the binary in the layout, and
   the packaged `/usr/bin/opamp-fleet` symlink resolves through that layout's `current`
   pointer — an administrator invoking the CLI executes account-owned code.
-- **The account's limits are the fleet's.** Anything under this Client that needs a port below
-  1024 or root-only telemetry sources will fail — that trade-off is the point of the flag.
+- **The account's limits are the fleet's.** Under an account other than root, GLPI Agent's full
+  inventory and its Deploy task, a Telegraf input without a `sudo` rule, a listener on a port below
+  1024, and a log receiver reading `root:adm` files fail — that trade-off is the point. Grant what
+  is missing (a `sudoers` entry, `usermod -aG adm opamp-fleet`, or a drop-in, below), or choose
+  root with `opamp-fleet service install --run-as root`.
 
-Re-running `install` with a different `--run-as` re-registers and re-owns the same directories;
-without the flag it registers exactly as before — root/`LocalSystem`, no handover.
+Re-running `install` with a different `--run-as` re-registers and re-owns the same directories.
+Without the flag it keeps the account; a plain re-install does not return a host to root.
+
+#### The systemd unit, and what a drop-in adds
+
+On Linux the Client writes its system unit itself. It quotes every word of `ExecStart=`, so a root
+holding a space, a `%` or a `$` works, and it carries only the sandboxing that leaves `sudo`,
+setuid helpers and every supported agent working. Most of systemd's sandboxing directives set
+`no_new_privs` for a unit that does not run as root, and with it set `sudo` and every setuid
+helper stop working for the service and every Managed Process.
+
+| unit runs as | carries |
+|---|---|
+| any account | `ProtectControlGroups=yes` |
+| root | also `ProtectKernelTunables=yes`, `LockPersonality=yes`, `RestrictRealtime=yes` |
+
+`NoNewPrivileges=`, `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`, `CapabilityBoundingSet=` and
+the rest are left out, because a supported agent needs what each takes away. A re-registration
+rewrites the unit; `service install` never touches `/etc/systemd/system/opamp-fleet.service.d/`, so
+what a host can take, or must not have, goes into a drop-in there and survives every upgrade:
+
+```ini
+# /etc/systemd/system/opamp-fleet.service.d/host.conf
+[Service]
+# Nothing on this host uses sudo or a setuid helper:
+NoNewPrivileges=yes
+# A receiver listens on a port below 1024:
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Log files readable by group adm:
+SupplementaryGroups=adm
+```
+
+```console
+# systemctl daemon-reload && systemctl restart opamp-fleet
+```
+
+A drop-in that removes a directive the unit sets assigns it its default, for example
+`ProtectKernelTunables=no`. A `User=` in a drop-in governs the process, but the install hands the
+roots to the account the unit names; name the account with `--run-as` instead.
 
 ### Files beside the program
 
@@ -538,6 +607,16 @@ $ sudo systemctl start opamp-fleet
 The first asks for the endpoint, the client certificate and its key, and the verification key.
 `--endpoint` alone writes a file the Client refuses until you add the certificate and its key. An upgrade of a host whose service was running restarts it on the delivered
 binary.
+
+**The `.deb` and the `.rpm` run the service under the system account `opamp-fleet`.** The
+post-install creates it where it is missing — no password, `/usr/sbin/nologin`, the data root as its
+home — and passes `--run-as opamp-fleet` only when no unit is registered yet. Every upgrade runs
+`service install` without the flag, which keeps the account the unit names, so a host moved to
+another account or to root with `--run-as` stays there. A host that already ran as root before the
+packages created the account stays root; move it with
+`sudo opamp-fleet service install --run-as opamp-fleet` and a restart. No removal, not even a purge,
+deletes the account. See [Running it under its own account](#running-it-under-its-own-account) for
+what an account cannot do and how to grant it.
 
 **Without a terminal**, as configuration management installs a host, the package is installed first
 and the host enrolled in a step after it — the package's own install never enrols, so `apt` and

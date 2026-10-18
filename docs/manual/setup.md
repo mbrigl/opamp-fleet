@@ -329,6 +329,11 @@ holds the `[tls]` section that names them there.
 
 **Install the Client** from the release's `.deb`, `.rpm` or `.msi`. The package registers the
 service and leaves it stopped (see [Installing from a native package](client.md#installing-from-a-native-package)).
+On Linux the service runs as the system account `opamp-fleet`, which the package creates. The
+install hands the files under the data root to it; a file you name elsewhere, such as under
+`/etc/opamp/`, the service reads only if that account may — give the key to the account, not to
+root alone, or choose root with `--run-as root`
+([Running it under its own account](client.md#running-it-under-its-own-account)).
 Then let it write its configuration by asking you. The questions end with the host's enrolment,
 so first **open the enrolment window** as [step 5](#5-enrol-the-client) shows, and have the
 **Enrolments** tab at hand to approve the request the install waits for:

@@ -144,14 +144,6 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     // and swung `current` at it and only then failed (ADR-0019: fail with a clear message).
     windows_rights::ensure_can_register(level)?;
 
-    // Resolve the `--run-as` account with the same before-anything-is-written rule (ADR-0019): a
-    // name that does not exist, or a Windows form that would need a password, fails here.
-    let run_as = args
-        .run_as
-        .as_deref()
-        .map(|account| run_as::RunAs::resolve(account, manager::service_name()))
-        .transpose()?;
-
     // Two roots and two flags (ADR-0019 clause 8). The executable layout and the data default to
     // different places on Linux at system scope — and only there — because systemd may not execute
     // from `/var/lib` under SELinux. `--root` alone keeps ADR-0019's meaning and collapses both
@@ -169,6 +161,19 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
             manager::default_root(level)?,
         ),
     };
+
+    // The account, decided and resolved with the same before-anything-is-written rule (ADR-0042
+    // clause 2): `--run-as`, else the account the existing unit or plist names, else the owner of
+    // a data root that unit lost its account on, else root. A name that does not exist, or a
+    // Windows form that would need a password, fails here.
+    let account = run_as::decide(
+        level,
+        args.run_as.as_deref(),
+        manager::registration(level)?.as_ref(),
+        &data_root,
+        manager::service_name(),
+    )?;
+    let run_as = account.run_as;
 
     // Everything baked into the unit is absolute: a service's working directory is `/` or
     // `System32`, so a relative path would silently point nowhere. An operator who named no path
@@ -283,31 +288,44 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         run_as: run_as.as_ref().map(|r| r.account().to_string()),
     })?;
 
-    // The handover (ADR-0019 clause 13): both roots belong to the account —
-    // config and state because the service reads and rewrites them (ADR-0017), the executable
-    // layout because the self-update that stages into it *is* the service (ADR-0018). The state
-    // directory is created first: the daemon must not need rights on its parent to begin.
+    // The handover (ADR-0042 clause 2), on every registration that runs under an account — a kept
+    // one and root included: both roots belong to it — config and state because the service reads
+    // and rewrites them (ADR-0017), the executable layout because the self-update that stages into
+    // it *is* the service (ADR-0018). The state directory is created first: the daemon must not
+    // need rights on its parent to begin.
     if let Some(run_as) = &run_as {
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
-        run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path])?;
+        let mut skipped =
+            run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path])?;
         // A Supervisors' root this install created and cut on Windows is the service's to write
         // too (ADR-0017 clause 21); none is created on Unix.
-        run_as.hand_over(
-            &created_outside
-                .iter()
-                .filter(|dir| **dir != state_dir)
-                .map(PathBuf::as_path)
-                .collect::<Vec<_>>(),
-        )?;
+        skipped.extend(
+            run_as.hand_over(
+                &created_outside
+                    .iter()
+                    .filter(|dir| **dir != state_dir)
+                    .map(PathBuf::as_path)
+                    .collect::<Vec<_>>(),
+            )?,
+        );
         // The copy beside a configuration named outside the data root is not under it.
-        run_as.hand_over(
-            &written
-                .copies
-                .iter()
-                .map(PathBuf::as_path)
-                .collect::<Vec<_>>(),
-        )?;
+        skipped.extend(
+            run_as.hand_over(
+                &written
+                    .copies
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .collect::<Vec<_>>(),
+            )?,
+        );
+        for file in skipped {
+            println!(
+                "warning: {} has a second hard link and was not handed over to {}",
+                file.display(),
+                run_as.account()
+            );
+        }
     }
 
     println!("installed {}", manager::service_name());
@@ -315,7 +333,11 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     println!("  config:    {}", config_path.display());
     println!("  state dir: {}", state_dir.display());
     if let Some(run_as) = &run_as {
-        println!("  runs as:   {}", run_as.account());
+        println!(
+            "  runs as:   {} ({})",
+            run_as.account(),
+            account.source.describe()
+        );
     }
     // Since service-manager 0.10, launchd installs do not auto-start; say the next step instead
     // of pretending.

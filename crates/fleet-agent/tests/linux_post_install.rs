@@ -106,3 +106,116 @@ fn the_post_install_steps_ask_for_the_client_identity() {
         );
     }
 }
+
+fn maintainer_script(name: &str) -> String {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packaging/linux")
+        .join(name);
+    std::fs::read_to_string(&script)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", script.display()))
+}
+
+/// What the script runs: the lines outside its heredocs and comments, trimmed, each `\`
+/// continuation joined onto its line.
+fn commands(script: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut inside = false;
+    let mut pending = String::new();
+    for line in script.lines() {
+        if inside {
+            inside = line != "EOF";
+            continue;
+        }
+        if line.contains("<<'EOF'") {
+            inside = true;
+        }
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(head) = line.strip_suffix('\\') {
+            pending.push_str(head.trim_end());
+            pending.push(' ');
+            continue;
+        }
+        pending.push_str(line);
+        commands.push(std::mem::take(&mut pending));
+    }
+    commands
+}
+
+/// The account exists before the first `service install` runs, created as a system account with
+/// no password and no login shell, its home the data root.
+/// Verifies: ADR-0042
+#[test]
+fn the_post_install_creates_the_account_before_it_registers() {
+    let commands = commands(&post_install());
+    let position = |needle: &str| {
+        commands
+            .iter()
+            .position(|c| c.contains(needle))
+            .unwrap_or_else(|| panic!("no {needle} in {commands:#?}"))
+    };
+    let getent = position("getent passwd opamp-fleet");
+    let group = position("getent group opamp-fleet");
+    let useradd = position("useradd ");
+    assert!(getent < group && group < useradd, "{commands:#?}");
+    let adds: Vec<&String> = commands
+        .iter()
+        .filter(|c| c.starts_with("useradd "))
+        .collect();
+    assert_eq!(
+        adds,
+        [
+            "useradd --system --gid opamp-fleet --no-create-home --home-dir /var/lib/opamp-fleet \
+             --shell /usr/sbin/nologin opamp-fleet",
+            "useradd --system --user-group --no-create-home --home-dir /var/lib/opamp-fleet \
+             --shell /usr/sbin/nologin opamp-fleet",
+        ],
+        "a lone group is joined, otherwise one is created with the account"
+    );
+    for (index, command) in commands.iter().enumerate() {
+        if command.contains("supervisor service install") {
+            assert!(index > useradd, "{command} runs before the account exists");
+        }
+    }
+}
+
+/// `--run-as opamp-fleet` is passed only where no unit is registered; a re-registration runs
+/// `service install` without it, which keeps the account the unit names.
+/// Verifies: ADR-0042
+#[test]
+fn the_post_install_names_the_account_only_where_no_unit_is_registered() {
+    let commands = commands(&post_install());
+    let start = commands
+        .iter()
+        .position(|c| c == "if [ -e /etc/systemd/system/opamp-fleet.service ]; then")
+        .unwrap_or_else(|| panic!("no test for the unit in {commands:#?}"));
+    assert_eq!(
+        commands[start + 1..start + 5],
+        [
+            "/usr/libexec/opamp-fleet/supervisor service install",
+            "else",
+            "/usr/libexec/opamp-fleet/supervisor service install --run-as opamp-fleet",
+            "fi",
+        ]
+    );
+    let installs = commands
+        .iter()
+        .filter(|c| c.contains("supervisor service install"))
+        .count();
+    assert_eq!(installs, 2, "{commands:#?}");
+}
+
+/// The account outlives the package: no hook removes it or its group, on removal or on purge.
+/// Verifies: ADR-0042
+#[test]
+fn no_maintainer_script_removes_the_account() {
+    for name in ["postinst", "prerm", "postrm", "posttrans"] {
+        for command in commands(&maintainer_script(name)) {
+            for removes in ["userdel", "groupdel", "deluser", "delgroup"] {
+                assert!(!command.contains(removes), "{name}: {command}");
+            }
+        }
+    }
+}

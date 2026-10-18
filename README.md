@@ -340,7 +340,10 @@ What still needs a human, per platform: starting at **boot** (a runner never reb
 (`journalctl -u opamp-fleet` on Linux, Console/`log show` on macOS), the Agent in
 the fleet UI, and an **SELinux-enforcing host** (Fedora, RHEL, or SUSE 16 with `getenforce`
 answering `Enforcing`): the `.rpm` install must start — a service dying with `status=203/EXEC` and
-an AVC denial in `ausearch -m avc` is the failure ADR-0019 clause 8 exists to prevent. Known platform gaps (tracked in the ADR):
+an AVC denial in `ausearch -m avc` is the failure ADR-0019 clause 8 exists to prevent. Each wrapped
+kind — Telegraf, Icinga 2 with its plugins, GLPI Agent with its tasks — under the packaged account
+`opamp-fleet` and under `--run-as root`: it starts, reports, and its `sudo` or setuid helpers still
+work ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)). Known platform gaps (tracked in the ADR):
 launchd `status` is advisory and `install` does not auto-start there. The SCM still discards a
 Windows service's stderr, but the service now writes its own rotating log under
 `<state_dir>/logs` on every platform (ADR-0019), which is where to look when the manager shows a
