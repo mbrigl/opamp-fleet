@@ -1,6 +1,6 @@
 # ADR-0035: A Host is what a client certificate names, the Server keeps it with its Agents and shows it, and an Agent's effective description takes the Host's subject values and its Client Agent's labels
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clause 1 superseded by [ADR-0047](0047-a-host-and-its-bindings-end-with-its-last-valid-certificate.md)
 - **Date:** 2026-10-17
 - **Deciders:** Markus Brigl
 - **Applies to:** the host register in `crates/fleet-server/src/revocation.rs` and its filesystem adapter, the host an Agent record names and the effective description in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/labels.rs`, the persisted Agent record in `crates/fleet-server/src/agent_store.rs` and `crates/fleet-server/src/fs/agents.rs`, the label store in `crates/fleet-server/src/fs/labels.rs`, the `/api/v1/hosts` and `/api/v1/agents/{instance_uid}/labels` routes of `crates/fleet-server/src/api.rs`, the Hosts and Agents tabs of the bundled UI in `crates/fleet-server/static/index.html`, and every document that tells an operator what a host is or how labels and Selectors work
