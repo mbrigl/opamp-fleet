@@ -1,6 +1,6 @@
 # ADR-0036: A bootstrap certificate's subject may name country, state, locality, organization, organizational unit and organization identifier, and the Server carries it into the host certificate it issues
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clause 3 superseded by [ADR-0039](0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)
 - **Date:** 2026-10-17
 - **Deciders:** Markus Brigl
 - **Applies to:** the bootstrap-certificate routes and the subject they take in `crates/fleet-server/src/api.rs` and `crates/fleet-server/src/bootstrap.rs`, the signing of host certificates in `crates/fleet-server/src/ca.rs` and the approval and renewal paths in `crates/fleet-server/src/fleet.rs`, the enrolment queue's view in `crates/fleet-server/src/enrolment.rs` and `crates/fleet-server/src/api.rs`, the Enrolments tab of the bundled UI in `crates/fleet-server/static/index.html`, and every document that shows a certificate's subject or tells an operator how to issue a bootstrap certificate

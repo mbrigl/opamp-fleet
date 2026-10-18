@@ -1,6 +1,6 @@
 # ADR-0037: The Server's state lives under one data directory, one store per domain behind a port a database could implement, artifact bytes are kept by their hash, the enrolment queue is persisted, and an old layout is moved by an offline migration
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clause 10 superseded by [ADR-0039](0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)
 - **Date:** 2026-10-17
 - **Deciders:** Markus Brigl
 - **Applies to:** the storage ports in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`, `audit.rs`) and every adapter under `crates/fleet-server/src/fs/`, the wiring in `crates/fleet-server/src/lib.rs` and `crates/fleet-server/src/main.rs`, `data_dir`, `config_dir` and `packages_dir` in `server.toml` and `crates/fleet-server/src/config.rs`, the `server migrate` command, `config/server.toml`, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its state
