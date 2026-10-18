@@ -165,7 +165,8 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes, by `Origin` where a browser sends
     no Fetch Metadata
   - ✅ a Content-Security-Policy that names the UI's inline scripts by hash and forbids framing ·
-    ✅ `nosniff`, `no-referrer` on every response · ✅ `/api/v1` answers never cached
+    ✅ `nosniff`, `no-referrer` and HSTS (`max-age=31536000`, no subdomains) on every response ·
+    ✅ `/api/v1` answers never cached
   - ✅ the package upload has no deadline, but is held to the floor above, and its size to
     `max_package_size_bytes` and the whole store, uploads still arriving included, to
     `max_total_package_bytes` · ✅ capped, HTTP/2-bounded and throttled as above

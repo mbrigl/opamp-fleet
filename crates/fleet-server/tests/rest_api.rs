@@ -1035,8 +1035,9 @@ async fn a_post_from_a_foreign_origin_without_fetch_metadata_is_refused() {
 }
 
 /// Every response of the Operator plane — the UI, the API, the API docs and a miss alike —
-/// forbids framing and content sniffing and sends no referrer, and an `/api/v1` answer is never
-/// cached.
+/// forbids framing and content sniffing, sends no referrer and tells a browser to come back over
+/// TLS only, and an `/api/v1` answer is never cached.
+/// Verifies: Q-1
 #[tokio::test]
 async fn every_operator_response_carries_the_security_headers() {
     let server = spawn().await;
@@ -1073,6 +1074,11 @@ async fn every_operator_response_carries_the_security_headers() {
         assert_eq!(header("x-frame-options"), "DENY", "{path}");
         assert_eq!(header("x-content-type-options"), "nosniff", "{path}");
         assert_eq!(header("referrer-policy"), "no-referrer", "{path}");
+        assert_eq!(
+            header("strict-transport-security"),
+            "max-age=31536000",
+            "{path}"
+        );
         if path.starts_with("/api/v1/") {
             assert_eq!(header("cache-control"), "no-store", "{path}");
         }

@@ -13,7 +13,7 @@ use fleet_server::config::ServerConfig;
 use fleet_server::fleet::AppState;
 use fleet_server::listen;
 use opamp::server::listen::Handle;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 fn usage() -> ! {
     eprintln!(
@@ -475,19 +475,20 @@ async fn main() {
             }
         };
     // The audit record (ADR-0022), opened before anything is decided.
-    let audit = match fleet_server::fs::FsAuditStore::open(&config.data_dir).and_then(|store| {
+    let audit_log = match fleet_server::fs::FsAuditStore::open(&config.data_dir).and_then(|store| {
         fleet_server::audit_log::AuditLog::start(
             Box::new(store),
             config.audit.limits(),
             clock.clone(),
         )
     }) {
-        Ok(audit) => Arc::new(audit) as Arc<dyn fleet_server::audit::Audit>,
+        Ok(audit) => Arc::new(audit),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
     };
+    let audit: Arc<dyn fleet_server::audit::Audit> = audit_log.clone();
     if let Some(enrolment) = &enrolment {
         enrolment.set_audit(audit.clone());
     }
@@ -624,6 +625,13 @@ async fn main() {
     // The graceful-shutdown flush (ADR-0024): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
+    // What is still queued for the audit record is written before the process, and the writer
+    // thread with it, ends (ADR-0022).
+    if !audit_log.drain(std::time::Duration::from_secs(5)) {
+        error!(
+            "the audit record could not be written out before shutdown; its last entries are lost"
+        );
+    }
 }
 
 /// The shutdown signal: `SIGTERM`, which a service manager sends on stop, or `SIGINT` from a

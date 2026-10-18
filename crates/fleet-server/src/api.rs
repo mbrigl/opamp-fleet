@@ -320,7 +320,11 @@ static CONTENT_SECURITY_POLICY: std::sync::LazyLock<header::HeaderValue> =
     });
 
 /// The response headers of the Operator plane: its policy, no framing, no content sniffing, no
-/// referrer, and no cached `/api/v1` answer.
+/// referrer, no cached `/api/v1` answer, and HSTS. The plane serves TLS on every address
+/// (ADR-0013), so a browser that once reached it by name never tries `http://` for it again,
+/// where an active attacker could answer and ask for the Basic credentials; browsers ignore the
+/// header for an IP address. It names no subdomains: what else runs on the plane's domain is not
+/// the plane's to bind.
 async fn security_headers(request: Request, next: Next) -> Response {
     let api = request.uri().path().starts_with("/api/v1/");
     let mut response = next.run(request).await;
@@ -340,6 +344,10 @@ async fn security_headers(request: Request, next: Next) -> Response {
     headers.insert(
         header::REFERRER_POLICY,
         header::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        header::HeaderValue::from_static("max-age=31536000"),
     );
     if api {
         headers.insert(

@@ -23,6 +23,8 @@ impl FsAuditStore {
     pub fn open(root: &Path) -> Result<Self, String> {
         let dir = root.join(super::AUDIT);
         super::create_private_dir(&dir)?;
+        // The directory's own name, durable before the first file in it is (ADR-0022).
+        super::sync_dir_of(&dir)?;
         for (name, path) in super::entries(&dir)? {
             if !path.is_file() || seq_in(&name).is_none() {
                 return Err(super::unknown(&path));
@@ -93,6 +95,11 @@ fn open_append(path: &Path) -> Result<(std::fs::File, u64), String> {
         .metadata()
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?
         .len();
+    // A new file's name is durable only once its directory is: without that, a crash can take the
+    // file and every entry synced into it (ADR-0022).
+    if size == 0 {
+        super::sync_dir_of(path)?;
+    }
     Ok((file, size))
 }
 

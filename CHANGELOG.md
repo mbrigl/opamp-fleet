@@ -47,6 +47,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `ws://` or `http://` no longer starts; set a `wss://` or `https://` endpoint or remove the key.
   A development setup on the loopback names its plaintext endpoint in `supervisor.toml`.
 
+- **The Operator plane sends HSTS.** Every response carries `Strict-Transport-Security:
+  max-age=31536000`, without `includeSubDomains`, so a browser that reached the plane once by its
+  name never tries `http://` for it again, where an attacker on the network could answer and ask for the
+  Basic credentials. **What to do:** nothing; the plane serves TLS on every address already.
+
+### Fixed
+
+- **The audit record is written out before the Server exits.** Entries still queued for the audit
+  writer at shutdown were lost with the process, without a trace in the record. The Server now
+  waits up to five seconds for them after both planes have drained, and logs an error if they
+  could not be written, or if the record was failing. The audit directory and a new audit file's
+  name are synced when they are created, so a crash cannot take the file and the entries already
+  synced into it.
+
 ## [0.5.5] - 2026-10-18
 
 ### Added
