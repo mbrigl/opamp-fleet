@@ -2,7 +2,7 @@
 //! connection that carried a message (ADR-0015).
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,14 +23,14 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::agent_store::{AgentStore, PersistedAgent};
+use crate::agent_store::{AgentStore, PersistedAgent, Pin};
 use crate::audit::{Audit, Entry};
-use crate::configs::{self, ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
-use crate::deployments::{deployment_for, Deployment, DeploymentError, DeploymentStore};
+use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Revision};
+use crate::deployments::{self, deployment_for, Deployment, DeploymentError, DeploymentStore};
 use crate::enrolment::{DecisionError, Enrolment};
-use crate::labels::{LabelError, LabelStore};
-use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, Source};
-use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor};
+use crate::labels::{LabelError, Sources};
+use crate::packages::{InstalledVersions, PackageId, PackageStore, Platform, SignatureState};
+use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor, SubjectValues};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
 /// binary is (see `server.toml`, `max_package_size_bytes`).
@@ -112,51 +112,105 @@ pub struct AgentRecord {
     /// polling is stateless. Only the owning connection may mark the Agent disconnected, and a
     /// report from a *different* live connection is the duplicate the Baseline wants detected.
     pub owner: Option<ConnId>,
-    /// The operator's labels for this Agent (ADR-0024), mirrored from the persisted store so that
-    /// every place a Selector is matched sees them without a second lookup. The store is the
-    /// authority; this copy is written when the labels are and when the record is created.
+    /// The operator's labels for this Agent (ADR-0024), part of its persisted record (ADR-0035
+    /// clause 6): they follow a re-key and leave with a forget.
     pub labels: BTreeMap<String, String>,
-    /// The Configurations the operator rolled out to this Agent (ADR-0025): name → the pinned
-    /// revision's hash in the `ConfigStore`'s retained revisions. **Every config offer is
-    /// composed from this**; matching only proposes. Written by the rollout acts, persisted like
-    /// `restart_pending` — operator intent that survives a restart (ADR-0024).
-    pub config_assignments: BTreeMap<String, String>,
-    /// What the operator rolled out to this Agent (ADR-0025, ADR-0026): the Deployment the act
-    /// named and the Package it pinned. `None` is what it says — nothing has been rolled out —
-    /// and there is exactly one, because an Agent belongs to at most one Deployment and a
-    /// Deployment holds one Package per Agent type. The Baseline's "one top-level package" is
-    /// structural here rather than enforced by a rule at the write.
-    pub package_assignment: Option<PackageAssignment>,
+    /// The Host this Agent last arrived over (ADR-0035 clause 2): its own on a direct connection,
+    /// the Gateway's behind one. For the fleet view and label inheritance; it grants nothing.
+    pub host: Option<String>,
+    /// Where the Host and the Client Agent place this Agent — derived, never persisted.
+    pub placement: Placement,
+    /// What the operator's last rollout released to this Agent (ADR-0034 clause 5). **Every offer
+    /// is composed from this**; matching only proposes. Written by the rollout acts, persisted like
+    /// `restart_pending` — operator intent that survives a restart (ADR-0024). `None` is what it
+    /// says: nothing has been rolled out.
+    pub assignment: Option<Assignment>,
 }
 
-/// One Agent's package assignment: the channel it was released through, and the release itself.
+/// One Agent's assignment (ADR-0034 clause 5): one release, pinned as of the press that wrote it
+/// and replaced whole by the next.
 ///
-/// The Deployment is carried alongside the Package rather than derived from it, because it is what
-/// supplies the signature the offer travels with (ADR-0026 point 28) — and because a Deployment
-/// re-aimed after the act must not change what an Agent was already given.
+/// The Deployment is carried alongside the release rather than derived from it, because a
+/// Deployment re-aimed or edited after the act must not change what an Agent was given, nor what
+/// the fleet view says it was given through. The signature a package offer travels with is the
+/// entry's own (ADR-0033).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PackageAssignment {
+pub struct Assignment {
+    /// The Deployment the release went through.
     pub deployment: String,
-    pub package: PackageId,
+    /// The Package pinned, if any — at most one, because an Agent belongs to at most one
+    /// Deployment and a Deployment holds one Package per Agent type. The Baseline's "one top-level
+    /// package" is structural here rather than enforced by a rule at the write.
+    pub package: Option<PackageId>,
+    /// Every Configuration released: its name → the content hash of the revision released, one
+    /// of the `ConfigStore`'s retained revisions.
+    pub configurations: BTreeMap<String, String>,
+}
+
+/// The configuration map of an Agent nothing was rolled out to.
+static NO_CONFIGURATIONS: BTreeMap<String, String> = BTreeMap::new();
+
+/// The Agents one Client presents (ADR-0035 clause 4), as far as the Server can tell them apart.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Group {
+    /// On a direct connection: the Agents arriving over the same Host.
+    Host(String),
+    /// Behind a Gateway: the Agents arriving over the same Gateway Host that report the same
+    /// machine — `host.id`, else `host.name` ([`crate::labels::machine`]).
+    Behind { gateway: String, machine: String },
+}
+
+/// What the Host an Agent arrived over and its Client Agent add to its effective description
+/// (ADR-0035 clauses 3 and 4). Derived from the records and the host register whenever either
+/// changes; never persisted.
+#[derive(Clone, Debug, Default)]
+pub struct Placement {
+    /// The `fleet.host.*` values of the Host it arrived over directly; empty behind a Gateway.
+    pub host_values: BTreeMap<String, String>,
+    /// The Client it belongs to, when the Server can tell.
+    pub group: Option<Group>,
+    /// Its Client Agent — itself, for the Client Agent — when its group holds exactly one.
+    pub client_agent: Option<InstanceUid>,
+    /// The labels of its Client Agent; empty for the Client Agent itself.
+    pub inherited: BTreeMap<String, String>,
+    /// Its group holds more than one Client Agent, so nothing is inherited.
+    pub ambiguous: bool,
 }
 
 impl AgentRecord {
-    /// What a Selector is matched against: what the Agent reported, plus the labels that do not
-    /// collide with it (ADR-0024).
+    /// What a Selector is matched against (ADR-0035 clause 3): the Host's values, what the Agent
+    /// reported, its own labels and its Client Agent's, each key from the first that has it.
     ///
-    /// Borrowed when there are no labels, which is the overwhelming majority of Agents — labelling
-    /// should cost the fleet view nothing on the hosts nobody has labelled.
+    /// Borrowed when it adds nothing to the report, which is the overwhelming majority of Agents —
+    /// labelling should cost the fleet view nothing on the hosts nobody has labelled.
     pub fn effective_description(&self) -> Option<Cow<'_, AgentDescription>> {
-        if self.labels.is_empty() {
+        let sources = self.sources();
+        if sources.adds_nothing() {
             return self.description.as_ref().map(Cow::Borrowed);
         }
-        crate::labels::effective_description(self.description.as_ref(), &self.labels)
-            .map(Cow::Owned)
+        crate::labels::effective_description(&sources).map(Cow::Owned)
+    }
+
+    fn sources(&self) -> Sources<'_> {
+        Sources {
+            host: &self.placement.host_values,
+            reported: self.description.as_ref(),
+            own: &self.labels,
+            inherited: &self.placement.inherited,
+        }
     }
 
     /// The Package rolled out to this Agent, if any.
     fn assigned_package(&self) -> Option<&PackageId> {
-        self.package_assignment.as_ref().map(|a| &a.package)
+        self.assignment.as_ref().and_then(|a| a.package.as_ref())
+    }
+
+    /// The Configurations rolled out to this Agent, name → pinned revision hash; empty when
+    /// nothing was.
+    fn assigned_configurations(&self) -> &BTreeMap<String, String> {
+        self.assignment
+            .as_ref()
+            .map_or(&NO_CONFIGURATIONS, |a| &a.configurations)
     }
 
     /// What this Agent last reported as installed, per package name (ADR-0025): the versions
@@ -188,15 +242,16 @@ impl AgentRecord {
             transport: self.transport,
             last_seen_ms: self.last_seen_ms,
             restart_pending: self.restart_pending,
-            config_assignments: Some(self.config_assignments.clone()),
-            package_assignment: self.package_assignment.clone(),
+            assignment: self.assignment.clone(),
+            labels: self.labels.clone(),
+            host: self.host.clone(),
         }
     }
 
     /// A restored record is **disconnected with no owning connection** until live evidence says
-    /// otherwise — connectedness is runtime-only (ADR-0024). The labels mirror is filled from
-    /// the `LabelStore`, which stays their single authority.
-    fn from_persisted(persisted: PersistedAgent, labels: BTreeMap<String, String>) -> AgentRecord {
+    /// otherwise — connectedness is runtime-only (ADR-0024). Its placement is derived once the
+    /// fleet is whole.
+    fn from_persisted(persisted: PersistedAgent) -> AgentRecord {
         AgentRecord {
             sequence_num: persisted.sequence_num,
             capabilities: persisted.capabilities,
@@ -212,9 +267,10 @@ impl AgentRecord {
             connection_settings_status: persisted.connection_settings_status,
             package_statuses: persisted.package_statuses,
             owner: None,
-            labels,
-            config_assignments: persisted.config_assignments.unwrap_or_default(),
-            package_assignment: persisted.package_assignment,
+            labels: persisted.labels,
+            host: persisted.host,
+            placement: Placement::default(),
+            assignment: persisted.assignment,
         }
     }
 }
@@ -238,31 +294,29 @@ pub enum ForgetError {
     StillReporting,
 }
 
-/// Why a rollout act (ADR-0025) was refused.
+/// Why a rollout act (ADR-0034 clause 6) was refused.
 #[derive(Debug)]
 pub enum RolloutError {
     /// No Agent of that identity is known.
     UnknownAgent,
-    /// The named Configuration or Deployment does not exist (or package delivery is not
-    /// configured).
+    /// The named Deployment does not exist (or package delivery, which arms the Deployments, is
+    /// not configured).
     UnknownResource(String),
-    /// The resource exists but cannot be released here: it does not fit or aim at the Agent, the
-    /// Deployment holds nothing for it, or the Package it holds is empty or no upgrade.
+    /// The act cannot release here: the Agent is in no Deployment, in a conflict, or in another
+    /// Deployment than the one named; or the Deployment holds nothing, or a Package with an
+    /// unsigned entry.
     NotApplicable(String),
     /// The act could not be persisted.
     Storage(String),
 }
 
-/// What one per-Agent rollout act releases (ADR-0025).
-pub enum RolloutTarget {
-    /// Everything currently waiting for the Agent: every candidate Configuration, and the
-    /// candidate Package of the Deployment that claims it.
-    Everything,
-    /// One Configuration by name.
-    Configuration(String),
-    /// One Deployment by name — the one that claims the Agent; the act releases the Package it
-    /// holds for the Agent's type (ADR-0026).
-    Deployment(String),
+/// Why deleting a Configuration was refused (ADR-0034 clause 8).
+#[derive(Debug)]
+pub enum DeleteError {
+    /// An Agent's assignment pins it; the message says how many.
+    Pinned(String),
+    /// The store could not be written.
+    Storage(String),
 }
 
 /// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
@@ -323,11 +377,13 @@ pub trait Clock: Send + Sync {
 /// CA ([`ClientCa`](crate::ca::ClientCa)) is the adapter the composition root wires when
 /// `[client_ca]` is configured.
 pub trait CertificateSigner: Send + Sync {
-    /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself.
+    /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself. Its subject
+    /// carries `subject` — the values copied from the bootstrap certificate or the predecessor
+    /// (ADR-0036 clauses 3 and 4) — and never the request's.
     ///
     /// # Errors
     /// Returns an error when the request does not parse or cannot be signed.
-    fn sign(&self, csr_pem: &str, host: &str) -> Result<Signed, String>;
+    fn sign(&self, csr_pem: &str, host: &str, subject: &SubjectValues) -> Result<Signed, String>;
 
     /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0021
     /// clause 27); `Ok(None)` when it carries none.
@@ -423,27 +479,17 @@ impl Drop for UploadReservation<'_> {
     }
 }
 
-/// The package store plus the base URL each `download_url` is built from (ADR-0026).
+/// The package store and the Deployments that release from it (ADR-0026). Every `download_url`
+/// is a path the Client resolves against its own endpoint — the Agent plane, where the download
+/// is served behind the same handshake as `/v1/opamp` (ADR-0033).
 pub struct PackageOffering {
     store: PackageStore,
     deployments: DeploymentStore,
-    download_base: String,
 }
 
 impl PackageOffering {
-    /// `download_base` is the advertised absolute URL, or empty for a path the Client resolves
-    /// against its own endpoint — which is the Agent plane, where the download is served
-    /// (ADR-0013), behind the same handshake as `/v1/opamp` (ADR-0021 clause 23).
-    pub fn with_deployments(
-        store: PackageStore,
-        deployments: DeploymentStore,
-        download_base: String,
-    ) -> Self {
-        PackageOffering {
-            store,
-            deployments,
-            download_base,
-        }
+    pub fn with_deployments(store: PackageStore, deployments: DeploymentStore) -> Self {
+        PackageOffering { store, deployments }
     }
 
     pub fn store(&self) -> &PackageStore {
@@ -466,10 +512,9 @@ pub struct AppState {
     /// heartbeat from reaching any storage backend (ADR-0024). Locked strictly after `fleet`.
     written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
     configs: ConfigStore,
-    /// The operator's labels on Agents (ADR-0024), which join what a Selector matches. Persisted
-    /// beside the Configurations, because they are the same kind of thing: intent about the fleet
-    /// that has to be there after a restart.
-    labels: Box<dyn LabelStore>,
+    /// Which Agents each [`Group`] holds (ADR-0035 clause 4), so placing one Agent touches its
+    /// group alone. Locked strictly after `fleet`, and only while it is held.
+    groups: Mutex<HashMap<Group, HashSet<InstanceUid>>>,
     push: watch::Sender<u64>,
     /// Hands every WebSocket connection its identity for the duplicate detection.
     next_conn: AtomicU64,
@@ -525,13 +570,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Builds the state on any backend for the Agent records, the labels (ADR-0024) and the
-    /// Configurations (ADR-0025). The ports are the only thing the fleet logic knows about that
-    /// persistence, so a database or an external store is an implementation of [`AgentStore`],
-    /// [`LabelStore`] or [`ConfigBackend`] plus one wiring call.
+    /// Builds the state on any backend for the Agent records, their labels included (ADR-0024,
+    /// ADR-0035), and the Configurations (ADR-0025). The ports are the only thing the fleet logic
+    /// knows about that persistence, so a database or an external store is an implementation of
+    /// [`AgentStore`] or [`ConfigBackend`] plus one wiring call.
     pub fn with_stores(
         agent_store: Box<dyn AgentStore>,
-        labels: Box<dyn LabelStore>,
         configs: Box<dyn ConfigBackend>,
         clock: Box<dyn Clock>,
     ) -> Result<Self, String> {
@@ -552,19 +596,26 @@ impl AppState {
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
         for (uid, persisted) in agent_store.load()? {
-            let agent_labels = labels.get(&uid);
             written.insert(uid, persisted.durable_digest());
-            fleet.insert(uid, AgentRecord::from_persisted(persisted, agent_labels));
+            fleet.insert(uid, AgentRecord::from_persisted(persisted));
         }
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
         }
-        Ok(AppState {
+        // A rollout cut short leaves at most a revision no assignment references (ADR-0037
+        // clause 3); it is collected here, before anything is offered.
+        for config in configs.list() {
+            configs.retain_only(
+                &config.name,
+                &agent_store.referenced_revisions(&config.name),
+            )?;
+        }
+        let state = AppState {
             fleet: Mutex::new(fleet),
             agent_store,
             written: Mutex::new(written),
             configs,
-            labels,
+            groups: Mutex::new(HashMap::new()),
             push: watch::channel(0).0,
             next_conn: AtomicU64::new(1),
             connection_offer: None,
@@ -583,7 +634,9 @@ impl AppState {
             uploading_bytes: AtomicU64::new(0),
             stale_after: DEFAULT_STALE_AFTER,
             max_agents: DEFAULT_MAX_AGENTS,
-        })
+        };
+        state.place_all();
+        Ok(state)
     }
 
     /// Sets the message size limit both transports enforce (the Baseline recommends the default
@@ -733,7 +786,118 @@ impl AppState {
     #[must_use]
     pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
         self.revocations = revocations;
+        // The Hosts the records name are known now: their values and Gateway marks place them.
+        self.place_all();
         self
+    }
+
+    /// Marks `host` as a Gateway, or not (ADR-0021 clause 7); answers whether this Server knows
+    /// the host. The mark decides whether the Agents arriving over it carry its values and how
+    /// they group (ADR-0035 clauses 3 and 4), so every Agent is placed again.
+    ///
+    /// # Errors
+    /// Returns an error when there is no host register or the change cannot be written.
+    pub fn set_gateway(&self, host: &str, gateway: bool) -> Result<bool, String> {
+        let revocations = self
+            .revocations
+            .as_ref()
+            .ok_or_else(|| "revocation is not configured".to_string())?;
+        let known = revocations.set_gateway(host, gateway)?;
+        if known {
+            self.place_all();
+        }
+        Ok(known)
+    }
+
+    /// Where the Host an Agent arrived over places it (ADR-0035 clauses 3 and 4): the
+    /// `fleet.host.*` values of a Host it arrived over directly, and the group its Client is
+    /// recognised in. Nothing without a host register, and nothing for an Agent that names no
+    /// Host.
+    fn locate(&self, record: &AgentRecord) -> (BTreeMap<String, String>, Option<Group>) {
+        let (Some(host), Some(revocations)) = (&record.host, &self.revocations) else {
+            return (BTreeMap::new(), None);
+        };
+        let (gateway, subject) = revocations.placement(host);
+        if gateway {
+            let group =
+                crate::labels::machine(record.description.as_ref()).map(|machine| Group::Behind {
+                    gateway: host.clone(),
+                    machine,
+                });
+            return (BTreeMap::new(), group);
+        }
+        let values = subject
+            .attributes()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        (values, Some(Group::Host(host.clone())))
+    }
+
+    /// Places every Agent again — at startup, once the host register is known, and when a Gateway
+    /// mark changes.
+    fn place_all(&self) {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let mut groups = self.groups.lock().expect("groups lock");
+        groups.clear();
+        for (uid, record) in fleet.iter_mut() {
+            let (host_values, group) = self.locate(record);
+            record.placement = Placement {
+                host_values,
+                group: group.clone(),
+                ..Placement::default()
+            };
+            if let Some(group) = group {
+                groups.entry(group).or_default().insert(*uid);
+            }
+        }
+        for group in groups.keys() {
+            inherit(&mut fleet, &groups, group);
+        }
+    }
+
+    /// Places one Agent again after what places it may have changed — its Host, its report, or
+    /// its identity — and the groups it left and joined with it.
+    fn place(&self, fleet: &mut HashMap<InstanceUid, AgentRecord>, uid: &InstanceUid) {
+        let Some(record) = fleet.get_mut(uid) else {
+            return;
+        };
+        let (host_values, group) = self.locate(record);
+        record.placement.host_values = host_values;
+        let left = std::mem::replace(&mut record.placement.group, group.clone());
+        if group.is_none() {
+            record.placement.client_agent = None;
+            record.placement.inherited.clear();
+            record.placement.ambiguous = false;
+        }
+        let mut groups = self.groups.lock().expect("groups lock");
+        if left != group {
+            if let Some(left) = &left {
+                unindex(&mut groups, left, uid);
+            }
+        }
+        if let Some(joined) = &group {
+            groups.entry(joined.clone()).or_default().insert(*uid);
+            inherit(fleet, &groups, joined);
+        }
+        if let Some(left) = left.filter(|left| Some(left) != group.as_ref()) {
+            inherit(fleet, &groups, &left);
+        }
+    }
+
+    /// Takes an Agent that left the fleet, or its old identity, out of its group, and places what
+    /// is left of the group again.
+    fn unplace(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        uid: &InstanceUid,
+        group: Option<Group>,
+    ) {
+        let Some(group) = group else {
+            return;
+        };
+        let mut groups = self.groups.lock().expect("groups lock");
+        unindex(&mut groups, &group, uid);
+        inherit(fleet, &groups, &group);
     }
 
     /// The register and the revocation list.
@@ -830,17 +994,18 @@ impl AppState {
         }
     }
 
-    /// What a CSR renews, and the host the new certificate is for (ADR-0021 clause 27). A renewal
-    /// proof names the certificate whose key signed the new one — through a Gateway too — and the
-    /// host carries on from it; without one, the certificate the connection presented is renewed.
-    /// A certificate that names no host — one an operator provisioned — gets a host derived from
+    /// What a CSR renews, the host the new certificate is for (ADR-0021 clause 27), and the
+    /// subject values it carries on (ADR-0036 clause 4). A renewal proof names the certificate
+    /// whose key signed the new one — through a Gateway too — and the host and the values carry
+    /// on from it; without one, the certificate the connection presented is renewed. A
+    /// certificate that names no host — one an operator provisioned — gets a host derived from
     /// its issuer and serial, the same on every retry.
     fn renews(
         &self,
         ca: &dyn CertificateSigner,
         csr: &str,
         presented: Option<&Presented>,
-    ) -> Result<(Option<CertId>, String), String> {
+    ) -> Result<(Option<CertId>, String, SubjectValues), String> {
         let derived = |id: &CertId| {
             use sha2::Digest as _;
             let digest = sha2::Sha256::digest(format!("{}\n{}", id.issuer, id.serial));
@@ -856,7 +1021,7 @@ impl AppState {
                 return Err("the certificate this request renews is revoked".to_string());
             }
             let host = old.host.clone().unwrap_or_else(|| derived(&old.id));
-            return Ok((Some(old.id), host));
+            return Ok((Some(old.id), host, old.subject_values));
         }
         Ok(match presented {
             Some(presented) => (
@@ -865,8 +1030,13 @@ impl AppState {
                     .host
                     .clone()
                     .unwrap_or_else(|| derived(&presented.id)),
+                presented.subject_values.clone(),
             ),
-            None => (None, InstanceUid::default().to_string()),
+            None => (
+                None,
+                InstanceUid::default().to_string(),
+                SubjectValues::default(),
+            ),
         })
     }
 
@@ -875,10 +1045,12 @@ impl AppState {
         self.enrolment.as_ref()
     }
 
-    /// Approves one pending enrolment request: the client CA signs it (ADR-0021 clause 22).
+    /// Approves one pending enrolment request: the client CA signs it (ADR-0021 clause 22), with
+    /// the subject values of the bootstrap certificate the request came with (ADR-0036 clause 3).
     ///
     /// # Errors
-    /// Returns [`DecisionError::NotFound`] when enrolment is off or the id is unknown, and
+    /// Returns [`DecisionError::NotFound`] when enrolment is off or the id is unknown,
+    /// [`DecisionError::Subject`] when the bootstrap certificate's subject cannot be carried, and
     /// [`DecisionError::Sign`] when no CA is configured or it refuses the request.
     pub fn approve_enrolment(&self, id: &str) -> Result<(), DecisionError> {
         let enrolment = self.enrolment.as_ref().ok_or(DecisionError::NotFound)?;
@@ -887,9 +1059,18 @@ impl AppState {
         })?;
         // A new host: its identity is minted here and carried by every renewal (ADR-0021 clause 7).
         let host = InstanceUid::default().to_string();
-        enrolment.approve(id, signer, &host, &|signed, instance_uid| {
-            self.record_issued(signed, instance_uid, None)
-        })
+        let revoked = |bootstrap: &CertId| {
+            self.revocations
+                .as_ref()
+                .is_some_and(|revocations| revocations.is_certificate_revoked(bootstrap))
+        };
+        enrolment.approve(
+            id,
+            signer,
+            &host,
+            &|signed, instance_uid| self.record_issued(signed, instance_uid, None),
+            &revoked,
+        )
     }
 
     /// What an enrolment connection is told (ADR-0021 clause 21): the capabilities that say it may
@@ -937,7 +1118,7 @@ impl AppState {
         self.packages.as_ref().map(PackageOffering::store)
     }
 
-    /// Read access to the Deployment store, armed by the same `packages_dir` (ADR-0026).
+    /// Read access to the Deployment store, armed with the package store (ADR-0026).
     pub fn deployment_store(&self) -> Option<&DeploymentStore> {
         self.packages.as_ref().map(PackageOffering::deployments)
     }
@@ -1007,164 +1188,170 @@ impl AppState {
         deployment_for(&all, record.effective_description().as_deref()).map(|found| found.cloned())
     }
 
-    /// One rollout act toward one Agent (ADR-0025): releases the target — a named Configuration,
-    /// a named Deployment, or everything currently waiting — to it, pinning the content as of
-    /// this press, and wakes the WebSocket loops so a connected Agent hears it now.
-    pub fn rollout_to_agent(
+    /// What a press of `deployment` would release to this Agent (ADR-0034 clause 6) — the
+    /// assignment it would write, or `None` when it has nothing for the Agent.
+    ///
+    /// Two parts, each as of now: the Package the Deployment holds for the Agent's type when it is
+    /// a candidate (ADR-0025 clauses 9–13), and every Configuration it holds that fits the Agent's
+    /// type, at its saved revision. Where the Deployment holds a Package for the Agent's type that
+    /// is no candidate — the Agent already runs it, or it would move the Agent backwards — the
+    /// press cannot move the package part, so the Package the assignment pins stays pinned: the
+    /// release is replaced whole, and a part the press does not move must not fall out of it
+    /// (ADR-0025 clause 17). A Package or Configuration the Deployment no longer holds leaves the
+    /// release.
+    ///
+    /// The rollout acts, the reach counts and the fleet view's waiting changes all ask this one
+    /// question, so the count beside a press, the press and the view cannot disagree.
+    fn release(
         &self,
-        uid: &InstanceUid,
-        target: &RolloutTarget,
-    ) -> Result<(), RolloutError> {
-        let mut fleet = self.fleet.lock().expect("fleet lock");
-        let record = fleet.get_mut(uid).ok_or(RolloutError::UnknownAgent)?;
-        let mut collected: Vec<String> = Vec::new();
-        match target {
-            RolloutTarget::Configuration(name) => {
-                let config = self.configs.get(name).ok_or_else(|| {
-                    RolloutError::UnknownResource(format!("no configuration {name:?}"))
-                })?;
-                if !configs::fits(&config.saved, record.effective_description().as_deref()) {
-                    return Err(RolloutError::NotApplicable(format!(
-                        "configuration {name:?} does not fit or aim at agent {uid}"
-                    )));
-                }
-                let hash = self
-                    .configs
-                    .retain_saved(name)
-                    .map_err(RolloutError::Storage)?;
-                record.config_assignments.insert(name.clone(), hash);
-                collected.push(name.clone());
-            }
-            RolloutTarget::Deployment(name) => {
-                let store = self
-                    .offering()
-                    .map_err(RolloutError::UnknownResource)?
-                    .store();
-                // Naming a Deployment is not a way past a conflict. An operator who names one has
-                // said which they mean, and refusing anyway is deliberate: otherwise the conflict
-                // is sidestepped for good instead of fixed, and the per-Agent path becomes the way
-                // into a state the fleet-wide one forbids (ADR-0026 point 30).
-                let claiming = self
-                    .deployment_of(record)
-                    .map_err(RolloutError::NotApplicable)?;
-                let deployment = match claiming {
-                    Some(deployment) if deployment.name == *name => deployment,
-                    Some(other) => {
-                        return Err(RolloutError::NotApplicable(format!(
-                            "agent {uid} belongs to deployment {:?}, not {name:?}",
-                            other.name
-                        )))
-                    }
-                    None => {
-                        return Err(RolloutError::NotApplicable(format!(
-                            "deployment {name:?} does not aim at agent {uid}"
-                        )))
-                    }
-                };
-                refuse_unsigned(store, &deployment)?;
-                let id = deployment
-                    .package_for(
-                        crate::packages::reported_agent_type(
-                            record.effective_description().as_deref(),
-                        )
-                        .unwrap_or_default(),
-                    )
+        store: &PackageStore,
+        deployment: &Deployment,
+        record: &AgentRecord,
+    ) -> Option<Assignment> {
+        let effective = record.effective_description();
+        let description = effective.as_deref();
+        let configurations = self
+            .configs
+            .candidates_in(&deployment.configurations, description);
+        let agent_type = crate::packages::reported_agent_type(description);
+        let held = agent_type.and_then(|agent_type| deployment.package_for(agent_type));
+        let package = store
+            .candidate(
+                deployment,
+                description,
+                &record.installed_package_versions(),
+            )
+            .or_else(|| {
+                held.and(record.assigned_package())
+                    .filter(|pinned| Some(pinned.agent_type.as_str()) == agent_type)
                     .cloned()
-                    .ok_or_else(|| {
-                        RolloutError::NotApplicable(format!(
-                            "deployment {name:?} holds no package for what agent {uid} reports"
-                        ))
-                    })?;
-                store
-                    .fits_agent(
-                        &id,
-                        record.effective_description().as_deref(),
-                        &record.installed_package_versions(),
-                    )
-                    .map_err(RolloutError::NotApplicable)?;
-                record.package_assignment = Some(PackageAssignment {
-                    deployment: deployment.name.clone(),
-                    package: id,
-                });
-            }
-            RolloutTarget::Everything => {
-                let effective_owned = record.effective_description().map(Cow::into_owned);
-                let description = effective_owned.as_ref();
-                for (name, hash) in self.configs.candidates_for(description) {
-                    if record.config_assignments.get(&name) != Some(&hash) {
-                        self.configs
-                            .retain_saved(&name)
-                            .map_err(RolloutError::Storage)?;
-                        record.config_assignments.insert(name.clone(), hash);
-                        collected.push(name);
-                    }
-                }
-                // A conflict proposes nothing (the view says why), so it never blocks the
-                // Configurations riding the same press.
-                if let (Some(store), Ok(Some(deployment))) =
-                    (self.packages(), self.deployment_of(record))
-                {
-                    let installed = record.installed_package_versions();
-                    if let Some(id) = store.candidate(&deployment, description, &installed) {
-                        record.package_assignment = Some(PackageAssignment {
-                            deployment: deployment.name.clone(),
-                            package: id,
+            });
+        (package.is_some() || !configurations.is_empty()).then(|| Assignment {
+            deployment: deployment.name.clone(),
+            package,
+            configurations,
+        })
+    }
+
+    /// Writes releases (ADR-0025 clause 2, ADR-0037 clause 3): each Configuration's saved revision
+    /// is pinned — copied into the store's retained revisions, its hash the one the assignment
+    /// keeps — and the revisions and the records carrying the new assignments go to the store as
+    /// one operation. Only once it succeeded are they the fleet's. A failure leaves the fleet's
+    /// assignments as they were, the store puts back the records it wrote, and the revisions the
+    /// stored assignments do not reference are collected. Answers the Configurations the old and
+    /// new assignments name, whose unreferenced revisions the caller collects.
+    fn write_releases(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        releases: Vec<(InstanceUid, Option<Assignment>)>,
+    ) -> Result<Vec<String>, RolloutError> {
+        let names: BTreeSet<String> = releases
+            .iter()
+            .flat_map(|(_, release)| release.iter())
+            .flat_map(|release| release.configurations.keys().cloned())
+            .collect();
+        let written = self
+            .configs
+            .pin(&names, |hashes, revisions| {
+                let agents: Vec<(InstanceUid, PersistedAgent)> = releases
+                    .into_iter()
+                    .map(|(uid, release)| {
+                        let mut persisted = fleet[&uid].to_persisted();
+                        persisted.assignment = release.map(|mut release| {
+                            for (name, hash) in release.configurations.iter_mut() {
+                                hash.clone_from(&hashes[name]);
+                            }
+                            release
                         });
-                    }
-                }
-            }
+                        (uid, persisted)
+                    })
+                    .collect();
+                self.agent_store.release(revisions, &agents)?;
+                Ok(agents)
+            })
+            .map_err(|e| {
+                self.collect_revisions(names);
+                RolloutError::Storage(e)
+            })?;
+        let mut digests = self.written.lock().expect("written lock");
+        let mut touched = Vec::new();
+        for (uid, persisted) in written {
+            let record = fleet.get_mut(&uid).expect("released to a known Agent");
+            let previous = std::mem::replace(&mut record.assignment, persisted.assignment.clone());
+            touched.extend(
+                previous
+                    .iter()
+                    .chain(record.assignment.iter())
+                    .flat_map(|a| a.configurations.keys().cloned()),
+            );
+            digests.insert(uid, persisted.durable_digest());
         }
-        self.persist_if_dirty(uid, record);
-        // The rollout may have replaced a pinned revision nothing references any more.
-        for name in collected {
-            let referenced = referenced_hashes(&fleet, &name);
+        Ok(touched)
+    }
+
+    /// Collects every retained revision of `names` no stored assignment references any more — a
+    /// question the store answers (ADR-0037 clause 3).
+    fn collect_revisions(&self, names: impl IntoIterator<Item = String>) {
+        for name in names.into_iter().collect::<BTreeSet<_>>() {
+            let referenced = self.agent_store.referenced_revisions(&name);
             if let Err(e) = self.configs.retain_only(&name, &referenced) {
                 warn!(configuration = %name, error = %e, "cannot collect unreferenced revisions");
             }
         }
+    }
+
+    /// The per-Agent rollout act (ADR-0034 clause 6): releases the Deployment that claims this
+    /// Agent to it, replacing its assignment, and wakes the WebSocket loops so a connected Agent
+    /// hears it now.
+    ///
+    /// `named` is what the request body said: nothing, or the Deployment the operator means. Naming
+    /// another one is refused, and so is an Agent no Deployment claims or two claim. Naming one is
+    /// not a way past a conflict: honouring it would sidestep the conflict for good instead of
+    /// fixing it, and make this path the way into a state the fleet-wide act forbids.
+    pub fn rollout_to_agent(
+        &self,
+        uid: &InstanceUid,
+        named: Option<&str>,
+    ) -> Result<(), RolloutError> {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let record = fleet.get_mut(uid).ok_or(RolloutError::UnknownAgent)?;
+        let deployment = self
+            .deployment_of(record)
+            .map_err(RolloutError::NotApplicable)?
+            .ok_or_else(|| {
+                RolloutError::NotApplicable(format!(
+                    "agent {uid} is in no deployment — no Deployment's Selector matches it, so \
+                     there is nothing to roll out to it; label it or re-aim a Deployment"
+                ))
+            })?;
+        if let Some(name) = named {
+            if deployment.name != name {
+                return Err(RolloutError::NotApplicable(format!(
+                    "agent {uid} belongs to deployment {:?}, not {name:?}",
+                    deployment.name
+                )));
+            }
+        }
+        let store = self
+            .offering()
+            .map_err(RolloutError::UnknownResource)?
+            .store();
+        refuse_unreleasable(store, &deployment)?;
+        let release = self.release(store, &deployment, record);
+        if release == record.assignment {
+            refuse_a_package_left_out(store, &deployment, record, release.as_ref())?;
+        }
+        let touched = self.write_releases(&mut fleet, vec![(*uid, release)])?;
+        // The release may have replaced a pinned revision nothing references any more.
+        self.collect_revisions(touched);
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
-        info!(agent = %uid, "rollout to agent");
+        info!(agent = %uid, deployment = %deployment.name, "rollout to agent");
         Ok(())
     }
 
-    /// The resource-level rollout act for a Configuration (ADR-0025 point 5): releases the saved
-    /// revision to **every Agent it currently fits and aims at** — a bulk write of the same
-    /// per-Agent assignments — and returns how many Agents that was. An Agent that appears later
-    /// waits for its own act (point 6).
-    pub fn rollout_configuration(&self, name: &str) -> Result<usize, RolloutError> {
-        let config = self
-            .configs
-            .get(name)
-            .ok_or_else(|| RolloutError::UnknownResource(format!("no configuration {name:?}")))?;
-        let hash = self
-            .configs
-            .retain_saved(name)
-            .map_err(RolloutError::Storage)?;
-        let mut fleet = self.fleet.lock().expect("fleet lock");
-        let mut assigned = 0usize;
-        for (uid, record) in fleet.iter_mut() {
-            if !configs::fits(&config.saved, record.effective_description().as_deref()) {
-                continue;
-            }
-            record
-                .config_assignments
-                .insert(name.to_string(), hash.clone());
-            self.persist_if_dirty(uid, record);
-            assigned += 1;
-        }
-        let referenced = referenced_hashes(&fleet, name);
-        if let Err(e) = self.configs.retain_only(name, &referenced) {
-            warn!(configuration = %name, error = %e, "cannot collect unreferenced revisions");
-        }
-        drop(fleet);
-        self.push.send_modify(|rev| *rev += 1);
-        info!(configuration = %name, agents = assigned, "configuration rolled out to all matching agents");
-        Ok(assigned)
-    }
-
-    /// The rollout act for a Deployment (ADR-0025 point 5, ADR-0026 point 29): releases it to
-    /// every Agent it claims, and returns how many Agents that was.
+    /// The rollout act for a Deployment (ADR-0034 clause 6): releases it to every Agent it claims
+    /// and would move, replacing each one's assignment, and returns how many Agents that was.
     ///
     /// An Agent some *other* Deployment also claims is skipped rather than counted — the conflict
     /// is reported on that Agent, and a press that quietly resolved it here would be the ranking
@@ -1179,31 +1366,24 @@ impl AppState {
         let deployment = deployments
             .get(name)
             .ok_or_else(|| RolloutError::UnknownResource(format!("no deployment {name:?}")))?;
-        if deployment.packages.is_empty() {
-            return Err(RolloutError::NotApplicable(format!(
-                "deployment {name:?} holds no packages — put one in it before rolling it out"
-            )));
-        }
-        refuse_unsigned(store, deployment)?;
-        let mut assigned = 0usize;
-        for (uid, record) in fleet.iter_mut() {
-            let effective = record.effective_description().map(Cow::into_owned);
-            let claiming = deployment_for(&deployments, effective.as_ref());
+        refuse_unreleasable(store, deployment)?;
+        let mut releases: Vec<(InstanceUid, Option<Assignment>)> = Vec::new();
+        for (uid, record) in fleet.iter() {
+            let claiming = deployment_for(&deployments, record.effective_description().as_deref());
             match claiming {
                 Ok(Some(claimed)) if claimed.name == name => {}
                 _ => continue,
             }
-            let installed = record.installed_package_versions();
-            let Some(id) = store.candidate(deployment, effective.as_ref(), &installed) else {
-                continue;
-            };
-            record.package_assignment = Some(PackageAssignment {
-                deployment: name.to_string(),
-                package: id,
-            });
-            self.persist_if_dirty(uid, record);
-            assigned += 1;
+            let release = self.release(store, deployment, record);
+            if release != record.assignment {
+                releases.push((*uid, release));
+            }
         }
+        // In one order, so a rollout that fails part-way fails the same way every time.
+        releases.sort_by_key(|(uid, _)| uid.0);
+        let assigned = releases.len();
+        let touched = self.write_releases(&mut fleet, releases)?;
+        self.collect_revisions(touched);
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
         info!(deployment = %name, agents = assigned, "deployment rolled out to every agent it claims");
@@ -1237,30 +1417,34 @@ impl AppState {
     ///
     /// A label move changes only what the fleet view **proposes** (ADR-0025): the Agent's
     /// candidates follow its new channel, and nothing is distributed until a rollout act says so.
+    ///
+    /// The labels are part of the Agent's record (ADR-0035 clause 6) and are written with it before
+    /// this answers. A Client Agent's labels hold for its Client's other Agents (clause 4), so its
+    /// group is placed again.
     pub fn set_labels(
         &self,
         uid: &InstanceUid,
         set: BTreeMap<String, String>,
     ) -> Result<(), LabelError> {
-        crate::labels::check_pairs(&set).map_err(LabelError::Storage)?;
+        crate::labels::check_pairs(&set).map_err(LabelError::Invalid)?;
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get_mut(uid).ok_or(LabelError::UnknownAgent)?;
         let reported = crate::labels::reported_keys(record.description.as_ref());
         if let Some(clash) = set.keys().find(|key| reported.iter().any(|r| r == *key)) {
             return Err(LabelError::RestatesReported(clash.clone()));
         }
-        self.labels
-            .put(uid, set.clone())
-            .map_err(LabelError::Storage)?;
-        record.labels = set;
+        let previous = std::mem::replace(&mut record.labels, set);
+        if let Err(e) = self.persist(uid, record) {
+            record.labels = previous;
+            return Err(LabelError::Storage(e));
+        }
+        if let Some(group) = record.placement.group.clone() {
+            let groups = self.groups.lock().expect("groups lock");
+            inherit(&mut fleet, &groups, &group);
+        }
         drop(fleet);
         info!(agent = %uid, "labels set — candidates follow, nothing is distributed");
         Ok(())
-    }
-
-    /// This Agent's labels as the store holds them, for the REST view.
-    pub fn labels_of(&self, uid: &InstanceUid) -> BTreeMap<String, String> {
-        self.labels.get(uid)
     }
 
     /// Which Deployments hold each Package, keyed by `<agent type>@<version>` — how a Package
@@ -1282,12 +1466,30 @@ impl AppState {
         holding
     }
 
+    /// Which Deployments hold each Configuration, by name (ADR-0034 clause 9) — how a
+    /// Configuration answers "whom would this reach", since it does not aim by itself.
+    pub fn deployments_holding_configurations(&self) -> BTreeMap<String, Vec<String>> {
+        let mut holding: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let Some(store) = self.deployment_store() else {
+            return holding;
+        };
+        for deployment in store.list() {
+            for name in &deployment.configurations {
+                holding
+                    .entry(name.clone())
+                    .or_default()
+                    .push(deployment.name.clone());
+            }
+        }
+        holding
+    }
+
     /// Whom each Deployment reaches, per name — the three counts the fleet view reads.
     ///
     /// Zero has three meanings now, and only the first is a mistake to go hunting for:
     /// `claiming` is zero when the channel aims at nobody (a misspelled label, a Selector nothing
-    /// matches); `targeted` is zero when every Agent it claims already runs what it holds, which
-    /// is nothing to fix; and `conflicting` counts the Agents another Deployment also claims,
+    /// matches); `targeted` is zero when a press would move none of the Agents it claims — each
+    /// already holds what it would release — which is nothing to fix; and `conflicting` counts the Agents another Deployment also claims,
     /// which is the one an operator has to resolve before this channel can reach them.
     ///
     /// It answers for the fleet *as reported so far*: a channel aimed at hosts that have not
@@ -1310,11 +1512,7 @@ impl AppState {
                 Ok(Some(deployment)) => {
                     let entry = reach.entry(deployment.name.clone()).or_default();
                     entry.claiming += 1;
-                    let installed = record.installed_package_versions();
-                    if store
-                        .candidate(deployment, effective.as_deref(), &installed)
-                        .is_some()
-                    {
+                    if self.release(store, deployment, record) != record.assignment {
                         entry.targeted += 1;
                     }
                 }
@@ -1323,7 +1521,7 @@ impl AppState {
                 // them, not at whichever one happened to be listed first.
                 Err(_) => {
                     for (name, deployment) in &all {
-                        if configs::matches(&deployment.selector, effective.as_deref()) {
+                        if deployments::matches(&deployment.selector, effective.as_deref()) {
                             reach.entry(name.clone()).or_default().conflicting += 1;
                         }
                     }
@@ -1358,16 +1556,14 @@ impl AppState {
         }
         let removed = fleet.remove(uid);
         // Forgetting that left a stored record behind would be the "remembering under another
-        // name" ADR-0024 rejected — the record leaves the store with the row (ADR-0024).
+        // name" ADR-0024 rejected — the record leaves the store with the row, its labels with it
+        // (ADR-0024, ADR-0035 clause 6).
         self.unpersist(uid);
-        // A pinned revision only this Agent referenced is unreferenced now (ADR-0025).
         if let Some(record) = removed {
-            for name in record.config_assignments.keys() {
-                let referenced = referenced_hashes(&fleet, name);
-                if let Err(e) = self.configs.retain_only(name, &referenced) {
-                    warn!(configuration = %name, error = %e, "cannot collect unreferenced revisions");
-                }
-            }
+            // A Client Agent forgotten takes its labels from the Agents that inherited them.
+            self.unplace(&mut fleet, uid, record.placement.group.clone());
+            // A pinned revision only this Agent referenced is unreferenced now (ADR-0025).
+            self.collect_revisions(record.assigned_configurations().keys().cloned());
         }
         drop(fleet);
         self.push.send_modify(|rev| *rev += 1);
@@ -1388,24 +1584,68 @@ impl AppState {
         Some(restart_command(uid, self.capabilities()))
     }
 
-    /// Deletes a Configuration and removes every assignment that referenced it (ADR-0025 point
-    /// 7); `false` when none of that name exists. That is **not inert** for an Agent that had it
-    /// assigned: its composed map shrinks and it applies the map without the entry — only an
-    /// Agent left assigned nothing keeps running what it runs (goal 9).
-    pub fn delete_configuration(&self, name: &str) -> Result<bool, String> {
-        let mut fleet = self.fleet.lock().expect("fleet lock");
-        let deleted = self.configs.delete(name)?;
+    /// Deletes a Configuration (ADR-0034 clause 8); `false` when none of that name exists.
+    /// **Refused while any Agent's assignment pins it** — the message says how many — because a
+    /// deletion must not change what a running Agent receives: those Agents are rolled out through
+    /// a Deployment without it first, or forgotten. A deleted Configuration leaves every Deployment
+    /// that held it.
+    ///
+    /// The fleet lock is held across the check and the delete, so a rollout cannot pin it in
+    /// between.
+    pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
+        let fleet = self.fleet.lock().expect("fleet lock");
+        let pinning = self.agent_store.pinning(Pin::Configuration(name));
+        if pinning > 0 {
+            return Err(DeleteError::Pinned(format!(
+                "configuration {name:?} is pinned by the assignment of {pinning} Agent(s) — roll \
+                 them out through a Deployment without it, or forget them, before deleting it"
+            )));
+        }
+        let deleted = self.configs.delete(name).map_err(DeleteError::Storage)?;
         if deleted {
-            for (uid, record) in fleet.iter_mut() {
-                if record.config_assignments.remove(name).is_some() {
-                    self.persist_if_dirty(uid, record);
+            if let Some(store) = self.deployment_store() {
+                let left = store
+                    .drop_configuration(name)
+                    .map_err(|e| DeleteError::Storage(e.to_string()))?;
+                if !left.is_empty() {
+                    info!(configuration = %name, deployments = ?left, "configuration left the deployments that held it");
                 }
             }
-            drop(fleet);
-            self.push.send_modify(|rev| *rev += 1);
-            info!(configuration = %name, "configuration deleted — its entry leaves every assigned map");
+            info!(configuration = %name, "configuration deleted");
         }
+        drop(fleet);
         Ok(deleted)
+    }
+
+    /// Puts a Configuration into a Deployment (ADR-0034 clause 4); a Configuration the Server
+    /// does not hold is `Missing`. Distributes nothing. Under the fleet lock, so a Configuration
+    /// cannot be deleted between the check and the write.
+    pub fn put_deployment_configuration(
+        &self,
+        name: &str,
+        configuration: &str,
+    ) -> Result<Deployment, DeploymentError> {
+        let store = self.deployment_store().ok_or(DeploymentError::NotFound)?;
+        let _fleet = self.fleet.lock().expect("fleet lock");
+        if self.configs.get(configuration).is_none() {
+            return Err(DeploymentError::Missing(format!(
+                "no configuration {configuration:?} — save it before a deployment can hold it"
+            )));
+        }
+        store.put_configuration(name, configuration)
+    }
+
+    /// Takes a Configuration out of a Deployment. Not gated: nothing a Deployment holds is frozen
+    /// (ADR-0034 clause 7), and an Agent already released keeps its pinned revision until the next
+    /// press, which drops it from the Agent's map.
+    pub fn remove_deployment_configuration(
+        &self,
+        name: &str,
+        configuration: &str,
+    ) -> Result<Deployment, DeploymentError> {
+        self.deployment_store()
+            .ok_or(DeploymentError::NotFound)?
+            .remove_configuration(name, configuration)
     }
 
     /// Persists one record when — and only when — its durable content changed since it was last
@@ -1415,18 +1655,23 @@ impl AppState {
     /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
     /// one that refuses reports.
     fn persist_if_dirty(&self, uid: &InstanceUid, record: &AgentRecord) {
+        if let Err(e) = self.persist(uid, record) {
+            warn!(agent = %uid, error = %e, "cannot persist the agent record");
+        }
+    }
+
+    /// Writes one record when its durable content changed since it was last written, and says
+    /// whether the write failed — for an operator's act that must not be answered unwritten.
+    fn persist(&self, uid: &InstanceUid, record: &AgentRecord) -> Result<(), String> {
         let persisted = record.to_persisted();
         let digest = persisted.durable_digest();
         let mut written = self.written.lock().expect("written lock");
         if written.get(uid) == Some(&digest) {
-            return;
+            return Ok(());
         }
-        match self.agent_store.put(uid, &persisted) {
-            Ok(()) => {
-                written.insert(*uid, digest);
-            }
-            Err(e) => warn!(agent = %uid, error = %e, "cannot persist the agent record"),
-        }
+        self.agent_store.put(uid, &persisted)?;
+        written.insert(*uid, digest);
+        Ok(())
     }
 
     /// Drops one record from the store and the dirty-check ledger — the storage half of
@@ -1548,8 +1793,12 @@ impl AppState {
             && msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0
         {
             let new_uid = InstanceUid::default();
-            if let Some(record) = fleet.remove(&uid) {
+            if let Some(mut record) = fleet.remove(&uid) {
+                // The labels go with it (ADR-0035 clause 6); the old identity leaves its group,
+                // and the new one is placed below.
+                let group = record.placement.group.take();
                 fleet.insert(new_uid, record);
+                self.unplace(&mut fleet, &uid, group);
                 // The persisted record follows the identity (ADR-0024): the old key leaves the
                 // store now, the new one is written by the dirty check at this exchange's end.
                 self.unpersist(&uid);
@@ -1606,7 +1855,10 @@ impl AppState {
         }
         if let Some(revocations) = &self.revocations {
             if let Some((host, bound)) = binding {
-                if let Err(e) = revocations.check_report(host, bound.as_bytes()) {
+                let subject = presented
+                    .map(|p| p.subject_values.clone())
+                    .unwrap_or_default();
+                if let Err(e) = revocations.check_report(host, &subject, bound.as_bytes()) {
                     return Processed {
                         reply: bad_request(&e),
                         uid: None,
@@ -1621,13 +1873,12 @@ impl AppState {
                 }
             }
         }
-        // Labels outlive the record (ADR-0024): a host that was forgotten, or that this Server has
-        // only just restarted into, comes back in the channel the operator put it in.
-        let persisted_labels = self.labels.get(&uid);
         let record = fleet.entry(uid).or_insert_with(|| {
             info!(agent = %uid, transport = transport.as_str(), "new agent");
             AgentRecord {
-                labels: persisted_labels,
+                labels: BTreeMap::new(),
+                host: None,
+                placement: Placement::default(),
                 sequence_num: msg.sequence_num,
                 capabilities: 0,
                 description: None,
@@ -1644,8 +1895,7 @@ impl AppState {
                 owner: conn,
                 // A new Agent waits (ADR-0025 point 6): it is assigned nothing until an
                 // operator's rollout act says so, and the fleet view shows what it could get.
-                config_assignments: BTreeMap::new(),
-                package_assignment: None,
+                assignment: None,
             }
         });
 
@@ -1657,6 +1907,15 @@ impl AppState {
         if compressed && (!known || gap) {
             reply_flags |= ServerToAgentFlags::ReportFullState as u64;
         }
+
+        // The Host it arrived over (ADR-0035 clause 2) — none without a host register.
+        let arrived_over = self
+            .revocations
+            .as_ref()
+            .and(presented.and_then(|p| p.host.clone()));
+        let moved = record.host != arrived_over;
+        record.host = arrived_over;
+        let described = msg.agent_description.is_some();
 
         record.sequence_num = msg.sequence_num;
         record.transport = transport;
@@ -1743,6 +2002,14 @@ impl AppState {
             }
         }
 
+        // What places it in its Client and under its Host may have changed (ADR-0035): a new
+        // record, a new Host, a new description, or a new identity — a re-key took the old one
+        // out of its group, and a compressed message carries no description to place it by.
+        if !known || moved || described || rekeyed.is_some() {
+            self.place(&mut fleet, &uid);
+        }
+        let record = fleet.get_mut(&uid).expect("the record was just written");
+
         // The Agent asked to be issued a client certificate (ADR-0021). Signing it here, on the
         // connection it arrived over, is the whole of the approval: admission already required
         // every proof this endpoint asks of any message, which is what the Baseline's flow means
@@ -1766,8 +2033,9 @@ impl AppState {
                         .and_then(|csr| {
                             // The message's own instance_uid, before any re-key (ADR-0021).
                             ca.check_claims(&csr, &sender)?;
-                            let (predecessor, host) = self.renews(ca.as_ref(), &csr, presented)?;
-                            Ok((ca.sign(&csr, &host)?, predecessor))
+                            let (predecessor, host, subject) =
+                                self.renews(ca.as_ref(), &csr, presented)?;
+                            Ok((ca.sign(&csr, &host, &subject)?, predecessor))
                         }) {
                         Err(e) => Ok(Err(e)),
                         Ok((signed, predecessor)) => self
@@ -1874,7 +2142,7 @@ impl AppState {
         let remote_config = if disconnected {
             None
         } else {
-            let desired = self.configs.compose(&record.config_assignments);
+            let desired = self.configs.compose(record.assigned_configurations());
             offer(record, desired.as_ref())
         };
 
@@ -1925,7 +2193,6 @@ impl AppState {
         let effective = record.effective_description();
         let description = effective.as_deref();
         let assigned = record.assigned_package();
-        let deployment = assigned_deployment(offering, record);
         let reported = record
             .package_statuses
             .as_ref()
@@ -1934,36 +2201,30 @@ impl AppState {
         if reported
             == offering
                 .store
-                .assigned_hash_for(assigned, deployment.as_ref(), description)
+                .assigned_hash_for(assigned, description)
                 .as_slice()
         {
             return None;
         }
-        offering.store.offer_for_assigned(
-            assigned,
-            deployment.as_ref(),
-            description,
-            &offering.download_base,
-        )
+        offering.store.offer_for_assigned(assigned, description)
     }
 
-    /// Whether a certificate naming `host` may fetch the uploaded artifact `(id, platform)` from
-    /// the download route (ADR-0026): it is offered to an Agent the host speaks for. The offer's
-    /// own test decides, for each such Agent — the `instance_uid`s bound to the host, or every Agent
-    /// for a host marked as a Gateway. Nothing is offered without package delivery or a host
-    /// register.
+    /// Whether a certificate naming `host` may fetch the artifact `(id, platform)` from the download
+    /// route (ADR-0026): it is offered to an Agent the host speaks for. The offer's own test
+    /// decides (ADR-0033 clause 10), for each such Agent — the `instance_uid`s bound to the host, or
+    /// every Agent for a host marked as a Gateway. Nothing is offered without package delivery or a
+    /// host register.
     ///
-    /// The package store, the Deployments and the host register are read first and released
-    /// before the fleet is locked: no two of those locks are held together here.
+    /// The package store and the host register are read first and released before the fleet is
+    /// locked: no two of those locks are held together here.
     pub fn offers_artifact(&self, host: &str, id: &PackageId, platform: &Platform) -> bool {
         let (Some(offering), Some(revocations)) = (&self.packages, &self.revocations) else {
             return false;
         };
         // What does not depend on the Agent is resolved once, before the fleet is locked.
-        let Some(artifact) = offering.store.uploaded(id, platform) else {
+        let Some(artifact) = offering.store.offerable(id, platform) else {
             return false;
         };
-        let signing = offering.deployments.signing(id, platform);
         let speaks_for = revocations.speaks_for(host);
         let fleet = self.fleet.lock().expect("fleet lock");
         let offered = |record: &AgentRecord| {
@@ -1972,10 +2233,6 @@ impl AppState {
                 && record.assigned_package() == Some(id)
                 && artifact.offered_to(
                     record.assigned_package(),
-                    record
-                        .package_assignment
-                        .as_ref()
-                        .is_some_and(|a| signing.contains(&a.deployment)),
                     record.effective_description().as_deref(),
                 )
         };
@@ -1989,23 +2246,17 @@ impl AppState {
         }
     }
 
-    /// Why this Agent is **proposed** nothing although it accepts packages: more than one
-    /// Deployment claims it, and an Agent belongs to at most one (ADR-0026 point 26). `None` when
-    /// nothing is wrong.
+    /// Why this Agent is **proposed** nothing: more than one Deployment claims it, and an Agent
+    /// belongs to at most one (ADR-0026 point 26). `None` when nothing is wrong. Every Agent can be
+    /// in conflict, since a Deployment carries Configurations as well as Packages (ADR-0034).
     ///
     /// A conflict takes the *candidate* away and never a standing assignment: an Agent already
     /// rolled out to keeps its offer, because nothing distributes or un-distributes by itself
-    /// (ADR-0025). Creating an overlapping channel must not withdraw software from a running host.
+    /// (ADR-0025). Creating an overlapping channel must not withdraw anything from a running host.
     ///
     /// `claim` is what [`deployment_for`] answered for this Agent — `Ok(None)` when package
-    /// delivery is not configured, since then no Deployment exists to claim it.
-    fn package_conflict(
-        record: &AgentRecord,
-        claim: &Result<Option<&Deployment>, String>,
-    ) -> Option<String> {
-        if !accepts_packages(record) {
-            return None;
-        }
+    /// delivery, which arms the Deployments, is not configured.
+    fn package_conflict(claim: &Result<Option<&Deployment>, String>) -> Option<String> {
         claim.as_ref().err().cloned()
     }
 
@@ -2071,7 +2322,7 @@ impl AppState {
     pub fn offer_for(&self, uid: &InstanceUid) -> Option<ServerToAgent> {
         let fleet = self.fleet.lock().expect("fleet lock");
         let record = fleet.get(uid)?;
-        let desired = self.configs.compose(&record.config_assignments);
+        let desired = self.configs.compose(record.assigned_configurations());
         let remote_config = offer(record, desired.as_ref());
         let packages_available = self.packages_offer(record);
         if remote_config.is_none() && packages_available.is_none() {
@@ -2100,66 +2351,11 @@ impl AppState {
     }
 
     /// Whether any Agent's assignment references this Package — the gate that makes an assigned
-    /// Package's bytes immutable (ADR-0025 point 8). Only the fleet can answer it, which is why the
-    /// store does not try to.
+    /// Package's bytes immutable (ADR-0025 point 8). The Agent store answers it (ADR-0037
+    /// clause 3); the fleet lock keeps a rollout from pinning it meanwhile.
     fn package_set_assigned(&self, id: &PackageId) -> bool {
-        let fleet = self.fleet.lock().expect("fleet lock");
-        fleet
-            .values()
-            .any(|record| record.assigned_package() == Some(id))
-    }
-
-    /// Whether any Agent's assignment was released through *this* Deployment and pins *this*
-    /// Package — the gate that freezes a channel's signature and its hold on that Package
-    /// (ADR-0026 point 31).
-    ///
-    /// It is not the same question as [`package_set_assigned`](Self::package_set_assigned): a
-    /// Package may be assigned through one channel while another holds it untouched, and only the
-    /// channel an offer actually travels through has anything frozen.
-    fn deployment_pins(&self, deployment: &str, id: &PackageId) -> bool {
-        let fleet = self.fleet.lock().expect("fleet lock");
-        fleet.values().any(|record| {
-            record
-                .package_assignment
-                .as_ref()
-                .is_some_and(|a| a.deployment == deployment && a.package == *id)
-        })
-    }
-
-    /// The refusal every write that would change **what a standing offer travels with** answers
-    /// with.
-    ///
-    /// What gates re-offering is the package hash, which covers the version and the content — **not
-    /// the signature**. So a signature changed under a standing offer would never reach the Agent
-    /// installing against the old one, and one *removed* would silently turn a signed rollout into
-    /// an unsigned one for any Agent that has not finished. A Client with a verification key then
-    /// refuses an artifact it was already downloading, for a reason nothing on the Server said out
-    /// loud.
-    ///
-    /// This is narrower than freezing the channel. **Swapping the Package a channel holds is not gated**
-    /// — that is how a rollout proceeds, and it leaves every standing offer exactly as it was.
-    fn refuse_if_pinned(&self, deployment: &str, id: &PackageId) -> Result<(), String> {
-        if self.deployment_pins(deployment, id) {
-            return Err(format!(
-                "deployment {deployment:?} released {id} to at least one Agent, so what it holds \
-                 for that Package is frozen — roll the channel out with the next version instead, \
-                 which is a new Package"
-            ));
-        }
-        Ok(())
-    }
-
-    /// The Deployment store for a write [`refuse_if_pinned`](Self::refuse_if_pinned) gates —
-    /// `NotFound` when package delivery is not configured, `Conflict` when the gate refuses.
-    fn unpinned_deployments(
-        &self,
-        name: &str,
-        id: &PackageId,
-    ) -> Result<&DeploymentStore, DeploymentError> {
-        let store = self.deployment_store().ok_or(DeploymentError::NotFound)?;
-        self.refuse_if_pinned(name, id)
-            .map_err(DeploymentError::Conflict)?;
-        Ok(store)
+        let _fleet = self.fleet.lock().expect("fleet lock");
+        self.agent_store.pinning(Pin::Package(id)) > 0
     }
 
     /// Puts a Package into a channel (ADR-0026 point 23). Not gated: adding one for an Agent type
@@ -2177,66 +2373,35 @@ impl AppState {
             .put_package(name, id, replace)
     }
 
-    /// Takes a Package out of a channel — refused while an assignment released through this
-    /// channel pins it.
+    /// Takes a Package out of a channel. Not gated: nothing a Deployment holds is frozen
+    /// (ADR-0034 clause 7) — an assignment pins the Package itself, so an Agent already released
+    /// keeps its offer until the next press.
     pub fn remove_deployment_package(
         &self,
         name: &str,
         id: &PackageId,
     ) -> Result<Deployment, DeploymentError> {
-        self.unpinned_deployments(name, id)?
+        self.deployment_store()
+            .ok_or(DeploymentError::NotFound)?
             .remove_package(name, id)
     }
 
-    /// Records one artifact's signature on a channel, frozen once the channel released that Package.
-    pub fn put_deployment_signature(
-        &self,
-        name: &str,
-        id: &PackageId,
-        platform: &Platform,
-        signature: Vec<u8>,
-    ) -> Result<Deployment, DeploymentError> {
-        self.unpinned_deployments(name, id)?
-            .put_signature(name, id, platform, signature)
-    }
-
-    /// Takes one artifact's signature away, with the same gate.
-    pub fn remove_deployment_signature(
-        &self,
-        name: &str,
-        id: &PackageId,
-        platform: &Platform,
-    ) -> Result<Deployment, DeploymentError> {
-        self.unpinned_deployments(name, id)?
-            .remove_signature(name, id, platform)
-    }
-
-    /// Deletes a Deployment — **refused while an Agent's assignment names it**.
+    /// Deletes a Deployment — **refused while an Agent's assignment names it** (ADR-0034 clause 8).
     ///
-    /// An assignment points at the channel it was released through, and that channel is where the
-    /// offer's signature lives. Deleting it under a standing offer would keep offering the Package
-    /// without one. So the operator ends the offer first, by an act that says so: rolling those
-    /// Agents out through another Deployment, or deleting the Package.
+    /// An assignment points at the channel it was released through, and the fleet view names it.
+    /// So the operator ends that first, by an act that says so: rolling those Agents out through
+    /// another Deployment, or forgetting them.
     ///
     /// The fleet lock is held across the check and the delete, so a rollout cannot assign through
     /// the channel in between.
     pub fn delete_deployment(&self, name: &str) -> Result<bool, DeploymentError> {
         let store = self.deployment_store().ok_or(DeploymentError::NotFound)?;
         let fleet = self.fleet.lock().expect("fleet lock");
-        let released = fleet
-            .values()
-            .filter(|record| {
-                record
-                    .package_assignment
-                    .as_ref()
-                    .is_some_and(|a| a.deployment == name)
-            })
-            .count();
-        if released > 0 {
+        let pinning = self.agent_store.pinning(Pin::Deployment(name));
+        if pinning > 0 {
             return Err(DeploymentError::Conflict(format!(
-                "deployment {name:?} released a package to {released} Agent(s), and their offer \
-                 travels with its signatures — roll them out through another deployment, or delete \
-                 the package, before deleting it"
+                "deployment {name:?} is pinned by the assignment of {pinning} Agent(s) — roll them \
+                 out through another deployment, or forget them, before deleting it"
             )));
         }
         let deleted = store.delete(name)?;
@@ -2267,59 +2432,60 @@ impl AppState {
         Ok(())
     }
 
-    /// Stores one streamed upload as an entry of a Package (ADR-0026). Refused while the Package is
-    /// assigned to an Agent (ADR-0025 point 8); no push, because saving never distributes.
+    /// Stores one streamed upload as an entry of a Package (ADR-0026, ADR-0037). Refused while the
+    /// Package is assigned to an Agent (ADR-0025 point 8); no push, because saving never
+    /// distributes.
     pub fn put_package_entry(
         &self,
         id: &PackageId,
         platform: &Platform,
-        staged: &std::path::Path,
+        bytes: &mut dyn std::io::Read,
     ) -> Result<(), String> {
         self.refuse_if_assigned(id)?;
-        self.package_store()?.put_staged(id, platform, staged)?;
+        self.package_store()?.put_entry_from(id, platform, bytes)?;
         info!(set = %id, platform = %format!("{}-{}", platform.os, platform.arch), "package entry stored");
         Ok(())
     }
 
-    /// Where an upload for one entry is streamed before it becomes an artifact. Refused while
-    /// the Package is assigned to an Agent (ADR-0025 point 8), so a refused upload is refused
-    /// before its bytes are streamed.
-    pub fn package_staging_path(
+    /// Whether an upload for one entry of `id` may begin: the Package exists and is not assigned
+    /// to an Agent (ADR-0025 point 8), so a refused upload is refused before its bytes are
+    /// streamed.
+    pub fn check_package_upload(&self, id: &PackageId) -> Result<(), String> {
+        self.refuse_if_assigned(id)?;
+        self.package_store()?.writable(id)
+    }
+
+    /// Writes the operator's signature onto one entry of a Package (ADR-0033), and answers what the
+    /// Server found when it checked it. Refused while the Package is assigned to an Agent, like
+    /// any other write to its entries (ADR-0025 point 8): the re-offer gate does not cover the
+    /// signature, so one changed under a standing offer would never reach the Agent.
+    pub fn put_package_entry_signature(
         &self,
         id: &PackageId,
         platform: &Platform,
-    ) -> Result<std::path::PathBuf, String> {
+        signature: Vec<u8>,
+    ) -> Result<SignatureState, String> {
         self.refuse_if_assigned(id)?;
-        self.package_store()?.staging_path(id, platform)
+        let state = self
+            .package_store()?
+            .put_signature(id, platform, signature)?;
+        info!(set = %id, platform = %platform.tag(), state = state.as_str(), "package entry signed");
+        Ok(state)
     }
 
-    /// Whether [`set_package_entry_source`](Self::set_package_entry_source) would take this
-    /// reference, answered without storing it.
-    pub fn check_package_entry_source(
-        &self,
-        id: &PackageId,
-        content_hash: &[u8],
-        source: &Source,
-    ) -> Result<(), String> {
-        self.refuse_if_assigned(id)?;
-        self.package_store()?
-            .check_entry_source(id, content_hash, source)
-    }
-
-    /// Points one entry of a Package at an artifact hosted elsewhere (ADR-0026).
-    /// Refused while the Package is assigned to an Agent (ADR-0025 point 8).
-    pub fn set_package_entry_source(
+    /// Takes one entry's signature away (ADR-0033); `Ok(false)` when it carries none. Refused
+    /// while the Package is assigned to an Agent (ADR-0025 point 8).
+    pub fn remove_package_entry_signature(
         &self,
         id: &PackageId,
         platform: &Platform,
-        content_hash: Vec<u8>,
-        source: Source,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.refuse_if_assigned(id)?;
-        self.package_store()?
-            .set_entry_source(id, platform, content_hash, source)?;
-        info!(set = %id, "package entry now referenced from its source");
-        Ok(())
+        let removed = self.package_store()?.remove_signature(id, platform)?;
+        if removed {
+            info!(set = %id, platform = %platform.tag(), "package entry signature removed");
+        }
+        Ok(removed)
     }
 
     /// Deletes one entry of a Package; `Ok(false)` when the Package or entry does not exist.
@@ -2337,25 +2503,33 @@ impl AppState {
         Ok(deleted)
     }
 
-    /// Deletes a Package and removes every assignment that referenced it (ADR-0025 point 7);
-    /// `Ok(false)` when none of that identity exists. The withdrawal uninstalls nothing — an
-    /// Agent keeps running what it installed (ADR-0026) — and the loops wake so a pending offer
-    /// is not delivered after its Package is gone.
+    /// Deletes a Package (ADR-0034 clause 8); `Ok(false)` when none of that identity exists.
+    /// **Refused while any Agent's assignment pins it** — the message says how many — because a
+    /// deletion must not change what a running Agent receives. A deleted Package leaves every
+    /// Deployment that held it. Nothing is uninstalled either way (ADR-0026).
+    ///
+    /// The fleet lock is held across the check and the delete, so a rollout cannot pin it in
+    /// between.
     pub fn delete_package_set(&self, id: &PackageId) -> Result<bool, String> {
-        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let fleet = self.fleet.lock().expect("fleet lock");
+        let pinning = self.agent_store.pinning(Pin::Package(id));
+        if pinning > 0 {
+            return Err(format!(
+                "package {id} is pinned by the assignment of {pinning} Agent(s) — roll them out \
+                 through a Deployment without it, or forget them, before deleting it"
+            ));
+        }
         let deleted = self.package_store()?.delete_set(id)?;
         if deleted {
-            for (uid, record) in fleet.iter_mut() {
-                let removed = record.assigned_package() == Some(id);
-                if removed {
-                    record.package_assignment = None;
-                    self.persist_if_dirty(uid, record);
+            if let Some(store) = self.deployment_store() {
+                let left = store.drop_package(id).map_err(|e| e.to_string())?;
+                if !left.is_empty() {
+                    info!(set = %id, deployments = ?left, "package left the deployments that held it");
                 }
             }
-            drop(fleet);
-            self.push.send_modify(|rev| *rev += 1);
-            info!(set = %id, "package set deleted — every assignment that referenced it is gone");
+            info!(set = %id, "package set deleted");
         }
+        drop(fleet);
         Ok(deleted)
     }
 
@@ -2375,6 +2549,58 @@ impl AppState {
         }
     }
 
+    /// The Agents each Host carries (ADR-0035 clause 7) — those whose record names it as the Host
+    /// they last arrived over — and the name it is displayed by: the `host.name` its Client Agent
+    /// reports, when it has exactly one on a direct connection. Shown only; it decides nothing.
+    pub fn host_agents(&self) -> BTreeMap<String, HostAgents> {
+        let fleet = self.fleet.lock().expect("fleet lock");
+        let mut hosts: BTreeMap<String, HostAgents> = BTreeMap::new();
+        for (uid, record) in fleet.iter() {
+            let Some(host) = &record.host else { continue };
+            let reported = |key: &str| {
+                record
+                    .description
+                    .as_ref()
+                    .and_then(|d| {
+                        attributes::string_value(&d.identifying_attributes, key).or_else(|| {
+                            attributes::string_value(&d.non_identifying_attributes, key)
+                        })
+                    })
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let entry = hosts.entry(host.clone()).or_default();
+            let is_client_agent = record.placement.client_agent == Some(*uid);
+            if is_client_agent && record.placement.group == Some(Group::Host(host.clone())) {
+                entry.name = Some(reported("host.name")).filter(|name| !name.is_empty());
+            }
+            entry.agents.push(HostAgentView {
+                instance_uid: uid.to_string(),
+                service_name: reported(attributes::SERVICE_NAME),
+                service_instance_name: reported(attributes::SERVICE_INSTANCE_NAME),
+                host_name: reported("host.name"),
+                client: crate::labels::is_client_agent(record.description.as_ref()),
+                client_agent: record
+                    .placement
+                    .client_agent
+                    .map(|uid| uid.to_string())
+                    .unwrap_or_default(),
+                machine: match &record.placement.group {
+                    Some(Group::Behind { machine, .. }) => machine.clone(),
+                    _ => String::new(),
+                },
+                ambiguous: record.placement.ambiguous,
+                connected: record.connected,
+            });
+        }
+        for entry in hosts.values_mut() {
+            entry
+                .agents
+                .sort_by(|a, b| a.instance_uid.cmp(&b.instance_uid));
+        }
+        hosts
+    }
+
     /// The REST view of the fleet (`GET /api/v1/agents`).
     pub fn snapshot(&self) -> Vec<AgentView> {
         let fleet = self.fleet.lock().expect("fleet lock");
@@ -2386,63 +2612,34 @@ impl AppState {
                 // One derived description for everything below, so a label can never mean one
                 // thing for the offer and another for what the view proposes.
                 let effective = record.effective_description();
-                let desired = self.configs.compose(&record.config_assignments);
-                let matched = self.configs.matching_names(effective.as_deref());
+                let desired = self.configs.compose(record.assigned_configurations());
                 let claim = match &deployments {
                     Some(all) => deployment_for(all, effective.as_deref()),
                     None => Ok(None),
                 };
-                let package_conflict = Self::package_conflict(record, &claim);
+                let package_conflict = Self::package_conflict(&claim);
                 let claimed = claim.ok().flatten();
                 // Which channel claims it *now* — the other half of the answer, so "no channel" and
                 // "a channel with nothing for me" are not the same empty row (ADR-0026 point 25).
                 let claiming_deployment = claimed.map(|d| d.name.clone()).unwrap_or_default();
 
-                // What is waiting (ADR-0025 point 4): the difference between the candidates a
-                // rollout act would release and what the assignments pin.
-                let pending_configurations: Vec<PendingConfigurationView> = self
-                    .configs
-                    .candidates_for(effective.as_deref())
-                    .into_iter()
-                    .filter_map(|(name, hash)| match record.config_assignments.get(&name) {
-                        Some(assigned) if *assigned == hash => None,
-                        Some(_) => Some(PendingConfigurationView {
-                            name,
-                            change: "update".to_string(),
-                        }),
-                        None => Some(PendingConfigurationView {
-                            name,
-                            change: "new".to_string(),
-                        }),
-                    })
-                    .collect();
-                // At most one, because an Agent belongs to at most one Deployment and that
-                // Deployment holds one Package for its type (ADR-0026). A conflict proposes
-                // nothing — `package_conflict` above says why.
-                let pending_packages: Vec<PendingPackageView> = self
+                // What a press would release to it now (ADR-0034 clause 6). A conflict, or no
+                // channel at all, proposes nothing — `package_conflict` says why.
+                let proposed = self
                     .packages()
                     .zip(claimed)
-                    .and_then(|(store, deployment)| {
-                        let id = store.candidate(
-                            deployment,
-                            effective.as_deref(),
-                            &record.installed_package_versions(),
-                        )?;
-                        let change = match record.assigned_package() {
-                            Some(assigned) if *assigned == id => return None,
-                            Some(_) => "update",
-                            None => "new",
-                        };
-                        Some(PendingPackageView {
-                            deployment: deployment.name.clone(),
-                            display_name: id.display_name(),
-                            agent_type: id.agent_type,
-                            version: id.version,
-                            change: change.to_string(),
-                        })
-                    })
-                    .into_iter()
+                    .map(|(store, deployment)| self.release(store, deployment, record));
+                let matched = proposed
+                    .iter()
+                    .flatten()
+                    .flat_map(|release| release.configurations.keys().cloned())
                     .collect();
+                let waits = match (&proposed, claimed) {
+                    (Some(release), Some(deployment)) => {
+                        waiting(record.assignment.as_ref(), release.as_ref(), deployment)
+                    }
+                    _ => Waiting::default(),
+                };
 
                 AgentView::from_record(
                     uid,
@@ -2451,8 +2648,7 @@ impl AppState {
                     matched,
                     package_conflict,
                     claiming_deployment,
-                    pending_configurations,
-                    pending_packages,
+                    waits,
                     is_stale(record, self.stale_after(), self.clock.now_ms()),
                 )
             })
@@ -2462,29 +2658,141 @@ impl AppState {
     }
 }
 
-/// Every revision hash of `name` that any Agent's assignment still references — what
-/// [`ConfigStore::retain_only`] is told to keep.
-fn referenced_hashes(fleet: &HashMap<InstanceUid, AgentRecord>, name: &str) -> BTreeSet<String> {
-    fleet
-        .values()
-        .filter_map(|record| record.config_assignments.get(name))
-        .cloned()
-        .collect()
+/// Takes `uid` out of `group`, and the group out of the index once it holds nobody.
+fn unindex(groups: &mut HashMap<Group, HashSet<InstanceUid>>, group: &Group, uid: &InstanceUid) {
+    if let Some(members) = groups.get_mut(group) {
+        members.remove(uid);
+        if members.is_empty() {
+            groups.remove(group);
+        }
+    }
+}
+
+/// Places the members of one group under their Client Agent (ADR-0035 clause 4): with exactly
+/// one, the others inherit its labels; with more than one, nobody inherits and every member is
+/// marked ambiguous; with none, nobody inherits.
+fn inherit(
+    fleet: &mut HashMap<InstanceUid, AgentRecord>,
+    groups: &HashMap<Group, HashSet<InstanceUid>>,
+    group: &Group,
+) {
+    let Some(members) = groups.get(group) else {
+        return;
+    };
+    let clients: Vec<InstanceUid> = members
+        .iter()
+        .filter(|uid| {
+            fleet
+                .get(uid)
+                .is_some_and(|record| crate::labels::is_client_agent(record.description.as_ref()))
+        })
+        .copied()
+        .collect();
+    let (client_agent, labels) = match clients.as_slice() {
+        [one] => (Some(*one), fleet[one].labels.clone()),
+        _ => (None, BTreeMap::new()),
+    };
+    let ambiguous = clients.len() > 1;
+    for uid in members {
+        if let Some(record) = fleet.get_mut(uid) {
+            record.placement.client_agent = client_agent;
+            record.placement.inherited = if client_agent == Some(*uid) {
+                BTreeMap::new()
+            } else {
+                labels.clone()
+            };
+            record.placement.ambiguous = ambiguous;
+        }
+    }
+}
+
+/// What waits for one Agent's next press — every part in which what the claiming Deployment
+/// would release differs from what the assignment pins.
+#[derive(Default)]
+struct Waiting {
+    configurations: Vec<PendingConfigurationView>,
+    packages: Vec<PendingPackageView>,
+    /// The Deployment the press would release through, when the assignment names another one or
+    /// none.
+    deployment: String,
+}
+
+/// What waits for an Agent's next press (ADR-0025 clause 4, ADR-0034 clauses 5 and 6): the
+/// difference between what the claiming Deployment would release and what the assignment pins,
+/// per Configuration, for the Package, and for the Deployment the release goes through — so
+/// whatever makes a press move this Agent shows here, and the reach count agrees with the view.
+///
+/// `new` is not pinned yet, `update` is pinned at another revision or version, and `remove` is
+/// pinned and leaves the release — the Deployment no longer holds it, or no longer fits it to this
+/// Agent — while the release keeps something else, so the smaller assignment is applied. `kept` is
+/// pinned while the release holds nothing for the Agent at all: the press leaves it with no
+/// assignment, it is offered nothing, and it keeps running what it runs (ADR-0034 clause 6).
+fn waiting(
+    assigned: Option<&Assignment>,
+    release: Option<&Assignment>,
+    deployment: &Deployment,
+) -> Waiting {
+    let dropped = if release.is_some() { "remove" } else { "kept" };
+    let pinned = assigned.map_or(&NO_CONFIGURATIONS, |a| &a.configurations);
+    let released = release.map_or(&NO_CONFIGURATIONS, |a| &a.configurations);
+    let mut configurations: Vec<PendingConfigurationView> = released
+        .iter()
+        .filter_map(|(name, hash)| {
+            let change = match pinned.get(name) {
+                Some(pinned) if pinned == hash => return None,
+                Some(_) => "update",
+                None => "new",
+            };
+            Some(PendingConfigurationView {
+                name: name.clone(),
+                change: change.to_string(),
+            })
+        })
+        .chain(
+            pinned
+                .keys()
+                .filter(|name| !released.contains_key(*name))
+                .map(|name| PendingConfigurationView {
+                    name: name.clone(),
+                    change: dropped.to_string(),
+                }),
+        )
+        .collect();
+    configurations.sort_by(|a, b| a.name.cmp(&b.name));
+    let pinned_package = assigned.and_then(|a| a.package.as_ref());
+    let released_package = release.and_then(|a| a.package.as_ref());
+    let package = match (pinned_package, released_package) {
+        (Some(pinned), Some(released)) if pinned == released => None,
+        (Some(_), Some(released)) => Some((released, "update")),
+        (None, Some(released)) => Some((released, "new")),
+        (Some(pinned), None) => Some((pinned, dropped)),
+        (None, None) => None,
+    };
+    let packages = package
+        .map(|(id, change)| PendingPackageView {
+            deployment: deployment.name.clone(),
+            agent_type: id.agent_type.clone(),
+            version: id.version.clone(),
+            display_name: id.display_name(),
+            change: change.to_string(),
+        })
+        .into_iter()
+        .collect();
+    let through = release
+        .map(|r| r.deployment.as_str())
+        .filter(|through| assigned.map(|a| a.deployment.as_str()) != Some(*through))
+        .unwrap_or_default();
+    Waiting {
+        configurations,
+        packages,
+        deployment: through.to_string(),
+    }
 }
 
 /// Whether this Agent declared that it accepts packages — the first condition of every offer
 /// (ADR-0026 clause 35).
 fn accepts_packages(record: &AgentRecord) -> bool {
     record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 != 0
-}
-
-/// The Deployment this Agent's package assignment names: the channel the act released through,
-/// not the one that claims the Agent today, because an offer travels with what the act released.
-fn assigned_deployment(offering: &PackageOffering, record: &AgentRecord) -> Option<Deployment> {
-    record
-        .package_assignment
-        .as_ref()
-        .and_then(|a| offering.deployments.get(&a.deployment))
 }
 
 /// The remote-config offer for one Agent, or `None` when the hash comparison says it already has
@@ -2539,6 +2847,35 @@ fn display_version(reported: &str) -> String {
         .to_string()
 }
 
+/// The Agents one Host carries, and the name it is shown by (ADR-0035 clause 7).
+#[derive(Default)]
+pub struct HostAgents {
+    /// The `host.name` its Client Agent reports; `None` for a Gateway, and while it has no single
+    /// Client Agent.
+    pub name: Option<String>,
+    pub agents: Vec<HostAgentView>,
+}
+
+/// One Agent under the Host it arrived over (ADR-0035 clause 7): enough to group it by its
+/// Client Agent.
+pub struct HostAgentView {
+    pub instance_uid: String,
+    pub service_name: String,
+    pub service_instance_name: String,
+    /// The `host.name` it reports, or empty.
+    pub host_name: String,
+    /// Whether it is a Client Agent: it reports `supervisor.kind.*`.
+    pub client: bool,
+    /// The Instance UID of its Client Agent — its own, for the Client Agent — or empty.
+    pub client_agent: String,
+    /// Behind a Gateway, the machine it is grouped by (`host.id=…` or `host.name=…`); empty on
+    /// a direct connection.
+    pub machine: String,
+    /// Its group holds more than one Client Agent.
+    pub ambiguous: bool,
+    pub connected: bool,
+}
+
 /// One Agent as the REST API and the UI see it.
 #[derive(Serialize)]
 pub struct AgentView {
@@ -2567,12 +2904,12 @@ pub struct AgentView {
     pub identifying_attributes: BTreeMap<String, String>,
     /// Every reported non-identifying attribute — Selectors match these too.
     pub non_identifying_attributes: BTreeMap<String, String>,
-    /// The Configurations whose saved revision currently matches this Agent — the **candidates**
-    /// a rollout act would release to it (ADR-0025), in name order. Never what it runs; that is
-    /// [`assigned_configurations`](Self::assigned_configurations).
+    /// The Configurations a press of the Deployment claiming this Agent would release to it — the
+    /// ones it holds that fit this Agent's type (ADR-0034), in name order. Never what it runs;
+    /// that is [`assigned_configurations`](Self::assigned_configurations).
     pub matched_configurations: Vec<String>,
-    /// The Configurations rolled out to this Agent (ADR-0025), in name order — what its offer is
-    /// composed from.
+    /// The Configurations rolled out to this Agent (ADR-0034 clause 5), in name order — what its
+    /// offer is composed from.
     pub assigned_configurations: Vec<String>,
     /// The Deployment that claims this Agent **now** — whose Selector matches it — or empty when
     /// none does.
@@ -2585,7 +2922,7 @@ pub struct AgentView {
     /// in each case, which is why the Server says which one it is rather than showing an empty
     /// row three ways.
     pub deployment: String,
-    /// The Deployment this Agent's package was released **through** (ADR-0026), or empty when
+    /// The Deployment this Agent's release went **through** (ADR-0034 clause 5), or empty when
     /// nothing has been rolled out to it. Pinned as of that act, so it may name a channel that no
     /// longer claims this Agent.
     pub assigned_deployment: String,
@@ -2595,13 +2932,23 @@ pub struct AgentView {
     /// putting a newer Package in that channel, changes what is *proposed* and never what this Agent
     /// was already given.
     pub assigned_package: String,
-    /// The Configurations waiting for a rollout act toward this Agent (ADR-0025 point 4): a
-    /// candidate not yet assigned (`change: "new"`), or one whose saved revision is newer than
-    /// the assigned one (`change: "update"`). The Server never acts on this by itself.
+    /// The Configurations waiting for a rollout act toward this Agent (ADR-0025 point 4,
+    /// ADR-0034): one its Deployment holds and it is not assigned (`change: "new"`), one whose
+    /// saved revision differs from the assigned one (`change: "update"`), one assigned that the
+    /// next press drops from a release that keeps something else (`change: "remove"`), or one
+    /// assigned while the release holds nothing for the Agent, so the press leaves it with no
+    /// assignment and it keeps running what it runs (`change: "kept"`). The Server never acts on
+    /// this by itself.
     pub pending_configurations: Vec<PendingConfigurationView>,
-    /// The Package waiting for a rollout act toward this Agent (ADR-0025 point 4) — at most one,
-    /// the candidate of the Deployment that claims it, when that is not what it is assigned.
+    /// The Package waiting for a rollout act toward this Agent (ADR-0025 point 4) — at most one:
+    /// the candidate of the Deployment that claims it, when that is not what it is assigned, or
+    /// the assigned one the next press drops (`change: "remove"`, or `"kept"` as for a
+    /// Configuration).
     pub pending_packages: Vec<PendingPackageView>,
+    /// The Deployment the next press releases through, when the assignment names another one or
+    /// none (ADR-0034 clause 6); empty otherwise. A release whose content is unchanged still moves
+    /// the assignment to the claiming Deployment.
+    pub pending_deployment: String,
     /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
     /// nothing.
     pub desired_hash: String,
@@ -2612,9 +2959,9 @@ pub struct AgentView {
     pub available_components: Vec<String>,
     /// The Agent's package installations (ADR-0026), in name order; empty until reported.
     pub packages: Vec<PackageStatusView>,
-    /// Why this Agent is proposed no package although it accepts them — more than one Deployment
-    /// claims it, and an Agent belongs to at most one (ADR-0026 point 26). The message names every
-    /// Deployment in the way. Absent when at most one claims it.
+    /// Why this Agent is proposed nothing — more than one Deployment claims it, and an Agent
+    /// belongs to at most one (ADR-0026 point 26). The message names every Deployment in the way.
+    /// Absent when at most one claims it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_conflict: Option<String>,
     /// What the Agent said about the *offer* rather than about a package it holds — an offer it
@@ -2656,14 +3003,36 @@ pub struct AgentView {
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed_labels: Vec<String>,
+    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0035
+    /// clause 4); empty for the Client Agent itself, for an Agent whose Client the Server cannot
+    /// tell, and for an ambiguous one.
+    pub inherited_labels: BTreeMap<String, String>,
+    /// The Instance UID of this Agent's Client Agent — its own, for the Client Agent — or empty
+    /// when the Server cannot tell.
+    pub client_agent: String,
+    /// The group this Agent's Client is recognised in holds more than one Client Agent, so it
+    /// inherits nothing (ADR-0035 clause 4).
+    pub ambiguous: bool,
+    /// The Host this Agent last arrived over (ADR-0035 clause 2), or empty. Behind a Gateway, the
+    /// Gateway's.
+    pub host: String,
+    /// The `fleet.host.*` values its effective description takes from that Host (ADR-0035
+    /// clause 3); empty behind a Gateway.
+    pub host_attributes: BTreeMap<String, String>,
+    /// Reported attributes in the Server's `fleet.` space, left out of what Selectors match
+    /// (ADR-0035 clause 5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored_attributes: Vec<String>,
 }
 
 /// One Configuration waiting for a rollout act toward one Agent (ADR-0025).
 #[derive(Serialize)]
 pub struct PendingConfigurationView {
     pub name: String,
-    /// `new` — a candidate not yet assigned; `update` — the saved revision is newer than the
-    /// assigned one.
+    /// `new` — held by the claiming Deployment and not yet assigned; `update` — the saved
+    /// revision differs from the assigned one; `remove` — assigned, and dropped by the next press,
+    /// which applies the smaller map; `kept` — assigned, and the next press leaves the Agent with no
+    /// assignment, so it keeps running it.
     pub change: String,
 }
 
@@ -2673,8 +3042,9 @@ pub struct PendingConfigurationView {
 pub struct DeploymentReach {
     /// Agents this Deployment claims — and no other does. Zero is the aim mistake worth hunting.
     pub claiming: usize,
-    /// Of those, the Agents this channel would actually move — it holds a Package for what they
-    /// report and it is an upgrade. Zero with a non-zero `claiming` means everyone is up to date.
+    /// Of those, the Agents a press would actually move — what it would release differs from what
+    /// their assignment pins (ADR-0034 clause 6). Zero with a non-zero `claiming` means everyone is
+    /// up to date.
     pub targeted: usize,
     /// Agents this Deployment matches that **another one matches too**. They are offered nothing
     /// new until an operator narrows a Selector (ADR-0026 point 26).
@@ -2691,7 +3061,9 @@ pub struct PendingPackageView {
     pub version: String,
     /// What an operator reads: the Agent type and the version together.
     pub display_name: String,
-    /// `new` — nothing is assigned for this Agent type; `update` — another version is.
+    /// `new` — nothing is assigned for this Agent type; `update` — another version is; `remove` —
+    /// the assigned one, which the next press drops; `kept` — the assigned one, while the next
+    /// press leaves the Agent with no assignment.
     pub change: String,
 }
 
@@ -2821,8 +3193,7 @@ impl AgentView {
         matched_configurations: Vec<String>,
         package_conflict: Option<String>,
         claiming_deployment: String,
-        pending_configurations: Vec<PendingConfigurationView>,
-        pending_packages: Vec<PendingPackageView>,
+        waits: Waiting,
         stale: bool,
     ) -> Self {
         let (identifying, non_identifying) = match &record.description {
@@ -2865,20 +3236,20 @@ impl AgentView {
             identifying_attributes: identifying,
             non_identifying_attributes: non_identifying,
             matched_configurations,
-            assigned_configurations: record.config_assignments.keys().cloned().collect(),
+            assigned_configurations: record.assigned_configurations().keys().cloned().collect(),
             deployment: claiming_deployment,
             assigned_deployment: record
-                .package_assignment
+                .assignment
                 .as_ref()
                 .map(|a| a.deployment.clone())
                 .unwrap_or_default(),
             assigned_package: record
-                .package_assignment
-                .as_ref()
-                .map(|a| a.package.to_string())
+                .assigned_package()
+                .map(PackageId::to_string)
                 .unwrap_or_default(),
-            pending_configurations,
-            pending_packages,
+            pending_configurations: waits.configurations,
+            pending_packages: waits.packages,
+            pending_deployment: waits.deployment,
             desired_hash: desired.map(|d| hex::encode(&d.hash)).unwrap_or_default(),
             capabilities: capability_names(record.capabilities),
             available_components: record
@@ -2931,6 +3302,16 @@ impl AgentView {
             stale,
             shadowed_labels: crate::labels::shadowed(record.description.as_ref(), &record.labels),
             labels: record.labels.clone(),
+            inherited_labels: record.placement.inherited.clone(),
+            client_agent: record
+                .placement
+                .client_agent
+                .map(|uid| uid.to_string())
+                .unwrap_or_default(),
+            ambiguous: record.placement.ambiguous,
+            host: record.host.clone().unwrap_or_default(),
+            host_attributes: record.placement.host_values.clone(),
+            ignored_attributes: crate::labels::ignored(record.description.as_ref()),
         }
     }
 }
@@ -3059,18 +3440,51 @@ fn config_map_text(map: Option<&AgentConfigMap>) -> String {
         .join("\n")
 }
 
-/// Refuses a rollout of a Deployment that lacks a signature for any entry of any Package it holds,
-/// naming each such Package and its platforms; nothing is released (ADR-0026).
-fn refuse_unsigned(
+/// Refuses a per-Agent press that would move nothing because the Package the Deployment holds for
+/// the Agent's type is not released to it — no upgrade, no entry for its platform — and says why,
+/// naming the version it compared against (ADR-0025 clause 16). A press that moves nothing for any
+/// other reason is not refused: it is the same request arriving twice.
+fn refuse_a_package_left_out(
+    store: &crate::packages::PackageStore,
+    deployment: &Deployment,
+    record: &AgentRecord,
+    release: Option<&Assignment>,
+) -> Result<(), RolloutError> {
+    let effective = record.effective_description();
+    let description = effective.as_deref();
+    let Some(held) = crate::packages::reported_agent_type(description)
+        .and_then(|agent_type| deployment.package_for(agent_type))
+    else {
+        return Ok(());
+    };
+    if release.and_then(|r| r.package.as_ref()) == Some(held) {
+        return Ok(());
+    }
+    store
+        .fits_agent(held, description, &record.installed_package_versions())
+        .map_err(RolloutError::NotApplicable)
+}
+
+/// Refuses a rollout of a Deployment that holds nothing, or a Package with an unsigned entry —
+/// naming each such Package and its platforms; nothing is released (ADR-0034 clause 6, ADR-0033).
+fn refuse_unreleasable(
     store: &crate::packages::PackageStore,
     deployment: &Deployment,
 ) -> Result<(), RolloutError> {
+    if deployment.holds_nothing() {
+        return Err(RolloutError::NotApplicable(format!(
+            "deployment {:?} holds no package and no configuration — put one in it before rolling \
+             it out",
+            deployment.name
+        )));
+    }
     let unsigned = store.unsigned_in(deployment);
     if unsigned.is_empty() {
         return Ok(());
     }
     Err(RolloutError::NotApplicable(format!(
-        "deployment {:?} carries no signature for {} — sign every artifact before rolling it out",
+        "deployment {:?} holds packages with unsigned entries: {} — sign every entry on the \
+         Packages tab before rolling it out",
         deployment.name,
         unsigned.join("; ")
     )))
@@ -3263,8 +3677,9 @@ mod tests {
             package_statuses: None,
             owner: None,
             labels: BTreeMap::new(),
-            config_assignments: BTreeMap::new(),
-            package_assignment: None,
+            host: None,
+            placement: Placement::default(),
+            assignment: None,
         }
     }
 
@@ -3453,39 +3868,68 @@ mod tests {
         assert!(dir.join("agents").join(format!("{new_uid}.json")).exists());
     }
 
-    /// There is no seed. A record carrying no assignment fields loads as **assigned nothing** —
-    /// the Server never invents a rollout at startup — and what it could receive shows up as
+    /// A fleet on `dir` whose Deployments are armed: an empty package store under `packages`, and
+    /// the `stable` channel claiming every `otelcol` holding the Configuration `fleet`.
+    fn configuring_fleet(dir: &std::path::Path) -> AppState {
+        let store = PackageStore::open(dir.join("packages")).expect("store");
+        let state = AppState::new(dir.join("configs"))
+            .expect("state")
+            .with_packages(Some(
+                PackageOffering::new(&dir.join("packages"), store).expect("offering"),
+            ));
+        if state.configurations().get("fleet").is_none() {
+            state
+                .save_configuration("fleet", body("receivers: {}\n"))
+                .expect("save a Configuration nobody has released");
+            state
+                .deployment_store()
+                .expect("deployments")
+                .put(
+                    "stable",
+                    BTreeMap::from([("service.name".to_string(), "otelcol".to_string())]),
+                )
+                .expect("deployment");
+            state
+                .put_deployment_configuration("stable", "fleet")
+                .expect("hold it");
+        }
+        state
+    }
+
+    /// A top-level revision of `text` for the Agent type `report` describes.
+    fn body(text: &str) -> Revision {
+        Revision {
+            body: text.to_string(),
+            role: String::new(),
+            service_name: "otelcol".to_string(),
+        }
+    }
+
+    /// There is no seed. A record carrying no assignment loads as **assigned nothing** — the Server
+    /// never invents a rollout at startup — and what its Deployment would release shows up as
     /// waiting instead, which is the one thing an operator has to act on.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0026, ADR-0034
     #[test]
     fn a_record_without_assignments_loads_assigned_to_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
         let uid = InstanceUid::default();
         {
-            let state = AppState::new(dir.clone()).expect("state");
+            let state = configuring_fleet(&dir);
             state.process(report(&uid, 1), Transport::WebSocket, Some(1));
-            state
-                .save_configuration(
-                    "fleet",
-                    Revision {
-                        selector: BTreeMap::new(),
-                        body: "receivers: {}\n".to_string(),
-                        role: String::new(),
-                        service_name: String::new(),
-                    },
-                )
-                .expect("save a Configuration nobody has released");
+            state.rollout_deployment("stable").expect("rollout");
         }
-        let record_path = dir.join("agents").join(format!("{uid}.json"));
+        let record_path = dir
+            .join("configs")
+            .join("agents")
+            .join(format!("{uid}.json"));
         let mut record: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&record_path).expect("read"))
                 .expect("json");
         let fields = record.as_object_mut().expect("object");
-        fields.remove("config_assignments");
-        fields.remove("package_assignments");
+        assert!(fields.remove("assignment").is_some(), "it was assigned");
         std::fs::write(&record_path, serde_json::to_vec(&record).expect("json")).expect("write");
 
-        let state = AppState::new(dir).expect("reopened state");
+        let state = configuring_fleet(&dir);
         let view = &state.snapshot()[0];
         assert!(
             view.assigned_configurations.is_empty(),
@@ -3497,26 +3941,15 @@ mod tests {
         );
     }
 
-    /// ADR-0025: saving proposes, the acts assign — and an Agent that appears after the bulk act
-    /// waits for one of its own (point 6).
-    // Verifies: ADR-0025
+    /// ADR-0025: saving proposes, the acts assign — and an Agent that appears after the
+    /// Deployment's act waits for one of its own (point 6).
+    /// Verifies: ADR-0025, ADR-0034
     #[test]
     fn rollout_acts_assign_and_a_late_agent_waits() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
-        let state = AppState::new(dir).expect("state");
+        let state = configuring_fleet(&dir);
         let early = InstanceUid::default();
         state.process(report(&early, 1), Transport::Http, None);
-        state
-            .save_configuration(
-                "fleet",
-                Revision {
-                    selector: BTreeMap::new(),
-                    body: "receivers: {}\n".to_string(),
-                    role: String::new(),
-                    service_name: String::new(),
-                },
-            )
-            .expect("save");
 
         let view = &state.snapshot()[0];
         assert!(
@@ -3526,11 +3959,12 @@ mod tests {
         assert_eq!(view.pending_configurations[0].change, "new");
 
         assert_eq!(
-            state.rollout_configuration("fleet").expect("rollout"),
+            state.rollout_deployment("stable").expect("rollout"),
             1,
-            "the bulk act assigns the one known Agent"
+            "the Deployment's act assigns the one known Agent"
         );
         assert_eq!(state.snapshot()[0].assigned_configurations, ["fleet"]);
+        assert_eq!(state.snapshot()[0].assigned_deployment, "stable");
 
         // The latecomer: a candidate, waiting, assigned nothing — until its own act.
         let late = InstanceUid::default();
@@ -3543,7 +3977,7 @@ mod tests {
         assert!(late_view.assigned_configurations.is_empty());
         assert_eq!(late_view.pending_configurations[0].change, "new");
         state
-            .rollout_to_agent(&late, &RolloutTarget::Everything)
+            .rollout_to_agent(&late, None)
             .expect("rollout to agent");
         let late_view = state
             .snapshot()
@@ -3552,6 +3986,73 @@ mod tests {
             .expect("the late agent");
         assert_eq!(late_view.assigned_configurations, ["fleet"]);
         assert!(late_view.pending_configurations.is_empty());
+    }
+
+    /// A rollout whose store fails part-way leaves disk and memory agreeing: the record it wrote
+    /// first is put back as it was, the fleet keeps its assignments, the revision those still pin
+    /// stays, and the one nothing pins is collected. The next press, once the store writes again,
+    /// releases to both.
+    /// Verifies: ADR-0037
+    #[test]
+    fn a_rollout_that_fails_part_way_leaves_disk_and_memory_as_they_were() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = configuring_fleet(dir.path());
+        let (first, second) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        for uid in [first, second] {
+            state.process(report(&uid, 1), Transport::Http, None);
+        }
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 2);
+        let pinned = state
+            .configurations()
+            .get("fleet")
+            .expect("fleet")
+            .retained
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let agents = dir.path().join("configs").join("agents");
+        let first_path = agents.join(format!("{first}.json"));
+        let before = std::fs::read(&first_path).expect("the first record");
+
+        state
+            .save_configuration("fleet", body("receivers: {otlp: {}}\n"))
+            .expect("edit");
+        // The second record cannot be replaced: a directory holding a file stands in its place.
+        let second_path = agents.join(format!("{second}.json"));
+        std::fs::remove_file(&second_path).expect("remove");
+        std::fs::create_dir_all(second_path.join("in-the-way")).expect("obstacle");
+
+        assert!(matches!(
+            state.rollout_deployment("stable"),
+            Err(RolloutError::Storage(_))
+        ));
+        assert_eq!(
+            std::fs::read(&first_path).expect("the first record"),
+            before,
+            "the record written before the failure is put back"
+        );
+        for view in state.snapshot() {
+            assert_eq!(
+                view.pending_configurations[0].change, "update",
+                "{}",
+                view.instance_uid
+            );
+        }
+        let retained = state
+            .configurations()
+            .get("fleet")
+            .expect("fleet")
+            .retained
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            retained, pinned,
+            "the pinned revision stays, the unpinned one is collected"
+        );
+
+        std::fs::remove_dir_all(&second_path).expect("clear the obstacle");
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 2);
     }
 
     /// ADR-0024: a queued restart is operator intent and survives the Server restarting.
@@ -3701,9 +4202,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let revocations = Arc::new(
             Revocations::open(
-                Box::new(
-                    crate::fs::FsLedgerStore::open(dir.path().join("revocation")).expect("ledger"),
-                ),
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
                 Arc::new(crate::clock::SystemClock),
                 Vec::new(),
             )
@@ -3715,6 +4214,7 @@ mod tests {
         let presented = |host: &str, serial: &str| Presented {
             id: CertId::new(b"CA", serial),
             host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
         };
         let victim = InstanceUid::default();
         let own = state.process_presented(
@@ -3790,9 +4290,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let revocations = Arc::new(
             Revocations::open(
-                Box::new(
-                    crate::fs::FsLedgerStore::open(dir.path().join("revocation")).expect("ledger"),
-                ),
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
                 Arc::new(crate::clock::SystemClock),
                 Vec::new(),
             )
@@ -3805,6 +4303,7 @@ mod tests {
         let presented = |host: &str| Presented {
             id: CertId::new(b"CA", host),
             host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
         };
         let first = InstanceUid::default();
         let accepted = state.process_presented(
@@ -3839,8 +4338,8 @@ mod tests {
 
     // ---- Who may fetch an uploaded artifact (ADR-0026) ----
 
-    /// A fleet delivering `otelcol@1.0.0`, uploaded for linux/amd64 and signed on the `stable`
-    /// channel that claims every `otelcol`, with a host register.
+    /// A fleet delivering `otelcol@1.0.0`, uploaded and signed for linux/amd64 and held by the
+    /// `stable` channel that claims every `otelcol`, with a host register.
     fn delivering_fleet(dir: &std::path::Path) -> (AppState, Arc<Revocations>, PackageId) {
         let store = PackageStore::open(dir.join("packages")).expect("store");
         let id = PackageId::new("otelcol", "1.0.0").expect("id");
@@ -3850,7 +4349,7 @@ mod tests {
             .expect("entry");
         let revocations = Arc::new(
             Revocations::open(
-                Box::new(crate::fs::FsLedgerStore::open(dir.join("revocation")).expect("ledger")),
+                Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
                 Arc::new(crate::clock::SystemClock),
                 Vec::new(),
             )
@@ -3859,7 +4358,7 @@ mod tests {
         let state = AppState::new(dir.join("configs"))
             .expect("state")
             .with_packages(Some(
-                PackageOffering::new(store, String::new()).expect("offering"),
+                PackageOffering::new(&dir.join("packages"), store).expect("offering"),
             ))
             .with_revocations(Some(revocations.clone()));
         state
@@ -3878,14 +4377,14 @@ mod tests {
         Platform::new("linux", "amd64").expect("platform")
     }
 
-    /// Puts `id` into the `stable` channel, signed for linux/amd64 — saved, released to nobody.
+    /// Signs `id` for linux/amd64 and puts it into the `stable` channel — saved, released to nobody.
     fn put_signed(state: &AppState, id: &PackageId) {
+        state
+            .put_package_entry_signature(id, &linux(), vec![1; 64])
+            .expect("signature");
         state
             .put_deployment_package("stable", id, true)
             .expect("package");
-        state
-            .put_deployment_signature("stable", id, &linux(), vec![1; 64])
-            .expect("signature");
     }
 
     /// One report of an `otelcol` Agent on linux/amd64 that accepts packages, over a certificate
@@ -3916,6 +4415,7 @@ mod tests {
             Some(&Presented {
                 id: CertId::new(b"CA", host),
                 host: Some(host.to_string()),
+                subject_values: crate::revocation::SubjectValues::default(),
             }),
         )
     }
@@ -3942,6 +4442,7 @@ mod tests {
             Some(&Presented {
                 id: CertId::new(b"CA", "h2"),
                 host: Some("h2".to_string()),
+                subject_values: crate::revocation::SubjectValues::default(),
             }),
         );
 
@@ -3958,6 +4459,45 @@ mod tests {
             state.offers_artifact("h2", &id, &linux()),
             "a Gateway speaks for any Agent"
         );
+    }
+
+    /// The offer and the download agree on the capability half of the test (ADR-0033 clause 10): an
+    /// Agent that does not declare `AcceptsPackages` is offered nothing, and its host may fetch
+    /// nothing through it, although its assignment names a signed Package that fits it.
+    /// Verifies: ADR-0033
+    #[test]
+    fn an_agent_that_accepts_no_packages_is_neither_offered_nor_fetched_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _, id) = delivering_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_from(&state, "h1", uid, &[]);
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        assert!(state.offers_artifact("h1", &id, &linux()));
+        let attr = opamp::attributes::string_attr;
+        let reply = state.process_presented(
+            AgentToServer {
+                instance_uid: uid.as_bytes().to_vec(),
+                sequence_num: 1,
+                capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64,
+                agent_description: Some(AgentDescription {
+                    identifying_attributes: vec![attr("service.name", "otelcol")],
+                    non_identifying_attributes: vec![
+                        attr("os.type", "linux"),
+                        attr("host.arch", "amd64"),
+                    ],
+                }),
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", "h1"),
+                host: Some("h1".to_string()),
+                subject_values: crate::revocation::SubjectValues::default(),
+            }),
+        );
+        assert!(reply.reply.packages_available.is_none(), "no offer");
+        assert!(!state.offers_artifact("h1", &id, &linux()), "and no fetch");
     }
 
     /// An Agent that echoes the aggregate hash of its offer is not sent it again, and can still
@@ -4004,5 +4544,873 @@ mod tests {
         }
         assert_eq!(state.rollout_deployment("stable").expect("the press"), 2);
         assert!(state.offers_artifact("h1", &v2, &linux()));
+    }
+
+    // ---- A Deployment carries Configurations beside its Packages (ADR-0034) ----
+
+    /// One report of an `otelcol` Agent on linux/amd64 over a certificate naming `h1` that takes
+    /// both remote configuration and packages, echoing the hashes it holds.
+    fn report_holding(
+        state: &AppState,
+        uid: InstanceUid,
+        config_hash: &[u8],
+        packages_hash: &[u8],
+    ) -> Processed {
+        use opamp::proto::AgentCapabilities as C;
+        let attr = opamp::attributes::string_attr;
+        state.process_presented(
+            AgentToServer {
+                instance_uid: uid.as_bytes().to_vec(),
+                capabilities: C::ReportsStatus as u64
+                    | C::AcceptsRemoteConfig as u64
+                    | C::AcceptsPackages as u64
+                    | C::ReportsPackageStatuses as u64,
+                agent_description: Some(AgentDescription {
+                    identifying_attributes: vec![attr("service.name", "otelcol")],
+                    non_identifying_attributes: vec![
+                        attr("os.type", "linux"),
+                        attr("host.arch", "amd64"),
+                    ],
+                }),
+                remote_config_status: (!config_hash.is_empty()).then(|| RemoteConfigStatus {
+                    last_remote_config_hash: config_hash.to_vec(),
+                    status: RemoteConfigStatuses::Applied as i32,
+                    ..Default::default()
+                }),
+                package_statuses: (!packages_hash.is_empty()).then(|| PackageStatuses {
+                    server_provided_all_packages_hash: packages_hash.to_vec(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", "h1"),
+                host: Some("h1".to_string()),
+                subject_values: crate::revocation::SubjectValues::default(),
+            }),
+        )
+    }
+
+    /// The names of the entries a config offer carries.
+    fn offered_names(offer: &AgentRemoteConfig) -> Vec<String> {
+        let mut names: Vec<String> = offer
+            .config
+            .as_ref()
+            .expect("a map")
+            .config_map
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `delivering_fleet` with two Configurations in `stable`: `base`, for the Agent's type, and
+    /// `telegraf-conf`, typed for another Agent type.
+    fn mixed_fleet(dir: &std::path::Path) -> (AppState, PackageId) {
+        let (state, _, id) = delivering_fleet(dir);
+        state
+            .save_configuration("base", body("receivers: {}\n"))
+            .expect("base");
+        let mut telegraf = body("[agent]\n");
+        telegraf.service_name = "telegraf".to_string();
+        state
+            .save_configuration("telegraf-conf", telegraf)
+            .expect("telegraf");
+        for name in ["base", "telegraf-conf"] {
+            state
+                .put_deployment_configuration("stable", name)
+                .expect("hold it");
+        }
+        (state, id)
+    }
+
+    /// A Deployment holding a Package and two Configurations, one typed for another Agent type,
+    /// releases to an Agent the Package and the one Configuration that fits it — one act, one
+    /// assignment.
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_deployment_releases_its_package_and_the_fitting_configurations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, id) = mixed_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_holding(&state, uid, &[], &[]);
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+
+        let reply = report_holding(&state, uid, &[], &[]).reply;
+        let config = reply.remote_config.expect("a config offer");
+        assert_eq!(
+            offered_names(&config),
+            ["base"],
+            "the typed one does not fit"
+        );
+        let packages = reply.packages_available.expect("a package offer");
+        assert_eq!(
+            packages.packages.keys().collect::<Vec<_>>(),
+            [&id.agent_type]
+        );
+        let view = &state.snapshot()[0];
+        assert_eq!(view.assigned_deployment, "stable");
+        assert_eq!(view.assigned_package, id.to_string());
+        assert_eq!(view.assigned_configurations, ["base"]);
+        assert!(view.pending_configurations.is_empty());
+        assert!(view.pending_packages.is_empty());
+    }
+
+    /// The hash gates send only what changed: a new body re-sends the config map and no package
+    /// offer, and a new Package re-sends the package offer and no config map — though each is
+    /// one press of the whole Deployment.
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_second_press_sends_only_the_part_that_changed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _) = mixed_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_holding(&state, uid, &[], &[]);
+        state.rollout_deployment("stable").expect("rollout");
+        let first = report_holding(&state, uid, &[], &[]).reply;
+        let config_hash = first.remote_config.expect("config").config_hash;
+        let packages_hash = first
+            .packages_available
+            .expect("packages")
+            .all_packages_hash;
+        let settled = report_holding(&state, uid, &config_hash, &packages_hash).reply;
+        assert!(settled.remote_config.is_none() && settled.packages_available.is_none());
+
+        state
+            .save_configuration("base", body("receivers: {otlp: {}}\n"))
+            .expect("edit");
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        let reply = report_holding(&state, uid, &config_hash, &packages_hash).reply;
+        let config_hash = reply.remote_config.expect("the new map").config_hash;
+        assert!(reply.packages_available.is_none(), "no new package offer");
+
+        let v2 = PackageId::new("otelcol", "2.0.0").expect("id");
+        let store = state.packages().expect("store");
+        store.create(&v2).expect("create");
+        store
+            .put_entry(&v2, &linux(), b"v2".to_vec())
+            .expect("entry");
+        put_signed(&state, &v2);
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        let reply = report_holding(&state, uid, &config_hash, &packages_hash).reply;
+        assert!(reply.remote_config.is_none(), "no new config map");
+        assert!(reply.packages_available.is_some(), "the new package offer");
+    }
+
+    /// A press of a Deployment that no longer holds a Configuration drops it from the Agent's map;
+    /// until the press, the view shows the drop waiting.
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_configuration_the_deployment_dropped_leaves_the_map_on_the_next_press() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _) = mixed_fleet(dir.path());
+        state
+            .save_configuration("extra", body("exporters: {}\n"))
+            .expect("extra");
+        state
+            .put_deployment_configuration("stable", "extra")
+            .expect("hold it");
+        let uid = InstanceUid([1; 16]);
+        report_holding(&state, uid, &[], &[]);
+        state.rollout_deployment("stable").expect("rollout");
+        let offer = report_holding(&state, uid, &[], &[])
+            .reply
+            .remote_config
+            .expect("offer");
+        assert_eq!(offered_names(&offer), ["base", "extra"]);
+
+        state
+            .remove_deployment_configuration("stable", "extra")
+            .expect("drop it");
+        let view = &state.snapshot()[0];
+        assert_eq!(view.assigned_configurations, ["base", "extra"]);
+        assert_eq!(
+            view.pending_configurations
+                .iter()
+                .map(|p| (p.name.as_str(), p.change.as_str()))
+                .collect::<Vec<_>>(),
+            [("extra", "remove")]
+        );
+        assert_eq!(state.deployment_reach()["stable"].targeted, 1);
+
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        assert_eq!(state.snapshot()[0].assigned_configurations, ["base"]);
+        let offer = report_holding(&state, uid, &offer.config_hash, &[])
+            .reply
+            .remote_config
+            .expect("the smaller map is offered");
+        assert_eq!(offered_names(&offer), ["base"]);
+    }
+
+    /// A Deployment that keeps nothing for an Agent leaves it with no assignment on the next press,
+    /// and the Agent keeps running what it runs: the view shows what it was given as `kept`, never
+    /// as `remove`, and the press makes no offer that would take it away. A Package pinned with no
+    /// Configuration sends no config map either, so nothing empty ever replaces a running one.
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_release_holding_nothing_for_an_agent_keeps_what_it_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, id) = mixed_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_holding(&state, uid, &[], &[]);
+        state.rollout_deployment("stable").expect("rollout");
+        let first = report_holding(&state, uid, &[], &[]).reply;
+        let config_hash = first.remote_config.expect("config").config_hash;
+        let packages_hash = first
+            .packages_available
+            .expect("packages")
+            .all_packages_hash;
+
+        // `telegraf-conf` stays, so the Deployment still holds something and may be pressed; none
+        // of it fits this Agent.
+        state
+            .remove_deployment_configuration("stable", "base")
+            .expect("drop base");
+        state
+            .remove_deployment_package("stable", &id)
+            .expect("drop the package");
+        let view = &state.snapshot()[0];
+        let changes = |view: &AgentView| {
+            view.pending_configurations
+                .iter()
+                .map(|p| (p.name.clone(), p.change.clone()))
+                .chain(
+                    view.pending_packages
+                        .iter()
+                        .map(|p| (p.display_name.clone(), p.change.clone())),
+                )
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            changes(view),
+            [
+                ("base".to_string(), "kept".to_string()),
+                (id.display_name(), "kept".to_string())
+            ],
+            "nothing is removed from an Agent the press leaves with no assignment"
+        );
+        assert_eq!(state.deployment_reach()["stable"].targeted, 1);
+
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        let view = &state.snapshot()[0];
+        assert!(view.assigned_deployment.is_empty() && view.assigned_configurations.is_empty());
+        assert!(changes(view).is_empty(), "nothing waits any more");
+        let reply = report_holding(&state, uid, &config_hash, &packages_hash).reply;
+        assert!(
+            reply.remote_config.is_none(),
+            "no config map replaces the one it runs"
+        );
+
+        // A Package and no Configuration, to an Agent that runs nothing yet: a package offer, and
+        // no config map at all.
+        state
+            .put_deployment_package("stable", &id, true)
+            .expect("the package again");
+        let fresh = InstanceUid([2; 16]);
+        report_holding(&state, fresh, &[], &[]);
+        state.rollout_deployment("stable").expect("rollout");
+        let reply = report_holding(&state, fresh, &[], &[]).reply;
+        assert!(reply.packages_available.is_some(), "the package is offered");
+        assert!(
+            reply.remote_config.is_none(),
+            "an assignment holding no Configuration offers no empty map"
+        );
+    }
+
+    /// A Deployment that newly claims an Agent with the content its assignment already pins still
+    /// moves that assignment on a press, so the view shows the Deployment waiting — the count
+    /// beside the press, the per-Agent press and the view agree.
+    /// Verifies: ADR-0034
+    #[test]
+    fn a_new_claiming_deployment_with_the_same_content_waits_in_the_view() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = configuring_fleet(dir.path());
+        let uid = InstanceUid::default();
+        state.process(report(&uid, 1), Transport::Http, None);
+        state.rollout_deployment("stable").expect("rollout");
+        let deployments = state.deployment_store().expect("deployments");
+        deployments
+            .put(
+                "stable",
+                BTreeMap::from([("service.name".to_string(), "nobody".to_string())]),
+            )
+            .expect("re-aim stable away");
+        deployments
+            .put(
+                "canary",
+                BTreeMap::from([("service.name".to_string(), "otelcol".to_string())]),
+            )
+            .expect("canary");
+        state
+            .put_deployment_configuration("canary", "fleet")
+            .expect("the same Configuration");
+
+        let view = &state.snapshot()[0];
+        assert_eq!(view.assigned_deployment, "stable");
+        assert!(view.pending_configurations.is_empty() && view.pending_packages.is_empty());
+        assert_eq!(view.pending_deployment, "canary");
+        assert_eq!(state.deployment_reach()["canary"].targeted, 1);
+
+        state.rollout_to_agent(&uid, None).expect("the press");
+        let view = &state.snapshot()[0];
+        assert_eq!(view.assigned_deployment, "canary");
+        assert!(view.pending_deployment.is_empty());
+        assert_eq!(state.deployment_reach()["canary"].targeted, 0);
+    }
+
+    /// Editing a Deployment after a rollout — a Configuration's body, a Configuration added, the
+    /// Package swapped — changes no Agent's offer until the next press, and the view shows each
+    /// change waiting.
+    /// Verifies: ADR-0034
+    #[test]
+    fn editing_a_deployment_changes_no_offer_until_the_next_press() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _) = mixed_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_holding(&state, uid, &[], &[]);
+        state.rollout_deployment("stable").expect("rollout");
+        let first = report_holding(&state, uid, &[], &[]).reply;
+        let config_hash = first.remote_config.expect("config").config_hash;
+        let packages_hash = first
+            .packages_available
+            .expect("packages")
+            .all_packages_hash;
+
+        state
+            .save_configuration("base", body("receivers: {otlp: {}}\n"))
+            .expect("edit");
+        state
+            .save_configuration("extra", body("exporters: {}\n"))
+            .expect("extra");
+        state
+            .put_deployment_configuration("stable", "extra")
+            .expect("hold it");
+        let v2 = PackageId::new("otelcol", "2.0.0").expect("id");
+        let store = state.packages().expect("store");
+        store.create(&v2).expect("create");
+        store
+            .put_entry(&v2, &linux(), b"v2".to_vec())
+            .expect("entry");
+        put_signed(&state, &v2);
+
+        let reply = report_holding(&state, uid, &config_hash, &packages_hash).reply;
+        assert!(reply.remote_config.is_none(), "the edits reach nobody yet");
+        assert!(
+            reply.packages_available.is_none(),
+            "the swap reaches nobody yet"
+        );
+        let view = &state.snapshot()[0];
+        assert_eq!(
+            view.pending_configurations
+                .iter()
+                .map(|p| (p.name.as_str(), p.change.as_str()))
+                .collect::<Vec<_>>(),
+            [("base", "update"), ("extra", "new")]
+        );
+        assert_eq!(view.pending_packages[0].change, "update");
+        assert_eq!(view.pending_packages[0].version, "2.0.0");
+
+        state
+            .rollout_to_agent(&uid, Some("stable"))
+            .expect("the press");
+        let reply = report_holding(&state, uid, &config_hash, &packages_hash).reply;
+        assert!(reply.remote_config.is_some() && reply.packages_available.is_some());
+    }
+
+    /// The per-Agent act releases only the Deployment that claims the Agent: one in no Deployment,
+    /// one two Deployments claim, and naming another Deployment are each refused, as is a
+    /// Deployment that holds nothing — and nothing is assigned.
+    /// Verifies: ADR-0034
+    #[test]
+    fn the_per_agent_act_refuses_without_exactly_one_claiming_deployment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, _) = mixed_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_holding(&state, uid, &[], &[]);
+        let deployments = state.deployment_store().expect("deployments");
+
+        deployments
+            .put(
+                "canary",
+                BTreeMap::from([("channel".into(), "canary".into())]),
+            )
+            .expect("canary");
+        assert!(matches!(
+            state.rollout_to_agent(&uid, Some("canary")),
+            Err(RolloutError::NotApplicable(why)) if why.contains("\"stable\"")
+        ));
+
+        deployments
+            .put(
+                "linux",
+                BTreeMap::from([("os.type".into(), "linux".into())]),
+            )
+            .expect("a second channel claiming it");
+        assert!(matches!(
+            state.rollout_to_agent(&uid, None),
+            Err(RolloutError::NotApplicable(why)) if why.contains("linux") && why.contains("stable")
+        ));
+        assert!(matches!(
+            state.rollout_to_agent(&uid, Some("stable")),
+            Err(RolloutError::NotApplicable(_))
+        ));
+        assert_eq!(
+            state
+                .rollout_deployment("stable")
+                .expect("the press skips it"),
+            0
+        );
+
+        state.delete_deployment("linux").expect("delete");
+        state.delete_deployment("stable").expect("delete");
+        assert!(matches!(
+            state.rollout_to_agent(&uid, None),
+            Err(RolloutError::NotApplicable(why)) if why.contains("no deployment")
+        ));
+
+        deployments
+            .put(
+                "empty",
+                BTreeMap::from([("os.type".into(), "linux".into())]),
+            )
+            .expect("a channel holding nothing");
+        assert!(matches!(
+            state.rollout_to_agent(&uid, None),
+            Err(RolloutError::NotApplicable(why)) if why.contains("holds no package and no configuration")
+        ));
+        assert!(matches!(
+            state.rollout_deployment("empty"),
+            Err(RolloutError::NotApplicable(_))
+        ));
+        assert!(state.snapshot()[0].assigned_deployment.is_empty());
+    }
+
+    /// Nothing an assignment pins can be deleted — a Configuration, a Package, a Deployment — and
+    /// the refusal says how many Agents pin it. After a press without it the deletion succeeds,
+    /// and a deleted Configuration or Package leaves every Deployment that held it.
+    /// Verifies: ADR-0034
+    #[test]
+    fn nothing_an_assignment_pins_can_be_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, id) = mixed_fleet(dir.path());
+        let uid = InstanceUid([1; 16]);
+        report_holding(&state, uid, &[], &[]);
+        let deployments = state.deployment_store().expect("deployments");
+        deployments
+            .put(
+                "canary",
+                BTreeMap::from([("channel".into(), "canary".into())]),
+            )
+            .expect("canary");
+        state
+            .put_deployment_configuration("canary", "base")
+            .expect("base in canary too");
+        state
+            .put_deployment_package("canary", &id, false)
+            .expect("the package in canary too");
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+
+        assert!(matches!(
+            state.delete_configuration("base"),
+            Err(DeleteError::Pinned(why)) if why.contains("1 Agent")
+        ));
+        let refused = state.delete_package_set(&id).expect_err("pinned");
+        assert!(refused.contains("1 Agent"), "{refused}");
+        assert!(matches!(
+            state.delete_deployment("stable"),
+            Err(DeploymentError::Conflict(why)) if why.contains("1 Agent")
+        ));
+
+        // Taking both out of the channel is not refused, and the next press releases without them.
+        state
+            .remove_deployment_configuration("stable", "base")
+            .expect("nothing a Deployment holds is frozen");
+        state
+            .remove_deployment_package("stable", &id)
+            .expect("nothing a Deployment holds is frozen");
+        state
+            .save_configuration("other", body("exporters: {}\n"))
+            .expect("other");
+        state
+            .put_deployment_configuration("stable", "other")
+            .expect("hold it");
+        assert_eq!(state.rollout_deployment("stable").expect("rollout"), 1);
+        assert!(state.delete_configuration("base").expect("deleted"));
+        assert!(state.delete_package_set(&id).expect("deleted"));
+        let canary = deployments.get("canary").expect("canary");
+        assert!(
+            canary.configurations.is_empty() && canary.packages.is_empty(),
+            "both left every Deployment that held them"
+        );
+        assert!(state.configurations().get("base").is_none());
+
+        // The Deployment goes once its Agents are released through another one.
+        state
+            .put_deployment_configuration("canary", "other")
+            .expect("hold it");
+        state
+            .set_labels(&uid, BTreeMap::from([("channel".into(), "canary".into())]))
+            .unwrap_or_else(|_| panic!("label"));
+        deployments
+            .put(
+                "stable",
+                BTreeMap::from([("channel".into(), "stable".into())]),
+            )
+            .expect("re-aim");
+        assert_eq!(state.rollout_deployment("canary").expect("rollout"), 1);
+        assert!(state.delete_deployment("stable").expect("deleted"));
+    }
+
+    // ---- Hosts, the effective description and label inheritance (ADR-0035) ----
+
+    /// A fleet whose host register is kept in `dir`, so a reopen restores both.
+    fn hosted_fleet(dir: &std::path::Path) -> AppState {
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        AppState::new(dir.join("configs"))
+            .expect("state")
+            .with_revocations(Some(revocations))
+    }
+
+    fn organization(name: &str) -> crate::revocation::SubjectValues {
+        crate::revocation::SubjectValues {
+            organization: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// A full report from `uid` describing itself with `pairs`, over a certificate naming `host`
+    /// whose subject carries `subject`.
+    fn report_over(
+        state: &AppState,
+        host: &str,
+        subject: crate::revocation::SubjectValues,
+        uid: InstanceUid,
+        pairs: &[(&str, &str)],
+    ) -> Processed {
+        let mut message = report(&uid, 1);
+        message
+            .agent_description
+            .as_mut()
+            .expect("described")
+            .non_identifying_attributes = pairs
+            .iter()
+            .map(|(key, value)| opamp::attributes::string_attr(key, value))
+            .collect();
+        state.process_presented(
+            message,
+            Transport::Http,
+            None,
+            Some(&Presented {
+                id: CertId::new(b"CA", host),
+                host: Some(host.to_string()),
+                subject_values: subject,
+            }),
+        )
+    }
+
+    /// Whether a Selector of `pairs` matches this Agent — the one test every Selector is decided by.
+    fn selects(state: &AppState, uid: &InstanceUid, pairs: &[(&str, &str)]) -> bool {
+        let selector: BTreeMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        let fleet = state.fleet.lock().expect("fleet lock");
+        let record = fleet.get(uid).expect("known");
+        deployments::matches(&selector, record.effective_description().as_deref())
+    }
+
+    fn view(state: &AppState, uid: &InstanceUid) -> AgentView {
+        state
+            .snapshot()
+            .into_iter()
+            .find(|view| view.instance_uid == uid.to_string())
+            .expect("in the view")
+    }
+
+    fn label(state: &AppState, uid: &InstanceUid, pairs: &[(&str, &str)]) {
+        let set = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        if state.set_labels(uid, set).is_err() {
+            panic!("labels refused");
+        }
+    }
+
+    /// An Agent on a direct connection carries its Host's subject values as `fleet.host.*`; an
+    /// Agent that reports `fleet.host.organization` itself is not selected by it, and the attribute
+    /// is listed as ignored. Without a host register an Agent names no Host.
+    /// Verifies: ADR-0035
+    #[test]
+    fn a_direct_agent_matches_its_hosts_values_and_none_it_reports_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let honest = InstanceUid::default();
+        report_over(&state, "h1", organization("Kunde GmbH"), honest, &[]);
+        assert!(selects(
+            &state,
+            &honest,
+            &[("fleet.host.organization", "Kunde GmbH")]
+        ));
+        assert_eq!(view(&state, &honest).host, "h1");
+        assert_eq!(
+            view(&state, &honest).host_attributes["fleet.host.organization"],
+            "Kunde GmbH"
+        );
+
+        // On a Host of its own whose certificate carries no organization.
+        let claimant = InstanceUid::default();
+        report_over(
+            &state,
+            "h2",
+            crate::revocation::SubjectValues::default(),
+            claimant,
+            &[("fleet.host.organization", "Kunde GmbH")],
+        );
+        assert!(!selects(
+            &state,
+            &claimant,
+            &[("fleet.host.organization", "Kunde GmbH")]
+        ));
+        assert_eq!(
+            view(&state, &claimant).ignored_attributes,
+            ["fleet.host.organization"]
+        );
+
+        // On the Host whose values it would contradict, the Host's value is what matches.
+        let liar = InstanceUid::default();
+        report_over(
+            &state,
+            "h1",
+            organization("Kunde GmbH"),
+            liar,
+            &[("fleet.host.organization", "Mitbewerber AG")],
+        );
+        assert!(selects(
+            &state,
+            &liar,
+            &[("fleet.host.organization", "Kunde GmbH")]
+        ));
+        assert!(!selects(
+            &state,
+            &liar,
+            &[("fleet.host.organization", "Mitbewerber AG")]
+        ));
+
+        // A Server without a host register has no Hosts, and its records name none.
+        let bare = AppState::new(dir.path().join("bare")).expect("state");
+        let uid = InstanceUid::default();
+        report_over(&bare, "h1", organization("Kunde GmbH"), uid, &[]);
+        assert_eq!(view(&bare, &uid).host, "");
+        assert!(!selects(
+            &bare,
+            &uid,
+            &[("fleet.host.organization", "Kunde GmbH")]
+        ));
+    }
+
+    /// A Supervisor Agent matches a Selector on a label set only on its Client Agent, its own label
+    /// of the same key wins, the Agents tab is told which labels are inherited, and all of it
+    /// survives a restart.
+    /// Verifies: ADR-0035
+    #[test]
+    fn a_supervisor_agent_inherits_its_client_agents_labels_below_its_own() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = InstanceUid::default();
+        let supervisor = InstanceUid::default();
+        {
+            let state = hosted_fleet(dir.path());
+            report_over(
+                &state,
+                "h1",
+                organization("Kunde GmbH"),
+                client,
+                &[("supervisor.kind.collector", "true")],
+            );
+            report_over(&state, "h1", organization("Kunde GmbH"), supervisor, &[]);
+            label(&state, &client, &[("ring", "early"), ("site", "wien")]);
+            label(&state, &supervisor, &[("ring", "late")]);
+            assert!(selects(&state, &supervisor, &[("site", "wien")]));
+            assert!(selects(&state, &supervisor, &[("ring", "late")]));
+            assert!(!selects(&state, &supervisor, &[("ring", "early")]));
+            assert!(selects(&state, &client, &[("ring", "early")]));
+        }
+        let state = hosted_fleet(dir.path());
+        assert!(
+            selects(&state, &supervisor, &[("site", "wien"), ("ring", "late")]),
+            "restored with its own labels and its Client Agent's"
+        );
+        let seen = view(&state, &supervisor);
+        assert_eq!(seen.client_agent, client.to_string());
+        assert_eq!(
+            seen.inherited_labels,
+            BTreeMap::from([
+                ("ring".to_string(), "early".to_string()),
+                ("site".to_string(), "wien".to_string())
+            ])
+        );
+        assert!(view(&state, &client).inherited_labels.is_empty());
+
+        // The Client Agent's labels cleared, nothing is inherited any more.
+        label(&state, &client, &[]);
+        assert!(!selects(&state, &supervisor, &[("site", "wien")]));
+    }
+
+    /// Behind a Gateway an Agent carries no `fleet.host.*`; the Agents sharing a `host.id` inherit
+    /// their Client Agent's labels, and two Client Agents with one `host.id` leave every Agent of it
+    /// inheriting nothing and marked ambiguous.
+    /// Verifies: ADR-0035
+    #[test]
+    fn behind_a_gateway_agents_sharing_a_host_id_inherit_unless_ambiguous() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let gateway = InstanceUid::default();
+        report_over(
+            &state,
+            "gw",
+            organization("Gateway GmbH"),
+            gateway,
+            &[("supervisor.kind.collector", "true"), ("host.id", "gw-1")],
+        );
+        assert!(state.set_gateway("gw", true).expect("marked"));
+        assert!(
+            !selects(
+                &state,
+                &gateway,
+                &[("fleet.host.organization", "Gateway GmbH")]
+            ),
+            "nothing arrives over a Gateway directly"
+        );
+
+        let client = InstanceUid::default();
+        let supervisor = InstanceUid::default();
+        let elsewhere = InstanceUid::default();
+        let behind = |uid, pairs: &[(&str, &str)]| {
+            report_over(&state, "gw", organization("Gateway GmbH"), uid, pairs);
+        };
+        behind(
+            client,
+            &[("supervisor.kind.collector", "true"), ("host.id", "m-1")],
+        );
+        behind(supervisor, &[("host.id", "m-1")]);
+        behind(elsewhere, &[("host.id", "m-2")]);
+        label(&state, &client, &[("site", "linz")]);
+        assert!(selects(&state, &supervisor, &[("site", "linz")]));
+        assert!(!selects(&state, &elsewhere, &[("site", "linz")]));
+        let seen = view(&state, &supervisor);
+        assert_eq!(seen.host, "gw");
+        assert!(seen.host_attributes.is_empty());
+        assert!(!seen.ambiguous);
+
+        // A second Client on the same machine: nobody of it can be told apart.
+        let second = InstanceUid::default();
+        behind(
+            second,
+            &[("supervisor.kind.collector", "true"), ("host.id", "m-1")],
+        );
+        assert!(!selects(&state, &supervisor, &[("site", "linz")]));
+        for uid in [client, supervisor, second] {
+            assert!(view(&state, &uid).ambiguous, "{uid}");
+        }
+        assert!(!view(&state, &elsewhere).ambiguous);
+    }
+
+    /// A Client Agent re-keyed by a compressed message — no description to place it by — stays
+    /// its group's Client Agent: its Supervisor Agents keep inheriting its labels, and a label set
+    /// on its new identity reaches them.
+    /// Verifies: ADR-0035
+    #[test]
+    fn a_client_agent_rekeyed_without_a_description_keeps_its_group_inheriting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let client = InstanceUid::default();
+        let supervisor = InstanceUid::default();
+        report_over(
+            &state,
+            "h1",
+            organization("Kunde GmbH"),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        report_over(&state, "h1", organization("Kunde GmbH"), supervisor, &[]);
+        label(&state, &client, &[("site", "wien")]);
+        assert!(selects(&state, &supervisor, &[("site", "wien")]));
+
+        let rekey = AgentToServer {
+            instance_uid: client.as_bytes().to_vec(),
+            sequence_num: 2,
+            capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64,
+            flags: AgentToServerFlags::RequestInstanceUid as u64,
+            ..Default::default()
+        };
+        let rekeyed = state
+            .process_presented(
+                rekey,
+                Transport::Http,
+                None,
+                Some(&Presented {
+                    id: CertId::new(b"CA", "h1"),
+                    host: Some("h1".to_string()),
+                    subject_values: organization("Kunde GmbH"),
+                }),
+            )
+            .uid
+            .expect("the new identity");
+        assert_ne!(rekeyed, client);
+        assert!(
+            selects(&state, &supervisor, &[("site", "wien")]),
+            "the Supervisor Agent still inherits"
+        );
+        assert_eq!(view(&state, &supervisor).client_agent, rekeyed.to_string());
+        assert_eq!(view(&state, &rekeyed).client_agent, rekeyed.to_string());
+
+        label(&state, &rekeyed, &[("site", "linz")]);
+        assert!(selects(&state, &supervisor, &[("site", "linz")]));
+    }
+
+    /// Labels are part of the Agent's record: a re-keyed Agent keeps them, on disk too, and
+    /// forgetting it removes them — it comes back unlabelled.
+    /// Verifies: ADR-0035
+    #[test]
+    fn forgetting_an_agent_removes_its_labels_and_a_rekey_keeps_them() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let state = AppState::new(dir.clone())
+            .expect("state")
+            .with_stale_after(Duration::from_secs(90));
+        let uid = InstanceUid::default();
+        state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+        label(&state, &uid, &[("rollout", "canary")]);
+
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let new_uid = state
+            .process(rekey, Transport::WebSocket, Some(1))
+            .uid
+            .expect("the new identity");
+        assert_eq!(view(&state, &new_uid).labels["rollout"], "canary");
+        let stored = std::fs::read_to_string(dir.join("agents").join(format!("{new_uid}.json")))
+            .expect("stored");
+        assert!(stored.contains("canary"), "{stored}");
+
+        let mut goodbye = report(&new_uid, 3);
+        goodbye.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        state.process(goodbye, Transport::WebSocket, Some(1));
+        assert!(state.forget_agent(&new_uid).is_ok());
+        state.process(report(&new_uid, 4), Transport::WebSocket, Some(2));
+        assert!(
+            view(&state, &new_uid).labels.is_empty(),
+            "it comes back unlabelled"
+        );
+        assert!(!dir.join("labels").exists(), "no label store is written");
     }
 }

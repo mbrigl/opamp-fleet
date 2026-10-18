@@ -14,7 +14,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fleet_server::fleet::{AgentView, AppState};
+use fleet_server::fleet::AgentView;
 use futures_util::SinkExt;
 use opamp::proto::{
     any_value, AgentConfigMap, AgentConfigObject, AgentDescription, AgentToServer, AnyValue,
@@ -89,9 +89,7 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
 async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_agent() {
     opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(
-        AppState::new(dir.path().join("fleet-configs")).expect("open the configuration store"),
-    );
+    let state = Arc::new(common::fleet_state(dir.path()));
     let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -153,20 +151,8 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
                 .map(|a| (a.service_name.clone(), a.instance_uid.clone()))
         })
         .await;
-    state
-        .save_configuration(
-            "collector",
-            fleet_server::configs::Revision {
-                selector: Default::default(),
-                body: "receivers: {}\n".to_string(),
-                role: String::new(),
-                service_name: collector_type,
-            },
-        )
-        .expect("save the Collector's configuration");
-    state
-        .rollout_configuration("collector")
-        .expect("roll the Collector's configuration out");
+    common::save(&state, "collector", "receivers: {}\n", &collector_type);
+    common::release_to_every_agent(&state, &["collector"]);
 
     // The Collector is running, and it was handed the token its extension presents.
     let token = wait_until("the Collector to start with its endpoint token", || {

@@ -352,8 +352,8 @@ impl Local {
             download_url: file.download_url.clone(),
             content_hash: file.content_hash.clone(),
             signature: file.signature.clone(),
-            // The Baseline asks the Agent to send these on the GET; the Server fills them for a
-            // referenced source from what the operator said it needs (ADR-0026).
+            // The Baseline asks the Agent to send these on the GET. This Server sends none; any a
+            // Server does send go to its own origin alone (ADR-0033).
             headers: file
                 .headers
                 .as_ref()
@@ -432,9 +432,9 @@ pub struct PackageDownload {
     pub content_hash: Vec<u8>,
     /// The Ed25519 signature over the artifact; empty means unsigned.
     pub signature: Vec<u8>,
-    /// The headers the offer says this download needs — a referenced source's credential
-    /// (ADR-0026), which the Server fills from the operator's configuration. The Baseline: *"The
-    /// Agent SHOULD include the HTTP headers provided in the headers field for the GET request."*
+    /// The headers the offer says this download needs, sent only to this Client's own Server
+    /// origin (ADR-0033). The Baseline: *"The Agent SHOULD include the HTTP headers provided in the
+    /// headers field for the GET request."*
     ///
     /// Raw pairs rather than the wire type, like every other field here: what the download needs is
     /// a name and a value, not a protobuf message.

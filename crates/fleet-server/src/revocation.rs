@@ -98,6 +98,59 @@ pub struct Facts {
     /// keeps across renewals and re-keys; `None` for a certificate an operator provisioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// The values of its subject a Host carries (ADR-0035 clause 1); empty when it has none.
+    #[serde(default, skip_serializing_if = "SubjectValues::is_empty")]
+    pub subject_values: SubjectValues,
+}
+
+/// The values of a client certificate's subject a Host carries into the effective description of
+/// the Agents that arrive over it directly (ADR-0035 clauses 1 and 3). Each holds the first value
+/// of its attribute in the subject; empty when the subject has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectValues {
+    /// `C`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub country: String,
+    /// `ST`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    /// `L`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub locality: String,
+    /// `O`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub organization: String,
+    /// `OU`, which the description calls the site.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub organizational_unit: String,
+    /// `organizationIdentifier` (2.5.4.97).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub organization_identifier: String,
+}
+
+impl SubjectValues {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.attributes().next().is_none()
+    }
+
+    /// The `fleet.host.*` attributes these values are (ADR-0035 clause 3), the empty ones left
+    /// out.
+    pub fn attributes(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [
+            ("fleet.host.country", self.country.as_str()),
+            ("fleet.host.state", self.state.as_str()),
+            ("fleet.host.locality", self.locality.as_str()),
+            ("fleet.host.organization", self.organization.as_str()),
+            ("fleet.host.site", self.organizational_unit.as_str()),
+            (
+                "fleet.host.organization_id",
+                self.organization_identifier.as_str(),
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+    }
 }
 
 /// The certificate a connection presented: what it renews, and the host it speaks for.
@@ -105,9 +158,11 @@ pub struct Facts {
 pub struct Presented {
     pub id: CertId,
     pub host: Option<String>,
+    /// Its subject's values, which a Host made at its first report carries (ADR-0035 clause 1).
+    pub subject_values: SubjectValues,
 }
 
-/// A host this Server issued certificates to (ADR-0021 clause 7).
+/// A Host: what a client certificate's host id names (ADR-0021 clause 7, ADR-0035 clause 1).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     /// A Gateway carries other hosts' Agents, so its certificate binds none of them.
@@ -116,6 +171,14 @@ pub struct Host {
     /// The `instance_uid`s that have reported with this host's certificate, hex.
     #[serde(default)]
     pub instance_uids: BTreeSet<String>,
+    /// The subject values of the client certificate it was issued, or — for a Host made at its
+    /// first report — of the certificate it presented.
+    #[serde(default, skip_serializing_if = "SubjectValues::is_empty")]
+    pub subject: SubjectValues,
+    /// When its enrolment was approved, in milliseconds since the Unix epoch; `None` for a Host a
+    /// provisioned certificate made at its first report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_ms: Option<u64>,
 }
 
 /// The Agents a host's certificate speaks for (ADR-0026 clause 37).
@@ -496,9 +559,27 @@ impl Revocations {
     ) -> Result<(), String> {
         let mut state = self.state.lock().expect("revocation lock");
         let forgotten = self.prune(&mut state)?;
-        let recorded = self.admit(&mut state, facts, instance_uid, predecessor);
+        let minted = predecessor.is_none();
+        let recorded = self.admit(&mut state, facts.clone(), instance_uid, predecessor);
+        // The approval that mints a host id writes the Host (ADR-0035 clause 1): an issuance that
+        // renews nothing and names a host the register does not know yet.
+        let hosts = match (&recorded, minted, &facts.host) {
+            (Ok(()), true, Some(host)) if !state.hosts.contains_key(host) => {
+                let now = self.clock.now_ms();
+                state.hosts.insert(
+                    host.clone(),
+                    Host {
+                        subject: facts.subject_values.clone(),
+                        approved_ms: Some(now),
+                        ..Host::default()
+                    },
+                );
+                Some(Self::hosts_changed(&mut state))
+            }
+            _ => forgotten,
+        };
         drop(state);
-        self.write_forgotten(forgotten);
+        self.write_forgotten(hosts);
         recorded
     }
 
@@ -565,11 +646,18 @@ impl Revocations {
     /// Whether a connection presenting a certificate of `host` may report for `instance_uid`
     /// (ADR-0021 clause 7). An `instance_uid` first heard from a host is bound to it; one bound to
     /// another host is refused. A Gateway's certificate binds nothing — it carries other hosts'
-    /// Agents.
+    /// Agents. A certificate an operator provisioned with a host id makes its Host here, at its
+    /// first report, with `subject` — the values of the certificate it presented (ADR-0035
+    /// clause 1).
     ///
     /// # Errors
     /// Returns the refusal, or an error when a new binding cannot be written.
-    pub fn check_report(&self, host: &str, instance_uid: &[u8]) -> Result<(), String> {
+    pub fn check_report(
+        &self,
+        host: &str,
+        subject: &SubjectValues,
+        instance_uid: &[u8],
+    ) -> Result<(), String> {
         let uid = hex::encode(instance_uid);
         let mut state = self.state.lock().expect("revocation lock");
         if !Self::admits(&state, host, &uid)? {
@@ -578,7 +666,10 @@ impl Revocations {
         state
             .hosts
             .entry(host.to_string())
-            .or_default()
+            .or_insert_with(|| Host {
+                subject: subject.clone(),
+                ..Host::default()
+            })
             .instance_uids
             .insert(uid.clone());
         state.owners.insert(uid, host.to_string());
@@ -671,12 +762,12 @@ impl Revocations {
         self.write_hosts(version, &hosts)
     }
 
-    /// Writes the hosts a prune forgot. The register does not depend on it, so a failure is
-    /// logged and left to the next write of the hosts.
+    /// Writes the hosts a prune forgot or an approval wrote. The register does not depend on
+    /// them, so a failure is logged and left to the next write of the hosts.
     fn write_forgotten(&self, forgotten: Option<HostsVersion>) {
         if let Some((version, hosts)) = forgotten {
             if let Err(e) = self.write_hosts(version, &hosts) {
-                tracing::warn!(error = %e, "cannot write the hosts a prune forgot");
+                tracing::warn!(error = %e, "cannot write the hosts");
             }
         }
     }
@@ -851,6 +942,20 @@ impl Revocations {
             .filter(|id| issuers.contains(id.issuer.as_str()))
             .cloned()
             .collect()
+    }
+
+    /// Whether `host` is marked as a Gateway, and its subject values — what places an Agent that
+    /// arrived over it (ADR-0035 clauses 3 and 4). A host the register does not know is neither a
+    /// Gateway nor has values.
+    #[must_use]
+    pub fn placement(&self, host: &str) -> (bool, SubjectValues) {
+        self.state
+            .lock()
+            .expect("revocation lock")
+            .hosts
+            .get(host)
+            .map(|host| (host.gateway, host.subject.clone()))
+            .unwrap_or_default()
     }
 
     /// Whether `host` is marked as a Gateway.
@@ -1035,6 +1140,7 @@ mod tests {
             key_fingerprint: format!("key-{serial}"),
             not_after_ms,
             host: None,
+            subject_values: SubjectValues::default(),
         }
     }
 
@@ -1068,35 +1174,41 @@ mod tests {
             .expect("another host");
 
         revocations
-            .check_report("h1", &[1; 16])
+            .check_report("h1", &SubjectValues::default(), &[1; 16])
             .expect("first report binds");
         revocations
-            .check_report("h1", &[1; 16])
+            .check_report("h1", &SubjectValues::default(), &[1; 16])
             .expect("its own Agent");
         assert!(
-            revocations.check_report("h2", &[1; 16]).is_err(),
+            revocations
+                .check_report("h2", &SubjectValues::default(), &[1; 16])
+                .is_err(),
             "another host spoke for h1's Agent"
         );
         revocations.rebind(&[1; 16], &[3; 16]).expect("rebind");
         revocations
-            .check_report("h1", &[3; 16])
+            .check_report("h1", &SubjectValues::default(), &[3; 16])
             .expect("the re-keyed Agent");
-        assert!(revocations.check_report("h2", &[3; 16]).is_err());
+        assert!(revocations
+            .check_report("h2", &SubjectValues::default(), &[3; 16])
+            .is_err());
         revocations
-            .check_report("h2", &[1; 16])
+            .check_report("h2", &SubjectValues::default(), &[1; 16])
             .expect("the old identity is free");
 
         assert!(!revocations.set_gateway("unknown", true).expect("set"));
         assert!(revocations.set_gateway("h2", true).expect("set"));
         revocations
-            .check_report("h2", &[3; 16])
+            .check_report("h2", &SubjectValues::default(), &[3; 16])
             .expect("a Gateway speaks for any Agent");
 
         // The bindings survive a restart.
         let (reopened, _) = open(&store);
-        assert!(reopened.check_report("h3", &[3; 16]).is_err());
+        assert!(reopened
+            .check_report("h3", &SubjectValues::default(), &[3; 16])
+            .is_err());
         reopened
-            .check_report("h2", &[9; 16])
+            .check_report("h2", &SubjectValues::default(), &[9; 16])
             .expect("still a Gateway");
     }
 
@@ -1117,8 +1229,12 @@ mod tests {
             SpeaksFor::Agents(BTreeSet::new()),
             "nothing reported yet"
         );
-        revocations.check_report("h1", &[1; 16]).expect("binds");
-        revocations.check_report("h1", &[3; 16]).expect("binds");
+        revocations
+            .check_report("h1", &SubjectValues::default(), &[1; 16])
+            .expect("binds");
+        revocations
+            .check_report("h1", &SubjectValues::default(), &[3; 16])
+            .expect("binds");
         assert_eq!(
             revocations.speaks_for("h1"),
             SpeaksFor::Agents([hex::encode([1; 16]), hex::encode([3; 16])].into())
@@ -1130,7 +1246,7 @@ mod tests {
         assert!(revocations.set_gateway("h2", true).expect("mark"));
         assert_eq!(revocations.speaks_for("h2"), SpeaksFor::Any);
         revocations
-            .check_report("h2", &[1; 16])
+            .check_report("h2", &SubjectValues::default(), &[1; 16])
             .expect("a Gateway reports for h1's Agent");
         assert_eq!(
             revocations.speaks_for("h2"),
@@ -1166,7 +1282,9 @@ mod tests {
         assert!(revocations.set_gateway("gw", true).expect("mark"));
         assert!(revocations.set_gateway("old", true).expect("mark"));
         assert!(revocations.set_gateway("old", false).expect("unmark"));
-        revocations.check_report("h1", &[2; 16]).expect("binds");
+        revocations
+            .check_report("h1", &SubjectValues::default(), &[2; 16])
+            .expect("binds");
 
         clock.0.fetch_add(1_000, Ordering::SeqCst);
         revocations
@@ -1180,7 +1298,9 @@ mod tests {
         assert_eq!(names, ["gw", "h1", "h2"], "old is forgotten");
         assert!(revocations.is_gateway("gw"), "the Gateway keeps its mark");
         assert!(
-            revocations.check_report("h2", &[2; 16]).is_err(),
+            revocations
+                .check_report("h2", &SubjectValues::default(), &[2; 16])
+                .is_err(),
             "h1's Agent stays h1's"
         );
         assert_eq!(
@@ -1191,9 +1311,75 @@ mod tests {
                 .hosts
                 .keys()
                 .collect::<Vec<_>>(),
-            ["gw", "h1"],
+            // h2 holds a valid certificate, and its approval wrote it (ADR-0035 clause 1).
+            ["gw", "h1", "h2"],
             "the forgetting is written"
         );
+    }
+
+    /// The issuance that mints a host id — an approval — writes the Host before its first report,
+    /// with the certificate's subject values and the time; a renewal writes none, and a report
+    /// does not overwrite what the approval wrote.
+    /// Verifies: ADR-0035
+    #[test]
+    fn an_approval_writes_the_host_before_its_first_report() {
+        let store = Memory::default();
+        let (revocations, _) = open(&store);
+        let subject = SubjectValues {
+            organization: "Kunde GmbH".into(),
+            organizational_unit: "Wien".into(),
+            ..SubjectValues::default()
+        };
+        revocations
+            .record(
+                Facts {
+                    subject_values: subject.clone(),
+                    ..on_host("a1", "h1")
+                },
+                &[1; 16],
+                None,
+            )
+            .expect("approved");
+        let written = store.0.lock().expect("lock").hosts.clone();
+        let host = written.get("h1").expect("the Host is written");
+        assert_eq!(host.subject, subject);
+        assert_eq!(host.approved_ms, Some(NOW));
+        assert!(host.instance_uids.is_empty(), "nothing reported yet");
+        assert_eq!(revocations.placement("h1"), (false, subject.clone()));
+
+        revocations
+            .record(on_host("a2", "h9"), &[1; 16], Some(id("a1")))
+            .expect("a renewal");
+        assert!(
+            !store.0.lock().expect("lock").hosts.contains_key("h9"),
+            "a renewal mints no Host"
+        );
+
+        revocations
+            .check_report("h1", &SubjectValues::default(), &[1; 16])
+            .expect("its first report");
+        let host = store.0.lock().expect("lock").hosts["h1"].clone();
+        assert_eq!(host.subject, subject, "the approval's values stay");
+        assert_eq!(host.instance_uids.len(), 1);
+    }
+
+    /// A certificate an operator provisioned with a host id makes its Host at its first report,
+    /// with the values of the certificate it presented.
+    /// Verifies: ADR-0035
+    #[test]
+    fn a_provisioned_certificate_makes_its_host_at_its_first_report() {
+        let store = Memory::default();
+        let (revocations, _) = open(&store);
+        let subject = SubjectValues {
+            country: "AT".into(),
+            ..SubjectValues::default()
+        };
+        revocations
+            .check_report("p1", &subject, &[5; 16])
+            .expect("binds");
+        let host = store.0.lock().expect("lock").hosts["p1"].clone();
+        assert_eq!(host.subject, subject);
+        assert_eq!(host.approved_ms, None, "no approval made it");
     }
 
     /// A store whose host writes fail.
@@ -1216,6 +1402,81 @@ mod tests {
         fn save_hosts(&self, _: &BTreeMap<String, Host>) -> Result<(), String> {
             Err("the disk is full".into())
         }
+    }
+
+    /// A store whose host writes fail while `failing` is set.
+    #[derive(Clone, Default)]
+    struct FailingHosts {
+        inner: Memory,
+        failing: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl LedgerStore for FailingHosts {
+        fn load(&self) -> Result<Ledger, String> {
+            self.inner.load()
+        }
+        fn put_issued(&self, issued: &Issued) -> Result<(), String> {
+            self.inner.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId) -> Result<(), String> {
+            self.inner.remove_issued(id)
+        }
+        fn save_revocations(&self, revocations: &[Revocation]) -> Result<(), String> {
+            self.inner.save_revocations(revocations)
+        }
+        fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err("the disk is full".into());
+            }
+            self.inner.save_hosts(hosts)
+        }
+    }
+
+    /// An approval whose Host cannot be written is not refused: the certificate is recorded, the
+    /// Host is known with the approval's values, and it reaches the store with the next host
+    /// write — here its first report.
+    /// Verifies: ADR-0035
+    #[test]
+    fn an_approval_whose_host_cannot_be_written_is_not_refused() {
+        let store = FailingHosts::default();
+        store.failing.store(true, Ordering::SeqCst);
+        let revocations = Revocations::open(
+            Box::new(store.clone()),
+            Arc::new(Manual(AtomicU64::new(NOW))),
+            Vec::new(),
+        )
+        .expect("open");
+        let subject = SubjectValues {
+            organization: "Kunde GmbH".into(),
+            ..SubjectValues::default()
+        };
+        revocations
+            .record(
+                Facts {
+                    subject_values: subject.clone(),
+                    ..on_host("a1", "h1")
+                },
+                &[1; 16],
+                None,
+            )
+            .expect("approved all the same");
+        assert_eq!(store.inner.0.lock().expect("lock").issued.len(), 1);
+        assert!(
+            !store.inner.0.lock().expect("lock").hosts.contains_key("h1"),
+            "the Host write failed"
+        );
+        assert_eq!(revocations.placement("h1"), (false, subject.clone()));
+
+        store.failing.store(false, Ordering::SeqCst);
+        revocations
+            .check_report("h1", &SubjectValues::default(), &[1; 16])
+            .expect("its first report");
+        let host = store.inner.0.lock().expect("lock").hosts["h1"].clone();
+        assert_eq!(
+            host.subject, subject,
+            "the approval's values reach the store"
+        );
+        assert_eq!(host.approved_ms, Some(NOW));
     }
 
     /// A host the prune forgets but cannot write fails neither an issuance nor a start.
@@ -1309,7 +1570,9 @@ mod tests {
         );
         let reporter = {
             let revocations = revocations.clone();
-            std::thread::spawn(move || revocations.check_report("h1", &[1; 16]))
+            std::thread::spawn(move || {
+                revocations.check_report("h1", &SubjectValues::default(), &[1; 16])
+            })
         };
         written.recv().expect("the binding is being written");
         assert!(!revocations.is_certificate_revoked(&id("a1")));

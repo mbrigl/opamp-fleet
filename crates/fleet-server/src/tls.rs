@@ -1,10 +1,10 @@
-//! The listeners' TLS material (ADR-0013, ADR-0021), read from the files `[tls]` and `[enrolment]`
-//! name and handed to `opamp`'s listener (ADR-0010).
+//! The listeners' TLS material (ADR-0013, ADR-0021, ADR-0032), read from the files `[tls]`,
+//! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (ADR-0010).
 //!
 //! What is the Server's here is which material and why. The Agent plane requires a client
 //! certificate in the handshake, verified against the client CA and, while `[enrolment]` is set,
-//! the bootstrap CA. The Operator plane serves the same certificate and asks for none: a browser
-//! reaches it with a password ([`crate::api`]). Which CA issued the certificate a connection
+//! the bootstrap CA. The Operator plane serves `[rest.tls]`'s certificate, or without it the same
+//! one, and asks for none: a browser reaches it with a password ([`crate::api`]). Which CA issued the certificate a connection
 //! carries decides what it may do, and [`Issuers`] tells the two apart.
 
 use std::path::Path;
@@ -13,8 +13,8 @@ use opamp::server::listen::{ClientAuth, ServerTls};
 use opamp::tls::Identity;
 use x509_parser::prelude::{FromDer, SubjectPublicKeyInfo, X509Certificate};
 
-use crate::config::{EnrolmentConfig, TlsConfig};
-use crate::revocation::{name_hash, Authority, CertId};
+use crate::config::{EnrolmentConfig, RestTlsConfig, TlsConfig};
+use crate::revocation::{name_hash, Authority, CertId, SubjectValues};
 
 /// The material each plane serves with, and who issued what the Agent plane admits.
 pub struct PlaneTls {
@@ -55,10 +55,14 @@ pub enum Peer {
     /// A bootstrap certificate: it may only enrol.
     Enrolling {
         subject: String,
+        /// The values an approval carries into the host certificate, or why its subject breaks
+        /// the rules they are issued by (ADR-0036 clause 3).
+        carried: Box<Result<SubjectValues, String>>,
         /// SHA-256 of the certificate, hex.
         fingerprint: String,
-        /// The serial as the bootstrap record keys it (`ca::facts`).
-        serial: String,
+        /// Its issuer and serial: the serial as the bootstrap record keys it (`ca::facts`), and the
+        /// pair as the revocation list names it.
+        id: CertId,
     },
 }
 
@@ -71,8 +75,12 @@ impl Issuers {
             // The handshake verified it, so it parses; a certificate that does not is no member.
             return Peer::Enrolling {
                 subject: String::new(),
+                carried: Box::new(Err("the certificate does not parse".to_string())),
                 fingerprint: hex::encode(Sha256::digest(certificate)),
-                serial: String::new(),
+                id: CertId {
+                    issuer: String::new(),
+                    serial: String::new(),
+                },
             };
         };
         let issuer = parsed.issuer().as_raw();
@@ -86,27 +94,27 @@ impl Issuers {
             return Peer::Member;
         }
         Peer::Enrolling {
-            subject: parsed.subject().to_string(),
+            subject: crate::ca::name_text(parsed.subject()),
+            carried: Box::new(crate::ca::carried_subject(parsed.subject())),
             fingerprint: hex::encode(Sha256::digest(certificate)),
-            serial: CertId::new(issuer, &hex::encode(parsed.raw_serial())).serial,
+            id: CertId::new(issuer, &hex::encode(parsed.raw_serial())),
         }
     }
 }
 
-/// The material both planes serve with.
+/// The material both planes serve with: `[tls]`'s on the Agent plane, and on the Operator plane
+/// `operator`'s — `[rest.tls]` — or, without it, `[tls]`'s as well (ADR-0032).
 ///
 /// # Errors
-/// Returns an error naming the file that cannot be read or holds nothing usable, and refuses a
-/// bootstrap CA that shares a subject with the client CA, since the two could not be told apart.
+/// Returns an error naming the file that cannot be read or holds nothing usable, or a `[rest.tls]`
+/// pair whose key does not match its certificate, and refuses a bootstrap CA that shares a subject
+/// with the client CA, since the two could not be told apart.
 pub fn server_tls(
     tls: &TlsConfig,
+    operator: Option<&RestTlsConfig>,
     enrolment: Option<&EnrolmentConfig>,
 ) -> Result<PlaneTls, String> {
-    let cert_pem = read(&tls.cert_file)?;
-    opamp::tls::certificates(&cert_pem).map_err(|e| in_file(&tls.cert_file, &e))?;
-    let key_pem = read(&tls.key_file)?;
-    opamp::tls::private_key(&key_pem)
-        .map_err(|_| format!("{} contains no private key", tls.key_file.display()))?;
+    let identity = identity(&tls.cert_file, &tls.key_file)?;
     let client_ca_file = tls
         .client_ca_file
         .as_ref()
@@ -137,19 +145,52 @@ pub fn server_tls(
         issuers.bootstrap = bootstrap_cas;
         issuers.members = client_cas;
     }
-    let identity = Identity { cert_pem, key_pem };
+    let operator = ServerTls {
+        identity: match operator {
+            Some(operator) => operator_identity(operator)?,
+            None => identity.clone(),
+        },
+        client_auth: ClientAuth::None,
+    };
     Ok(PlaneTls {
         agent: ServerTls {
-            identity: identity.clone(),
+            identity,
             client_auth: ClientAuth::Required { ca_pem },
         },
-        operator: ServerTls {
-            identity,
-            client_auth: ClientAuth::None,
-        },
+        operator,
         issuers,
         authorities,
     })
+}
+
+/// The `[rest.tls]` pair, read and checked as `[tls]`'s is (ADR-0032 clause 3). The key is
+/// matched against the certificate here rather than when the plane is built, so the refusal
+/// names both files.
+fn operator_identity(operator: &RestTlsConfig) -> Result<Identity, String> {
+    let identity = identity(&operator.cert_file, &operator.key_file)?;
+    ServerTls {
+        identity: identity.clone(),
+        client_auth: ClientAuth::None,
+    }
+    .rustls_config()
+    .map_err(|e| {
+        format!(
+            "[rest.tls] key_file {} does not serve with cert_file {}: {e}",
+            operator.key_file.display(),
+            operator.cert_file.display()
+        )
+    })?;
+    Ok(identity)
+}
+
+/// A certificate chain and its key, each file read and checked to hold what it is named for.
+fn identity(cert_file: &Path, key_file: &Path) -> Result<Identity, String> {
+    let cert_pem = read(cert_file)?;
+    opamp::tls::certificates(&cert_pem).map_err(|e| in_file(cert_file, &e))?;
+    let key_pem = read(key_file)?;
+    opamp::tls::private_key(&key_pem)
+        .map_err(|_| format!("{} contains no private key", key_file.display()))?;
+    Ok(Identity { cert_pem, key_pem })
 }
 
 fn authorities_of(role: &str, cas: &[Ca]) -> Vec<Authority> {
@@ -255,9 +296,72 @@ mod tests {
             bootstrap_ca_file: path("bootstrap-ca.pem", &pem(bootstrap)),
             bootstrap_ca_key_file: None,
         };
-        server_tls(&tls, Some(&enrolment))
+        server_tls(&tls, None, Some(&enrolment))
             .expect("server material")
             .issuers
+    }
+
+    /// A `[rest.tls]` pair is checked at startup as `[tls]`'s is: a key that does not match its
+    /// certificate, or a key file that cannot be read, refuses the start, and the message names
+    /// the files (ADR-0032 clause 3). A matching pair is what the Operator plane serves, while the
+    /// Agent plane keeps `[tls]`'s.
+    /// Verifies: ADR-0032
+    #[test]
+    fn a_rest_tls_pair_is_checked_at_startup_and_served_on_the_operator_plane_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = |name: &str, content: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).expect("write");
+            path
+        };
+        let self_signed = |key: &KeyPair| {
+            CertificateParams::new(vec!["localhost".to_string()])
+                .expect("params")
+                .self_signed(key)
+                .expect("certificate")
+                .pem()
+        };
+        let (client, _, _) = ca("client CA", None);
+        let server = KeyPair::generate().expect("key");
+        let tls = TlsConfig {
+            cert_file: path("server.pem", &self_signed(&server)),
+            key_file: path("server-key.pem", &server.serialize_pem()),
+            client_ca_file: Some(path("client-ca.pem", &pem(&client))),
+        };
+        let ui = KeyPair::generate().expect("key");
+        let other = KeyPair::generate().expect("key");
+        let ui_cert = self_signed(&ui);
+        let operator = RestTlsConfig {
+            cert_file: path("ui.pem", &ui_cert),
+            key_file: path("ui-key.pem", &ui.serialize_pem()),
+        };
+
+        let planes = server_tls(&tls, Some(&operator), None).expect("served");
+        assert_eq!(planes.operator.identity.cert_pem, ui_cert.as_bytes());
+        assert_eq!(
+            planes.agent.identity.cert_pem,
+            std::fs::read(&tls.cert_file).expect("read")
+        );
+
+        let mismatched = RestTlsConfig {
+            cert_file: operator.cert_file.clone(),
+            key_file: path("other-key.pem", &other.serialize_pem()),
+        };
+        let Err(refused) = server_tls(&tls, Some(&mismatched), None) else {
+            panic!("a key that does not match its certificate is served");
+        };
+        assert!(
+            refused.contains("other-key.pem") && refused.contains("ui.pem"),
+            "{refused}"
+        );
+        let missing = RestTlsConfig {
+            cert_file: operator.cert_file.clone(),
+            key_file: dir.path().join("absent-key.pem"),
+        };
+        let Err(refused) = server_tls(&tls, Some(&missing), None) else {
+            panic!("a key file that cannot be read is served");
+        };
+        assert!(refused.contains("absent-key.pem"), "{refused}");
     }
 
     fn leaf(issuer: &Issuer<'_, KeyPair>) -> Vec<u8> {

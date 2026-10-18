@@ -45,7 +45,7 @@ echo "Extracting otelcol to /usr/local/bin..."
 sudo tar -xvf "$core_tgz" -C /usr/local/bin otelcol
 
 # 3. Stage the minimal example Configurations (ADR-0023) for the two Collectors into
-# fleet-configs/, so the Server offers them from its next start (see the seed script for
+# fleet-data/configurations/, so the Server offers them from its next start (see the seed script for
 # the Selector mapping and usage notes).
 echo "Staging example test Configurations..."
 "$(dirname "$0")/seed_test_configs.sh" --offline

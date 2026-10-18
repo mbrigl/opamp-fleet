@@ -10,6 +10,7 @@ pub mod agent_store;
 pub mod api;
 pub mod audit;
 pub mod audit_log;
+pub mod blobs;
 pub mod bootstrap;
 pub mod ca;
 pub mod clock;
@@ -22,6 +23,7 @@ pub mod fleet;
 pub mod fs;
 pub mod labels;
 pub mod listen;
+pub mod migrate;
 pub mod packages;
 pub mod pki;
 pub mod revocation;
@@ -35,25 +37,24 @@ use axum::Router;
 
 use deployments::DeploymentStore;
 use fleet::{AppState, PackageOffering};
-use fs::{FsAgentStore, FsConfigBackend, FsDeploymentBackend, FsLabelStore, FsPackageBackend};
+use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPackageBackend};
 
 /// The default wiring of the fleet's state to its storage adapters (ADR-0006): it lives here, in
-/// the composition root, so the fleet logic names the ports — [`AgentStore`](agent_store::AgentStore)
-/// and [`LabelStore`](labels::LabelStore) — and never the filesystem behind them.
+/// the composition root, so the fleet logic names the port — [`AgentStore`](agent_store::AgentStore)
+/// — and never the filesystem behind it.
 impl AppState {
-    /// Builds the state on the default storage adapters — one JSON file per Agent under
-    /// `<config_dir>/agents/` and per labelled Agent under `<config_dir>/labels/` (ADR-0024) — restoring every persisted Configuration and Agent
+    /// Builds the state on the default storage adapters in the data directory `data_dir`
+    /// (ADR-0037) — one JSON file per Agent, its labels inside, under `agents/`, and one per
+    /// Configuration under `configurations/` — restoring every persisted Configuration and Agent
     /// record. A store that cannot be opened (or holds an unparsable file) fails startup loudly.
     ///
     /// # Errors
     /// Returns an error when a store cannot be opened or holds an unparsable record.
-    pub fn new(config_dir: std::path::PathBuf) -> Result<Self, String> {
-        let agents = FsAgentStore::open(config_dir.join("agents"))?;
-        let labels = FsLabelStore::open(config_dir.join("labels"))?;
-        let configs = FsConfigBackend::open(config_dir)?;
+    pub fn new(data_dir: std::path::PathBuf) -> Result<Self, String> {
+        let agents = FsAgentStore::open(&data_dir)?;
+        let configs = FsConfigBackend::open(&data_dir)?;
         Self::with_stores(
             Box::new(agents),
-            Box::new(labels),
             Box::new(configs),
             Box::new(clock::SystemClock),
         )
@@ -62,44 +63,51 @@ impl AppState {
 
 /// The default wiring of the package store to its filesystem adapter (ADR-0006).
 impl packages::PackageStore {
-    /// Opens the store on `dir`, loading every persisted Package (ADR-0026).
+    /// Opens the store in the data directory `data_dir`, loading every persisted Package
+    /// (ADR-0026, ADR-0037).
     ///
     /// # Errors
-    /// Returns an error when the directory cannot be opened, or a Package in it cannot be read,
-    /// does not match its recorded hash, or is in a layout this Server does not write.
-    pub fn open(dir: std::path::PathBuf) -> Result<Self, String> {
-        Self::with_backend(Box::new(FsPackageBackend::open(dir)?))
+    /// Returns an error when the store cannot be opened, or a Package in it cannot be read, does
+    /// not match its recorded hash, or is in a layout this Server does not write.
+    pub fn open(data_dir: std::path::PathBuf) -> Result<Self, String> {
+        Self::with_backend(
+            Box::new(FsPackageBackend::open(&data_dir)?),
+            Box::new(FsBlobStore::open(&data_dir)?),
+        )
     }
 }
 
 /// The default wiring of the package offering to the Deployments' filesystem adapter (ADR-0006).
 impl PackageOffering {
-    /// Opening the package store arms the **Deployments** too, from `deployments/` beneath it
-    /// (ADR-0026): a Deployment is meaningless without the artifacts it signs, so the two share a
-    /// directory and a configuration key rather than acquiring one of their own. See
-    /// [`with_deployments`](PackageOffering::with_deployments) for `download_base`.
+    /// Arms the **Deployments** beside the package store, from `deployments/` in the data
+    /// directory `data_dir` (ADR-0026, ADR-0037).
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them cannot be read.
-    pub fn new(store: packages::PackageStore, download_base: String) -> Result<Self, String> {
-        let backend = FsDeploymentBackend::open(store.dir().join(packages::DEPLOYMENTS_DIR))?;
+    pub fn new(data_dir: &std::path::Path, store: packages::PackageStore) -> Result<Self, String> {
+        let backend = FsDeploymentBackend::open(data_dir)?;
         let deployments = DeploymentStore::open(Box::new(backend))?;
-        Ok(Self::with_deployments(store, deployments, download_base))
+        Ok(Self::with_deployments(store, deployments))
     }
 }
 
 /// The default wiring of the bootstrap record to its filesystem adapter (ADR-0006, ADR-0028).
 impl bootstrap::BootstrapCertificates {
-    /// Opens the record on `dir`, one file per certificate, forgetting what has ended.
+    /// Opens the record in the data directory `data_dir`, one file per certificate under
+    /// `bootstrap/` (ADR-0037), forgetting what has ended.
     ///
     /// # Errors
     /// Returns an error when the directory cannot be opened or a file in it cannot be read.
     pub fn on_disk(
         signer: Option<Box<dyn bootstrap::BootstrapSigner>>,
-        dir: std::path::PathBuf,
+        data_dir: &std::path::Path,
         clock: Arc<dyn fleet::Clock>,
     ) -> Result<Self, String> {
-        Self::open(signer, Box::new(fs::FsBootstrapStore::open(dir)?), clock)
+        Self::open(
+            signer,
+            Box::new(fs::FsBootstrapStore::open(data_dir)?),
+            clock,
+        )
     }
 }
 

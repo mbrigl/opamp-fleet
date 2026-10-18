@@ -12,7 +12,9 @@ use opamp::proto::{
 };
 use opamp::uid::InstanceUid;
 use prost::Message;
-use support::{compressed_report, distribute, full_report, spawn, spawn_with_limit};
+use support::{
+    compressed_report, deploy, distribute, full_report, save_configuration, spawn, spawn_with_limit,
+};
 
 const PROTOBUF: &str = "application/x-protobuf";
 
@@ -93,7 +95,7 @@ async fn the_offer_is_gated_by_the_config_hash() {
 
     // The operator distributes a configuration through the REST API; the fleet view names the
     // hash this Agent's composed configuration should have.
-    distribute(server.rest_addr, "fleet", &[], "receivers: {}\n").await;
+    distribute(server.rest_addr, "fleet", "receivers: {}\n").await;
     let agents: serde_json::Value = serde_json::from_slice(
         &client
             .get(format!("http://{}/api/v1/agents", server.rest_addr))
@@ -132,9 +134,9 @@ async fn the_offer_is_gated_by_the_config_hash() {
     );
 }
 
-/// A Configuration aimed by a Selector reaches the Agents it matches, and an Agent outside it is
-/// offered nothing and keeps what it runs.
-/// Verifies: G-9
+/// A Configuration held by a Deployment reaches the Agents the Deployment's Selector matches, and
+/// an Agent outside it is offered nothing and keeps what it runs.
+/// Verifies: G-9, ADR-0034
 #[tokio::test]
 async fn a_selector_aims_a_configuration_at_part_of_the_fleet() {
     let server = spawn().await;
@@ -144,11 +146,12 @@ async fn a_selector_aims_a_configuration_at_part_of_the_fleet() {
     exchange(&client, &url, &full_report(&inside, "canary-01", 1)).await;
     exchange(&client, &url, &full_report(&outside, "edge-01", 1)).await;
 
-    distribute(
+    save_configuration(server.rest_addr, "canary", "receivers: {}\n", "").await;
+    deploy(
         server.rest_addr,
         "canary",
         &[("service.instance.name", "canary-01")],
-        "receivers: {}\n",
+        &["canary"],
     )
     .await;
 
@@ -163,7 +166,7 @@ async fn a_selector_aims_a_configuration_at_part_of_the_fleet() {
     let untouched = exchange(&client, &url, &compressed_report(&outside, 2)).await;
     assert!(
         untouched.remote_config.is_none(),
-        "an Agent outside the Selector is offered nothing"
+        "an Agent outside the Deployment's Selector is offered nothing"
     );
 }
 
@@ -180,7 +183,7 @@ async fn a_queued_restart_is_delivered_once_as_a_command_only_reply() {
     exchange(&client, &url, &report).await;
 
     // A configuration is pending too — the command must never be combined with the offer.
-    distribute(server.rest_addr, "fleet", &[], "receivers: {}\n").await;
+    distribute(server.rest_addr, "fleet", "receivers: {}\n").await;
     let restart = client
         .post(format!(
             "http://{}/api/v1/agents/{uid}/restart",

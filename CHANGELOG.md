@@ -13,7 +13,283 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.5.4]
+## [0.5.5]
+
+### Added
+
+- **Two more looks for the UI:** a style combo chooses between the GitKraken look, a Carbon look —
+  IBM's Carbon Design System as Würth Phoenix's NetEye wears it, Gray 100 with its purple — or a
+  quiet look where colour says only state and selection. Beside it, three buttons choose light,
+  dark or System, which follows the operating system's preference as it changes. The two are
+  independent: a theme holds across every look. A first visit follows the system; a light or dark
+  chosen before in this browser still holds.
+
+- **Coloured effective configurations**
+  ([ADR-0038](docs/adr/0038-the-ui-colours-an-agents-effective-configuration-with-shiki.md)). The
+  Agents tab colours an Agent's effective configuration, in its cell and in the dialog, with the
+  TextMate grammars VS Code uses, in the colours of the look and theme chosen: YAML for
+  `otelcol*`, TOML for the fleet's own Client and Telegraf, INI for Fluent Bit; any other type stays
+  plain. TOML table headers and keys and INI section headers take the same colours as YAML's keys
+  and values, so the three languages look alike. The colouring runs in the browser from a script the Server serves itself as `/shiki.js`,
+  so nothing is loaded from elsewhere and the page's policy is unchanged. Nothing to configure.
+
+- **The UI can present a certificate of its own**
+  ([ADR-0032](docs/adr/0032-the-operator-plane-may-serve-a-certificate-of-its-own.md)). An optional
+  `[rest.tls]` with `cert_file` and `key_file` gives the Operator plane — the UI, the REST API and
+  its docs — a certificate of its own, for example from your organization's PKI, so browsers trust
+  it without importing the fleet's server CA. The Agent plane keeps `[tls]`'s, and nothing changes
+  for the Clients. Without the section the Operator plane serves `[tls]`'s as before, so no
+  `server.toml` has to change. `server pki status` and the expiry warnings include it.
+
+- **The Server checks package signatures, as feedback** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). An optional
+  `[packages] verification_key` in `server.toml` — the same hex public key the Clients hold —
+  makes the Server check each entry's signature when it is written and when it starts, and the
+  Packages tab and `GET /api/v1/packages` show it as `valid` or `invalid` (`unchecked` without the
+  key, `missing` with none). An invalid signature is shown as a warning and kept; each Client's own
+  check still decides what is installed. A malformed key fails startup.
+
+- **Hosts, and a Hosts tab** ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). A Host is what a
+  client certificate of this Server names: the Server writes it when you approve its enrolment, or
+  at the first report of a provisioned certificate that names a host id, with the certificate's
+  subject values. The new Hosts tab lists each Host — its name (the `host.name` its Client's own
+  Agent reports, else the host id), its subject values, the Gateway mark, its valid certificates
+  and when each ends, and its Agents — and marks a Gateway or revokes a Host's certificates from
+  its row. Selecting a Host shows its Agents grouped by Client; for a Gateway, the Agents behind
+  it. `GET /api/v1/hosts` adds `name`, `subject`, `approved_ms` and `agents`, and each Agent in
+  `GET /api/v1/agents` names its `host`.
+
+- **Selectors can match the Host's certificate, and a Client's own Agent labels its whole Client**
+  ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). An Agent on a direct
+  connection carries its Host's subject values as `fleet.host.country`, `fleet.host.state`,
+  `fleet.host.locality`, `fleet.host.organization`, `fleet.host.site` (the organizational unit)
+  and `fleet.host.organization_id`, which no Agent can report over; an Agent behind a Gateway
+  carries none. A host certificate carries the values of the bootstrap certificate it enrolled
+  with (see *A bootstrap certificate's subject* below). The labels of a Client's own Agent — the one reporting
+  `supervisor.kind.*` — hold for that Client's Supervisor Agents below their own labels; behind a
+  Gateway the Agents are grouped by the `host.id` (else `host.name`) they report, and a group with
+  two Client Agents inherits nothing and is marked `ambiguous`. The Agents tab marks inherited
+  labels. **What to do:** label a Client's own Agent once instead of each of its Agents.
+
+### Changed
+
+- **Every field of the UI's forms says whether it is required or optional.** A caption above
+  each field names it and says *required* or *optional* in words — the placeholder that said it
+  before vanished as soon as something was typed — and a required field is announced as such to
+  screen readers. Nothing about what the Server accepts changed.
+
+- **All of the Server's state lives under one data directory, and `server migrate` moves an
+  installation there**
+  ([ADR-0037](docs/adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)).
+  `server.toml` names `data_dir` (default `fleet-data`) instead of `config_dir` and `packages_dir`;
+  a file still naming either fails the start, naming `server migrate`. Under it each domain has a
+  directory of its own — `configurations/`, `deployments/`, `packages/`, `blobs/`, `agents/`,
+  `hosts/`, `certificates/`, `bootstrap/`, `audit/` — beside `revocations.json` and
+  `enrolment.json`, every directory `0700` and every file `0600`; anything else in it, or a file
+  whose name disagrees with what it holds, fails the start naming the path. An artifact is kept
+  once by its SHA-256 in `blobs/`, hashed again at every start, and deleted with the last entry
+  naming it; identical artifacts count once against `max_total_package_bytes`. The audit is
+  checked with `server audit-verify <data_dir>/audit`.
+  **What to do**, once, with the Server stopped:
+  1. Run `server migrate --config-dir <config_dir> --packages-dir <packages_dir> --data-dir <new,
+     empty directory>` as the Server's account. It copies — the old directories stay as your
+     backup — and prints what it carried, dropped and listed; it exits non-zero when it could not
+     carry the register, the revocation list, the Hosts, the bootstrap certificates or the audit.
+  2. In `server.toml`, remove `config_dir` and `packages_dir` and set `data_dir` to the new
+     directory. Under systemd's `ProtectSystem=strict`, a `data_dir` outside the unit's
+     `StateDirectory` needs a `ReadWritePaths=` line.
+  3. Start the Server. Put each Configuration the migration listed into a Deployment, sign each
+     entry it named unsigned, upload each artifact it dropped, and roll the Deployments out.
+  4. Keep the old directories until you are satisfied, then delete them.
+  The steps, and what the migration does with each kind of data, are in the Server's manual
+  ([Upgrading to one data directory](docs/manual/server.md#upgrading-to-one-data-directory)).
+
+- **The enrolment window and its queue survive a restart**
+  ([ADR-0037](docs/adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)).
+  They are written to `enrolment.json` before the act that changes them is answered, so an open
+  window stays open until its end and a host whose approval it had not collected yet is handed its
+  certificate after the restart; a window whose end passed while the Server was down is closed
+  when it starts. Opening the window, approving and rejecting answer `500` when that cannot be
+  written, and change nothing.
+
+- **A bootstrap certificate's subject names up to six values, and every host certificate issued
+  from it carries them**
+  ([ADR-0036](docs/adr/0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md)).
+  `subject` in `POST /api/v1/bootstrap-certificates` takes `country` (two upper-case letters, ISO
+  3166-1 alpha-2), `state`, `locality`, `organization`, `organizational_unit` and
+  `organization_identifier` (a customer or contract number); `organization` and
+  `organizational_unit` are required, and a request without either is answered `400` naming it, so
+  every Host names a customer and a site. The Enrolments tab has a field for each, marks the two
+  required and offers the countries as a list. Approving an enrolment copies these values
+  from the bootstrap certificate the host enrolled with into its host certificate, and every
+  renewal carries them on, so its Agents carry them as `fleet.host.*`; the CSR's subject is never
+  copied. `GET /api/v1/enrolments` lists the bootstrap certificate's values as the object
+  `bootstrap_subject` and no longer lists the request's `subject`. An approval whose bootstrap
+  certificate has a malformed subject — an attribute twice, a value of the wrong string type or
+  length, a country that is not two upper-case letters, no organization or no organizational
+  unit — is answered `409` naming the attribute,
+  and nothing is signed; the queue lists such a request with `subject_refusal` giving that reason
+  instead of `bootstrap_subject`, and the Enrolments tab shows it on the row. **What to do:** a script that reads `subject` or the text
+  `bootstrap_subject` of `GET /api/v1/enrolments` reads the `bootstrap_subject` object instead.
+  Host certificates issued before carry no values, and their Hosts have none until the host enrols
+  again with a bootstrap certificate that names them. A bootstrap CA of your own PKI must write
+  an organization and an organizational unit, the country as a `PrintableString` and every other
+  value as a `UTF8String` or a `PrintableString`, each at most once; replace a bootstrap
+  certificate that does not. A script that issues bootstrap certificates names `organization` and
+  `organizational_unit` in every request.
+
+- **Labels are part of the Agent's record, and forgetting an Agent removes them**
+  ([ADR-0035](docs/adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)). Labels follow an Agent
+  the Server re-keys, and are gone with an Agent you forget; one that comes back starts with only
+  what its Client Agent's labels give it. A label key
+  starting `fleet.` is refused `400`, and a reported attribute starting `fleet.` is left out of what
+  Selectors match and listed in `ignored_attributes` on the Agent. A label that cannot be written
+  is answered `500`. **What to do:** nothing beyond `server migrate` (see *All of the Server's
+  state lives under one data directory* above), which moves each Agent's labels into its record.
+
+- **A Deployment carries Configurations, and is the one thing rolled out** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)). A
+  Deployment holds any number of Configurations beside its Packages
+  (`PUT|DELETE /api/v1/deployments/{name}/configurations/{configuration}`, or the Deployments
+  tab), and one press of its rollout releases both: each Agent it claims gets the Package for its
+  type and every Configuration that fits its type, and the hash gates send only what changed. A
+  Configuration is content only — `{"body", "service_name", "role"}`; a `PUT` naming a `selector`
+  is refused `400`, `GET` lists the Deployments holding each one, and an Agent in no Deployment is
+  offered no Configuration. The per-Agent rollout takes an empty body or
+  `{"deployment": "<the one that claims it>"}`; naming a Configuration or a Package is refused.
+  A Deployment stays editable in every state: taking a Package out of a channel that released it
+  is no longer refused. The fleet view shows per Configuration and for the Package what the next
+  press would change, including what it drops (`change: "remove"`) and what the Agent keeps
+  running because the press leaves it with no assignment (`change: "kept"`), and in
+  `pending_deployment` the Deployment the press releases through when the assignment names
+  another one. The Configurations tab edits
+  content only; the Deployments tab holds the Selector, the Packages and the Configurations.
+  **What to do:** `server migrate` (see *All of the Server's state lives under one data
+  directory* above) drops each Configuration's Selector and lists it with the Selector it had.
+  After the upgrade, put each Configuration into a Deployment whose Selector reaches the Agents it
+  was aimed at — an Agent belongs to at most one Deployment, so a fleet-wide Configuration goes
+  into every channel — and roll the Deployments out. An Agent keeps the Package it was released
+  through a Deployment until then. Every Configuration an Agent was given was released without a
+  Deployment, so the migration drops each Agent's Configuration pins and lists them per Agent; the
+  Agent keeps running them until a Deployment holding them reaches it.
+  `opamp-fleetctl package fetch` stores its default Configurations typed for their Collector, and
+  `scripts/seed_test_configs.sh` puts each into a Deployment of that Collector's name.
+
+- **Nothing an Agent's assignment pins can be deleted** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)). Deleting a Configuration, a
+  Package or a Deployment that any Agent's assignment pins answers `409`, saying how many Agents
+  pin it, where deleting a Configuration or a Package used to take it out of every assignment.
+  A deleted Configuration or Package leaves every Deployment that held it. **What to do:** roll the
+  Agents out through a Deployment without it — or forget them — and delete it then.
+
+- **Every Configuration names its Agent type** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)).
+  `service_name` is required: a `PUT /api/v1/configurations/{name}` without it, or with an empty
+  one, is answered `400` naming it, and the Configurations tab marks the Agent type required. A
+  Configuration reaches only the Agents of its Deployment that report that `service.name`; one
+  without a type no longer reaches every Agent, and an Agent that reports no `service.name`
+  receives no Configuration. A stored Configuration without a type stops the Server at startup,
+  naming its file, and `server migrate` does not carry one: it lists it by name and leaves its file
+  in the old directory. **What to do:** give every Configuration a type before the upgrade — save
+  it again with `service_name` — and split content meant for several Agent types, a certificate
+  bundle for instance, into one Configuration per type; one the migration listed, save again from
+  its old file with a type.
+
+- **A package's signature lives on its entry, not on the Deployment** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). Sign each
+  entry once, with `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature`
+  (`{"signature": "<hex>"}`) or on the Packages tab, where the signing-file import now lives too;
+  every Deployment that holds the Package offers that signature. Uploading new bytes to an entry
+  removes its signature, and a signature write on a Package rolled out to an Agent is refused
+  (`409`) like any other change to its entries. The Deployment signature routes
+  (`…/deployments/{name}/signatures/…`) answer `404`, the Deployment view no longer reports
+  `signed_platforms`, and the Deployments tab only shows each entry's signature state. Signatures
+  stored on a Deployment are not read any more. **What to do:** `server migrate` moves the
+  signature the Deployments held onto each entry. An entry two Deployments held different
+  signatures for is carried unsigned and named: sign it again, on the Packages tab (import the
+  signed signing file there) or through the entry route — until then it is offered to nobody, and
+  a rollout of a Deployment holding it is refused naming it.
+
+- **A Client downloads packages only from its own Server's origin** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). A path is
+  resolved against the origin of its OpAMP endpoint; an absolute URL on any other origin, or a
+  redirect off it, is refused before a byte is fetched and reported `InstallFailed` naming that
+  origin.
+
+- **The UI's look follows GitKraken Dark as GitKraken Desktop 12.6 ships it:** charcoal panels,
+  GitKraken's blue for buttons and the selected row, and its purple for what is selected. Light
+  follows GitKraken Light. The theme button and a browser's remembered choice work as before.
+
+- **The enrolment queue names a request's bootstrap certificate by what it was issued for.** The
+  Enrolments tab leads with its customer and site, then its serial and end, and marks a revoked
+  one; the full subject, issue date and fingerprint are in the tooltip, so the only fingerprint
+  beside a request is the key fingerprint you compare. The bootstrap-certificate list counts the
+  requests waiting with each certificate.
+
+### Removed
+
+- **Issuing a bootstrap certificate without a password, and its key as PEM**
+  ([ADR-0036](docs/adr/0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md)).
+  `password` is required in `POST /api/v1/bootstrap-certificates`: a request without it is
+  answered `400` naming it, every bootstrap certificate is kept as a PKCS#12 file for download, and
+  the answer never carries `private_key_pem`. The Enrolments tab requires the password, typed
+  twice, and offers **Save bootstrap.p12** on every certificate; its **Save bootstrap.pem** and
+  **Save bootstrap-key.pem** are gone, and the page holds no private key. **What to do:** issue
+  bootstrap certificates with an organization, an organizational unit and a password, and download
+  `bootstrap.p12`; where a host needs the pair as PEM, take it out of the file with
+  `opamp-fleetctl pki p12-extract bootstrap.p12 --out <dir>`. A script that read
+  `private_key_pem` downloads `GET /api/v1/bootstrap-certificates/{serial}/p12` instead;
+  `scripts/seed_test_configs.sh --enrol` does so.
+
+- **A Configuration's own Selector and its rollout route** ([ADR-0034](docs/adr/0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)).
+  `POST /api/v1/configurations/{name}/rollout` answers `404`, and the Configurations tab has no
+  Selector and no rollout press. **What to do:** aim through a Deployment and press its rollout
+  (see *A Deployment carries Configurations* above); a script that calls the route or sends a
+  `selector` has to change the same way.
+
+- **Referenced package entries** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). An entry is an uploaded artifact and nothing
+  else: `PUT …/entries/{os}/{arch}/source`, its `url`, `sha256` and `headers`, and the Server's
+  probe of the URL are gone (the route answers `404`), and the Packages tab takes files only. The
+  Server sends no request for a package anywhere. **What to do:** before upgrading, upload every referenced artifact as a file to its
+  entry (`opamp-fleetctl package fetch` does it for the agents it knows) and sign it; `server
+  migrate` drops a referenced entry it still finds, naming it — upload that artifact afterwards.
+
+- **`[packages] allowed_sources` in `supervisor.toml`** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). There is no other
+  download source than the Client's own Server, and a file that still names the key fails the
+  Client's start, naming it. **What to do:** delete `allowed_sources` from every `supervisor.toml`
+  before the Client is upgraded.
+
+- **`advertised_url` in `server.toml`** ([ADR-0033](docs/adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)). Every package is offered as a path the Client
+  resolves against its own Server, and a Client downloads from no other host, so a URL naming a
+  mirror reached no Client. A file that still names the key fails the Server's start, naming it.
+  **What to do:** delete `advertised_url` from `server.toml` before the Server is upgraded.
+
+### Fixed
+
+- **The expiry warnings follow the certificate the Server serves.** The daily check read each
+  certificate file anew, so a file replaced without a restart silenced the warning while the
+  Server still served the old, ending certificate. It now judges what the Server read at startup,
+  and says when a file holds another certificate than the one served: restart the Server to serve
+  it ([ADR-0028](docs/adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)
+  clause 11).
+- **An Agent that asks the Server for a new `instance_uid` keeps its labels**
+  ([ADR-0024](docs/adr/0024-the-fleet-record.md)). The record moved to the new identity but its
+  labels stayed under the old one, so after the next restart the Agent had none and fell out of
+  the Deployment its labels put it in. Labels now live in the Agent's record and follow it.
+  **What to do:** `server migrate` lists the labels it drops because no Agent record of their
+  Instance UID exists — those are the leftovers; set them again on the re-keyed Agent.
+- **A deleted Package leaves the Deployments that held it**
+  ([ADR-0026](docs/adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
+  The Deployment kept the Package and its signatures, so the Deployment still passed the check for
+  unsigned Packages, and a Package created again under the same type and version reappeared in it
+  with the old signatures. **What to do:** nothing — `server migrate` drops such a name from its
+  Deployment and lists it.
+
+### Security
+
+- **Revoking a bootstrap certificate withdraws the enrolment requests waiting with it.** Until
+  now such a request stayed in the queue until the window closed, and approving it still signed a
+  certificate for its key. The revocation now takes it out of the queue, and an approval of a
+  request whose bootstrap certificate is revoked is refused (`409`) with nothing signed. The
+  revocation's audit entry counts the withdrawn requests as `withdrawn_requests`
+  ([ADR-0021](docs/adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
+  clause 35).
+
+## [0.5.4] - 2026-10-15
 
 ### Added
 

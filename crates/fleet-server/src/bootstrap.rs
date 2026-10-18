@@ -1,16 +1,16 @@
 //! Bootstrap certificates the Server issues (ADR-0028).
 //!
-//! An operator asks for one with a subject of their choosing — a customer, a site, a batch — and
-//! is handed the certificate and its private key once. The Server keeps the certificate's facts,
-//! never its key in the clear, so it can list what is valid and an operator can revoke one by its
-//! serial (ADR-0021 clause 34). Asked with a password, the key never leaves in PEM: the Server
-//! seals it with its certificate into a PKCS#12 file under that password, keeps the file and
-//! hands it out on request until the certificate ends or is revoked; the password it keeps
-//! nowhere (ADR-0029). A bootstrap certificate opens nothing on its own: it needs an open
-//! enrolment window and an operator's approval (ADR-0021 clauses 20, 21).
+//! An operator asks for one with a subject naming at least a customer and a site, and a password
+//! (ADR-0036 clauses 1 and 8). The key never leaves in PEM: the Server seals it with its
+//! certificate into a PKCS#12 file under that password, keeps the file and hands it out on request
+//! until the certificate ends or is revoked; the password it keeps nowhere (ADR-0029). The Server
+//! keeps the certificate's facts, never its key in the clear, so it can list what is valid and an
+//! operator can revoke one by its serial (ADR-0021 clause 34). A bootstrap certificate opens
+//! nothing on its own: it needs an open enrolment window and an operator's approval (ADR-0021
+//! clauses 20, 21).
 //!
 //! The signing is the [`BootstrapSigner`] port, the bootstrap CA in [`crate::ca`] its adapter; the
-//! record is the [`BootstrapStore`] port, a directory under `config_dir` its adapter.
+//! record is the [`BootstrapStore`] port, `bootstrap/` under `data_dir` its adapter (ADR-0037).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::fleet::Clock;
-use crate::revocation::CertId;
+use crate::revocation::{CertId, SubjectValues};
 
 /// A bootstrap certificate's life when the request names none (ADR-0028 clause 23).
 pub const DEFAULT_VALIDITY_DAYS: u32 = 10;
@@ -34,54 +34,193 @@ pub const MAX_VALUE_CHARS: usize = 64;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// The subject an operator names (ADR-0028 clause 22): the organization and its unit, each
-/// optional. The Server sets the common name.
+/// The subject an operator names (ADR-0036 clause 1): six attributes, `organization` and
+/// `organizational_unit` required and the others optional. The Server sets the common name. The
+/// values describe and select; they authorize nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Subject {
+    /// C — two upper-case letters, ISO 3166-1 alpha-2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    /// ST.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// L.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locality: Option<String>,
     /// O — the customer, typically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization: Option<String>,
     /// OU — the site, typically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organizational_unit: Option<String>,
+    /// organizationIdentifier (2.5.4.97) — a customer or contract number, in no format of the
+    /// Server's choosing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_identifier: Option<String>,
 }
 
-/// An attribute of a bootstrap certificate's subject, in the order a certificate lists them.
+/// An attribute of a bootstrap certificate's subject, in the order a certificate lists them
+/// (ADR-0036 clause 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attribute {
+    Country,
+    State,
+    Locality,
     Organization,
     OrganizationalUnit,
+    OrganizationIdentifier,
     CommonName,
+}
+
+impl Attribute {
+    /// The six attributes a host certificate carries over from its bootstrap certificate, in
+    /// certificate order (ADR-0036 clauses 1 to 4).
+    pub const CARRIED: [Attribute; 6] = [
+        Attribute::Country,
+        Attribute::State,
+        Attribute::Locality,
+        Attribute::Organization,
+        Attribute::OrganizationalUnit,
+        Attribute::OrganizationIdentifier,
+    ];
+
+    /// The name a request, a list and a refusal give it.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Attribute::Country => "country",
+            Attribute::State => "state",
+            Attribute::Locality => "locality",
+            Attribute::Organization => "organization",
+            Attribute::OrganizationalUnit => "organizational_unit",
+            Attribute::OrganizationIdentifier => "organization_identifier",
+            Attribute::CommonName => "common_name",
+        }
+    }
+
+    /// Its object identifier, X.520.
+    #[must_use]
+    pub fn oid(self) -> &'static str {
+        match self {
+            Attribute::Country => "2.5.4.6",
+            Attribute::State => "2.5.4.8",
+            Attribute::Locality => "2.5.4.7",
+            Attribute::Organization => "2.5.4.10",
+            Attribute::OrganizationalUnit => "2.5.4.11",
+            Attribute::OrganizationIdentifier => "2.5.4.97",
+            Attribute::CommonName => "2.5.4.3",
+        }
+    }
+
+    /// Whether a certificate carries it as a `PrintableString`; every other attribute is a
+    /// `UTF8String`.
+    #[must_use]
+    pub fn printable(self) -> bool {
+        self == Attribute::Country
+    }
+
+    /// Checks a value against ADR-0036 clause 1: a country of exactly two upper-case letters,
+    /// any other value 1 to [`MAX_VALUE_CHARS`] characters without a control character.
+    ///
+    /// # Errors
+    /// Returns why the value is refused, naming the attribute.
+    pub fn check(self, value: &str) -> Result<(), String> {
+        let name = self.key();
+        if self == Attribute::Country {
+            if value.len() == 2 && value.bytes().all(|b| b.is_ascii_uppercase()) {
+                return Ok(());
+            }
+            return Err(format!(
+                "{name} must be two upper-case letters, an ISO 3166-1 alpha-2 code"
+            ));
+        }
+        let chars = value.chars().count();
+        if chars == 0 || chars > MAX_VALUE_CHARS {
+            return Err(format!("{name} must be 1 to {MAX_VALUE_CHARS} characters"));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(format!("{name} must not carry a control character"));
+        }
+        Ok(())
+    }
+
+    /// Its value in `values`; empty when they hold none.
+    #[must_use]
+    pub fn of(self, values: &SubjectValues) -> &str {
+        match self {
+            Attribute::Country => &values.country,
+            Attribute::State => &values.state,
+            Attribute::Locality => &values.locality,
+            Attribute::Organization => &values.organization,
+            Attribute::OrganizationalUnit => &values.organizational_unit,
+            Attribute::OrganizationIdentifier => &values.organization_identifier,
+            Attribute::CommonName => "",
+        }
+    }
+
+    /// Puts `value` into `values` as this attribute's; a common name has no place there.
+    pub fn set(self, values: &mut SubjectValues, value: String) {
+        let slot = match self {
+            Attribute::Country => &mut values.country,
+            Attribute::State => &mut values.state,
+            Attribute::Locality => &mut values.locality,
+            Attribute::Organization => &mut values.organization,
+            Attribute::OrganizationalUnit => &mut values.organizational_unit,
+            Attribute::OrganizationIdentifier => &mut values.organization_identifier,
+            Attribute::CommonName => return,
+        };
+        *slot = value;
+    }
+}
+
+/// The attributes `values` hold, in certificate order, ending with `common_name`: the subject of
+/// a host certificate (ADR-0036 clause 2).
+#[must_use]
+pub fn carried_attributes(values: &SubjectValues, common_name: &str) -> Vec<(Attribute, String)> {
+    let mut attributes: Vec<(Attribute, String)> = Attribute::CARRIED
+        .into_iter()
+        .filter(|attribute| !attribute.of(values).is_empty())
+        .map(|attribute| (attribute, attribute.of(values).to_string()))
+        .collect();
+    attributes.push((Attribute::CommonName, common_name.to_string()));
+    attributes
 }
 
 impl Subject {
     /// The attributes to sign, in certificate order, ending with the common name the Server sets.
     ///
     /// # Errors
-    /// Returns the `400` text for a value that is empty, longer than [`MAX_VALUE_CHARS`], or
-    /// carries a control character.
+    /// Returns the `400` text for a missing `organization` or `organizational_unit`, or a value
+    /// that breaks ADR-0036 clause 1, naming the attribute.
     pub fn attributes(&self, common_name: &str) -> Result<Vec<(Attribute, String)>, String> {
+        for (attribute, value) in [
+            (Attribute::Organization, &self.organization),
+            (Attribute::OrganizationalUnit, &self.organizational_unit),
+        ] {
+            if value.is_none() {
+                return Err(format!(
+                    "subject.{} is required, so every Host names a customer and a site",
+                    attribute.key()
+                ));
+            }
+        }
         let named = [
-            (Attribute::Organization, "organization", &self.organization),
+            (Attribute::Country, &self.country),
+            (Attribute::State, &self.state),
+            (Attribute::Locality, &self.locality),
+            (Attribute::Organization, &self.organization),
+            (Attribute::OrganizationalUnit, &self.organizational_unit),
             (
-                Attribute::OrganizationalUnit,
-                "organizational_unit",
-                &self.organizational_unit,
+                Attribute::OrganizationIdentifier,
+                &self.organization_identifier,
             ),
         ];
         let mut attributes = Vec::new();
-        for (attribute, name, value) in named {
+        for (attribute, value) in named {
             let Some(value) = value else { continue };
-            let chars = value.chars().count();
-            if chars == 0 || chars > MAX_VALUE_CHARS {
-                return Err(format!(
-                    "subject.{name} must be 1 to {MAX_VALUE_CHARS} characters"
-                ));
-            }
-            if value.chars().any(char::is_control) {
-                return Err(format!("subject.{name} must not carry a control character"));
-            }
+            attribute.check(value).map_err(|e| format!("subject.{e}"))?;
             attributes.push((attribute, value.clone()));
         }
         attributes.push((Attribute::CommonName, common_name.to_string()));
@@ -98,7 +237,8 @@ pub struct IssueRequest {
     /// 1 to 90; 10 when absent.
     #[serde(default)]
     pub validity_days: Option<u32>,
-    /// The password of the PKCS#12 file to make instead of handing out the key (ADR-0029).
+    /// The password of the PKCS#12 file the key is sealed in (ADR-0029, ADR-0036 clause 8).
+    /// Required; read as absent when it is missing, so the refusal names it.
     #[serde(default)]
     pub password: Option<Password>,
 }
@@ -114,8 +254,9 @@ impl std::fmt::Debug for Password {
     }
 }
 
-/// A certificate the signer made, with the key that belongs to it — in PEM, or sealed with the
-/// certificate into a PKCS#12 file under the password the request named.
+/// A certificate the signer made, with the key that belongs to it sealed with the certificate into
+/// a PKCS#12 file under the password the request named; the key is never handed out in PEM
+/// (ADR-0036 clause 8).
 #[derive(Clone)]
 pub struct Pair {
     pub id: CertId,
@@ -128,10 +269,8 @@ pub struct Pair {
     pub not_before_ms: u64,
     pub not_after_ms: u64,
     pub certificate_pem: String,
-    /// The key, when no password was named.
-    pub private_key_pem: Option<String>,
-    /// The PKCS#12 file, when a password was named (ADR-0029 clause 3).
-    pub pkcs12: Option<Vec<u8>>,
+    /// The PKCS#12 file (ADR-0029 clause 1).
+    pub pkcs12: Vec<u8>,
 }
 
 impl std::fmt::Debug for Pair {
@@ -139,7 +278,6 @@ impl std::fmt::Debug for Pair {
         f.debug_struct("Pair")
             .field("serial", &self.serial)
             .field("subject", &self.subject)
-            .field("pkcs12", &self.pkcs12.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -158,8 +296,9 @@ pub trait BootstrapSigner: Send + Sync {
     fn ca_key_fingerprint(&self) -> String;
 
     /// Makes a fresh key and signs a client-authentication leaf for it, valid from `now_ms`
-    /// less the allowance for clocks that disagree until `not_after_ms`. With a `password` the key
-    /// is sealed with the certificate into a PKCS#12 file and not handed back in PEM (ADR-0029).
+    /// less the allowance for clocks that disagree until `not_after_ms`. The key is sealed with
+    /// the certificate into a PKCS#12 file under `password` and not handed back in PEM
+    /// (ADR-0036 clause 8).
     ///
     /// # Errors
     /// Returns an error when no key can be made, the certificate cannot be signed, or the file
@@ -169,7 +308,7 @@ pub trait BootstrapSigner: Send + Sync {
         subject: &[(Attribute, String)],
         now_ms: u64,
         not_after_ms: u64,
-        password: Option<&str>,
+        password: &str,
     ) -> Result<Pair, String>;
 }
 
@@ -191,7 +330,8 @@ pub struct Entry {
     pub p12: bool,
 }
 
-/// The port the record persists through: one document per certificate.
+/// The port the record persists through: one document per certificate, keyed by its issuer and
+/// serial as every certificate store keys one (ADR-0037 clause 13).
 pub trait BootstrapStore: Send + Sync {
     /// Every entry persisted.
     ///
@@ -209,25 +349,25 @@ pub trait BootstrapStore: Send + Sync {
     ///
     /// # Errors
     /// Returns an error when it cannot be removed.
-    fn remove(&self, serial: &str) -> Result<(), String>;
+    fn remove(&self, id: &CertId) -> Result<(), String>;
 
     /// Keeps the PKCS#12 file of one entry, owner-only.
     ///
     /// # Errors
     /// Returns an error when it cannot be written.
-    fn put_p12(&self, serial: &str, file: &[u8]) -> Result<(), String>;
+    fn put_p12(&self, id: &CertId, file: &[u8]) -> Result<(), String>;
 
     /// The PKCS#12 file of one entry, `None` when there is none.
     ///
     /// # Errors
     /// Returns an error when it cannot be read.
-    fn p12(&self, serial: &str) -> Result<Option<Vec<u8>>, String>;
+    fn p12(&self, id: &CertId) -> Result<Option<Vec<u8>>, String>;
 
     /// Forgets the PKCS#12 file of one entry, keeping the entry.
     ///
     /// # Errors
     /// Returns an error when it cannot be removed.
-    fn remove_p12(&self, serial: &str) -> Result<(), String>;
+    fn remove_p12(&self, id: &CertId) -> Result<(), String>;
 }
 
 /// Why a bootstrap certificate was not issued.
@@ -263,7 +403,8 @@ pub struct BootstrapCertificates {
     signer: Option<Box<dyn BootstrapSigner>>,
     store: Box<dyn BootstrapStore>,
     clock: Arc<dyn Clock>,
-    entries: Mutex<BTreeMap<String, Entry>>,
+    /// Keyed by issuer and serial.
+    entries: Mutex<BTreeMap<CertId, Entry>>,
 }
 
 impl BootstrapCertificates {
@@ -285,9 +426,9 @@ impl BootstrapCertificates {
                 .as_ref()
                 .is_some_and(|ca_key| *ca_key != entry.ca_key)
             {
-                store.remove(&entry.serial)?;
+                store.remove(&entry.id)?;
             } else {
-                entries.insert(entry.serial.clone(), entry);
+                entries.insert(entry.id.clone(), entry);
             }
         }
         let record = BootstrapCertificates {
@@ -324,10 +465,13 @@ impl BootstrapCertificates {
             .subject
             .attributes(&signer.leaf_common_name())
             .map_err(IssueError::Invalid)?;
-        let password = request.password.as_ref().map(|p| p.0.as_str());
-        if let Some(password) = password {
-            fleet_core::pkcs12::check_password(password).map_err(IssueError::Invalid)?;
-        }
+        let Some(Password(password)) = &request.password else {
+            return Err(IssueError::Invalid(
+                "password is required: the Server keeps the key only in a PKCS#12 file under it"
+                    .to_string(),
+            ));
+        };
+        fleet_core::pkcs12::check_password(password).map_err(IssueError::Invalid)?;
         self.room()?;
         let now = self.clock.now_ms();
         if signer.ca_not_after_ms() <= now {
@@ -353,20 +497,18 @@ impl BootstrapCertificates {
             issued_ms: now,
             not_after_ms: pair.not_after_ms,
             ca_key: signer.ca_key_fingerprint(),
-            p12: pair.pkcs12.is_some(),
+            p12: true,
         };
         // The file before the entry that says it is there (ADR-0029 clause 4), and gone again
         // when the entry cannot be written: no file is kept that no entry ends.
-        if let Some(file) = &pair.pkcs12 {
-            self.store
-                .put_p12(&entry.serial, file)
-                .map_err(IssueError::Failed)?;
-        }
+        self.store
+            .put_p12(&entry.id, &pair.pkcs12)
+            .map_err(IssueError::Failed)?;
         if let Err(e) = self.store.put(&entry) {
-            let _ = self.store.remove_p12(&entry.serial);
+            let _ = self.store.remove_p12(&entry.id);
             return Err(IssueError::Failed(e));
         }
-        entries.insert(entry.serial.clone(), entry);
+        entries.insert(entry.id.clone(), entry);
         Ok(pair)
     }
 
@@ -406,10 +548,10 @@ impl BootstrapCertificates {
     pub fn p12(&self, serial: &str) -> Result<Option<(Entry, Vec<u8>)>, String> {
         let mut entries = self.entries.lock().expect("bootstrap record lock");
         self.prune(&mut entries)?;
-        let Some(entry) = entries.get(serial).filter(|entry| entry.p12) else {
+        let Some(entry) = self.in_force(&entries, serial).filter(|entry| entry.p12) else {
             return Ok(None);
         };
-        Ok(self.store.p12(serial)?.map(|file| (entry.clone(), file)))
+        Ok(self.store.p12(&entry.id)?.map(|file| (entry.clone(), file)))
     }
 
     /// Deletes a revoked certificate's entry and any PKCS#12 file of it (ADR-0029 clause 15).
@@ -427,15 +569,18 @@ impl BootstrapCertificates {
     ) -> Result<Entry, DeleteError> {
         let mut entries = self.entries.lock().expect("bootstrap record lock");
         self.prune(&mut entries).map_err(DeleteError::Failed)?;
-        let entry = entries.get(serial).cloned().ok_or(DeleteError::NotFound)?;
+        let entry = self
+            .in_force(&entries, serial)
+            .cloned()
+            .ok_or(DeleteError::NotFound)?;
         if !revoked(&entry) {
             return Err(DeleteError::NotRevoked);
         }
         if !recorded(&entry) {
             return Err(DeleteError::Unrecorded);
         }
-        self.store.remove(serial).map_err(DeleteError::Failed)?;
-        entries.remove(serial);
+        self.store.remove(&entry.id).map_err(DeleteError::Failed)?;
+        entries.remove(&entry.id);
         Ok(entry)
     }
 
@@ -446,29 +591,56 @@ impl BootstrapCertificates {
     /// Returns an error when the file or the entry cannot be written.
     pub fn forget_p12(&self, serial: &str) -> Result<(), String> {
         let mut entries = self.entries.lock().expect("bootstrap record lock");
-        let Some(entry) = entries.get_mut(serial).filter(|entry| entry.p12) else {
+        let Some(id) = self
+            .in_force(&entries, serial)
+            .filter(|entry| entry.p12)
+            .map(|entry| entry.id.clone())
+        else {
             return Ok(());
         };
         // The entry first, so it never names a file that is gone — and a file left by a failed
         // removal is never handed out, since the entry no longer says it is there.
-        let mut forgotten = entry.clone();
+        let mut forgotten = entries[&id].clone();
         forgotten.p12 = false;
         self.store.put(&forgotten)?;
-        *entry = forgotten;
-        self.store.remove_p12(serial)
+        entries.insert(id.clone(), forgotten);
+        self.store.remove_p12(&id)
+    }
+
+    /// The entry a REST `{serial}` names: the one of the bootstrap CA in force (ADR-0037
+    /// clause 13). Without the CA's key, the Server holds entries of whichever CA issued them, and
+    /// the newest of that serial is the one meant.
+    fn in_force<'a>(
+        &self,
+        entries: &'a BTreeMap<CertId, Entry>,
+        serial: &str,
+    ) -> Option<&'a Entry> {
+        let current = self
+            .signer
+            .as_ref()
+            .map(|signer| signer.ca_key_fingerprint());
+        entries
+            .values()
+            .filter(|entry| entry.serial == serial)
+            .filter(|entry| {
+                current
+                    .as_ref()
+                    .is_none_or(|ca_key| *ca_key == entry.ca_key)
+            })
+            .max_by_key(|entry| entry.issued_ms)
     }
 
     /// Forgets every certificate that has ended (ADR-0028 clause 24).
-    fn prune(&self, entries: &mut BTreeMap<String, Entry>) -> Result<(), String> {
+    fn prune(&self, entries: &mut BTreeMap<CertId, Entry>) -> Result<(), String> {
         let now = self.clock.now_ms();
-        let ended: Vec<String> = entries
+        let ended: Vec<CertId> = entries
             .values()
             .filter(|entry| entry.not_after_ms <= now)
-            .map(|entry| entry.serial.clone())
+            .map(|entry| entry.id.clone())
             .collect();
-        for serial in ended {
-            self.store.remove(&serial)?;
-            entries.remove(&serial);
+        for id in ended {
+            self.store.remove(&id)?;
+            entries.remove(&id);
         }
         Ok(())
     }
@@ -488,8 +660,8 @@ mod tests {
 
     #[derive(Default)]
     struct MemoryStore(
-        Mutex<BTreeMap<String, Entry>>,
-        Mutex<BTreeMap<String, Vec<u8>>>,
+        Mutex<BTreeMap<CertId, Entry>>,
+        Mutex<BTreeMap<CertId, Vec<u8>>>,
         std::sync::atomic::AtomicBool,
     );
     impl BootstrapStore for Arc<MemoryStore> {
@@ -503,26 +675,23 @@ mod tests {
             self.0
                 .lock()
                 .unwrap()
-                .insert(entry.serial.clone(), entry.clone());
+                .insert(entry.id.clone(), entry.clone());
             Ok(())
         }
-        fn remove(&self, serial: &str) -> Result<(), String> {
-            self.0.lock().unwrap().remove(serial);
-            self.1.lock().unwrap().remove(serial);
+        fn remove(&self, id: &CertId) -> Result<(), String> {
+            self.0.lock().unwrap().remove(id);
+            self.1.lock().unwrap().remove(id);
             Ok(())
         }
-        fn put_p12(&self, serial: &str, file: &[u8]) -> Result<(), String> {
-            self.1
-                .lock()
-                .unwrap()
-                .insert(serial.to_string(), file.to_vec());
+        fn put_p12(&self, id: &CertId, file: &[u8]) -> Result<(), String> {
+            self.1.lock().unwrap().insert(id.clone(), file.to_vec());
             Ok(())
         }
-        fn p12(&self, serial: &str) -> Result<Option<Vec<u8>>, String> {
-            Ok(self.1.lock().unwrap().get(serial).cloned())
+        fn p12(&self, id: &CertId) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.1.lock().unwrap().get(id).cloned())
         }
-        fn remove_p12(&self, serial: &str) -> Result<(), String> {
-            self.1.lock().unwrap().remove(serial);
+        fn remove_p12(&self, id: &CertId) -> Result<(), String> {
+            self.1.lock().unwrap().remove(id);
             Ok(())
         }
     }
@@ -547,7 +716,7 @@ mod tests {
             subject: &[(Attribute, String)],
             now_ms: u64,
             not_after_ms: u64,
-            password: Option<&str>,
+            password: &str,
         ) -> Result<Pair, String> {
             let serial = format!("{:x}", self.serial.fetch_add(1, Ordering::SeqCst) + 1);
             Ok(Pair {
@@ -562,8 +731,7 @@ mod tests {
                 not_before_ms: now_ms,
                 not_after_ms,
                 certificate_pem: String::new(),
-                private_key_pem: password.is_none().then(String::new),
-                pkcs12: password.map(|p| format!("sealed under {p}").into_bytes()),
+                pkcs12: format!("sealed under {password}").into_bytes(),
             })
         }
     }
@@ -583,56 +751,150 @@ mod tests {
         (record, clock, store)
     }
 
+    /// A request with a customer, a site and a password, each replaced by what `json` names.
     fn request(json: serde_json::Value) -> IssueRequest {
-        serde_json::from_value(json).expect("request")
+        let mut full = serde_json::json!({
+            "subject": {"organization": "Kunde GmbH", "organizational_unit": "Werk Nord"},
+            "password": "twelve chars",
+        });
+        for (key, value) in json.as_object().expect("an object") {
+            full[key] = value.clone();
+        }
+        serde_json::from_value(full).expect("request")
     }
 
-    /// Verifies: ADR-0028
+    /// The smallest request that issues.
+    fn valid() -> IssueRequest {
+        request(serde_json::json!({}))
+    }
+
+    /// The customer and site every subject needs, with `more` beside them.
+    fn with_site(more: serde_json::Value) -> Subject {
+        let mut full = serde_json::json!({
+            "organization": "Kunde GmbH",
+            "organizational_unit": "Werk Nord",
+        });
+        for (key, value) in more.as_object().expect("an object") {
+            full[key] = value.clone();
+        }
+        serde_json::from_value(full).expect("subject")
+    }
+
+    /// A subject takes the six attributes of ADR-0036 clause 1 and nothing else, each within its
+    /// bounds, and lists them in certificate order before the common name the Server sets.
+    /// Verifies: ADR-0036
     #[test]
-    fn a_subject_takes_only_the_organization_and_its_unit_within_bounds() {
-        for unknown in ["common_name", "country", "email"] {
+    fn a_subject_takes_six_attributes_within_bounds() {
+        for unknown in ["common_name", "email", "serial_number", "street"] {
             let refused = serde_json::from_value::<IssueRequest>(
                 serde_json::json!({"subject": {unknown: "x"}}),
             );
             assert!(refused.is_err(), "{unknown} is refused");
         }
-        for bad in [
-            serde_json::json!({"organization": ""}),
-            serde_json::json!({"organization": "x".repeat(65)}),
-            serde_json::json!({"organizational_unit": "a\nb"}),
+        let twice = serde_json::from_str::<IssueRequest>(
+            r#"{"subject": {"organization": "a", "organization": "b"}}"#,
+        );
+        assert!(twice.is_err(), "an attribute named twice is refused");
+        for (bad, named) in [
+            (serde_json::json!({"country": "at"}), "country"),
+            (serde_json::json!({"country": "AUT"}), "country"),
+            (serde_json::json!({"country": ""}), "country"),
+            (serde_json::json!({"country": "Ö1"}), "country"),
+            (serde_json::json!({"organization": ""}), "organization"),
+            (serde_json::json!({"state": "x".repeat(65)}), "state"),
+            (
+                serde_json::json!({"organizational_unit": "a\nb"}),
+                "organizational_unit",
+            ),
+            (
+                serde_json::json!({"organization_identifier": "a\u{7}b"}),
+                "organization_identifier",
+            ),
         ] {
-            let subject: Subject = serde_json::from_value(bad.clone()).expect("subject");
-            assert!(subject.attributes("cn").is_err(), "{bad} is refused");
+            let refused = with_site(bad.clone())
+                .attributes("cn")
+                .expect_err("refused");
+            assert!(
+                refused.starts_with(&format!("subject.{named} ")),
+                "{bad} is refused naming {named}: {refused}"
+            );
         }
         let subject: Subject = serde_json::from_value(serde_json::json!({
-            "organization": "Kunde GmbH", "organizational_unit": "Wien"
+            "organization_identifier": "6f1c0b9e-2a4d-4c55-9b1e-0d2f3a4b5c6d",
+            "organizational_unit": "Werk Nord",
+            "organization": "Kunde GmbH",
+            "locality": "Linz",
+            "state": "Oberösterreich",
+            "country": "AT",
         }))
         .expect("subject");
         assert_eq!(
             subject.attributes("acme bootstrap").expect("valid"),
             vec![
+                (Attribute::Country, "AT".to_string()),
+                (Attribute::State, "Oberösterreich".to_string()),
+                (Attribute::Locality, "Linz".to_string()),
                 (Attribute::Organization, "Kunde GmbH".to_string()),
-                (Attribute::OrganizationalUnit, "Wien".to_string()),
+                (Attribute::OrganizationalUnit, "Werk Nord".to_string()),
+                (
+                    Attribute::OrganizationIdentifier,
+                    "6f1c0b9e-2a4d-4c55-9b1e-0d2f3a4b5c6d".to_string()
+                ),
                 (Attribute::CommonName, "acme bootstrap".to_string()),
             ]
         );
         assert_eq!(
-            Subject::default()
+            with_site(serde_json::json!({}))
                 .attributes("acme bootstrap")
-                .expect("empty is fine"),
-            vec![(Attribute::CommonName, "acme bootstrap".to_string())]
+                .expect("a customer and a site are enough"),
+            vec![
+                (Attribute::Organization, "Kunde GmbH".to_string()),
+                (Attribute::OrganizationalUnit, "Werk Nord".to_string()),
+                (Attribute::CommonName, "acme bootstrap".to_string()),
+            ]
         );
+    }
+
+    /// Organization and organizational unit are required, and a request without either, or
+    /// without a password, issues nothing and is refused naming the field (ADR-0036 clauses 1
+    /// and 8).
+    /// Verifies: ADR-0036
+    #[test]
+    fn an_issue_without_a_customer_a_site_or_a_password_is_refused_naming_it() {
+        let (record, _, store) = fixture(u64::MAX);
+        for (json, named) in [
+            (
+                serde_json::json!({"subject": {"organizational_unit": "Werk Nord"}}),
+                "subject.organization ",
+            ),
+            (
+                serde_json::json!({"subject": {"organization": "Kunde GmbH"}}),
+                "subject.organizational_unit ",
+            ),
+            (serde_json::json!({"subject": {}}), "subject.organization "),
+            (serde_json::json!({"password": null}), "password "),
+        ] {
+            let Err(IssueError::Invalid(why)) = record.issue(&request(json.clone())) else {
+                panic!("{json} is refused as invalid");
+            };
+            assert!(
+                why.starts_with(named) && why.contains("required"),
+                "{json}: {why}"
+            );
+        }
+        assert!(record.list().is_empty(), "nothing issued");
+        assert!(store.1.lock().unwrap().is_empty(), "no file kept");
     }
 
     /// Verifies: ADR-0028
     #[test]
     fn a_certificate_lives_ten_days_by_default_at_most_ninety_and_never_past_its_ca() {
         let (record, _, _) = fixture(u64::MAX);
-        let pair = record.issue(&IssueRequest::default()).expect("issued");
+        let pair = record.issue(&valid()).expect("issued");
         assert_eq!(pair.not_after_ms, 1_000 + 10 * DAY_MS);
         assert_eq!(
-            pair.subject, "Acme Bootstrap Certificate",
-            "the CA's name with ` CA` turned into ` Certificate`"
+            pair.subject, "Kunde GmbH,Werk Nord,Acme Bootstrap Certificate",
+            "the common name is the CA's name with ` CA` turned into ` Certificate`"
         );
         for days in [0, 91] {
             let refused = record.issue(&request(serde_json::json!({"validity_days": days})));
@@ -650,10 +912,7 @@ mod tests {
     #[test]
     fn an_ended_ca_issues_nothing() {
         let (record, _, _) = fixture(1_000);
-        assert!(matches!(
-            record.issue(&IssueRequest::default()),
-            Err(IssueError::CaEnded)
-        ));
+        assert!(matches!(record.issue(&valid()), Err(IssueError::CaEnded)));
     }
 
     /// After the bootstrap CA is replaced, what the old one issued no longer passes the
@@ -662,7 +921,7 @@ mod tests {
     #[test]
     fn what_a_replaced_ca_issued_is_forgotten() {
         let (record, clock, store) = fixture(u64::MAX);
-        record.issue(&IssueRequest::default()).expect("issued");
+        record.issue(&valid()).expect("issued");
         let reopened = BootstrapCertificates::open(
             Some(Box::new(EchoSigner {
                 ca_end_ms: u64::MAX - 1,
@@ -709,10 +968,7 @@ mod tests {
         )
         .expect("open");
         assert!(!record.can_issue());
-        assert!(matches!(
-            record.issue(&IssueRequest::default()),
-            Err(IssueError::NoKey)
-        ));
+        assert!(matches!(record.issue(&valid()), Err(IssueError::NoKey)));
     }
 
     /// A password of four characters is taken and one of three is not.
@@ -730,40 +986,25 @@ mod tests {
         assert_eq!(file, b"sealed under four");
     }
 
-    /// With a password the Server keeps the file, not the key, and hands it out until the
-    /// certificate ends or a revocation forgets it; a password out of bounds issues nothing.
-    /// Verifies: ADR-0029
+    /// The Server keeps the file, not the key, and hands it out until the certificate ends or a
+    /// revocation forgets it; a password out of bounds issues nothing.
+    /// Verifies: ADR-0029, ADR-0036
     #[test]
-    fn a_password_keeps_a_pkcs12_file_until_the_certificate_ends_or_is_forgotten() {
+    fn every_certificate_keeps_a_pkcs12_file_until_it_ends_or_is_forgotten() {
         let (record, clock, store) = fixture(u64::MAX);
         let short = record.issue(&request(serde_json::json!({"password": "abc"})));
         assert!(matches!(short, Err(IssueError::Invalid(_))));
         assert!(record.list().is_empty(), "nothing issued");
-
-        let plain = record.issue(&IssueRequest::default()).expect("issued");
-        assert!(plain.private_key_pem.is_some() && plain.pkcs12.is_none());
-        assert_eq!(
-            record.p12(&plain.serial).expect("read"),
-            None,
-            "no file without a password"
-        );
 
         let sealed = record
             .issue(&request(
                 serde_json::json!({"validity_days": 1, "password": "twelve chars"}),
             ))
             .expect("issued");
-        assert!(
-            sealed.private_key_pem.is_none(),
-            "no PEM key with a password"
-        );
         let (entry, file) = record.p12(&sealed.serial).expect("read").expect("kept");
         assert!(entry.p12);
         assert_eq!(file, b"sealed under twelve chars");
-        assert!(
-            store.0.lock().unwrap()[&sealed.serial].p12,
-            "the entry says so"
-        );
+        assert!(store.0.lock().unwrap()[&sealed.id].p12, "the entry says so");
 
         let other = record
             .issue(&request(serde_json::json!({"password": "twelve chars"})))
@@ -771,15 +1012,15 @@ mod tests {
         record.forget_p12(&other.serial).expect("forgotten");
         assert_eq!(record.p12(&other.serial).expect("read"), None);
         assert!(
-            store.1.lock().unwrap().get(&other.serial).is_none(),
+            store.1.lock().unwrap().get(&other.id).is_none(),
             "the file is gone"
         );
-        assert!(!store.0.lock().unwrap()[&other.serial].p12);
+        assert!(!store.0.lock().unwrap()[&other.id].p12);
 
         clock.0.store(1_000 + 2 * DAY_MS, Ordering::SeqCst);
         assert_eq!(record.p12(&sealed.serial).expect("read"), None, "ended");
         assert!(
-            store.1.lock().unwrap().get(&sealed.serial).is_none(),
+            store.1.lock().unwrap().get(&sealed.id).is_none(),
             "removed with its entry"
         );
     }
@@ -790,8 +1031,8 @@ mod tests {
         let request = request(serde_json::json!({"password": "do not show me"}));
         assert!(!format!("{request:?}").contains("do not show me"));
         let (record, _, _) = fixture(u64::MAX);
-        let pair = record.issue(&IssueRequest::default()).expect("issued");
-        assert!(!format!("{pair:?}").contains("private_key_pem"));
+        let pair = record.issue(&valid()).expect("issued");
+        assert!(!format!("{pair:?}").contains("twelve chars"));
     }
 
     /// An entry that cannot be written leaves no PKCS#12 file behind, which nothing would end.

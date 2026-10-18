@@ -1,8 +1,8 @@
-//! Server-offered packages (ADR-0026): resolving a download URL, downloading the artifact from an
-//! allowed source over TLS 1.3, and **verifying it before it is applied** — the content hash and the
-//! Ed25519 signature, both always. What protects an installed binary is verification; what the
-//! source rules protect is what a download exposes — the offered headers and this Client's
-//! certificate.
+//! Server-offered packages (ADR-0026): resolving a download URL, downloading the artifact from this
+//! Client's own Server origin over TLS 1.3 (ADR-0033), and **verifying it before it is applied** —
+//! the content hash and the Ed25519 signature, both always. What protects an installed binary is
+//! verification; what the origin rule protects is what a download exposes — the offered headers and
+//! this Client's certificate — and that a host never reaches past its Server for software.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,8 +15,8 @@ use crate::config::ClientConfig;
 use crate::supervisor::agent::PackageDownload;
 
 /// Resolves an offered `download_url` to an absolute URL. An absolute `http(s)://` URL is used as
-/// given; a path (the Server's zero-config default) is resolved against the Client's own OpAMP
-/// endpoint host, `ws(s)://` mapped to `http(s)://`.
+/// given — and then held to [`ServerOrigin::permit`]; a path (the Server's zero-config default) is
+/// resolved against the Client's own OpAMP endpoint host, `ws(s)://` mapped to `http(s)://`.
 pub fn resolve_url(download_url: &str, endpoint: &str) -> Result<String, String> {
     if download_url.starts_with("http://") || download_url.starts_with("https://") {
         return Ok(download_url.to_string());
@@ -119,10 +119,9 @@ pub async fn download_and_verify_patiently(
     // Refused before a byte is fetched: no key, or no signature to check with it (ADR-0026).
     let key = signature_policy(&package.signature, config.package_key())?;
     let url = resolve_url(&package.download_url, &config.endpoint)?;
-    let sources = Sources::new(config)?;
-    // Two clients, one per kind of host: this Client's certificate goes to its own Server's origin
-    // and to nobody else (ADR-0026), so a mirror never learns the fleet identity.
-    let anonymous = download_client(crate::tls::trust(config)?)?;
+    let origin = ServerOrigin::new(config)?;
+    // Every request goes to this Client's own Server origin (ADR-0033), which is where its
+    // certificate belongs: the download route sits behind the Agent plane's handshake.
     let identified = download_client(crate::tls::client_tls(config)?)?;
     // A count, never a key and never a value — and the source without whatever authorises reaching
     // it. This line goes to the log file, and through the bridge to the destination the Server named
@@ -131,16 +130,9 @@ pub async fn download_and_verify_patiently(
     let source = source_of(&url);
     info!(package = %package.name, url = %source, headers = package.headers.len(), "downloading package");
     let download = tracing::info_span!("download", source = %source);
-    let mut response = send_patiently(
-        &sources,
-        &anonymous,
-        &identified,
-        &url,
-        &package.headers,
-        patience,
-    )
-    .instrument(download.clone())
-    .await?;
+    let mut response = send_patiently(&origin, &identified, &url, &package.headers, patience)
+        .instrument(download.clone())
+        .await?;
     if !response.status().is_success() {
         return Err(format!("{url} answered {}", response.status()));
     }
@@ -210,87 +202,42 @@ pub(crate) fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::
         .map_err(|e| format!("cannot build the download client: {e}"))
 }
 
-/// Where a download may go (ADR-0026): the Server's own origin always, and the prefixes of
-/// `[packages] allowed_sources`. Every URL is held to the transport rule first — `https://`, and
-/// `http://` only to `127.0.0.1` or `::1`.
-pub struct Sources {
+/// Where a download may go (ADR-0033 clause 13): this Client's own Server origin — the scheme, host
+/// and port of its OpAMP endpoint, `wss` mapped to `https` (and `ws` to `http`, which the endpoint
+/// may only be on the loopback) — and nowhere else. Every URL is held to the transport rule first.
+pub struct ServerOrigin {
     server: reqwest::Url,
-    allowed: Vec<reqwest::Url>,
 }
 
-impl Sources {
+impl ServerOrigin {
     /// # Errors
-    /// Returns an error when the endpoint or an allowed source cannot be parsed.
+    /// Returns an error when the endpoint cannot be parsed.
     pub fn new(config: &ClientConfig) -> Result<Self, String> {
         let server = resolve_url("/", &config.endpoint)?;
         let server =
             reqwest::Url::parse(&server).map_err(|e| format!("cannot parse {server}: {e}"))?;
-        let allowed = config
-            .packages
-            .as_ref()
-            .map(|p| p.allowed_sources.as_slice())
-            .unwrap_or_default()
-            .iter()
-            .map(|entry| parse_source(entry))
-            .collect::<Result<_, _>>()?;
-        Ok(Sources { server, allowed })
+        Ok(ServerOrigin { server })
     }
 
     fn is_server(&self, url: &reqwest::Url) -> bool {
         same_origin(&self.server, url)
     }
 
-    /// Whether a download may go to `url`, and why not when it may not.
+    /// Whether a download may go to `url`, and why not when it may not: the message names the
+    /// origin it pointed at, and is what the Client reports `InstallFailed` with.
     fn permit(&self, url: &reqwest::Url) -> Result<(), String> {
         opamp::endpoint::check_url(url.as_str())
             .map_err(|e| format!("refusing {}: {e}", source_of(url.as_str())))?;
-        if self.is_server(url) || self.allowed.iter().any(|prefix| below(prefix, url)) {
+        if self.is_server(url) {
             return Ok(());
         }
         Err(format!(
-            "{} is not an allowed download source — add its https:// prefix to \
-             [packages] allowed_sources",
-            origin_label(url)
+            "refusing a download from {}: a package is fetched only from this Client's own \
+             Server origin, {} (ADR-0033)",
+            origin_label(url),
+            origin_label(&self.server)
         ))
     }
-}
-
-/// An `allowed_sources` entry, held to the rules of ADR-0026: an `https://` URL (`http://` only to
-/// a loopback literal) with no credentials, query or fragment.
-///
-/// # Errors
-/// Returns a sentence naming the entry.
-pub fn parse_source(entry: &str) -> Result<reqwest::Url, String> {
-    let url = reqwest::Url::parse(entry)
-        .map_err(|e| format!("[packages] allowed_sources entry {entry:?} is not a URL: {e}"))?;
-    if !matches!(url.scheme(), "https" | "http") {
-        return Err(format!(
-            "[packages] allowed_sources entry {entry:?} must be https://"
-        ));
-    }
-    opamp::endpoint::check_url(entry)
-        .map_err(|e| format!("[packages] allowed_sources entry {e}"))?;
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(format!(
-            "[packages] allowed_sources entry {entry:?} must carry no credentials, query or fragment"
-        ));
-    }
-    Ok(url)
-}
-
-/// Whether `url` lies below `prefix`: the same origin, and a path that begins with the prefix's at
-/// a `/` boundary, so `https://m.example/a` admits `/a/x` but not `/ab`.
-fn below(prefix: &reqwest::Url, url: &reqwest::Url) -> bool {
-    if !same_origin(prefix, url) {
-        return false;
-    }
-    let base = prefix.path().trim_end_matches('/');
-    let path = url.path();
-    path == base || base.is_empty() || path.starts_with(&format!("{base}/"))
 }
 
 /// The scheme, host and port of a URL, for a message.
@@ -300,46 +247,39 @@ fn origin_label(url: &reqwest::Url) -> String {
 
 /// Sends the download request, walking every redirect by hand.
 ///
-/// Each hop is checked against [`Sources`] before it is requested, so a mirror cannot bounce the
-/// download to a host the operator did not allow, or onto plaintext. This Client's certificate goes
-/// only to the Server's own origin. The offered headers go only to an allowed hop on the origin they
-/// were given for: `reqwest` strips only `Authorization`, `Cookie` and `Proxy-Authorization` when a
-/// redirect crosses origins, so a custom credential — `X-JFrog-Art-Api`, `PRIVATE-TOKEN` — would
-/// otherwise be re-sent to wherever a mirror points it. Integrity is unaffected either way, since
-/// the content hash and the signature are checked after the bytes land.
+/// Each hop is checked against [`ServerOrigin`] before it is requested, so nothing — not the offer,
+/// not a redirect — takes the download to another host or onto plaintext, and nothing is fetched
+/// from a refused one. Every hop is therefore the Server's own origin, the one the offered headers
+/// and this Client's certificate (the `client`) are for.
 pub(crate) async fn send_download(
-    sources: &Sources,
-    anonymous: &reqwest::Client,
-    identified: &reqwest::Client,
+    origin: &ServerOrigin,
+    client: &reqwest::Client,
     url: &str,
     headers: &[(String, String)],
 ) -> Result<reqwest::Response, String> {
-    let origin =
+    let mut current =
         reqwest::Url::parse(url).map_err(|e| format!("cannot parse {}: {e}", source_of(url)))?;
-    let mut current = origin.clone();
     for _ in 0..=MAX_REDIRECTS {
-        sources.permit(&current)?;
-        let client = if sources.is_server(&current) {
-            identified
-        } else {
-            anonymous
-        };
-        let mut request = client.get(current.clone());
-        if same_origin(&origin, &current) {
-            request = with_headers(request, headers)?;
-        }
+        origin.permit(&current)?;
+        let request = with_headers(client.get(current.clone()), headers)?;
         let response = request
             .send()
             .await
-            .map_err(|e| format!("cannot download {current}: {e}"))?;
+            .map_err(|e| format!("cannot download {}: {e}", source_of(current.as_str())))?;
         let Some(location) = redirect_target(&response) else {
             return Ok(response);
         };
-        current = current
-            .join(&location)
-            .map_err(|e| format!("{current} redirected to an unusable location: {e}"))?;
+        current = current.join(&location).map_err(|e| {
+            format!(
+                "{} redirected to an unusable location: {e}",
+                source_of(current.as_str())
+            )
+        })?;
     }
-    Err(format!("{url} redirected more than {MAX_REDIRECTS} times"))
+    Err(format!(
+        "{} redirected more than {MAX_REDIRECTS} times",
+        source_of(url)
+    ))
 }
 
 /// [`send_download`], waiting out a `429` or `503` with `Retry-After` in seconds from the Server's
@@ -347,17 +287,16 @@ pub(crate) async fn send_download(
 /// within `patience` (ADR-0026 clause 49). Anything else is returned as it came, for the caller to
 /// fail on.
 pub(crate) async fn send_patiently(
-    sources: &Sources,
-    anonymous: &reqwest::Client,
-    identified: &reqwest::Client,
+    origin: &ServerOrigin,
+    client: &reqwest::Client,
     url: &str,
     headers: &[(String, String)],
     patience: Patience,
 ) -> Result<reqwest::Response, String> {
     let waits = Waits::new(patience);
     loop {
-        let response = send_download(sources, anonymous, identified, url, headers).await?;
-        match waits.asked(sources, url, &response)? {
+        let response = send_download(origin, client, url, headers).await?;
+        match waits.asked(url, &response)? {
             Some(wait) => tokio::time::sleep(wait).await,
             None => return Ok(response),
         }
@@ -382,22 +321,21 @@ impl Waits {
         }
     }
 
-    /// How long `response` asks the download to wait before it asks again: `None` when it is not a
-    /// `429` or `503` with `Retry-After` in seconds from the Server's own origin, which the caller
-    /// takes as it is.
+    /// How long `response` — from the Server's own origin, the only one [`send_download`] reaches
+    /// — asks the download to wait before it asks again: `None` when it is not a `429` or `503`
+    /// with `Retry-After` in seconds, which the caller takes as it is.
     ///
     /// # Errors
     /// Returns the failure once a wait would end past the deadline.
     pub(crate) fn asked(
         &self,
-        sources: &Sources,
         url: &str,
         response: &reqwest::Response,
     ) -> Result<Option<std::time::Duration>, String> {
         let status = response.status();
         let busy = status == reqwest::StatusCode::TOO_MANY_REQUESTS
             || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
-        if !busy || !sources.is_server(response.url()) {
+        if !busy {
             return Ok(None);
         }
         let Some(after) = retry_after(response) else {
@@ -462,7 +400,7 @@ fn with_headers(
 /// The span this labels leaves the host for a destination the *Server* named (ADR-0016 clause 23), and
 /// a download URL is one of the few strings here that can carry a credential in plain sight: a
 /// pre-signed URL puts its signature in the query. The scheme, host and path answer the question a
-/// trace is read for — *which mirror served this* — and the query answers none of it.
+/// trace is read for — *which artifact was fetched* — and the query answers none of it.
 ///
 /// A URL that will not parse is reported as nothing rather than as itself: the one case where the
 /// query cannot be found is the case where it must not be assumed absent.
@@ -478,7 +416,7 @@ pub(crate) fn source_of(url: &str) -> String {
     parsed.to_string()
 }
 
-/// Whether a redirect stayed where the offered headers may go: same scheme, host, and port.
+/// Whether two URLs share an origin: same scheme, host, and port.
 fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
     a.scheme() == b.scheme()
         && a.host_str() == b.host_str()
@@ -687,12 +625,12 @@ mod tests {
         (addr, count)
     }
 
-    fn sources_for(endpoint: &str) -> (Sources, reqwest::Client) {
+    fn origin_for(endpoint: &str) -> (ServerOrigin, reqwest::Client) {
         opamp::tls::install_ring_provider();
         let config: ClientConfig =
             toml::from_str(&format!("endpoint = \"{endpoint}\"\n")).expect("config");
         let client = download_client(crate::tls::trust(&config).expect("trust")).expect("client");
-        (Sources::new(&config).expect("sources"), client)
+        (ServerOrigin::new(&config).expect("origin"), client)
     }
 
     const SHORT: Patience = Patience {
@@ -706,10 +644,9 @@ mod tests {
     #[tokio::test]
     async fn a_download_waits_out_retry_after_from_its_server_origin() {
         let (server, count) = answering(vec![(503, Some("30")), (429, Some("30"))]).await;
-        let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+        let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
         let response = send_patiently(
-            &sources,
-            &client,
+            &origin,
             &client,
             &format!("http://{server}/file"),
             &[],
@@ -727,14 +664,13 @@ mod tests {
     #[tokio::test]
     async fn a_download_gives_up_once_its_waits_reach_the_bound() {
         let (server, count) = answering(vec![(503, Some("30")); 100]).await;
-        let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+        let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
         let patience = Patience {
             per_wait: std::time::Duration::from_millis(10),
             total: std::time::Duration::from_millis(35),
         };
         let err = send_patiently(
-            &sources,
-            &client,
+            &origin,
             &client,
             &format!("http://{server}/file"),
             &[],
@@ -756,14 +692,13 @@ mod tests {
     #[tokio::test]
     async fn a_retry_after_of_zero_does_not_loop_without_bound() {
         let (server, count) = answering(vec![(503, Some("0")); 1000]).await;
-        let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+        let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
         let patience = Patience {
             per_wait: std::time::Duration::from_millis(10),
             total: std::time::Duration::from_millis(100),
         };
         let err = send_patiently(
-            &sources,
-            &client,
+            &origin,
             &client,
             &format!("http://{server}/file"),
             &[],
@@ -802,14 +737,13 @@ mod tests {
             .expect("bind");
         let server = listener.local_addr().expect("addr");
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
-        let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+        let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
         let patience = Patience {
             per_wait: std::time::Duration::from_millis(1),
             total: std::time::Duration::from_millis(150),
         };
         let err = send_patiently(
-            &sources,
-            &client,
+            &origin,
             &client,
             &format!("http://{server}/file"),
             &[],
@@ -831,10 +765,9 @@ mod tests {
     async fn an_unusable_retry_after_is_not_waited_out() {
         for after in [Some("Wed, 21 Oct 2015 07:28:00 GMT"), None, Some("soon")] {
             let (server, count) = answering(vec![(503, after)]).await;
-            let (sources, client) = sources_for(&format!("ws://{server}/v1/opamp"));
+            let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
             let response = send_patiently(
-                &sources,
-                &client,
+                &origin,
                 &client,
                 &format!("http://{server}/file"),
                 &[],
@@ -851,12 +784,12 @@ mod tests {
         }
     }
 
-    /// A `503` with `Retry-After` from the host a redirect off the Server's origin led to is not
-    /// waited out.
-    /// Verifies: ADR-0026
+    /// A redirect off the Server's origin is refused before the host it points at is asked: the
+    /// download fails naming that origin, and nothing is fetched from it (ADR-0033 clause 13).
+    /// Verifies: ADR-0033
     #[tokio::test]
-    async fn a_retry_after_after_a_redirect_off_the_origin_is_not_waited_out() {
-        let (mirror, count) = answering(vec![(503, Some("1"))]).await;
+    async fn a_redirect_off_the_origin_is_refused_without_a_fetch() {
+        let (mirror, count) = answering(Vec::new()).await;
         let target = format!("http://{mirror}/file");
         let app = axum::Router::new().route(
             "/file",
@@ -870,52 +803,47 @@ mod tests {
             .expect("bind");
         let server = listener.local_addr().expect("addr");
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
-        opamp::tls::install_ring_provider();
-        let config: ClientConfig = toml::from_str(&format!(
-            "endpoint = \"ws://{server}/v1/opamp\"\n[packages]\nallowed_sources = [\"http://{mirror}/\"]\n"
-        ))
-        .expect("config");
-        let sources = Sources::new(&config).expect("sources");
-        let client = download_client(crate::tls::trust(&config).expect("trust")).expect("client");
-        let response = send_patiently(
-            &sources,
-            &client,
+        let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
+        let err = send_patiently(
+            &origin,
             &client,
             &format!("http://{server}/file"),
             &[],
             SHORT,
         )
         .await
-        .expect("a response");
-        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(count.load(Ordering::SeqCst), 1);
+        .expect_err("refused");
+        assert!(err.contains(&format!("http://{mirror}")), "{err}");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "the other host is never asked"
+        );
     }
 
-    /// A `503` with `Retry-After` from a host that is not the Client's own Server origin is not
-    /// waited out: the response comes back as it is, for the download to fail on.
-    /// Verifies: ADR-0026
+    /// An absolute `download_url` on another origin is refused without a byte fetched, and the
+    /// refusal names that origin (ADR-0033 clause 13) — whatever the offer's headers would have
+    /// carried never leaves the host.
+    /// Verifies: ADR-0033
     #[tokio::test]
-    async fn a_retry_after_from_another_host_fails_the_download() {
-        let (server, count) = answering(vec![(503, Some("1"))]).await;
-        let (_, client) = sources_for(&format!("ws://{server}/v1/opamp"));
-        let (other, _) = answering(Vec::new()).await;
-        let config: ClientConfig = toml::from_str(&format!(
-            "endpoint = \"ws://{other}/v1/opamp\"\n[packages]\nallowed_sources = [\"http://{server}/\"]\n"
-        ))
-        .expect("config");
-        let sources = Sources::new(&config).expect("sources");
-        let response = send_patiently(
-            &sources,
+    async fn an_absolute_url_on_another_origin_is_refused_without_a_fetch() {
+        let (other, count) = answering(Vec::new()).await;
+        let (server, _) = answering(Vec::new()).await;
+        let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
+        let err = send_patiently(
+            &origin,
             &client,
-            &client,
-            &format!("http://{server}/file"),
-            &[],
+            &format!("http://{other}/file"),
+            &[("Authorization".to_string(), "Bearer t".to_string())],
             SHORT,
         )
         .await
-        .expect("a response");
-        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(count.load(Ordering::SeqCst), 1);
+        .expect_err("refused");
+        assert!(
+            err.contains(&format!("http://{other}")) && err.contains("own Server origin"),
+            "{err}"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 0, "nothing was fetched");
     }
 
     /// What labels the download span must not carry what authorises the download: the span goes to
@@ -1187,57 +1115,30 @@ mod tests {
         );
     }
 
-    /// A download goes to the Server's own origin, or below a configured prefix at a `/` boundary,
-    /// and nowhere else; plaintext is held to the loopback literals even there.
-    /// Verifies: ADR-0026
+    /// A download goes to the Server's own origin and nowhere else — not another port, not
+    /// plaintext, not another host (ADR-0033 clause 13).
+    /// Verifies: ADR-0033
     #[test]
-    fn a_source_is_allowed_only_below_a_prefix_or_at_the_server() {
+    fn a_download_goes_only_to_the_servers_own_origin() {
         let config = ClientConfig {
             endpoint: "wss://fleet.example:4320/v1/opamp".to_string(),
-            packages: Some(crate::config::PackagesConfig {
-                allowed_sources: vec!["https://mirror.example/releases".to_string()],
-                ..Default::default()
-            }),
             ..ClientConfig::default()
         };
-        let sources = Sources::new(&config).expect("sources");
+        let origin = ServerOrigin::new(&config).expect("origin");
         let url = |u: &str| reqwest::Url::parse(u).expect("url");
-        for allowed in [
-            "https://fleet.example:4320/api/v1/packages/x/file",
-            "https://mirror.example/releases/agent.tar.gz",
-            "https://mirror.example/releases",
-        ] {
-            assert_eq!(sources.permit(&url(allowed)), Ok(()), "{allowed}");
-        }
+        assert_eq!(
+            origin.permit(&url(
+                "https://fleet.example:4320/api/v1/packages/x/1/file?os=linux"
+            )),
+            Ok(())
+        );
         for refused in [
-            "https://mirror.example/releases-evil/agent.tar.gz",
-            "https://mirror.example/other/agent.tar.gz",
-            "https://fleet.example:4321/api/v1/packages/x/file",
-            "http://mirror.example/releases/agent.tar.gz",
-            "https://evil.example/releases/agent.tar.gz",
+            "https://fleet.example:4321/api/v1/packages/x/1/file",
+            "http://fleet.example:4320/api/v1/packages/x/1/file",
+            "https://mirror.example/releases/agent.tar.gz",
+            "https://evil.example:4320/api/v1/packages/x/1/file",
         ] {
-            assert!(sources.permit(&url(refused)).is_err(), "{refused}");
-        }
-    }
-
-    /// An `allowed_sources` entry is an https prefix and nothing else: plaintext only on a loopback
-    /// literal, never on a host name, and no credentials, query or fragment.
-    /// Verifies: ADR-0026
-    #[test]
-    fn an_allowed_source_must_be_a_plain_https_prefix() {
-        assert!(parse_source("https://mirror.example/releases").is_ok());
-        assert!(parse_source("http://127.0.0.1:8080/").is_ok());
-        assert!(parse_source("http://[::1]:8080/").is_ok());
-        for bad in [
-            "http://mirror.example/releases",
-            "http://localhost:8080/",
-            "ftp://mirror.example/",
-            "https://user:pw@mirror.example/",
-            "https://mirror.example/?token=x",
-            "https://mirror.example/#x",
-            "mirror.example",
-        ] {
-            assert!(parse_source(bad).is_err(), "{bad}");
+            assert!(origin.permit(&url(refused)).is_err(), "{refused}");
         }
     }
 }

@@ -105,7 +105,8 @@ Every Agent reports two names that are easy to confuse:
 | **instance name** | *your* name for this one Agent | `edge-collector-3` |
 
 Aim at the type to reach every Agent of a kind; aim at the instance name to reach exactly one. A
-package is built for a type and reaches no Agent of another, whatever else its Selector says.
+package is built for a type and reaches no Agent of another, whatever Deployment holds it; a
+Configuration stated for a type does the same.
 
 The Client's own type is `supervisor` — the Agent that supervises the others. Its instance name
 defaults to a display name, deliberately not equal to the type: if both columns of the fleet view
@@ -212,12 +213,11 @@ about twice. The alternative was a second kind that the fleet could watch but ne
 seam between the two ran through every decision that touched packages.
 
 ### Packages, updates and connectivity, in one paragraph each
-**Packages.** The Server decides which artifact an Agent is offered; the Client fetches it from the
-Server or a source the operator allowed, verifies it by hash and by signature, unpacks it beside
-the running program,
+**Packages.** The Server decides which artifact an Agent is offered; the Client fetches it from its
+own Server, verifies it by hash and by signature, unpacks it beside the running program,
 swaps it in by rename, and watches whether it stays up. If it does not, the predecessor comes back.
-The unit is a versioned **Package** — the Agent type it is built for and its version — held by a
-**Deployment** that aims it at a channel and carries its signature; only that deployment is rolled out,
+The unit is a versioned **Package** — the Agent type it is built for and its version, each entry
+signed — held by a **Deployment** that aims it at a channel; only that deployment is rolled out,
 and a Package assigned to any Agent is immutable. In full: [Package updates](#package-updates).
 
 **Versions.** An Agent reports two numbers that can disagree — the version its package record claims
@@ -907,7 +907,8 @@ one, in its very first message, before the Server has ever seen it.
 
 To tag **one** Agent among several on a host, use a Server **label** instead
 (`PUT /api/v1/agents/<uid>/labels`): it is keyed by that Agent's `instance_uid`, matched by the
-same Selectors, and takes effect at once without editing a file on the host. A block's own
+same Selectors, and takes effect at once without editing a file on the host. A label on the
+Client's own Agent holds for every Agent of that Client, below their own labels. A block's own
 `[supervisor.attributes]` table used to do this and no longer exists; a block carrying one fails at
 startup with that sentence.
 
@@ -1017,7 +1018,6 @@ The Server is upgraded before its Clients: a Server that demands a credential an
 [packages]
 self_update = true
 verification_key = "<hex-encoded Ed25519 public key>"
-allowed_sources = ["https://mirror.example.com/releases/"]
 archive_key = "the key an encrypted .7z was packed with"
 ```
 
@@ -1025,33 +1025,28 @@ archive_key = "the key an encrypted .7z was packed with"
 |---|---|
 | `self_update` | Consent for the Server to replace this Client's own binary. `true` by default, and an absent key or `[packages]` section is the consent; `false` withdraws it, and the Supervisors keep taking their packages. It takes effect only while `verification_key` is set. See [Updating the Client itself](#updating-the-client-itself). |
 | `verification_key` | **Required to take any package.** Every Server-offered package must carry a valid Ed25519 signature over its artifact, and the signature must verify against this key. Without it, no Agent of this Client declares `AcceptsPackages` — neither a Supervisor nor the Client's own Agent — and the Client says so once at startup. A package offered regardless is refused before anything is downloaded and reported `InstallFailed`, naming the key. A malformed key fails startup. Generate the key with `opamp-fleetctl package keygen` (see [the Server](server.md#packages-and-deployments-distributing-software)). |
-| `allowed_sources` | `https://` URL prefixes a download may come from besides the Server's own origin. Empty by default. See [Where a download may come from](#where-a-download-may-come-from). |
 | `archive_key` | Opens an encrypted `.7z` artifact. One secret for the fleet — a single archive serves every Agent. The Server never learns this key; the artifact stays encrypted wherever it is stored and is opened only on the host that runs it. |
 
 Note what is *not* here: which artifact a Supervisor receives is the Server's decision, expressed as
-the Deployment that holds the package, never a key in this file.
+the Deployment that holds the package, never a key in this file — and where it comes from is not
+configurable either. `allowed_sources` no longer exists, and a file that still names it fails
+startup naming the key; remove it.
 
 #### Where a download may come from
 
-A download goes to the Server's own origin — the scheme, host and port of this Client's OpAMP
-endpoint — or to a source `allowed_sources` lists. The Server's own origin
-needs no entry, and an empty list allows it alone.
+A download goes to this Client's own Server origin — the scheme, host and port of its OpAMP
+endpoint, `wss` mapped to `https` (and `ws` to `http`, which the endpoint may only be on the
+loopback) — and nowhere else. Every artifact is uploaded to the Server, so there is no other
+source to allow.
 
-- **An entry is an `https://` URL prefix.** `http://` is accepted only when the host is
-  `127.0.0.1` or `::1`. An entry with another scheme, a plaintext entry off the loopback, or an
-  entry carrying credentials, a query or a fragment fails startup naming it.
-- **A URL matches an entry** when scheme, host and port are equal and its path begins with the
-  entry's path at a `/` boundary. `https://mirror.example.com/releases/` allows
-  `https://mirror.example.com/releases/otelcol.tar.gz`, and not
-  `https://mirror.example.com/releases-old/…`.
-- **The source is checked before the request is sent.** A URL that is not allowed is refused
+- **A path is resolved against that origin.** It is what the Server offers for every artifact,
+  and what a Gateway relays.
+- **An absolute URL is accepted only when its origin is that origin.** Any other is refused
   without a byte fetched and reported `InstallFailed`, naming its origin.
-- **Every redirect hop is checked** against the same rules before it is requested, up to 5 hops. A
-  hop outside them fails the download, naming the origin it pointed at.
-- **The offer's headers go only to an allowed source**, and are re-sent along a redirect only while
-  scheme, host and port stay the same.
-- **The client certificate goes only to the Server's own origin.** To a mirror, and on a hop that
-  leaves the Server's origin, the Client presents none.
+- **Redirects are followed up to 5**, and only while every hop stays on that origin. A hop that
+  leaves it fails the download, naming the origin it pointed at.
+- **The offer's headers, if any, go only to that origin**, and are never logged.
+- **The client certificate is presented there**, which is the only place a download goes.
 - **A `429` or `503` with `Retry-After` from the Server's own origin is waited out**. That origin answers so when its rate limit is reached, or —
   for a Client behind a Gateway — while the Gateway is still fetching the artifact. Each wait is
   the `Retry-After`, at least 1 and at most 60 seconds, and the asking stops 30 minutes after the
@@ -1112,8 +1107,7 @@ A Gateway delivers the packages the Server hosts to the Agents behind it, so tha
 crosses the Gateway's upstream link once instead of once per Agent:
 
 - **What it fetches.** When the Gateway relays a package offer whose `download_url` is a path on
-  the Server's download route — what the Server offers for an uploaded artifact while its
-  `advertised_url` is unset — it fetches that artifact once, before any Agent asks, with this
+  the Server's download route — what the Server offers for every artifact — it fetches that artifact once, before any Agent asks, with this
   Client's own certificate. A request for it while that fetch runs is answered `503` with
   `Retry-After: 30`, which the Client behind the Gateway waits out (see
   [Where a download may come from](#where-a-download-may-come-from)). At most four fetches run at
@@ -1125,14 +1119,9 @@ crosses the Gateway's upstream link once instead of once per Agent:
   interrupted, or bytes that do not match — is not repeated by the Agents' requests, which are
   answered `404`, nor by the same offer relayed again; the Gateway fetches it again when the
   artifact newly appears in an Agent's offer.
-- **What it does not fetch.** An offer with an absolute URL is left alone. A referenced artifact
-  on an operator's own server is fetched by the Agent behind the Gateway directly, as it would
-  without one, under its own `[packages] allowed_sources`. **With the Server's `advertised_url`
-  set, an uploaded artifact is not delivered behind a Gateway at all:** the offer names the
-  Server, the Client's own origin is the Gateway, so the download is refused as a source not
-  allowed, or — when the Server's URL is listed in `allowed_sources` — by the Server's handshake,
-  because the Client presents its certificate only to its own origin. Leave `advertised_url` unset
-  in a fleet with Gateways.
+- **What it does not fetch.** An offer with an absolute URL, which only a foreign Server would
+  send, is left alone: the Client's own origin is the Gateway, and it refuses a download from any
+  other.
 - **What it holds.** Only bytes whose SHA-256 is the one the offer names: a download is staged,
   hashed as it arrives and renamed into place only when it matches. The Agent behind it still
   checks the hash and the signature itself before it installs anything.
@@ -1211,7 +1200,8 @@ A new kind of process means a new plugin, not a change to the core.
 
 The `[[supervisor]]` blocks are the fleet-manageable half of `supervisor.toml`. A
 Configuration typed for the Client itself — `service_name = "supervisor"` —
-carries `[[supervisor]]` blocks in its body, and a matching Client applies them as its new set:
+carries `[[supervisor]]` blocks in its body, and a Client its Deployment releases it to applies them
+as its new set:
 
 - **Only the blocks are read.** Every other top-level key in the offered document is ignored —
   the endpoint, the client identity, the state directory stay the host's, and can never arrive over
@@ -1233,8 +1223,7 @@ carries `[[supervisor]]` blocks in its body, and a matching Client applies them 
   once the file is written and the starts are issued — or `FAILED` with the reason when the
   offer does not parse, a block does not validate against this host's globals, or the write
   fails (then nothing is applied and the running set stays in force). A body that is not TOML —
-  say, a Collector YAML rolled out fleet-wide with no type — is refused the same way, which is
-  one more reason to state whom a Configuration is for.
+  say, a Collector YAML typed for the Client by mistake — is refused the same way.
 
 A Client whose Server never rolls such a Configuration out runs its locally written blocks
 exactly as before. Note that once one applied, the Server's set is authoritative, unless
@@ -1361,8 +1350,8 @@ says what supplies the value now. The same check runs on a Supervisor set the Se
 block that would not work is refused *before* any running process is touched.
 
 This Client reports the kinds it was compiled with as attributes of its own Agent — one key per
-kind, `supervisor.kind.collector = "true"` — so a Supervisor set can be aimed with a Selector at the
-Clients that can actually run it.
+kind, `supervisor.kind.collector = "true"` — so a Supervisor set can be aimed, by the Selector of
+the Deployment that holds it, at the Clients that can actually run it.
 
 The published build carries every kind. A wrapper, when the code base carries one, is a Cargo feature named after its `type`, so
 a build for hosts that run only some of them leaves the others out:
@@ -1403,7 +1392,7 @@ a set the Server offers:
 
 | Key | What answers it now |
 |---|---|
-| `package` | the Server aims packages by Selector |
+| `package` | the Server aims packages by a Deployment's Selector |
 | `accepts_packages` | every Agent's program path decides |
 | `working_dir` | the process starts in the directory its program lives in |
 | `reload_signal` | a kind that knows the agent holds it; an unwrapped agent applies by restarting |
@@ -1560,13 +1549,13 @@ Three rules go with them:
 ## Package updates
 
 Every Supervisor accepts packages while `[packages] verification_key` is set, and the Server
-offers it one built for the Agent type it reports, released through the Deployment that claims it
-and signed there — so a Supervisor reporting `promtail` is never handed the Collector's
+offers it one built for the Agent type it reports, released through the Deployment that claims it,
+with the signature of the entry for its platform — so a Supervisor reporting `promtail` is never handed the Collector's
 binary, whatever anyone forgot to aim. What then happens on the host:
 
 1. The artifact is **streamed to disk** in that Supervisor's `packages/` directory — never held in
-   memory — over TLS 1.3, from the Server's own origin or a source
-   [`allowed_sources`](#where-a-download-may-come-from) lists.
+   memory — over TLS 1.3, from this Client's own Server origin and nowhere else (see
+   [Where a download may come from](#where-a-download-may-come-from)).
 2. It is **verified** before anything is unpacked: the content hash, and the Ed25519 signature
    against `[packages] verification_key`, always. An offer without a signature is refused before
    anything is downloaded, and an invalid signature refuses the artifact.
@@ -1723,16 +1712,17 @@ name.
 
 **The version in the path is the release number** — the one in the file name — and the
 platform is the entry's, spelled as the Agent reports it. The Package is typed `supervisor`, the
-Client's own Agent type, and it reaches a Client only through a Deployment that holds it and signs
-each entry.
+Client's own Agent type, each entry is signed, and it reaches a Client only through a Deployment
+that holds it.
 
 **In the UI:** on the **Packages** tab, press **＋ Create** and choose the first release archive:
 a file named `supervisor_<version>_<os>_<arch>.tar.gz` fills the agent type, the version and the
 platform by itself. Press **OK**, add each further platform's archive with **＋ Add entry**, then
 press **Signing info** and sign the downloaded file with
 `opamp-fleetctl package sign --signing-info` ([Signing a whole Package at
-once](tools.md#signing-a-whole-package-at-once)). On the **Deployments** tab, add the Package to
-the channel, **Import signing file**, press **OK**, and press the row's **Roll out**.
+once](tools.md#signing-a-whole-package-at-once)), then **Import signing file** on the same tab. On
+the **Deployments** tab, add the Package to the channel, press **OK**, and press the row's
+**Roll out**.
 
 **Over the API**, the same steps:
 
@@ -1741,9 +1731,9 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{}' \
        https://<server>:4321/api/v1/packages/supervisor/1.2.3
 $ curl --cacert ca.pem -X PUT --data-binary @supervisor_1.2.3_linux_amd64.tar.gz \
        https://<server>:4321/api/v1/packages/supervisor/1.2.3/entries/linux/amd64
-$ curl --cacert ca.pem -X PUT https://<server>:4321/api/v1/deployments/stable/packages/supervisor/1.2.3
 $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d "{\"signature\": \"$sig\"}" \
-       https://<server>:4321/api/v1/deployments/stable/signatures/supervisor/1.2.3/linux/amd64
+       https://<server>:4321/api/v1/packages/supervisor/1.2.3/entries/linux/amd64/signature
+$ curl --cacert ca.pem -X PUT https://<server>:4321/api/v1/deployments/stable/packages/supervisor/1.2.3
 ```
 
 The type **is** the name the consent takes, because a Package carries its Agent type on the wire
@@ -1829,7 +1819,7 @@ The ones you are most likely to meet:
 | `[tls] cert_file and key_file are required` | Give the Client its certificate and key: one the client CA issued, or a bootstrap certificate to [enrol](#enrolment-the-first-certificate) with. |
 | an endpoint refused as plaintext | `ws://` and `http://` are accepted only to `127.0.0.1` or `::1`. Use `wss://` or `https://`, and set `[tls] ca_file` for a private CA. |
 | `[gateway.tls] is required`, or its `client_ca_file` | A Gateway serves its Agents over mutual TLS only; give it `cert_file`, `key_file` and `client_ca_file`. |
-| `[packages] allowed_sources entry …` | An entry must be an `https://` prefix with no credentials, query or fragment; `http://` only to `127.0.0.1` or `::1`. |
+| `[packages] allowed_sources is removed` | The key no longer exists: a Client downloads only from its own Server's origin. Delete it. |
 
 **A Foreign Agent runs but never gets new configuration.** Its command line is pointing somewhere
 the Client does not write. Use `${config_dir}` (see [Path placeholders](#path-placeholders)) and
@@ -1844,8 +1834,9 @@ configuration.
 Deployments may claim the Agent, which `package_conflict` on its fleet row names. Or the entry for
 its platform carries no signature, and the Server offers no unsigned entry.
 
-**A download fails naming an origin.** The offered URL, or a redirect hop, leads to a source
-neither the Server's own origin nor an entry of [`allowed_sources`](#where-a-download-may-come-from).
+**A download fails naming an origin.** The offered URL, or a redirect hop, leads off this Client's
+own Server origin (see [Where a download may come from](#where-a-download-may-come-from)). This
+Server offers only paths, so the URL comes from a redirect or from a foreign Server.
 
 **Everything re-registered as new Agents after a move.** `supervisor_dir` changed, and the
 `instance-uid` files stayed behind in the old tree. That is expected; nothing migrates

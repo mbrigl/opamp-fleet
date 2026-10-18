@@ -92,7 +92,8 @@ impl Fleet {
         let revocations = Arc::new(
             Revocations::open(
                 Box::new(
-                    fleet_server::fs::FsLedgerStore::open(pki.join("revocation")).expect("ledger"),
+                    fleet_server::fs::FsLedgerStore::open(&pki.join("fleet-configs"))
+                        .expect("ledger"),
                 ),
                 clock.clone(),
                 vec![fleet_server::revocation::Authority {
@@ -121,7 +122,13 @@ impl Fleet {
             .expect("csr")
             .pem()
             .expect("pem");
-        let signed = signer.sign(&csr, "gateway-host").expect("sign");
+        let signed = signer
+            .sign(
+                &csr,
+                "gateway-host",
+                &fleet_server::revocation::SubjectValues::default(),
+            )
+            .expect("sign");
         std::fs::write(pki.join("gateway-cert.pem"), &signed.pem).expect("write");
         std::fs::write(pki.join("gateway-cert-key.pem"), key.serialize_pem()).expect("write");
         let gateway_host = signed.facts.host.clone().expect("a host");
@@ -148,7 +155,7 @@ impl Fleet {
             pki.join("ca.pem").display().to_string(),
         ))
         .expect("tls config");
-        let planes = fleet_server::tls::server_tls(&tls, None).expect("server material");
+        let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
         let admission = fleet_server::transport::Admission::new(true)
             .with_enrolment(planes.issuers, None)
             .with_revocations(Some(revocations.clone()));

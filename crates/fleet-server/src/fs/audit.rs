@@ -14,12 +14,20 @@ pub struct FsAuditStore {
 }
 
 impl FsAuditStore {
-    /// Opens the store in `dir`, creating it owner-only. The newest file is continued.
+    /// Opens the store in the data directory `root`, creating `audit/` owner-only (ADR-0037). The
+    /// newest file is continued.
     ///
     /// # Errors
-    /// Returns an error when the directory cannot be created or read.
-    pub fn open(dir: PathBuf) -> Result<Self, String> {
+    /// Returns an error when the directory cannot be created or read, or holds anything but audit
+    /// files.
+    pub fn open(root: &Path) -> Result<Self, String> {
+        let dir = root.join(super::AUDIT);
         super::create_private_dir(&dir)?;
+        for (name, path) in super::entries(&dir)? {
+            if !path.is_file() || seq_in(&name).is_none() {
+                return Err(super::unknown(&path));
+            }
+        }
         let mut store = FsAuditStore { dir, current: None };
         if let Some(newest) = store.files()?.pop() {
             let (mut file, mut size) = open_append(&newest)?;
@@ -54,18 +62,20 @@ pub fn files_in(dir: &Path) -> Result<Vec<PathBuf>, String> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter_map(|path| {
-            let seq = path
-                .file_name()?
-                .to_str()?
-                .strip_prefix("audit-")?
-                .strip_suffix(".jsonl")?
-                .parse()
-                .ok()?;
+            let seq = seq_in(path.file_name()?.to_str()?)?;
             Some((seq, path))
         })
         .collect();
     files.sort();
     Ok(files.into_iter().map(|(_, path)| path).collect())
+}
+
+/// The sequence number an audit file's name carries: `audit-<first seq>.jsonl`.
+fn seq_in(name: &str) -> Option<u64> {
+    name.strip_prefix("audit-")?
+        .strip_suffix(".jsonl")?
+        .parse()
+        .ok()
 }
 
 fn open_append(path: &Path) -> Result<(std::fs::File, u64), String> {
@@ -229,11 +239,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("audit");
         {
-            let mut store = FsAuditStore::open(root.clone()).expect("open");
+            let mut store = FsAuditStore::open(dir.path()).expect("open");
             store.append(1, "{\"seq\":1}").expect("append");
             store.append(2, "{\"seq\":2}").expect("append");
         }
-        let mut store = FsAuditStore::open(root.clone()).expect("reopen");
+        let mut store = FsAuditStore::open(dir.path()).expect("reopen");
         assert_eq!(
             store.tail().expect("tail"),
             Some(Tail {
@@ -283,23 +293,27 @@ mod tests {
         )
         .expect("write");
         std::fs::write(root.join("audit-9.jsonl"), "").expect("an empty newest file");
-        let mut store = FsAuditStore::open(root.clone()).expect("open");
+        let mut store = FsAuditStore::open(dir.path()).expect("open");
         let tail = store.tail().expect("tail").expect("a tail");
         assert_eq!(tail.last_seq, 2);
         assert!(tail.torn);
         assert_eq!(tail.last_line, "{\"seq\":3,\"pr");
         store.rotate(16).expect("rotate");
         store.append(3, "{\"seq\":3}").expect("append");
-        let mut reopened = FsAuditStore::open(root.clone()).expect("reopen");
+        let mut reopened = FsAuditStore::open(dir.path()).expect("reopen");
         assert_eq!(reopened.tail().expect("tail").expect("tail").last_seq, 3);
 
         // The newest file torn: it is continued on a line of its own.
         let other = dir.path().join("other");
-        std::fs::create_dir_all(&other).expect("dir");
-        std::fs::write(other.join("audit-1.jsonl"), "{\"seq\":1}\n{\"seq\":2,\"pr").expect("write");
-        let mut store = FsAuditStore::open(other.clone()).expect("open");
+        std::fs::create_dir_all(other.join("audit")).expect("dir");
+        std::fs::write(
+            other.join("audit/audit-1.jsonl"),
+            "{\"seq\":1}\n{\"seq\":2,\"pr",
+        )
+        .expect("write");
+        let mut store = FsAuditStore::open(&other).expect("open");
         store.append(2, "{\"seq\":2}").expect("append");
-        let text = std::fs::read_to_string(other.join("audit-1.jsonl")).expect("read");
+        let text = std::fs::read_to_string(other.join("audit/audit-1.jsonl")).expect("read");
         assert_eq!(text, "{\"seq\":1}\n{\"seq\":2,\"pr\n{\"seq\":2}\n");
     }
 }

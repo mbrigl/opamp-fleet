@@ -1,6 +1,6 @@
 # ADR-0029: A bootstrap certificate may be issued as a password-protected PKCS#12 file, which the Server keeps for download until the certificate ends and the Client enrols with
 
-- **Status:** 🟢 accepted · clause 2 superseded by [ADR-0030](0030-a-pkcs12-password-of-4-to-128-characters.md)
+- **Status:** 🟢 accepted · clause 2 superseded by [ADR-0030](0030-a-pkcs12-password-of-4-to-128-characters.md) · clauses 3 and 5 superseded by [ADR-0036](0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md) · clause 4 superseded by [ADR-0037](0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)
 - **Date:** 2026-10-14
 - **Deciders:** Markus Brigl
 - **Applies to:** the bootstrap-certificate routes of the Operator plane in `crates/fleet-server/src/api.rs` and the module that issues and records bootstrap certificates, the `bootstrap-certificates/` directory under `config_dir`, the Enrolments tab of the bundled UI in `crates/fleet-server/static/index.html`, `service install`, its flags and the questionnaire of the Client in `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs` and `crates/fleet-agent/src/config_init.rs`, the steps `packaging/linux/postinst` prints, the enrolment in `crates/fleet-agent/src/service/enrol.rs`, the `p12-keystore` crate in `Cargo.toml`, and every document that tells an operator how to hand out, revoke or list a bootstrap certificate or install a Client

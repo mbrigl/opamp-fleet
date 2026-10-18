@@ -27,23 +27,26 @@ use crate::config::RestAuthConfig;
 use crate::configs::{self, Configuration, Revision};
 use crate::credentials::Credentials;
 use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
-use crate::fleet::{self, AppState, ForgetError, RestartError, RolloutError, RolloutTarget};
+use crate::fleet::{self, AppState, DeleteError, ForgetError, RestartError, RolloutError};
 use crate::labels::LabelError;
-use crate::packages::{PackageId, PackageSummary, Platform, Source};
+use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
 
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "OpAMP Fleet REST API",
-        description = "Read fleet state; create, change, and delete Selector-targeted \
-                       Configurations. The stable contract any UI or portal builds on (ADR-0023)."
+        description = "Read fleet state; create, change, and delete Configurations, Packages \
+                       and the Deployments that aim and release them. The stable contract any UI \
+                       or portal builds on (ADR-0023, ADR-0034)."
     ),
     tags(
         (name = "fleet", description = "The fleet as the Server sees it"),
-        (name = "configurations", description = "Selector-targeted Configurations"),
+        (name = "configurations", description = "Configurations: content an Agent type runs, \
+                                                 released only through a Deployment (ADR-0034)"),
         (name = "packages", description = "Software packages the Server delivers (ADR-0026)"),
-        (name = "deployments", description = "What reaches a channel of hosts — the only thing \
-                                              rolled out (ADR-0026)"),
+        (name = "deployments", description = "What reaches a channel of hosts — Packages and \
+                                              Configurations under one Selector, and the only \
+                                              thing rolled out (ADR-0026, ADR-0034)"),
         (name = "enrolment", description = "How a host gets its first certificate: a window an \
                                             operator opens, and requests an operator decides \
                                             (ADR-0021)"),
@@ -204,7 +207,6 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
             put_configuration,
             delete_configuration
         ))
-        .routes(routes!(rollout_configuration))
         .routes(routes!(list_packages))
         .routes(routes!(
             get_package_set,
@@ -215,14 +217,14 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         // refuse every real agent binary, so the upload streams past it and the handler bounds it
         // by `max_package_size_bytes` instead (ADR-0010). No other route is unbounded.
         .routes(routes!(put_package_entry, delete_package_entry).layer(DefaultBodyLimit::disable()))
-        .routes(routes!(put_package_entry_source))
+        .routes(routes!(put_entry_signature, delete_entry_signature))
         .routes(routes!(list_deployments))
         .routes(routes!(get_deployment, put_deployment, delete_deployment))
         .routes(routes!(put_deployment_selector))
         .routes(routes!(put_deployment_package, delete_deployment_package))
         .routes(routes!(
-            put_deployment_signature,
-            delete_deployment_signature
+            put_deployment_configuration,
+            delete_deployment_configuration
         ))
         .routes(routes!(rollout_deployment))
         .routes(routes!(
@@ -264,6 +266,10 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/api/v1/docs", get(docs))
         .route("/api/v1/docs/redoc.js", get(redoc_js))
         .route("/", get(index))
+        .route("/ui.css", get(ui_css))
+        .route("/ui-carbon.css", get(ui_carbon_css))
+        .route("/ui-quiet.css", get(ui_quiet_css))
+        .route("/shiki.js", get(shiki_js))
         .with_state(state.clone());
     // Inside the guard, so an act is recorded only once it is authenticated, and named by the
     // operator who made it (ADR-0022 clause 1).
@@ -282,8 +288,9 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
 }
 
 /// The policy every page of the plane is held to. Scripts come from this origin, or are the
-/// bundled UI's inline ones named by their hash; styles may be inline, as the UI's `style`
-/// attributes and the API docs' rendered styles are. Nothing may frame the plane.
+/// bundled UI's inline ones named by their hash; styles come from this origin, as the UI's
+/// stylesheet does, or are inline, as the UI's `style` attributes and the API docs' rendered
+/// styles are. Nothing may frame the plane.
 static CONTENT_SECURITY_POLICY: std::sync::LazyLock<header::HeaderValue> =
     std::sync::LazyLock::new(|| {
         use base64::Engine as _;
@@ -362,6 +369,36 @@ pub fn download_router(state: Arc<AppState>) -> Router {
 /// The bundled UI: one embedded page, no frontend toolchain (ADR-0010).
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
+}
+
+/// The bundled UI's default stylesheet, kept apart from the page so its look can be replaced
+/// without touching the markup or the scripts.
+async fn ui_css() -> Response {
+    stylesheet(include_str!("../static/ui.css"))
+}
+
+/// The bundled UI's second look, after IBM's Carbon Design System as Würth Phoenix's NetEye wears it.
+async fn ui_carbon_css() -> Response {
+    stylesheet(include_str!("../static/ui-carbon.css"))
+}
+
+/// The bundled UI's third look, the quiet one, where colour says only state and selection.
+async fn ui_quiet_css() -> Response {
+    stylesheet(include_str!("../static/ui-quiet.css"))
+}
+
+/// The vendored Shiki bundle the UI colours an Agent's effective configuration with (ADR-0038),
+/// served from this origin like the stylesheets, so `script-src 'self'` admits it.
+async fn shiki_js() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../static/shiki.js"),
+    )
+        .into_response()
+}
+
+fn stylesheet(css: &'static str) -> Response {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], css).into_response()
 }
 
 /// The API docs page: renders the OpenAPI document with the vendored Redoc bundle (ADR-0013).
@@ -508,12 +545,12 @@ struct AgentResponse {
     identifying_attributes: BTreeMap<String, String>,
     /// Every reported non-identifying attribute — Selectors match these too.
     non_identifying_attributes: BTreeMap<String, String>,
-    /// The Configurations whose saved revision currently matches this Agent — the **candidates**
-    /// a rollout act would release to it (ADR-0025), in name order. Never what it runs; that is
-    /// [`assigned_configurations`](Self::assigned_configurations).
+    /// The Configurations a press of the Deployment claiming this Agent would release to it — the
+    /// ones it holds that fit this Agent's type (ADR-0034), in name order. Never what it runs;
+    /// that is [`assigned_configurations`](Self::assigned_configurations).
     matched_configurations: Vec<String>,
-    /// The Configurations rolled out to this Agent (ADR-0025), in name order — what its offer is
-    /// composed from.
+    /// The Configurations rolled out to this Agent (ADR-0034 clause 5), in name order — what its
+    /// offer is composed from.
     assigned_configurations: Vec<String>,
     /// The Deployment that claims this Agent **now** — whose Selector matches it — or empty when
     /// none does.
@@ -526,7 +563,7 @@ struct AgentResponse {
     /// in each case, which is why the Server says which one it is rather than showing an empty
     /// row three ways.
     deployment: String,
-    /// The Deployment this Agent's package was released **through** (ADR-0026), or empty when
+    /// The Deployment this Agent's release went **through** (ADR-0034 clause 5), or empty when
     /// nothing has been rolled out to it. Pinned as of that act, so it may name a channel that no
     /// longer claims this Agent.
     assigned_deployment: String,
@@ -536,13 +573,23 @@ struct AgentResponse {
     /// putting a newer Package in that channel, changes what is *proposed* and never what this Agent
     /// was already given.
     assigned_package: String,
-    /// The Configurations waiting for a rollout act toward this Agent (ADR-0025 point 4): a
-    /// candidate not yet assigned (`change: "new"`), or one whose saved revision is newer than
-    /// the assigned one (`change: "update"`). The Server never acts on this by itself.
+    /// The Configurations waiting for a rollout act toward this Agent (ADR-0025 point 4,
+    /// ADR-0034): one its Deployment holds and it is not assigned (`change: "new"`), one whose
+    /// saved revision differs from the assigned one (`change: "update"`), one assigned that the
+    /// next press drops from a release that keeps something else, applying the smaller map
+    /// (`change: "remove"`), or one assigned while the Deployment releases nothing to this Agent
+    /// any more, so the next press leaves it with no assignment and it keeps running what it runs
+    /// (`change: "kept"`). The Server never acts on this by itself.
     pending_configurations: Vec<PendingConfigurationResponse>,
-    /// The Package waiting for a rollout act toward this Agent (ADR-0025 point 4) — at most one,
-    /// the candidate of the Deployment that claims it, when that is not what it is assigned.
+    /// The Package waiting for a rollout act toward this Agent (ADR-0025 point 4) — at most one:
+    /// the candidate of the Deployment that claims it, when that is not what it is assigned, or
+    /// the assigned one the next press drops (`change: "remove"`, or `"kept"` as for a
+    /// Configuration).
     pending_packages: Vec<PendingPackageResponse>,
+    /// The Deployment the next press releases through, when the assignment names another one or
+    /// none (ADR-0034 clause 6); empty otherwise. Set alone, it says the press moves only the
+    /// assignment over to the claiming Deployment, with the same content.
+    pending_deployment: String,
     /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
     /// nothing.
     desired_hash: String,
@@ -553,9 +600,9 @@ struct AgentResponse {
     available_components: Vec<String>,
     /// The Agent's package installations (ADR-0026), in name order; empty until reported.
     packages: Vec<PackageStatusResponse>,
-    /// Why this Agent is proposed no package although it accepts them — more than one Deployment
-    /// claims it, and an Agent belongs to at most one (ADR-0026 point 26). The message names every
-    /// Deployment in the way. Absent when at most one claims it.
+    /// Why this Agent is proposed nothing — more than one Deployment claims it, and an Agent
+    /// belongs to at most one (ADR-0026 point 26). The message names every Deployment in the way.
+    /// Absent when at most one claims it.
     #[serde(skip_serializing_if = "Option::is_none")]
     package_conflict: Option<String>,
     /// What the Agent said about the *offer* rather than about a package it holds — an offer it
@@ -597,6 +644,26 @@ struct AgentResponse {
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     shadowed_labels: Vec<String>,
+    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0035
+    /// clause 4); empty for the Client Agent itself, for an Agent whose Client the Server cannot
+    /// tell, and for an ambiguous one.
+    inherited_labels: BTreeMap<String, String>,
+    /// The Instance UID of this Agent's Client Agent — its own, for the Client Agent — or empty
+    /// when the Server cannot tell.
+    client_agent: String,
+    /// The group this Agent's Client is recognised in holds more than one Client Agent, so it
+    /// inherits nothing (ADR-0035 clause 4).
+    ambiguous: bool,
+    /// The Host this Agent last arrived over (ADR-0035 clause 2), or empty. Behind a Gateway, the
+    /// Gateway's.
+    host: String,
+    /// The `fleet.host.*` values Selectors match on this Agent, from the certificate of the Host it
+    /// arrived over directly (ADR-0035 clause 3); empty behind a Gateway.
+    host_attributes: BTreeMap<String, String>,
+    /// Reported attributes in the Server's `fleet.` space, left out of what Selectors match
+    /// (ADR-0035 clause 5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ignored_attributes: Vec<String>,
 }
 
 impl From<fleet::AgentView> for AgentResponse {
@@ -621,6 +688,7 @@ impl From<fleet::AgentView> for AgentResponse {
                 .map(Into::into)
                 .collect(),
             pending_packages: view.pending_packages.into_iter().map(Into::into).collect(),
+            pending_deployment: view.pending_deployment,
             desired_hash: view.desired_hash,
             capabilities: view.capabilities,
             available_components: view.available_components,
@@ -641,6 +709,12 @@ impl From<fleet::AgentView> for AgentResponse {
             stale: view.stale,
             labels: view.labels,
             shadowed_labels: view.shadowed_labels,
+            inherited_labels: view.inherited_labels,
+            client_agent: view.client_agent,
+            ambiguous: view.ambiguous,
+            host: view.host,
+            host_attributes: view.host_attributes,
+            ignored_attributes: view.ignored_attributes,
         }
     }
 }
@@ -650,8 +724,10 @@ impl From<fleet::AgentView> for AgentResponse {
 #[schema(as = PendingConfigurationView)]
 struct PendingConfigurationResponse {
     name: String,
-    /// `new` — a candidate not yet assigned; `update` — the saved revision is newer than the
-    /// assigned one.
+    /// `new` — held by the claiming Deployment and not yet assigned; `update` — the saved
+    /// revision differs from the assigned one; `remove` — assigned, and dropped by the next press,
+    /// which applies the smaller map; `kept` — assigned, and the next press leaves the Agent with
+    /// no assignment, so it keeps running it.
     change: String,
 }
 
@@ -675,7 +751,9 @@ struct PendingPackageResponse {
     version: String,
     /// What an operator reads: the Agent type and the version together.
     display_name: String,
-    /// `new` — nothing is assigned for this Agent type; `update` — another version is.
+    /// `new` — nothing is assigned for this Agent type; `update` — another version is; `remove` —
+    /// the assigned one, which the next press drops; `kept` — the assigned one, while the next
+    /// press leaves the Agent with no assignment.
     change: String,
 }
 
@@ -786,18 +864,22 @@ struct LabelsBody {
     tag = "fleet",
     params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
     request_body = LabelsBody,
-    description = "Replace this Agent's labels (ADR-0024). A label is an operator's key/value pair \
-                   that joins what a Selector matches — for Configurations and for packages alike — \
-                   so a rollout channel is a Server-side decision instead of an edit to supervisor.toml on \
-                   the host. An empty map clears them. Labels never travel to the Agent, and they \
-                   outlive it: forgetting an Agent does not clear them. A key the Agent already \
-                   reports is refused, because reported attributes decide which artifact fits the \
-                   machine and a label must never be able to overrule them.",
+    description = "Replace this Agent's labels (ADR-0024, ADR-0035). A label is an operator's \
+                   key/value pair that joins what a Deployment's Selector matches, so a rollout \
+                   channel is a Server-side decision instead of an edit to supervisor.toml on the \
+                   host. An empty map clears them. The labels of a Client's own Agent hold for the \
+                   Client's other Agents, below their own. Labels are part of the Agent's record: \
+                   they follow a re-key, forgetting the Agent removes them, and they never travel \
+                   to the Agent. A key the Agent already reports is refused, because reported \
+                   attributes decide which artifact fits the machine and a label must never be \
+                   able to overrule them; a key starting `fleet.` is refused, because the Server \
+                   fills those from the Host's certificate.",
     responses(
         (status = 200, description = "The Agent, with its new labels", body = AgentResponse),
-        (status = 400, description = "Malformed Instance UID, or an unusable label", body = ErrorBody),
+        (status = 400, description = "Malformed Instance UID, an unusable label, or a key starting `fleet.`", body = ErrorBody),
         (status = 404, description = "No such Agent", body = ErrorBody),
-        (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody)
+        (status = 409, description = "A label restates an attribute the Agent reports", body = ErrorBody),
+        (status = 500, description = "The Agent's record could not be written", body = ErrorBody)
     )
 )]
 async fn set_agent_labels(
@@ -820,46 +902,43 @@ async fn set_agent_labels(
                  comes from, in that host's supervisor.toml, or label it under another key"
             ),
         ),
-        Err(LabelError::Storage(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(LabelError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(LabelError::Storage(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
-/// What a per-Agent rollout act releases (ADR-0025). Name at most one of the two; an empty body
-/// releases everything currently waiting for the Agent.
+/// What a per-Agent rollout act names (ADR-0034 clause 6): nothing, or the Deployment that claims
+/// the Agent. An empty body releases that Deployment just the same.
 #[derive(Deserialize, ToSchema, Default)]
 #[serde(deny_unknown_fields)]
 struct AgentRolloutSpec {
-    /// Release this Configuration — its saved revision, pinned as of this press.
-    #[serde(default)]
-    configuration: Option<String>,
-    /// Release this Agent's Deployment — the Package it holds for the Agent's type, pinned as of
-    /// this press.
+    /// The Deployment the operator means — the one that claims this Agent; its release replaces
+    /// the Agent's assignment, pinned as of this press.
     ///
-    /// It must be the Deployment that actually claims this Agent. Naming another is refused, and
-    /// so is naming one while a second Deployment also claims the Agent: an operator who names one
-    /// has said which they mean, but honouring that would sidestep the conflict for good instead
-    /// of fixing it, and make this path the way into a state the fleet-wide act forbids
-    /// (ADR-0026 point 30).
+    /// Naming another is refused, and so is any act while no Deployment or a second one claims the
+    /// Agent: honouring a name over a conflict would sidestep the conflict for good instead of
+    /// fixing it, and make this path the way into a state the fleet-wide act forbids.
     #[serde(default)]
     deployment: Option<String>,
 }
 
-/// Rolls a Configuration or this Agent's Deployment out to **this Agent** (ADR-0025) — or, with an empty
-/// body, everything the fleet view shows as waiting for it. The operator's press is the only
-/// thing that distributes: saving, publishing-like states, Selector edits and label moves all
-/// merely change what is *proposed* here.
+/// Rolls the Deployment that claims **this Agent** out to it (ADR-0034 clause 6): its Package for
+/// the Agent's type, if that is a candidate, and every Configuration it holds that fits the
+/// Agent's type, at its saved revision — replacing the Agent's assignment. The operator's press is
+/// the only thing that distributes: saving, Selector edits and label moves all merely change what
+/// is *proposed* here.
 #[utoipa::path(
     post,
     path = "/api/v1/agents/{instance_uid}/rollout",
     tag = "fleet",
     params(("instance_uid" = String, Path, description = "The Agent's Instance UID")),
-    request_body(content = AgentRolloutSpec, description = "What to release; empty releases everything waiting"),
+    request_body(content = AgentRolloutSpec, description = "Empty, or the claiming Deployment's name"),
     responses(
-        (status = 200, description = "Rolled out; the Agent with its new assignments", body = AgentResponse),
+        (status = 200, description = "Rolled out; the Agent with its new assignment", body = AgentResponse),
         (status = 400, description = "Malformed Instance UID or body", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such Agent, Configuration, or Deployment", body = ErrorBody),
-        (status = 409, description = "The named resource does not fit or aim at this Agent", body = ErrorBody)
+        (status = 404, description = "No such Agent", body = ErrorBody),
+        (status = 409, description = "The Agent is in no Deployment, in a conflict, or in another one than named; or the Deployment holds nothing, or a Package with an unsigned entry", body = ErrorBody)
     )
 )]
 async fn rollout_to_agent(
@@ -873,16 +952,7 @@ async fn rollout_to_agent(
         Err((status, why)) => return error(status, why),
     };
     let spec = body.map(|Json(spec)| spec).unwrap_or_default();
-    let target = match (spec.configuration, spec.deployment) {
-        (Some(_), Some(_)) => return error(
-            StatusCode::BAD_REQUEST,
-            "name a configuration or a deployment, not both — or neither for everything waiting",
-        ),
-        (Some(name), None) => RolloutTarget::Configuration(name),
-        (None, Some(deployment)) => RolloutTarget::Deployment(deployment),
-        (None, None) => RolloutTarget::Everything,
-    };
-    match state.rollout_to_agent(&uid, &target) {
+    match state.rollout_to_agent(&uid, spec.deployment.as_deref()) {
         Ok(()) => agent_response(&state, &uid),
         Err(e) => rollout_error(e),
     }
@@ -930,58 +1000,75 @@ async fn forget_agent(
 }
 
 /// The writable part of a [`Configuration`] — the `PUT` request body; the name comes from the
-/// URL. Writes the saved revision (ADR-0025): saving only saves.
+/// URL. Writes the saved revision (ADR-0025): saving only saves. A Configuration is content only
+/// (ADR-0034): what aims it is the Selector of a Deployment that holds it.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct ConfigurationSpec {
-    #[serde(default)]
-    selector: std::collections::BTreeMap<String, String>,
     body: String,
     /// See [`Revision::role`]. Absent means top-level configuration.
     #[serde(default)]
     role: String,
-    /// See [`Revision::service_name`]. Absent means every Agent type.
+    /// The Agent type this Configuration is written for, compared raw against the `service.name`
+    /// an Agent reports (ADR-0034 clauses 1 and 3). Required: absent or empty is refused `400`.
+    /// Read as empty when absent, so the refusal names it.
     #[serde(default)]
+    #[schema(required = true)]
     service_name: String,
+    /// Read only to refuse it by name: a Configuration has no Selector (ADR-0034 clauses 1 and 9).
+    #[serde(default)]
+    #[schema(ignore)]
+    selector: Option<serde_json::Value>,
 }
 
-/// One Configuration as the API shows it (ADR-0025): the **saved** revision — what editing
-/// operates on and what a rollout act releases. Which Agents run which pinned revision is a fact
-/// about the Agents, answered per Agent by `GET /api/v1/agents`.
+/// One Configuration as the API shows it (ADR-0025, ADR-0034): the **saved** revision — what
+/// editing operates on and what a rollout act releases — and the Deployments holding it. Which
+/// Agents run which pinned revision is a fact about the Agents, answered per Agent by
+/// `GET /api/v1/agents`.
 #[derive(Serialize, ToSchema)]
 struct ConfigurationView {
     name: String,
-    selector: std::collections::BTreeMap<String, String>,
     body: String,
     /// The Baseline's `AgentConfigObject.role` (ADR-0023); absent means top-level configuration.
     #[serde(skip_serializing_if = "String::is_empty")]
     role: String,
-    /// The Agent type this Configuration is for (ADR-0023); absent means every type.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    /// The Agent type this Configuration is written for (ADR-0034 clauses 1 and 3).
     service_name: String,
+    /// The Deployments that hold this Configuration, in name order — where "whom does it reach"
+    /// is answered. Empty means it is saved and no rollout act can release it.
+    deployments: Vec<String>,
 }
 
-impl From<Configuration> for ConfigurationView {
-    fn from(config: Configuration) -> Self {
+impl ConfigurationView {
+    fn of(config: Configuration, deployments: Vec<String>) -> Self {
         ConfigurationView {
             name: config.name,
-            selector: config.saved.selector,
             body: config.saved.body,
             role: config.saved.role,
             service_name: config.saved.service_name,
+            deployments,
         }
     }
 }
 
-/// What a resource-level rollout act did (ADR-0025 point 5).
+/// One Configuration as the API answers with it, with the Deployments that hold it read now.
+fn configuration_view(state: &AppState, config: Configuration) -> ConfigurationView {
+    let deployments = state
+        .deployments_holding_configurations()
+        .remove(&config.name)
+        .unwrap_or_default();
+    ConfigurationView::of(config, deployments)
+}
+
+/// What a Deployment's rollout act did (ADR-0034 clause 6).
 #[derive(Serialize, ToSchema)]
 struct RolloutOutcome {
-    /// How many Agents the act assigned the resource to — every Agent it currently fits and
-    /// aims at. An Agent that appears later waits for its own act.
+    /// How many Agents the act assigned — every Agent the Deployment claims and the press moved.
+    /// An Agent that appears later waits for its own act.
     assigned_agents: usize,
 }
 
-/// All Configurations, in name order.
+/// All Configurations, in name order, each with the Deployments that hold it.
 #[utoipa::path(
     get,
     path = "/api/v1/configurations",
@@ -989,12 +1076,16 @@ struct RolloutOutcome {
     responses((status = 200, description = "Every stored Configuration", body = [ConfigurationView]))
 )]
 async fn list_configurations(State(state): State<Arc<AppState>>) -> Json<Vec<ConfigurationView>> {
+    let mut holding = state.deployments_holding_configurations();
     Json(
         state
             .configurations()
             .list()
             .into_iter()
-            .map(ConfigurationView::from)
+            .map(|config| {
+                let deployments = holding.remove(&config.name).unwrap_or_default();
+                ConfigurationView::of(config, deployments)
+            })
             .collect(),
     )
 }
@@ -1015,14 +1106,17 @@ async fn get_configuration(
     Path(name): Path<String>,
 ) -> Response {
     match state.configurations().get(&name) {
-        Some(config) => Json(ConfigurationView::from(config)).into_response(),
+        Some(config) => Json(configuration_view(&state, config)).into_response(),
         None => error(StatusCode::NOT_FOUND, format!("no configuration {name:?}")),
     }
 }
 
 /// Creates a Configuration or replaces its saved revision. **Saving only saves** (ADR-0025):
 /// nothing reaches any Agent — every Agent keeps the revision its assignment pins — until a
-/// rollout act (`POST …/rollout`, or per Agent) releases the saved revision as one snapshot.
+/// rollout act of a Deployment holding it releases the saved revision as one snapshot.
+///
+/// A Configuration has no Selector (ADR-0034): a body naming one is refused, and the Deployment
+/// that holds the Configuration is where it is aimed.
 #[utoipa::path(
     put,
     path = "/api/v1/configurations/{name}",
@@ -1030,8 +1124,8 @@ async fn get_configuration(
     params(("name" = String, Path, description = "The Configuration's name (ADR-0019 grammar)")),
     request_body = ConfigurationSpec,
     responses(
-        (status = 200, description = "The stored Configuration — distributed to nobody until rolled out", body = ConfigurationView),
-        (status = 400, description = "Invalid name or empty body", body = ErrorBody),
+        (status = 200, description = "The stored Configuration — distributed to nobody until a Deployment holding it is rolled out", body = ConfigurationView),
+        (status = 400, description = "Invalid name, an empty body, no service_name, or a selector", body = ErrorBody),
         (status = 500, description = "The Configuration could not be persisted", body = ErrorBody)
     )
 )]
@@ -1040,6 +1134,13 @@ async fn put_configuration(
     Path(name): Path<String>,
     Json(spec): Json<ConfigurationSpec>,
 ) -> Response {
+    if spec.selector.is_some() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "a Configuration has no selector — put it into a Deployment and aim the Deployment \
+             (PUT /api/v1/deployments/{name}/configurations/{configuration})",
+        );
+    }
     if let Err(e) = configs::validate_name(&name) {
         return error(
             StatusCode::BAD_REQUEST,
@@ -1057,25 +1158,27 @@ async fn put_configuration(
         body.push('\n');
     }
     let revision = Revision {
-        selector: spec.selector,
         body,
         // Carried verbatim (ADR-0023): the values are Agent-type-specific, so the Server never
         // validates one against a vocabulary of its own. Empty is top-level configuration.
         role: spec.role,
-        // Compared raw against the reported `service.name` (ADR-0023); empty is every type. Not
+        // Compared raw against the reported `service.name` (ADR-0034 clause 3). Required, and not
         // validated against the fleet, because a Configuration may precede its first Agent.
         service_name: spec.service_name,
     };
+    if let Err(e) = configs::check_type(&revision) {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
     match state.save_configuration(&name, revision) {
         Ok(config) => {
             info!(configuration = %config.name, role = %config.saved.role, service_name = %config.saved.service_name, bytes = config.saved.body.len(), "configuration saved from the API");
-            Json(ConfigurationView::from(config)).into_response()
+            Json(configuration_view(&state, config)).into_response()
         }
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
-/// Maps a rollout refusal onto the REST contract (ADR-0025).
+/// Maps a rollout refusal onto the REST contract (ADR-0034 clause 6).
 fn rollout_error(e: RolloutError) -> Response {
     match e {
         RolloutError::UnknownAgent => error(StatusCode::NOT_FOUND, "no such agent"),
@@ -1085,50 +1188,18 @@ fn rollout_error(e: RolloutError) -> Response {
     }
 }
 
-/// Rolls a Configuration out to **every Agent it currently fits and aims at** (ADR-0025).
-///
-/// **This is the moment the fleet changes.** The saved revision is pinned as one snapshot and
-/// written into each matching Agent's assignment; a later edit changes nothing anywhere until
-/// the next rollout act. An Agent that enrols — or starts matching — later is *not* included: it
-/// surfaces in the fleet view as waiting, for its own act.
-#[utoipa::path(
-    post,
-    path = "/api/v1/configurations/{name}/rollout",
-    tag = "configurations",
-    params(("name" = String, Path, description = "The Configuration's name")),
-    responses(
-        (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
-        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No Configuration of that name", body = ErrorBody),
-        (status = 500, description = "The rollout could not be persisted", body = ErrorBody)
-    )
-)]
-async fn rollout_configuration(
-    State(state): State<Arc<AppState>>,
-    _csrf: SameOrigin,
-    Path(name): Path<String>,
-) -> Response {
-    match state.rollout_configuration(&name) {
-        Ok(assigned_agents) => {
-            info!(configuration = %name, agents = assigned_agents, "configuration rolled out from the API");
-            Json(RolloutOutcome { assigned_agents }).into_response()
-        }
-        Err(e) => rollout_error(e),
-    }
-}
-
-/// Deletes a Configuration and removes every per-Agent assignment that referenced it
-/// (ADR-0025). That is **not inert** for an Agent that had it assigned: its composed map
-/// shrinks, and it applies the map without the entry; only an Agent left assigned nothing keeps
-/// running what it runs.
+/// Deletes a Configuration — refused with `409` while an Agent's assignment pins it, saying how
+/// many (ADR-0034 clause 8). Rolling those Agents out through a Deployment without it, or
+/// forgetting them, comes first. A deleted Configuration leaves every Deployment that held it.
 #[utoipa::path(
     delete,
     path = "/api/v1/configurations/{name}",
     tag = "configurations",
     params(("name" = String, Path, description = "The Configuration's name")),
     responses(
-        (status = 204, description = "Deleted"),
+        (status = 204, description = "Deleted, and taken out of every Deployment that held it"),
         (status = 404, description = "No Configuration of that name", body = ErrorBody),
+        (status = 409, description = "An Agent's assignment pins it", body = ErrorBody),
         (status = 500, description = "The Configuration could not be deleted", body = ErrorBody)
     )
 )]
@@ -1139,7 +1210,8 @@ async fn delete_configuration(
     match state.delete_configuration(&name) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no configuration {name:?}")),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(DeleteError::Pinned(e)) => error(StatusCode::CONFLICT, e),
+        Err(DeleteError::Storage(e)) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -1170,14 +1242,14 @@ struct PackageSetView {
     deployments: Vec<String>,
 }
 
-/// One platform's entry of a Package: an uploaded artifact or a source reference (ADR-0026).
+/// One platform's entry of a Package: an uploaded artifact and its signature (ADR-0033).
 #[derive(Serialize, ToSchema)]
 struct PackageEntryView {
     /// The operating system, as `os.type` reports it: `linux`, `darwin`, `windows`.
     os: String,
     /// The architecture, as `host.arch` reports it: `amd64`, `arm64`.
     arch: String,
-    /// The artifact's size in bytes; `0` for a referenced one, whose bytes this Server never holds.
+    /// The artifact's size in bytes.
     size: u64,
     /// The artifact's SHA-256, hex — **the exact value the Agent verifies what it downloaded
     /// against** (ADR-0026). Reading it is how an operator answers "did this host take my bytes"
@@ -1188,10 +1260,41 @@ struct PackageEntryView {
     /// sync, and the Server stops re-offering while the two agree — so a rollout that seems not to
     /// travel is answered here rather than by reading logs.
     package_hash: String,
-    /// Where Agents fetch the artifact when this Server does not hold it (ADR-0026). Absent for an
-    /// uploaded one, which is served from here.
+    /// The operator's Ed25519 signature over this entry, hex, as `opamp-fleetctl package sign`
+    /// prints it (ADR-0033); absent while the entry is unsigned. An unsigned entry is offered to
+    /// nobody.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    source_url: Option<String>,
+    signature: Option<String>,
+    /// What the Server found when it checked that signature against `[packages] verification_key`
+    /// (ADR-0033). Feedback only: an `invalid` one is stored and offered, and the Agent's own check
+    /// decides.
+    signature_state: SignatureStateView,
+}
+
+/// What the Server found when it checked an entry's signature (ADR-0033).
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+enum SignatureStateView {
+    /// The entry carries no signature; it is offered to nobody.
+    Missing,
+    /// The signature verifies against the Server's `[packages] verification_key`.
+    Valid,
+    /// The signature does not verify against that key. Stored, shown as a warning, and never
+    /// refused: the Agent's check decides.
+    Invalid,
+    /// The entry carries a signature and the Server holds no key to check it with.
+    Unchecked,
+}
+
+impl From<SignatureState> for SignatureStateView {
+    fn from(state: SignatureState) -> Self {
+        match state {
+            SignatureState::Missing => SignatureStateView::Missing,
+            SignatureState::Valid => SignatureStateView::Valid,
+            SignatureState::Invalid => SignatureStateView::Invalid,
+            SignatureState::Unchecked => SignatureStateView::Unchecked,
+        }
+    }
 }
 
 impl PackageSetView {
@@ -1210,7 +1313,8 @@ impl PackageSetView {
                     size: entry.size,
                     content_hash: entry.content_hash,
                     package_hash: entry.package_hash,
-                    source_url: entry.source_url,
+                    signature: entry.signature,
+                    signature_state: entry.signature_state.into(),
                 })
                 .collect(),
         }
@@ -1235,19 +1339,8 @@ impl PlatformQuery {
     }
 }
 
-/// The query parameters of an entry upload: everything but the artifact, which is the body — and
-/// the platform, which is the path.
-#[derive(Deserialize, IntoParams)]
-struct EntryUpload {
-    /// Refused when given: a signature belongs to the Deployment that offers these bytes
-    /// (ADR-0026). Accepted as a parameter only so an upload carrying one fails by name.
-    #[serde(default)]
-    signature: Option<String>,
-}
-
 /// The `(Package, Platform)` a route names in its path, or the `400` that says which half of it
-/// does not parse. `platform_prefix` leads the platform half's message: the entry routes name it
-/// `invalid platform: `, the signature routes add nothing.
+/// does not parse. `platform_prefix` leads the platform half's message.
 fn artifact_of(
     agent_type: &str,
     version: &str,
@@ -1280,9 +1373,10 @@ fn set_response(state: &AppState, id: &PackageId) -> Response {
 /// Maps a store refusal onto the status the REST contract names: immutability and emptiness are
 /// conflicts with the Package's current state (`409`), absence is `404`, bad input `400`.
 fn package_error(e: String) -> Response {
-    if e.contains("not configured") || e.starts_with("no package set") {
+    if e.contains("not configured") || e.starts_with("no package set") || e.starts_with("no entry")
+    {
         error(StatusCode::NOT_FOUND, e)
-    } else if e.contains("immutable") || e.contains("holds no entries") {
+    } else if e.contains("immutable") || e.contains("holds no entries") || e.contains("is pinned") {
         error(StatusCode::CONFLICT, e)
     } else if e.starts_with("invalid") || e.starts_with("the ") || e.contains("empty") {
         error(StatusCode::BAD_REQUEST, e)
@@ -1387,9 +1481,9 @@ async fn put_package_set(
     }
 }
 
-/// Deletes a Package — entries, artifacts, metadata, and every per-Agent assignment that
-/// referenced it (ADR-0025): the offer is withdrawn, and Agents that installed it keep running it
-/// (ADR-0026).
+/// Deletes a Package — entries, artifacts and metadata — refused with `409` while an Agent's
+/// assignment pins it, saying how many (ADR-0034 clause 8). A deleted Package leaves every
+/// Deployment that held it; nothing is ever uninstalled (ADR-0026).
 #[utoipa::path(
     delete,
     path = "/api/v1/packages/{agent_type}/{version}",
@@ -1402,6 +1496,7 @@ async fn put_package_set(
         (status = 204, description = "Deleted"),
         (status = 400, description = "Invalid identity", body = ErrorBody),
         (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "An Agent's assignment pins the Package", body = ErrorBody),
         (status = 500, description = "The Set could not be deleted", body = ErrorBody)
     )
 )]
@@ -1420,10 +1515,11 @@ async fn delete_package_set(
     }
 }
 
-/// Stores one platform's artifact as an entry of a Package (ADR-0026). The artifact is the raw
-/// request body; the Package and the platform are the path. Nothing is distributed: the Package
-/// reaches nobody until a rollout act releases it (ADR-0025). Refused while the Package is
-/// assigned to an Agent — an assigned Package's bytes are immutable.
+/// Stores one platform's artifact as an entry of a Package (ADR-0026, ADR-0033). The artifact is
+/// the raw request body; the Package and the platform are the path. New bytes remove the entry's
+/// signature, which covered the old hash. Nothing is distributed: the Package reaches nobody until
+/// a rollout act releases it (ADR-0025). Refused while the Package is assigned to an Agent — an
+/// assigned Package's bytes are immutable.
 #[utoipa::path(
     put,
     path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}",
@@ -1432,13 +1528,12 @@ async fn delete_package_set(
         ("agent_type" = String, Path, description = "The Agent type"),
         ("version" = String, Path, description = "The version"),
         ("os" = String, Path, description = "The operating system this artifact is built for, as `os.type`: `linux`, `darwin`, `windows`"),
-        ("arch" = String, Path, description = "The architecture, as `host.arch`: `amd64`, `arm64`"),
-        EntryUpload
+        ("arch" = String, Path, description = "The architecture, as `host.arch`: `amd64`, `arm64`")
     ),
     request_body(content = Vec<u8>, description = "The artifact bytes", content_type = "application/octet-stream"),
     responses(
-        (status = 200, description = "The Set, with the stored entry", body = PackageSetView),
-        (status = 400, description = "Invalid identity, platform, empty artifact, or bad signature", body = ErrorBody),
+        (status = 200, description = "The Set, with the stored entry, unsigned", body = PackageSetView),
+        (status = 400, description = "Invalid identity, platform, or an empty artifact", body = ErrorBody),
         (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
         (status = 413, description = "The artifact exceeds max_package_size_bytes", body = ErrorBody),
@@ -1449,71 +1544,70 @@ async fn delete_package_set(
 async fn put_package_entry(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
-    Query(upload): Query<EntryUpload>,
     body: Body,
 ) -> Response {
     let id = match PackageId::new(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    if upload.signature.is_some() {
-        // Named rather than ignored: a signature dropped on the floor here is an unsigned rollout
-        // nobody notices, which is the one failure mode this whole gate exists to prevent.
-        return error(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "a signature belongs to the deployment that offers these bytes, not to the \
-                 artifact (ADR-0026) — upload the artifact without it, then \
-                 PUT /api/v1/deployments/<name>/signatures/{agent_type}/{version}/{os}/{arch}"
-            ),
-        );
-    }
     let platform = match Platform::new(&os, &arch) {
         Ok(platform) => platform,
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
-    let staged = match state.package_staging_path(&id, &platform) {
-        Ok(path) => path,
-        Err(e) => return package_error(e),
-    };
+    if let Err(e) = state.check_package_upload(&id) {
+        return package_error(e);
+    }
     let mut reservation = match state.admit_upload() {
         Ok(reservation) => reservation,
         Err(full) => return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string()),
     };
-    // Removed however the request ends short of an artifact, a cancelled one included.
-    let staged = Staged(Some(staged));
-    // The artifact is streamed to the store's own directory and bounded as it arrives: taking it
+    // The artifact is streamed into the blob store as it arrives and bounded on the way: taking it
     // as `Bytes` would mean holding a whole program in memory — twice — before writing it out.
-    let written = match stream_to_file(
-        body,
-        staged.path(),
-        state.max_package_size(),
-        &mut reservation,
-    )
-    .await
-    {
-        Ok(written) => written,
-        Err(UploadError::TooLarge(limit)) => {
-            return error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("the artifact exceeds the {limit}-byte package size limit"),
-            );
+    // The store reads on a thread of its own; this side hands it each chunk, and the end only once
+    // every limit has passed, so a refused or cancelled upload stores nothing.
+    let (chunks, receiver) = tokio::sync::mpsc::channel(8);
+    let store = tokio::task::spawn_blocking({
+        let state = state.clone();
+        let (id, platform) = (id.clone(), platform.clone());
+        move || state.put_package_entry(&id, &platform, &mut ChunkReader::new(receiver))
+    });
+    let streamed = stream_upload(body, &chunks, state.max_package_size(), &mut reservation).await;
+    let streamed = streamed.and_then(|written| {
+        reservation
+            .admit_artifact()
+            .map(|()| written)
+            .map_err(UploadError::StoreFull)
+    });
+    let written = match streamed {
+        Ok(written) => {
+            // The end of the artifact: the store may commit it now. A store that has already
+            // given up answers below.
+            let _ = chunks.send(Chunk::End).await;
+            written
         }
-        Err(UploadError::StoreFull(full)) => {
-            return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string());
-        }
-        Err(UploadError::Io(e)) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("the upload could not be stored: {e}"),
-            );
+        Err(e) => {
+            // Without the end, the store's stream fails and nothing is stored.
+            drop(chunks);
+            let _ = store.await;
+            return match e {
+                UploadError::TooLarge(limit) => error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("the artifact exceeds the {limit}-byte package size limit"),
+                ),
+                UploadError::StoreFull(full) => {
+                    error(StatusCode::INSUFFICIENT_STORAGE, full.to_string())
+                }
+                UploadError::Io(e) => error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("the upload could not be stored: {e}"),
+                ),
+            };
         }
     };
-    if let Err(full) = reservation.admit_artifact() {
-        return error(StatusCode::INSUFFICIENT_STORAGE, full.to_string());
-    }
-    // The store takes the staged file from here: it moves it into place or removes it.
-    let committed = state.put_package_entry(&id, &platform, &staged.keep());
+    drop(chunks);
+    let committed = store
+        .await
+        .unwrap_or_else(|e| Err(format!("the upload could not be stored: {e}")));
     // Stored now, or gone: either way the store counts it from here, and the upload no longer.
     drop(reservation);
     match committed {
@@ -1565,41 +1659,17 @@ async fn delete_package_entry(
     }
 }
 
-/// The body of `PUT …/entries/{os}/{arch}/source` (ADR-0026): an entry that is a
-/// reference instead of an upload.
-#[derive(Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-struct EntrySourceSpec {
-    /// Where the artifact lives — `http://` or `https://`. Agents fetch it from here; this Server
-    /// never downloads it.
-    url: String,
-    /// The artifact's SHA-256, hex, as published in the release's checksums file. Required: for a
-    /// referenced entry nothing here ever sees the bytes, so this is what protects every Agent.
-    sha256: String,
-    /// Retired (ADR-0026): the signature belongs to the Deployment that offers these bytes.
-    /// Supplying it here is refused by name rather than ignored.
-    #[serde(default)]
-    signature: Option<String>,
-    /// Headers the Agents send with the download — a token for a private source. Two things to know
-    /// before using one: it is stored in cleartext in the package store (owner-only on disk, not
-    /// encrypted), and it is delivered to **every** Agent this artifact is offered to. Prefer a
-    /// narrowly-scoped, rotatable token over a long-lived credential.
-    #[serde(default)]
-    headers: std::collections::BTreeMap<String, String>,
-}
-
-/// Points one entry of a Package at an artifact hosted elsewhere (ADR-0026), instead of
-/// uploading it. Refused while the Package is assigned to an Agent (ADR-0025). The Server stores
-/// the reference and offers it verbatim; it never downloads the artifact, so the `sha256` — and
-/// the signature its Deployment holds, when there is one — is what protects every Agent.
+/// Writes the operator's Ed25519 signature onto one entry of a Package (ADR-0033), as
+/// `opamp-fleetctl package sign` prints it. One signature serves every Deployment that holds the
+/// Package; an entry without one is offered to nobody.
 ///
-/// The URL is probed once, to catch a typo while the operator is still looking at the screen. A
-/// definitive refusal from the source (a 4xx) fails the request; a source this Server simply
-/// cannot reach does not, because the Server is not in the download path and its reachability says
-/// nothing about the Agents'.
+/// With `[packages] verification_key` set the Server checks it and answers the entry's
+/// `signature_state`. An `invalid` signature is stored all the same: the Server only reports, and
+/// the Agent's own verification decides. Refused while the Package is assigned to an Agent, like
+/// any other write to its entries (ADR-0025).
 #[utoipa::path(
     put,
-    path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/source",
+    path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature",
     tag = "packages",
     params(
         ("agent_type" = String, Path, description = "The Agent type"),
@@ -1607,199 +1677,82 @@ struct EntrySourceSpec {
         ("os" = String, Path, description = "The entry's operating system"),
         ("arch" = String, Path, description = "The entry's architecture")
     ),
-    request_body = EntrySourceSpec,
+    request_body = SignatureSpec,
     responses(
-        (status = 200, description = "The Set, with the referenced entry", body = PackageSetView),
-        (status = 400, description = "Invalid identity, url, hash or signature — or the source refused the probe", body = ErrorBody),
-        (status = 404, description = "No such Set, or package delivery is not configured", body = ErrorBody),
+        (status = 200, description = "The Set, with the signed entry and its signature_state", body = PackageSetView),
+        (status = 400, description = "Invalid identity or platform, or a signature that is empty, not hex, or not 64 bytes", body = ErrorBody),
+        (status = 404, description = "No such Set or entry, or package delivery is not configured", body = ErrorBody),
         (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
-        (status = 500, description = "The reference could not be persisted", body = ErrorBody)
+        (status = 500, description = "The signature could not be persisted", body = ErrorBody)
     )
 )]
-async fn put_package_entry_source(
+async fn put_entry_signature(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
-    Json(spec): Json<EntrySourceSpec>,
+    Json(spec): Json<SignatureSpec>,
 ) -> Response {
     let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "invalid platform: ")
     {
         Ok(pair) => pair,
         Err((status, why)) => return error(status, why),
     };
-    let content_hash = match hex::decode(spec.sha256.trim()) {
+    let signature = match hex::decode(spec.signature.trim()) {
         Ok(bytes) => bytes,
-        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid sha256: {e}")),
-    };
-    if spec.signature.is_some() {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "a signature belongs to the deployment that offers these bytes, not to the source \
-             record (ADR-0026) — put it on the deployment instead"
-                .to_string(),
-        );
-    }
-    let source = Source {
-        url: spec.url.clone(),
-        headers: spec.headers.clone(),
-    };
-    // The store's own checks come first, so a URL it would refuse never receives the headers.
-    if let Err(e) = state.check_package_entry_source(&id, &content_hash, &source) {
-        return package_error(e);
-    }
-    if let Err(e) = probe(&spec.url, &spec.headers).await {
-        return error(StatusCode::BAD_REQUEST, e);
-    }
-    match state.set_package_entry_source(&id, &platform, content_hash, source) {
-        Ok(()) => {
-            info!(set = %id, url = %spec.url, "package entry source stored from the API");
-            set_response(&state, &id)
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "the signature must be hex, as `opamp-fleetctl package sign` prints it: {e}"
+                ),
+            );
         }
+    };
+    match state.put_package_entry_signature(&id, &platform, signature) {
+        Ok(_) => set_response(&state, &id),
         Err(e) => package_error(e),
     }
 }
 
-/// Asks the source whether it has the artifact. A refusal is reported; being unable to ask is not,
-/// because this Server never downloads it and the Agents may well reach what it cannot.
-async fn probe(
-    url: &str,
-    headers: &std::collections::BTreeMap<String, String>,
-) -> Result<(), String> {
-    // Refuse to aim the probe at an internal address on the caller's behalf (SSRF): the source URL
-    // and its headers are entirely client-supplied, so without this a caller could read the cloud
-    // metadata endpoint or map internal services by the answers this probe reflects back.
-    if let Some(reason) = ssrf_blocked(url).await {
-        return Err(reason);
-    }
-    let client = match reqwest::Client::builder()
-        .use_rustls_tls()
-        // TLS 1.3 alone, as every connection of this Server (ADR-0013, ADR-0026).
-        .tls_version_min(reqwest::tls::Version::TLS_1_3)
-        .timeout(std::time::Duration::from_secs(10))
-        // Never chase a redirect: a public URL that 3xx-bounces to `169.254.169.254` or an internal
-        // host would otherwise walk the probe straight past the check above.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
+/// Takes one entry's signature away (ADR-0033): the entry is offered to nobody until it is signed
+/// again. Refused while the Package is assigned to an Agent (ADR-0025).
+#[utoipa::path(
+    delete,
+    path = "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature",
+    tag = "packages",
+    params(
+        ("agent_type" = String, Path, description = "The Agent type"),
+        ("version" = String, Path, description = "The version"),
+        ("os" = String, Path, description = "The entry's operating system"),
+        ("arch" = String, Path, description = "The entry's architecture")
+    ),
+    responses(
+        (status = 200, description = "The Set, with the entry unsigned", body = PackageSetView),
+        (status = 400, description = "Invalid identity or platform", body = ErrorBody),
+        (status = 404, description = "No such Set, entry or signature, or package delivery is not configured", body = ErrorBody),
+        (status = 409, description = "The Set is assigned to an Agent and its entries are immutable", body = ErrorBody),
+        (status = 500, description = "The change could not be persisted", body = ErrorBody)
+    )
+)]
+async fn delete_entry_signature(
+    State(state): State<Arc<AppState>>,
+    Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
+) -> Response {
+    let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "invalid platform: ")
     {
-        Ok(client) => client,
-        Err(e) => {
-            warn!(error = %e, "cannot build the probe client; storing the source unprobed");
-            return Ok(());
-        }
+        Ok(pair) => pair,
+        Err((status, why)) => return error(status, why),
     };
-    let mut request = client.head(url);
-    for (key, value) in headers {
-        request = request.header(key, value);
+    match state.remove_package_entry_signature(&id, &platform) {
+        Ok(true) => set_response(&state, &id),
+        Ok(false) => error(
+            StatusCode::NOT_FOUND,
+            format!(
+                "entry {}-{} of set {id} carries no signature",
+                platform.os, platform.arch
+            ),
+        ),
+        Err(e) => package_error(e),
     }
-    match request.send().await {
-        Ok(response) if response.status().is_client_error() => Err(format!(
-            "the source answered {} — check the url{}",
-            response.status(),
-            if response.status() == reqwest::StatusCode::UNAUTHORIZED
-                || response.status() == reqwest::StatusCode::FORBIDDEN
-            {
-                " and whether it needs headers"
-            } else {
-                ""
-            }
-        )),
-        Ok(_) => Ok(()),
-        Err(e) => {
-            // Not an error: a fleet may reach an address its Server cannot.
-            warn!(url = %url, error = %e, "cannot reach the source from here; storing it anyway");
-            Ok(())
-        }
-    }
-}
-
-/// Whether probing `url` would make the Server reach a non-routable address on the caller's behalf,
-/// and the reason to refuse if so. `None` clears the probe to proceed: a public host, or one this
-/// Server cannot resolve (left to the probe, which treats unreachable as "not an error" — the
-/// Server is not in the download path).
-///
-/// A resolve-then-probe still leaves a DNS-rebinding window in theory; it closes the URLs that
-/// matter (literal internal IPs, the metadata address, internal hostnames) without a custom
-/// resolver, which is proportionate for a probe the Server itself never downloads through.
-async fn ssrf_blocked(url: &str) -> Option<String> {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        // Unparsable here is not this check's error to raise — `PackageStore::set_entry_source`
-        // validates the scheme and rejects a bad URL with its own message.
-        return None;
-    };
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Some(format!(
-            "the source url must be http:// or https://, not {}://",
-            parsed.scheme()
-        ));
-    }
-    let host = parsed.host_str()?;
-    let port = parsed.port_or_known_default().unwrap_or(80);
-    let resolved = tokio::net::lookup_host((host, port)).await.ok()?;
-    for addr in resolved {
-        if is_internal(addr.ip()) {
-            return Some(format!(
-                "the source url resolves to the non-routable address {} — refusing to probe an \
-                 internal endpoint",
-                addr.ip()
-            ));
-        }
-    }
-    None
-}
-
-/// Whether an address is one a client-supplied URL must never steer the Server at.
-///
-/// The line is deliberate. This blocks the cloud-metadata address and the ranges that are never a
-/// legitimate artifact source — link-local (where `169.254.169.254` lives), the shared/CGNAT range
-/// (Alibaba's `100.100.100.200` among it), the unspecified address, broadcast, documentation, and
-/// `0.0.0.0/8` — also where an IPv6 address carries one of them — and AWS's IPv6 metadata address
-/// `fd00:ec2::254`. It does **not** block loopback or the RFC 1918 / unique-local private ranges: an
-/// operator's mirror (ADR-0026) legitimately lives on an internal network, and the URL here is the
-/// operator's, not a stranger's. Redirects are disabled separately, so a public URL cannot bounce
-/// the probe onto a blocked address behind this check.
-fn is_internal(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => is_v4_internal(v4),
-        std::net::IpAddr::V6(v6) => {
-            if let Some(embedded) = embedded_v4(v6) {
-                return is_v4_internal(embedded);
-            }
-            // link-local fe80::/10, the unspecified address, and AWS's IPv6 metadata endpoint.
-            v6.is_unspecified()
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                || v6 == std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
-        }
-    }
-}
-
-/// The IPv4 address an IPv6 one carries and reaches: IPv4-mapped `::ffff:a.b.c.d`,
-/// IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::a.b.c.d` and 6to4 `2002:aabb:ccdd::/48`. The
-/// loopback `::1` and the unspecified `::` are themselves, not IPv4 addresses.
-fn embedded_v4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
-    let s = v6.segments();
-    let low = |hi: u16, lo: u16| {
-        let [a, b] = hi.to_be_bytes();
-        let [c, d] = lo.to_be_bytes();
-        std::net::Ipv4Addr::new(a, b, c, d)
-    };
-    match s {
-        [0, 0, 0, 0, 0, 0xffff, hi, lo] | [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => Some(low(hi, lo)),
-        [0, 0, 0, 0, 0, 0, hi, lo] if !v6.is_loopback() && !v6.is_unspecified() => {
-            Some(low(hi, lo))
-        }
-        [0x2002, hi, lo, ..] => Some(low(hi, lo)),
-        _ => None,
-    }
-}
-
-fn is_v4_internal(v4: std::net::Ipv4Addr) -> bool {
-    v4.is_link_local() // 169.254.0.0/16 — the cloud metadata endpoint
-        || v4.is_unspecified()
-        || v4.is_broadcast()
-        || v4.is_documentation()
-        // 0.0.0.0/8 "this network"
-        || v4.octets()[0] == 0
-        // 100.64.0.0/10 shared / carrier-grade NAT — Alibaba's metadata address among it
-        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
 }
 
 /// Serves an entry's artifact bytes — the `download_url` the Agent is offered points here.
@@ -1855,17 +1808,21 @@ async fn download_package(
             return not_found();
         }
     }
-    let Some(path) = state
+    let Some((sha256, size)) = state
         .packages()
-        .and_then(|store| store.artifact_path(&id, &platform))
+        .and_then(|store| store.artifact(&id, &platform))
     else {
         return not_found();
     };
-    // Streamed from disk, never buffered: a fleet updating at once means many concurrent
+    // Streamed from the blob store, never buffered: a fleet updating at once means many concurrent
     // downloads of the same artifact, and each one holding a copy of a program in memory is how a
     // rollout takes the Server down with it.
-    let file = match tokio::fs::File::open(&path).await {
-        Ok(file) => file,
+    let opened = state
+        .packages()
+        .map(|store| store.open_artifact(&sha256))
+        .unwrap_or_else(|| Err("package delivery is not configured".to_string()));
+    let bytes = match opened {
+        Ok(bytes) => bytes,
         Err(e) => {
             warn!(package = %id, error = %e, "cannot open the stored artifact");
             return error(
@@ -1874,13 +1831,11 @@ async fn download_package(
             );
         }
     };
-    let mut response = Response::builder().header(header::CONTENT_TYPE, "application/octet-stream");
-    if let Ok(metadata) = file.metadata().await {
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
         // So the Agent can size the download, and a truncated transfer is detectable as one.
-        response = response.header(header::CONTENT_LENGTH, metadata.len());
-    }
-    response
-        .body(Body::from_stream(read_chunks(file)))
+        .header(header::CONTENT_LENGTH, size)
+        .body(Body::from_stream(read_chunks(bytes)))
         .unwrap_or_else(|e| {
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1889,7 +1844,7 @@ async fn download_package(
         })
 }
 
-/// Why a streamed upload did not become a file.
+/// Why a streamed upload did not become an artifact.
 enum UploadError {
     /// The body grew past the configured package limit; the number is that limit.
     TooLarge(usize),
@@ -1898,43 +1853,64 @@ enum UploadError {
     Io(std::io::Error),
 }
 
-/// An upload's staging file, removed when dropped unless the store took it: a request that ends
-/// short of an artifact, or is cancelled mid-body, leaves nothing staged.
-struct Staged(Option<std::path::PathBuf>);
-
-impl Staged {
-    fn path(&self) -> &std::path::Path {
-        self.0.as_deref().expect("held until kept")
-    }
-
-    /// Hands the file to the store, which moves it into place or removes it.
-    fn keep(mut self) -> std::path::PathBuf {
-        self.0.take().expect("held until kept")
-    }
+/// What the request side hands the store's reader: the next chunk of the artifact, or its end.
+enum Chunk {
+    Data(axum::body::Bytes),
+    End,
 }
 
-impl Drop for Staged {
-    fn drop(&mut self) {
-        if let Some(path) = &self.0 {
-            let _ = std::fs::remove_file(path);
+/// The upload as the blob store reads it (ADR-0037 clause 4): the request's chunks, handed over a
+/// channel to the thread the store reads on. A channel that closes before [`Chunk::End`] is a
+/// failed stream — a refused, cut-off or cancelled upload — so the store keeps nothing of it.
+struct ChunkReader {
+    receiver: tokio::sync::mpsc::Receiver<Chunk>,
+    current: axum::body::Bytes,
+    ended: bool,
+}
+
+impl ChunkReader {
+    fn new(receiver: tokio::sync::mpsc::Receiver<Chunk>) -> Self {
+        ChunkReader {
+            receiver,
+            current: axum::body::Bytes::new(),
+            ended: false,
         }
     }
 }
 
-/// Streams a request body into `path`, refusing it the moment it grows past `limit` or takes the
-/// store past its ceiling. Returns how many bytes were written.
-async fn stream_to_file(
+impl std::io::Read for ChunkReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.current.is_empty() {
+            if self.ended {
+                return Ok(0);
+            }
+            match self.receiver.blocking_recv() {
+                Some(Chunk::Data(bytes)) => self.current = bytes,
+                Some(Chunk::End) => self.ended = true,
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the upload ended before its last byte",
+                    ))
+                }
+            }
+        }
+        let n = buf.len().min(self.current.len());
+        buf[..n].copy_from_slice(&self.current.split_to(n));
+        Ok(n)
+    }
+}
+
+/// Streams a request body to the store's reader, refusing it the moment it grows past `limit` or
+/// takes the store past its ceiling. Returns how many bytes were handed over.
+async fn stream_upload(
     body: Body,
-    path: &std::path::Path,
+    chunks: &tokio::sync::mpsc::Sender<Chunk>,
     limit: usize,
     reservation: &mut crate::fleet::UploadReservation<'_>,
 ) -> Result<u64, UploadError> {
     use futures_util::StreamExt;
-    use tokio::io::AsyncWriteExt;
 
-    let mut file = tokio::fs::File::create(path)
-        .await
-        .map_err(UploadError::Io)?;
     let mut stream = body.into_data_stream();
     let mut written = 0u64;
     while let Some(chunk) = stream.next().await {
@@ -1946,31 +1922,44 @@ async fn stream_to_file(
         reservation
             .grow(chunk.len() as u64)
             .map_err(UploadError::StoreFull)?;
-        file.write_all(&chunk).await.map_err(UploadError::Io)?;
+        if chunks.send(Chunk::Data(chunk)).await.is_err() {
+            // The store stopped reading: it failed, and says why when it is awaited.
+            break;
+        }
     }
-    file.flush().await.map_err(UploadError::Io)?;
     Ok(written)
 }
 
-/// A stream of the file's chunks, so a response body never materialises whole.
+/// A stream of an artifact's chunks, read on a thread of its own, so a response body never
+/// materialises whole and a slow disk never holds up the runtime.
 fn read_chunks(
-    file: tokio::fs::File,
+    mut bytes: Box<dyn std::io::Read + Send>,
 ) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> {
-    futures_util::stream::unfold(file, |mut file| async move {
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    tokio::task::spawn_blocking(move || loop {
         let mut buffer = vec![0u8; 64 * 1024];
-        match tokio::io::AsyncReadExt::read(&mut file, &mut buffer).await {
-            Ok(0) => None,
+        let next = match bytes.read(&mut buffer) {
+            Ok(0) => return,
             Ok(read) => {
                 buffer.truncate(read);
-                Some((Ok(buffer), file))
+                Ok(buffer)
             }
-            Err(e) => Some((Err(e), file)),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => Err(e),
+        };
+        let failed = next.is_err();
+        if sender.blocking_send(next).is_err() || failed {
+            return;
         }
+    });
+    futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|chunk| (chunk, receiver))
     })
 }
 
 // -------------------------------------------------------------------------------------------
-// Deployments (ADR-0026): the aim, the signature, and the act — everything a Package gave up.
+// Deployments (ADR-0026, ADR-0034): the aim and the act — what a Package and a Configuration do
+// not have.
 // -------------------------------------------------------------------------------------------
 
 /// One Deployment as the REST API shows it.
@@ -1984,22 +1973,27 @@ struct DeploymentView {
     selector: std::collections::BTreeMap<String, String>,
     /// At most one Package per Agent type — an Agent has one binary to replace.
     packages: Vec<DeploymentPackageView>,
+    /// The Configurations it holds, by name, in name order (ADR-0034). Each reaches the Agents of
+    /// this channel whose type it fits.
+    configurations: Vec<String>,
     /// Agents this channel claims, and no other does.
     ///
     /// **Zero is the value worth looking at**: a channel aims at nobody when its Selector names an
     /// attribute no Agent reports, or a value none of them carries — and neither is a rejected
     /// write, so nothing else would say so.
     claiming_agents: usize,
-    /// Of those, the Agents a rollout act would actually move — this channel holds a Package for what
-    /// they report and it is an upgrade (ADR-0025). Zero here with a non-zero `claiming_agents`
-    /// means everyone in the channel already runs it: nothing to do, and nothing wrong.
+    /// Of those, the Agents a rollout act would actually move — what it would release to them
+    /// differs from what their assignment pins (ADR-0034 clause 6). Zero here with a non-zero
+    /// `claiming_agents` means everyone in the channel already holds it: nothing to do, and nothing
+    /// wrong.
     targeted_agents: usize,
     /// Agents this channel matches that **another Deployment matches too**. They are offered nothing
     /// new until an operator narrows a Selector, and they are not in `claiming_agents`.
     conflicting_agents: usize,
 }
 
-/// One Package a Deployment holds, and how much of it is signed.
+/// One Package a Deployment holds. Its entries and their signatures are the Package's own
+/// (`GET /api/v1/packages`, ADR-0033).
 #[derive(Serialize, ToSchema)]
 struct DeploymentPackageView {
     /// The Agent type this Package is built for — also the key under which this Deployment holds
@@ -2008,11 +2002,6 @@ struct DeploymentPackageView {
     version: String,
     /// What an operator reads: the Agent type and the version together.
     display_name: String,
-    /// The platforms whose artifact this Deployment holds a signature for, as `os/arch`.
-    ///
-    /// Read it against the Package's own entries: a platform listed there and missing here is one
-    /// no Agent is offered, and it keeps the channel from being rolled out (ADR-0026).
-    signed_platforms: Vec<String>,
 }
 
 impl DeploymentView {
@@ -2024,12 +2013,6 @@ impl DeploymentView {
                 agent_type: id.agent_type.clone(),
                 version: id.version.clone(),
                 display_name: id.display_name(),
-                signed_platforms: deployment
-                    .signatures
-                    .keys()
-                    .filter(|(held, _)| held == id)
-                    .map(|(_, platform)| format!("{}/{}", platform.os, platform.arch))
-                    .collect(),
             })
             .collect();
         packages.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
@@ -2037,6 +2020,7 @@ impl DeploymentView {
             name: deployment.name,
             selector: deployment.selector,
             packages,
+            configurations: deployment.configurations.into_iter().collect(),
             claiming_agents: reach.claiming,
             targeted_agents: reach.targeted,
             conflicting_agents: reach.conflicting,
@@ -2052,12 +2036,12 @@ struct DeploymentSpec {
     selector: std::collections::BTreeMap<String, String>,
 }
 
-/// One artifact's Ed25519 signature, as the operator supplies it.
+/// One artifact's Ed25519 signature, as the operator supplies it (ADR-0033).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct SignatureSpec {
-    /// The signature over the artifact's bytes, hex-encoded — what `opamp-fleetctl package sign`
-    /// prints.
+    /// The signature over the entry's statement — the Agent type, the version and the artifact's
+    /// SHA-256 — hex-encoded, as `opamp-fleetctl package sign` prints it.
     signature: String,
 }
 
@@ -2067,7 +2051,7 @@ fn deployment_error(refusal: DeploymentError) -> Response {
     let text = refusal.to_string();
     match refusal {
         E::Invalid(_) => error(StatusCode::BAD_REQUEST, text),
-        E::NotFound => error(StatusCode::NOT_FOUND, text),
+        E::NotFound | E::Missing(_) => error(StatusCode::NOT_FOUND, text),
         E::TypeTaken { .. } | E::Conflict(_) => error(StatusCode::CONFLICT, text),
         E::Storage(_) => error(StatusCode::INTERNAL_SERVER_ERROR, text),
     }
@@ -2078,7 +2062,7 @@ fn deployments(state: &AppState) -> Result<&DeploymentStore, Refusal> {
     state.deployment_store().ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            "package delivery is not configured on this Server (packages_dir)".to_string(),
+            "package delivery is not configured on this Server".to_string(),
         )
     })
 }
@@ -2176,9 +2160,9 @@ async fn put_deployment(
     }
 }
 
-/// Deletes a Deployment — refused with `409` while an Agent's assignment names it, because the
-/// offer travels with the channel's signatures. Rolling those Agents out through another Deployment,
-/// or deleting the Package, ends the offer first. Nothing is uninstalled either way (ADR-0025).
+/// Deletes a Deployment — refused with `409` while an Agent's assignment names it, saying how many
+/// (ADR-0034 clause 8). Rolling those Agents out through another Deployment, or forgetting them,
+/// comes first. Nothing is uninstalled either way (ADR-0025).
 #[utoipa::path(
     delete,
     path = "/api/v1/deployments/{name}",
@@ -2204,7 +2188,7 @@ async fn delete_deployment(
     }
 }
 
-/// Re-aims a Deployment. Editable in every state — aim is not bytes, and moving a channel is how a
+/// Re-aims a Deployment. Editable in every state (ADR-0034 clause 7) — moving a channel is how a
 /// rollout proceeds. It changes whom the *next* act would reach, never a running offer.
 #[utoipa::path(
     put,
@@ -2265,9 +2249,8 @@ async fn put_deployment_package(
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    // A channel cannot offer what the store does not hold: the artifacts are what the Deployment
-    // signs and hands out, so a reference to a Package that is not there is a mistake, not a
-    // reservation for one uploaded later.
+    // A channel cannot offer what the store does not hold, so a reference to a Package that is not
+    // there is a mistake, not a reservation for one uploaded later.
     match state.packages() {
         Some(packages) if packages.summary(&id).is_some() => {}
         _ => {
@@ -2283,7 +2266,8 @@ async fn put_deployment_package(
     }
 }
 
-/// Takes a Package out of a Deployment, and every signature that named it.
+/// Takes a Package out of a Deployment. Editable in every state (ADR-0034 clause 7): an Agent
+/// already released keeps the Package its assignment pins until the next press, which drops it.
 #[utoipa::path(
     delete,
     path = "/api/v1/deployments/{name}/packages/{agent_type}/{version}",
@@ -2294,7 +2278,7 @@ async fn put_deployment_package(
         ("version" = String, Path, description = "the Package's version")
     ),
     responses(
-        (status = 200, description = "The Deployment, without the Package and its signatures", body = DeploymentView),
+        (status = 200, description = "The Deployment, without the Package", body = DeploymentView),
         (status = 400, description = "Invalid Agent type or version", body = ErrorBody),
         (status = 404, description = "No such Deployment or Package in it, or package delivery is not configured", body = ErrorBody)
     )
@@ -2313,82 +2297,53 @@ async fn delete_deployment_package(
     }
 }
 
-/// Records the Ed25519 signature of one artifact this Deployment offers (ADR-0026 point 28).
-///
-/// The signature lives here rather than on the artifact because what an operator signs off on is a
-/// release to a set of machines. The same Package in two Deployments is therefore signed in each.
-/// Generate it with `opamp-fleetctl package sign`.
+/// Puts a Configuration into a Deployment (ADR-0034 clause 4). A Configuration may sit in several
+/// Deployments; holding it already is the same request arriving twice. **This distributes
+/// nothing**: the Agents of the channel see it waiting until the next press.
 #[utoipa::path(
     put,
-    path = "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
+    path = "/api/v1/deployments/{name}/configurations/{configuration}",
     tag = "deployments",
     params(
         ("name" = String, Path, description = "the Deployment's name"),
-        ("agent_type" = String, Path, description = "the Package's Agent type"),
-        ("version" = String, Path, description = "the Package's version"),
-        ("os" = String, Path, description = "the artifact's operating system"),
-        ("arch" = String, Path, description = "the artifact's architecture")
+        ("configuration" = String, Path, description = "the Configuration's name")
     ),
-    request_body = SignatureSpec,
     responses(
-        (status = 200, description = "The Deployment, with the signature", body = DeploymentView),
-        (status = 400, description = "Invalid identity or platform, or a signature that is empty or not hex", body = ErrorBody),
-        (status = 404, description = "No such Deployment, the Package is not in it, or package delivery is not configured", body = ErrorBody)
+        (status = 200, description = "The Deployment, with the Configuration", body = DeploymentView),
+        (status = 404, description = "No such Deployment or Configuration, or package delivery is not configured", body = ErrorBody)
     )
 )]
-async fn put_deployment_signature(
+async fn put_deployment_configuration(
     State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
-    Json(spec): Json<SignatureSpec>,
+    Path((name, configuration)): Path<(String, String)>,
 ) -> Response {
-    let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "") {
-        Ok(pair) => pair,
-        Err((status, why)) => return error(status, why),
-    };
-    let signature = match hex::decode(spec.signature.trim()) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return error(
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "the signature must be hex, as `opamp-fleetctl package sign` prints it: {e}"
-                ),
-            );
-        }
-    };
-    match state.put_deployment_signature(&name, &id, &platform, signature) {
+    match state.put_deployment_configuration(&name, &configuration) {
         Ok(deployment) => deployment_response(&state, deployment),
         Err(e) => deployment_error(e),
     }
 }
 
-/// Takes one artifact's signature away. The Package stays; what it is offered with changes.
+/// Takes a Configuration out of a Deployment. Editable in every state (ADR-0034 clause 7): an
+/// Agent already released keeps the revision its assignment pins until the next press, which drops
+/// it from the Agent's map.
 #[utoipa::path(
     delete,
-    path = "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
+    path = "/api/v1/deployments/{name}/configurations/{configuration}",
     tag = "deployments",
     params(
         ("name" = String, Path, description = "the Deployment's name"),
-        ("agent_type" = String, Path, description = "the Package's Agent type"),
-        ("version" = String, Path, description = "the Package's version"),
-        ("os" = String, Path, description = "the artifact's operating system"),
-        ("arch" = String, Path, description = "the artifact's architecture")
+        ("configuration" = String, Path, description = "the Configuration's name")
     ),
     responses(
-        (status = 200, description = "The Deployment, without the signature", body = DeploymentView),
-        (status = 400, description = "Invalid identity or platform", body = ErrorBody),
-        (status = 404, description = "No such Deployment or signature, or package delivery is not configured", body = ErrorBody)
+        (status = 200, description = "The Deployment, without the Configuration", body = DeploymentView),
+        (status = 404, description = "No such Deployment, or it does not hold the Configuration, or package delivery is not configured", body = ErrorBody)
     )
 )]
-async fn delete_deployment_signature(
+async fn delete_deployment_configuration(
     State(state): State<Arc<AppState>>,
-    Path((name, agent_type, version, os, arch)): Path<(String, String, String, String, String)>,
+    Path((name, configuration)): Path<(String, String)>,
 ) -> Response {
-    let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "") {
-        Ok(pair) => pair,
-        Err((status, why)) => return error(status, why),
-    };
-    match state.remove_deployment_signature(&name, &id, &platform) {
+    match state.remove_deployment_configuration(&name, &configuration) {
         Ok(deployment) => deployment_response(&state, deployment),
         Err(e) => deployment_error(e),
     }
@@ -2400,12 +2355,13 @@ struct ReplaceQuery {
     replace: Option<bool>,
 }
 
-/// Rolls a Deployment out to **every Agent it claims** (ADR-0025 point 5, ADR-0026 point 29).
+/// Rolls a Deployment out to **every Agent it claims and would move** (ADR-0034 clause 6).
 ///
-/// **This is the moment the fleet changes.** Each claimed Agent's assignment is written with this
-/// channel and the Package it holds for what that Agent reports, pinned as of this press. An Agent
-/// that enrols — or is labelled into the channel — later is *not* included: it surfaces in the fleet
-/// view as waiting, for its own act.
+/// **This is the moment the fleet changes.** Each such Agent's assignment is replaced with this
+/// channel's release, pinned as of this press: the Package it holds for the Agent's type, if that
+/// is a candidate, and every Configuration it holds that fits the Agent's type, at its saved
+/// revision. The hash gates send only what changed. An Agent that enrols — or is labelled into the
+/// channel — later is *not* included: it surfaces in the fleet view as waiting, for its own act.
 ///
 /// An Agent some **other** Deployment also claims is skipped rather than counted. Its conflict is
 /// reported on the Agent, and a press that quietly resolved it here would be the ranking this
@@ -2420,7 +2376,7 @@ struct ReplaceQuery {
         (status = 200, description = "Rolled out; how many Agents were assigned", body = RolloutOutcome),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such Deployment, or package delivery is not configured", body = ErrorBody),
-        (status = 409, description = "The Deployment holds no packages", body = ErrorBody)
+        (status = 409, description = "The Deployment holds no Package and no Configuration, or a Package with an unsigned entry", body = ErrorBody)
     )
 )]
 async fn rollout_deployment(
@@ -2474,13 +2430,21 @@ struct PendingEnrolment {
     /// The address the request came from.
     #[serde(skip_serializing_if = "Option::is_none")]
     peer: Option<String>,
-    /// The subject the request asks for.
-    subject: String,
     /// The SHA-256 fingerprint of the requested public key, hex — the Client logs the same value,
     /// so an operator can match a request to a host.
     key_fingerprint: String,
-    /// The bootstrap certificate the connection carried.
-    bootstrap_subject: String,
+    /// The six subject values of the bootstrap certificate the connection carried: what an
+    /// approval carries into the host certificate (ADR-0036 clause 5). The request's own subject
+    /// is not listed, because it is neither trusted nor carried. Absent when that certificate's
+    /// subject cannot be carried — `subject_refusal` then says why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bootstrap_subject: Option<HostSubject>,
+    /// Why the bootstrap certificate's subject breaks the rules of ADR-0036 clause 1, naming the
+    /// attribute: an approval is refused `409` with this reason, and nothing is signed. Absent
+    /// when the values can be carried.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject_refusal: Option<String>,
+    /// The SHA-256 fingerprint of that bootstrap certificate, hex.
     bootstrap_fingerprint: String,
     /// Its serial, lowercase hex: the `serial` of `GET /api/v1/bootstrap-certificates` when this
     /// Server issued it.
@@ -2491,34 +2455,47 @@ struct PendingEnrolment {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct IssueBootstrapRequest {
+    /// Required, with `organization` and `organizational_unit`.
     #[serde(default)]
+    #[schema(required = true)]
     subject: Option<BootstrapSubject>,
     /// 1 to 90; 10 when absent. Cut to the bootstrap CA's end.
     #[serde(default)]
     validity_days: Option<u32>,
-    /// 4 to 128 characters without a control character. With it the key is not answered in PEM:
-    /// the Server keeps a PKCS#12 file of the certificate and its key under this password, to be
-    /// downloaded until the certificate ends or is revoked. The password is kept nowhere.
+    /// 4 to 128 characters without a control character. Required: the Server keeps a PKCS#12
+    /// file of the certificate and its key under this password, to be downloaded until the
+    /// certificate ends or is revoked; the key is never answered in PEM. The password is kept
+    /// nowhere. Read as absent when it is missing, so the refusal names it.
     #[serde(default)]
-    #[schema(format = Password)]
+    #[schema(format = Password, required = true)]
     password: Option<String>,
 }
 
-/// The subject of a bootstrap certificate: these attributes only, each optional and 1 to 64
-/// characters without a control character; the Server sets the common name. It labels the
-/// certificate and authorizes nothing (ADR-0028 clause 22).
+/// The subject of a bootstrap certificate: these attributes only, `organization` and
+/// `organizational_unit` required and the others optional; the Server sets the common name. Every
+/// host certificate issued from it carries them, and they describe and select the Host through
+/// `fleet.host.*`; they authorize nothing (ADR-0036 clause 1).
 #[derive(Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct BootstrapSubject {
-    /// O — the customer, typically.
+    /// C — exactly two upper-case letters, an ISO 3166-1 alpha-2 code.
+    country: Option<String>,
+    /// ST — 1 to 64 characters without a control character, as are the others.
+    state: Option<String>,
+    /// L.
+    locality: Option<String>,
+    /// O — the customer, typically. Required; absent is refused `400` naming it.
+    #[schema(required = true)]
     organization: Option<String>,
-    /// OU — the site, typically.
+    /// OU — the site, typically. Required; absent is refused `400` naming it.
+    #[schema(required = true)]
     organizational_unit: Option<String>,
+    /// organizationIdentifier (2.5.4.97) — a customer or contract number, a UUID for instance.
+    organization_identifier: Option<String>,
 }
 
-/// An issued bootstrap certificate with its private key — the one time the key is handed out
-/// (ADR-0028 clause 21) — or, issued with a password, without it: the key is then in the PKCS#12
-/// file of `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0029 clause 3).
+/// An issued bootstrap certificate, never with its private key: the key is in the PKCS#12 file of
+/// `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0036 clause 8).
 #[derive(Serialize, ToSchema)]
 struct IssuedBootstrap {
     /// What a revocation names, with the authority `bootstrap`.
@@ -2527,9 +2504,6 @@ struct IssuedBootstrap {
     not_before_ms: u64,
     not_after_ms: u64,
     certificate_pem: String,
-    /// Absent when a password was named.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    private_key_pem: Option<String>,
 }
 
 /// A bootstrap certificate on record (ADR-0028 clause 24).
@@ -2581,19 +2555,19 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
     Json(list).into_response()
 }
 
-/// Issues a bootstrap certificate with the subject an operator names. Without a password the
-/// private key is in this answer and nowhere else: the Server keeps the certificate's facts, never
-/// its key. With one, the key is in no answer: the Server keeps it, encrypted under that password
-/// in a PKCS#12 file, for download (ADR-0029). A host with it may only ask to enrol, inside an open
-/// window, and an operator approves (ADR-0028).
+/// Issues a bootstrap certificate with the subject an operator names, which holds at least an
+/// organization and an organizational unit, under the password the request names. The key is in no
+/// answer: the Server keeps it, encrypted under that password in a PKCS#12 file, for download
+/// (ADR-0029, ADR-0036 clause 8). A host with it may only ask to enrol, inside an open window, and
+/// an operator approves (ADR-0028).
 #[utoipa::path(
     post,
     path = "/api/v1/bootstrap-certificates",
     tag = "enrolment",
     request_body = IssueBootstrapRequest,
     responses(
-        (status = 201, description = "Issued; the certificate and, without a password, its private key, this once", body = IssuedBootstrap),
-        (status = 400, description = "A subject attribute this route does not know, a value out of bounds, validity_days outside 1 to 90, or a password outside 4 to 128 characters", body = ErrorBody),
+        (status = 201, description = "Issued; the certificate, its key kept in the PKCS#12 file only", body = IssuedBootstrap),
+        (status = 400, description = "No organization, organizational_unit or password, a subject attribute this route does not know, a country that is not two upper-case letters, another value out of bounds, validity_days outside 1 to 90, or a password outside 4 to 128 characters", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody),
         (status = 409, description = "No bootstrap_ca_key_file is configured, the bootstrap CA has ended, or the record is full", body = ErrorBody),
@@ -2614,8 +2588,12 @@ async fn issue_bootstrap_certificate(
             let subject = request.subject.unwrap_or_default();
             crate::bootstrap::IssueRequest {
                 subject: crate::bootstrap::Subject {
+                    country: subject.country,
+                    state: subject.state,
+                    locality: subject.locality,
                     organization: subject.organization,
                     organizational_unit: subject.organizational_unit,
+                    organization_identifier: subject.organization_identifier,
                 },
                 validity_days: request.validity_days,
                 password: request.password.map(crate::bootstrap::Password),
@@ -2640,13 +2618,11 @@ async fn issue_bootstrap_certificate(
                         .with("serial", pair.serial.clone())
                         .with("subject", pair.subject.clone())
                         .with("not_after_ms", pair.not_after_ms)
-                        .with("p12", pair.pkcs12.is_some().to_string()),
+                        .with("p12", "true"),
                 );
                 if recorded.is_err() {
                     // Nor later: an issuance that is not on the record keeps no file to download.
-                    if pair.pkcs12.is_some() {
-                        let _ = bootstrap.forget_p12(&pair.serial);
-                    }
+                    let _ = bootstrap.forget_p12(&pair.serial);
                     return error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "the audit record cannot be written now; nothing was handed out",
@@ -2663,7 +2639,6 @@ async fn issue_bootstrap_certificate(
                     not_before_ms: pair.not_before_ms,
                     not_after_ms: pair.not_after_ms,
                     certificate_pem: pair.certificate_pem,
-                    private_key_pem: pair.private_key_pem,
                 }),
             )
                 .into_response()
@@ -2689,7 +2664,7 @@ async fn issue_bootstrap_certificate(
     }
 }
 
-/// The PKCS#12 file of a bootstrap certificate issued with a password, as often as it is asked,
+/// The PKCS#12 file of a bootstrap certificate, as often as it is asked,
 /// until the certificate ends or is revoked (ADR-0029 clause 4). Each download is on the record.
 #[utoipa::path(
     get,
@@ -2698,7 +2673,7 @@ async fn issue_bootstrap_certificate(
     params(("serial" = String, Path, description = "the serial, as the list names it")),
     responses(
         (status = 200, description = "The PKCS#12 file, `bootstrap.p12`", content_type = "application/x-pkcs12", body = Vec<u8>),
-        (status = 404, description = "No such certificate, none issued with a password, revoked or ended — or enrolment is not configured", body = ErrorBody),
+        (status = 404, description = "No such certificate, no file kept for it, revoked or ended — or enrolment is not configured", body = ErrorBody),
         (status = 503, description = "The audit record cannot be written; nothing was handed out", body = ErrorBody)
     )
 )]
@@ -2850,8 +2825,8 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-/// Opens the enrolment window for a bounded time, or moves its end. It is closed by default and
-/// lives in memory only, so a Server restart closes it.
+/// Opens the enrolment window for a bounded time, or moves its end. It is closed by default, and
+/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0037).
 #[utoipa::path(
     post,
     path = "/api/v1/enrolment/window",
@@ -2860,7 +2835,8 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
     responses(
         (status = 200, description = "The window, open until its new end", body = EnrolmentWindow),
         (status = 400, description = "open_for_secs is out of range", body = ErrorBody),
-        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody),
+        (status = 500, description = "The window could not be persisted; it is as it was", body = ErrorBody)
     )
 )]
 async fn open_enrolment_window(
@@ -2879,7 +2855,11 @@ async fn open_enrolment_window(
             );
             window_view(Some(until))
         }
-        Err(e) => error(StatusCode::BAD_REQUEST, e),
+        Err(crate::enrolment::WindowError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(crate::enrolment::WindowError::Store(e)) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the enrolment window could not be persisted: {e}"),
+        ),
     }
 }
 
@@ -2891,7 +2871,8 @@ async fn open_enrolment_window(
     tag = "enrolment",
     responses(
         (status = 204, description = "Closed"),
-        (status = 404, description = "Enrolment is not configured", body = ErrorBody)
+        (status = 404, description = "Enrolment is not configured", body = ErrorBody),
+        (status = 500, description = "Closed, but not persisted: a restart may find the window open until its end", body = ErrorBody)
     )
 )]
 async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
@@ -2899,13 +2880,22 @@ async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response 
         return enrolment_off();
     };
     let expired = enrolment.pending().len();
-    enrolment.close();
+    let saved = enrolment.close();
     info!("enrolment window closed");
     note(
         &state,
         crate::audit::Entry::new("enrolment.window", "closed").with("expired_requests", expired),
     );
-    StatusCode::NO_CONTENT.into_response()
+    match saved {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "the enrolment window is closed, but that could not be persisted — a restart may \
+                 find it open until its end: {e}"
+            ),
+        ),
+    }
 }
 
 /// The enrolment requests waiting for an operator, oldest first.
@@ -2929,11 +2919,11 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
             id: p.id,
             arrived_ms: p.arrived_ms,
             peer: p.requester.peer.map(|ip| ip.to_string()),
-            subject: p.subject,
             key_fingerprint: p.key_fingerprint,
-            bootstrap_subject: p.requester.bootstrap_subject,
+            bootstrap_subject: p.requester.carried.clone().ok().map(Into::into),
+            subject_refusal: p.requester.carried.err(),
             bootstrap_fingerprint: p.requester.bootstrap_fingerprint,
-            bootstrap_serial: p.requester.bootstrap_serial,
+            bootstrap_serial: p.requester.bootstrap.serial,
         })
         .collect();
     Json(pending).into_response()
@@ -2949,7 +2939,8 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
         (status = 204, description = "Approved and signed"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
-        (status = 409, description = "The CA could not sign the request", body = ErrorBody)
+        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, or that certificate's subject breaks the rules of ADR-0036 clause 1 — the message names the attribute, and nothing is signed", body = ErrorBody),
+        (status = 500, description = "The approval could not be persisted; the request still waits", body = ErrorBody)
     )
 )]
 async fn approve_enrolment(
@@ -2970,7 +2961,20 @@ async fn approve_enrolment(
             StatusCode::NOT_FOUND,
             format!("no pending enrolment request {id:?}"),
         ),
-        Err(crate::enrolment::DecisionError::Sign(e)) => error(StatusCode::CONFLICT, e),
+        Err(crate::enrolment::DecisionError::Revoked) => error(
+            StatusCode::CONFLICT,
+            format!(
+                "enrolment request {id:?} came with a bootstrap certificate that is revoked; it is \
+                 withdrawn, and nothing was signed"
+            ),
+        ),
+        Err(
+            crate::enrolment::DecisionError::Subject(e) | crate::enrolment::DecisionError::Sign(e),
+        ) => error(StatusCode::CONFLICT, e),
+        Err(crate::enrolment::DecisionError::Store(e)) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the approval could not be persisted, and the request still waits: {e}"),
+        ),
     }
 }
 
@@ -2983,7 +2987,8 @@ async fn approve_enrolment(
     responses(
         (status = 204, description = "Rejected"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
-        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody)
+        (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
+        (status = 500, description = "The rejection could not be persisted; the request still waits", body = ErrorBody)
     )
 )]
 async fn reject_enrolment(
@@ -3003,6 +3008,10 @@ async fn reject_enrolment(
             );
             StatusCode::NO_CONTENT.into_response()
         }
+        Err(crate::enrolment::DecisionError::Store(e)) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the rejection could not be persisted, and the request still waits: {e}"),
+        ),
         Err(_) => error(
             StatusCode::NOT_FOUND,
             format!("no pending enrolment request {id:?}"),
@@ -3034,16 +3043,82 @@ struct CertificateView {
     host: Option<String>,
 }
 
-/// A host the client CA issued to (ADR-0021 clause 7).
+/// A Host: what a client certificate's host id names (ADR-0021 clause 7, ADR-0035).
 #[derive(Serialize, ToSchema)]
 struct HostView {
     host: String,
+    /// What it is shown by: the `host.name` its Client Agent reports, else the host id. Shown
+    /// only; it decides nothing (ADR-0035 clause 7).
+    name: String,
     /// A Gateway speaks for any Agent; any other host only for those it reported first.
     gateway: bool,
     /// The `instance_uid`s it speaks for, hex.
     instance_uids: Vec<String>,
     /// How many valid certificates it holds — at most three.
     certificates: usize,
+    /// The subject values of the client certificate it was issued (ADR-0035 clause 1), which the
+    /// Agents arriving over it directly carry as `fleet.host.*`.
+    subject: HostSubject,
+    /// When its enrolment was approved, in milliseconds since the Unix epoch; absent for a Host a
+    /// provisioned certificate made at its first report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approved_ms: Option<u64>,
+    /// The Agents whose record names it as the Host they last arrived over (ADR-0035 clause 2) —
+    /// for a Gateway, the Agents behind it.
+    agents: Vec<HostAgent>,
+}
+
+/// The subject values a Host carries (ADR-0035 clause 1), or a bootstrap certificate carries into
+/// the host certificate an approval issues (ADR-0036 clause 3); an empty one is absent from the
+/// certificate.
+#[derive(Serialize, ToSchema)]
+struct HostSubject {
+    /// `C`, as `fleet.host.country`.
+    country: String,
+    /// `ST`, as `fleet.host.state`.
+    state: String,
+    /// `L`, as `fleet.host.locality`.
+    locality: String,
+    /// `O`, as `fleet.host.organization`.
+    organization: String,
+    /// `OU`, as `fleet.host.site`.
+    organizational_unit: String,
+    /// `organizationIdentifier`, as `fleet.host.organization_id`.
+    organization_identifier: String,
+}
+
+impl From<crate::revocation::SubjectValues> for HostSubject {
+    fn from(values: crate::revocation::SubjectValues) -> Self {
+        HostSubject {
+            country: values.country,
+            state: values.state,
+            locality: values.locality,
+            organization: values.organization,
+            organizational_unit: values.organizational_unit,
+            organization_identifier: values.organization_identifier,
+        }
+    }
+}
+
+/// One Agent under the Host it arrived over (ADR-0035 clause 7).
+#[derive(Serialize, ToSchema)]
+struct HostAgent {
+    instance_uid: String,
+    service_name: String,
+    service_instance_name: String,
+    /// The `host.name` it reports, or empty.
+    host_name: String,
+    /// Whether it is a Client Agent: it reports `supervisor.kind.*`.
+    client: bool,
+    /// The Instance UID of its Client Agent — its own, for the Client Agent — or empty when the
+    /// Server cannot tell.
+    client_agent: String,
+    /// Behind a Gateway, the machine it is grouped by (`host.id=…`, else `host.name=…`); empty on a
+    /// direct connection.
+    machine: String,
+    /// Its group holds more than one Client Agent, so it inherits nothing.
+    ambiguous: bool,
+    connected: bool,
 }
 
 /// Whether a host is a Gateway.
@@ -3164,13 +3239,13 @@ async fn list_certificates(State(state): State<Arc<AppState>>) -> Response {
     Json(issued).into_response()
 }
 
-/// Every host the client CA issued to, by name.
+/// Every Host, by host id, with its subject values and the Agents that arrived over it.
 #[utoipa::path(
     get,
     path = "/api/v1/hosts",
     tag = "revocation",
     responses(
-        (status = 200, description = "Every host the client CA issued to, by name", body = Vec<HostView>),
+        (status = 200, description = "Every Host, by host id, with its subject values and the Agents that arrived over it (ADR-0035)", body = Vec<HostView>),
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
@@ -3178,14 +3253,36 @@ async fn list_hosts(State(state): State<Arc<AppState>>) -> Response {
     let Some(revocations) = state.revocations() else {
         return revocation_off();
     };
+    let mut carried = state.host_agents();
     let hosts: Vec<HostView> = revocations
         .hosts()
         .into_iter()
-        .map(|(host, entry, certificates)| HostView {
-            host,
-            gateway: entry.gateway,
-            instance_uids: entry.instance_uids.into_iter().collect(),
-            certificates,
+        .map(|(host, entry, certificates)| {
+            let agents = carried.remove(&host).unwrap_or_default();
+            HostView {
+                name: agents.name.unwrap_or_else(|| host.clone()),
+                host,
+                gateway: entry.gateway,
+                instance_uids: entry.instance_uids.into_iter().collect(),
+                certificates,
+                subject: entry.subject.into(),
+                approved_ms: entry.approved_ms,
+                agents: agents
+                    .agents
+                    .into_iter()
+                    .map(|agent| HostAgent {
+                        instance_uid: agent.instance_uid,
+                        service_name: agent.service_name,
+                        service_instance_name: agent.service_instance_name,
+                        host_name: agent.host_name,
+                        client: agent.client,
+                        client_agent: agent.client_agent,
+                        machine: agent.machine,
+                        ambiguous: agent.ambiguous,
+                        connected: agent.connected,
+                    })
+                    .collect(),
+            }
         })
         .collect();
     Json(hosts).into_response()
@@ -3210,10 +3307,10 @@ async fn set_gateway(
     Path(host): Path<String>,
     Json(request): Json<GatewayRequest>,
 ) -> Response {
-    let Some(revocations) = state.revocations() else {
+    if state.revocations().is_none() {
         return revocation_off();
-    };
-    match revocations.set_gateway(&host, request.gateway) {
+    }
+    match state.set_gateway(&host, request.gateway) {
         Ok(true) => {
             info!(%host, gateway = request.gateway, "gateway mark set");
             note(
@@ -3301,7 +3398,13 @@ async fn revoke(
             let crate::revocation::Revoked::Certificate {
                 authority, serial, ..
             } = &entry.revoked;
+            let mut withdrawn = 0;
             if authority == "bootstrap" {
+                // The requests it carried wait no longer (ADR-0021 clause 35); approving one is
+                // refused either way.
+                withdrawn = state.enrolment().map_or(0, |enrolment| {
+                    enrolment.withdraw(&|bootstrap| revocations.is_certificate_revoked(bootstrap))
+                });
                 if let Some(Err(e)) = state.bootstrap().map(|b| b.forget_p12(serial)) {
                     // Said, not swallowed: lifting this revocation would make the file
                     // downloadable again.
@@ -3317,7 +3420,8 @@ async fn revoke(
             }
             note(
                 &state,
-                revocation_entry("revocation.revoked", "revoked", &entry),
+                revocation_entry("revocation.revoked", "revoked", &entry)
+                    .with("withdrawn_requests", withdrawn),
             );
             (StatusCode::CREATED, Json(RevocationView::of(entry))).into_response()
         }
@@ -3364,41 +3468,5 @@ async fn lift_revocation(
         }
         Ok(false) => error(StatusCode::NOT_FOUND, format!("no revocation {id:?}")),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_internal;
-
-    /// The IPv6 forms that carry an IPv4 address — NAT64, 6to4 and IPv4-compatible — are judged by
-    /// that address, so none of them reaches a blocked one, and AWS's IPv6 metadata address is
-    /// blocked by name. Loopback and the unique-local range stay reachable, as their IPv4
-    /// counterparts do.
-    #[test]
-    fn an_ipv4_address_inside_an_ipv6_one_is_judged_as_itself() {
-        for blocked in [
-            "fd00:ec2::254",
-            "64:ff9b::a9fe:a9fe",
-            "2002:a9fe:a9fe::1",
-            "::169.254.169.254",
-            "::ffff:169.254.169.254",
-            "64:ff9b::6464:64c8",
-        ] {
-            let ip: std::net::IpAddr = blocked.parse().expect("an address");
-            assert!(is_internal(ip), "{blocked} must be blocked");
-        }
-        for allowed in [
-            "::1",
-            "fd00::1",
-            "fd00:ec2::253",
-            "64:ff9b::808:808",
-            "2002:808:808::1",
-            "::10.0.0.5",
-            "2606:4700::1111",
-        ] {
-            let ip: std::net::IpAddr = allowed.parse().expect("an address");
-            assert!(!is_internal(ip), "{allowed} must stay allowed");
-        }
     }
 }

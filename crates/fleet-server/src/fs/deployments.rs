@@ -1,27 +1,24 @@
 //! Deployments on the filesystem (ADR-0026): the default adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::configs::validate_name;
 use crate::deployments::{check_selector, Deployment, DeploymentBackend};
-use crate::packages::{PackageId, Platform};
+use crate::packages::PackageId;
 
-/// One JSON file per Deployment under `<packages_dir>/deployments/`, owner-only.
-///
-/// It lives beside the Packages rather than beside the Configurations because a Deployment is
-/// meaningless without the artifacts it signs — one directory is one backup — and it needs no
-/// configuration key of its own: it is armed by `packages_dir`, exactly as the package store is.
+/// One JSON file per Deployment under `<data_dir>/deployments/`, owner-only (ADR-0037).
 pub struct FsDeploymentBackend {
     dir: PathBuf,
 }
 
 impl FsDeploymentBackend {
-    /// Opens the directory, creating it owner-only.
-    pub fn open(dir: PathBuf) -> Result<Self, String> {
+    /// Opens the store in the data directory `root`, creating `deployments/` owner-only.
+    pub fn open(root: &std::path::Path) -> Result<Self, String> {
+        let dir = root.join(super::DEPLOYMENTS);
         super::create_private_dir(&dir)?;
         Ok(FsDeploymentBackend { dir })
     }
@@ -34,15 +31,7 @@ impl FsDeploymentBackend {
 impl DeploymentBackend for FsDeploymentBackend {
     fn load(&self) -> Result<Vec<Deployment>, String> {
         let mut deployments = Vec::new();
-        let listing = std::fs::read_dir(&self.dir)
-            .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?;
-        for entry in listing {
-            let path = entry
-                .map_err(|e| format!("cannot read {}: {e}", self.dir.display()))?
-                .path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
+        for (stem, path) in super::json_files(&self.dir)? {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let meta: DeploymentMeta = serde_json::from_str(&text)
@@ -50,12 +39,8 @@ impl DeploymentBackend for FsDeploymentBackend {
             let deployment = meta.into_deployment(&path)?;
             // The file name is derived from the name; a mismatch means a write would land
             // somewhere else, so it is refused rather than silently corrected.
-            if path.file_stem().and_then(|n| n.to_str()) != Some(deployment.name.as_str()) {
-                return Err(format!(
-                    "{} does not match the name {:?} it states — rename the file or fix it",
-                    path.display(),
-                    deployment.name
-                ));
+            if stem != deployment.name {
+                return Err(super::misnamed(&path, "name"));
             }
             deployments.push(deployment);
         }
@@ -71,43 +56,29 @@ impl DeploymentBackend for FsDeploymentBackend {
     }
 
     fn remove(&self, name: &str) -> Result<(), String> {
-        let path = self.path(name);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("cannot delete {}: {e}", path.display())),
-        }
+        super::remove_file(&self.path(name))
     }
 }
 
-/// A Deployment as persisted: `<packages_dir>/deployments/<name>.json`.
-///
-/// The signatures are a **list** rather than a map, because their key is a pair and JSON keys are
-/// strings. Folding them into the in-memory map on load keeps the uniqueness where it belongs
-/// without inventing a composite key nobody would read.
+/// A Deployment as persisted: `<data_dir>/deployments/<name>.json`. Unknown fields are refused, so a
+/// file an older Server wrote — with `signatures` beside its Packages — is named rather than read
+/// as something it is not: `server migrate` moves it (ADR-0037).
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeploymentMeta {
     name: String,
     selector: BTreeMap<String, String>,
     #[serde(default)]
     packages: Vec<PackageRefMeta>,
+    /// The Configurations it holds, by name (ADR-0034). Absent in a file that holds none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    signatures: Vec<SignatureMeta>,
+    configurations: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PackageRefMeta {
     agent_type: String,
     version: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SignatureMeta {
-    agent_type: String,
-    version: String,
-    os: String,
-    arch: String,
-    signature_hex: String,
 }
 
 impl DeploymentMeta {
@@ -123,17 +94,7 @@ impl DeploymentMeta {
                     version: id.version.clone(),
                 })
                 .collect(),
-            signatures: deployment
-                .signatures
-                .iter()
-                .map(|((id, platform), signature)| SignatureMeta {
-                    agent_type: id.agent_type.clone(),
-                    version: id.version.clone(),
-                    os: platform.os.clone(),
-                    arch: platform.arch.clone(),
-                    signature_hex: hex::encode(signature),
-                })
-                .collect(),
+            configurations: deployment.configurations.iter().cloned().collect(),
         }
     }
 
@@ -146,19 +107,17 @@ impl DeploymentMeta {
             let id = PackageId::new(&reference.agent_type, &reference.version).map_err(named)?;
             packages.insert(id.agent_type.clone(), id);
         }
-        let mut signatures = BTreeMap::new();
-        for signature in self.signatures {
-            let id = PackageId::new(&signature.agent_type, &signature.version).map_err(named)?;
-            let platform = Platform::new(&signature.os, &signature.arch).map_err(named)?;
-            let bytes = hex::decode(&signature.signature_hex)
-                .map_err(|e| named(format!("signature of {id}: {e}")))?;
-            signatures.insert((id, platform), bytes);
+        let mut configurations = BTreeSet::new();
+        for configuration in self.configurations {
+            validate_name(&configuration)
+                .map_err(|e| named(format!("configuration {configuration:?}: {e}")))?;
+            configurations.insert(configuration);
         }
         Ok(Deployment {
             name: self.name,
             selector: self.selector,
             packages,
-            signatures,
+            configurations,
         })
     }
 }
@@ -166,16 +125,15 @@ impl DeploymentMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deployments::tests::{channel, id, linux};
+    use crate::deployments::tests::{channel, id};
     use crate::deployments::DeploymentStore;
 
     fn open(dir: &std::path::Path) -> Result<DeploymentStore, String> {
-        DeploymentStore::open(Box::new(FsDeploymentBackend::open(dir.to_path_buf())?))
+        DeploymentStore::open(Box::new(FsDeploymentBackend::open(dir)?))
     }
 
-    /// The whole store survives a reopen — the signatures included, which is the part that had to
-    /// be flattened to be persisted at all.
-    /// Verifies: ADR-0026
+    /// The whole store survives a reopen.
+    /// Verifies: ADR-0026, ADR-0034
     #[test]
     fn a_deployment_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -187,8 +145,8 @@ mod tests {
                 .put_package("canary", &telegraf, false)
                 .expect("package");
             store
-                .put_signature("canary", &telegraf, &linux(), vec![9; 64])
-                .expect("signature");
+                .put_configuration("canary", "base")
+                .expect("configuration");
         }
 
         let reopened = open(dir.path()).expect("reopen");
@@ -196,7 +154,11 @@ mod tests {
         assert_eq!(canary.selector["channel"], "canary");
         assert_eq!(canary.selector["env"], "prod");
         assert_eq!(canary.package_for("telegraf"), Some(&telegraf));
-        assert_eq!(canary.signature(&telegraf, &linux()), Some(&[9u8; 64][..]));
+        assert_eq!(
+            canary.configurations.iter().collect::<Vec<_>>(),
+            ["base"],
+            "the Configurations it holds survive too (ADR-0034)"
+        );
 
         assert!(reopened.delete("canary").expect("delete"));
         assert!(!reopened
@@ -211,13 +173,15 @@ mod tests {
     #[test]
     fn an_unreadable_file_fails_the_open_and_names_it() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("broken.json"), "{").expect("write");
+        std::fs::create_dir_all(dir.path().join("deployments")).expect("dir");
+        std::fs::write(dir.path().join("deployments/broken.json"), "{").expect("write");
         let error = open(dir.path()).map(|_| ()).expect_err("refused");
         assert!(error.contains("broken.json"), "{error}");
 
         let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("deployments")).expect("dir");
         std::fs::write(
-            dir.path().join("stable.json"),
+            dir.path().join("deployments/stable.json"),
             r#"{"name":"canary","selector":{"channel":"canary"}}"#,
         )
         .expect("write");
@@ -238,7 +202,7 @@ mod tests {
         let store = open(dir.path()).expect("open");
         channel(&store, "stable", &[("channel", "stable")]);
         assert_eq!(
-            std::fs::metadata(dir.path())
+            std::fs::metadata(dir.path().join("deployments"))
                 .expect("dir")
                 .permissions()
                 .mode()
@@ -246,7 +210,7 @@ mod tests {
             0o700
         );
         assert_eq!(
-            std::fs::metadata(dir.path().join("stable.json"))
+            std::fs::metadata(dir.path().join("deployments/stable.json"))
                 .expect("file")
                 .permissions()
                 .mode()

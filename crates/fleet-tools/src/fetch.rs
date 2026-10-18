@@ -184,24 +184,21 @@ impl AgentKind {
         }
     }
 
-    /// The Configurations this agent needs before it can do anything, aimed the way
-    /// `scripts/seed_test_configs.sh` aims them — which is where these bodies come from, and why
+    /// The Configurations this agent needs before it can do anything, typed the way
+    /// `scripts/seed_test_configs.sh` types them — which is where these bodies come from, and why
     /// they agree with the `[[supervisor]]` blocks in `config/supervisor.toml` down to the file names.
     fn default_configurations(self) -> &'static [DefaultConfiguration] {
-        // Aiming differs by how an Agent's type becomes known. The Collectors report a
-        // `service.name` of their own, so a Selector on that attribute is what reaches them; the
-        // rest are matched by Agent type (ADR-0023).
+        // Each is stated for the `service.name` its Collector reports, so a Deployment holding it
+        // fits it to that Agent type alone (ADR-0034); the Deployment's Selector does the aiming.
         match self {
             AgentKind::Otelcol => &[DefaultConfiguration {
                 name: "otelcol-conf",
-                selector: &[("service.name", "otelcol")],
-                service_name: "",
+                service_name: "otelcol",
                 body: include_str!("../../../config/examples/otelcol-conf.yaml"),
             }],
             AgentKind::OtelcolContrib => &[DefaultConfiguration {
                 name: "otelcol-contrib-conf",
-                selector: &[("service.name", "otelcol-contrib")],
-                service_name: "",
+                service_name: "otelcol-contrib",
                 body: include_str!("../../../config/examples/otelcol-contrib-conf.yaml"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
@@ -222,9 +219,7 @@ struct DefaultConfiguration {
     /// The Configuration's name — also the file name its entry gets in the Supervisor's config
     /// directory, which is what the `[[supervisor]]` block has to name.
     name: &'static str,
-    /// Equality pairs against the Agent's attributes; empty aims at every Agent of the type below.
-    selector: &'static [(&'static str, &'static str)],
-    /// The Agent type this is for (ADR-0023); empty is every type.
+    /// The Agent type this is for (ADR-0034 clause 3); empty is every type.
     service_name: &'static str,
     body: &'static str,
 }
@@ -359,13 +354,16 @@ pub async fn run(args: Args) -> Result<(), String> {
     }
     if server.is_none() {
         eprintln!(
-            "\nNothing was uploaded. To do it later, create the package, PUT each artifact, and \
-             put it in the deployment that should carry it:\n  \
+            "\nNothing was uploaded. To do it later, create the package, PUT each artifact, sign \
+             each entry, and put it in the deployment that should carry it:\n  \
              curl -X PUT -H 'Content-Type: application/json' -d '{{}}' \\\n       \
              <server>/api/v1/packages/{name}/{version}\n  \
              curl -X PUT --data-binary @<artifact> \\\n       \
              \"<server>/api/v1/packages/{name}/{version}/entries/<os>/<arch>\"\n  \
-             curl -X PUT <server>/api/v1/deployments/<ring>/packages/{name}/{version}",
+             curl -X PUT -H 'Content-Type: application/json' -d '{{\"signature\": \"<hex>\"}}' \\\n       \
+             \"<server>/api/v1/packages/{name}/{version}/entries/<os>/<arch>/signature\"\n  \
+             curl -X PUT <server>/api/v1/deployments/<ring>/packages/{name}/{version}\n  \
+             curl -X POST <server>/api/v1/deployments/<ring>/rollout",
             name = source.service_name,
             version = version
         );
@@ -1039,8 +1037,9 @@ async fn upload(
     };
     expect_ok(response, &entry).await?;
     eprintln!(
-        "  stored as the {}/{} entry — and it reaches nobody yet: a package aims at nothing by \
-         itself. Put it in a deployment when it should reach hosts:\n    \
+        "  stored as the {}/{} entry — and it reaches nobody yet: it is unsigned, and a package \
+         aims at nothing by itself. Sign the entry on the Packages tab (or PUT its …/signature), \
+         then put it in a deployment when it should reach hosts:\n    \
          curl -X PUT <server>/api/v1/deployments/<ring>/packages/{}/{}",
         plan.os, plan.arch, service_name, version
     );
@@ -1056,10 +1055,11 @@ async fn upload(
 ///
 /// Two rules keep it from being a surprise. **An existing Configuration is never touched** — the
 /// name is asked for first, and one that answers is left exactly as the operator left it, edits and
-/// all. And **nothing is distributed**: saving only saves (ADR-0025), so the default reaches no
-/// Agent until an operator reads it and presses the rollout. That matters here, because these
-/// bodies are starting points with example values in them — a parent host to correct, a plugin
-/// path to confirm.
+/// all. And **nothing is distributed**: saving only saves (ADR-0025), and a Configuration reaches an
+/// Agent only through a Deployment that holds it (ADR-0034), so the default reaches no Agent until
+/// an operator reads it, puts it into a Deployment and presses that Deployment's rollout. That
+/// matters here, because these bodies are starting points with example values in them — a parent
+/// host to correct, a plugin path to confirm.
 async fn upload_default_configurations(
     client: &reqwest::Client,
     server: &str,
@@ -1071,26 +1071,15 @@ async fn upload_default_configurations(
             eprintln!("  {} is already on the Server — left as it is", config.name);
             continue;
         }
-        let selector: serde_json::Map<String, serde_json::Value> = config
-            .selector
-            .iter()
-            .map(|(k, v)| {
-                (
-                    (*k).to_string(),
-                    serde_json::Value::String((*v).to_string()),
-                )
-            })
-            .collect();
         let spec = serde_json::json!({
-            "selector": selector,
             "body": config.body,
             "service_name": config.service_name,
         });
         eprintln!("  storing the default configuration {} …", config.name);
         put_json(client, &url, spec.to_string()).await?;
         eprintln!(
-            "  saved — read it over and press its rollout when it should reach hosts, since it \
-             carries example values"
+            "  saved — read it over, put it into the deployment that should carry it and press \
+             that deployment's rollout when it should reach hosts, since it carries example values"
         );
     }
     Ok(())
@@ -1723,7 +1712,7 @@ mod tests {
     /// Every *supervised* agent this tool can fetch carries a default Configuration, and each one
     /// is storable: the name follows the ADR-0019 grammar the Server enforces (which admits no dot,
     /// so no file extension), the body is not empty (the Server refuses an empty one), and it is
-    /// aimed at something — by Selector or by Agent type — rather than at the whole fleet.
+    /// stated for its Agent type, so a Deployment holding it fits it to that type alone (ADR-0034).
     ///
     /// This is the test that fails when a variant is added and its default is forgotten, which is
     /// the only way an agent could reach a Server with a package and nothing to run. The Client's
@@ -1764,9 +1753,9 @@ mod tests {
                     "{service_name}: {} has an empty body",
                     config.name
                 );
-                assert!(
-                    !config.selector.is_empty() || !config.service_name.is_empty(),
-                    "{service_name}: {} would be aimed at every Agent in the fleet",
+                assert_eq!(
+                    config.service_name, service_name,
+                    "{service_name}: {} would fit every Agent type of its Deployment",
                     config.name
                 );
             }

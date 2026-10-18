@@ -769,13 +769,11 @@ mod tests {
         state.accept_packages();
         let mut engine = Engine::new(vec![state]);
         let uid = engine.poll_reports()[0].instance_uid.clone();
-        // A Client that takes packages holds a key and allows the source (ADR-0026).
+        // A Client that takes packages holds a key, and fetches from its own Server's origin
+        // (ADR-0026, ADR-0033).
         let config = ClientConfig {
+            endpoint: format!("ws://{addr}/v1/opamp"),
             state_dir: dir.path().to_path_buf(),
-            packages: Some(crate::config::PackagesConfig {
-                allowed_sources: vec![format!("http://{addr}/")],
-                ..Default::default()
-            }),
             package_key: Some(public),
             ..ClientConfig::default()
         };

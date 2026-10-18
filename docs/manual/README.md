@@ -8,7 +8,7 @@ is one machine, the Clients are all the others — so each half can be read on i
 |---|---|
 | **[Setting up a fleet](setup.md)** | go from nothing to a running fleet, in order: the three certificate authorities and the files they make, the Server's and the Client's configuration, enrolling a host, and living with the certificates afterwards |
 | **[A host's life](lifecycle.md)** | follow one managed host from start to finish, in the UI: issuing its bootstrap certificate, installing the Client, enrolling it, renewal, and the updates of its agents and of the Client itself |
-| **[Server](server.md)** | run the control plane: the two listeners, Configurations and Selectors, packages and deployments, the REST API, authentication, enrolment, TLS |
+| **[Server](server.md)** | run the control plane: the two listeners, Configurations, packages and the deployments that aim them, the REST API, authentication, enrolment, TLS |
 | **[Client](client.md)** | run a managed host, end to end: how it is built, the OS service, the on-disk layout, Supervisors for Collectors and Foreign Agents, package updates, self-update, and Gateway Mode |
 | **[Rollout walkthrough](rollout.md)** | both ends at once, end to end: build an artifact, sign it, upload it, aim it, and watch a Foreign Agent be installed and configured entirely from the Server |
 | **[Command-line tools](tools.md)** | get software into the fleet: fetch a known agent's release and hand it to the Server, or build, hash, and sign an artifact out of any program |
@@ -91,16 +91,26 @@ development set of them.
    import `.dev-pki/offline/server-ca.pem` into its trust store first. The Agent is listed as *Connected*, with
    the attributes it reported.
 
-5. **Create and roll out a Configuration.** In the UI, press **Configurations**, give it a name,
-   leave the Selector empty (which targets every Agent), enter the configuration text, save — and
-   then press **Roll out to all matching**, because saving only stores; the rollout act is what
-   reaches the fleet. The same two steps over the API, with `--cacert` naming the development CA:
+5. **Create a Configuration and roll it out through a Deployment.** In the UI, press
+   **Configurations**, then **＋ Create**, give it a name and the Agent type it is for —
+   `supervisor`, the type the Client's own Agent reports — enter the configuration text and press
+   **OK**. The Client's own Agent is configured with its Supervisor set, and with no Managed
+   Process yet a comment is the whole of it: `# no [[supervisor]] block yet`. A Configuration
+   aims at nobody by itself: on **Deployments**, press **＋ Create**, name
+   the deployment, give it a selector every Agent of this host matches — `os.type=linux` on Linux —
+   add the Configuration and press **OK**. Then press the row's **Roll out**, because saving only
+   stores; the rollout act is what reaches the fleet. The same steps over the API, with `--cacert`
+   naming the development CA:
 
    ```console
    $ curl --cacert .dev-pki/offline/server-ca.pem -X PUT -H 'Content-Type: application/json' \
-          -d '{"selector": {}, "body": "receivers: {}"}' \
+          -d '{"service_name": "supervisor", "body": "# no [[supervisor]] block yet\n"}' \
           https://127.0.0.1:4321/api/v1/configurations/base
-   $ curl --cacert .dev-pki/offline/server-ca.pem -X POST https://127.0.0.1:4321/api/v1/configurations/base/rollout
+   $ curl --cacert .dev-pki/offline/server-ca.pem -X PUT -H 'Content-Type: application/json' \
+          -d '{"selector": {"os.type": "linux"}}' \
+          https://127.0.0.1:4321/api/v1/deployments/dev
+   $ curl --cacert .dev-pki/offline/server-ca.pem -X PUT https://127.0.0.1:4321/api/v1/deployments/dev/configurations/base
+   $ curl --cacert .dev-pki/offline/server-ca.pem -X POST https://127.0.0.1:4321/api/v1/deployments/dev/rollout
    ```
 
 6. **Watch the loop close.** A WebSocket Client receives it within a second, an HTTP Client on its
@@ -109,6 +119,10 @@ development set of them.
    sends nothing — every push is gated on a content hash. An Agent that connects *later* is not
    changed by the earlier act: its row on the Agents tab shows the Configuration waiting, with a
    **roll out** control of its own.
+
+   A Configuration reaches only the Agents of the Deployment that report its `service_name`. A
+   Collector put under the Client later reports a type of its own and needs a Configuration of
+   its own: content for several Agent types is one Configuration per type.
 
 For a deployment that crosses a network, with certificates of your own, follow
 [Setting up a fleet](setup.md). From here, [Server](server.md) covers targeting a subset of the
@@ -135,11 +149,11 @@ same value on every host running that kind of agent, while `service.instance.nam
 for one Agent, the `[[supervisor]]` block's `name`. Aim at the type to reach every Agent of a kind,
 at the instance name to reach exactly one.
 
-**Configuration and Selector.** A *Configuration* is a named body of text held by the
-Server. Its *Selector* is a set of `key=value` pairs that an Agent's reported attributes must equal
-for it to receive that Configuration; an empty Selector targets every Agent. An Agent matching
-several Configurations receives all of them, as named entries, and merges them itself; an Agent
-matching none is left running what it already runs.
+**Configuration.** A *Configuration* is a named body of text held by the Server, optionally
+stated for one Agent type (`service_name`). It aims at nobody by itself: a Deployment holds it, and
+it reaches the Agents of that Deployment whose type it fits. An Agent receives every Configuration
+its Deployment holds for it, as named entries, and merges them itself; an Agent in no Deployment is
+left running what it already runs.
 
 **Role.** A Configuration may carry the role `supplementary`, which means *content the
 Managed Process reads by path* — a rule file, a lookup table — rather than configuration it is
@@ -147,17 +161,22 @@ started with. The Client writes it beside the configuration under its own name, 
 what the process is configured with.
 
 **Package.** What an Agent type runs at a version — its identity is those two things and nothing
-else, and it holds one artifact per platform. It reaches no Agent of another type, and it aims at
-nobody by itself.
+else, and it holds one artifact per platform, each with the operator's signature. It reaches no
+Agent of another type, and it aims at nobody by itself.
 
-**Deployment.** Where a Package goes: a name, the **channel** a Selector aims at, at most one Package
-per Agent type, and each artifact's signature. It is the only thing that is rolled out, and an
+**Selector and Deployment.** A *Selector* is a set of `key=value` pairs that an Agent's effective
+description must equal: the `fleet.host.*` values of the Host it connects over, what it reported,
+its labels, and the labels of its Client's own Agent, in that order. It aims a *Deployment*: a name, the **channel** its Selector
+names, at most one Package per Agent type, and any number of Configurations. It is the only thing
+that is rolled out — one press releases its Packages and Configurations together — and an
 Agent belongs to **at most one** — two claiming the same Agent is a conflict the Server reports
 rather than resolves. A Selector is equality and cannot say "not", so channels are a partition over an
 attribute every Agent carries; there is no fleet-wide default. The Server decides which artifact an
 Agent is offered; the Client decides whether it accepts packages at all. Every artifact is verified
-by its content hash and by its Ed25519 signature. A Client without a verification key takes no
-package, and the Server offers no entry its Deployment has not signed.
+by its content hash and by its Ed25519 signature, which the operator puts on each entry of the
+Package. A Client without a verification key takes no package, and the Server offers no entry
+that carries no signature. Every artifact is uploaded to the Server, and a Client downloads from
+its own Server alone.
 
 **Transports.** The URL scheme in the Client's `endpoint` selects the transport: `wss://` for
 WebSocket, where the Server pushes changes within seconds, and `https://` for plain-HTTP polling.

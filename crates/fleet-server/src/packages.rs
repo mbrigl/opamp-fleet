@@ -1,7 +1,7 @@
-//! The package store (ADR-0026): the Server's software artifacts, held as **Packages**.
+//! The package store (ADR-0026, ADR-0033): the Server's software artifacts, held as **Packages**.
 //! A Package is identified by *(Agent type, version)* and holds **one entry per Platform**
-//! (ADR-0026) — an uploaded artifact or a source reference (ADR-0026), with its SHA-256 content
-//! hash. It aims at nobody and carries no signature: both belong to the Deployment that holds it
+//! (ADR-0026) — an uploaded artifact with its SHA-256 content hash, its size and the operator's
+//! signature over it (ADR-0033). It aims at nobody: that belongs to the Deployment that holds it
 //! (ADR-0026). A stored Package reaches nobody by itself (ADR-0025): what an Agent is offered is
 //! composed from the assignment the operator's rollout act wrote; [`resolve`] only computes the
 //! **candidate** such an act would release. A Package reaches an Agent only as an **upgrade**
@@ -12,17 +12,17 @@
 //! Package *bodies* are opaque bytes: what a package contains and how it is applied is the Agent's
 //! business (the specification forbids the Server abstracting over it). The Server's job is to
 //! store, hash, offer, and serve — and to hand each Agent the artifact built for the machine it
-//! runs on, never another one.
+//! runs on, never another one. It checks a signature against the operator's public key when it
+//! holds one, and only reports what it found: the Agent's own check decides (ADR-0033).
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use crate::blobs::BlobStore;
 use crate::deployments::Deployment;
 use opamp::proto::{
-    AgentDescription, DownloadableFile, Header, Headers, PackageAvailable, PackageType,
-    PackagesAvailable,
+    AgentDescription, DownloadableFile, PackageAvailable, PackageType, PackagesAvailable,
 };
 use sha2::{Digest, Sha256};
 
@@ -143,10 +143,6 @@ pub struct PackageId {
     pub version: String,
 }
 
-/// The subdirectory of `packages_dir` the Deployments live in (ADR-0026) — skipped by the package
-/// loader, which owns every *other* entry in that directory.
-pub const DEPLOYMENTS_DIR: &str = "deployments";
-
 impl PackageId {
     /// Validates both parts; the one gate every write goes through.
     pub fn new(agent_type: &str, version: &str) -> Result<Self, String> {
@@ -194,9 +190,9 @@ impl fmt::Display for PackageId {
 /// there is no Selector here and no kind flag: an Agent's Deployment holds one Package for its
 /// type, and that is the whole of the decision.
 ///
-/// Artifacts stay on disk (`<package>/<os>-<arch>.bin`) and are streamed to whoever asks — a
-/// program weighs hundreds of megabytes, and a fleet server holding every one of them in memory,
-/// plus a copy per download, is the shape this deliberately avoids.
+/// Artifacts stay in the blob store, named by their hash (ADR-0037), and are streamed to whoever
+/// asks — a program weighs hundreds of megabytes, and a fleet server holding every one of them in
+/// memory, plus a copy per download, is the shape this deliberately avoids.
 #[derive(Clone)]
 pub struct Package {
     pub id: PackageId,
@@ -205,35 +201,81 @@ pub struct Package {
     pub entries: BTreeMap<Platform, Entry>,
 }
 
-/// One platform's artifact of a Package: **either** an uploaded file **or** a source reference, with
-/// the hash that identifies what an Agent installs. The **signature** is not here: what an
-/// operator signs off on is a release to a set of machines, so it belongs to the Deployment that
-/// offers these bytes (ADR-0026 point 28), and the same artifact in two channels is signed in each.
+/// One platform's artifact of a Package: an uploaded file, the hash that identifies what an Agent
+/// installs, and the operator's signature over it (ADR-0033). The signature lives here because what
+/// it covers — `fleet_core::package::statement` — names the Agent type, the version and this hash,
+/// and no Deployment: one signature serves every Deployment that holds the Package.
 #[derive(Clone)]
 pub struct Entry {
     pub platform: Platform,
-    /// SHA-256 of the artifact bytes: computed here for an upload, the operator's word (verified
-    /// by every Agent) for a source reference (ADR-0026).
+    /// SHA-256 of the artifact bytes, computed here as they arrive.
     pub content_hash: Vec<u8>,
-    /// The artifact's size in bytes; zero for a referenced one, whose bytes this Server never
-    /// holds.
+    /// The artifact's size in bytes.
     pub size: u64,
-    /// Where the artifact lives when it is **not** here (ADR-0026). `None` is an uploaded entry,
-    /// whose bytes this Server holds and serves; `Some` is a reference, offered to Agents as the
-    /// address it names — the Server never downloads it and has nothing to serve.
-    pub source: Option<Source>,
+    /// The operator's Ed25519 signature over the statement for this entry, as `opamp-fleetctl
+    /// package sign` makes it. `None` until one is written; new bytes remove it, because a
+    /// signature covers the hash (ADR-0033). An entry without one is offered to nobody.
+    pub signature: Option<Vec<u8>>,
 }
 
-/// An artifact that lives somewhere else (ADR-0026): the address Agents fetch it from, and what
-/// they must send to be allowed to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Source {
-    pub url: String,
-    /// Sent with the download — a token for a private source. Two exposures the operator accepts by
-    /// using one: it is stored **in cleartext** in the package store (owner-only on disk, but not
-    /// encrypted), and it is delivered to **every** Agent this artifact is offered to. Prefer a
-    /// narrowly-scoped, rotatable token over a long-lived credential.
-    pub headers: BTreeMap<String, String>,
+/// What the Server found when it checked an entry's signature (ADR-0033) — feedback for the
+/// operator, never a gate: the Agent's own verification is the one that decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignatureState {
+    /// The entry carries no signature, and is offered to nobody.
+    Missing,
+    /// The signature verifies against the Server's `[packages] verification_key`.
+    Valid,
+    /// The signature does not verify against that key. Stored and offered all the same: the
+    /// Server's key may lag behind the operator's, and the Client's check decides.
+    Invalid,
+    /// The entry carries a signature, and the Server holds no key to check it with.
+    Unchecked,
+}
+
+impl SignatureState {
+    /// The state as the REST API spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SignatureState::Missing => "missing",
+            SignatureState::Valid => "valid",
+            SignatureState::Invalid => "invalid",
+            SignatureState::Unchecked => "unchecked",
+        }
+    }
+}
+
+/// The length of an Ed25519 signature (RFC 8032).
+pub(crate) const ED25519_SIGNATURE_LEN: usize = 64;
+
+/// The signature check's port (ADR-0006, ADR-0033): whether `signature` is the operator's over
+/// `statement`. The Ed25519 adapter over `[packages] verification_key`
+/// ([`Ed25519Verifier`](crate::config::Ed25519Verifier)) is what the composition root wires.
+pub trait SignatureVerifier: Send + Sync {
+    fn verifies(&self, statement: &[u8], signature: &[u8]) -> bool;
+}
+
+/// Checks one entry's signature over the statement a Client verifies
+/// (`fleet_core::package::statement`, ADR-0026 clause 54) with `verifier`, the operator's public
+/// key when the Server holds it (ADR-0033).
+pub fn signature_state(
+    verifier: Option<&dyn SignatureVerifier>,
+    id: &PackageId,
+    entry: &Entry,
+) -> SignatureState {
+    let Some(signature) = entry.signature.as_deref() else {
+        return SignatureState::Missing;
+    };
+    let Some(verifier) = verifier else {
+        return SignatureState::Unchecked;
+    };
+    let statement =
+        fleet_core::package::statement(&id.agent_type, &id.version, &entry.content_hash);
+    if verifier.verifies(&statement, signature) {
+        SignatureState::Valid
+    } else {
+        SignatureState::Invalid
+    }
 }
 
 impl Package {
@@ -251,49 +293,18 @@ impl Package {
 
     /// One entry as a wire `PackageAvailable`.
     ///
-    /// An uploaded artifact is offered from this Server: `download_base` prefixes the artifact
-    /// endpoint, and an empty prefix yields a path the Agent resolves against its own OpAMP
-    /// endpoint. A **referenced** artifact is offered as the address it names, with whatever
-    /// headers the operator gave — the Baseline's Download Server "may be on the same host as the
-    /// OpAMP Server or a different host", and this is that other host (ADR-0026).
-    ///
-    /// `signature` is the Deployment's, for these exact bytes on this exact platform (ADR-0026
-    /// point 7) — empty where the channel holds none, which is a policy the Server reports rather
-    /// than refuses (ADR-0026).
-    fn to_available(
-        &self,
-        entry: &Entry,
-        signature: &[u8],
-        download_base: &str,
-    ) -> PackageAvailable {
-        let (download_url, headers) = match &entry.source {
-            Some(source) => (
-                source.url.clone(),
-                // What travels is what the operator said that source needs.
-                (!source.headers.is_empty()).then(|| Headers {
-                    headers: source
-                        .headers
-                        .iter()
-                        .map(|(key, value)| Header {
-                            key: key.clone(),
-                            value: value.clone(),
-                        })
-                        .collect(),
-                }),
-            ),
-            None => (
-                format!(
-                    "{download_base}/api/v1/packages/{}/{}/file?os={}&arch={}",
-                    self.id.agent_type, self.id.version, entry.platform.os, entry.platform.arch
-                ),
-                None,
-            ),
-        };
+    /// Every artifact is offered from this Server, as a path the Agent resolves against its own
+    /// OpAMP endpoint (ADR-0033): there is no other host to name. `signature` is the entry's own,
+    /// for these exact bytes (ADR-0033); the wire is unchanged.
+    fn to_available(&self, entry: &Entry, signature: &[u8]) -> PackageAvailable {
         let file = DownloadableFile {
-            download_url,
+            download_url: format!(
+                "/api/v1/packages/{}/{}/file?os={}&arch={}",
+                self.id.agent_type, self.id.version, entry.platform.os, entry.platform.arch
+            ),
             content_hash: entry.content_hash.clone(),
             signature: signature.to_vec(),
-            headers,
+            headers: None,
         };
         PackageAvailable {
             // Always top-level. An Agent has one binary to replace, its Deployment holds one
@@ -325,12 +336,14 @@ pub struct EntrySummary {
     /// The per-package hash this entry is offered under, hex — what an Agent echoes back once it
     /// is in sync, and what gates re-offering.
     pub package_hash: String,
-    /// The address an Agent fetches this from when the Server does not hold it (ADR-0026).
-    pub source_url: Option<String>,
+    /// The entry's signature, hex, when it carries one (ADR-0033).
+    pub signature: Option<String>,
+    /// What the Server found when it checked that signature (ADR-0033).
+    pub signature_state: SignatureState,
 }
 
 impl PackageSummary {
-    fn of(set: &Package) -> Self {
+    fn of(set: &Package, key: Option<&dyn SignatureVerifier>) -> Self {
         PackageSummary {
             id: set.id.clone(),
             entries: set
@@ -342,95 +355,118 @@ impl PackageSummary {
                     size: entry.size,
                     content_hash: hex::encode(&entry.content_hash),
                     package_hash: hex::encode(set.package_hash(entry)),
-                    source_url: entry.source.as_ref().map(|s| s.url.clone()),
+                    signature: entry.signature.as_ref().map(hex::encode),
+                    signature_state: signature_state(key, &set.id, entry),
                 })
                 .collect(),
         }
     }
 }
 
-/// The package store's port (ADR-0006): where Packages and their artifacts persist. ADR-0026
-/// decides that the store is a directory and an artifact a file there — streamed in through a
-/// staging file, re-hashed when the store opens, streamed out to a download — so the port speaks
-/// in paths. The filesystem adapter ([`FsPackageBackend`](crate::fs::FsPackageBackend)) is what
-/// the composition root wires.
+/// The package store's port (ADR-0006, ADR-0037): where Packages persist — each one's identity
+/// and entries, every entry naming its artifact by the hash of its bytes. The bytes are the
+/// [`BlobStore`]'s. The filesystem adapter ([`FsPackageBackend`](crate::fs::FsPackageBackend)) is
+/// what the composition root wires.
 pub trait PackageBackend: Send + Sync {
-    /// Every persisted Package, once, when the store opens — each uploaded artifact re-hashed
-    /// against its recorded content hash. Anything unreadable, unparsable, mismatched, or in a
-    /// layout this Server does not write fails the open and names where it is: a corrupt
-    /// distribution artifact must never ship (ADR-0026).
+    /// Every persisted Package, once, when the store opens. Anything unreadable, unparsable, or in
+    /// a layout this Server does not write fails the open and names where it is (ADR-0026).
     fn load(&self) -> Result<Vec<Package>, String>;
 
-    /// Creates or replaces one Package's metadata, owner-only: it can carry a private source's
-    /// headers (ADR-0026).
+    /// Creates or replaces one Package's metadata.
     fn put(&self, package: &Package) -> Result<(), String>;
 
-    /// Deletes a whole Package — metadata and artifacts.
+    /// Deletes one Package's metadata; its blobs are the store's to collect.
     fn remove(&self, id: &PackageId) -> Result<(), String>;
-
-    /// The directory the Packages live in; the Deployments sit beneath it (ADR-0026).
-    fn dir(&self) -> &Path;
-
-    /// Where an upload of one entry is streamed before it becomes an artifact.
-    fn staging_path(&self, id: &PackageId, platform: &Platform) -> PathBuf;
-
-    /// The `(size, SHA-256)` of a staged upload, read by streaming.
-    fn hash_staged(&self, staged: &Path) -> Result<(u64, Vec<u8>), String>;
-
-    /// Moves a staged upload into place as one entry's artifact.
-    fn commit_staged(
-        &self,
-        id: &PackageId,
-        platform: &Platform,
-        staged: &Path,
-    ) -> Result<(), String>;
-
-    /// Removes a staged upload that will not become an artifact; best effort.
-    fn discard_staged(&self, staged: &Path);
-
-    /// Writes one entry's artifact from bytes in hand.
-    fn write_artifact(
-        &self,
-        id: &PackageId,
-        platform: &Platform,
-        bytes: &[u8],
-    ) -> Result<(), String>;
-
-    /// Removes one entry's artifact; one that is not there is not an error.
-    fn remove_artifact(&self, id: &PackageId, platform: &Platform) -> Result<(), String>;
-
-    /// Where one entry's artifact lives, for the download to stream from.
-    fn artifact_path(&self, id: &PackageId, platform: &Platform) -> PathBuf;
-
-    /// The total bytes of stored artifacts — best effort, for the ceiling on new uploads.
-    fn total_bytes(&self) -> u64;
 }
 
-/// The package store (ADR-0026): every Package, held in memory for the control loop to read, and
-/// persisted through a [`PackageBackend`].
+/// The package store (ADR-0026, ADR-0037): every Package, held in memory for the control loop to
+/// read, its metadata persisted through a [`PackageBackend`] and its artifacts through a
+/// [`BlobStore`].
 pub struct PackageStore {
     backend: Box<dyn PackageBackend>,
+    blobs: Box<dyn BlobStore>,
     sets: RwLock<BTreeMap<PackageId, Package>>,
+    /// The check against the operator's public key, `[packages] verification_key` (ADR-0033).
+    /// Each entry's signature is reported by it; `None` reports every signature `unchecked`.
+    key: Option<Box<dyn SignatureVerifier>>,
 }
 
 impl PackageStore {
-    /// Opens the store on `backend`, loading every persisted Package.
-    pub fn with_backend(backend: Box<dyn PackageBackend>) -> Result<Self, String> {
-        let sets = backend
-            .load()?
-            .into_iter()
-            .map(|package| (package.id.clone(), package))
-            .collect();
-        Ok(PackageStore {
+    /// Opens the store on `backend` and `blobs`, loading every persisted Package. Every blob is
+    /// read once (and the filesystem adapter hashes it again on the way, ADR-0037 clause 4); an
+    /// entry naming a blob that is not stored, or of another size, fails the open, and a blob no
+    /// entry names is deleted.
+    ///
+    /// # Errors
+    /// Returns an error when a Package cannot be loaded, the blobs cannot be listed, or an entry
+    /// names a blob that is not stored as recorded.
+    pub fn with_backend(
+        backend: Box<dyn PackageBackend>,
+        blobs: Box<dyn BlobStore>,
+    ) -> Result<Self, String> {
+        let stored: BTreeMap<String, u64> = blobs.list()?.into_iter().collect();
+        let mut sets = BTreeMap::new();
+        for package in backend.load()? {
+            for entry in package.entries.values() {
+                let sha256 = hex::encode(&entry.content_hash);
+                match stored.get(&sha256) {
+                    Some(size) if *size == entry.size => {}
+                    Some(size) => {
+                        return Err(format!(
+                        "package {} for {}: blob {sha256} holds {size} bytes, the entry records {}",
+                        package.id,
+                        entry.platform.tag(),
+                        entry.size
+                    ))
+                    }
+                    None => {
+                        return Err(format!(
+                            "package {} for {}: blob {sha256} is not stored — restore it from a \
+                             backup or upload the artifact again",
+                            package.id,
+                            entry.platform.tag()
+                        ))
+                    }
+                }
+            }
+            sets.insert(package.id.clone(), package);
+        }
+        let store = PackageStore {
             backend,
-            sets: RwLock::new(sets),
-        })
+            blobs,
+            sets: RwLock::new(BTreeMap::new()),
+            key: None,
+        };
+        // A blob no entry names is deleted at startup (ADR-0037 clause 4): an upload whose entry
+        // was never written, or an entry whose deletion stopped short of its blob.
+        for sha256 in stored.keys() {
+            if !referenced(&sets, sha256) {
+                store.blobs.delete(sha256)?;
+            }
+        }
+        *store.sets.write().expect("sets lock") = sets;
+        Ok(store)
     }
 
-    /// Where this store keeps its Packages — the directory the Deployments sit beneath
-    /// (ADR-0026), so the two are armed by one configuration key.
-    pub fn dir(&self) -> &Path {
-        self.backend.dir()
+    /// Arms the signature check with the operator's public key (ADR-0033), and checks every
+    /// stored signature against it now, as the store is loaded: an `invalid` one is logged and
+    /// kept, because the Server only reports — the Agent's own verification decides.
+    #[must_use]
+    pub fn with_verifier(mut self, key: Option<Box<dyn SignatureVerifier>>) -> Self {
+        self.key = key;
+        for set in self.sets.read().expect("sets lock").values() {
+            for entry in set.entries.values() {
+                if signature_state(self.key.as_deref(), &set.id, entry) == SignatureState::Invalid {
+                    tracing::warn!(
+                        package = %set.id,
+                        platform = %entry.platform.tag(),
+                        "the stored signature does not verify against [packages] verification_key \
+                         — kept and offered; the Agent's own check decides"
+                    );
+                }
+            }
+        }
+        self
     }
 
     /// Every Package, in identity order — the REST list view; never the artifact bytes.
@@ -439,7 +475,7 @@ impl PackageStore {
             .read()
             .expect("sets lock")
             .values()
-            .map(PackageSummary::of)
+            .map(|set| PackageSummary::of(set, self.key.as_deref()))
             .collect()
     }
 
@@ -449,21 +485,27 @@ impl PackageStore {
             .read()
             .expect("sets lock")
             .get(id)
-            .map(PackageSummary::of)
+            .map(|set| PackageSummary::of(set, self.key.as_deref()))
     }
 
-    /// Where one uploaded artifact lives, for the download endpoint to stream from. `None` when no
-    /// Package of that identity holds one for that Platform, or holds it as a reference.
-    pub fn artifact_path(&self, id: &PackageId, platform: &Platform) -> Option<PathBuf> {
+    /// The artifact of one entry, for the download to stream: its SHA-256 and its size. `None`
+    /// when no Package of that identity holds one for that Platform.
+    pub fn artifact(&self, id: &PackageId, platform: &Platform) -> Option<(Vec<u8>, u64)> {
         self.sets
             .read()
             .expect("sets lock")
             .get(id)?
             .entries
             .get(platform)
-            // A referenced artifact is not served from here; the Agents were given its address.
-            .filter(|entry| entry.source.is_none())
-            .map(|_| self.backend.artifact_path(id, platform))
+            .map(|entry| (entry.content_hash.clone(), entry.size))
+    }
+
+    /// The bytes of the artifact `sha256` names, as a stream.
+    ///
+    /// # Errors
+    /// Returns an error when the blob is not stored or cannot be read.
+    pub fn open_artifact(&self, sha256: &[u8]) -> Result<Box<dyn std::io::Read + Send>, String> {
+        self.blobs.get(&hex::encode(sha256))
     }
 
     /// `true` when the store holds no Package — the Server then leaves `OffersPackages` undeclared.
@@ -471,10 +513,16 @@ impl PackageStore {
         self.sets.read().expect("sets lock").is_empty()
     }
 
-    /// The total bytes of stored artifacts. An upload still in flight is deliberately not counted
-    /// — it is not yet an artifact, and the per-upload limit already bounds it.
+    /// The total bytes of the stored blobs (ADR-0037 clause 4): bytes two entries share count
+    /// once. An upload still in flight is deliberately not counted — it is not yet an artifact,
+    /// and the per-upload limit already bounds it.
     pub fn total_bytes(&self) -> u64 {
-        self.backend.total_bytes()
+        let sets = self.sets.read().expect("sets lock");
+        let mut blobs = BTreeMap::new();
+        for entry in sets.values().flat_map(|set| set.entries.values()) {
+            blobs.insert(entry.content_hash.as_slice(), entry.size);
+        }
+        blobs.values().sum()
     }
 
     /// Creates a Package. **Saving never distributes** (ADR-0025), and there is nothing to update:
@@ -494,23 +542,12 @@ impl PackageStore {
         Ok(())
     }
 
-    /// Where an upload for one entry is streamed before it becomes an artifact. In the Package's
-    /// own directory, so [`put_staged`](Self::put_staged) can move it into place with a rename —
-    /// and named per Platform and per upload, so neither a release's five artifacts uploaded at
-    /// once nor two uploads of one entry can overwrite each other while they are still in flight.
-    ///
-    /// # Errors
-    /// Returns an error when no Package of that identity exists. The fleet refuses the upload
-    /// before this when the Package is assigned to an Agent — an assigned Package's bytes are
-    /// immutable (ADR-0025), so there would be nothing an upload could become.
-    pub fn staging_path(&self, id: &PackageId, platform: &Platform) -> Result<PathBuf, String> {
-        self.writable(id)?;
-        Ok(self.backend.staging_path(id, platform))
-    }
-
     /// The gate every entry write passes: the Package must exist. The immutability of an
     /// assigned Package (ADR-0025) is the fleet's to enforce — only it knows the assignments.
-    fn writable(&self, id: &PackageId) -> Result<(), String> {
+    ///
+    /// # Errors
+    /// Returns an error when no Package of that identity exists.
+    pub fn writable(&self, id: &PackageId) -> Result<(), String> {
         if self.sets.read().expect("sets lock").contains_key(id) {
             Ok(())
         } else {
@@ -518,172 +555,200 @@ impl PackageStore {
         }
     }
 
-    /// Turns a streamed upload into an entry: hashed by streaming, moved into place with a rename,
-    /// then visible to the control loop. The artifact never passes through memory — an agent
-    /// binary is far too big to buffer twice just to store it once.
-    ///
-    /// The staged file is consumed on success and removed on failure, so a rejected upload leaves
-    /// nothing behind.
-    pub fn put_staged(
+    /// Turns a streamed upload into an entry: the bytes go to the blob store, hashed on the way —
+    /// the artifact never passes through memory, an agent binary is far too big to buffer twice
+    /// just to store it once — and the entry naming them is written, then visible to the control
+    /// loop. A failed stream stores nothing; an entry that cannot be written leaves no blob behind.
+    pub fn put_entry_from(
         &self,
         id: &PackageId,
         platform: &Platform,
-        staged: &Path,
+        bytes: &mut dyn std::io::Read,
     ) -> Result<(), String> {
-        let result = self.store_staged(id, platform, staged);
+        self.writable(id)?;
+        let (sha256, size) = self.blobs.put(bytes)?;
+        let result = if size == 0 {
+            Err("the package artifact is empty; refusing to distribute it".to_string())
+        } else {
+            self.put_entry_record(
+                id,
+                Entry {
+                    platform: platform.clone(),
+                    content_hash: hex::decode(&sha256).expect("a blob's hash is hex"),
+                    size,
+                    // New bytes take the old signature with them: it covered the old hash
+                    // (ADR-0033).
+                    signature: None,
+                },
+            )
+        };
         if result.is_err() {
-            self.backend.discard_staged(staged);
+            self.collect(&self.sets.read().expect("sets lock"), &sha256);
         }
         result
     }
 
-    fn store_staged(
-        &self,
-        id: &PackageId,
-        platform: &Platform,
-        staged: &Path,
-    ) -> Result<(), String> {
-        self.writable(id)?;
-        let (size, content_hash) = self.backend.hash_staged(staged)?;
-        if size == 0 {
-            return Err("the package artifact is empty; refusing to distribute it".to_string());
-        }
-        self.backend.commit_staged(id, platform, staged)?;
-        self.put_entry_record(
-            id,
-            Entry {
-                platform: platform.clone(),
-                content_hash,
-                size,
-                source: None,
-            },
-        )
-    }
-
     /// Creates or replaces one entry from bytes already in hand — the shape the tests and any
-    /// small artifact use. A real upload takes [`put_staged`](Self::put_staged) instead.
+    /// small artifact use. A real upload takes [`put_entry_from`](Self::put_entry_from) instead.
     pub fn put_entry(
         &self,
         id: &PackageId,
         platform: &Platform,
         artifact: Vec<u8>,
     ) -> Result<(), String> {
-        self.writable(id)?;
-        if artifact.is_empty() {
-            return Err("the package artifact is empty; refusing to distribute it".to_string());
-        }
-        let content_hash = Sha256::digest(&artifact).to_vec();
-        let size = artifact.len() as u64;
-        self.backend.write_artifact(id, platform, &artifact)?;
-        self.put_entry_record(
-            id,
-            Entry {
-                platform: platform.clone(),
-                content_hash,
-                size,
-                source: None,
-            },
-        )
+        self.put_entry_from(id, platform, &mut artifact.as_slice())
     }
 
-    /// Points one entry at a file that lives somewhere else (ADR-0026): no bytes are stored or
-    /// fetched, and Agents are given `url` — with `headers`, when the source needs them — plus the
-    /// `content_hash` the operator supplied, which is the only thing that will check what they
-    /// receive.
-    pub fn set_entry_source(
+    /// Writes the operator's signature onto one entry (ADR-0033), and answers what the Server found
+    /// when it checked it. An `invalid` signature is stored all the same: the Server only reports.
+    ///
+    /// # Errors
+    /// `no package set …` or `no entry …` when there is nothing to sign (a `404`), and `the
+    /// signature …` when it is empty or not the 64 bytes of an Ed25519 signature (a `400`).
+    pub fn put_signature(
         &self,
         id: &PackageId,
         platform: &Platform,
-        content_hash: Vec<u8>,
-        source: Source,
-    ) -> Result<(), String> {
-        self.check_entry_source(id, &content_hash, &source)?;
-        // The reference replaces any bytes this Server was holding, wholesale. Another version is
-        // another Package — nothing is remembered here (ADR-0026).
-        self.backend.remove_artifact(id, platform)?;
-        self.put_entry_record(
-            id,
-            Entry {
-                platform: platform.clone(),
-                content_hash,
-                size: 0,
-                source: Some(source),
-            },
-        )
-    }
-
-    /// Whether [`set_entry_source`](Self::set_entry_source) would take this reference: the Package
-    /// exists, the hash is a SHA-256 and the URL is one an Agent may be sent to. Answered before
-    /// anything is sent to the source, so a refused URL never receives the operator's headers.
-    pub fn check_entry_source(
-        &self,
-        id: &PackageId,
-        content_hash: &[u8],
-        source: &Source,
-    ) -> Result<(), String> {
-        self.writable(id)?;
-        if content_hash.len() != 32 {
+        signature: Vec<u8>,
+    ) -> Result<SignatureState, String> {
+        if signature.is_empty() {
             return Err(
-                "the content hash must be a SHA-256: 64 hex characters, as published in a \
-                 release's checksums file"
-                    .to_string(),
+                "the signature is empty — it says nothing; delete the one held instead".to_string(),
             );
         }
-        if !source.url.starts_with("http://") && !source.url.starts_with("https://") {
+        if signature.len() != ED25519_SIGNATURE_LEN {
             return Err(format!(
-                "the source url {:?} must start with https:// (http:// only to 127.0.0.1 or ::1)",
-                source.url
+                "the signature must be the 64 bytes of an Ed25519 signature (128 hex characters, \
+                 as `opamp-fleetctl package sign` prints it), not {} bytes",
+                signature.len()
             ));
         }
-        // Neither the artifact nor the headers an Agent sends for it cross a network in plaintext
-        // (ADR-0026).
-        opamp::endpoint::check_url(&source.url).map_err(|e| format!("the source url {e}"))
-    }
-
-    /// Writes one entry into the Package's map and its `package.json` — the single path every
-    /// entry write converges on. Replacing the entry for a Platform the Package already holds is
-    /// what "no duplicate entries" means in a map: the combination stays unique by construction.
-    fn put_entry_record(&self, id: &PackageId, entry: Entry) -> Result<(), String> {
         let mut sets = self.sets.write().expect("sets lock");
         let set = sets
             .get_mut(id)
             .ok_or_else(|| format!("no package set {id}"))?;
-        set.entries.insert(entry.platform.clone(), entry);
-        self.persist(set)
+        let entry = set
+            .entries
+            .get_mut(platform)
+            .ok_or_else(|| no_entry(id, platform))?;
+        let previous = entry.signature.replace(signature);
+        let state = signature_state(self.key.as_deref(), id, entry);
+        if let Err(e) = self.backend.put(set) {
+            // What did not reach the disk did not happen.
+            if let Some(entry) = set.entries.get_mut(platform) {
+                entry.signature = previous;
+            }
+            return Err(e);
+        }
+        Ok(state)
+    }
+
+    /// Takes one entry's signature away (ADR-0033); `Ok(false)` when the entry carries none.
+    ///
+    /// # Errors
+    /// `no package set …` or `no entry …` when the entry does not exist (a `404`).
+    pub fn remove_signature(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
+        let mut sets = self.sets.write().expect("sets lock");
+        let set = sets
+            .get_mut(id)
+            .ok_or_else(|| format!("no package set {id}"))?;
+        let entry = set
+            .entries
+            .get_mut(platform)
+            .ok_or_else(|| no_entry(id, platform))?;
+        let Some(previous) = entry.signature.take() else {
+            return Ok(false);
+        };
+        if let Err(e) = self.backend.put(set) {
+            if let Some(entry) = set.entries.get_mut(platform) {
+                entry.signature = Some(previous);
+            }
+            return Err(e);
+        }
+        Ok(true)
+    }
+
+    /// Writes one entry into the Package's map and its metadata — the single path every entry
+    /// write converges on. Replacing the entry for a Platform the Package already holds is what
+    /// "no duplicate entries" means in a map: the combination stays unique by construction. The
+    /// blob it names must still be stored — a deletion that collected it while the upload was
+    /// streaming is refused here rather than recorded — and a blob the replaced entry named is
+    /// deleted when no other entry names it.
+    fn put_entry_record(&self, id: &PackageId, entry: Entry) -> Result<(), String> {
+        let mut sets = self.sets.write().expect("sets lock");
+        if !self.blobs.exists(&hex::encode(&entry.content_hash)) {
+            return Err("the artifact was removed while it was uploaded; upload it again".into());
+        }
+        let set = sets
+            .get_mut(id)
+            .ok_or_else(|| format!("no package set {id}"))?;
+        let platform = entry.platform.clone();
+        let previous = set.entries.insert(platform.clone(), entry);
+        if let Err(e) = self.backend.put(set) {
+            match previous {
+                Some(previous) => set.entries.insert(platform, previous),
+                None => set.entries.remove(&platform),
+            };
+            return Err(e);
+        }
+        if let Some(previous) = previous {
+            self.collect(&sets, &hex::encode(previous.content_hash));
+        }
+        Ok(())
     }
 
     /// Deletes one entry; `Ok(false)` when the Package or the entry does not exist. The fleet
     /// refuses this before calling here when the Package is assigned to an Agent (ADR-0025). The
     /// last entry taken away leaves an **empty Package**, kept: a Package being reassembled is a
-    /// normal state, and deleting the Package is its own act.
+    /// normal state, and deleting the Package is its own act. Its blob goes with the last entry
+    /// that names it (ADR-0037 clause 4).
     pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, String> {
         let mut sets = self.sets.write().expect("sets lock");
         let Some(set) = sets.get_mut(id) else {
             return Ok(false);
         };
-        if set.entries.remove(platform).is_none() {
+        let Some(removed) = set.entries.remove(platform) else {
             return Ok(false);
+        };
+        if let Err(e) = self.backend.put(set) {
+            set.entries.insert(platform.clone(), removed);
+            return Err(e);
         }
-        self.backend.remove_artifact(id, platform)?;
-        self.persist(set)?;
+        self.collect(&sets, &hex::encode(removed.content_hash));
         Ok(true)
     }
 
-    /// Deletes a whole Package — entries, artifacts, and metadata; `Ok(false)` when none of that
-    /// identity exists. The fleet removes every assignment that referenced it, which withdraws
-    /// the offer; Agents that installed it keep running it (ADR-0026).
+    /// Deletes a whole Package — entries, metadata, and every blob no other entry names;
+    /// `Ok(false)` when none of that identity exists. The fleet removes every assignment that
+    /// referenced it, which withdraws the offer; Agents that installed it keep running it
+    /// (ADR-0026).
     pub fn delete_set(&self, id: &PackageId) -> Result<bool, String> {
         let mut sets = self.sets.write().expect("sets lock");
-        if sets.remove(id).is_none() {
+        if !sets.contains_key(id) {
             return Ok(false);
         }
         self.backend.remove(id)?;
+        let removed = sets.remove(id).expect("checked above");
+        for entry in removed.entries.values() {
+            self.collect(&sets, &hex::encode(&entry.content_hash));
+        }
         Ok(true)
     }
 
-    /// Every entry of every Package `deployment` holds that it carries no signature for, as
-    /// "display name (os/arch, …)" per Package — what a refused rollout names (ADR-0026). Empty when
-    /// every entry is signed.
+    /// Deletes the blob `sha256` when no entry of `sets` names it (ADR-0037 clause 4). A failure
+    /// is logged and left to the next startup, which deletes every blob no entry names.
+    fn collect(&self, sets: &BTreeMap<PackageId, Package>, sha256: &str) {
+        if referenced(sets, sha256) {
+            return;
+        }
+        if let Err(e) = self.blobs.delete(sha256) {
+            tracing::warn!(blob = %sha256, error = %e, "cannot delete an artifact no entry names");
+        }
+    }
+
+    /// Every entry of every Package `deployment` holds that carries no signature, as
+    /// "display name (os/arch, …)" per Package — what a refused rollout names (ADR-0026, ADR-0033).
+    /// Empty when every entry is signed.
     pub fn unsigned_in(&self, deployment: &Deployment) -> Vec<String> {
         let sets = self.sets.read().expect("sets lock");
         deployment
@@ -693,9 +758,9 @@ impl PackageStore {
                 let set = sets.get(id)?;
                 let missing: Vec<String> = set
                     .entries
-                    .keys()
-                    .filter(|platform| deployment.signature(id, platform).is_none())
-                    .map(|platform| format!("{}/{}", platform.os, platform.arch))
+                    .values()
+                    .filter(|entry| entry.signature.is_none())
+                    .map(|entry| format!("{}/{}", entry.platform.os, entry.platform.arch))
                     .collect();
                 (!missing.is_empty())
                     .then(|| format!("{} ({})", id.display_name(), missing.join(", ")))
@@ -706,24 +771,19 @@ impl PackageStore {
     /// One Agent's offer, composed from its **assignment** (ADR-0025): the entry [`offered_entry`]
     /// names, plus the `all_packages_hash` over it (the Baseline's per-Agent aggregate). `None`
     /// when the Agent is offered nothing — it keeps running what it runs. An assignment whose
-    /// Package is gone composes nothing rather than failing: deletion removes assignments, so the
-    /// case is a race, not a state.
-    ///
-    /// `deployment` is the *assigned* Deployment, not whichever channel claims the Agent now: an
-    /// offer travels with what the act released.
+    /// Package is gone composes nothing rather than failing: a pinned Package cannot be deleted
+    /// (ADR-0034 clause 8), so the case is a race, not a state.
     pub fn offer_for_assigned(
         &self,
         assigned: Option<&PackageId>,
-        deployment: Option<&Deployment>,
         description: Option<&AgentDescription>,
-        download_base: &str,
     ) -> Option<PackagesAvailable> {
         let sets = self.sets.read().expect("sets lock");
-        let (set, entry, signature) = offered_entry(&sets, assigned, deployment, description)?;
+        let (set, entry, signature) = offered_entry(&sets, assigned, description)?;
         Some(PackagesAvailable {
             packages: [(
                 set.id.agent_type.clone(),
-                set.to_available(entry, signature, download_base),
+                set.to_available(entry, signature),
             )]
             .into(),
             all_packages_hash: aggregate_hash(set, entry),
@@ -735,46 +795,38 @@ impl PackageStore {
     pub fn assigned_hash_for(
         &self,
         assigned: Option<&PackageId>,
-        deployment: Option<&Deployment>,
         description: Option<&AgentDescription>,
     ) -> Vec<u8> {
         let sets = self.sets.read().expect("sets lock");
-        match offered_entry(&sets, assigned, deployment, description) {
+        match offered_entry(&sets, assigned, description) {
             Some((set, entry, _)) => aggregate_hash(set, entry),
             None => Vec::new(),
         }
     }
 
-    /// The uploaded artifact `(id, platform)`, when this Server holds it — the half of the download
-    /// route's test that needs no Agent (ADR-0026 clause 35). A referenced entry is fetched from its
-    /// source, never from here, so it is `None` too.
-    pub fn uploaded(&self, id: &PackageId, platform: &Platform) -> Option<Uploaded> {
+    /// The artifact `(id, platform)`, when this Server holds it and it carries a signature — the
+    /// half of the download route's test that needs no Agent (ADR-0033 clause 10).
+    pub fn offerable(&self, id: &PackageId, platform: &Platform) -> Option<Offerable> {
         let sets = self.sets.read().expect("sets lock");
         let entry = sets.get(id)?.entries.get(platform)?;
-        entry.source.is_none().then(|| Uploaded {
+        entry.signature.is_some().then(|| Offerable {
             id: id.clone(),
             platform: platform.clone(),
         })
     }
 
-    /// Whether the uploaded artifact `(id, platform)` is what this Agent is offered: the download
-    /// route's test, composed as [`crate::fleet`] composes it.
+    /// Whether the artifact `(id, platform)` is what this Agent is offered: the download route's
+    /// test, composed as [`crate::fleet`] composes it.
     #[cfg(test)]
     pub fn offers(
         &self,
         assigned: Option<&PackageId>,
-        deployment: Option<&Deployment>,
         description: Option<&AgentDescription>,
         id: &PackageId,
         platform: &Platform,
     ) -> bool {
-        self.uploaded(id, platform).is_some_and(|artifact| {
-            artifact.offered_to(
-                assigned,
-                deployment.is_some_and(|d| d.signature(id, platform).is_some()),
-                description,
-            )
-        })
+        self.offerable(id, platform)
+            .is_some_and(|artifact| artifact.offered_to(assigned, description))
     }
 
     /// The Package a rollout act would release to this Agent — the **candidate** (ADR-0025),
@@ -872,58 +924,67 @@ impl PackageStore {
 }
 
 /// The entry one Agent is offered, with the signature it travels with — the one test of "offered"
-/// that the offer and the download share (ADR-0026 clause 35). The Agent's assignment names the
+/// that the offer and the download share (ADR-0033 clause 10). The Agent's assignment names the
 /// Package; the Package must be built for the Agent type the Agent reports (ADR-0026 clause 9) and
-/// hold an entry for the Platform it reports; and the assigned Deployment must hold a signature
-/// for that entry, because the Server never offers a Package unsigned (ADR-0026). Whether the
-/// Agent accepts packages at all is its record's, and the fleet asks that first.
+/// hold an entry for the Platform it reports; and that entry must carry a signature, because the
+/// Server never offers a Package unsigned (ADR-0033). Whether the Agent accepts packages at all is
+/// its record's, and the fleet asks that first.
 ///
 /// An assignment pins *which* release the operator released; which artifact of it this host takes
 /// is the machine's own answer, and a host reporting a platform the release does not hold is offered
 /// nothing rather than something else.
-fn offered_entry<'a, 'd>(
+fn offered_entry<'a>(
     sets: &'a BTreeMap<PackageId, Package>,
     assigned: Option<&PackageId>,
-    deployment: Option<&'d Deployment>,
     description: Option<&AgentDescription>,
-) -> Option<(&'a Package, &'a Entry, &'d [u8])> {
+) -> Option<(&'a Package, &'a Entry, &'a [u8])> {
     let set = sets.get(assigned?)?;
     let platform = Platform::reported(description)?;
     if !fits(description, &set.id, &platform) {
         return None;
     }
     let entry = set.entries.get(&platform)?;
-    let signature = deployment?.signature(&set.id, &entry.platform)?;
+    let signature = entry.signature.as_deref()?;
     Some((set, entry, signature))
 }
 
 /// Whether an Agent reporting `description` is one the artifact `(id, platform)` is built for: the
 /// Agent type it reports is the Package's, and the Platform it reports is the entry's. The part of
-/// [`offered_entry`] that reads the Agent, shared with [`Uploaded::offered_to`].
+/// [`offered_entry`] that reads the Agent, shared with [`Offerable::offered_to`].
 fn fits(description: Option<&AgentDescription>, id: &PackageId, platform: &Platform) -> bool {
     reported_agent_type(description) == Some(id.agent_type.as_str())
         && Platform::reported(description).as_ref() == Some(platform)
 }
 
-/// An uploaded artifact this Server holds, as [`PackageStore::uploaded`] found it: what the
-/// download route tests each Agent of a host against (ADR-0026 clause 35).
-pub struct Uploaded {
+/// Whether any entry of `sets` names the blob `sha256`.
+fn referenced(sets: &BTreeMap<PackageId, Package>, sha256: &str) -> bool {
+    sets.values()
+        .flat_map(|set| set.entries.values())
+        .any(|entry| hex::encode(&entry.content_hash) == sha256)
+}
+
+/// The refusal for an entry a Package does not hold.
+fn no_entry(id: &PackageId, platform: &Platform) -> String {
+    format!("no entry {}-{} in set {id}", platform.os, platform.arch)
+}
+
+/// A signed artifact this Server holds, as [`PackageStore::offerable`] found it: what the download
+/// route tests each Agent of a host against (ADR-0033 clause 10).
+pub struct Offerable {
     id: PackageId,
     platform: Platform,
 }
 
-impl Uploaded {
-    /// Whether an Agent is offered this artifact: [`offered_entry`]'s test for one known entry. Its
-    /// assignment names this Package, the Deployment it is assigned through signs this entry
-    /// (`signed`, which the caller resolves), and the Agent reports this Package's type and this
+impl Offerable {
+    /// Whether an Agent is offered this artifact: [`offered_entry`]'s test for one known, signed
+    /// entry. Its assignment names this Package, and the Agent reports this Package's type and this
     /// entry's Platform. Whether it accepts packages at all is its record's, asked first.
     pub fn offered_to(
         &self,
         assigned: Option<&PackageId>,
-        signed: bool,
         description: Option<&AgentDescription>,
     ) -> bool {
-        assigned == Some(&self.id) && signed && fits(description, &self.id, &self.platform)
+        assigned == Some(&self.id) && fits(description, &self.id, &self.platform)
     }
 }
 
@@ -1113,26 +1174,25 @@ mod tests {
             name: "stable".to_string(),
             selector: BTreeMap::from([("channel".to_string(), "stable".to_string())]),
             packages: BTreeMap::from([(id.agent_type.clone(), id.clone())]),
-            signatures: BTreeMap::new(),
+            configurations: Default::default(),
         }
     }
 
-    /// The same channel, signing every entry the Package holds — what it must do before anything is
-    /// offered through it (ADR-0026).
-    fn signed_channel(store: &PackageStore, id: &PackageId) -> Deployment {
-        let mut deployment = channel(id);
-        let sets = store.sets.read().expect("sets lock");
-        for platform in sets
+    /// Signs every entry the Package holds — what an operator does before anything of it is offered
+    /// (ADR-0033). The bytes are a stand-in: the store offers a signature it has not checked.
+    fn sign_all(store: &PackageStore, id: &PackageId) {
+        let platforms: Vec<Platform> = store
+            .sets
+            .read()
+            .expect("sets lock")
             .get(id)
-            .map(|set| set.entries.keys())
-            .into_iter()
-            .flatten()
-        {
-            deployment
-                .signatures
-                .insert((id.clone(), platform.clone()), vec![1u8; 64]);
+            .map(|set| set.entries.keys().cloned().collect())
+            .unwrap_or_default();
+        for platform in platforms {
+            store
+                .put_signature(id, &platform, vec![1u8; 64])
+                .expect("signature");
         }
-        deployment
     }
 
     /// The candidate a rollout act would release to an Agent that has installed nothing.
@@ -1171,10 +1231,11 @@ mod tests {
         assigned: Option<&PackageId>,
         description: &AgentDescription,
     ) -> Vec<(String, String)> {
-        let held = assigned.map(|id| signed_channel(store, id));
-        let deployment = held.as_ref();
+        if let Some(id) = assigned {
+            sign_all(store, id);
+        }
         store
-            .offer_for_assigned(assigned, deployment, Some(description), "")
+            .offer_for_assigned(assigned, Some(description))
             .map(|offer| {
                 offer
                     .packages
@@ -1185,9 +1246,9 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// ADR-0026: the identity is the triple, entries are per platform, and the whole Set —
-    /// entries and selector — survives a reopen.
-    /// Verifies: ADR-0026
+    /// ADR-0026: the identity is the pair and entries are per platform; ADR-0033: each entry's
+    /// signature is its own, and the whole Package — entries and signatures — survives a reopen.
+    /// Verifies: ADR-0026, ADR-0033
     #[test]
     fn a_set_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1199,24 +1260,26 @@ mod tests {
                 .put_entry(&set, &linux(), b"linux-bytes".to_vec())
                 .expect("linux entry");
             store
-                .set_entry_source(
-                    &set,
-                    &windows(),
-                    vec![0u8; 32],
-                    Source {
-                        url: "https://example.com/w.7z".into(),
-                        headers: BTreeMap::new(),
-                    },
-                )
+                .put_entry(&set, &windows(), b"windows-bytes".to_vec())
                 .expect("windows entry");
+            store
+                .put_signature(&set, &windows(), vec![7u8; 64])
+                .expect("signature");
         }
         let store = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
         let summary = store.summary(&id("otelcol", "1.2.3")).expect("summary");
         assert_eq!(summary.entries.len(), 2);
         assert_eq!(summary.entries[0].os, "linux");
+        assert_eq!(summary.entries[0].signature, None);
+        assert_eq!(summary.entries[0].signature_state, SignatureState::Missing);
+        assert_eq!(summary.entries[1].size, 13);
         assert_eq!(
-            summary.entries[1].source_url.as_deref(),
-            Some("https://example.com/w.7z")
+            summary.entries[1].signature.as_deref(),
+            Some(hex::encode([7u8; 64]).as_str())
+        );
+        assert_eq!(
+            summary.entries[1].signature_state,
+            SignatureState::Unchecked
         );
     }
 
@@ -1242,30 +1305,183 @@ mod tests {
         );
     }
 
-    /// An entry its Deployment holds no signature for is offered to nobody, and the Deployment
-    /// names it as what keeps it from being rolled out (ADR-0026).
-    /// Verifies: ADR-0026
+    /// An entry that carries no signature is offered to nobody, and a Deployment holding it names
+    /// it as what keeps it from being rolled out (ADR-0033).
+    /// Verifies: ADR-0033
     #[test]
-    fn an_entry_its_deployment_has_not_signed_is_not_a_candidate() {
+    fn an_entry_without_a_signature_is_offered_to_nobody() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = stored_set(&store, "otelcol", "1.0.0", b"bytes");
-        let unsigned = channel(&set);
+        let stable = channel(&set);
         let linux = agent("linux", "amd64", &[]);
         assert!(
-            store
-                .offer_for_assigned(Some(&set), Some(&unsigned), Some(&linux), "")
-                .is_none(),
+            store.offer_for_assigned(Some(&set), Some(&linux)).is_none(),
             "an unsigned entry was offered"
         );
-        assert_eq!(store.unsigned_in(&unsigned).len(), 1);
-        assert!(store.unsigned_in(&unsigned)[0].contains("linux/amd64"));
+        assert_eq!(store.unsigned_in(&stable).len(), 1);
+        assert!(store.unsigned_in(&stable)[0].contains("linux/amd64"));
 
-        let signed = signed_channel(&store, &set);
-        assert!(store.unsigned_in(&signed).is_empty());
+        sign_all(&store, &set);
+        assert!(store.unsigned_in(&stable).is_empty());
+        assert!(store.offer_for_assigned(Some(&set), Some(&linux)).is_some());
+    }
+
+    /// A signature is written on an entry, offered to an Agent of that Platform with exactly those
+    /// bytes, and removed when new bytes are uploaded to the entry — a signature covers the hash
+    /// (ADR-0033 clause 6). Removing it takes the offer away.
+    /// Verifies: ADR-0033
+    #[test]
+    fn a_signature_lives_on_its_entry_and_new_bytes_remove_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let set = stored_set(&store, "otelcol", "1.0.0", b"first");
+        let linux_agent = agent("linux", "amd64", &[]);
+        assert_eq!(
+            store.put_signature(&set, &linux(), vec![5u8; 64]),
+            Ok(SignatureState::Unchecked)
+        );
+        let offer = store
+            .offer_for_assigned(Some(&set), Some(&linux_agent))
+            .expect("a signed entry is offered");
+        assert_eq!(
+            offer.packages["otelcol"]
+                .file
+                .as_ref()
+                .expect("file")
+                .signature,
+            vec![5u8; 64]
+        );
+
+        store
+            .put_entry(&set, &linux(), b"second".to_vec())
+            .expect("new bytes");
+        let summary = store.summary(&set).expect("summary");
+        assert_eq!(summary.entries[0].signature_state, SignatureState::Missing);
+        assert!(
+            store
+                .offer_for_assigned(Some(&set), Some(&linux_agent))
+                .is_none(),
+            "the signature for the old bytes went with them"
+        );
+
+        store
+            .put_signature(&set, &linux(), vec![6u8; 64])
+            .expect("signed again");
+        assert_eq!(store.remove_signature(&set, &linux()), Ok(true));
+        assert_eq!(store.remove_signature(&set, &linux()), Ok(false));
         assert!(store
-            .offer_for_assigned(Some(&set), Some(&signed), Some(&linux), "")
-            .is_some());
+            .offer_for_assigned(Some(&set), Some(&linux_agent))
+            .is_none());
+    }
+
+    /// A signature has to name an entry the Package holds (`no entry`, a `404`), and has to be
+    /// one: empty or not 64 bytes is refused (a `400`) and nothing is stored (ADR-0033 clause 6).
+    /// Verifies: ADR-0033
+    #[test]
+    fn a_signature_needs_an_entry_and_the_shape_of_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let set = stored_set(&store, "otelcol", "1.0.0", b"bytes");
+        assert!(store
+            .put_signature(&set, &windows(), vec![1u8; 64])
+            .expect_err("no windows entry")
+            .starts_with("no entry"));
+        assert!(store
+            .remove_signature(&set, &windows())
+            .expect_err("no windows entry")
+            .starts_with("no entry"));
+        assert!(store
+            .put_signature(&id("otelcol", "9.9.9"), &linux(), vec![1u8; 64])
+            .expect_err("no such package")
+            .starts_with("no package set"));
+        for refused in [Vec::new(), vec![1u8; 63], vec![1u8; 65]] {
+            assert!(store
+                .put_signature(&set, &linux(), refused)
+                .expect_err("refused")
+                .starts_with("the signature"));
+        }
+        assert_eq!(
+            store.summary(&set).expect("summary").entries[0].signature,
+            None
+        );
+    }
+
+    /// With the operator's public key the Server reports a signature over the statement `valid` and
+    /// any other `invalid` — and stores both; without the key every signature is `unchecked`
+    /// (ADR-0033 clause 7). The state is checked again when the store is reopened.
+    /// Verifies: ADR-0033
+    #[test]
+    fn the_server_checks_a_signature_against_its_key_and_only_reports() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+        let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
+        let public = ring::signature::KeyPair::public_key(&keypair)
+            .as_ref()
+            .to_vec();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let set = id("otelcol", "1.0.0");
+        {
+            let store = PackageStore::open(dir.path().to_path_buf())
+                .expect("open")
+                .with_verifier(Some(Box::new(crate::config::Ed25519Verifier::new(
+                    public.clone(),
+                ))));
+            store.create(&set).expect("create");
+            store
+                .put_entry(&set, &linux(), b"linux".to_vec())
+                .expect("entry");
+            store
+                .put_entry(&set, &windows(), b"windows".to_vec())
+                .expect("entry");
+            let hash = Sha256::digest(b"linux").to_vec();
+            let good = keypair
+                .sign(&fleet_core::package::statement("otelcol", "1.0.0", &hash))
+                .as_ref()
+                .to_vec();
+            assert_eq!(
+                store.put_signature(&set, &linux(), good),
+                Ok(SignatureState::Valid)
+            );
+            // A signature over another type's statement does not verify for this one.
+            let wrong = keypair
+                .sign(&fleet_core::package::statement("promtail", "1.0.0", &hash))
+                .as_ref()
+                .to_vec();
+            assert_eq!(
+                store.put_signature(&set, &windows(), wrong),
+                Ok(SignatureState::Invalid),
+                "an invalid signature is stored and reported, never refused"
+            );
+            assert!(
+                store
+                    .offer_for_assigned(Some(&set), Some(&agent("windows", "amd64", &[])))
+                    .is_some(),
+                "and offered: the Client's check decides"
+            );
+        }
+        let states = |store: &PackageStore| -> Vec<SignatureState> {
+            store
+                .summary(&set)
+                .expect("summary")
+                .entries
+                .iter()
+                .map(|entry| entry.signature_state)
+                .collect()
+        };
+        let reopened = PackageStore::open(dir.path().to_path_buf())
+            .expect("reopen")
+            .with_verifier(Some(Box::new(crate::config::Ed25519Verifier::new(public))));
+        assert_eq!(
+            states(&reopened),
+            [SignatureState::Valid, SignatureState::Invalid]
+        );
+        let keyless = PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert_eq!(
+            states(&keyless),
+            [SignatureState::Unchecked, SignatureState::Unchecked]
+        );
     }
 
     /// The gate an explicit rollout act runs (ADR-0025): the Package must hold entries and fit the
@@ -1698,21 +1914,17 @@ mod tests {
         );
     }
 
-    /// The offered download URL names the whole identity, so two versions of one name never serve
-    /// each other's bytes.
-    /// Verifies: ADR-0026
+    /// The offered download URL is a path the Agent resolves against its own Server (ADR-0033),
+    /// and it names the whole identity, so two versions of one name never serve each other's bytes.
+    /// Verifies: ADR-0026, ADR-0033
     #[test]
     fn the_offer_carries_a_download_url_naming_the_identity() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = stored_set(&store, "otelcol", "1.2.3", b"bytes");
+        sign_all(&store, &set);
         let offer = store
-            .offer_for_assigned(
-                Some(&set),
-                Some(&signed_channel(&store, &set)),
-                Some(&agent("linux", "amd64", &[])),
-                "https://fleet.example",
-            )
+            .offer_for_assigned(Some(&set), Some(&agent("linux", "amd64", &[])))
             .expect("an offer");
         let url = &offer.packages["otelcol"]
             .file
@@ -1721,7 +1933,7 @@ mod tests {
             .download_url;
         assert_eq!(
             url,
-            "https://fleet.example/api/v1/packages/otelcol/1.2.3/file?os=linux&arch=amd64"
+            "/api/v1/packages/otelcol/1.2.3/file?os=linux&arch=amd64"
         );
     }
 
@@ -1732,25 +1944,26 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let v1 = stored_set(&store, "otelcol", "1.0.0", b"v1");
-        let stable = signed_channel(&store, &v1);
-        let hash = |assigned: Option<&PackageId>, deployment: &Deployment, os: &str| {
-            store.assigned_hash_for(assigned, Some(deployment), Some(&agent(os, "amd64", &[])))
+        let hash = |assigned: Option<&PackageId>, os: &str| {
+            store.assigned_hash_for(assigned, Some(&agent(os, "amd64", &[])))
         };
-        let before = hash(Some(&v1), &stable, "linux");
-        assert!(!before.is_empty());
-        assert!(hash(Some(&v1), &stable, "windows").is_empty());
-        assert!(hash(None, &stable, "linux").is_empty());
         assert!(
-            hash(Some(&v1), &channel(&v1), "linux").is_empty(),
+            hash(Some(&v1), "linux").is_empty(),
             "an unsigned entry is offered nothing to be in sync with"
         );
+        sign_all(&store, &v1);
+        let before = hash(Some(&v1), "linux");
+        assert!(!before.is_empty());
+        assert!(hash(Some(&v1), "windows").is_empty());
+        assert!(hash(None, "linux").is_empty());
 
         let v2 = stored_set(&store, "otelcol", "2.0.0", b"v2");
-        let after = hash(Some(&v2), &signed_channel(&store, &v2), "linux");
+        sign_all(&store, &v2);
+        let after = hash(Some(&v2), "linux");
         assert_ne!(before, after, "a new assigned version moves the aggregate");
     }
 
-    /// Deleting an entry frees its artifact; deleting the Set takes the directory with it.
+    /// Deleting an entry frees its artifact; deleting the Set takes its metadata with it.
     /// Verifies: ADR-0026
     #[test]
     fn deletion_frees_entries_and_sets() {
@@ -1767,13 +1980,73 @@ mod tests {
         assert!(!store.delete_entry(&set, &linux()).expect("gone already"));
         assert!(store.delete_set(&set).expect("delete set"));
         assert!(store.summary(&set).is_none());
-        assert!(!dir.path().join(set.to_string()).exists());
+        assert!(!dir.path().join("packages/otelcol@1.0.0.json").exists());
         assert!(!store.delete_set(&set).expect("gone already"));
     }
 
-    /// A corrupt artifact fails the reopen loudly — a corrupt distribution artifact must never
-    /// ship (ADR-0026 clause 12).
-    /// Verifies: ADR-0026
+    /// The blobs under one entry's bytes (ADR-0037 clause 4): two entries with identical bytes
+    /// store one blob, counted once against the store's size; it stays while an entry names it and
+    /// goes with the last one — replaced or deleted — and a blob no entry names is deleted when
+    /// the store opens.
+    /// Verifies: ADR-0037
+    #[test]
+    fn identical_bytes_are_one_blob_that_goes_with_its_last_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blobs = || {
+            std::fs::read_dir(dir.path().join("blobs"))
+                .expect("blobs")
+                .map(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .into_string()
+                        .expect("utf-8")
+                })
+                .collect::<Vec<_>>()
+        };
+        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+        let (one, two) = (id("otelcol", "1.0.0"), id("otelcol", "1.0.1"));
+        for set in [&one, &two] {
+            store.create(set).expect("create");
+            store
+                .put_entry(set, &linux(), b"same bytes".to_vec())
+                .expect("entry");
+        }
+        let sha256 = hex::encode(Sha256::digest(b"same bytes"));
+        assert_eq!(blobs(), std::slice::from_ref(&sha256), "stored once");
+        assert_eq!(store.total_bytes(), 10, "and counted once");
+        let metadata =
+            std::fs::read_to_string(dir.path().join("packages/otelcol@1.0.0.json")).expect("meta");
+        assert!(metadata.contains(&sha256), "named by its hash: {metadata}");
+
+        assert!(store.delete_entry(&one, &linux()).expect("delete"));
+        assert_eq!(
+            blobs(),
+            std::slice::from_ref(&sha256),
+            "another entry still names it"
+        );
+        store
+            .put_entry(&two, &linux(), b"new bytes".to_vec())
+            .expect("replace");
+        assert_eq!(
+            blobs(),
+            [hex::encode(Sha256::digest(b"new bytes"))],
+            "the replaced entry was the last to name it"
+        );
+        assert!(store.delete_set(&two).expect("delete"));
+        assert!(blobs().is_empty(), "the last entry took its blob with it");
+
+        std::fs::write(dir.path().join("blobs").join(&sha256), b"same bytes").expect("orphan");
+        PackageStore::open(dir.path().to_path_buf()).expect("reopen");
+        assert!(
+            blobs().is_empty(),
+            "a blob no entry names is deleted at startup"
+        );
+    }
+
+    /// A corrupt artifact fails the reopen loudly, naming its blob — a corrupt distribution
+    /// artifact must never ship (ADR-0026 clause 12, ADR-0037 clause 4).
+    /// Verifies: ADR-0026, ADR-0037
     #[test]
     fn a_corrupt_artifact_fails_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1785,19 +2058,25 @@ mod tests {
                 .put_entry(&set, &linux(), b"good bytes".to_vec())
                 .expect("entry");
         }
-        std::fs::write(
-            dir.path().join(set.to_string()).join("linux-amd64.bin"),
-            b"tampered",
-        )
-        .expect("tamper");
+        let sha256 = hex::encode(Sha256::digest(b"good bytes"));
+        std::fs::write(dir.path().join("blobs").join(&sha256), b"tampered").expect("tamper");
         let err = PackageStore::open(dir.path().to_path_buf())
             .map(|_| ())
             .expect_err("must refuse");
-        assert!(err.contains("does not match"), "{err}");
+        assert!(
+            err.contains("does not match") && err.contains(&sha256),
+            "{err}"
+        );
+
+        std::fs::remove_file(dir.path().join("blobs").join(&sha256)).expect("lose it");
+        let err = PackageStore::open(dir.path().to_path_buf())
+            .map(|_| ())
+            .expect_err("an entry whose blob is gone is refused");
+        assert!(err.contains("not stored"), "{err}");
     }
 
-    /// The store directory and each Set's metadata are owner-only (ADR-0026): a referenced
-    /// source's headers may carry a token.
+    /// The store's directories, each Package's metadata and each blob are owner-only (ADR-0026,
+    /// ADR-0037 clause 1).
     /// Verifies: ADR-0026
     #[cfg(unix)]
     #[test]
@@ -1807,66 +2086,120 @@ mod tests {
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = id("otelcol", "1.0.0");
         store.create(&set).expect("create");
+        store
+            .put_entry(&set, &linux(), b"bytes".to_vec())
+            .expect("entry");
+        let mode = |path: std::path::PathBuf| {
+            std::fs::metadata(path).expect("meta").permissions().mode() & 0o777
+        };
+        assert_eq!(mode(dir.path().join("packages")), 0o700);
+        assert_eq!(mode(dir.path().join("blobs")), 0o700);
+        assert_eq!(mode(dir.path().join("packages/otelcol@1.0.0.json")), 0o600);
         assert_eq!(
-            std::fs::metadata(dir.path())
-                .expect("meta")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(dir.path().join(set.to_string()).join("package.json"))
-                .expect("meta")
-                .permissions()
-                .mode()
-                & 0o777,
+            mode(
+                dir.path()
+                    .join("blobs")
+                    .join(hex::encode(Sha256::digest(b"bytes")))
+            ),
             0o600
         );
     }
 
-    /// There is no migration and no legacy reader: a store holding what an older layout wrote is
-    /// **named at startup**, never skipped (ADR-0026 point 19). Skipping is the dangerous half — a
-    /// store that merely looks empty offers nothing and says nothing about why, which an operator
-    /// reads as "nothing uploaded yet".
+    /// There is no legacy reader: a store holding what an older layout wrote is **named at
+    /// startup**, never skipped (ADR-0026 point 19, ADR-0037 clause 6). Skipping is the dangerous
+    /// half — a store that merely looks empty offers nothing and says nothing about why, which an
+    /// operator reads as "nothing uploaded yet".
     ///
-    /// Both shapes an older Server left behind are covered: loose files in the store root, and
-    /// `<name>@<version>@<type>/set.json` directories.
-    /// Verifies: ADR-0026
+    /// The shapes an older Server left behind are covered: a loose file, a
+    /// `<name>@<version>@<type>/set.json` directory, and the `<type>@<version>/package.json`
+    /// directory of the layout before ADR-0037.
+    /// Verifies: ADR-0026, ADR-0037
     #[test]
     fn a_store_in_an_older_layout_refuses_to_open_and_names_what_is_in_the_way() {
-        // Loose files in the store root.
+        let older = |relative: &str, contents: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("packages").join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            std::fs::write(&path, contents).expect("write");
+            let error = PackageStore::open(dir.path().to_path_buf())
+                .map(|_| ())
+                .expect_err("an older layout is refused, never read as an empty store");
+            let named = relative.split('/').next().expect("first segment");
+            assert!(
+                error.contains(named),
+                "the error must name what an operator has to move aside, got: {error}"
+            );
+        };
+        older("otelcol@linux-amd64.bin", "bytes");
+        older("otelcol@1.0.0@otelcol/set.json", "{}");
+        older(
+            "otelcol@1.0.0/package.json",
+            r#"{"agent_type":"otelcol","version":"1.0.0","entries":[]}"#,
+        );
+    }
+
+    /// Every artifact is uploaded (ADR-0033 clause 1): an entry an older Server stored as a
+    /// reference to a source is not read as something else — the open fails naming the file.
+    /// Verifies: ADR-0033
+    #[test]
+    fn a_referenced_entry_from_an_older_server_fails_the_open_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("packages")).expect("dir");
         std::fs::write(
-            dir.path().join("otelcol.json"),
-            serde_json::json!({"name": "otelcol", "service_name": "otelcol"}).to_string(),
+            dir.path().join("packages/otelcol@1.0.0.json"),
+            serde_json::json!({
+                "agent_type": "otelcol",
+                "version": "1.0.0",
+                "entries": [{
+                    "os": "linux",
+                    "arch": "amd64",
+                    "sha256": "00".repeat(32),
+                    "size": 1,
+                    "source_url": "https://example.com/otelcol.tar.gz"
+                }]
+            })
+            .to_string(),
         )
-        .expect("write a loose rollout file");
+        .expect("metadata");
         let error = PackageStore::open(dir.path().to_path_buf())
             .map(|_| ())
-            .expect_err("an older layout is refused, never read as an empty store");
+            .expect_err("a referenced entry is refused");
         assert!(
-            error.contains("otelcol.json"),
-            "the error must name what an operator has to move aside, got: {error}"
+            error.contains("otelcol@1.0.0.json") && error.contains("source_url"),
+            "the error names the file and the field: {error}"
         );
+    }
 
-        // ADR-0026: a Set directory holding `set.json`.
+    /// A stored signature is held to the length a write is held to: one that is not 64 bytes fails
+    /// the open naming the file, rather than being offered for every Client to refuse.
+    /// Verifies: ADR-0033
+    #[test]
+    fn a_stored_signature_of_the_wrong_length_fails_the_open_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let set = dir.path().join("otelcol@1.0.0@otelcol");
-        std::fs::create_dir_all(&set).expect("set dir");
-        std::fs::write(set.join("set.json"), "{}").expect("set.json");
+        std::fs::create_dir_all(dir.path().join("packages")).expect("dir");
+        std::fs::write(
+            dir.path().join("packages/otelcol@1.0.0.json"),
+            serde_json::json!({
+                "agent_type": "otelcol",
+                "version": "1.0.0",
+                "entries": [{
+                    "os": "linux",
+                    "arch": "amd64",
+                    "sha256": "00".repeat(32),
+                    "size": 1,
+                    "signature_hex": "ab".repeat(63)
+                }]
+            })
+            .to_string(),
+        )
+        .expect("metadata");
         let error = PackageStore::open(dir.path().to_path_buf())
             .map(|_| ())
-            .expect_err("a Set directory is refused too");
+            .expect_err("a short signature is refused");
         assert!(
-            error.contains("otelcol@1.0.0@otelcol"),
-            "the error must name the directory, got: {error}"
+            error.contains("otelcol@1.0.0.json") && error.contains("signature"),
+            "the error names the file and the signature: {error}"
         );
-
-        // But the Deployments live here on purpose, and the loader steps over them.
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join(DEPLOYMENTS_DIR)).expect("deployments dir");
-        PackageStore::open(dir.path().to_path_buf()).expect("the channel store is not a stray");
     }
 
     /// The identity grammar keeps the triple a safe directory name and an unambiguous parse:
@@ -1911,9 +2244,10 @@ mod tests {
     }
 
     /// Every artifact `offer_for_assigned` names is one `offers` answers yes for, and nothing else
-    /// is — across assignments, Agent types, Platforms, signed and unsigned Deployments, and
-    /// artifacts the store does not hold.
-    /// Verifies: ADR-0026
+    /// is — across assignments, Agent types, Platforms, signed and unsigned entries, and artifacts
+    /// the store does not hold (ADR-0033 clause 10). Whether the Agent accepts packages is the
+    /// record's, asked by the fleet before either; `fleet` tests that half.
+    /// Verifies: ADR-0026, ADR-0033
     #[test]
     fn the_download_and_the_offer_test_one_predicate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1936,19 +2270,21 @@ mod tests {
             typed_agent("other", "linux"),
         ];
         let mut offered = 0;
-        for assigned in [None, Some(&v1), Some(&v2), Some(&other)] {
-            let deployments = match assigned {
-                Some(id) => vec![Some(signed_channel(&store, id)), Some(channel(id)), None],
-                None => vec![None],
-            };
-            for deployment in &deployments {
+        // Unsigned first, then v1's windows entry alone, then everything.
+        let signing: [&[(&PackageId, Platform)]; 3] = [
+            &[],
+            &[(&v1, windows())],
+            &[(&v1, linux()), (&v2, linux()), (&other, linux())],
+        ];
+        for signed in signing {
+            for (id, platform) in signed {
+                store
+                    .put_signature(id, platform, vec![1u8; 64])
+                    .expect("signature");
+            }
+            for assigned in [None, Some(&v1), Some(&v2), Some(&other)] {
                 for description in &agents {
-                    let offer = store.offer_for_assigned(
-                        assigned,
-                        deployment.as_ref(),
-                        Some(description),
-                        "",
-                    );
+                    let offer = store.offer_for_assigned(assigned, Some(description));
                     let named = offer.as_ref().map(named_by);
                     offered += usize::from(named.is_some());
                     for (id, platform) in &artifacts {
@@ -1956,13 +2292,7 @@ mod tests {
                             *t == id.agent_type && *v == id.version && p == platform
                         });
                         assert_eq!(
-                            store.offers(
-                                assigned,
-                                deployment.as_ref(),
-                                Some(description),
-                                id,
-                                platform
-                            ),
+                            store.offers(assigned, Some(description), id, platform),
                             expected,
                             "{id} {} for {description:?}",
                             platform.tag()
@@ -1971,7 +2301,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(offered, 4, "each assignment is offered where it fits");
+        assert_eq!(
+            offered,
+            1 + 4,
+            "nothing unsigned, then v1 on windows alone, then each assignment where it fits"
+        );
     }
 
     /// An Agent that reports another Agent type than its assigned Package's is offered nothing, and
@@ -1982,99 +2316,43 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = stored_set(&store, "otelcol", "1.0.0", b"bytes");
-        let stable = signed_channel(&store, &set);
+        sign_all(&store, &set);
         let renamed = typed_agent("otelcol-contrib", "linux");
         assert!(store
-            .offer_for_assigned(Some(&set), Some(&stable), Some(&renamed), "")
+            .offer_for_assigned(Some(&set), Some(&renamed))
             .is_none());
         assert!(store
-            .assigned_hash_for(Some(&set), Some(&stable), Some(&renamed))
+            .assigned_hash_for(Some(&set), Some(&renamed))
             .is_empty());
-        assert!(!store.offers(Some(&set), Some(&stable), Some(&renamed), &set, &linux()));
+        assert!(!store.offers(Some(&set), Some(&renamed), &set, &linux()));
         assert!(store.offers(
             Some(&set),
-            Some(&stable),
             Some(&typed_agent("otelcol", "linux")),
             &set,
             &linux()
         ));
     }
 
-    /// An entry the assigned Deployment holds no signature for is neither offered nor fetched,
-    /// though another entry of the same Package is signed.
-    /// Verifies: ADR-0026
+    /// An entry that carries no signature is neither offered nor fetched, though another entry of
+    /// the same Package is signed (ADR-0033 clause 6).
+    /// Verifies: ADR-0033
     #[test]
-    fn an_entry_its_deployment_does_not_sign_is_not_offered() {
+    fn an_unsigned_entry_is_not_offered_though_another_is_signed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
         let set = stored_set(&store, "otelcol", "1.0.0", b"linux");
         store
             .put_entry(&set, &windows(), b"windows".to_vec())
             .expect("entry");
-        let mut deployment = channel(&set);
-        deployment
-            .signatures
-            .insert((set.clone(), windows()), vec![1u8; 64]);
+        store
+            .put_signature(&set, &windows(), vec![1u8; 64])
+            .expect("signature");
         let linux_agent = agent("linux", "amd64", &[]);
         assert!(store
-            .offer_for_assigned(Some(&set), Some(&deployment), Some(&linux_agent), "")
+            .offer_for_assigned(Some(&set), Some(&linux_agent))
             .is_none());
-        assert!(!store.offers(
-            Some(&set),
-            Some(&deployment),
-            Some(&linux_agent),
-            &set,
-            &linux()
-        ));
+        assert!(!store.offers(Some(&set), Some(&linux_agent), &set, &linux()));
         let windows_agent = agent("windows", "amd64", &[]);
-        assert!(store.offers(
-            Some(&set),
-            Some(&deployment),
-            Some(&windows_agent),
-            &set,
-            &windows()
-        ));
-    }
-
-    /// A referenced entry is offered from its source, and the download route never serves it: the
-    /// Server holds no bytes for it.
-    /// Verifies: ADR-0026
-    #[test]
-    fn a_referenced_entry_is_never_offered_for_the_route() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let set = id("otelcol", "1.0.0");
-        store.create(&set).expect("create");
-        store
-            .set_entry_source(
-                &set,
-                &linux(),
-                vec![0u8; 32],
-                Source {
-                    url: "https://example.com/otelcol.tar.gz".into(),
-                    headers: BTreeMap::new(),
-                },
-            )
-            .expect("source");
-        let stable = signed_channel(&store, &set);
-        let linux_agent = agent("linux", "amd64", &[]);
-        let offer = store
-            .offer_for_assigned(Some(&set), Some(&stable), Some(&linux_agent), "")
-            .expect("offered from its source");
-        assert_eq!(
-            offer.packages["otelcol"]
-                .file
-                .as_ref()
-                .expect("file")
-                .download_url,
-            "https://example.com/otelcol.tar.gz"
-        );
-        assert!(!store.offers(
-            Some(&set),
-            Some(&stable),
-            Some(&linux_agent),
-            &set,
-            &linux()
-        ));
+        assert!(store.offers(Some(&set), Some(&windows_agent), &set, &windows()));
     }
 }

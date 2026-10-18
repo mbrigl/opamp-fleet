@@ -13,16 +13,18 @@
 //! ADR-0028): nothing the Server or Client runtime does depends on it, and a managed host never
 //! runs it. `fetch` is [`crate::fetch`]; the rest is here.
 //!
-//! Typical use — build an artifact, sign it, upload it:
+//! Typical use — build an artifact, upload it, sign its entry (ADR-0033):
 //!
 //! ```text
 //! opamp-fleetctl package keygen --out fleet-signing.pk8   # prints the public key (hex) to stdout
-//! # put that hex in the Client's `[packages] verification_key`
+//! # put that hex in the Client's `[packages] verification_key` (and, optionally, the Server's)
 //! sha=$(opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail)
 //! sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtail --version 3.0.0 \
 //!       promtail-3.0.0.tar.gz)
-//! curl -X PUT "http://<server>:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64?signature=$sig" \
+//! curl -X PUT "https://<server>:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64" \
 //!      --data-binary @promtail-3.0.0.tar.gz
+//! curl -X PUT "https://<server>:4321/api/v1/packages/promtail/3.0.0/entries/linux/amd64/signature" \
+//!      -H 'content-type: application/json' --data "{\"signature\": \"$sig\"}"
 //! ```
 //!
 //! Script-friendly: the hex output (public key, signature, or SHA-256) goes to stdout alone;
@@ -47,8 +49,8 @@ pub enum Command {
         #[arg(long, default_value = "package-signing-key.pk8")]
         out: PathBuf,
     },
-    /// Sign an artifact and print the signature (hex) — the value of a Deployment's signature for
-    /// that entry. Or, with --signing-info, sign every entry of a Package's signing file from the
+    /// Sign an artifact and print the signature (hex) — the value of that Package entry's signature
+    /// (ADR-0033). Or, with --signing-info, sign every entry of a Package's signing file from the
     /// UI and write the signatures into it (ADR-0027).
     Sign {
         /// The PKCS#8 private key from `keygen`.
@@ -110,8 +112,8 @@ pub enum Command {
         #[arg(long)]
         archive_key: Option<String>,
     },
-    /// Print an artifact's SHA-256 (hex) — the `sha256` of `PUT …/entries/<os>/<arch>/source`
-    /// for an artifact this Server will not hold.
+    /// Print an artifact's SHA-256 (hex) — the `content_hash` the Server shows for its entry, and
+    /// what to compare with upstream's checksums before signing.
     Sha256 {
         /// The artifact to hash, exactly as the Agents will fetch it.
         artifact: PathBuf,
@@ -175,7 +177,7 @@ pub fn run(command: Command) -> Result<(), String> {
             let out = out.unwrap_or(path);
             file.write(&out)?;
             eprintln!(
-                "wrote the signatures to {} — import it on the Deployment. These hashes were \
+                "wrote the signatures to {} — import it on the Packages tab. These hashes were \
                  signed as the file states them; they are only as right as your comparison with \
                  upstream's checksums or the files.",
                 out.display()
