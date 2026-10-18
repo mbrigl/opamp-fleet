@@ -151,9 +151,11 @@ core module names an adapter or a technology, and when a module has no role.
   `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the
   Supervisors' root as an absolute path too. When a failed process is started again or held is
   `supervisor::restart`'s decision; the runner reads the clock and starts it.
-  `supervisor::agent`, an Agent's decisions, names two more ports there: `AgentStorage`, which
-  `storage::Storage` implements on the state directory, and `HostFacts`, which `host::SystemHost`
-  implements from the platform. It answers each Server message in `handle` and leaves three
+  `supervisor::agent`, an Agent's decisions, names three more ports there: `AgentStorage`, which
+  `storage::Storage` implements on the state directory, `HighWaterMarks`, which
+  `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares
+  ([ADR-0043](adr/0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md)),
+  and `HostFacts`, which `host::SystemHost` implements from the platform. It answers each Server message in `handle` and leaves three
   channels and its description each to a submodule: `packages`, `remote_config`,
   `connection_settings`, and `description`, what the Agent reports about itself.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet

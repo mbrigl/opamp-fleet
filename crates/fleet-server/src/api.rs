@@ -1454,7 +1454,7 @@ async fn get_package_set(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
-    match PackageId::new(&agent_type, &version) {
+    match PackageId::load(&agent_type, &version) {
         Ok(id) => set_response(&state, &id),
         Err(e) => error(StatusCode::BAD_REQUEST, e),
     }
@@ -1470,11 +1470,11 @@ async fn get_package_set(
     tag = "packages",
     params(
         ("agent_type" = String, Path, description = "The Agent type the Set is built for, compared raw against the `service.name` Agents report"),
-        ("version" = String, Path, description = "The Set's version — every entry shares it")
+        ("version" = String, Path, description = "The Set's version — every entry shares it. A SemVer 2.0.0 version, such as `1.19.0` for upstream's `1.19` (ADR-0043)")
     ),
     responses(
         (status = 200, description = "The stored Set", body = PackageSetView),
-        (status = 400, description = "Invalid identity", body = ErrorBody),
+        (status = 400, description = "Invalid identity, or a version that is not SemVer", body = ErrorBody),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody),
         (status = 500, description = "The Set could not be persisted", body = ErrorBody)
     )
@@ -1516,7 +1516,8 @@ async fn delete_package_set(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
-    let id = match PackageId::new(&agent_type, &version) {
+    // A Package stored under a non-SemVer version is deleted like any other (ADR-0043 clause 3).
+    let id = match PackageId::load(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -1777,7 +1778,9 @@ async fn download_package(
     Query(query): Query<PlatformQuery>,
     request: Request,
 ) -> Response {
-    let id = match PackageId::new(&agent_type, &version) {
+    // A read: a pinned Package an older Server stored under a non-SemVer version is still offered
+    // (ADR-0043 clause 3), so its bytes are still served.
+    let id = match PackageId::load(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -2299,7 +2302,8 @@ async fn delete_deployment_package(
     State(state): State<Arc<AppState>>,
     Path((name, agent_type, version)): Path<(String, String, String)>,
 ) -> Response {
-    let id = match PackageId::new(&agent_type, &version) {
+    // Taking a Package out writes nothing to it, so an older non-SemVer one may leave too.
+    let id = match PackageId::load(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };

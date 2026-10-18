@@ -16,6 +16,7 @@ pub mod process;
 pub mod restart;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -23,11 +24,11 @@ use tracing::{info, warn};
 use crate::config::{ClientConfig, SupervisorBlock};
 use crate::engine::{Engine, EngineAgent};
 use crate::shutdown::{shutdown_channel, Shutdown};
-use crate::storage::{DroppedRemoteConfig, DroppedStoredSet, Storage};
+use crate::storage::{DroppedRemoteConfig, DroppedStoredSet, HighWaterFile, Storage};
 
 use agent::AgentState;
 use block::{find_plugin, resolve, take_program, Resolved};
-use ports::{EventSender, Plugin, ProcessEvent, SupervisorContext};
+use ports::{EventSender, HighWaterMarks, Plugin, ProcessEvent, SupervisorContext};
 
 pub use crate::engine::SELF_AGENT_INDEX;
 
@@ -137,12 +138,20 @@ pub fn build_engine(config: &ClientConfig, shutdown: &Shutdown) -> Result<Engine
         block_name: None,
     });
 
+    // One set of high-water marks for every Supervisor this Client runs, now and after a
+    // Supervisor-set apply adds one (ADR-0043 clause 8). Read afresh at every start, and seeded
+    // from each Supervisor's installed record as it starts (clause 9).
+    let marks: Arc<dyn HighWaterMarks> = Arc::new(HighWaterFile::open(&config.state_dir));
     for (block_index, block) in config.supervisors.iter().enumerate() {
         // The event channel is keyed by position in `agents`, and the self-Agent holds 0.
         let index = block_index + SELF_AGENT_OFFSET;
-        agents.push(start_supervisor(config, block, index, &event_tx, shutdown)?);
+        agents.push(start_supervisor(
+            config, block, index, &event_tx, shutdown, &marks,
+        )?);
     }
-    Ok(Engine::with_processes(agents, events, event_tx))
+    let mut engine = Engine::with_processes(agents, events, event_tx);
+    engine.set_high_water(marks);
+    Ok(engine)
 }
 
 /// A directory under the Supervisor root that no `[[supervisor]]` block names is reported, never
@@ -245,6 +254,7 @@ pub fn start_supervisor(
     index: usize,
     event_tx: &mpsc::Sender<(usize, ProcessEvent)>,
     shutdown: &Shutdown,
+    marks: &Arc<dyn HighWaterMarks>,
 ) -> Result<EngineAgent, String> {
     let plugins = registry();
     let Resolved {
@@ -297,7 +307,8 @@ pub fn start_supervisor(
         state
             .map_err(|e| format!("cannot restore the state of {:?}: {e}", block.name))?
             .with_attributes(config.agent_attributes(Some(block)))
-            .with_namespace(config.service_namespace.clone()),
+            .with_namespace(config.service_namespace.clone())
+            .with_high_water(marks.clone()),
     );
     // Every Managed Process is the fleet's (ADR-0017), so every Supervisor takes whichever
     // top-level package the Server selects for it (ADR-0026). There is no second branch:
@@ -669,6 +680,150 @@ mod tests {
             .is_ok(),
             "the opampextension connects to it, so pinning it is a decision"
         );
+    }
+
+    /// Two Supervisors, `a` and `b`, of the one Agent type `managed-agent`, taking packages.
+    fn two_of_a_type(root: &std::path::Path) -> ClientConfig {
+        keyed(
+            toml::from_str(&format!(
+                "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\
+                 [[supervisor]]\ntype = \"command\"\nname = \"a\"\ncommand = \"managed-agent\"\n\
+                 [[supervisor]]\ntype = \"command\"\nname = \"b\"\ncommand = \"managed-agent\"\n",
+                state = root.join("state").to_string_lossy(),
+            ))
+            .expect("parse"),
+        )
+    }
+
+    /// Writes the installed-package record of Supervisor `name`, as an install would have.
+    fn installed(config: &ClientConfig, name: &str, version: &str) {
+        use crate::supervisor::ports::AgentStorage as _;
+        Storage::new(config.supervisor_dir(name))
+            .expect("storage")
+            .store_package(&crate::supervisor::ports::InstalledPackage {
+                name: "managed-agent".to_string(),
+                version: version.to_string(),
+                hash_hex: hex::encode(version),
+            })
+            .expect("store");
+    }
+
+    /// Offers `version` of `managed-agent` to the Agent at `index`: whether a download was
+    /// scheduled, and the refusal it reports.
+    fn offer_to(engine: &mut Engine, index: usize, version: &str) -> (bool, String) {
+        let uid = engine.uids().nth(index).expect("an agent");
+        engine.handle(&opamp::proto::ServerToAgent {
+            instance_uid: uid.as_bytes().to_vec(),
+            packages_available: Some(opamp::proto::PackagesAvailable {
+                packages: [(
+                    "managed-agent".to_string(),
+                    opamp::proto::PackageAvailable {
+                        version: version.to_string(),
+                        file: Some(opamp::proto::DownloadableFile {
+                            download_url: "/x".to_string(),
+                            content_hash: b"chash".to_vec(),
+                            ..Default::default()
+                        }),
+                        hash: version.as_bytes().to_vec(),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                all_packages_hash: version.as_bytes().to_vec(),
+            }),
+            ..Default::default()
+        });
+        let downloads = !engine.take_package_downloads().is_empty();
+        let why = engine.poll_reports()[index]
+            .package_statuses
+            .as_ref()
+            .map(|statuses| statuses.error_message.clone())
+            .unwrap_or_default();
+        (downloads, why)
+    }
+
+    /// With no mark file and `a`'s record at `0.110.0`, the start seeds the mark: `b`, which has
+    /// no record of its own, refuses `0.109.0` naming the mark (ADR-0043 clause 9).
+    /// Verifies: ADR-0043
+    #[tokio::test]
+    async fn the_start_seeds_the_mark_from_the_installed_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = two_of_a_type(dir.path());
+        installed(&config, "a", "0.110.0");
+
+        let mut engine = build_engine(&config, &shutdown).expect("build");
+        let (downloads, why) = offer_to(&mut engine, 2, "0.109.0");
+        assert!(!downloads, "nothing below the seeded mark is fetched");
+        assert!(why.contains("0.110.0"), "{why}");
+        assert!(
+            dir.path()
+                .join("state")
+                .join(crate::storage::HIGH_WATER_FILE)
+                .is_file(),
+            "the seeded mark is written"
+        );
+    }
+
+    /// A mark file that does not parse is never read as empty: every Supervisor offer is refused
+    /// naming the file, and the Client still starts and reports (ADR-0043 clause 11).
+    /// Verifies: ADR-0043
+    #[tokio::test]
+    async fn an_unreadable_mark_file_refuses_every_supervisor_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = two_of_a_type(dir.path());
+        std::fs::create_dir_all(&config.state_dir).expect("state");
+        let file = config.state_dir.join(crate::storage::HIGH_WATER_FILE);
+        std::fs::write(&file, "{ not json").expect("write");
+
+        let mut engine = build_engine(&config, &shutdown).expect("the Client still starts");
+        assert_eq!(engine.poll_reports().len(), 3, "and every Agent reports");
+        for index in [1, 2] {
+            let (downloads, why) = offer_to(&mut engine, index, "9.0.0");
+            assert!(!downloads, "{index}: nothing is fetched");
+            assert!(
+                why.contains(crate::storage::HIGH_WATER_FILE),
+                "{index}: {why}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read"),
+            "{ not json",
+            "the file is the operator's to repair"
+        );
+
+        // A value that is not SemVer is just as unreadable.
+        std::fs::write(&file, r#"{"managed-agent": "1.19"}"#).expect("write");
+        let mut engine = build_engine(&config, &shutdown).expect("build");
+        assert!(!offer_to(&mut engine, 1, "9.0.0").0);
+    }
+
+    /// Only the host lowers the mark: with the Client stopped, the operator deletes the type's
+    /// entry and the type's installed records, and after the start an offer at `0.109.0` is taken
+    /// (ADR-0043 clause 12).
+    /// Verifies: ADR-0043
+    #[tokio::test]
+    async fn the_host_lowers_the_mark_by_deleting_the_entry_and_the_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_tx, shutdown) = shutdown_channel();
+        let config = two_of_a_type(dir.path());
+        installed(&config, "a", "0.110.0");
+        let mut engine = build_engine(&config, &shutdown).expect("build");
+        assert!(!offer_to(&mut engine, 2, "0.109.0").0, "held by the mark");
+        drop(engine);
+
+        std::fs::write(
+            config.state_dir.join(crate::storage::HIGH_WATER_FILE),
+            r#"{"another-type": "2.0.0"}"#,
+        )
+        .expect("remove the type's entry");
+        std::fs::remove_file(config.supervisor_dir("a").join("installed-package.json"))
+            .expect("remove the record");
+
+        let mut engine = build_engine(&config, &shutdown).expect("build");
+        let (downloads, why) = offer_to(&mut engine, 2, "0.109.0");
+        assert!(downloads, "the lowered mark takes 0.109.0: {why}");
     }
 
     fn accepts_packages(engine: &mut Engine) -> bool {

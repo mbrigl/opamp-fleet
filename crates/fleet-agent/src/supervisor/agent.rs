@@ -23,7 +23,7 @@ use opamp::proto::{
 use opamp::uid::InstanceUid;
 use tracing::{info, warn};
 
-use crate::supervisor::ports::{AgentStorage, HostFacts, InstalledPackage};
+use crate::supervisor::ports::{AgentStorage, HighWaterMarks, HostFacts, InstalledPackage};
 
 use connection_settings::{carries_settings, settings_status};
 use opamp::client::protocol::{AgentProtocol, ReportContent};
@@ -201,6 +201,10 @@ struct Local {
     namespace: Option<String>,
     /// Handling an offer changed the package status; the protocol is told once it is done.
     package_status_owed: bool,
+    /// The high-water marks every Supervisor of this Client shares (ADR-0043 clause 8): an offer
+    /// below its Agent type's mark is refused, and an `Installed` raises it. `None` for the
+    /// Client's own Agent, which keeps no mark (clause 13).
+    high_water: Option<std::sync::Arc<dyn HighWaterMarks>>,
 }
 
 impl AgentState {
@@ -282,6 +286,7 @@ impl AgentState {
                 configured_attributes: Vec::new(),
                 namespace: None,
                 package_status_owed: false,
+                high_water: None,
             },
             storage: Box::new(storage),
             pending_apply: None,
@@ -1977,6 +1982,130 @@ mod tests {
             handled.package_download.is_some(),
             "a newer one of its own type is taken"
         );
+    }
+
+    /// A Supervisor of type `otelcol` over its own directory, holding `marks`, taking packages.
+    fn supervisor_with_marks(
+        dir: &std::path::Path,
+        marks: &std::sync::Arc<dyn HighWaterMarks>,
+    ) -> AgentState {
+        let mut agent = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            Storage::new(dir.to_path_buf()).expect("storage"),
+            crate::host::SystemHost,
+        )
+        .expect("agent")
+        .with_high_water(marks.clone());
+        agent.accept_packages();
+        let _ = agent.next_report();
+        agent
+    }
+
+    /// Offers `version` and answers whether a download was scheduled, and the reported refusal.
+    fn offered(agent: &mut AgentState, version: &str, hash: &[u8]) -> (bool, String) {
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", version, hash)),
+            ..Default::default()
+        });
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        (handled.package_download.is_some(), statuses.error_message)
+    }
+
+    /// A Supervisor with no installed record and no mark refuses an offer at `1.19`: nothing is
+    /// downloaded, and the reason names the version (ADR-0043 clause 7).
+    /// Verifies: ADR-0043
+    #[test]
+    fn a_supervisor_refuses_an_offer_whose_version_is_not_semver() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marks: std::sync::Arc<dyn HighWaterMarks> =
+            std::sync::Arc::new(crate::storage::HighWaterFile::open(dir.path()));
+        let mut agent = supervisor_with_marks(&dir.path().join("otelcol"), &marks);
+        for version in ["1.19", "24.04.1", "nightly"] {
+            let (downloads, why) = offered(&mut agent, version, version.as_bytes());
+            assert!(!downloads, "{version}: nothing is fetched");
+            assert!(
+                why.contains(&format!("{version:?}")) && why.contains("SemVer"),
+                "{version}: {why}"
+            );
+        }
+        assert!(
+            offered(&mut agent, "1.19.0", b"semver").0,
+            "1.19.0 is taken"
+        );
+    }
+
+    /// The mark rises on `Installed` and on nothing else: a failed apply, which rolled back to the
+    /// predecessor, leaves it and the version reported where they were; an `Installed` raises it
+    /// and writes the file owner-only (ADR-0043 clause 8).
+    /// Verifies: ADR-0043
+    #[test]
+    fn the_mark_rises_only_when_a_package_is_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join(crate::storage::HIGH_WATER_FILE);
+        let marks: std::sync::Arc<dyn HighWaterMarks> =
+            std::sync::Arc::new(crate::storage::HighWaterFile::open(dir.path()));
+        let mut agent = supervisor_with_marks(&dir.path().join("otelcol"), &marks);
+
+        assert!(offered(&mut agent, "0.110.0", b"v110").0);
+        agent.package_applied(b"v110".to_vec(), Ok("0.110.0".to_string()));
+        assert_eq!(marks.mark("otelcol"), Ok(Some("0.110.0".to_string())));
+        let on_disk: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&std::fs::read(&file).expect("the mark file")).expect("json");
+        assert_eq!(on_disk["otelcol"], "0.110.0");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&file).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "owner-only");
+        }
+
+        assert!(offered(&mut agent, "0.111.0", b"v111").0);
+        agent.package_applied(b"v111".to_vec(), Err("would not stay up".to_string()));
+        assert_eq!(
+            marks.mark("otelcol"),
+            Ok(Some("0.110.0".to_string())),
+            "a rollback moves nothing"
+        );
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        assert_eq!(
+            statuses.packages["otelcol"].agent_has_version, "0.110.0",
+            "the predecessor runs"
+        );
+    }
+
+    /// An installed record an older Client wrote under `1.19` is dropped at load: the Agent
+    /// reports no `agent_has_version`, and nothing enters the mark (ADR-0043 clause 10).
+    /// Verifies: ADR-0043
+    #[test]
+    fn an_installed_record_whose_version_is_not_semver_is_dropped_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let supervisor = dir.path().join("otelcol");
+        Storage::new(supervisor.clone())
+            .expect("storage")
+            .store_package(&InstalledPackage {
+                name: "otelcol".to_string(),
+                version: "1.19".to_string(),
+                hash_hex: hex::encode(b"old"),
+            })
+            .expect("store");
+        let marks: std::sync::Arc<dyn HighWaterMarks> =
+            std::sync::Arc::new(crate::storage::HighWaterFile::open(dir.path()));
+        let mut agent = supervisor_with_marks(&supervisor, &marks);
+
+        assert!(
+            !supervisor.join("installed-package.json").exists(),
+            "the record is deleted"
+        );
+        assert_eq!(marks.mark("otelcol"), Ok(None));
+        // The first offer keys the status; it reports nothing installed.
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "1.19.0", b"republished")),
+            ..Default::default()
+        });
+        assert!(handled.package_download.is_some(), "a first rollout");
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        assert_eq!(statuses.packages["otelcol"].agent_has_version, "");
     }
 
     /// A reply declaring a Capability Set, so a test can say what the Server accepts.

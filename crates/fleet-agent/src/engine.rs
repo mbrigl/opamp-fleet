@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::supervisor::agent::PackageDownload;
 use crate::supervisor::agent::{AgentState, Handled};
-use crate::supervisor::ports::{ProcessCommand, ProcessEvent};
+use crate::supervisor::ports::{HighWaterMarks, ProcessCommand, ProcessEvent};
 use crate::update::{SelfInstall, SelfUpdate, SelfUpdater};
 
 /// The Engine index of the Client's own Agent (ADR-0018). It is built first, so a Supervisor's
@@ -119,6 +119,9 @@ pub struct Engine {
     /// The certificate request last queued on this connection (ADR-0021): a new one goes out at
     /// once, the same one again only with the next report.
     last_csr: Option<Vec<u8>>,
+    /// The high-water marks every Supervisor of this Client shares (ADR-0043 clause 8), kept so a
+    /// Supervisor a set apply adds at runtime is held to the same marks.
+    high_water: Option<Arc<dyn HighWaterMarks>>,
 }
 
 impl Engine {
@@ -163,6 +166,7 @@ impl Engine {
             self_update: SelfUpdate::default(),
             sampling: Arc::new(Mutex::new(Vec::new())),
             last_csr: None,
+            high_water: None,
         };
         // The Client's own Agent samples this process, and that is true from the start — only a
         // Managed Process's pid has to wait for the process to exist.
@@ -172,6 +176,17 @@ impl Engine {
 
     /// Arms self-update (ADR-0018) with what installs a new version and commits this one if it is
     /// itself freshly installed.
+    /// Gives the Engine the high-water marks its Supervisors share (ADR-0043 clause 8).
+    pub fn set_high_water(&mut self, marks: Arc<dyn HighWaterMarks>) {
+        self.high_water = Some(marks);
+    }
+
+    /// The high-water marks a Supervisor started at runtime is held to — `None` only for an
+    /// Engine not built by [`build_engine`](crate::supervisor::build_engine).
+    pub fn high_water(&self) -> Option<Arc<dyn HighWaterMarks>> {
+        self.high_water.clone()
+    }
+
     pub fn arm_self_update(&mut self, updater: impl SelfUpdater + 'static) {
         self.self_update.arm(updater);
     }

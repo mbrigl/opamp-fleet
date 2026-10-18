@@ -316,12 +316,12 @@ fn read_deployments(
         let read = read_json::<OldDeployment>(&path).and_then(|old| {
             let mut packages = BTreeMap::new();
             for reference in &old.packages {
-                let id = PackageId::new(&reference.agent_type, &reference.version)?;
+                let id = PackageId::load(&reference.agent_type, &reference.version)?;
                 packages.insert(id.agent_type.clone(), id);
             }
             let mut held = Signatures::new();
             for signature in &old.signatures {
-                let id = PackageId::new(&signature.agent_type, &signature.version)?;
+                let id = PackageId::load(&signature.agent_type, &signature.version)?;
                 let platform = Platform::new(&signature.os, &signature.arch)?;
                 held.entry((id, platform))
                     .or_default()
@@ -450,7 +450,9 @@ fn carry_packages(
                 continue;
             }
         };
-        let id = match PackageId::new(&old.agent_type, &old.version) {
+        // A version that is a token but not SemVer is carried over as read (ADR-0043 clause 3):
+        // the new Server keeps it, warns about it, and writes nothing to it.
+        let id = match PackageId::load(&old.agent_type, &old.version) {
             Ok(id) => id,
             Err(e) => {
                 report.line(format!("dropped: {} — {e}", meta.display()));

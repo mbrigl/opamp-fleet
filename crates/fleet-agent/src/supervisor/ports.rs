@@ -149,6 +149,24 @@ pub struct InstalledPackage {
     pub hash_hex: String,
 }
 
+/// The highest package version this Client has installed for each Agent type — its **high-water
+/// mark** (ADR-0043 clause 8). Shared by every Supervisor of the Client and kept where no purge of
+/// a Supervisor's directory reaches it. The filesystem adapter is
+/// [`HighWaterFile`](crate::storage::HighWaterFile).
+pub trait HighWaterMarks: Send + Sync {
+    /// The mark of `agent_type`: `Ok(None)` when this Client has installed nothing of the type,
+    /// and `Err` with a reason naming the file when the marks cannot be read — which refuses every
+    /// Supervisor package (ADR-0043 clause 11).
+    ///
+    /// # Errors
+    /// Returns the reason the marks cannot be read.
+    fn mark(&self, agent_type: &str) -> Result<Option<String>, String>;
+
+    /// Raises the mark of `agent_type` to `version` when that is SemVer and greater; never lowers
+    /// it. A write that fails is logged, and the raised mark is kept in memory.
+    fn raise(&self, agent_type: &str, version: &str);
+}
+
 /// What an Agent persists across restarts (ADR-0006): its identity, the remote configuration it
 /// last applied, and the package its Managed Process runs (ADR-0026). The filesystem adapter is
 /// [`Storage`](crate::storage::Storage).

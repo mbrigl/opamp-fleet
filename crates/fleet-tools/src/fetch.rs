@@ -149,6 +149,16 @@ impl AgentKind {
         format!("{}{version}", self.tag_prefix())
     }
 
+    /// What one upstream version is called on each side: the tag it is fetched under, in
+    /// upstream's own spelling, and the Package version it is uploaded as, written as SemVer
+    /// (ADR-0043 clause 6) — `1.19` is fetched as `v1.19` and becomes Package `1.19.0`.
+    ///
+    /// # Errors
+    /// Returns the message to print when upstream's number cannot be written as SemVer.
+    fn release_names(self, upstream: &str) -> Result<(String, String), String> {
+        Ok((self.tag_of_version(upstream), package_version(upstream)?))
+    }
+
     /// The systems this agent can be fetched for, as the agent menu states them.
     ///
     /// A hint, not the plan: what is actually offered comes from the release itself a step later.
@@ -207,6 +217,39 @@ impl AgentKind {
             AgentKind::Supervisor => &[],
         }
     }
+}
+
+/// An upstream version written as a Package version (ADR-0043 clause 6): a number with fewer than
+/// three numeric components is completed with `.0` (`1.19` becomes `1.19.0`), and a leading zero
+/// is dropped from a numeric component (`24.04.1` becomes `24.4.1`). Both keep upstream's order.
+///
+/// # Errors
+/// Names the number when it cannot be written as SemVer this way.
+fn package_version(upstream: &str) -> Result<String, String> {
+    let split = upstream.find(['-', '+']).unwrap_or(upstream.len());
+    let (core, rest) = upstream.split_at(split);
+    let components: Vec<&str> = core.split('.').collect();
+    let numeric = |c: &&str| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit());
+    let written = (components.len() <= 3 && components.iter().all(numeric)).then(|| {
+        let mut parts: Vec<&str> = components
+            .iter()
+            .map(|c| match c.trim_start_matches('0') {
+                "" => "0",
+                trimmed => trimmed,
+            })
+            .collect();
+        parts.resize(3, "0");
+        format!("{}{rest}", parts.join("."))
+    });
+    written
+        .filter(|version| fleet_core::version::is_semver(version))
+        .ok_or_else(|| {
+            format!(
+                "upstream's version {upstream:?} cannot be written as SemVer, which a Package \
+                 version is — fetch it by hand and upload it under a SemVer version you choose \
+                 in the same order"
+            )
+        })
 }
 
 /// A Configuration this tool puts on the Server beside the package, when the Server has none of
@@ -294,7 +337,9 @@ pub async fn run(args: Args) -> Result<(), String> {
         Some(version) => version,
         None => choose_version(agent, &source).await?,
     };
-    let tag = agent.tag_of_version(&version);
+    // The release is fetched under upstream's spelling, and named as a Package in SemVer — before
+    // anything is downloaded, so a number that cannot be written so costs nothing.
+    let (tag, package_version) = agent.release_names(&version)?;
 
     let assets = release_assets(&source, &tag).await?;
     let available = plans(agent, &version, &assets).await?;
@@ -333,7 +378,7 @@ pub async fn run(args: Args) -> Result<(), String> {
                 &server_client,
                 server,
                 source.service_name,
-                &version,
+                &package_version,
                 plan,
                 artifact,
             )
@@ -365,7 +410,7 @@ pub async fn run(args: Args) -> Result<(), String> {
              curl -X PUT <server>/api/v1/deployments/<ring>/packages/{name}/{version}\n  \
              curl -X POST <server>/api/v1/deployments/<ring>/rollout",
             name = source.service_name,
-            version = version
+            version = package_version
         );
         // Silent for an agent that has none — the Client's own configuration is its host's
         // (ADR-0017), so there is nothing here to offer and nothing to apologise for.
@@ -1347,6 +1392,34 @@ mod tests {
             AgentKind::Supervisor.tag_of_version("1.2.3"),
             "version/1.2.3"
         );
+    }
+
+    /// Upstream `1.19` is fetched under its own tag and named Package `1.19.0`; a leading zero is
+    /// dropped, and a number that cannot be written as SemVer is refused, naming it (ADR-0043
+    /// clause 6).
+    /// Verifies: ADR-0043
+    #[test]
+    fn fetch_names_the_package_in_semver_and_fetches_upstreams_tag() {
+        assert_eq!(
+            AgentKind::Otelcol.release_names("1.19"),
+            Ok(("v1.19".to_string(), "1.19.0".to_string()))
+        );
+        assert_eq!(
+            AgentKind::Otelcol.release_names("0.158.0"),
+            Ok(("v0.158.0".to_string(), "0.158.0".to_string()))
+        );
+        assert_eq!(package_version("24.04.1").as_deref(), Ok("24.4.1"));
+        assert_eq!(package_version("2").as_deref(), Ok("2.0.0"));
+        assert_eq!(package_version("1.19-rc.1").as_deref(), Ok("1.19.0-rc.1"));
+        for unwritable in ["nightly", "1.2.3.4", "1.x", "", "1.0.0-01"] {
+            let refusal = AgentKind::Otelcol
+                .release_names(unwritable)
+                .expect_err(unwritable);
+            assert!(
+                refusal.contains(&format!("{unwritable:?}")) && refusal.contains("SemVer"),
+                "{refusal}"
+            );
+        }
     }
 
     /// Versions sort by their numbers: `0.9.0` is older than `0.10.0`, which as text it is not.

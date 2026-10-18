@@ -60,7 +60,8 @@ pub enum Command {
         /// holds for this type alone.
         #[arg(long, required_unless_present = "signing_info")]
         agent_type: Option<String>,
-        /// The Package's version. The signature holds for this version alone.
+        /// The Package's version, a SemVer 2.0.0 version (`1.19.0`, not `1.19`). The signature
+        /// holds for this version alone.
         #[arg(long, required_unless_present = "signing_info")]
         version: Option<String>,
         /// The package artifact to sign (the exact bytes uploaded to the Server).
@@ -196,6 +197,9 @@ pub fn run(command: Command) -> Result<(), String> {
             else {
                 return Err("sign needs --agent-type, --version and the artifact".to_string());
             };
+            // Before the key is read: it never signs a version a Client would refuse
+            // (ADR-0043 clause 4).
+            require_semver(&version)?;
             let keypair = load_key(&key)?;
             let bytes = std::fs::read(&artifact)
                 .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
@@ -391,6 +395,23 @@ pub(crate) fn signing_key() -> Result<(Vec<u8>, String), String> {
     ))
 }
 
+/// Refuses a Package version that is not SemVer (ADR-0043 clauses 2 and 4), naming it — the
+/// predicate the Server and the Client ask too, so what is signed here is what they take.
+///
+/// # Errors
+/// Returns the message to print when `version` is not SemVer.
+pub(crate) fn require_semver(version: &str) -> Result<(), String> {
+    if fleet_core::version::is_semver(version) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the version {version:?} is not SemVer — a Package version is a SemVer 2.0.0 \
+             version (for example 1.19.0 for upstream's 1.19), and a Client refuses any other; \
+             nothing was signed"
+        ))
+    }
+}
+
 fn load_key(path: &PathBuf) -> Result<Ed25519KeyPair, String> {
     let pkcs8 = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     Ed25519KeyPair::from_pkcs8(&pkcs8)
@@ -455,6 +476,63 @@ mod tests {
         };
         drop(out);
         std::fs::read(&out_path).expect("read the unpacked member")
+    }
+
+    /// `sign --version 1.19` and a signing file at `1.19` each fail naming the version, before
+    /// the key is read: the key named here does not exist, so reading it would fail with another
+    /// message (ADR-0043 clause 4).
+    /// Verifies: ADR-0043
+    #[test]
+    fn sign_refuses_a_version_that_is_not_semver_before_reading_the_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = dir.path().join("no-such.key");
+        let artifact = dir.path().join("artifact");
+        std::fs::write(&artifact, b"bytes").expect("write");
+
+        let flags = run(Command::Sign {
+            key: key.clone(),
+            signing_info: None,
+            out: None,
+            agent_type: Some("otelcol".to_string()),
+            version: Some("1.19".to_string()),
+            artifact: Some(artifact),
+        })
+        .expect_err("1.19 is not SemVer");
+        assert!(
+            flags.contains("\"1.19\"") && flags.contains("SemVer"),
+            "{flags}"
+        );
+
+        let file = dir.path().join("signing.json");
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "format": crate::signing::FORMAT,
+                "agent_type": "otelcol",
+                "version": "1.19",
+                "entries": [{
+                    "os": "linux",
+                    "arch": "amd64",
+                    "sha256": "127f9a4866448977b174bc2718e4d53646c7ff571782756837ae9bf1412cfb9e"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write");
+        let from_file = run(Command::Sign {
+            key,
+            signing_info: Some(file),
+            out: None,
+            agent_type: None,
+            version: None,
+            artifact: None,
+        })
+        .expect_err("1.19 is not SemVer");
+        assert!(
+            from_file.contains("\"1.19\"") && from_file.contains("SemVer"),
+            "{from_file}"
+        );
+        assert!(!from_file.contains("no-such.key"), "{from_file}");
     }
 
     /// The round trip that matters: what `pack` writes, the Client opens, finding the member under

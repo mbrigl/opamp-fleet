@@ -135,12 +135,16 @@ has:
 - **The Supervisor Endpoint admits only the process its Supervisor started** (ADR-0015): a token
   made at every start, handed to the process in its environment, asked of every connection.
 - **A package signature covers the Agent type, the version and the hash** (ADR-0026): a signed
-  artifact installs as its own type's program at its own version and nowhere else. A Supervisor
-  refuses a package whose version SemVer orders below the one its installed-package record names;
-  a version on either side that is not SemVer cannot be ordered and is taken, and with no record —
-  a program the operator placed, or a Supervisor after a purge — any version is. The Client's own
-  self-update refuses an offered version that is not SemVer, and one SemVer orders below the
-  running build.
+  artifact installs as its own type's program at its own version and nowhere else. **A Package
+  version is SemVer** (ADR-0043): the Server creates no other, `package sign` signs no other, and a
+  Supervisor takes no other. A Supervisor refuses a package whose version SemVer orders below the
+  one its installed-package record names, or below the **high-water mark** of its Agent type — the
+  highest version this Client has installed for the type, kept in
+  `<state_dir>/package-high-water.json`, which no purge of a Supervisor's directory reaches; a file
+  that cannot be read refuses every Supervisor package. Residual: an old build the operator signed
+  under a version above the current mark, such as a long-ago pre-release of a later version, is
+  still taken; only a signed floor would close that. The Client's own self-update refuses an
+  offered version that is not SemVer, and one SemVer orders below the running build.
 - `TLSConnectionSettings`, `ProxyConnectionSettings` and offered `headers` refused on merit, so a
   Server cannot command a Client to weaken its own verification or plant a header on every
   connection of the fleet (ADR-0014 clause 8,
@@ -238,7 +242,9 @@ out; serve a host from its download route an artifact that is not offered to an 
 speaks for, or serve a host behind a Gateway an artifact the Gateway did not relay to one of
 that host's Agents, or forward a report for an `instance_uid` bound to another host behind a
 Gateway — within the residual that the Gateway binds an `instance_uid` to the host of its first
-report since the Gateway started (ADR-0039); downgrade the Client or install a program that is not the Client as the Client; switch to
+report since the Gateway started (ADR-0039); downgrade the Client or install a program that is not the Client as the Client; install a
+Supervisor package below the highest version this Client installed for its type, or under a version
+that is not SemVer — not by purging the Supervisor and adding it back under any name (ADR-0043); switch to
 plaintext, on the loopback neither, or keep a persisted move to plaintext that `supervisor.toml` does not name; weaken TLS verification, set a proxy or plant a header; hand the Client a private
 key. Each of these is enforced in the code, and most by a test.
 

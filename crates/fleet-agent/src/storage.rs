@@ -1,6 +1,7 @@
 //! What the Client persists across restarts — its identity, the last received remote
 //! configuration, and the installed package — on the filesystem: the adapter behind
-//! [`AgentStorage`].
+//! [`AgentStorage`]. Beside it, [`HighWaterFile`] keeps the high-water marks every Supervisor
+//! shares (ADR-0043).
 //!
 //! The identity file keeps the `instance_uid` stable across restarts, as the Baseline recommends.
 //! The remote configuration is stored losslessly as the received protobuf, plus one plain file per
@@ -444,6 +445,108 @@ fn entry_file_name(name: &str) -> String {
     match sanitized.trim_start_matches('.') {
         "" => "config".to_string(),
         name => name.to_string(),
+    }
+}
+
+/// The file under `state_dir` that holds the high-water marks (ADR-0043 clause 8). It sits outside
+/// `supervisor_dir`, and its name holds a `.`, which no Supervisor name can: no purge of a
+/// Supervisor's directory deletes it, even where `supervisor_dir` is `state_dir` itself.
+pub const HIGH_WATER_FILE: &str = "package-high-water.json";
+
+/// The high-water marks on the filesystem (ADR-0043 clause 8): `<state_dir>/package-high-water.json`,
+/// a JSON object mapping an Agent type to the highest version this Client installed for it,
+/// written owner-only through a temporary file and a rename.
+///
+/// Read once, when the Client starts. A file that exists but does not parse, or that maps a type to
+/// a value that is not SemVer, is never read as empty: every mark then answers the reason, which
+/// refuses every Supervisor package until the operator repairs or deletes the file (clause 11).
+pub struct HighWaterFile {
+    path: PathBuf,
+    marks: std::sync::Mutex<Result<BTreeMap<String, String>, String>>,
+}
+
+impl HighWaterFile {
+    /// Reads the marks under `state_dir`. No file is no mark; an unreadable one is logged as an
+    /// error naming it.
+    #[must_use]
+    pub fn open(state_dir: &Path) -> Self {
+        let path = state_dir.join(HIGH_WATER_FILE);
+        let marks = match std::fs::read(&path) {
+            Ok(bytes) => parse_marks(&bytes),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(e) => Err(e.to_string()),
+        }
+        .map_err(|why| {
+            let reason = format!(
+                "the high-water file {} cannot be read ({why}) — every Supervisor package is \
+                 refused until it is repaired or deleted",
+                path.display()
+            );
+            tracing::error!("{reason}");
+            reason
+        });
+        HighWaterFile {
+            path,
+            marks: std::sync::Mutex::new(marks),
+        }
+    }
+
+    fn write(&self, marks: &BTreeMap<String, String>) -> io::Result<()> {
+        let mut json = serde_json::to_vec_pretty(marks).expect("a map of strings serializes");
+        json.push(b'\n');
+        let tmp = self.path.with_extension("json.tmp");
+        write_private(&tmp, &json)?;
+        std::fs::rename(&tmp, &self.path)
+    }
+}
+
+/// The marks a file holds, or why they cannot be read: it must be a JSON object of strings, each
+/// a SemVer version.
+fn parse_marks(bytes: &[u8]) -> Result<BTreeMap<String, String>, String> {
+    let marks: BTreeMap<String, String> =
+        serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if let Some((agent_type, version)) = marks
+        .iter()
+        .find(|(_, version)| !fleet_core::version::is_semver(version))
+    {
+        return Err(format!(
+            "the mark of {agent_type:?} is {version:?}, which is not SemVer"
+        ));
+    }
+    Ok(marks)
+}
+
+impl crate::supervisor::ports::HighWaterMarks for HighWaterFile {
+    fn mark(&self, agent_type: &str) -> Result<Option<String>, String> {
+        match &*self.marks.lock().expect("marks lock") {
+            Ok(marks) => Ok(marks.get(agent_type).cloned()),
+            Err(reason) => Err(reason.clone()),
+        }
+    }
+
+    fn raise(&self, agent_type: &str, version: &str) {
+        if !fleet_core::version::is_semver(version) {
+            return;
+        }
+        let mut guard = self.marks.lock().expect("marks lock");
+        // An unreadable file stays as the operator finds it: it is theirs to repair.
+        let Ok(marks) = &mut *guard else {
+            return;
+        };
+        let higher = marks.get(agent_type).is_none_or(|mark| {
+            fleet_core::version::precedence(version, mark) == Some(std::cmp::Ordering::Greater)
+        });
+        if !higher {
+            return;
+        }
+        marks.insert(agent_type.to_string(), version.to_string());
+        if let Err(e) = self.write(marks) {
+            warn!(
+                file = %self.path.display(), agent_type, version, error = %e,
+                "cannot write the high-water mark; it is kept in memory, and the next start seeds \
+                 it again from the installed-package records"
+            );
+        }
     }
 }
 

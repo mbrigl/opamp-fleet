@@ -493,6 +493,32 @@ mod tests {
         );
     }
 
+    /// An assignment an older Server wrote, pinning a Package whose version is not SemVer, loads
+    /// as it was: the assignment stays in force (ADR-0043 clause 3), and it still pins the Package.
+    /// Verifies: ADR-0043
+    #[test]
+    fn an_assignment_pinning_a_non_semver_package_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = PackageId::load("otelcol", "1.19").expect("a token");
+        let uid = InstanceUid::default();
+        let mut agent = record();
+        agent.assignment = Some(Assignment {
+            deployment: "stable".to_string(),
+            package: Some(legacy.clone()),
+            configurations: BTreeMap::new(),
+        });
+        FsAgentStore::open(dir.path())
+            .expect("open")
+            .put(&uid, &agent)
+            .expect("put");
+
+        let reopened = FsAgentStore::open(dir.path()).expect("reopen");
+        let loaded = reopened.load().expect("the record loads");
+        let assignment = loaded[&uid].assignment.as_ref().expect("an assignment");
+        assert_eq!(assignment.package.as_ref(), Some(&legacy));
+        assert_eq!(reopened.pinning(Pin::Package(&legacy)), 1);
+    }
+
     /// A rollout writes its revisions before the assignments that pin them, so one cut short in
     /// between leaves a revision nothing references and every record as it was. The next load
     /// accepts that state and collects the orphaned revision, from memory and from disk.

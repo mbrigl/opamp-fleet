@@ -123,6 +123,15 @@ pub fn validate_identity_token(value: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The refusal of a Package version that is a token but not SemVer (ADR-0043 clause 1): it names
+/// the version and the rule. It starts with `the ` so the REST API answers it `400`.
+pub fn not_semver(version: &str) -> String {
+    format!(
+        "the version {version:?} is not SemVer — a Package version is a SemVer 2.0.0 version, \
+         for example 1.19.0 for upstream's 1.19"
+    )
+}
+
 /// A Package's identity (ADR-0026): the Agent type it is built for and its version, stated at
 /// creation and never edited. A new version is a **new Package**, and the type is as constitutive
 /// of "what is this artifact" as the version — an attribute would be editable, and retyping stored
@@ -144,14 +153,39 @@ pub struct PackageId {
 }
 
 impl PackageId {
-    /// Validates both parts; the one gate every write goes through.
+    /// Validates both parts, and that the version is SemVer (ADR-0043 clause 1): the gate every
+    /// write goes through — creating a Package, an entry, a signature, adding it to a Deployment.
+    ///
+    /// # Errors
+    /// Returns the token rule's refusal, or [`not_semver`] when the version is a token but not a
+    /// SemVer version.
     pub fn new(agent_type: &str, version: &str) -> Result<Self, String> {
+        let id = PackageId::load(agent_type, version)?;
+        if !id.is_semver() {
+            return Err(not_semver(version));
+        }
+        Ok(id)
+    }
+
+    /// Validates both parts as tokens only: the gate for what the store already holds and for a
+    /// route that only reads or deletes. A Package an older Server stored under a version that is
+    /// not SemVer loads through here, inert (ADR-0043 clause 3).
+    ///
+    /// # Errors
+    /// Returns an error when either part breaks the token rule of [`validate_identity_token`].
+    pub fn load(agent_type: &str, version: &str) -> Result<Self, String> {
         validate_identity_token(agent_type, "agent type")?;
         validate_identity_token(version, "version")?;
         Ok(PackageId {
             agent_type: agent_type.to_string(),
             version: version.to_string(),
         })
+    }
+
+    /// Whether the version is SemVer (ADR-0043 clause 2). A Package for which it is not was stored
+    /// by an older Server: it is no candidate, and nothing is written to it.
+    pub fn is_semver(&self) -> bool {
+        fleet_core::version::is_semver(&self.version)
     }
 
     /// What an operator reads: the Agent type **and** its version. Never the wire name — that one
@@ -166,7 +200,7 @@ impl PackageId {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut parts = text.split('@');
         match (parts.next(), parts.next(), parts.next()) {
-            (Some(agent_type), Some(version), None) => PackageId::new(agent_type, version),
+            (Some(agent_type), Some(version), None) => PackageId::load(agent_type, version),
             _ => Err(format!(
                 "{text:?} is not an <agent type>@<version> package identity"
             )),
@@ -428,6 +462,15 @@ impl PackageStore {
                         ))
                     }
                 }
+            }
+            // Kept and read, never a candidate and never written to (ADR-0043 clause 3).
+            if !package.id.is_semver() {
+                tracing::warn!(
+                    package = %package.id,
+                    "{} — the package is kept, but it is no candidate and nothing is written to \
+                     it; republish its content under a SemVer version and sign it again",
+                    not_semver(&package.id.version)
+                );
             }
             sets.insert(package.id.clone(), package);
         }
@@ -864,6 +907,13 @@ impl PackageStore {
     ) -> Result<(), String> {
         let sets = self.sets.read().expect("sets lock");
         let set = sets.get(id).ok_or_else(|| format!("no package set {id}"))?;
+        // Nobody's candidate, whatever the Agent reports (ADR-0043 clause 5).
+        if !set.id.is_semver() {
+            return Err(format!(
+                "set {id} is no candidate for any Agent: {}",
+                not_semver(&set.id.version)
+            ));
+        }
         if set.entries.is_empty() {
             return Err(format!(
                 "set {id} holds no entries — a set contains one or more entries before it can be \
@@ -1063,9 +1113,10 @@ fn reported_service_version(description: Option<&AgentDescription>) -> Option<&s
 
 /// What one Agent's Deployment would release to it, if an operator rolled out now.
 ///
-/// Four tests, and every one of them is a hard gate: the Agent reports a platform and a type
-/// (ADR-0026), its Deployment holds a Package for that type (ADR-0026), that Package holds
-/// an entry for the platform, and it is an **upgrade** over what the Agent runs (ADR-0025). Neither
+/// Five tests, and every one of them is a hard gate: the Agent reports a platform and a type
+/// (ADR-0026), its Deployment holds a Package for that type (ADR-0026) whose version is SemVer
+/// (ADR-0043), that Package holds an entry for the platform, and it is an **upgrade** over what
+/// the Agent runs (ADR-0025). Neither
 /// report has an "unknown, so anything goes" case — an Agent reporting neither fits nothing. The
 /// type needs no second comparison: a Deployment holds each Package under its own Agent type.
 ///
@@ -1080,6 +1131,11 @@ fn resolve<'a>(
 ) -> Option<(&'a Package, &'a Entry)> {
     let platform = Platform::reported(description)?;
     let set = sets.get(deployment.package_for(reported_agent_type(description)?)?)?;
+    // A Package an older Server stored under a version that is not SemVer is nobody's candidate
+    // (ADR-0043 clause 5).
+    if !set.id.is_semver() {
+        return None;
+    }
     let entry = set.entries.get(&platform)?;
     upgrades(set, installed, description).then_some((set, entry))
 }
@@ -1837,12 +1893,12 @@ mod tests {
     fn only_the_package_its_ring_holds_is_a_candidate() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
-        let a = stored_set(&store, "otelcol", "nightly-a", b"a");
-        let b = stored_set(&store, "otelcol", "nightly-b", b"b");
+        let a = stored_set(&store, "otelcol", "2.0.0", b"a");
+        let b = stored_set(&store, "otelcol", "3.0.0", b"b");
         let host = agent("linux", "amd64", &[]);
 
-        // Neither version can be ordered against the other, a case with no defensible answer — and
-        // a question nobody asks here.
+        // The store holds a greater version, and the channel still decides: the store does not
+        // rank its way to the newest Package of the type.
         for held in [&a, &b] {
             assert_eq!(
                 store.candidate(&channel(held), Some(&host), &InstalledVersions::new()),
@@ -1854,11 +1910,83 @@ mod tests {
             store.candidate(
                 &channel(&a),
                 Some(&host),
-                &installed(&[("otelcol", "1.0.0")])
+                &installed(&[("otelcol", "2.0.0")])
             ),
             None,
             "and what is no upgrade is still no candidate (ADR-0025)"
         );
+    }
+
+    /// A store an older Server wrote, holding `otelcol@1.19`: it opens and warns naming the
+    /// Package, the Package is nobody's candidate, and a rollout act aimed at it is refused naming
+    /// the version and the SemVer rule (ADR-0043 clauses 3 and 5).
+    /// Verifies: ADR-0043
+    #[test]
+    fn a_stored_package_whose_version_is_not_semver_loads_and_is_no_candidate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = PackageId::load("otelcol", "1.19").expect("a token");
+        {
+            let store = PackageStore::open(dir.path().to_path_buf()).expect("open");
+            store.create(&legacy).expect("create");
+            store
+                .put_entry(&legacy, &linux(), b"old".to_vec())
+                .expect("entry");
+            sign_all(&store, &legacy);
+        }
+
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = {
+            let logs = logs.clone();
+            move || LogBuffer(logs.clone())
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_ansi(false)
+            .finish();
+        let store = tracing::subscriber::with_default(subscriber, || {
+            PackageStore::open(dir.path().to_path_buf())
+        })
+        .expect("a store holding a non-SemVer Package opens");
+        let logs = String::from_utf8(logs.lock().expect("logs").clone()).expect("utf-8");
+        assert!(
+            logs.contains("WARN") && logs.contains("otelcol@1.19") && logs.contains("SemVer"),
+            "one warning names the Package and the rule: {logs}"
+        );
+        assert!(store.summary(&legacy).is_some(), "the Package is kept");
+
+        let nothing = InstalledVersions::new();
+        let host = agent("linux", "amd64", &[]);
+        assert_eq!(
+            store.candidate(&channel(&legacy), Some(&host), &nothing),
+            None,
+            "an Agent that reports nothing would take any SemVer Package — not this one"
+        );
+        let refusal = store
+            .fits_agent(&legacy, Some(&host), &nothing)
+            .expect_err("no act releases it");
+        assert!(
+            refusal.contains("\"1.19\"") && refusal.contains("SemVer"),
+            "the refusal names the version and the rule: {refusal}"
+        );
+        // An assignment that already pins it is still offered (ADR-0025 clause 17): the Client
+        // refuses the offer, and reports why.
+        assert!(store
+            .offer_for_assigned(Some(&legacy), Some(&host))
+            .is_some());
+    }
+
+    /// A `tracing` writer into a shared buffer, so a test can read what was logged.
+    struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("logs").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     /// Fit before aim (ADR-0026): an entry for another platform, or a Set for another
@@ -2213,6 +2341,30 @@ mod tests {
         assert!(PackageId::new("", "1.0.0").is_err());
         assert!(PackageId::new("not a type", "1.0.0").is_err());
         assert!(PackageId::new(&"x".repeat(65), "1.0.0").is_err());
+    }
+
+    /// A write takes only a SemVer version, while what the store holds loads as a token
+    /// (ADR-0043 clauses 1 and 3) — an assignment that pins an older Package parses back.
+    /// Verifies: ADR-0043
+    #[test]
+    fn a_write_takes_a_semver_version_and_a_load_any_token() {
+        for not_semver in ["1.19", "24.04.1", "nightly", "1.0.0-01"] {
+            let refusal = PackageId::new("otelcol", not_semver).expect_err(not_semver);
+            assert!(
+                refusal.contains(&format!("{not_semver:?}")) && refusal.contains("SemVer"),
+                "{refusal}"
+            );
+            let held = PackageId::load("otelcol", not_semver).expect("a token loads");
+            assert!(!held.is_semver());
+            assert_eq!(
+                PackageId::parse(&format!("otelcol@{not_semver}")),
+                Ok(held),
+                "a persisted assignment parses back"
+            );
+        }
+        assert!(PackageId::new("otelcol", "1.19.0").is_ok_and(|id| id.is_semver()));
+        assert!(PackageId::load("otelcol", "1.0.0/../evil").is_err());
+        assert!(PackageId::load("a@b", "1.0.0").is_err());
     }
 
     // ---- What is offered, for the offer and the download alike (ADR-0026) ----

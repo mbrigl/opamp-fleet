@@ -39,7 +39,7 @@ impl PackageBackend for FsPackageBackend {
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let meta: PackageMeta = serde_json::from_str(&text)
                 .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-            let id = PackageId::new(&meta.agent_type, &meta.version)
+            let id = PackageId::load(&meta.agent_type, &meta.version)
                 .map_err(|e| format!("invalid identity in {}: {e}", path.display()))?;
             if id.to_string() != stem {
                 return Err(super::misnamed(&path, "identity"));

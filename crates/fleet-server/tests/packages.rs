@@ -2922,3 +2922,109 @@ async fn a_download_past_the_limit_is_answered_429_after_thirty_seconds() {
         b"the-new-binary"
     );
 }
+
+/// A new Package takes only a SemVer version, and the refusal says so (ADR-0043 clause 1).
+/// Verifies: ADR-0043
+#[tokio::test]
+async fn a_package_is_created_only_under_a_semver_version() {
+    let (server, _scratch) = spawn_with_packages().await;
+    let refused = reqwest::Client::new()
+        .put(set_url(&server, "otelcol", "1.19"))
+        .send()
+        .await
+        .expect("put set");
+    assert_eq!(refused.status(), 400);
+    let body: serde_json::Value = refused.json().await.expect("json");
+    let why = body["error"].as_str().expect("an error text");
+    assert!(
+        why.contains("\"1.19\"") && why.contains("SemVer") && why.contains("1.19.0"),
+        "the refusal names the version and the rule: {why}"
+    );
+    assert!(server.state.packages().expect("store").list().is_empty());
+
+    create_set(&server, "otelcol", "1.19.0").await;
+}
+
+/// A Package an older Server stored under `1.19` is read, and nothing new is done with it: an
+/// entry, a signature and adding it to a Deployment are each refused `400`, while it can be read
+/// and deleted once nothing pins it (ADR-0043 clause 3).
+/// Verifies: ADR-0043
+#[tokio::test]
+async fn a_stored_package_whose_version_is_not_semver_takes_no_write_and_can_be_deleted() {
+    use fleet_server::packages::{PackageId, Platform};
+
+    async fn refused_naming_semver(response: reqwest::Response, what: &str) {
+        assert_eq!(response.status(), 400, "{what}");
+        let body: serde_json::Value = response.json().await.expect("json");
+        let why = body["error"].as_str().expect("an error text");
+        assert!(
+            why.contains("\"1.19\"") && why.contains("SemVer"),
+            "{what}: {why}"
+        );
+    }
+
+    let (server, _scratch) = spawn_with_packages().await;
+    let store = server.state.packages().expect("store");
+    let legacy = PackageId::load(support::AGENT_TYPE, "1.19").expect("a token");
+    store.create(&legacy).expect("create");
+    store
+        .put_entry(
+            &legacy,
+            &Platform::new("linux", "amd64").expect("platform"),
+            b"old".to_vec(),
+        )
+        .expect("entry");
+
+    let read = reqwest::Client::new()
+        .get(set_url(&server, support::AGENT_TYPE, "1.19"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(read.status(), 200, "it is read");
+
+    refused_naming_semver(
+        upload_entry(&server, support::AGENT_TYPE, "1.19", HOST, b"new").await,
+        "an entry",
+    )
+    .await;
+    refused_naming_semver(
+        sign_entry(
+            &server,
+            support::AGENT_TYPE,
+            "1.19",
+            "linux",
+            "amd64",
+            &"01".repeat(64),
+        )
+        .await,
+        "a signature",
+    )
+    .await;
+    assert_eq!(
+        put_deployment(&server, "stable", &[("service.name", support::AGENT_TYPE)])
+            .await
+            .status(),
+        200
+    );
+    refused_naming_semver(
+        reqwest::Client::new()
+            .put(format!(
+                "{}/packages/{}/1.19",
+                deployment_url(&server, "stable"),
+                support::AGENT_TYPE
+            ))
+            .send()
+            .await
+            .expect("put deployment package"),
+        "adding it to a Deployment",
+    )
+    .await;
+
+    let deleted = reqwest::Client::new()
+        .delete(set_url(&server, support::AGENT_TYPE, "1.19"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(deleted.status(), 204, "nothing pins it, so it is deleted");
+    assert!(store.summary(&legacy).is_none());
+}

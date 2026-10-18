@@ -926,7 +926,7 @@ declares the capability only while the store holds a Package. Two objects, and t
 whole of the model:
 
 - A **Package** is *what* an Agent type runs at a version. Its identity is the **Agent type and
-  the version**, and it holds one entry per platform — the Linux build, the macOS builds, the
+  the version**, the version a SemVer 2.0.0 version, and it holds one entry per platform — the Linux build, the macOS builds, the
   Windows build — each an uploaded artifact with its SHA-256 and the operator's **signature**.
   Nothing else: no name of its own, no Selector. It aims at nobody and is never rolled out.
 - A **Deployment** is *where that goes*. A name, the **channel** it aims at, one Package per Agent
@@ -1145,7 +1145,18 @@ Agent reports.
 That is what makes the rule reach a Client installed from a `.deb`, an `.rpm` or an MSI, which has
 installed no package and has none to report: no Client is offered the version it already runs, and
 none is moved backwards. A `service.version` nothing can order (`1.19`, `24.04.1`) simply says
-nothing, so an Agent whose program numbers itself its own way stays reachable.
+nothing, so an Agent whose program numbers itself its own way stays reachable. Its Packages are
+numbered in the program's own space, written as SemVer: `1.19` becomes `1.19.0`, `24.04.1` becomes
+`24.4.1`.
+
+**A Package an older Server stored under a version that is not SemVer is kept and inert.** At
+startup the Server logs one warning per such Package, naming it. It is nobody's candidate, and every
+write to it — an entry, a signature, adding it to a Deployment — is answered `400`. It can be read,
+and deleted once no assignment pins it; an assignment that already pins it stays in force and its
+offer still goes out, which an upgraded Client refuses and reports. Republish the content under a
+SemVer version, sign it again, and roll that out. The Client's own rules — no version below the
+highest it has installed for the type — are in
+[the Client's manual](client.md#a-supervisor-never-goes-back).
 
 **Where an Agent reports both, what it *runs* decides**. The Package must be greater
 than the `service.version` the Agent reports, and the package status is not read beside it —
@@ -1268,7 +1279,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `PUT /api/v1/configurations/{name}` | Create it, or replace its saved revision. Body: `{"body": "…", "service_name": "…", "role": "…"}` — `role` may be omitted; without `service_name` it is refused `400`, as is a `selector`. **Distributes nothing**. |
 | `DELETE /api/v1/configurations/{name}` | Remove it, and take it out of every Deployment that holds it. `409` while an Agent's assignment pins it, saying how many. |
 | `GET /api/v1/packages` | Every stored Package (never the artifact bytes), each with its entries — their hash, size, signature and `signature_state` — and the Deployments that hold it. |
-| `PUT /api/v1/packages/{agent_type}/{version}` | Create a Package. The body has no writable field — `{}`. **Distributes nothing**. |
+| `PUT /api/v1/packages/{agent_type}/{version}` | Create a Package. The body has no writable field — `{}`. **Distributes nothing**. The version is SemVer 2.0.0: any other is answered `400`, naming it — `1.19.0` for upstream's `1.19`. |
 | `GET /api/v1/packages/{agent_type}/{version}` | One Package. |
 | `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body); new bytes remove the entry's signature. `409` while the Package is rolled out to an Agent. The signature is written through the entry's signature route. |
 | `PUT` / `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature` | Record or remove that entry's Ed25519 signature. Body: `{"signature": "<hex>"}`. `404` for an entry that does not exist, `400` for an empty or malformed signature, `409` while the Package is rolled out to an Agent. The answer is the Package, with the entry's `signature_state`. |

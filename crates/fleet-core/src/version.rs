@@ -120,6 +120,29 @@ fn is_dot_identifiers(field: &str) -> bool {
         .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
 }
 
+/// The longest version [`is_semver`] takes: the bound a Package's identity tokens carry (ADR-0043
+/// clause 1), so a version that passes here also fits a Package.
+pub const MAX_SEMVER_LEN: usize = 64;
+
+/// Whether `raw` is a SemVer 2.0.0 version — the one predicate the Server, `opamp-fleetctl` and the
+/// Client ask of a Package version (ADR-0043 clause 2).
+///
+/// [`parse`] already holds the core and both identifier sets to SemVer. The one rule it does not
+/// check is added here: a numeric pre-release identifier has no leading zero (SemVer 2.0.0 §9).
+/// `parse` itself keeps its shape, because ADR-0012 defines it. A value longer than
+/// [`MAX_SEMVER_LEN`] is not taken either.
+#[must_use]
+pub fn is_semver(raw: &str) -> bool {
+    let leading_zero =
+        |id: &str| id.len() > 1 && id.starts_with('0') && id.bytes().all(|b| b.is_ascii_digit());
+    raw.len() <= MAX_SEMVER_LEN
+        && parse(raw).is_some_and(|version| {
+            version
+                .prerelease
+                .is_none_or(|pre| !pre.split('.').any(leading_zero))
+        })
+}
+
 /// The identifying part of a version string — everything except the build metadata — or `None`
 /// when the value is not a version (ADR-0012).
 ///
@@ -299,8 +322,8 @@ mod tests {
         assert!(!same_release("1.0.0", "0.1.0"));
     }
 
-    /// A package version is free-form by the API's own contract, so this parser meets values that
-    /// are not versions at all. It says so rather than guessing.
+    /// A Server, or a program reporting about itself, can send values that are not versions at
+    /// all. This parser says so rather than guessing.
     #[test]
     fn what_is_not_a_version_is_refused() {
         for not_a_version in [
@@ -368,6 +391,30 @@ mod tests {
         if let Some(metadata) = parsed.build {
             assert_eq!(metadata.len(), 7, "{full:?}: metadata is not a short hash");
             assert!(metadata.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+    }
+
+    /// The one predicate every end asks of a Package version (ADR-0043 clause 2).
+    /// Verifies: ADR-0043
+    #[test]
+    fn a_package_version_is_semver() {
+        for semver in ["1.2.3", "1.19.0", "1.2.3-rc.1+abc", "0.110.0", "1.0.0-0"] {
+            assert!(is_semver(semver), "{semver:?} refused");
+        }
+        let longest = format!("1.0.0-{}", "a".repeat(58));
+        assert_eq!(longest.len(), 64);
+        assert!(is_semver(&longest), "64 characters refused");
+        let too_long = format!("{longest}a");
+        for not_semver in [
+            "1.19",
+            "24.04.1",
+            "v1.2.3",
+            "1.0.0-01",
+            "nightly",
+            too_long.as_str(),
+            "",
+        ] {
+            assert!(!is_semver(not_semver), "{not_semver:?} taken");
         }
     }
 

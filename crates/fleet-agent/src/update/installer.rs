@@ -630,7 +630,7 @@ mod tests {
     /// even though it may be validly signed — the refusal happens ahead of the layout check, so it
     /// holds regardless of where this test binary runs from. `0.0.1` is below any release this
     /// project builds.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0018, ADR-0043
     #[test]
     fn install_refuses_a_downgrade() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -866,9 +866,9 @@ mod tests {
         probe(&binary, "0.1.1-dev").expect("offered as what it is, it installs");
     }
 
-    /// A package version is free-form by the API's own contract, so the offer may not be a version
-    /// at all — including the `0.1.1 799e36a` a query string makes of an unencoded `+`.
-    /// Verifies: ADR-0018
+    /// A Server may offer a value that is not a version at all — including the `0.1.1 799e36a` a
+    /// query string makes of an unencoded `+` — and the probe refuses it (ADR-0043 clause 13).
+    /// Verifies: ADR-0018, ADR-0043
     #[cfg(unix)]
     #[test]
     fn the_probe_refuses_an_offer_that_is_not_a_version() {

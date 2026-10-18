@@ -8,7 +8,7 @@ use opamp::proto::{
 use tracing::{error, info, warn};
 
 use super::{AgentState, Handled, Local};
-use crate::supervisor::ports::InstalledPackage;
+use crate::supervisor::ports::{HighWaterMarks, InstalledPackage};
 
 impl AgentState {
     /// Opts this Agent into package delivery (ADR-0026): declares `AcceptsPackages` and
@@ -17,11 +17,50 @@ impl AgentState {
     ///
     /// It consents; it does not choose. Which artifact arrives is decided on the Server, so a
     /// rollout is aimed centrally rather than from this host's file.
+    ///
+    /// For a Supervisor the restored record also seeds the high-water mark of its Agent type
+    /// (ADR-0043 clause 9), and a record whose version is not SemVer is dropped with a warning
+    /// (clause 10): nothing enters the mark from it, and the Agent reports no version for it.
     pub fn accept_packages(&mut self) {
         self.local.accepts_packages = true;
         self.local.installed_package = self.storage.load_package();
+        if self.local.managed {
+            self.restore_supervisor_record();
+        }
         self.declare_capability(AgentCapabilities::AcceptsPackages);
         self.declare_capability(AgentCapabilities::ReportsPackageStatuses);
+    }
+
+    /// Hands this Supervisor the high-water marks it shares with every other Supervisor of the
+    /// Client (ADR-0043 clause 8). Set before [`accept_packages`](Self::accept_packages), which
+    /// seeds the mark from the installed record.
+    #[must_use]
+    pub fn with_high_water(mut self, marks: std::sync::Arc<dyn HighWaterMarks>) -> Self {
+        self.local.high_water = Some(marks);
+        self
+    }
+
+    /// A Supervisor's restored record, held to the SemVer rule and entered into the mark.
+    fn restore_supervisor_record(&mut self) {
+        let Some(installed) = &self.local.installed_package else {
+            return;
+        };
+        if !fleet_core::version::is_semver(&installed.version) {
+            warn!(
+                supervisor = %self.local.instance_name, version = %installed.version,
+                "the installed-package record names a version that is not SemVer; dropping it — \
+                 the program keeps running, and a rollout of a SemVer version reaches it as a \
+                 first rollout"
+            );
+            self.local.installed_package = None;
+            if let Err(e) = self.storage.forget_package() {
+                warn!(error = %e, "cannot drop the installed package record");
+            }
+            return;
+        }
+        if let Some(marks) = &self.local.high_water {
+            marks.raise(&self.local.service_name, &installed.version);
+        }
     }
 
     /// Opts this Agent into package delivery for **one named package only** (ADR-0018) — what the
@@ -104,6 +143,13 @@ impl AgentState {
                 };
                 if let Err(e) = self.storage.store_package(&installed) {
                     warn!(error = %e, "cannot persist the installed package record");
+                }
+                // The program survived the apply grace: its Agent type's mark rises to it
+                // (ADR-0043 clause 8). A rollback is an `Err` and moves nothing.
+                if local.expected_package.is_none() {
+                    if let Some(marks) = &local.high_water {
+                        marks.raise(&local.service_name, &version);
+                    }
                 }
                 info!(version = %version, "package installed");
                 local.installed_package = Some(installed);
@@ -290,10 +336,26 @@ impl Local {
             self.refuse_offer(offer, error, handled);
             return;
         }
-        // A Supervisor takes a package for its own Agent type and nothing else, and never an older
-        // one than it runs: the signature covers type and version (ADR-0026), so neither can be
-        // changed in transit — this refuses a Server that offers the wrong one.
+        // A Supervisor takes a package for its own Agent type and nothing else, only under a
+        // SemVer version, and never one below what it runs or below the highest version this
+        // Client has installed for the type (ADR-0043 clause 7). The signature binds the artifact
+        // to its type and version, but says nothing about how that version orders against
+        // another, so the order is this side's to hold — against a Server that offers an old,
+        // validly signed build.
         if self.expected_package.is_none() {
+            let mark = match self
+                .high_water
+                .as_ref()
+                .map(|marks| marks.mark(&self.service_name))
+            {
+                Some(Err(reason)) => {
+                    error!(reason = %reason, "refusing a package: the high-water file cannot be read");
+                    self.refuse_offer(offer, reason, handled);
+                    return;
+                }
+                Some(Ok(mark)) => mark,
+                None => None,
+            };
             if name != self.service_name {
                 error!(
                     offered = %name, agent_type = %self.service_name,
@@ -302,6 +364,16 @@ impl Local {
                 let error = format!(
                     "this Agent is a {:?}; the Server offered a package for {name:?}",
                     self.service_name
+                );
+                self.refuse_offer(offer, error, handled);
+                return;
+            }
+            if !fleet_core::version::is_semver(&available.version) {
+                error!(offered = %available.version, "refusing a package whose version is not SemVer");
+                let error = format!(
+                    "the Server offered {name} {:?}, which is not SemVer — a package version is a \
+                     SemVer 2.0.0 version, and no other is taken",
+                    available.version
                 );
                 self.refuse_offer(offer, error, handled);
                 return;
@@ -322,6 +394,22 @@ impl Local {
                     self.refuse_offer(offer, error, handled);
                     return;
                 }
+            }
+            if let Some(mark) = mark.filter(|mark| {
+                fleet_core::version::precedence(&available.version, mark)
+                    == Some(std::cmp::Ordering::Less)
+            }) {
+                error!(
+                    offered = %available.version, mark = %mark,
+                    "refusing a package below the high-water mark of its Agent type"
+                );
+                let error = format!(
+                    "the Server offered {name} {}, below {mark}, the highest version this Client \
+                     has installed for {name:?} — a downgrade is not taken",
+                    available.version
+                );
+                self.refuse_offer(offer, error, handled);
+                return;
             }
         }
         // A usable offer clears whatever the last unusable one complained about.

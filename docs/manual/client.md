@@ -223,7 +223,9 @@ and a Package assigned to any Agent is immutable. In full: [Package updates](#pa
 **Versions.** An Agent reports two numbers that can disagree — the version its package record claims
 and the version the program says it is. A Package must move the Agent forward from the **lower** of
 the two and never below what the record claims, so each number is used only in the direction it is
-trustworthy for. A version that cannot be ordered blocks nothing on its own.
+trustworthy for. A version an Agent reports that cannot be ordered blocks nothing on its own. A
+Package's own version is SemVer, and a Supervisor takes nothing below the highest version this
+Client has installed for its type: [A Supervisor never goes back](#a-supervisor-never-goes-back).
 
 **Updating itself.** The same machinery, with two differences that exist because the thing being
 replaced is the thing doing the replacing: the staged binary is asked what version it is before
@@ -859,6 +861,7 @@ and macOS, and a directory junction on Windows, where junctions need no special 
     remote-config.pb        the last configuration it received
     connection-settings.pb  Server-offered settings, if any
     installed-package.json  the update it last installed, if any
+    package-high-water.json the highest version installed per Agent type — see "A Supervisor never goes back"
     packages/               staging for its own update
     logs/                   the service's rotating log
     supervisors/            one directory per Agent — see below
@@ -1677,6 +1680,44 @@ land.
 One limit worth knowing before you plan a rollout: only a **top-level** package is installed. An
 addon is something a Supervisor has no way to apply, so it is refused with `InstallFailed` rather
 than written over the binary it was meant to extend.
+
+### A Supervisor never goes back
+
+A signature binds an artifact to its version, but says nothing about how that version orders
+against another, and an old build stays validly signed forever. So before anything is downloaded a
+Supervisor refuses an offer:
+
+- for another Agent type than its own;
+- whose version is not SemVer 2.0.0 (`1.19`, `24.04.1`, `nightly`);
+- whose version is below the one its `installed-package.json` names;
+- whose version is below the **high-water mark** of its Agent type: the highest version this
+  Client has ever installed for that type.
+
+An offer equal to either is taken. Each refusal is reported in the Agent's package status, naming
+the offered version and the one it was compared against.
+
+The marks live in `<state_dir>/package-high-water.json`, a JSON object from Agent type to version,
+written owner-only. They are kept per Agent type, not per Supervisor, so every Supervisor of a type
+on this Client shares one mark, and removing a Supervisor and adding it back — under its old name
+or a new one — does not reset it: the purge deletes the Supervisor's directory and never this file.
+A mark rises when a Supervisor reports a package `Installed`, after its apply grace; a failed apply
+and its rollback move nothing. At every start each Supervisor's installed record raises its type's
+mark again, so a Client upgraded from a release without the file, or one whose file was deleted,
+starts with the marks its Supervisors already run. An installed record whose version is not SemVer
+is dropped at startup with a warning; the program keeps running, and the Agent reports no version
+for it.
+
+A mark file that exists but does not parse, or that maps a type to a value that is not SemVer, is
+never read as empty: the startup logs an error naming it, and every Supervisor package offer is
+refused, naming the file, until you repair or delete it. The connection, the configurations and the
+Client's own update are unaffected. The Client's own Agent keeps no mark: its floor is the binary
+that runs ([Updating the Client itself](#updating-the-client-itself)).
+
+**Only the host lowers a mark.** To move a Supervisor to an older version on purpose: stop the
+Client, remove that type's entry from `package-high-water.json` (or delete the file, which resets
+every type no remaining record names), delete `installed-package.json` of every Supervisor of that
+type, and start the Client. The path that needs no host access is to publish the old content as a
+new, greater version.
 
 ### Package updates: rollback and retention
 

@@ -26,6 +26,9 @@ ones it uses without defining.
 - **Entry** — one platform's artifact in a Package: operating system and architecture, content hash,
   size and signature.
   _Avoid:_ file, asset, build.
+- **High-water mark** — the highest Package version a Client has installed for one Agent type; a
+  Supervisor of that type refuses any offer below it.
+  _Avoid:_ floor, minimum version.
 - **Blob** — the bytes of an Entry's artifact as the Server stores them, named by their SHA-256;
   identical bytes are one blob, whichever Entries name it.
   _Avoid:_ artifact file, binary.

@@ -47,6 +47,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `ws://` or `http://` no longer starts; set a `wss://` or `https://` endpoint or remove the key.
   A development setup on the loopback names its plaintext endpoint in `supervisor.toml`.
 
+- **A Package version is SemVer, and a Supervisor never installs one below its high-water mark**
+  ([ADR-0043](docs/adr/0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md)).
+  A compromised Server could move a Supervisor back to an old, validly signed build: by offering
+  it under a version that cannot be ordered, such as `1.19`, or by purging the Supervisor and
+  adding it back, which deleted the record its floor was read from. A Package version must now
+  be SemVer on the Server (`400` otherwise), in `opamp-fleetctl package sign` (refused before the
+  key is read) and on the Client. Each Client keeps the highest version it has installed per
+  Agent type in `<state_dir>/package-high-water.json`, which no purge touches, and every
+  Supervisor of that type refuses an offer below it. `package fetch` names the Package of an
+  upstream `1.19` as `1.19.0`. The Client's own update keeps its own rules. **What to do:** a
+  Server holding a Package under a version that is not SemVer starts, warns about each one, and
+  writes nothing to it; such a Package is no candidate, and an upgraded Client refuses its offer.
+  Republish its content under a SemVer version (`1.19` becomes `1.19.0`), sign it again and roll
+  that out; an Agent whose installed record named the old version takes it as a first rollout.
+  Scripts that create Packages under non-SemVer versions get `400`. To move a Supervisor to an
+  older version on purpose, stop the Client, remove that type's entry from
+  `package-high-water.json`, delete `installed-package.json` of every Supervisor of that type,
+  and start the Client — or publish the old content under a new, greater version.
+
 - **The Operator plane sends HSTS.** Every response carries `Strict-Transport-Security:
   max-age=31536000`, without `includeSubDomains`, so a browser that reached the plane once by its
   name never tries `http://` for it again, where an attacker on the network could answer and ask for the
@@ -89,28 +108,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `sudo systemctl restart opamp-fleet`, after checking that its Agents work without root (GLPI
   Agent's inventory and Deploy, Telegraf inputs that need `sudo`, ports below 1024, logs readable
   only by `adm`). A file the service reads outside the data root must be readable by the account.
-
-### Changed
-
-- **A plain `service install` no longer returns a host to root**
-  ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
-  Without `--run-as` a re-registration keeps the account the registration names. Root is chosen
-  with `--run-as root`, which the unit records as `User=root`. The install prints the account and
-  where it came from, and on every system registration under Linux and macOS, root included, hands
-  both roots over to that account. **What to do:** a host you returned to root with a plain
-  re-install while its data root still belonged to the account comes back up under the account at
-  its next re-registration; run `sudo opamp-fleet service install --run-as root` to keep it root.
-  Windows is unchanged: the SCM keeps the logon account it holds.
-
-- **The Client writes its systemd unit itself**
-  ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
-  `ExecStart=` now quotes every word, so a root holding a space, a `%` or a `$` names the right
-  program. Every system unit carries `ProtectControlGroups=yes`; a unit running as root also
-  carries `ProtectKernelTunables=yes`, `LockPersonality=yes` and `RestrictRealtime=yes`. Nothing
-  that sets `no_new_privs` under an account is added, so `sudo` and setuid helpers keep working.
-  **What to do:** nothing, the next upgrade rewrites the unit. A host that needs more or less puts
-  it in a drop-in under `/etc/systemd/system/opamp-fleet.service.d/`, which no install touches. An
-  archive install that only self-updates gets the new unit at its next `service install`.
 
 - **A third-party GitHub Action is pinned to a commit SHA**
   ([ADR-0044](docs/adr/0044-third-party-actions-are-pinned-to-a-commit-sha.md)). The workflows
@@ -158,6 +155,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   least 8 characters for the next bootstrap certificate you issue, and update any script that
   issues one with a shorter password. A file issued before keeps the password it was issued under
   and opens with it.
+
+### Changed
+
+- **A plain `service install` no longer returns a host to root**
+  ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
+  Without `--run-as` a re-registration keeps the account the registration names. Root is chosen
+  with `--run-as root`, which the unit records as `User=root`. The install prints the account and
+  where it came from, and on every system registration under Linux and macOS, root included, hands
+  both roots over to that account. **What to do:** a host you returned to root with a plain
+  re-install while its data root still belonged to the account comes back up under the account at
+  its next re-registration; run `sudo opamp-fleet service install --run-as root` to keep it root.
+  Windows is unchanged: the SCM keeps the logon account it holds.
+
+- **The Client writes its systemd unit itself**
+  ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
+  `ExecStart=` now quotes every word, so a root holding a space, a `%` or a `$` names the right
+  program. Every system unit carries `ProtectControlGroups=yes`; a unit running as root also
+  carries `ProtectKernelTunables=yes`, `LockPersonality=yes` and `RestrictRealtime=yes`. Nothing
+  that sets `no_new_privs` under an account is added, so `sudo` and setuid helpers keep working.
+  **What to do:** nothing, the next upgrade rewrites the unit. A host that needs more or less puts
+  it in a drop-in under `/etc/systemd/system/opamp-fleet.service.d/`, which no install touches. An
+  archive install that only self-updates gets the new unit at its next `service install`.
 
 ### Fixed
 
