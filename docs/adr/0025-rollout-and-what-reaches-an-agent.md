@@ -1,6 +1,6 @@
 # ADR-0025: A rollout is an explicit act per Agent that pins what it releases, and a package reaches an Agent only when it fits, is aimed at it, and moves it forward from what it runs
 
-- **Status:** 🟢 accepted · clauses 2, 5, 7 and 20 superseded by [ADR-0034](0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)
+- **Status:** 🟢 accepted · clauses 2, 5, 7 and 20 superseded by [ADR-0034](0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md) · clauses 9 and 14 superseded by [ADR-0043](0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md)
 - **Date:** 2026-10-10
 - **Deciders:** Markus Brigl
 - **Applies to:** the assignments and rollout acts in `crates/fleet-server/src/fleet.rs`, the saved and retained revisions in `crates/fleet-server/src/configs.rs`, the matching and offer functions of `crates/fleet-server/src/packages.rs`, the rollout routes of `crates/fleet-server/src/api.rs`, the persisted Agent record, the rollout column of the bundled UI, the Client's check of an offer for its own package
