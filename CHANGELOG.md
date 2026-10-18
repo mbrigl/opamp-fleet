@@ -13,7 +13,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.5.5]
+## [0.6.0]
+
+## [0.5.5] - 2026-10-18
 
 ### Added
 
