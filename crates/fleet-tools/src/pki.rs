@@ -1419,6 +1419,7 @@ mod tests {
         let enrolment = fleet_server::config::EnrolmentConfig {
             bootstrap_ca_file: out.join("bootstrap-ca.pem"),
             bootstrap_ca_key_file: Some(out.join("bootstrap-ca-key.pem")),
+            max_pending_per_bootstrap: fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
         };
         assert!(fleet_server::ca::BootstrapCa::from_config(&enrolment, None)
             .expect("the Server loads it")

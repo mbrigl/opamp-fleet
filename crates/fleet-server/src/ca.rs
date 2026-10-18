@@ -1302,6 +1302,7 @@ mod tests {
         crate::config::EnrolmentConfig {
             bootstrap_ca_file: dir.join("bootstrap-ca.pem"),
             bootstrap_ca_key_file: Some(dir.join("bootstrap-ca-key.pem")),
+            max_pending_per_bootstrap: crate::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
         }
     }
 

@@ -295,6 +295,7 @@ mod tests {
         let enrolment = EnrolmentConfig {
             bootstrap_ca_file: path("bootstrap-ca.pem", &pem(bootstrap)),
             bootstrap_ca_key_file: None,
+            max_pending_per_bootstrap: crate::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
         };
         server_tls(&tls, None, Some(&enrolment))
             .expect("server material")

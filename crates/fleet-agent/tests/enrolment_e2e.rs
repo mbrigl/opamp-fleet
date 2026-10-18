@@ -441,6 +441,8 @@ impl Served {
             Some(&fleet_server::config::EnrolmentConfig {
                 bootstrap_ca_file: pki.join("bootstrap-ca.pem"),
                 bootstrap_ca_key_file: None,
+                max_pending_per_bootstrap:
+                    fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
             }),
         )
         .expect("server material");

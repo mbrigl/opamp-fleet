@@ -344,12 +344,15 @@ async fn main() {
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
     // ADR-0021: closed until an operator opens it; the window and its queue survive a restart
     // (ADR-0037 clause 9).
-    let enrolment = match config.enrolment.as_ref().map(|_| {
+    let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
         fleet_server::enrolment::Enrolment::open_on(
             clock.clone(),
             Box::new(fleet_server::fs::FsEnrolmentStore::open(&config.data_dir)),
         )
+        .map(|enrolment| {
+            enrolment.with_max_pending_per_bootstrap(section.max_pending_per_bootstrap)
+        })
     }) {
         None => None,
         Some(Ok(enrolment)) => Some(Arc::new(enrolment)),

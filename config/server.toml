@@ -183,9 +183,12 @@ client_ca_file = "client-ca.pem"
 # key in that one answer:
 #   POST /api/v1/bootstrap-certificates  {"subject": {"organization": "…"}, "validity_days": 10}
 #   GET  /api/v1/bootstrap-certificates  lists the valid ones, each revocable by its serial
+# The pending queue holds at most 1024 requests; those of one bootstrap certificate at most
+# max_pending_per_bootstrap of them (1 to 1024), a quarter by default.
 # [enrolment]
 # bootstrap_ca_file = "bootstrap-ca.pem"
 # bootstrap_ca_key_file = "bootstrap-ca-key.pem"
+# max_pending_per_bootstrap = 256
 
 # Repeated admission failures from one peer address: past max_failures 401s within
 # window_secs, the address is answered 429 with Retry-After for backoff_secs, before anything else

@@ -1141,6 +1141,30 @@ impl Fleet {
                 &report.instance_uid,
                 "the enrolment queue is full — retry later",
             ),
+            Submitted::OverShare { first } => {
+                // Audited once per certificate and window (ADR-0046): a host re-sending its
+                // refused request does not flood the record.
+                if let (true, Some(audit)) = (first, self.0.audit()) {
+                    audit.refusal(
+                        Entry::new("enrolment.refused", "refused")
+                            .peer(enrolling.requester.peer)
+                            .with("reason", "bootstrap_share")
+                            .with(
+                                "bootstrap_serial",
+                                enrolling.requester.bootstrap.serial.clone(),
+                            )
+                            .with(
+                                "bootstrap_subject",
+                                enrolling.requester.bootstrap_subject.clone(),
+                            ),
+                    );
+                }
+                unavailable(
+                    &report.instance_uid,
+                    "this bootstrap certificate holds its share of the enrolment queue — retry \
+                     later",
+                )
+            }
             Submitted::Closed => unavailable(&report.instance_uid, "no enrolment window is open"),
         }
     }

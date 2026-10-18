@@ -138,6 +138,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   without an extension now also picks up the `.cdx.json`; select `.tar.gz`. No asset carries a
   code signature.
 
+- **One bootstrap certificate holds at most a quarter of the enrolment queue**
+  ([ADR-0046](docs/adr/0046-one-bootstrap-certificate-holds-at-most-a-quarter-of-the-enrolment-queue.md)).
+  Whoever held one bootstrap certificate could fill all 1024 places of the pending queue with
+  requests for fresh keys, and every other host was refused until the window closed. The requests
+  of one bootstrap certificate now hold at most `[enrolment] max_pending_per_bootstrap` places,
+  256 by default; a request beyond that is answered `Unavailable`, and audited as
+  `enrolment.refused` once per certificate and window. A re-sent request that already waits is
+  never refused. **What to do:** nothing, unless one bootstrap certificate enrols more than 256
+  hosts in one window: then approve them in batches, or set `max_pending_per_bootstrap` (1 to
+  1024) in `[enrolment]`.
+
 ### Fixed
 
 - **The audit record is written out before the Server exits.** Entries still queued for the audit

@@ -182,6 +182,8 @@ struct Setup<'a> {
     issue_bootstrap: bool,
     /// The CA of `[rest.tls]`: the Operator plane then serves a certificate it issued (ADR-0032).
     operator_pki: Option<&'a Pki>,
+    /// `[enrolment] max_pending_per_bootstrap` (ADR-0046); its default when `None`.
+    max_pending_per_bootstrap: Option<usize>,
 }
 
 /// The CAs a revocation can name, as `main` takes them from `[tls]` and `[enrolment]`.
@@ -223,9 +225,16 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
     let dir = tempfile::tempdir().expect("tempdir");
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
     let test_clock = setup.clock.clone().unwrap_or_else(|| clock.clone());
-    let enrolment = setup
-        .bootstrap
-        .map(|_| Arc::new(fleet_server::enrolment::Enrolment::new(test_clock.clone())));
+    let enrolment = setup.bootstrap.map(|_| {
+        Arc::new(
+            fleet_server::enrolment::Enrolment::new(test_clock.clone())
+                .with_max_pending_per_bootstrap(
+                    setup
+                        .max_pending_per_bootstrap
+                        .unwrap_or(fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP),
+                ),
+        )
+    });
     let revocations = setup.revocations.then(|| {
         Arc::new(
             Revocations::open(
@@ -250,6 +259,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
         fleet_server::config::EnrolmentConfig {
             bootstrap_ca_file: file,
             bootstrap_ca_key_file: key_file,
+            max_pending_per_bootstrap: fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
         }
     });
     let bootstrap = enrolment_config.as_ref().map(|config| {
@@ -1018,6 +1028,7 @@ fn a_bootstrap_ca_sharing_its_subject_with_the_client_ca_is_refused() {
     let enrolment = fleet_server::config::EnrolmentConfig {
         bootstrap_ca_file: file("bootstrap-ca.pem", &twin.ca_pem).into(),
         bootstrap_ca_key_file: None,
+        max_pending_per_bootstrap: fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
     };
     let Err(err) = fleet_server::tls::server_tls(&tls, None, Some(&enrolment)) else {
         panic!("a bootstrap CA indistinguishable from the client CA was accepted");
@@ -3066,6 +3077,108 @@ async fn a_throttled_message_leaves_an_aggregated_refusal_naming_the_host() {
     }
 }
 
+/// One bootstrap certificate holds at most its share of the enrolment queue: past it, a request
+/// for a fresh key is answered `Unavailable` with `retry_info` and audited once for the window,
+/// a request of another bootstrap certificate is still queued, and a re-sent request of the first
+/// still joins its own entry.
+/// Verifies: ADR-0046
+#[tokio::test]
+async fn one_bootstrap_certificate_holds_at_most_its_share_of_the_queue() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let lines = Lines::default();
+    let clock = Manual::now();
+    let audit: Arc<dyn fleet_server::audit::Audit> = Arc::new(
+        fleet_server::audit_log::AuditLog::start(
+            Box::new(lines.clone()),
+            fleet_server::audit_log::Limits::default(),
+            clock.clone(),
+        )
+        .expect("audit"),
+    );
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            audit: Some(audit),
+            clock: Some(clock),
+            max_pending_per_bootstrap: Some(2),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let enrolment = served.enrolment.clone().expect("enrolment");
+    enrolment.open(600).expect("open the window");
+    let (first_cert, first_key) = bootstrap.issue_bootstrap("bootstrap-1");
+    let first = client(&served.ca_pem, Some((&first_cert, &first_key)));
+    let uid = InstanceUid::default();
+    let send = |client: &reqwest::Client, csr: Vec<u8>| {
+        let message = with_csr(&uid, csr);
+        let client = client.clone();
+        let endpoint = served.endpoint.clone();
+        async move { decode(post(&client, &endpoint, message).await).await }
+    };
+    let (kept, _) = csr_for("edge-01");
+    assert!(!is_unavailable(&send(&first, kept.clone()).await));
+    assert!(!is_unavailable(&send(&first, csr_for("edge-02").0).await));
+    for _ in 0..2 {
+        let refused = send(&first, csr_for("edge-03").0).await;
+        assert!(is_unavailable(&refused), "{refused:?}");
+        assert!(
+            refused
+                .error_response
+                .as_ref()
+                .is_some_and(|error| error.details.is_some()),
+            "told when to retry: {refused:?}"
+        );
+    }
+    assert!(
+        !is_unavailable(&send(&first, kept).await),
+        "a re-sent request joins its own entry"
+    );
+    let (other_cert, other_key) = bootstrap.issue_bootstrap("bootstrap-2");
+    let other = client(&served.ca_pem, Some((&other_cert, &other_key)));
+    assert!(
+        !is_unavailable(&send(&other, csr_for("edge-04").0).await),
+        "another bootstrap certificate is still queued"
+    );
+    assert_eq!(enrolment.pending().len(), 3);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let refused = loop {
+        let all: Vec<serde_json::Value> = lines
+            .0
+            .lock()
+            .expect("lines")
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect();
+        if named(&all, "enrolment.queued").len() == 3 {
+            break named(&all, "enrolment.refused")
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the queued requests were never recorded: {all:#?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        refused.len(),
+        1,
+        "once per certificate and window: {refused:#?}"
+    );
+    assert_eq!(refused[0]["outcome"], "refused");
+    assert_eq!(refused[0]["reason"], "bootstrap_share");
+    assert_eq!(refused[0]["peer"], "127.0.0.1");
+    assert!(refused[0]["bootstrap_serial"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty()));
+}
+
 /// Each `Unavailable` this Server sends carries the `instance_uid` of the message it answers — the
 /// field the Client and a Gateway route a reply by: the rate limit's, the Agent-record ceiling's, a
 /// CSR held back for its record, the full enrolment queue and the closed enrolment window.
@@ -3195,13 +3308,18 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
             bootstrap_subject: String::new(),
             carried: Ok(fleet_server::revocation::SubjectValues::default()),
             bootstrap_fingerprint: String::new(),
+            // One bootstrap certificate holds a quarter of the queue at most (ADR-0046): the
+            // fillers come with one each, so they fill it all.
             bootstrap: fleet_server::revocation::CertId {
                 issuer: String::new(),
-                serial: String::new(),
+                serial: format!("{n:x}"),
             },
             peer: None,
         };
-        enrolment.submit(request, requester);
+        assert_eq!(
+            enrolment.submit(request, requester),
+            fleet_server::enrolment::Submitted::Waiting
+        );
     }
     let (bootstrap_cert, bootstrap_key) = bootstrap.issue_bootstrap("bootstrap");
     let enrolling = client(&served.ca_pem, Some((&bootstrap_cert, &bootstrap_key)));

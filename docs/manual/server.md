@@ -251,12 +251,18 @@ the approved request.
 [enrolment]
 bootstrap_ca_file = "bootstrap-ca.pem"
 bootstrap_ca_key_file = "bootstrap-ca-key.pem"   # optional: the Server issues bootstrap certificates
+max_pending_per_bootstrap = 256                  # optional: requests of one bootstrap certificate
 ```
 
 `bootstrap_ca_key_file` is the CA's key, PKCS#8 PEM. With it the Server issues bootstrap
 certificates on request ([Bootstrap certificates](#bootstrap-certificates-issued-by-the-server));
 without it, hosts enrol with bootstrap certificates made elsewhere from the same CA. A key that is
 not the CA's, or that is the client CA's, is refused at startup.
+
+`max_pending_per_bootstrap` is the most requests of one bootstrap certificate, by its issuer and
+serial, the pending queue holds at once: 256 by default, a quarter of the queue, from 1 to 1024.
+Anything else fails startup naming the key. Raise it when one bootstrap certificate enrols more
+than 256 hosts in one window and you would rather not approve them in batches.
 
 ### `[admission_throttle]`
 
@@ -670,8 +676,12 @@ whose certificate its host has not collected included; that host enrols again in
 
 **While it is open, an enrolling host may send a certificate request and nothing else.** The
 Server creates no Agent record for it and offers it nothing but the issued certificate. The request
-waits in a queue of at most 1024. The Client keeps its pending key and re-sends the same request
-until it is answered.
+waits in a queue of at most 1024, of which the requests of one bootstrap certificate hold at most
+`max_pending_per_bootstrap`, 256 by default. A request beyond either bound is answered
+`Unavailable` and the host retries later; one beyond its bootstrap certificate's share is recorded
+in the audit as `enrolment.refused` with `reason` `bootstrap_share` and the certificate's serial,
+once per certificate and window. A re-sent request that already waits is never refused. The Client
+keeps its pending key and re-sends the same request until it is answered.
 
 **Match the request to the host by its fingerprint.** The enrolling Client logs the SHA-256
 fingerprint of the key it generated:
