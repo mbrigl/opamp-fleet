@@ -976,10 +976,11 @@ impl Handler for Fleet {
             .proofs
             .certificate
             .as_ref()
-            .map(|(id, _)| Presented {
+            .map(|(id, not_after_ms)| Presented {
                 id: id.clone(),
                 host: carrier.proofs.host.clone(),
                 subject_values: carrier.proofs.subject_values.clone(),
+                not_after_ms: *not_after_ms,
             });
         let outcome =
             self.0

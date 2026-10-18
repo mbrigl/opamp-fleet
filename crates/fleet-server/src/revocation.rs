@@ -163,6 +163,9 @@ pub struct Presented {
     pub host: Option<String>,
     /// Its subject's values, which a Host made at its first report carries (ADR-0035 clause 1).
     pub subject_values: SubjectValues,
+    /// Its `not_after`: every admission moves its Host's valid until forward to it (ADR-0047
+    /// clause 1).
+    pub not_after_ms: u64,
 }
 
 /// A Host: what a client certificate's host id names (ADR-0021 clause 7, ADR-0035 clause 1).
@@ -182,6 +185,23 @@ pub struct Host {
     /// provisioned certificate made at its first report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_ms: Option<u64>,
+    /// The latest `not_after` of a certificate naming it that the Server issued or that it
+    /// presented, in milliseconds since the Unix epoch (ADR-0047 clause 1). Every issuance and
+    /// every admission moves it forward, never back. Once it has passed, a Host not marked as a
+    /// Gateway ends with its bindings. `None` for a Host written before it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until_ms: Option<u64>,
+}
+
+impl Host {
+    /// Moves its valid until forward to `not_after_ms`, never back; answers whether it moved.
+    fn extend(&mut self, not_after_ms: u64) -> bool {
+        if self.valid_until_ms >= Some(not_after_ms) {
+            return false;
+        }
+        self.valid_until_ms = Some(not_after_ms);
+        true
+    }
 }
 
 /// The Agents a host's certificate speaks for (ADR-0026 clause 37).
@@ -317,7 +337,8 @@ struct State {
     roots: BTreeMap<CertId, CertId>,
     /// How many register entries descend from each root.
     descendants: BTreeMap<CertId, usize>,
-    /// The earliest `not_after` in the register: nothing can be pruned before it.
+    /// The earliest `not_after` in the register, or valid until of a Host: nothing can be pruned
+    /// before it.
     earliest_expiry_ms: u64,
     hosts: BTreeMap<String, Host>,
     /// Counts the changes to `hosts`.
@@ -509,6 +530,14 @@ impl Revocations {
                         state.earliest_expiry_ms.min(issued.facts.not_after_ms);
                     state.issued.insert(issued.facts.id.clone(), issued);
                 }
+                // A Host's valid until may pass before any certificate in the register expires
+                // (ADR-0047 clause 1); one written before it had a valid until is pruned at once,
+                // so it takes the register's latest `not_after` for it.
+                for host in state.hosts.values().filter(|host| !host.gateway) {
+                    state.earliest_expiry_ms = state
+                        .earliest_expiry_ms
+                        .min(host.valid_until_ms.unwrap_or(0));
+                }
                 // Each root by the predecessor links themselves, not by the order entries load in.
                 let ids: Vec<CertId> = state.issued.keys().cloned().collect();
                 for id in ids {
@@ -566,6 +595,7 @@ impl Revocations {
         let recorded = self.admit(&mut state, facts.clone(), instance_uid, predecessor);
         // The approval that mints a host id writes the Host (ADR-0035 clause 1): an issuance that
         // renews nothing and names a host the register does not know yet.
+        // Every issuance moves its Host's valid until forward (ADR-0047 clause 1).
         let hosts = match (&recorded, minted, &facts.host) {
             (Ok(()), true, Some(host)) if !state.hosts.contains_key(host) => {
                 let now = self.clock.now_ms();
@@ -574,9 +604,18 @@ impl Revocations {
                     Host {
                         subject: facts.subject_values.clone(),
                         approved_ms: Some(now),
+                        valid_until_ms: Some(facts.not_after_ms),
                         ..Host::default()
                     },
                 );
+                Some(Self::hosts_changed(&mut state))
+            }
+            (Ok(()), _, Some(host))
+                if state
+                    .hosts
+                    .get_mut(host)
+                    .is_some_and(|entry| entry.extend(facts.not_after_ms)) =>
+            {
                 Some(Self::hosts_changed(&mut state))
             }
             _ => forgotten,
@@ -651,7 +690,8 @@ impl Revocations {
     /// another host is refused. A Gateway's certificate binds nothing — it carries other hosts'
     /// Agents. A certificate an operator provisioned with a host id makes its Host here, at its
     /// first report, with `subject` — the values of the certificate it presented (ADR-0035
-    /// clause 1).
+    /// clause 1). Every admitted report moves the Host's valid until forward to `not_after_ms`,
+    /// the end of the certificate it presented (ADR-0047 clause 1).
     ///
     /// # Errors
     /// Returns the refusal, or an error when a new binding cannot be written.
@@ -659,23 +699,53 @@ impl Revocations {
         &self,
         host: &str,
         subject: &SubjectValues,
+        not_after_ms: u64,
         instance_uid: &[u8],
     ) -> Result<(), String> {
         let uid = hex::encode(instance_uid);
         let mut state = self.state.lock().expect("revocation lock");
-        if !Self::admits(&state, host, &uid)? {
-            return Ok(());
+        let binds = Self::admits(&state, host, &uid)?;
+        if binds {
+            state
+                .hosts
+                .entry(host.to_string())
+                .or_insert_with(|| Host {
+                    subject: subject.clone(),
+                    ..Host::default()
+                })
+                .instance_uids
+                .insert(uid.clone());
+            state.owners.insert(uid, host.to_string());
         }
-        state
+        let extended = state
             .hosts
-            .entry(host.to_string())
-            .or_insert_with(|| Host {
-                subject: subject.clone(),
-                ..Host::default()
-            })
-            .instance_uids
-            .insert(uid.clone());
-        state.owners.insert(uid, host.to_string());
+            .get_mut(host)
+            .is_some_and(|entry| entry.extend(not_after_ms));
+        if extended {
+            state.earliest_expiry_ms = state.earliest_expiry_ms.min(not_after_ms);
+        }
+        if binds || extended {
+            self.save_hosts(state)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Releases `instance_uid` from the Host it is bound to, when an operator forgets its Agent
+    /// (ADR-0047 clause 2): the next host that reports it binds it.
+    ///
+    /// # Errors
+    /// Returns an error when the release cannot be written; it holds in memory all the same, and
+    /// the next write of the hosts carries it.
+    pub fn release(&self, instance_uid: &[u8]) -> Result<(), String> {
+        let uid = hex::encode(instance_uid);
+        let mut state = self.state.lock().expect("revocation lock");
+        let Some(host) = state.owners.remove(&uid) else {
+            return Ok(());
+        };
+        if let Some(entry) = state.hosts.get_mut(&host) {
+            entry.instance_uids.remove(&uid);
+        }
         self.save_hosts(state)
     }
 
@@ -752,7 +822,13 @@ impl Revocations {
         if !known {
             return Ok(false);
         }
-        state.hosts.entry(host.to_string()).or_default().gateway = gateway;
+        let entry = state.hosts.entry(host.to_string()).or_default();
+        entry.gateway = gateway;
+        // A Host whose mark is taken away ends with its valid until again (ADR-0047 clause 1).
+        let until = entry.valid_until_ms.unwrap_or(0);
+        if !gateway {
+            state.earliest_expiry_ms = state.earliest_expiry_ms.min(until);
+        }
         self.save_hosts(state)?;
         Ok(true)
     }
@@ -990,9 +1066,9 @@ impl Revocations {
     /// and the revocations of certificates those entries held (clause 6). A revoked ancestor of a
     /// valid renewal stays, so the renewal stays revoked.
     ///
-    /// A host that holds no valid certificate, speaks for no Agent and is not marked as a Gateway
-    /// is forgotten; what is left of the hosts is answered for the caller to write once the lock
-    /// is released.
+    /// A Host not marked as a Gateway whose valid until has passed is forgotten, and every
+    /// `instance_uid` bound to it released (ADR-0047 clause 1); what is left of the hosts is
+    /// answered for the caller to write once the lock is released.
     fn prune(&self, state: &mut State) -> Result<Option<HostsVersion>, String> {
         let now = self.clock.now_ms();
         if now < state.earliest_expiry_ms {
@@ -1021,26 +1097,50 @@ impl Revocations {
             .filter(|id| !needed.contains(*id))
             .cloned()
             .collect();
-        // A host that holds no valid certificate in the register leaves nothing to keep when it
-        // speaks for no Agent — none can be taken over — and is not marked as a Gateway, whose
-        // certificate may be one an operator provisioned outside the register.
-        let holding: BTreeSet<&str> = state
-            .issued
-            .values()
-            .filter(|issued| issued.facts.not_after_ms > now)
-            .filter_map(|issued| issued.facts.host.as_deref())
+        // A Host ends when no certificate naming it is valid (ADR-0047 clause 1): once its valid
+        // until has passed nobody can speak as it again, so its bindings guard nothing. A
+        // Gateway's Host stays while it is marked, as its certificate may be one an operator
+        // provisioned and never presented. A Host written before it had a valid until takes the
+        // latest `not_after` the register holds for it, and stays until its next admission when
+        // the register holds none.
+        let mut latest: BTreeMap<&str, u64> = BTreeMap::new();
+        for issued in state.issued.values() {
+            if let Some(host) = issued.facts.host.as_deref() {
+                let until = latest.entry(host).or_default();
+                *until = (*until).max(issued.facts.not_after_ms);
+            }
+        }
+        let mut changed = false;
+        for (name, host) in &mut state.hosts {
+            if let Some(until) = latest.get(name.as_str()) {
+                changed |= host.extend(*until);
+            }
+        }
+        let ended: BTreeSet<String> = state
+            .hosts
+            .iter()
+            .filter(|(_, host)| !host.gateway && host.valid_until_ms.is_some_and(|t| t <= now))
+            .map(|(name, _)| name.clone())
             .collect();
-        let known = state.hosts.len();
-        state.hosts.retain(|name, host| {
-            host.gateway || !host.instance_uids.is_empty() || holding.contains(name.as_str())
-        });
-        let forgotten = (state.hosts.len() != known).then(|| Self::hosts_changed(state));
+        if !ended.is_empty() {
+            state.hosts.retain(|name, _| !ended.contains(name));
+            state.owners.retain(|_, owner| !ended.contains(owner));
+            changed = true;
+        }
+        let forgotten = changed.then(|| Self::hosts_changed(state));
         // Kept entries that have expired are revoked ancestors' chains: the next prune is due when
-        // the first entry still valid expires.
+        // the first entry still valid expires, or the first Host's valid until passes.
         state.earliest_expiry_ms = state
             .issued
             .values()
             .map(|issued| issued.facts.not_after_ms)
+            .chain(
+                state
+                    .hosts
+                    .values()
+                    .filter(|host| !host.gateway)
+                    .filter_map(|host| host.valid_until_ms),
+            )
             .filter(|not_after| *not_after > now)
             .min()
             .unwrap_or(u64::MAX);
@@ -1122,6 +1222,8 @@ mod tests {
     }
 
     const NOW: u64 = 1_000_000_000;
+    /// The end of a certificate presented in a test that does not ask when its Host ends.
+    const FAR: u64 = u64::MAX;
     const CA: &[u8] = b"fleet client CA";
 
     fn open(store: &Memory) -> (Revocations, Arc<Manual>) {
@@ -1185,41 +1287,41 @@ mod tests {
             .expect("another host");
 
         revocations
-            .check_report("h1", &SubjectValues::default(), &[1; 16])
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
             .expect("first report binds");
         revocations
-            .check_report("h1", &SubjectValues::default(), &[1; 16])
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
             .expect("its own Agent");
         assert!(
             revocations
-                .check_report("h2", &SubjectValues::default(), &[1; 16])
+                .check_report("h2", &SubjectValues::default(), FAR, &[1; 16])
                 .is_err(),
             "another host spoke for h1's Agent"
         );
         revocations.rebind(&[1; 16], &[3; 16]).expect("rebind");
         revocations
-            .check_report("h1", &SubjectValues::default(), &[3; 16])
+            .check_report("h1", &SubjectValues::default(), FAR, &[3; 16])
             .expect("the re-keyed Agent");
         assert!(revocations
-            .check_report("h2", &SubjectValues::default(), &[3; 16])
+            .check_report("h2", &SubjectValues::default(), FAR, &[3; 16])
             .is_err());
         revocations
-            .check_report("h2", &SubjectValues::default(), &[1; 16])
+            .check_report("h2", &SubjectValues::default(), FAR, &[1; 16])
             .expect("the old identity is free");
 
         assert!(!revocations.set_gateway("unknown", true).expect("set"));
         assert!(revocations.set_gateway("h2", true).expect("set"));
         revocations
-            .check_report("h2", &SubjectValues::default(), &[3; 16])
+            .check_report("h2", &SubjectValues::default(), FAR, &[3; 16])
             .expect("a Gateway speaks for any Agent");
 
         // The bindings survive a restart.
         let (reopened, _) = open(&store);
         assert!(reopened
-            .check_report("h3", &SubjectValues::default(), &[3; 16])
+            .check_report("h3", &SubjectValues::default(), FAR, &[3; 16])
             .is_err());
         reopened
-            .check_report("h2", &SubjectValues::default(), &[9; 16])
+            .check_report("h2", &SubjectValues::default(), FAR, &[9; 16])
             .expect("still a Gateway");
     }
 
@@ -1241,10 +1343,10 @@ mod tests {
             "nothing reported yet"
         );
         revocations
-            .check_report("h1", &SubjectValues::default(), &[1; 16])
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
             .expect("binds");
         revocations
-            .check_report("h1", &SubjectValues::default(), &[3; 16])
+            .check_report("h1", &SubjectValues::default(), FAR, &[3; 16])
             .expect("binds");
         assert_eq!(
             revocations.speaks_for("h1"),
@@ -1257,7 +1359,7 @@ mod tests {
         assert!(revocations.set_gateway("h2", true).expect("mark"));
         assert_eq!(revocations.speaks_for("h2"), SpeaksFor::Any);
         revocations
-            .check_report("h2", &SubjectValues::default(), &[1; 16])
+            .check_report("h2", &SubjectValues::default(), FAR, &[1; 16])
             .expect("a Gateway reports for h1's Agent");
         assert_eq!(
             revocations.speaks_for("h2"),
@@ -1266,12 +1368,13 @@ mod tests {
         );
     }
 
-    /// A host that holds no valid certificate, speaks for no Agent and is not marked as a Gateway
-    /// is forgotten. One that still speaks for an Agent keeps it, so no other host can take it
-    /// over, and a marked Gateway keeps its mark: its certificate may be one the register never held.
-    /// Verifies: ADR-0021
+    /// A Host whose only certificate has expired ends at the next prune, a bound Agent or not, and
+    /// its `instance_uid`s can be bound by another host; a marked Gateway keeps its Host and its
+    /// mark, since its certificate may be one the register never held, and one whose mark was
+    /// taken away ends like any other.
+    /// Verifies: ADR-0047
     #[test]
-    fn a_host_without_a_certificate_an_agent_or_a_mark_is_forgotten() {
+    fn a_host_whose_last_certificate_has_expired_ends_with_its_bindings() {
         let store = Memory::default();
         let (revocations, clock) = open(&store);
         let soon = |serial: &str, host: &str| Facts {
@@ -1293,9 +1396,19 @@ mod tests {
         assert!(revocations.set_gateway("gw", true).expect("mark"));
         assert!(revocations.set_gateway("old", true).expect("mark"));
         assert!(revocations.set_gateway("old", false).expect("unmark"));
+        // h1 reports with the certificate it was issued, so nothing moves its end.
         revocations
-            .check_report("h1", &SubjectValues::default(), &[2; 16])
+            .check_report("h1", &SubjectValues::default(), NOW + 1_000, &[2; 16])
             .expect("binds");
+        revocations
+            .check_report("gw", &SubjectValues::default(), NOW + 1_000, &[7; 16])
+            .expect("a Gateway binds nothing");
+        assert!(
+            revocations
+                .check_report("h2", &SubjectValues::default(), FAR, &[2; 16])
+                .is_err(),
+            "h1's Agent is h1's while h1 holds a valid certificate"
+        );
 
         clock.0.fetch_add(1_000, Ordering::SeqCst);
         revocations
@@ -1306,14 +1419,8 @@ mod tests {
             .into_iter()
             .map(|(name, ..)| name)
             .collect();
-        assert_eq!(names, ["gw", "h1", "h2"], "old is forgotten");
+        assert_eq!(names, ["gw", "h2"], "h1 and old end");
         assert!(revocations.is_gateway("gw"), "the Gateway keeps its mark");
-        assert!(
-            revocations
-                .check_report("h2", &SubjectValues::default(), &[2; 16])
-                .is_err(),
-            "h1's Agent stays h1's"
-        );
         assert_eq!(
             store
                 .0
@@ -1323,9 +1430,173 @@ mod tests {
                 .keys()
                 .collect::<Vec<_>>(),
             // h2 holds a valid certificate, and its approval wrote it (ADR-0035 clause 1).
-            ["gw", "h1", "h2"],
-            "the forgetting is written"
+            ["gw", "h2"],
+            "the ending is written"
         );
+        revocations
+            .check_report("h2", &SubjectValues::default(), FAR, &[2; 16])
+            .expect("h1's Agent is released, and another host binds it");
+        assert_eq!(
+            revocations.speaks_for("h2"),
+            SpeaksFor::Agents(["02".repeat(16)].into_iter().collect())
+        );
+    }
+
+    /// A Host whose certificate an operator provisioned is not in the register, but whose
+    /// presented certificate is still valid, keeps its bindings past every register entry's end;
+    /// it ends once the presented certificate has.
+    /// Verifies: ADR-0047
+    #[test]
+    fn a_host_with_a_valid_presented_certificate_keeps_its_bindings() {
+        let store = Memory::default();
+        let (revocations, clock) = open(&store);
+        revocations
+            .check_report("p1", &SubjectValues::default(), NOW + 5_000, &[5; 16])
+            .expect("a provisioned certificate binds");
+        revocations
+            .record(
+                Facts {
+                    host: Some("other".into()),
+                    ..facts("a1", NOW + 1_000)
+                },
+                &[1; 16],
+                None,
+            )
+            .expect("record");
+        clock.0.fetch_add(2_000, Ordering::SeqCst);
+        revocations
+            .record(on_host("b2", "h2"), &[2; 16], None)
+            .expect("a record prunes");
+        assert!(
+            revocations
+                .check_report("h2", &SubjectValues::default(), FAR, &[5; 16])
+                .is_err(),
+            "p1's Agent stays p1's"
+        );
+        assert_eq!(
+            store.0.lock().expect("lock").hosts["p1"].valid_until_ms,
+            Some(NOW + 5_000)
+        );
+
+        clock.0.fetch_add(3_000, Ordering::SeqCst);
+        revocations
+            .record(on_host("c3", "h3"), &[3; 16], None)
+            .expect("a record prunes");
+        assert!(!store.0.lock().expect("lock").hosts.contains_key("p1"));
+        revocations
+            .check_report("h2", &SubjectValues::default(), FAR, &[5; 16])
+            .expect("released with its Host");
+    }
+
+    /// Every issuance and every admission moves a Host's valid until forward, never back.
+    /// Verifies: ADR-0047
+    #[test]
+    fn a_hosts_valid_until_only_moves_forward() {
+        let store = Memory::default();
+        let (revocations, _) = open(&store);
+        let until = |store: &Memory| store.0.lock().expect("lock").hosts["h1"].valid_until_ms;
+        revocations
+            .record(on_host("a1", "h1"), &[1; 16], None)
+            .expect("approved");
+        assert_eq!(until(&store), Some(NOW + 1_000_000));
+        revocations
+            .record(
+                Facts {
+                    host: Some("h1".into()),
+                    ..facts("a2", NOW + 2_000_000)
+                },
+                &[1; 16],
+                Some(id("a1")),
+            )
+            .expect("renewed");
+        assert_eq!(until(&store), Some(NOW + 2_000_000), "an issuance moves it");
+        revocations
+            .check_report("h1", &SubjectValues::default(), NOW + 3_000_000, &[1; 16])
+            .expect("admitted");
+        assert_eq!(
+            until(&store),
+            Some(NOW + 3_000_000),
+            "an admission moves it"
+        );
+        revocations
+            .check_report("h1", &SubjectValues::default(), NOW + 500, &[1; 16])
+            .expect("admitted");
+        assert_eq!(until(&store), Some(NOW + 3_000_000), "never back");
+    }
+
+    /// A Host written before it had a valid until takes the latest `not_after` the register holds
+    /// for it, and stays until its next admission when the register holds none.
+    /// Verifies: ADR-0047
+    #[test]
+    fn a_host_written_before_its_valid_until_takes_the_registers() {
+        let store = Memory::default();
+        {
+            let mut ledger = store.0.lock().expect("lock");
+            let legacy = |uid: &str| Host {
+                instance_uids: [uid.to_string()].into_iter().collect(),
+                ..Host::default()
+            };
+            ledger.hosts.insert("registered".into(), legacy("01"));
+            ledger.hosts.insert("unknown".into(), legacy("02"));
+            ledger.issued.push(Issued {
+                facts: on_host("a1", "registered"),
+                instance_uid: "01".into(),
+                predecessor: None,
+                issued_ms: NOW,
+            });
+        }
+        let (revocations, clock) = open(&store);
+        assert_eq!(
+            store.0.lock().expect("lock").hosts["registered"].valid_until_ms,
+            Some(NOW + 1_000_000),
+            "the register's not_after, written"
+        );
+        clock.0.fetch_add(1_000_000, Ordering::SeqCst);
+        revocations
+            .record(on_host("b2", "h2"), &[3; 16], None)
+            .expect("a record prunes");
+        let hosts = store.0.lock().expect("lock").hosts.clone();
+        assert!(
+            !hosts.contains_key("registered"),
+            "ended with its certificate"
+        );
+        assert_eq!(
+            hosts["unknown"].valid_until_ms, None,
+            "stays until its next admission"
+        );
+        revocations
+            .check_report(
+                "unknown",
+                &SubjectValues::default(),
+                NOW + 2_000_000,
+                &[2; 16],
+            )
+            .expect("admitted");
+        assert_eq!(
+            store.0.lock().expect("lock").hosts["unknown"].valid_until_ms,
+            Some(NOW + 2_000_000)
+        );
+    }
+
+    /// Forgetting an Agent releases its binding.
+    /// Verifies: ADR-0047
+    #[test]
+    fn a_released_instance_uid_can_be_bound_by_another_host() {
+        let store = Memory::default();
+        let (revocations, _) = open(&store);
+        revocations
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
+            .expect("binds");
+        revocations.release(&[1; 16]).expect("released");
+        assert!(store.0.lock().expect("lock").hosts["h1"]
+            .instance_uids
+            .is_empty());
+        revocations
+            .check_report("h2", &SubjectValues::default(), FAR, &[1; 16])
+            .expect("another host binds it");
+        revocations
+            .release(&[9; 16])
+            .expect("an unbound instance_uid releases nothing");
     }
 
     /// The issuance that mints a host id — an approval — writes the Host before its first report,
@@ -1367,7 +1638,7 @@ mod tests {
         );
 
         revocations
-            .check_report("h1", &SubjectValues::default(), &[1; 16])
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
             .expect("its first report");
         let host = store.0.lock().expect("lock").hosts["h1"].clone();
         assert_eq!(host.subject, subject, "the approval's values stay");
@@ -1386,7 +1657,7 @@ mod tests {
             ..SubjectValues::default()
         };
         revocations
-            .check_report("p1", &subject, &[5; 16])
+            .check_report("p1", &subject, FAR, &[5; 16])
             .expect("binds");
         let host = store.0.lock().expect("lock").hosts["p1"].clone();
         assert_eq!(host.subject, subject);
@@ -1480,7 +1751,7 @@ mod tests {
 
         store.failing.store(false, Ordering::SeqCst);
         revocations
-            .check_report("h1", &SubjectValues::default(), &[1; 16])
+            .check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
             .expect("its first report");
         let host = store.inner.0.lock().expect("lock").hosts["h1"].clone();
         assert_eq!(
@@ -1495,8 +1766,15 @@ mod tests {
     #[test]
     fn a_failed_write_of_forgotten_hosts_fails_no_issuance_or_start() {
         let memory = Memory::default();
-        memory.0.lock().expect("lock").hosts =
-            BTreeMap::from([("old".to_string(), Host::default())]);
+        // Its valid until is its certificate's end: a Host without one and without a register
+        // entry would stay until its next admission (ADR-0047 clause 1).
+        memory.0.lock().expect("lock").hosts = BTreeMap::from([(
+            "old".to_string(),
+            Host {
+                valid_until_ms: Some(NOW - 1),
+                ..Host::default()
+            },
+        )]);
         memory
             .put_issued(&Issued {
                 facts: Facts {
@@ -1582,7 +1860,7 @@ mod tests {
         let reporter = {
             let revocations = revocations.clone();
             std::thread::spawn(move || {
-                revocations.check_report("h1", &SubjectValues::default(), &[1; 16])
+                revocations.check_report("h1", &SubjectValues::default(), FAR, &[1; 16])
             })
         };
         written.recv().expect("the binding is being written");

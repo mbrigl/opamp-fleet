@@ -1548,6 +1548,8 @@ impl AppState {
     /// certificate revoked, since a certificate here proves fleet membership and its host, never
     /// which Agent is speaking (ADR-0021 clause 7). A Client still running therefore reappears on its next
     /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
+    /// The `instance_uid` is released from the Host it was bound to, so that report binds it to
+    /// the host whose certificate carries it (ADR-0047 clause 2).
     ///
     /// Refused while the Agent is still reporting: the record holds the hashes that gate
     /// re-offering, so forgetting a live Agent has it offered its configuration again — and the
@@ -1571,6 +1573,13 @@ impl AppState {
         // name" ADR-0024 rejected — the record leaves the store with the row, its labels with it
         // (ADR-0024, ADR-0035 clause 6).
         self.unpersist(uid);
+        // Its `instance_uid` leaves the Host it was bound to: whichever host reports it next binds
+        // it (ADR-0047 clause 2).
+        if let Some(revocations) = &self.revocations {
+            if let Err(e) = revocations.release(uid.as_bytes()) {
+                warn!(agent = %uid, error = %e, "cannot write the released host binding");
+            }
+        }
         if let Some(record) = removed {
             // A Client Agent forgotten takes its labels from the Agents that inherited them.
             self.unplace(&mut fleet, uid, record.placement.group.clone());
@@ -1870,7 +1879,11 @@ impl AppState {
                 let subject = presented
                     .map(|p| p.subject_values.clone())
                     .unwrap_or_default();
-                if let Err(e) = revocations.check_report(host, &subject, bound.as_bytes()) {
+                // The binding exists only for a presented certificate that names a host.
+                let not_after_ms = presented.map_or(0, |p| p.not_after_ms);
+                if let Err(e) =
+                    revocations.check_report(host, &subject, not_after_ms, bound.as_bytes())
+                {
                     return Processed {
                         reply: bad_request(&e),
                         uid: None,
@@ -4241,6 +4254,7 @@ mod tests {
             id: CertId::new(b"CA", serial),
             host: Some(host.to_string()),
             subject_values: crate::revocation::SubjectValues::default(),
+            not_after_ms: u64::MAX,
         };
         let victim = InstanceUid::default();
         let own = state.process_presented(
@@ -4308,6 +4322,65 @@ mod tests {
         assert_eq!(state.snapshot().len(), 2, "one record per Agent, no more");
     }
 
+    /// Forgetting an Agent releases its binding: another host's report for it binds it, under the
+    /// identity it reported, where before it would have been re-keyed.
+    /// Verifies: ADR-0047
+    #[test]
+    fn forgetting_an_agent_releases_its_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_revocations(Some(revocations.clone()));
+        let presented = |host: &str| Presented {
+            id: CertId::new(b"CA", host),
+            host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
+            not_after_ms: u64::MAX,
+        };
+        let uid = InstanceUid::default();
+        let message = || AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64,
+            ..Default::default()
+        };
+        let conn = state.connection_id();
+        let first = state.process_presented(
+            message(),
+            Transport::WebSocket,
+            Some(conn),
+            Some(&presented("h1")),
+        );
+        assert_eq!(first.uid, Some(uid));
+        state.mark_disconnected(&[uid], conn);
+        assert!(state.forget_agent(&uid).is_ok(), "forgotten");
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            crate::revocation::SpeaksFor::Agents(std::collections::BTreeSet::new()),
+            "released from h1"
+        );
+
+        let other = state.process_presented(
+            message(),
+            Transport::WebSocket,
+            Some(state.connection_id()),
+            Some(&presented("h2")),
+        );
+        assert_eq!(other.uid, Some(uid), "bound by h2, not re-keyed");
+        assert!(other.reply.agent_identification.is_none());
+        assert_eq!(
+            revocations.speaks_for("h2"),
+            crate::revocation::SpeaksFor::Agents([uid.to_string().replace('-', "")].into())
+        );
+    }
+
     /// A report refused at the record ceiling binds no `instance_uid` to the host that sent it,
     /// so it cannot speak for that Agent once there is room — nor lock out the host it belongs to.
     /// Verifies: ADR-0021, ADR-0024
@@ -4330,6 +4403,7 @@ mod tests {
             id: CertId::new(b"CA", host),
             host: Some(host.to_string()),
             subject_values: crate::revocation::SubjectValues::default(),
+            not_after_ms: u64::MAX,
         };
         let first = InstanceUid::default();
         let accepted = state.process_presented(
@@ -4442,6 +4516,7 @@ mod tests {
                 id: CertId::new(b"CA", host),
                 host: Some(host.to_string()),
                 subject_values: crate::revocation::SubjectValues::default(),
+                not_after_ms: u64::MAX,
             }),
         )
     }
@@ -4469,6 +4544,7 @@ mod tests {
                 id: CertId::new(b"CA", "h2"),
                 host: Some("h2".to_string()),
                 subject_values: crate::revocation::SubjectValues::default(),
+                not_after_ms: u64::MAX,
             }),
         );
 
@@ -4520,6 +4596,7 @@ mod tests {
                 id: CertId::new(b"CA", "h1"),
                 host: Some("h1".to_string()),
                 subject_values: crate::revocation::SubjectValues::default(),
+                not_after_ms: u64::MAX,
             }),
         );
         assert!(reply.reply.packages_available.is_none(), "no offer");
@@ -4615,6 +4692,7 @@ mod tests {
                 id: CertId::new(b"CA", "h1"),
                 host: Some("h1".to_string()),
                 subject_values: crate::revocation::SubjectValues::default(),
+                not_after_ms: u64::MAX,
             }),
         )
     }
@@ -5140,6 +5218,7 @@ mod tests {
                 id: CertId::new(b"CA", host),
                 host: Some(host.to_string()),
                 subject_values: subject,
+                not_after_ms: u64::MAX,
             }),
         )
     }
@@ -5388,6 +5467,7 @@ mod tests {
                     id: CertId::new(b"CA", "h1"),
                     host: Some("h1".to_string()),
                     subject_values: organization("Kunde GmbH"),
+                    not_after_ms: u64::MAX,
                 }),
             )
             .uid

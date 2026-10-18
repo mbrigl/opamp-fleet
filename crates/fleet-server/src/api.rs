@@ -969,7 +969,8 @@ async fn rollout_to_agent(
 /// Forgets what the Server knows about an Agent, dropping its row from the fleet view.
 ///
 /// Reaches no host: nothing is stopped, nothing is uninstalled, and no certificate is revoked —
-/// a certificate is the host's, not the Agent's. A Client that is still running reappears on its next report.
+/// a certificate is the host's, not the Agent's. Its `instance_uid` is released from the Host it
+/// was bound to (ADR-0047 clause 2). A Client that is still running reappears on its next report.
 #[utoipa::path(
     delete,
     path = "/api/v1/agents/{instance_uid}",
@@ -978,8 +979,11 @@ async fn rollout_to_agent(
     description = "Forget this Agent: the Server drops what it knows and the row leaves the fleet \
                    view (ADR-0024). Nothing happens on the host — no process is stopped, nothing \
                    is uninstalled, and no certificate is revoked, because a certificate here \
-                   proves fleet membership and its host rather than one Agent's identity. A Client still configured \
-                   for this Server therefore comes back on its next report. Refused while the \
+                   proves fleet membership and its host rather than one Agent's identity. The \
+                   Instance UID is released from the Host it was bound to (ADR-0047), so its \
+                   next report binds it to the host whose certificate carries that report. A \
+                   Client still configured for this Server therefore comes back on its next \
+                   report. Refused while the \
                    Agent is still reporting, since forgetting it would have its configuration \
                    offered again and a managed process restarted with it.",
     responses(

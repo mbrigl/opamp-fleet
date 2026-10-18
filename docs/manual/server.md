@@ -469,8 +469,9 @@ provisioned a certificate by an operator.
 certificate it signs: a host is minted when an operator approves an enrolment, a certificate an
 operator provisioned is given one on its first renewal, and every renewal keeps it — the Client
 proves with its current key which certificate it renews, through a Gateway too. An Agent belongs
-to the host that first reported it: a connection with another host's certificate that reports
-for it is given an `instance_uid` of its own instead. A host holds at most three valid
+to the host that first reported it, until it is forgotten or that host's last certificate has
+ended: a connection with another host's certificate that reports for it is given an
+`instance_uid` of its own instead. A host holds at most three valid
 certificates. A Gateway carries other hosts' Agents, so mark it once its certificate names a
 host. **A Gateway admits nobody until its host is marked:** only a marked host is handed the
 revocation list a Gateway refuses by (see
@@ -502,8 +503,14 @@ organization identifier. A host certificate the Server issues carries the values
 certificate the host enrolled with, and every renewal carries them on unchanged (see
 [Bootstrap certificates](#bootstrap-certificates-issued-by-the-server)); a Host's values change
 only when it enrols again. A certificate an operator provisioned with a host id makes its Host at
-its first report, with the values of that certificate. A Host is forgotten when it holds no valid certificate, speaks for
-no Agent and is not marked as a Gateway.
+its first report, with the values of that certificate. Each Host records how long it is valid:
+the latest end of a certificate naming it that the Server issued or that the host presented, moved
+forward by every issuance and every connection. Once that has passed, nobody can speak as the host
+again, so a Host that is not marked as a Gateway is forgotten, and every Agent bound to it is
+released for whichever host reports it next. A Gateway's Host stays until its mark is taken away,
+since its certificate may be one you provisioned and the Server never saw. A Host written by an
+earlier version takes the latest end the register holds for it, and stays until it next connects
+when the register holds none.
 
 Every Agent record names the Host it last arrived over: its own on a direct connection, the
 Gateway's behind one. This places the Agent in the fleet view and decides which labels it inherits
@@ -1388,8 +1395,12 @@ content hash it already has — but the configuration is applied again, which fo
 one restart. That is the price of forgetting something that was not really gone.
 
 **Its labels go with it.** They are part of the Agent's record, so an Agent that comes back is
-labelled only by what its Client Agent's labels give it. The Host it arrived over stays: it is
-forgotten once it holds no valid certificate and speaks for no Agent.
+labelled only by what its Client Agent's labels give it. The Host it arrived over stays until
+no certificate naming it is valid (see [Hosts](#hosts)).
+
+**Its binding goes with it.** The Agent's `instance_uid` is released from the Host it was bound
+to, so its next report binds it to the host whose certificate carries that report. Forgetting an
+Agent that still runs elsewhere lets the next host that reports it take it.
 
 Nothing expires on its own: there is no retention sweep and no inactivity timeout, so a row stays
 until someone forgets it.

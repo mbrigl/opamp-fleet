@@ -349,4 +349,29 @@ mod tests {
         );
         assert!(log.contains("dropped=2"), "names the number dropped: {log}");
     }
+
+    /// A Host file written before a Host had a valid until loads without one, and one written now
+    /// keeps it across a reopen.
+    /// Verifies: ADR-0047
+    #[test]
+    fn a_host_file_without_a_valid_until_still_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsLedgerStore::open(dir.path()).expect("open");
+        std::fs::write(
+            dir.path().join("hosts/h1.json"),
+            r#"{"host":"h1","gateway":false,"instance_uids":["01"],"approved_ms":5}"#,
+        )
+        .expect("write");
+        let mut hosts = store.load().expect("load").hosts;
+        assert_eq!(hosts["h1"].valid_until_ms, None);
+        assert_eq!(hosts["h1"].approved_ms, Some(5));
+
+        hosts.get_mut("h1").expect("h1").valid_until_ms = Some(9);
+        store.save_hosts(&hosts).expect("save");
+        let reopened = FsLedgerStore::open(dir.path()).expect("open");
+        assert_eq!(
+            reopened.load().expect("load").hosts["h1"].valid_until_ms,
+            Some(9)
+        );
+    }
 }

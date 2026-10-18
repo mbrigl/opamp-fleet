@@ -151,6 +151,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Fixed
 
+- **A Host and its bindings end with its last valid certificate, and forgetting an Agent releases
+  its binding**
+  ([ADR-0047](docs/adr/0047-a-host-and-its-bindings-end-with-its-last-valid-certificate.md)).
+  A Host with a bound Agent was never removed, even long after its last certificate expired, and
+  forgetting an Agent left its `instance_uid` bound, so the host register only ever grew. Each
+  Host now records its valid until — the latest end of a certificate naming it that the Server
+  issued or that the host presented — and a Host not marked as a Gateway is removed once it has
+  passed, its Agents released. `DELETE /api/v1/agents/{instance_uid}` releases the Agent's
+  binding, so whichever host reports it next binds it. Host files under `data_dir/hosts/` gain a
+  `valid_until_ms` field; files without it still load, take the latest end the register holds for
+  their Host, and stay until the host next connects when the register holds none. **What to do:**
+  nothing. Forget an Agent only once it no longer runs, or accept that the next host reporting it
+  takes it.
+
 - **The audit record is written out before the Server exits.** Entries still queued for the audit
   writer at shutdown were lost with the process, without a trace in the record. The Server now
   waits up to five seconds for them after both planes have drained, and logs an error if they
