@@ -183,7 +183,13 @@ macOS and release-builds the Client for Linux, Windows, and macOS and the Server
 `version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
 nobody types a tag. Running it publishes one archive per platform,
 `supervisor_<version>_<os>_<arch>.tar.gz` for Linux, macOS and Windows on the architectures each
-ships on, plus a `SHA256SUMS` file. The files are named after the **Set** an operator uploads them
+ships on, a CycloneDX SBOM `<stem>.cdx.json` beside each archive of the Client and of the operator
+tool, and a `SHA256SUMS` file. Every asset is a subject of one build-provenance attestation, which
+the workflow verifies before it creates the release
+([ADR-0045](docs/adr/0045-every-release-asset-carries-a-provenance-attestation-and-every-program-an-sbom.md));
+an operator checks a download with
+`gh attestation verify SHA256SUMS --repo mbrigl/opamp-fleet --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml`
+and then `sha256sum -c --ignore-missing SHA256SUMS`. The files are named after the **Set** an operator uploads them
 to, not after the product inside them
 ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)) — and the program inside them and its configuration
 file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry

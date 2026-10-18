@@ -121,6 +121,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   that commit. GitHub's own `actions/*` stay on their major tag. **What to do:** nothing; the
   release assets are unchanged by this.
 
+- **Every release asset is attested, and every shipped program has an SBOM**
+  ([ADR-0045](docs/adr/0045-every-release-asset-carries-a-provenance-attestation-and-every-program-an-sbom.md)).
+  Until now `SHA256SUMS` proved only that a download matched the file beside it on the same
+  release page. Every asset of a release, `SHA256SUMS` included, is now a subject of one SLSA
+  build-provenance attestation, signed through Sigstore by the release workflow and recorded in
+  its public log, and the workflow verifies each asset before the release is created. A release
+  also carries nine more assets: one CycloneDX 1.5 SBOM per program and target,
+  `supervisor_<version>_<os>_<arch>.cdx.json` (five) and
+  `opamp-fleetctl_<version>_<os>_<arch>.cdx.json` (four), each listing the crates its binary is
+  built from on that target; the `.deb`, `.rpm` and `.msi` of a stem are described by its
+  archive's SBOM. **What to do:** verify a download with
+  `gh attestation verify SHA256SUMS --repo mbrigl/opamp-fleet --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml`,
+  then `sha256sum -c --ignore-missing SHA256SUMS`; the same `gh attestation verify` checks any
+  single asset. A script that downloads `supervisor_<version>_*` or `opamp-fleetctl_<version>_*`
+  without an extension now also picks up the `.cdx.json`; select `.tar.gz`. No asset carries a
+  code signature.
+
 ### Fixed
 
 - **The audit record is written out before the Server exits.** Entries still queued for the audit

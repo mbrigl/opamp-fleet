@@ -22,11 +22,17 @@ deliberately does not do.
 ## Getting it
 
 Every release publishes it for Linux and macOS, on amd64 and arm64, as
-`opamp-fleetctl_<version>_<os>_<arch>.tar.gz` beside the Client's assets and covered by the same
-`SHA256SUMS`; compare the archive's hash with its line there (`sha256sum`, or `shasum -a 256` on
-macOS). The archive holds the one program, executable:
+`opamp-fleetctl_<version>_<os>_<arch>.tar.gz` beside the Client's assets, with its CycloneDX SBOM
+`opamp-fleetctl_<version>_<os>_<arch>.cdx.json`, covered by the same `SHA256SUMS` and by the
+release's build-provenance attestation. Verify the archive before you run it, since this program makes the fleet's keys: the attestation
+proves it was built by this repository's release workflow, and its hash must match its line in
+`SHA256SUMS` (`sha256sum`, or `shasum -a 256` on macOS). The archive holds the one program,
+executable:
 
 ```console
+$ gh attestation verify opamp-fleetctl_<version>_linux_amd64.tar.gz --repo mbrigl/opamp-fleet \
+    --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml
+$ sha256sum -c --ignore-missing SHA256SUMS
 $ tar xzf opamp-fleetctl_<version>_linux_amd64.tar.gz
 $ ./opamp-fleetctl --version
 ```
