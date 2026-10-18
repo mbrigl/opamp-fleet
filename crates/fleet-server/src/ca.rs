@@ -181,6 +181,13 @@ impl ClientCa {
         else {
             return Ok(None);
         };
+        // Neither proof stands beside the other (ADR-0039 clause 8).
+        if request.params.subject_alt_names.iter().any(|san| {
+            matches!(san, SanType::URI(uri)
+                if uri.as_str().starts_with(fleet_core::bootstrap_proof::URI_PREFIX))
+        }) {
+            return Err(BOTH_PROOFS.to_string());
+        }
         let refused = |why: &str| format!("the renewal proof does not hold: {why}");
         let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
@@ -211,6 +218,75 @@ impl ClientCa {
         self.validity_days
     }
 }
+
+/// The bootstrap certificate (DER) a CSR proves it enrols with, when it carries a bootstrap proof
+/// (ADR-0039 clauses 7, 8): the certificate must be valid now, and its key must have signed the
+/// request's own key. Which CA issued it and whether it is revoked are the caller's to check, against
+/// `[enrolment]` and the register. `Ok(None)` for a request that carries no proof.
+///
+/// # Errors
+/// Returns the `BadRequest` text for a proof that does not hold, and for a request that carries a
+/// renewal proof beside it.
+pub fn bootstrap_proof(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let Some(encoded) = fleet_core::csr::requested_uri(
+        csr_pem.as_bytes(),
+        fleet_core::bootstrap_proof::URI_PREFIX,
+    )?
+    else {
+        return Ok(None);
+    };
+    if fleet_core::csr::requested_uri(csr_pem.as_bytes(), fleet_core::renewal::URI_PREFIX)?
+        .is_some()
+    {
+        return Err(BOTH_PROOFS.to_string());
+    }
+    let refused = |why: &str| format!("the bootstrap proof does not hold: {why}");
+    let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| refused("it is not base64url"))?;
+    let (der, signature) = fleet_core::bootstrap_proof::decode(&content)
+        .ok_or_else(|| refused("it does not parse"))?;
+    let (_, certificate) =
+        X509Certificate::from_der(der).map_err(|_| refused("its certificate does not parse"))?;
+    if !certificate.validity().is_valid() {
+        return Err(refused("its certificate is not valid now"));
+    }
+    let csr_der = pem_der(csr_pem)?;
+    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(&csr_der)
+        .map_err(|_| refused("the request does not parse"))?;
+    let new_key = Sha256::digest(csr.certification_request_info.subject_pki.raw);
+    let statement = fleet_core::bootstrap_proof::statement(&new_key);
+    verify_with(certificate.public_key(), &statement, signature)
+        .map_err(|()| refused("its signature does not verify with the certificate's key"))?;
+    Ok(Some(der.to_vec()))
+}
+
+/// The issuer and serial of the bootstrap certificate a CSR's bootstrap proof names, read without
+/// checking the proof — what the throttle keys an enrolment through a Gateway by (ADR-0039
+/// clause 6), and what tells a proof of the presented certificate itself from an enrolment. `None`
+/// for a request without a proof, or one that does not parse.
+#[must_use]
+pub fn bootstrap_proof_id(csr_pem: &str) -> Option<CertId> {
+    use base64::Engine as _;
+    let encoded =
+        fleet_core::csr::requested_uri(csr_pem.as_bytes(), fleet_core::bootstrap_proof::URI_PREFIX)
+            .ok()??;
+    let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()?;
+    let (der, _) = fleet_core::bootstrap_proof::decode(&content)?;
+    let (_, certificate) = X509Certificate::from_der(der).ok()?;
+    Some(CertId::new(
+        certificate.issuer().as_raw(),
+        &hex::encode(certificate.raw_serial()),
+    ))
+}
+
+/// What a CSR carrying both proofs is answered (ADR-0039 clause 8).
+pub const BOTH_PROOFS: &str =
+    "the certificate signing request carries both a renewal proof and a bootstrap proof";
 
 /// 16 bytes from the system's secure random source, the top bit cleared so the serial is a
 /// positive integer (RFC 5280 §4.1.2.2).
@@ -412,6 +488,11 @@ pub fn check_claims(csr_pem: &str, sender: &[u8]) -> Result<(), String> {
             SanType::DnsName(name) => values.push(name.as_str().to_string()),
             // A renewal proof is base64 this project wrote, never a claim (ADR-0021).
             SanType::URI(uri) if uri.as_str().starts_with(fleet_core::renewal::URI_PREFIX) => {}
+            // So is a bootstrap proof (ADR-0039).
+            SanType::URI(uri)
+                if uri
+                    .as_str()
+                    .starts_with(fleet_core::bootstrap_proof::URI_PREFIX) => {}
             SanType::URI(uri) => values.push(uri.as_str().to_string()),
             SanType::Rfc822Name(mail) => values.push(mail.as_str().to_string()),
             _ => {}
@@ -584,6 +665,18 @@ impl crate::fleet::CertificateSigner for ClientCa {
 
     fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String> {
         ClientCa::renewal_proof(self, csr_pem)
+    }
+
+    fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String> {
+        match fleet_core::csr::requested_uri(
+            csr_pem.as_bytes(),
+            fleet_core::bootstrap_proof::URI_PREFIX,
+        )? {
+            None => Ok(None),
+            Some(_) => bootstrap_proof_id(csr_pem)
+                .map(Some)
+                .ok_or_else(|| "the bootstrap proof does not hold: it does not parse".to_string()),
+        }
     }
 
     fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {

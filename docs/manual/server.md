@@ -462,8 +462,9 @@ A host needs a certificate before it can connect at all, and it gets one in one 
 **Behind a Gateway, the Gateway's handshake admits the Agents it carries.** Mutual TLS is per hop:
 the Gateway checks the Agents connecting to it against the client CA and the Server's revocation
 list, and presents its own certificate to the Server. It forwards no `Authorization` header. A
-Gateway trusts the client CA and never the bootstrap CA, so a host behind one enrols by connecting to the Server once, or is
-provisioned a certificate by an operator.
+Gateway that names the bootstrap CA's certificate as `[gateway.tls] bootstrap_ca_file` relays the
+enrolment request of a host behind it (see
+[Enrolment through a Gateway](#enrolment-through-a-gateway)).
 
 **A certificate names its host.** The Server puts `urn:opamp-fleet:host:<id>` into every
 certificate it signs: a host is minted when an operator approves an enrolment, a certificate an
@@ -490,8 +491,12 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"gateway"
 A Gateway's certificate speaks for any Agent; behind it, fleet membership is all the Server
 proves, and the Gateway's certificate may fetch the artifact offered to any Agent. A third-party
 client that sends no renewal proof renews the certificate it presents, but not through a Gateway:
-there the certificate presented is the Gateway's, and such a request is refused. A third-party
-client behind a Gateway gets its next certificate by enrolling directly or from the operator.
+there the certificate presented is the Gateway's, and a request with neither a renewal proof nor
+a bootstrap proof is refused, naming both. A third-party client behind a Gateway gets its next
+certificate by enrolling directly or from the operator. A request with a bootstrap proof over a
+member's certificate whose host is not marked as a Gateway is refused too, since a member does not
+enrol, unless the proof names the certificate the connection presents: a Client on a certificate an
+operator provisioned cannot tell it from a bootstrap certificate, and that request renews it.
 
 ### Hosts
 
@@ -737,8 +742,40 @@ the window is closed is answered `503`, and does not count toward the throttle.
 A request whose subject or SANs name an `instance_uid` other than the host's own is answered
 `BadRequest` and never enters the queue. The same holds for a renewal.
 
+**A request proves the bootstrap certificate it rests on.** The Client adds a bootstrap proof to
+its request: the certificate it enrols with, and a signature made with that certificate's key over
+the key it asks to be certified. The Server checks the proof itself, that the certificate is valid
+now, is not revoked, and that its key signed the request, and files the request under that
+certificate: the subject values, fingerprint and serial listed are the proven certificate's. On a
+direct connection the proof must name the certificate the connection presented. A request whose
+proof names another certificate or does not verify, and one that carries a renewal proof beside
+it, is answered `BadRequest` and never enters the queue. A request without a proof, as a
+third-party OpAMP client sends it, is filed under the certificate the connection presented.
+
 The bootstrap certificate stays in the host's `supervisor.toml`, unused once the issued pair is
 stored. Approve only what you can match to a host you are setting up.
+
+### Enrolment through a Gateway
+
+A host that reaches the Server only through a Gateway enrols through it, once the Gateway names
+the public certificate of `bootstrap_ca_file` as `[gateway.tls] bootstrap_ca_file` (see
+[Enrolment through a Gateway](client.md#enrolment-through-a-gateway) for the Gateway's side). The
+Gateway relays the host's request over its own certificate, so a request through a Gateway is a
+certificate signing request with a bootstrap proof over the certificate of a host marked as a
+Gateway. The Server checks the proof itself, against the bootstrap CA of `[enrolment]` and the
+revocation list, and decides the request as any enrolment: it is answered `Unavailable` without an
+open window, counts against the queue and its bootstrap certificate's share, and waits for your
+approval, which mints a host of its own and never the Gateway's. A proof whose certificate the
+bootstrap CA did not issue directly, or which is revoked, is answered `BadRequest` and never queued.
+
+The pending request names the Gateway's host in place of a peer address — `"gateway":"0192…"` in
+`GET /api/v1/enrolments`, *via Gateway* in the **Enrolments** tab, and `gateway` in every audit
+entry of it: `enrolment.queued`, `enrolment.refused`, `enrolment.approved` and
+`enrolment.rejected`. The host collects its certificate in its next request after the approval,
+and then reports through the Gateway as a member. The Server does not tell a Gateway whether a
+window is open, so a holder of a bootstrap certificate reaches the Server through a Gateway that
+trusts the bootstrap CA outside a window too; it is answered `Unavailable`, and the rate limit
+bounds what that costs (see [How often a member may be heard](#how-often-a-member-may-be-heard)).
 
 ## Revocation: withdrawing a certificate
 
@@ -1494,7 +1531,9 @@ A message that cannot be decoded is counted too. The bucket is:
   may serve the whole fleet;
 - for a host marked as a Gateway, two buckets, and a message takes a token from both: the bucket
   of the Agent it names, sized by `messages_per_sec` and `burst`, and the Gateway's aggregate,
-  sized by the `gateway_` keys. A message naming no valid `instance_uid`, an undecodable one and
+  sized by the `gateway_` keys. For a message carrying an enrolment request through the Gateway
+  the first bucket is the bootstrap certificate the request names instead of the Agent, so hosts
+  enrolling with different bootstrap certificates do not share one. A message naming no valid `instance_uid`, an undecodable one and
   a download count in the aggregate alone. Marking or unmarking a Gateway takes effect at its next
   message.
 

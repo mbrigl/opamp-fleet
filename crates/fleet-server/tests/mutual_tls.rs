@@ -3315,6 +3315,7 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
                 serial: format!("{n:x}"),
             },
             peer: None,
+            gateway: None,
         };
         assert_eq!(
             enrolment.submit(request, requester),
@@ -5068,4 +5069,479 @@ async fn a_renewal_carries_the_predecessors_values_unchanged() {
     .expect("pem");
     assert_eq!(values_of(&new_cert), values_of(&old_cert));
     assert_eq!(values_of(&new_cert).organization_identifier, "K-4711");
+}
+
+// ---- The bootstrap proof (ADR-0039) ----
+
+/// A CSR for a new key carrying a bootstrap proof of `cert`, signed with `signing_key` — the
+/// certificate's own key unless a test forges it — and, with `renewal`, a renewal proof beside it.
+fn bootstrap_csr(cert: &str, signing_key: &str, renewal: Option<(&str, &str)>) -> Vec<u8> {
+    use base64::Engine as _;
+    use rcgen::{PublicKeyData as _, SigningKey as _};
+    use sha2::{Digest as _, Sha256};
+    let new_key = KeyPair::generate().expect("new key");
+    let new_key_sha256 = Sha256::digest(new_key.subject_public_key_info());
+    let proof = |prefix: &str, statement: Vec<u8>, cert: &str, key: &str| {
+        let der = opamp::tls::certificates(cert.as_bytes()).expect("pem")[0].to_vec();
+        let signature = KeyPair::from_pem(key)
+            .expect("key")
+            .sign(&statement)
+            .expect("sign");
+        let uri = format!(
+            "{prefix}{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(fleet_core::bootstrap_proof::encode(&der, &signature))
+        );
+        rcgen::SanType::URI(uri.try_into().expect("uri"))
+    };
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "edge-01");
+    params.subject_alt_names.push(proof(
+        fleet_core::bootstrap_proof::URI_PREFIX,
+        fleet_core::bootstrap_proof::statement(&new_key_sha256),
+        cert,
+        signing_key,
+    ));
+    if let Some((old_cert, old_key)) = renewal {
+        params.subject_alt_names.push(proof(
+            fleet_core::renewal::URI_PREFIX,
+            fleet_core::renewal::statement(&new_key_sha256),
+            old_cert,
+            old_key,
+        ));
+    }
+    params
+        .serialize_request(&new_key)
+        .expect("csr")
+        .pem()
+        .expect("pem")
+        .into_bytes()
+}
+
+/// The error a reply carries, as its type and message.
+fn error_of(reply: &ServerToAgent) -> Option<(i32, String)> {
+    reply
+        .error_response
+        .as_ref()
+        .map(|error| (error.r#type, error.error_message.clone()))
+}
+
+/// On an enrolment connection a request proves the certificate of the handshake: one whose proof
+/// names another bootstrap certificate, whose signature does not verify, or that carries a renewal
+/// proof too is answered `BadRequest` and queued nowhere; one without a proof is queued under the
+/// handshake's certificate, and so is one whose proof names it — and its approval carries that
+/// certificate's values into the host certificate.
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn an_enrolment_request_proves_the_handshakes_bootstrap_certificate() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            revocations: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let enrolment = served.enrolment.clone().expect("enrolment");
+    enrolment.open(600).expect("open");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap-a");
+    let (other_cert, other_key) = bootstrap.issue_bootstrap("bootstrap-b");
+    let (member_cert, member_key) = pki.issue_to_host("h-1");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    let send = |csr: Vec<u8>| {
+        let enrolling = enrolling.clone();
+        let endpoint = served.endpoint.clone();
+        async move { decode(post(&enrolling, &endpoint, csr_report(csr)).await).await }
+    };
+
+    for (csr, what) in [
+        (
+            bootstrap_csr(&other_cert, &other_key, None),
+            "a proof of another bootstrap certificate",
+        ),
+        (
+            bootstrap_csr(&cert, &other_key, None),
+            "a proof whose signature does not verify",
+        ),
+        (
+            bootstrap_csr(&cert, &key, Some((&member_cert, &member_key))),
+            "a renewal proof beside the bootstrap proof",
+        ),
+    ] {
+        let reply = send(csr).await;
+        let (kind, message) = error_of(&reply).unwrap_or_else(|| panic!("{what} was taken"));
+        assert_eq!(kind, ServerErrorResponseType::BadRequest as i32, "{what}");
+        assert!(message.contains("proof"), "{what}: {message}");
+        assert!(enrolment.pending().is_empty(), "{what} was queued");
+    }
+
+    let serial = cert_id(&cert).serial;
+    let (csr, _) = csr_for("edge-00");
+    assert!(error_of(&send(csr).await).is_none());
+    let csr = bootstrap_csr(&cert, &key, None);
+    assert!(error_of(&send(csr.clone()).await).is_none());
+    let pending = enrolment.pending();
+    assert_eq!(pending.len(), 2, "both requests wait");
+    for request in &pending {
+        assert_eq!(request.requester.bootstrap.serial, serial);
+        assert_eq!(
+            request
+                .requester
+                .carried
+                .as_ref()
+                .map(|v| v.organizational_unit.clone()),
+            Ok("Werk Nord".to_string())
+        );
+    }
+    let proven_id =
+        fleet_server::ca::enrolment_request(std::str::from_utf8(&csr).expect("utf-8"), &[])
+            .expect("request")
+            .key_fingerprint;
+    assert!(pending.iter().any(|request| request.id == proven_id));
+    served.state.approve_enrolment(&proven_id).expect("approve");
+    let issued = issued(send(csr).await).expect("the issued certificate");
+    let der = opamp::tls::certificates(issued.as_bytes()).expect("pem");
+    let values = fleet_server::ca::facts(der[0].as_ref())
+        .expect("facts")
+        .subject_values;
+    assert_eq!(
+        (
+            values.organization.as_str(),
+            values.organizational_unit.as_str()
+        ),
+        ("Kunde GmbH", "Werk Nord"),
+        "the approval carries the proven certificate's values"
+    );
+}
+
+/// A bootstrap certificate the Server revoked enrols no further: its request is refused and
+/// queued nowhere.
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn a_revoked_bootstrap_certificates_request_is_refused() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            revocations: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let enrolment = served.enrolment.clone().expect("enrolment");
+    enrolment.open(600).expect("open");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap-a");
+    served
+        .revocations
+        .as_ref()
+        .expect("armed")
+        .revoke_certificate("bootstrap", &cert_id(&cert).serial)
+        .expect("revoke");
+    let enrolling = client(&served.ca_pem, Some((&cert, &key)));
+    let response = post(
+        &enrolling,
+        &served.endpoint,
+        csr_report(bootstrap_csr(&cert, &key, None)),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(enrolment.pending().is_empty());
+}
+
+// ---- Enrolment through a Gateway (ADR-0039) ----
+
+/// A Server with enrolment and the register, a Gateway host `gw` marked, its window open, and the
+/// Gateway's client: what a request a Gateway relays arrives on.
+async fn behind_a_gateway(
+    pki: &Pki,
+    bootstrap: &Pki,
+    audit: Option<Arc<dyn fleet_server::audit::Audit>>,
+    agent_rate: Option<fleet_server::agent_rate::Limits>,
+) -> (Served, reqwest::Client) {
+    let served = serve(
+        pki,
+        Setup {
+            client_ca: Some(client_ca_of(pki)),
+            bootstrap: Some(bootstrap),
+            revocations: true,
+            audit,
+            agent_rate,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let (gateway_cert, gateway_key) = pki.issue_to_host("gw");
+    let gateway = client(&served.ca_pem, Some((&gateway_cert, &gateway_key)));
+    assert!(
+        post(&gateway, &served.endpoint, report(&InstanceUid::default()))
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(served
+        .revocations
+        .as_ref()
+        .expect("armed")
+        .set_gateway("gw", true)
+        .expect("mark"));
+    served
+        .enrolment
+        .as_ref()
+        .expect("enrolment")
+        .open(600)
+        .expect("open");
+    (served, gateway)
+}
+
+/// A CSR with a bootstrap proof over a marked Gateway's certificate is an enrolment request: it
+/// waits in the queue naming the Gateway's host in place of a peer address, there and in the audit,
+/// becomes no Agent, and its approval mints a host of its own — never the Gateway's — whose
+/// certificate the enrolling host collects in a later reply, addressed to it.
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (served, gateway) =
+        behind_a_gateway(&pki, &bootstrap, Some(audit_in(dir.path())), None).await;
+    let agents = served.state.snapshot().len();
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap-a");
+    let uid = InstanceUid::default();
+    let csr = bootstrap_csr(&cert, &key, None);
+    let waiting = decode(post(&gateway, &served.endpoint, with_csr(&uid, csr.clone())).await).await;
+    assert_eq!(error_of(&waiting), None);
+    assert_eq!(
+        waiting.instance_uid,
+        uid.as_bytes(),
+        "routed back by its uid"
+    );
+    assert!(issued(waiting).is_none());
+
+    let pending = served.enrolment.as_ref().expect("enrolment").pending();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].requester.gateway.as_deref(), Some("gw"));
+    assert_eq!(pending[0].requester.peer, None);
+    assert_eq!(pending[0].requester.bootstrap.serial, cert_id(&cert).serial);
+    let listed: serde_json::Value = client(&served.ca_pem, None)
+        .get(operator(&served, "/api/v1/enrolments"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed[0]["gateway"], "gw", "{listed}");
+    assert!(listed[0].get("peer").is_none(), "{listed}");
+    assert_eq!(
+        served.state.snapshot().len(),
+        agents,
+        "an enrolling host is no Agent of the fleet"
+    );
+
+    let approved = client(&served.ca_pem, None)
+        .post(operator(
+            &served,
+            &format!("/api/v1/enrolments/{}/approve", pending[0].id),
+        ))
+        .send()
+        .await
+        .expect("approve");
+    assert_eq!(approved.status(), 204);
+    let reply = decode(post(&gateway, &served.endpoint, with_csr(&uid, csr)).await).await;
+    assert_eq!(reply.instance_uid, uid.as_bytes());
+    let certificate = issued(reply).expect("the issued certificate");
+    let host = fleet_server::ca::facts(
+        opamp::tls::certificates(certificate.as_bytes()).expect("pem")[0].as_ref(),
+    )
+    .expect("facts")
+    .host
+    .expect("a host");
+    assert_ne!(host, "gw", "the Gateway's host was handed out");
+
+    let all = entries(dir.path(), "enrolment.approved", 1).await;
+    for event in ["enrolment.queued", "enrolment.approved"] {
+        let entry = named(&all, event);
+        assert_eq!(entry.len(), 1, "{event}: {all:#?}");
+        assert_eq!(entry[0]["gateway"], "gw", "{event}");
+    }
+}
+
+/// Through a Gateway, without an open window the request is answered `Unavailable`; a bootstrap
+/// proof whose certificate is revoked, or not one of the bootstrap CA, is answered `BadRequest`
+/// and queued nowhere — every answer addressed to the message's `instance_uid`.
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn an_enrolment_through_a_gateway_is_refused_as_any_enrolment() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let (served, gateway) = behind_a_gateway(&pki, &bootstrap, None, None).await;
+    let enrolment = served.enrolment.clone().expect("enrolment");
+    let uid = InstanceUid::default();
+
+    let (revoked, revoked_key) = bootstrap.issue_bootstrap("bootstrap-revoked");
+    served
+        .revocations
+        .as_ref()
+        .expect("armed")
+        .revoke_certificate("bootstrap", &cert_id(&revoked).serial)
+        .expect("revoke");
+    let foreign = Pki::named("not the bootstrap CA");
+    let (stranger, stranger_key) = foreign.issue_bootstrap("bootstrap-foreign");
+    for (csr, what) in [
+        (bootstrap_csr(&revoked, &revoked_key, None), "revoked"),
+        (
+            bootstrap_csr(&stranger, &stranger_key, None),
+            "not issued by the bootstrap CA",
+        ),
+    ] {
+        let reply = decode(post(&gateway, &served.endpoint, with_csr(&uid, csr)).await).await;
+        assert_eq!(reply.instance_uid, uid.as_bytes(), "{what}");
+        let (kind, message) = error_of(&reply).unwrap_or_else(|| panic!("{what} was taken"));
+        assert_eq!(kind, ServerErrorResponseType::BadRequest as i32, "{what}");
+        assert!(message.contains(what), "{what}: {message}");
+    }
+    assert!(enrolment.pending().is_empty());
+
+    enrolment.close().expect("close");
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap-a");
+    let reply = decode(
+        post(
+            &gateway,
+            &served.endpoint,
+            with_csr(&uid, bootstrap_csr(&cert, &key, None)),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(reply.instance_uid, uid.as_bytes());
+    assert_eq!(
+        error_of(&reply).map(|(kind, _)| kind),
+        Some(ServerErrorResponseType::Unavailable as i32)
+    );
+    assert!(enrolment.pending().is_empty());
+}
+
+/// A member does not enrol: a CSR with a bootstrap proof over the certificate of a host that is
+/// not marked as a Gateway is answered `BadRequest`, and one with neither proof over a Gateway's
+/// certificate is answered `BadRequest` naming both proofs. Nothing is signed or queued. A proof of
+/// the presented certificate itself — what a Client on a certificate an operator provisioned
+/// sends — renews it as a request without a proof does.
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn a_member_does_not_enrol_and_a_gateway_needs_a_proof() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let (served, gateway) = behind_a_gateway(&pki, &bootstrap, None, None).await;
+    let revocations = served.revocations.clone().expect("armed");
+    let enrolment = served.enrolment.clone().expect("enrolment");
+    let before = revocations.issued().len();
+    let uid = InstanceUid::default();
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap-a");
+    let (member_cert, member_key) = pki.issue_to_host("h-1");
+    let member = client(&served.ca_pem, Some((&member_cert, &member_key)));
+
+    let reply = decode(
+        post(
+            &member,
+            &served.endpoint,
+            with_csr(&uid, bootstrap_csr(&cert, &key, None)),
+        )
+        .await,
+    )
+    .await;
+    let (kind, message) = error_of(&reply).expect("refused");
+    assert_eq!(kind, ServerErrorResponseType::BadRequest as i32);
+    assert!(message.contains("a member does not enrol"), "{message}");
+
+    let (csr, _) = csr_for("edge-02");
+    let reply = decode(post(&gateway, &served.endpoint, with_csr(&uid, csr)).await).await;
+    let (kind, message) = error_of(&reply).expect("refused");
+    assert_eq!(kind, ServerErrorResponseType::BadRequest as i32);
+    assert!(
+        message.contains("renewal proof") && message.contains("bootstrap proof"),
+        "{message}"
+    );
+    assert_eq!(
+        revocations.issued().len(),
+        before,
+        "a certificate was signed"
+    );
+    assert!(enrolment.pending().is_empty(), "a request was queued");
+
+    let own = bootstrap_csr(&member_cert, &member_key, None);
+    let reply = decode(post(&member, &served.endpoint, with_csr(&uid, own)).await).await;
+    assert!(
+        issued(reply).is_some(),
+        "a proof of the presented certificate renews it"
+    );
+}
+
+/// Two bootstrap certificates enrolling through one Gateway are counted in two buckets: one that
+/// spends its burst leaves the other's tokens alone.
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn two_bootstrap_certificates_through_one_gateway_are_two_buckets() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let (served, gateway) = behind_a_gateway(
+        &pki,
+        &bootstrap,
+        None,
+        Some(fleet_server::agent_rate::Limits {
+            messages_per_sec: 1,
+            burst: 3,
+            gateway_messages_per_sec: 1_000,
+            gateway_burst: 1_000,
+        }),
+    )
+    .await;
+    let throttled = |reply: &ServerToAgent| {
+        error_of(reply).is_some_and(|(kind, _)| kind == ServerErrorResponseType::Unavailable as i32)
+    };
+    let (one, one_key) = bootstrap.issue_bootstrap("bootstrap-one");
+    let (two, two_key) = bootstrap.issue_bootstrap("bootstrap-two");
+    let mut refused = 0;
+    for _ in 0..10 {
+        // A new host each time — a new instance_uid — under the one bootstrap certificate.
+        let csr = bootstrap_csr(&one, &one_key, None);
+        let reply = decode(
+            post(
+                &gateway,
+                &served.endpoint,
+                with_csr(&InstanceUid::default(), csr),
+            )
+            .await,
+        )
+        .await;
+        refused += usize::from(throttled(&reply));
+    }
+    assert!(
+        refused >= 6,
+        "one bootstrap certificate passed {} of 10",
+        10 - refused
+    );
+    let csr = bootstrap_csr(&two, &two_key, None);
+    let reply = decode(
+        post(
+            &gateway,
+            &served.endpoint,
+            with_csr(&InstanceUid::default(), csr),
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        !throttled(&reply),
+        "the other bootstrap certificate was throttled"
+    );
 }

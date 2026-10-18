@@ -2218,7 +2218,7 @@
         $("enrolments").innerHTML = enrolments.map((e) => `
           <tr>
             <td>${esc(when(e.arrived_ms))}</td>
-            <td>${esc(e.peer || "—")}</td>
+            <td>${e.gateway ? `via Gateway ${esc(e.gateway)}` : esc(e.peer || "—")}</td>
             <td><span class="fingerprint">${esc(e.key_fingerprint)}</span></td>
             <td>${bootstrapCell(e)}</td>
             <td>

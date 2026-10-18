@@ -879,6 +879,25 @@ impl PackageCache {
         Ok(len)
     }
 
+    /// Whether `uid` is bound to a host (ADR-0039 clause 6).
+    pub fn is_bound(&self, uid: &InstanceUid) -> bool {
+        self.inner().bindings.host_of(uid).is_some()
+    }
+
+    /// Logs one refusal of an enrolling peer's report or upgrade, aggregated per host it speaks as,
+    /// as every refusal of the Gateway is (ADR-0026 clause 46, ADR-0039 clause 11).
+    pub fn log_enrolment_refusal(&self, speaker: &str, peer: &str, why: &str) {
+        match self.inner().refusals.note(speaker, Instant::now()) {
+            Note::Log => warn!(host = %speaker, %peer, "refusing an enrolling peer: {why}"),
+            Note::LogAfter(more) => warn!(
+                host = %speaker, %peer, counted_last_minute = more,
+                "refusing an enrolling peer: {why}; more lines of this host were counted in the \
+                 minute before"
+            ),
+            Note::Count => {}
+        }
+    }
+
     /// Logs one refused download request, aggregated per host (ADR-0026 clause 46).
     fn log_refusal(&self, host: Option<&str>, serial: Option<&str>, path: &str) {
         let host = host.unwrap_or("none");
@@ -904,6 +923,8 @@ impl PackageCache {
 pub struct Downloads {
     pub cache: Arc<PackageCache>,
     pub revocations: RevocationList,
+    /// Tells an enrolling peer, which is served no download, from a member (ADR-0039 clause 11).
+    pub members: crate::gateway::Members,
 }
 
 /// The download route on the downstream listener (ADR-0026 clause 45).
@@ -960,7 +981,11 @@ async fn serve(
         .uri()
         .path_and_query()
         .map_or("", |path| path.as_str());
-    let host = host_of(&certificate);
+    // An enrolling peer is offered nothing, so it is served nothing (ADR-0039 clause 11), whatever
+    // host its certificate names.
+    let host = (!downloads.members.enrolling(&certificate))
+        .then(|| host_of(&certificate))
+        .flatten();
     let Some(artifact) = host
         .as_deref()
         .and_then(|host| downloads.cache.offered_to(host, path))

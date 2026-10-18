@@ -41,5 +41,8 @@ ones it uses without defining.
 - **Enrolment** — the time-limited, operator-approved exchange in which a host holding a bootstrap
   certificate obtains its client certificate and becomes a Host.
   _Avoid:_ registration, onboarding, enrollment.
+- **Enrolling peer** — a peer of a Gateway whose certificate chains to the bootstrap CA alone; the
+  Gateway relays one plain-HTTP enrolment request of it and nothing else.
+  _Avoid:_ bootstrap client, enrolling Agent.
 - **Rollout** — the explicit act that releases a Deployment to Agents and pins what each receives.
   _Avoid:_ publish, push, deploy.

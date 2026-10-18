@@ -123,15 +123,16 @@ async fn past(state: &AppState, after: u64) {
 }
 
 /// A host enrols with a bootstrap certificate and an operator's approval, and then renews, over the
-/// WebSocket transport: the approval issues one certificate and the renewal one more.
-/// Verifies: ADR-0021
+/// WebSocket transport: the approval issues one certificate and the renewal one more. The request
+/// proves the bootstrap certificate it is queued under.
+/// Verifies: ADR-0021, ADR-0039
 #[tokio::test]
 async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_websocket() {
     enrol_and_renew("wss").await;
 }
 
 /// The same over plain HTTP polling.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0021, ADR-0039
 #[tokio::test]
 async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_http() {
     enrol_and_renew("https").await;
@@ -333,6 +334,27 @@ async fn enrol_and_renew(scheme: &str) {
             .map(|pending| pending.id.clone())
     })
     .await;
+    // The request proves the bootstrap certificate it was queued under (ADR-0039).
+    let csr = std::fs::read(state_dir.join(fleet_agent::tls::PENDING_CSR_FILE)).expect("csr");
+    assert!(
+        fleet_core::csr::requested_uri(&csr, fleet_core::bootstrap_proof::URI_PREFIX)
+            .expect("a request")
+            .is_some(),
+        "the enrolment request carries no bootstrap proof"
+    );
+    assert_eq!(
+        served.enrolment.pending()[0]
+            .requester
+            .bootstrap_fingerprint,
+        {
+            use sha2::Digest as _;
+            let pem = std::fs::read(served.dir.path().join("bootstrap.pem")).expect("bootstrap");
+            hex::encode(sha2::Sha256::digest(
+                opamp::tls::certificates(&pem).expect("pem")[0].as_ref(),
+            ))
+        },
+        "queued under the bootstrap certificate it proves"
+    );
     state.approve_enrolment(&id).expect("approve");
     let first = until("the issued certificate", Duration::from_secs(10), || {
         held(state_dir)

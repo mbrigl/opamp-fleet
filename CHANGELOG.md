@@ -15,6 +15,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ## [0.6.0]
 
+### Added
+
+- **A host behind a Gateway enrols through it**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)). A Gateway with
+  `[gateway.tls] bootstrap_ca_file` admits a bootstrap certificate in its handshake and relays one
+  thing for it: a plain-HTTP report carrying a certificate signing request with a bootstrap proof
+  and nothing else. A WebSocket upgrade or any other report of such a peer is answered `403`, and
+  it binds no `instance_uid`, is offered nothing and served no download. The Server decides the
+  request as any enrolment — window, queue, the bootstrap certificate's share, approval, a new
+  host — and lists it with the Gateway's host in place of a peer address, as `gateway` in
+  `GET /api/v1/enrolments` and in every audit entry of it. Enrolment requests through one Gateway
+  are rate-limited per bootstrap certificate within its aggregate. **What to do:** to let hosts
+  behind a Gateway enrol, copy the Server's `[enrolment] bootstrap_ca_file` — the certificate,
+  never its key — to the Gateway, name it as `[gateway.tls] bootstrap_ca_file`, and point those
+  hosts at the Gateway with an `https://` endpoint. A CA that is in both `client_ca_file` and
+  `bootstrap_ca_file` fails the Gateway's startup.
+
 ### Security
 
 - **Through a Gateway a certificate is renewed only with a renewal proof**
@@ -157,6 +174,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   and opens with it.
 
 ### Changed
+
+- **An enrolment request proves its bootstrap certificate**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
+  The Client adds a bootstrap proof to every enrolment request: the bootstrap certificate it
+  enrols with and a signature with its key over the requested key, about 1 KiB more in the
+  request. The Server checks the proof and files the request under the certificate it names. On
+  a direct connection that must be the certificate the connection presented; a request whose proof
+  names another or does not verify, and one carrying a renewal proof beside it, is answered
+  `BadRequest` and not queued. **What to do:** nothing. A Client of an earlier release, and a
+  third-party OpAMP client, enrols as before without the proof.
+
+- **An enrolling Client on `https://` sends its request alone, and a member does not enrol**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)). A Client that holds
+  no certificate the Server issued and polls over `https://` now sends its certificate signing
+  request as its only report, before the Server's first answer, and re-sends it at every poll until
+  the certificate arrives. The Server refuses a request with a bootstrap proof over a member's
+  certificate whose host is not marked as a Gateway, unless the proof names that very certificate,
+  as a Client on a certificate an operator provisioned sends it; through a Gateway, a request with
+  neither a renewal proof nor a bootstrap proof is refused naming both. **What to do:** nothing. A
+  Client on a provisioned certificate whose request the Server refuses reports as a member again
+  until an exchange fails.
 
 - **A plain `service install` no longer returns a host to root**
   ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).

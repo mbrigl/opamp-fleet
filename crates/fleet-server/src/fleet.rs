@@ -392,6 +392,13 @@ pub trait CertificateSigner: Send + Sync {
     /// Returns the `BadRequest` text for a proof that does not hold.
     fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String>;
 
+    /// The issuer and serial of the bootstrap certificate a CSR's bootstrap proof names (ADR-0039
+    /// clause 1), read without checking the proof; `Ok(None)` when it carries none.
+    ///
+    /// # Errors
+    /// Returns the `BadRequest` text for a proof that does not parse.
+    fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String>;
+
     /// Checks the request's claims to an `instance_uid` against its sender's (ADR-0021).
     ///
     /// # Errors
@@ -998,9 +1005,12 @@ impl AppState {
     /// subject values it carries on (ADR-0036 clause 4). A renewal proof names the certificate
     /// whose key signed the new one — through a Gateway too — and the host and the values carry
     /// on from it; without one, the certificate the connection presented is renewed, unless its
-    /// host is marked as a Gateway (ADR-0039 clause 1). A
-    /// certificate that names no host — one an operator provisioned — gets a host derived from
-    /// its issuer and serial, the same on every retry.
+    /// host is marked as a Gateway (ADR-0039 clause 1). A bootstrap proof makes the request an
+    /// enrolment, which a member does not make (ADR-0039 clause 12) — unless it proves the very
+    /// certificate the connection presented: a Client cannot tell a certificate an operator
+    /// provisioned from a bootstrap certificate, and proves whichever it holds. A certificate that
+    /// names no host — one an operator provisioned — gets a host derived from its issuer and
+    /// serial, the same on every retry.
     fn renews(
         &self,
         ca: &dyn CertificateSigner,
@@ -1019,6 +1029,12 @@ impl AppState {
             let host = old.host.clone().unwrap_or_else(|| derived(&old.id));
             return Ok((Some(old.id), host, old.subject_values));
         }
+        // A proof of the certificate presented is that certificate's renewal, and without a
+        // certificate presented — `Admission::open`, which no Server serves — nothing is enrolled.
+        let enrols = match (ca.bootstrap_proof_id(csr)?, presented) {
+            (Some(named), Some(presented)) => named != presented.id,
+            _ => false,
+        };
         Ok(match presented {
             Some(presented) => {
                 let host = presented
@@ -1028,15 +1044,20 @@ impl AppState {
                 // Behind a Gateway the presented certificate is the Gateway's, and its host carries
                 // the mark: a CSR without a proof would hand the Gateway's powers to whoever sent
                 // it (ADR-0039 clause 1).
-                if self
+                let gateway = self
                     .revocations
                     .as_ref()
-                    .is_some_and(|revocations| revocations.is_gateway(&host))
-                {
-                    return Err(
-                        "a certificate requested through a Gateway needs a renewal proof"
-                            .to_string(),
-                    );
+                    .is_some_and(|revocations| revocations.is_gateway(&host));
+                if enrols {
+                    return Err(if gateway {
+                        "a bootstrap proof through a Gateway is an enrolment request, not a renewal"
+                            .to_string()
+                    } else {
+                        MEMBER_DOES_NOT_ENROL.to_string()
+                    });
+                }
+                if gateway {
+                    return Err(NEEDS_A_PROOF.to_string());
                 }
                 (
                     Some(presented.id.clone()),
@@ -3418,6 +3439,15 @@ pub fn bad_request(message: &str) -> ServerToAgent {
         ..Default::default()
     }
 }
+
+/// What a CSR with a bootstrap proof over a member's certificate is answered (ADR-0039 clause 12).
+pub const MEMBER_DOES_NOT_ENROL: &str =
+    "a certificate signing request with a bootstrap proof is an enrolment, and a member does not \
+     enrol";
+
+/// What a CSR with neither proof over a Gateway's certificate is answered (ADR-0039 clause 1).
+pub const NEEDS_A_PROOF: &str =
+    "a certificate requested through a Gateway needs a renewal proof or a bootstrap proof";
 
 /// How long an Agent told `Unavailable` waits before it asks again.
 pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);

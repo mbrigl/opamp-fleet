@@ -14,7 +14,13 @@ pub const URI_PREFIX: &str = "urn:opamp-fleet:renewal:v1:";
 /// SubjectPublicKeyInfo, in lowercase hex.
 #[must_use]
 pub fn statement(new_key_sha256: &[u8]) -> Vec<u8> {
-    let mut text = String::from("opamp-fleet-renewal-v1\n");
+    statement_of("opamp-fleet-renewal-v1", new_key_sha256)
+}
+
+/// `label`, a newline, the SHA-256 of the new key in lowercase hex, and a newline: what a proof's
+/// key signs. Each proof has a label of its own, so neither can stand for the other.
+pub(crate) fn statement_of(label: &str, new_key_sha256: &[u8]) -> Vec<u8> {
+    let mut text = format!("{label}\n");
     for byte in new_key_sha256 {
         text.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
         text.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));

@@ -52,7 +52,9 @@ base64.workspace = true
 ring.workspace = true
 rcgen.workspace = true
 time.workspace = true
-x509-parser.workspace = true
+# `verify`: a Gateway with a bootstrap CA tells a member from an enrolling peer by whether a CA of
+# its client CA file signed the certificate, as the Server does (ADR-0039).
+x509-parser = { workspace = true, features = ["verify"] }
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true

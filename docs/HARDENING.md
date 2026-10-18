@@ -52,7 +52,8 @@ has:
   `extendedKeyUsage`, and SANs **overwritten** rather than carried over, so a CSR cannot ask for the
   powers of a CA ([`ca.rs`](../crates/fleet-server/src/ca.rs)). Through a Gateway a CSR is signed
   only with a renewal proof, so a member behind it cannot obtain a certificate for the Gateway's
-  host and its powers (ADR-0039).
+  host and its powers; one with a bootstrap proof is an enrolment, which the Server checks and an
+  operator approves for a host of its own (ADR-0039).
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
 - **TLS 1.3 alone, on every connection of both ends** (ADR-0010, ADR-0013): the process-wide
@@ -62,7 +63,8 @@ has:
 - **A certificate in the handshake, and enrolment by approval** (ADR-0021, ADR-0015): every
   Agent presents a client certificate the Agent plane and every Gateway ask for in the TLS
   handshake. A fresh host enrols with a bootstrap certificate from a CA of its own, only inside an
-  operator-opened window, and only once an operator approves its request. Repeated admission
+  operator-opened window, and only once an operator approves its request, which proves the
+  bootstrap certificate it rests on with a signature of its key (ADR-0039). Repeated admission
   failures from one address are answered `429` before admission checks anything else, on both
   planes. On the Agent plane the TLS handshake and its client-certificate verification come
   before that, and a failed handshake is not counted as an admission failure.
@@ -92,7 +94,9 @@ has:
   fetches the revoked certificates of the client CA every 30 s and refuses them downstream, closing
   the sessions they hold with `1008`; while it holds no list younger than 300 s it admits nobody.
   It forwards no `Authorization` upstream, and every upstream connection carries its own
-  certificate alone.
+  certificate alone. A Gateway that trusts the bootstrap CA lets a peer of it relay one plain-HTTP
+  enrolment request and nothing else — no WebSocket, no binding, no offer, no download — and the
+  Server checks the request's proof against its own bootstrap CA and revocation list (ADR-0039).
 - **A CSR's claim to an `instance_uid` is checked** (ADR-0021): a CSR naming any
   `instance_uid` but its sender's is answered `BadRequest` before it is signed or queued — the
   Baseline's conditional MUST.
@@ -164,7 +168,8 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     ✅ gzip bounded *after* decompression · ✅ Admission by client certificate
   - ✅ connections capped (`max_connections`) · ✅ HTTP/2 streams and pings bounded
   - ✅ failed admissions throttled per address · ✅ admitted members rate-limited per host, and
-    per Agent within a Gateway's aggregate (ADR-0013)
+    per Agent within a Gateway's aggregate (ADR-0013), an enrolment through a Gateway per bootstrap
+    certificate (ADR-0039)
 - **Operator plane** — `127.0.0.1:4321` until an operator publishes it (ADR-0013).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ Basic over the whole plane, required beyond the loopback (ADR-0021) ·
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes, by `Origin` where a browser sends
@@ -185,6 +190,9 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     carries the Gateway's own certificate alone (ADR-0015)
   - ✅ a downstream peer that never finishes its headers after the handshake is hung up on
     ([`gateway_tls.rs`](../crates/fleet-agent/tests/gateway_tls.rs))
+  - ✅ an enrolling peer — a bootstrap certificate, with `bootstrap_ca_file` — is refused a
+    WebSocket and anything but one enrolment request `403`, binds nothing, and its place upstream
+    goes with its exchange (ADR-0039)
   - ✅ an Agent's place in the upstream pool is released when the socket that carried it goes ·
     ⚠️ a plain-HTTP Agent's place is released only when its upstream connection drops, so a peer
     that polls under ever new `instance_uid`s grows the pool's assignments until then

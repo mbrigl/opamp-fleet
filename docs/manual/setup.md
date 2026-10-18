@@ -449,9 +449,12 @@ closes on its own when its time runs out, and on a Server restart:
 $ curl --cacert server-ca.pem -X DELETE https://127.0.0.1:4321/api/v1/enrolment/window
 ```
 
-**A host behind a Gateway cannot enrol through it**, because a Gateway trusts only the client CA,
-never the bootstrap CA. Let the host reach the Server directly once to enrol, then point it at the
-Gateway. Gateways are described in [Gateway Mode](client.md#gateway-mode-carrying-other-clients).
+**A host behind a Gateway enrols through it** once the Gateway trusts the bootstrap CA: copy the
+Server's `bootstrap-ca.pem` — the certificate, never its key — to the Gateway and name it as
+`[gateway.tls] bootstrap_ca_file`. Point the host at the Gateway with an `https://` endpoint. Its
+request then waits in the **Enrolments** tab like any other, naming the Gateway's host where a
+direct one names its address, and the window, the queue and your approval apply as above. See
+[Enrolment through a Gateway](client.md#enrolment-through-a-gateway).
 
 ## 6. Living with the certificates
 

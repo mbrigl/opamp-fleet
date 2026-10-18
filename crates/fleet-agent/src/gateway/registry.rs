@@ -56,6 +56,11 @@ impl Registry {
         }
     }
 
+    /// The package cache, which holds the bindings and logs the Gateway's refusals.
+    pub fn cache(&self) -> &PackageCache {
+        &self.cache
+    }
+
     /// A WebSocket peer whose certificate speaks as `speaker` claims an Agent, and gets it only
     /// when the Agent's `instance_uid` is bound to `speaker`: then the route is its, and `false`
     /// leaves the route where it was (ADR-0039 clause 5). Claiming again from the same host
@@ -111,6 +116,30 @@ impl Registry {
             Route {
                 downstream: Downstream::Exchange(reply, exchange),
                 host,
+            },
+        );
+        Some(exchange)
+    }
+
+    /// An enrolling peer's plain-HTTP exchange waits for exactly one reply for `uid`, binding
+    /// nothing (ADR-0039 clause 5): its exchange is its route for that reply alone. `None` — the
+    /// report is not forwarded — for an `instance_uid` bound to a host or routed already, so an
+    /// enrolling peer never takes another Agent's replies.
+    pub fn expect_enrolment(
+        &self,
+        uid: InstanceUid,
+        reply: oneshot::Sender<ServerToAgent>,
+    ) -> Option<u64> {
+        let mut routes = self.routes.lock().expect("registry lock");
+        if routes.contains_key(&uid) || self.cache.is_bound(&uid) {
+            return None;
+        }
+        let exchange = self.exchanges.fetch_add(1, Ordering::Relaxed);
+        routes.insert(
+            uid,
+            Route {
+                downstream: Downstream::Exchange(reply, exchange),
+                host: None,
             },
         );
         Some(exchange)

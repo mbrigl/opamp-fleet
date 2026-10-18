@@ -113,7 +113,7 @@ window and your approval, and the host's private key never leaves the host.
    ```
 
 3. **The request waits in the queue.** The **Enrolments** tab lists it with its arrival time, the
-   address it came from, the key fingerprint, and the bootstrap certificate it carries: customer,
+   address it came from — or the Gateway it came through — the key fingerprint, and the bootstrap certificate it carries: customer,
    site, serial and end. A certificate the Server did not issue is marked *not issued here*.
 4. **Check two things, then approve.** The key fingerprint must match the one the host logged, and
    the bootstrap certificate must be the one you gave that host. Press **Approve**. Press **Reject**
@@ -124,8 +124,9 @@ window and your approval, and the host's private key never leaves the host.
 6. **Close the window** with **Close window** when you are done. It also closes when its time runs
    out, and when the Server restarts.
 
-A host behind a Gateway cannot enrol through it. Let it reach the Server directly once, then point
-it at the Gateway.
+A host behind a Gateway enrols through it over `https://`, once the Gateway names the bootstrap
+CA's certificate as `[gateway.tls] bootstrap_ca_file`; see
+[Enrolment through a Gateway](client.md#enrolment-through-a-gateway).
 
 Details: [Enrol the Client](setup.md#5-enrol-the-client) and
 [Enrolment: the first certificate](client.md#enrolment-the-first-certificate).

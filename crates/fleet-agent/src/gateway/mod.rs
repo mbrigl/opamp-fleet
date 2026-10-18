@@ -4,8 +4,10 @@
 //! downstream connections onto a small pool of upstream ones. What it does *not* do is as
 //! load-bearing as what it does: it forwards messages unchanged, holds no admission policy of its
 //! own — the one admission refusal beyond its handshake is a certificate its Server revoked
-//! ([`revocations`]), and the one refusal beyond admission is a download the Server did not offer
-//! to the requesting host through this Gateway ([`cache`]) — forwards no `Authorization`, and
+//! ([`revocations`]); beyond admission it refuses a report for another host's Agent
+//! ([`registry`]), anything but one plain-HTTP enrolment request from an enrolling peer
+//! ([`Members`]), and a download the Server did not offer to the requesting host through this
+//! Gateway ([`cache`]) — forwards no `Authorization`, and
 //! never speaks in an Agent's name, not even to say the goodbye a vanished Agent did not send.
 //!
 //! The pieces: this module serves the downstream endpoint on both transports (a downstream Client
@@ -65,6 +67,87 @@ struct Forwarding {
     max_agents: usize,
     /// What the Server revoked, which this Gateway refuses (ADR-0015 clause 14).
     revocations: RevocationList,
+    /// Tells a member from an enrolling peer (ADR-0039 clause 4).
+    members: Members,
+}
+
+/// What tells a downstream member from an **enrolling peer** (ADR-0039 clause 4). Without
+/// `bootstrap_ca_file` the handshake trusts the client CA alone, so every peer that passed it is a
+/// member. With it, a member is a peer whose certificate a CA of `client_ca_file` issued directly —
+/// named as its issuer and signed with its key, as the Server tells the two apart — and any other
+/// peer that passed the handshake chains to the bootstrap CA alone: it is enrolling.
+#[derive(Clone, Default)]
+pub struct Members {
+    /// The CAs of `client_ca_file`, while a bootstrap CA is trusted too.
+    client_cas: Option<Arc<Vec<Ca>>>,
+}
+
+/// One CA certificate of a PEM file, as far as it is read: its subject (DER and text) and its
+/// `SubjectPublicKeyInfo` (DER).
+struct Ca {
+    subject: Vec<u8>,
+    key: Vec<u8>,
+    name: String,
+}
+
+impl Members {
+    /// Whether the peer presenting `certificate` (DER, verified by the handshake) is enrolling.
+    #[must_use]
+    pub fn enrolling(&self, certificate: &[u8]) -> bool {
+        use x509_parser::prelude::{FromDer as _, SubjectPublicKeyInfo};
+        let Some(cas) = &self.client_cas else {
+            return false;
+        };
+        // One the handshake verified always parses; one that does not is no member.
+        let Ok((_, parsed)) = x509_parser::parse_x509_certificate(certificate) else {
+            return true;
+        };
+        !cas.iter().any(|ca| {
+            parsed.issuer().as_raw() == ca.subject.as_slice()
+                && SubjectPublicKeyInfo::from_der(&ca.key)
+                    .is_ok_and(|(_, key)| parsed.verify_signature(Some(&key)).is_ok())
+        })
+    }
+}
+
+/// Why a plain-HTTP report of an enrolling peer is not forwarded, or `None` when it is the one
+/// thing an enrolling peer sends (ADR-0039 clause 11): its identity, its sequence number and
+/// capabilities, and a certificate signing request carrying a bootstrap proof (ADR-0039 clause 7)
+/// — nothing a member reports, no description, health, effective configuration, configuration
+/// status, package statuses, components, connection-settings status, flags, goodbye or custom
+/// message. The Gateway does not check the proof: the Server does.
+fn not_an_enrolment(report: &AgentToServer) -> Option<&'static str> {
+    use opamp::proto::{
+        CertificateRequest, ConnectionSettingsRequest, OpAmpConnectionSettingsRequest,
+    };
+    let Some(csr) = report
+        .connection_settings_request
+        .as_ref()
+        .and_then(|request| request.opamp.as_ref())
+        .and_then(|opamp| opamp.certificate_request.as_ref())
+    else {
+        return Some("an enrolling peer sends a certificate signing request and nothing else");
+    };
+    let only = AgentToServer {
+        instance_uid: report.instance_uid.clone(),
+        sequence_num: report.sequence_num,
+        capabilities: report.capabilities,
+        connection_settings_request: Some(ConnectionSettingsRequest {
+            opamp: Some(OpAmpConnectionSettingsRequest {
+                certificate_request: Some(CertificateRequest {
+                    csr: csr.csr.clone(),
+                }),
+            }),
+        }),
+        ..AgentToServer::default()
+    };
+    if *report != only {
+        return Some("an enrolling peer sends a certificate signing request and nothing else");
+    }
+    match fleet_core::csr::requested_uri(&csr.csr, fleet_core::bootstrap_proof::URI_PREFIX) {
+        Ok(Some(_)) => None,
+        _ => Some("an enrolling peer's certificate signing request carries no bootstrap proof"),
+    }
 }
 
 /// The time bounds a Gateway runs with: the constants, unless a test drives them short.
@@ -87,11 +170,12 @@ impl Default for Timings {
 
 /// Serves the downstream endpoint until `shutdown` fires.
 ///
-/// Mutual TLS is per hop (ADR-0015): the downstream hop serves TLS 1.3 from `[gateway.tls]`, and
-/// every downstream Agent must present a certificate that chains to its `client_ca_file` — the
-/// access-control boundary of the hop. Both are required; a Gateway without them does not start.
-/// Downstream Agents travel upstream under this Gateway's own member certificate, so that CA must
-/// be the fleet's client CA and never a bootstrap CA.
+/// Mutual TLS is per hop (ADR-0039 clause 4): the downstream hop serves TLS 1.3 from
+/// `[gateway.tls]`, and every downstream peer must present a certificate that chains to its
+/// `client_ca_file`, or to its `bootstrap_ca_file` where one is named — the access-control boundary
+/// of the hop. Downstream Agents travel upstream under this Gateway's own member certificate, so
+/// `client_ca_file` must be the fleet's client CA and never a bootstrap CA; a peer of the bootstrap
+/// CA may only relay an enrolment request.
 ///
 /// # Errors
 /// Returns an error when the configured address cannot be bound — at startup, so a taken port is
@@ -174,15 +258,23 @@ pub async fn run_on_timed(
         shutdown.clone(),
         timings.revocation_refresh,
     ));
+    // Mutual TLS 1.3 and nothing less (ADR-0015); the load refused a Gateway without it.
+    let tls = gateway
+        .tls
+        .as_ref()
+        .ok_or("[gateway.tls] is required — a Gateway admits Agents over mutual TLS only")?;
+    let (server_tls, members) = server_tls(tls)?;
     let downloads = Arc::new(cache::Downloads {
         cache,
         revocations: revocations.clone(),
+        members: members.clone(),
     });
     let handler = Arc::new(Forwarding {
         pool: Pool::new(config.clone(), registry.clone()),
         registry,
         max_agents: gateway.max_carried_agents,
         revocations,
+        members,
     });
     // The receive and send limits the Baseline requires, enforced per hop; beside the OpAMP
     // endpoint, the download route the Agents behind this Gateway resolve their offers against
@@ -191,12 +283,7 @@ pub async fn run_on_timed(
         .merge(cache::router(downloads));
 
     let upstream_cap = gateway.upstream_connections;
-    // Mutual TLS 1.3 and nothing less (ADR-0015); the load refused a Gateway without it.
-    let tls = gateway
-        .tls
-        .as_ref()
-        .ok_or("[gateway.tls] is required — a Gateway admits Agents over mutual TLS only")?;
-    let config = server_tls(tls)?
+    let config = server_tls
         .rustls_config()
         .map_err(|e| format!("the gateway endpoint: {e}"))?;
     let handle = Handle::new();
@@ -217,24 +304,65 @@ pub async fn run_on_timed(
         .map_err(|e| format!("the gateway endpoint stopped: {e}"))
 }
 
-/// The material the downstream endpoint serves with (ADR-0015 clause 11): a client certificate
-/// that chains to `client_ca_file` is **mandatory** in the handshake. The Gateway trusts the fleet's
-/// client CA and never a bootstrap CA, so a host enrols with the Server directly (ADR-0021 clause 25).
-fn server_tls(tls: &GatewayTlsConfig) -> Result<ServerTls, String> {
+/// The material the downstream endpoint serves with (ADR-0039 clause 4), and what tells its members
+/// from its enrolling peers: a client certificate that chains to `client_ca_file` — or, where
+/// `bootstrap_ca_file` names one, to that bootstrap CA — is **mandatory** in the handshake. A CA in
+/// both files could not be told apart, so it fails startup naming both keys.
+fn server_tls(tls: &GatewayTlsConfig) -> Result<(ServerTls, Members), String> {
     let ca_file = tls
         .client_ca_file
         .as_ref()
         .ok_or("[gateway.tls] client_ca_file is required")?;
-    let client_auth = ClientAuth::Required {
-        ca_pem: crate::tls::certificates_file(ca_file)?,
-    };
-    Ok(ServerTls {
-        identity: Identity {
-            cert_pem: crate::tls::certificates_file(&tls.cert_file)?,
-            key_pem: crate::tls::key_file(&tls.key_file)?,
+    let mut ca_pem = crate::tls::certificates_file(ca_file)?;
+    let mut members = Members::default();
+    if let Some(bootstrap_file) = &tls.bootstrap_ca_file {
+        let bootstrap_pem = crate::tls::certificates_file(bootstrap_file)?;
+        let client_cas = cas_of(ca_file, &ca_pem)?;
+        let bootstrap_cas = cas_of(bootstrap_file, &bootstrap_pem)?;
+        if let Some(Ca { name, .. }) = bootstrap_cas
+            .iter()
+            .find(|ca| client_cas.iter().any(|other| other.subject == ca.subject))
+        {
+            return Err(format!(
+                "[gateway.tls] client_ca_file {} and bootstrap_ca_file {} both hold the CA {name} — \
+                 a bootstrap certificate must be told apart from a member's",
+                ca_file.display(),
+                bootstrap_file.display()
+            ));
+        }
+        if !ca_pem.ends_with(b"\n") {
+            ca_pem.push(b'\n');
+        }
+        ca_pem.extend_from_slice(&bootstrap_pem);
+        members.client_cas = Some(Arc::new(client_cas));
+    }
+    Ok((
+        ServerTls {
+            identity: Identity {
+                cert_pem: crate::tls::certificates_file(&tls.cert_file)?,
+                key_pem: crate::tls::key_file(&tls.key_file)?,
+            },
+            client_auth: ClientAuth::Required { ca_pem },
         },
-        client_auth,
-    })
+        members,
+    ))
+}
+
+/// Each CA certificate of a PEM file.
+fn cas_of(path: &std::path::Path, pem: &[u8]) -> Result<Vec<Ca>, String> {
+    opamp::tls::certificates(pem)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        .iter()
+        .map(|der| {
+            x509_parser::parse_x509_certificate(der.as_ref())
+                .map(|(_, cert)| Ca {
+                    subject: cert.subject().as_raw().to_vec(),
+                    key: cert.public_key().raw.to_vec(),
+                    name: cert.subject().to_string(),
+                })
+                .map_err(|e| format!("cannot parse {}: {e}", path.display()))
+        })
+        .collect()
 }
 
 /// One downstream connection: a socket, or one plain-HTTP exchange.
@@ -257,6 +385,9 @@ struct Downstream {
     /// The host that certificate speaks as, which the `instance_uid`s it reports for are bound to
     /// (ADR-0039 clause 6): the one it names, else the one the Server derives for it.
     speaker: String,
+    /// The certificate chains to the bootstrap CA alone (ADR-0039 clause 4): this peer may relay
+    /// one enrolment request and nothing else, and binds nothing.
+    enrolling: bool,
 }
 
 /// Releases a plain-HTTP exchange's route when the exchange ends, unless its reply took it.
@@ -269,6 +400,18 @@ struct Abandon<'a> {
 impl Drop for Abandon<'_> {
     fn drop(&mut self) {
         self.registry.abandon(self.uid, self.exchange);
+    }
+}
+
+/// Releases an enrolling peer's place on the upstream connections when its exchange ends.
+struct Release<'a> {
+    pool: &'a Pool,
+    uid: InstanceUid,
+}
+
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        self.pool.release([self.uid]);
     }
 }
 
@@ -350,6 +493,18 @@ impl Handler for Forwarding {
         let peer = request
             .peer
             .map_or_else(|| "unknown".to_string(), |peer| peer.to_string());
+        let enrolling = self.members.enrolling(&certificate);
+        if enrolling && request.transport == Transport::WebSocket {
+            let why = "an enrolment through a Gateway is a plain-HTTP exchange";
+            self.registry
+                .cache()
+                .log_enrolment_refusal(&speaker, &peer, why);
+            return Err(Rejection {
+                status: StatusCode::FORBIDDEN,
+                headers: Vec::new(),
+                message: why.to_string(),
+            });
+        }
         let ended = Arc::new(Mutex::new(None));
         let (replies, outbound) = match request.transport {
             Transport::WebSocket => {
@@ -377,9 +532,11 @@ impl Handler for Forwarding {
                 replies,
                 carried: HashSet::new(),
                 ended,
-                host: cache::host_of(&certificate),
+                // An enrolling peer is offered nothing, so nothing is recorded for its host.
+                host: (!enrolling).then(|| cache::host_of(&certificate)).flatten(),
                 speaker,
                 certificate,
+                enrolling,
             },
             outbound,
         ))
@@ -392,6 +549,9 @@ impl Handler for Forwarding {
     async fn on_message(&self, downstream: &mut Downstream, report: AgentToServer) -> Reply {
         match downstream.transport {
             Transport::WebSocket => self.forward_from_socket(downstream, report).await,
+            Transport::Http if downstream.enrolling => {
+                self.forward_enrolment(downstream, report).await
+            }
             Transport::Http => self.forward_exchange(downstream, report).await,
         }
     }
@@ -471,6 +631,59 @@ impl Forwarding {
             warn!(agent = %uid, error = %e, "cannot forward a report upstream");
         }
         Reply::Nothing
+    }
+
+    /// An enrolling peer's one report (ADR-0039 clauses 5, 11): forwarded only when it is an
+    /// enrolment request and nothing else, binding nothing, its exchange its route for its one
+    /// reply. Any other report is answered `403` and logged.
+    async fn forward_enrolment(&self, downstream: &Downstream, report: AgentToServer) -> Reply {
+        let refuse = |why: &str| {
+            self.registry
+                .cache()
+                .log_enrolment_refusal(&downstream.speaker, &downstream.peer, why);
+            Reply::Refuse(StatusCode::FORBIDDEN, why.to_string())
+        };
+        if self.revocations.verdict(&downstream.certificate) != Verdict::Admit {
+            return Reply::Refuse(
+                StatusCode::UNAUTHORIZED,
+                "this certificate is revoked".into(),
+            );
+        }
+        let Some(uid) = InstanceUid::from_wire(&report.instance_uid) else {
+            return Reply::Refuse(
+                StatusCode::BAD_REQUEST,
+                "instance_uid must be 16 bytes".into(),
+            );
+        };
+        if let Some(why) = not_an_enrolment(&report) {
+            return refuse(why);
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let Some(exchange) = self.registry.expect_enrolment(uid, reply_tx) else {
+            return refuse("this instance_uid is not this host's to report for");
+        };
+        // However the exchange ends, its route goes first and then its place upstream: an
+        // enrolling peer is carried for one reply.
+        let _place = Release {
+            pool: &self.pool,
+            uid,
+        };
+        let _route = Abandon {
+            registry: &self.registry,
+            uid,
+            exchange,
+        };
+        if let Err(e) = self.pool.forward(uid, &report).await {
+            warn!(agent = %uid, error = %e, "cannot forward an enrolment request upstream");
+            return Reply::Refuse(StatusCode::BAD_GATEWAY, "cannot reach the Server".into());
+        }
+        match tokio::time::timeout(EXCHANGE_TIMEOUT, reply_rx).await {
+            Ok(Ok(reply)) => Reply::Send(reply),
+            _ => Reply::Refuse(
+                StatusCode::GATEWAY_TIMEOUT,
+                "no reply from the Server".into(),
+            ),
+        }
     }
 
     /// The plain-HTTP half: one report in, one reply out, with the pool in between.
@@ -588,6 +801,7 @@ mod tests {
             registry,
             max_agents: 10,
             revocations,
+            members: Members::default(),
         }
     }
 
@@ -605,6 +819,7 @@ mod tests {
             host: cache::host_of(&certificate),
             speaker: cache::speaker_of(&certificate).expect("a readable certificate"),
             certificate,
+            enrolling: false,
         }
     }
 
@@ -767,5 +982,200 @@ mod tests {
         );
         forwarding.registry.deliver(uid, reply_for(uid)).await;
         assert!(after_rx.try_recv().is_ok());
+    }
+
+    /// A CSR for a fresh key whose SANs ask for `uri`.
+    fn csr_with_uri(uri: &str) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::URI(uri.try_into().expect("uri")));
+        params
+            .serialize_request(&key)
+            .expect("csr")
+            .pem()
+            .expect("pem")
+            .into_bytes()
+    }
+
+    /// A report of `uid` carrying `csr` and nothing else.
+    fn enrolment(uid: InstanceUid, csr: Vec<u8>) -> AgentToServer {
+        AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num: 1,
+            capabilities: 1,
+            connection_settings_request: Some(opamp::proto::ConnectionSettingsRequest {
+                opamp: Some(opamp::proto::OpAmpConnectionSettingsRequest {
+                    certificate_request: Some(opamp::proto::CertificateRequest { csr }),
+                }),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// An enrolling peer's report is forwarded only when it carries a CSR with a bootstrap proof
+    /// and nothing a member reports; any other is answered `403`. The one it forwards binds
+    /// nothing: its exchange is its route until it ends, and an `instance_uid` bound to a host is
+    /// not an enrolling peer's to report for.
+    /// Verifies: ADR-0039
+    #[tokio::test]
+    async fn an_enrolling_peer_relays_one_enrolment_request_and_binds_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let peer = Downstream {
+            enrolling: true,
+            host: None,
+            ..downstream(Transport::Http, None, certificate())
+        };
+        let proof = csr_with_uri(&format!("{}AAAA", fleet_core::bootstrap_proof::URI_PREFIX));
+        let refused = |reply: Reply| match reply {
+            Reply::Refuse(status, why) => {
+                assert_eq!(status, StatusCode::FORBIDDEN, "{why}");
+                why
+            }
+            _ => panic!("forwarded"),
+        };
+
+        let uid = InstanceUid::default();
+        let described = AgentToServer {
+            agent_description: Some(opamp::proto::AgentDescription::default()),
+            ..enrolment(uid, proof.clone())
+        };
+        let health = AgentToServer {
+            health: Some(opamp::proto::ComponentHealth::default()),
+            ..enrolment(uid, proof.clone())
+        };
+        let flagged = AgentToServer {
+            flags: 1,
+            ..enrolment(uid, proof.clone())
+        };
+        for report in [
+            report(uid),
+            described,
+            health,
+            flagged,
+            enrolment(uid, csr_with_uri("urn:example:nothing")),
+            enrolment(
+                uid,
+                csr_with_uri(&format!("{}AAAA", fleet_core::renewal::URI_PREFIX)),
+            ),
+        ] {
+            let why = refused(forwarding.forward_enrolment(&peer, report).await);
+            assert!(why.contains("enrolling peer"), "{why}");
+            assert!(!forwarding.registry.routes(&uid));
+        }
+
+        let mut exchange =
+            Box::pin(forwarding.forward_enrolment(&peer, enrolment(uid, proof.clone())));
+        tokio::select! {
+            _ = &mut exchange => panic!("the silent upstream answered"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+        }
+        assert!(
+            forwarding.registry.routes(&uid),
+            "its exchange is its route"
+        );
+        assert!(
+            !forwarding.registry.cache().is_bound(&uid),
+            "it binds nothing"
+        );
+        drop(exchange);
+        assert!(!forwarding.registry.routes(&uid), "gone with the exchange");
+        assert!(
+            !forwarding.pool.assignments().0.contains(&uid),
+            "and its place upstream"
+        );
+
+        // An Agent a member bound is not an enrolling peer's to report for.
+        let bound = InstanceUid::default();
+        let (tx, _rx) = mpsc::channel(64);
+        let mut member = downstream(Transport::WebSocket, Some(tx), certificate());
+        forwarding
+            .forward_from_socket(&mut member, report(bound))
+            .await;
+        refused(
+            forwarding
+                .forward_enrolment(&peer, enrolment(bound, proof))
+                .await,
+        );
+    }
+
+    /// Writes a self-signed CA named `name` into `dir` as `<file>.pem`; returns it.
+    fn ca_file(
+        dir: &std::path::Path,
+        file: &str,
+        name: &str,
+    ) -> (std::path::PathBuf, rcgen::Issuer<'static, rcgen::KeyPair>) {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, name);
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let cert = params.self_signed(&key).expect("ca");
+        let path = dir.join(format!("{file}.pem"));
+        std::fs::write(&path, cert.pem()).expect("write");
+        (path, rcgen::Issuer::new(params, key))
+    }
+
+    /// `[gateway.tls]` with `client_ca_file` and, optionally, `bootstrap_ca_file`.
+    fn gateway_tls(
+        dir: &std::path::Path,
+        client: &std::path::Path,
+        bootstrap: Option<&std::path::Path>,
+    ) -> GatewayTlsConfig {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = rcgen::CertificateParams::new(vec!["gateway".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert");
+        std::fs::write(dir.join("listener.pem"), cert.pem()).expect("write");
+        std::fs::write(dir.join("listener-key.pem"), key.serialize_pem()).expect("write");
+        GatewayTlsConfig {
+            cert_file: dir.join("listener.pem"),
+            key_file: dir.join("listener-key.pem"),
+            client_ca_file: Some(client.to_path_buf()),
+            bootstrap_ca_file: bootstrap.map(std::path::Path::to_path_buf),
+        }
+    }
+
+    /// With `bootstrap_ca_file` a peer of the client CA is a member and one of the bootstrap CA is
+    /// enrolling; without it every peer is a member, as the handshake admits the client CA's alone.
+    /// A CA in both files fails startup naming both keys.
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_bootstrap_ca_makes_its_peers_enrolling_and_may_not_be_the_client_ca() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (client, client_ca) = ca_file(dir.path(), "client-ca", "fleet client CA");
+        let (bootstrap, bootstrap_ca) = ca_file(dir.path(), "bootstrap-ca", "fleet bootstrap CA");
+        let leaf = |issuer: &rcgen::Issuer<'static, rcgen::KeyPair>| {
+            let key = rcgen::KeyPair::generate().expect("key");
+            rcgen::CertificateParams::new(vec!["edge".to_string()])
+                .expect("params")
+                .signed_by(&key, issuer)
+                .expect("signed")
+                .der()
+                .to_vec()
+        };
+        let (member, enrolling) = (leaf(&client_ca), leaf(&bootstrap_ca));
+
+        let (_, members) =
+            server_tls(&gateway_tls(dir.path(), &client, Some(&bootstrap))).expect("serves");
+        assert!(!members.enrolling(&member));
+        assert!(members.enrolling(&enrolling));
+        let (_, without) = server_tls(&gateway_tls(dir.path(), &client, None)).expect("serves");
+        assert!(
+            !without.enrolling(&enrolling),
+            "no bootstrap CA, no enrolling peer"
+        );
+
+        let Err(error) = server_tls(&gateway_tls(dir.path(), &client, Some(&client))) else {
+            panic!("a CA in both files was taken");
+        };
+        assert!(
+            error.contains("client_ca_file") && error.contains("bootstrap_ca_file"),
+            "{error}"
+        );
     }
 }

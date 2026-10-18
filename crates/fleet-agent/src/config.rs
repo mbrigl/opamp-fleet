@@ -760,6 +760,11 @@ pub struct GatewayTlsConfig {
     /// PEM bundle a downstream Agent's client certificate must chain to, required (ADR-0015): a
     /// peer without one fails the handshake. An `Option` only so its absence can be named.
     pub client_ca_file: Option<PathBuf>,
+    /// The public certificate of the Server's `[enrolment] bootstrap_ca_file`, optional (ADR-0039
+    /// clause 1): a peer whose certificate chains to it alone passes the handshake as an enrolling
+    /// peer, which may relay one plain-HTTP enrolment request and nothing else.
+    #[serde(default)]
+    pub bootstrap_ca_file: Option<PathBuf>,
 }
 
 impl GatewayConfig {

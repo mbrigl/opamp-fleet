@@ -428,6 +428,11 @@ impl AgentState {
         self.protocol.next_report(&self.local)
     }
 
+    /// A report carrying `csr` alone, as an enrolling host sends it (ADR-0039 clause 11).
+    pub fn csr_report(&mut self, csr: Vec<u8>) -> AgentToServer {
+        self.protocol.csr_report(csr)
+    }
+
     /// The final message of a connection: the Baseline requires `agent_disconnect` in it.
     pub fn disconnect_message(&mut self) -> AgentToServer {
         self.protocol.disconnect_message()

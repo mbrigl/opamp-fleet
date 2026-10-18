@@ -74,9 +74,10 @@ Five crates in one workspace ([ADR-0010](adr/0010-five-crates-the-whole-opamp-co
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
-  version, the platform aliases, the statement a package signature covers, the renewal proof a
-  CSR carries, the host a certificate that names none is taken for, when a certificate counts as
-  ending, and what a certificate is called — and the
+  version, the platform aliases, the statement a package signature covers, the renewal proof and
+  the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
+  certificate that names none is taken for, when a certificate counts as ending, and what a
+  certificate is called — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0029).
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
@@ -172,7 +173,9 @@ core module names an adapter or a technology, and when a module has no role.
   the Server's route once into the state directory, and serves it on the downstream download route
   to the hosts it was offered to ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
   Which host the Gateway takes to speak for an `instance_uid` is decided in the core module
-  `gateway::policy`; the cache holds the bindings.
+  `gateway::policy`; the cache holds the bindings. With a bootstrap CA the Gateway tells an
+  enrolling peer from a member and relays its one plain-HTTP enrolment request without a binding
+  ([ADR-0039](adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
@@ -232,7 +235,10 @@ probation that commits or rolls back.
 seal both into the PKCS#12 file it keeps, the key's only way out
 ([ADR-0028](adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
 A fresh host presents a bootstrap certificate while an operator has
-the enrolment window open; its CSR waits until an operator approves it, and the certificate it
+the enrolment window open — to the Server, or to a Gateway that relays its request — and proves it
+in its CSR ([ADR-0039](adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md));
+the request is filed under the certificate it proves and waits until an operator approves it, and
+the certificate it
 gets names a new host and carries the subject values `tls` read from the bootstrap certificate
 and `ca` checked again, never the CSR's; every renewal carries the predecessor's
 ([ADR-0036](adr/0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md)). The questionnaire of `service install --interactive` and `service config`

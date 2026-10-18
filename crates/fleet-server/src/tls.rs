@@ -70,18 +70,9 @@ impl Issuers {
     /// What `certificate` (DER, already verified by the handshake) makes its connection.
     #[must_use]
     pub fn classify(&self, certificate: &[u8]) -> Peer {
-        use sha2::{Digest, Sha256};
+        // The handshake verified it, so it parses; a certificate that does not is no member.
         let Ok((_, parsed)) = X509Certificate::from_der(certificate) else {
-            // The handshake verified it, so it parses; a certificate that does not is no member.
-            return Peer::Enrolling {
-                subject: String::new(),
-                carried: Box::new(Err("the certificate does not parse".to_string())),
-                fingerprint: hex::encode(Sha256::digest(certificate)),
-                id: CertId {
-                    issuer: String::new(),
-                    serial: String::new(),
-                },
-            };
+            return enrolling(certificate);
         };
         let issuer = parsed.issuer().as_raw();
         let member = self.bootstrap.is_empty()
@@ -93,12 +84,50 @@ impl Issuers {
         if member {
             return Peer::Member;
         }
-        Peer::Enrolling {
+        enrolling(certificate)
+    }
+
+    /// What a bootstrap certificate (DER) an enrolment request proves says about itself
+    /// (ADR-0039 clause 9), when a CA of `bootstrap_ca_file` issued it directly — named as its
+    /// issuer and signed with its key. `None` for any other: the proof carries no chain, so a
+    /// certificate below an intermediate cannot be told from one the CA never issued.
+    #[must_use]
+    pub fn bootstrap_issued(&self, certificate: &[u8]) -> Option<Peer> {
+        let (_, parsed) = X509Certificate::from_der(certificate).ok()?;
+        let issuer = parsed.issuer().as_raw();
+        self.bootstrap
+            .iter()
+            .any(|ca| {
+                ca.subject == issuer
+                    && SubjectPublicKeyInfo::from_der(&ca.key)
+                        .is_ok_and(|(_, key)| parsed.verify_signature(Some(&key)).is_ok())
+            })
+            .then(|| enrolling(certificate))
+    }
+}
+
+/// What a bootstrap certificate (DER) makes the request it carries or proves: its subject, the
+/// values an approval carries, its fingerprint and its issuer and serial.
+#[must_use]
+pub fn enrolling(certificate: &[u8]) -> Peer {
+    use sha2::{Digest, Sha256};
+    let fingerprint = hex::encode(Sha256::digest(certificate));
+    match X509Certificate::from_der(certificate) {
+        Ok((_, parsed)) => Peer::Enrolling {
             subject: crate::ca::name_text(parsed.subject()),
             carried: Box::new(crate::ca::carried_subject(parsed.subject())),
-            fingerprint: hex::encode(Sha256::digest(certificate)),
-            id: CertId::new(issuer, &hex::encode(parsed.raw_serial())),
-        }
+            fingerprint,
+            id: CertId::new(parsed.issuer().as_raw(), &hex::encode(parsed.raw_serial())),
+        },
+        Err(_) => Peer::Enrolling {
+            subject: String::new(),
+            carried: Box::new(Err("the certificate does not parse".to_string())),
+            fingerprint,
+            id: CertId {
+                issuer: String::new(),
+                serial: String::new(),
+            },
+        },
     }
 }
 

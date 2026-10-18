@@ -98,6 +98,9 @@ state_dir = "client-state"
 # key_file = "gateway-key.pem"
 # client_ca_file = "client-ca.pem"   # the fleet's client CA — never a bootstrap CA: downstream
 #                                    # Agents travel upstream as members
+# bootstrap_ca_file = "bootstrap-ca.pem"  # optional: the public certificate of the Server's
+#                                         # [enrolment] bootstrap_ca_file, never its key; relays a
+#                                         # plain-HTTP enrolment request of a host behind it
 
 # TLS toward the Server. ca_file trusts a private CA; cert_file and key_file are this Client's
 # identity, and the Client refuses to start without one — the Server asks for it in the

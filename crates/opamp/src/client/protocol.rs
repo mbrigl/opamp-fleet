@@ -254,6 +254,25 @@ impl AgentProtocol {
         msg
     }
 
+    /// A report carrying `csr` and nothing else but the Agent's identity, sequence number and
+    /// capabilities — what an application sends where only a certificate signing request may pass,
+    /// as through a gateway that relays an enrolment. What the next full report owes is left as it
+    /// was, so the report after this one carries it.
+    pub fn csr_report(&mut self, csr: Vec<u8>) -> AgentToServer {
+        self.sequence_num += 1;
+        AgentToServer {
+            instance_uid: self.uid.as_bytes().to_vec(),
+            sequence_num: self.sequence_num,
+            capabilities: self.capabilities,
+            connection_settings_request: Some(crate::proto::ConnectionSettingsRequest {
+                opamp: Some(crate::proto::OpAmpConnectionSettingsRequest {
+                    certificate_request: Some(crate::proto::CertificateRequest { csr }),
+                }),
+            }),
+            ..Default::default()
+        }
+    }
+
     /// The final message of a connection: the specification requires `agent_disconnect` in it.
     pub fn disconnect_message(&mut self) -> AgentToServer {
         self.sequence_num += 1;
@@ -404,6 +423,36 @@ mod tests {
         assert_eq!(second.sequence_num, 2);
         assert_eq!(second.instance_uid, agent.uid().as_bytes());
         assert!(second.agent_description.is_none() && second.health.is_none());
+    }
+
+    #[test]
+    fn a_csr_report_carries_the_request_alone_and_leaves_the_full_report_owed() {
+        let mut agent = protocol();
+        let content = Content::default();
+        let report = agent.csr_report(b"csr".to_vec());
+        assert_eq!(report.sequence_num, 1);
+        assert_eq!(
+            report,
+            AgentToServer {
+                instance_uid: agent.uid().as_bytes().to_vec(),
+                sequence_num: 1,
+                capabilities: AgentCapabilities::ReportsStatus as u64,
+                connection_settings_request: Some(crate::proto::ConnectionSettingsRequest {
+                    opamp: Some(crate::proto::OpAmpConnectionSettingsRequest {
+                        certificate_request: Some(crate::proto::CertificateRequest {
+                            csr: b"csr".to_vec()
+                        }),
+                    }),
+                }),
+                ..Default::default()
+            }
+        );
+        let next = agent.next_report(&content);
+        assert_eq!(next.sequence_num, 2);
+        assert!(
+            next.agent_description.is_some(),
+            "the full report is still owed"
+        );
     }
 
     #[test]

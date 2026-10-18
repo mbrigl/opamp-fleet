@@ -1065,7 +1065,8 @@ starts. Enrolment runs the same either way:
    [the Server](server.md#enrolment-a-new-host-approved-by-an-operator)).
 2. The Client connects with the bootstrap certificate. It generates a key,
    which never leaves the host, and sends a certificate signing request for it as soon as the
-   Server's first answer says it signs certificates.
+   Server's first answer says it signs certificates. The request proves the bootstrap certificate
+   with a signature made with its key, and the Server files it under that certificate.
 3. The Client logs the SHA-256 fingerprint of that key:
 
    ```text
@@ -1081,8 +1082,9 @@ closed window is answered `503`, which the Client retries with its usual backoff
 count toward the Server's admission throttle. The issued
 certificate is renewed the same way once it is two thirds through its validity, with no operator
 involved. The private key is written `0600`; on Windows the state directory's ACL is what protects
-it. A host behind a Gateway enrols by connecting to the Server directly once, or is given a
-certificate by an operator.
+it. Over an `https://` endpoint the enrolling Client sends its request alone, before the Server's
+first answer, and re-sends it at every poll. A host behind a Gateway enrols through it over
+`https://` (see [Enrolment through a Gateway](#enrolment-through-a-gateway)).
 
 ### A leftover `[auth]`
 
@@ -1172,11 +1174,13 @@ package_cache_bytes = 10737418240  # the package cache's bound, 10 GiB
 cert_file = "gateway.pem"          # what this Gateway presents to its Agents
 key_file = "gateway-key.pem"
 client_ca_file = "client-ca.pem"   # the CA every downstream Agent's certificate chains to
+# bootstrap_ca_file = "bootstrap-ca.pem"  # optional: relays enrolments, see below
 ```
 
 A Gateway without `[gateway.tls]`, or without `client_ca_file`, is refused at startup, on a
 loopback `listen` too. There is no plaintext Gateway. The downstream handshake requires a client
-certificate that chains to `client_ca_file`, so a peer without one never reaches OpAMP.
+certificate that chains to `client_ca_file`, or to `bootstrap_ca_file` where it is set, so a peer
+without one never reaches OpAMP.
 
 Point the Clients behind it at this address instead of the Server's, as a `wss://` or `https://`
 endpoint. Each of them still needs its client certificate. Nothing else about
@@ -1198,6 +1202,39 @@ and when it has none, the report is not forwarded. If a
 host locks another host's Agent out, restart the Gateway: the real host's next report then binds
 it. A certificate renewed through a Gateway is renewed with a renewal proof, which this Client
 always sends; the Server refuses a request without one there.
+
+### Enrolment through a Gateway
+
+A host that reaches the Server only through a Gateway enrols through it. Give the Gateway the
+public certificate of the Server's bootstrap CA, the file `[enrolment] bootstrap_ca_file` names on
+the Server, and never its key:
+
+```toml
+[gateway.tls]
+bootstrap_ca_file = "bootstrap-ca.pem"
+```
+
+A CA that is in both `client_ca_file` and `bootstrap_ca_file` fails startup naming both keys. A
+peer whose certificate chains to the bootstrap CA alone is an **enrolling peer**, and the Gateway
+relays one thing for it: a plain-HTTP report carrying its certificate signing request with the
+bootstrap proof (see [Enrolment](#enrolment-the-first-certificate)) and nothing a member reports,
+no description, health, configuration status, package statuses or connection-settings status.
+Anything else is answered `403` and logged, a WebSocket upgrade included, with a message that an
+enrolment through a Gateway is a plain-HTTP exchange. The Gateway does not check the proof; the
+Server does, and decides the request as any enrolment: in an open window, against the queue and
+its bootstrap certificate's share, and by an operator's approval, which mints a host of its own.
+Outside a window the request is answered `Unavailable`, which the Client waits out. The request
+binds nothing at the Gateway: its exchange is its route for its one reply, and it is offered
+nothing and served no download. So once its certificate arrives, the host reports through the
+Gateway as a member under its own `instance_uid`. The enrolling Client polls, so it collects its
+certificate at its next request after the approval.
+
+Point an enrolling host behind a Gateway at an `https://` endpoint. The Client enrols over plain
+HTTP whenever its endpoint is `https://` and it holds no certificate the Server issued: it then
+sends its request alone until the certificate arrives. Over `wss://` it enrols as before, which
+reaches a Server directly but not through a Gateway. Switch it to `wss://` once it is enrolled, if
+it should hear the Server's pushes at once. An enrolment through a Gateway behind another Gateway
+is not relayed.
 
 `upstream_connections` is a **ceiling**. Connections are opened as Agents appear, so a Gateway in
 front of three Agents holds three, and each Agent stays on its connection while that lives. Any
@@ -1260,7 +1297,8 @@ same version again does not re-send the offer.
 ### What a Gateway does not do
 
 - **It makes no authentication decision of its own.** A downstream peer is admitted by its
-  handshake against `client_ca_file`, which must be the fleet's client CA, never a bootstrap CA.
+  handshake against `client_ca_file`, which must be the fleet's client CA, never a bootstrap CA,
+  or against `bootstrap_ca_file` as an enrolling peer.
   The Gateway forwards no `Authorization` header: one a downstream peer sends is ignored, never
   refused, and nothing is sent upstream in its place. The one admission refusal it makes beyond
   its handshake is the Server's: it fetches the revoked certificates every 30 seconds and refuses a peer whose certificate is on that list with
@@ -1275,9 +1313,9 @@ same version again does not re-send the offer.
 - **It does not carry a downstream client certificate upstream.** Mutual TLS is per hop:
   `[gateway.tls]` verifies the Agents connecting here, and the identity presented to the Server is
   this Client's own, from the top-level `[tls]` or issued through the CSR flow.
-- **It does not carry an enrolment.** Its downstream handshake trusts the fleet's client CA and
-  never the bootstrap CA. A host behind a Gateway enrols by connecting to the Server once, or is
-  given a certificate by an operator.
+- **It does not vouch for an enrolment.** It relays an enrolling peer's request, with the proof
+  in it, and the Server checks the proof and decides; a revoked bootstrap certificate is refused
+  by the Server. Without `bootstrap_ca_file` its handshake refuses every bootstrap certificate.
 
 The upstream endpoint must be `wss://`, or `ws://` to `127.0.0.1` or `::1`. A polling connection
 cannot carry the Server's pushes to the Agents behind a Gateway, and the configuration refuses it

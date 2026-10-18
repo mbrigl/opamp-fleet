@@ -290,6 +290,20 @@ impl Engine {
         }
     }
 
+    /// The enrolment report (ADR-0039 clause 11): `csr` alone, on the Client's own Agent — the one
+    /// the identity of the connection belongs to, as [`request_certificate`] rides it. `None`
+    /// without such an Agent.
+    ///
+    /// [`request_certificate`]: Self::request_certificate
+    pub fn enrolment_report(&mut self, csr: Vec<u8>) -> Option<AgentToServer> {
+        let agent = self
+            .agents
+            .iter_mut()
+            .find(|agent| !agent.retired && !agent.state.is_managed())?;
+        self.last_csr = Some(csr.clone());
+        Some(agent.state.csr_report(csr))
+    }
+
     /// The connection-settings offer the transport must verify by actually connecting, taken
     /// exactly once (ADR-0014).
     pub fn take_connection_offer(&mut self) -> Option<ConnectionSettingsOffers> {

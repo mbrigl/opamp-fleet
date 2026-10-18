@@ -2443,13 +2443,17 @@ struct PendingEnrolment {
     /// What `approve` and `reject` name: the SHA-256 fingerprint of the requested public key.
     id: String,
     arrived_ms: u64,
-    /// The address the request came from.
+    /// The address the request came from, on a direct connection.
     #[serde(skip_serializing_if = "Option::is_none")]
     peer: Option<String>,
+    /// The host of the Gateway the request came through, in place of a peer address (ADR-0039
+    /// clause 4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway: Option<String>,
     /// The SHA-256 fingerprint of the requested public key, hex — the Client logs the same value,
     /// so an operator can match a request to a host.
     key_fingerprint: String,
-    /// The six subject values of the bootstrap certificate the connection carried: what an
+    /// The six subject values of the bootstrap certificate the request proves: what an
     /// approval carries into the host certificate (ADR-0036 clause 5). The request's own subject
     /// is not listed, because it is neither trusted nor carried. Absent when that certificate's
     /// subject cannot be carried — `subject_refusal` then says why.
@@ -2935,6 +2939,7 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
             id: p.id,
             arrived_ms: p.arrived_ms,
             peer: p.requester.peer.map(|ip| ip.to_string()),
+            gateway: p.requester.gateway.clone(),
             key_fingerprint: p.key_fingerprint,
             bootstrap_subject: p.requester.carried.clone().ok().map(Into::into),
             subject_refusal: p.requester.carried.err(),
@@ -2943,6 +2948,18 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
         })
         .collect();
     Json(pending).into_response()
+}
+
+/// The host of the Gateway a pending request came through, which every audit entry of it names
+/// (ADR-0039 clause 12).
+fn through_gateway(state: &AppState, id: &str) -> Option<String> {
+    state
+        .enrolment()?
+        .pending()
+        .into_iter()
+        .find(|pending| pending.id == id)?
+        .requester
+        .gateway
 }
 
 /// Approves one enrolment request: the client CA signs it, and the host is handed its certificate.
@@ -2964,12 +2981,15 @@ async fn approve_enrolment(
     _csrf: SameOrigin,
     Path(id): Path<String>,
 ) -> Response {
+    let gateway = through_gateway(&state, &id);
     match state.approve_enrolment(&id) {
         Ok(()) => {
             info!(request = %id, "enrolment request approved");
             note(
                 &state,
-                crate::audit::Entry::new("enrolment.approved", "approved").with("id", id.clone()),
+                crate::audit::Entry::new("enrolment.approved", "approved")
+                    .with("id", id.clone())
+                    .with("gateway", gateway),
             );
             StatusCode::NO_CONTENT.into_response()
         }
@@ -3015,12 +3035,15 @@ async fn reject_enrolment(
     let Some(enrolment) = state.enrolment() else {
         return enrolment_off();
     };
+    let gateway = through_gateway(&state, &id);
     match enrolment.reject(&id) {
         Ok(()) => {
             info!(request = %id, "enrolment request rejected");
             note(
                 &state,
-                crate::audit::Entry::new("enrolment.rejected", "rejected").with("id", id.clone()),
+                crate::audit::Entry::new("enrolment.rejected", "rejected")
+                    .with("id", id.clone())
+                    .with("gateway", gateway),
             );
             StatusCode::NO_CONTENT.into_response()
         }

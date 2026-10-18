@@ -4,8 +4,9 @@
 //! bucket. A bucket holds `burst` tokens and gains `messages_per_sec` of them a second, and a new
 //! one starts full. The bucket is the host the certificate names, the certificate itself where it
 //! names none, or the peer address of an enrolling host. A host marked as a Gateway carries other
-//! hosts' Agents, so a message through it takes a token from the bucket of the Agent it names and
-//! one from the Gateway's aggregate. Both tables are bounded, and a full one forgets the bucket
+//! hosts' Agents, so a message through it takes a token from the bucket of the Agent it names — for
+//! an enrolment request, of the bootstrap certificate the request proves (ADR-0039) — and one from
+//! the Gateway's aggregate. Both tables are bounded, and a full one forgets the bucket
 //! used least recently, which can only grant tokens.
 
 use std::collections::{BTreeMap, HashMap};
@@ -154,10 +155,18 @@ impl<K: Clone + Eq + Hash> Table<K> {
     }
 }
 
+/// What a message through a Gateway is counted for within its aggregate: the Agent it names, or —
+/// for an enrolment request — the bootstrap certificate the request proves (ADR-0039 clause 13).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Named {
+    Agent([u8; 16]),
+    Enrolment(CertId),
+}
+
 struct Tables {
     tick: u64,
     own: Table<Key>,
-    agents: Table<(String, [u8; 16])>,
+    agents: Table<(String, Named)>,
 }
 
 /// The limit itself: the two tables and what they are sized by.
@@ -205,6 +214,29 @@ impl AgentRate {
         gateway: bool,
         agent: Option<&[u8]>,
     ) -> Result<(), Bucket> {
+        let named = agent
+            .and_then(|uid| <[u8; 16]>::try_from(uid).ok())
+            .map(Named::Agent);
+        self.take(subject, gateway, named)
+    }
+
+    /// [`admit`](Self::admit) for a message carrying an enrolment request: through a Gateway its
+    /// bucket within the aggregate is keyed by the bootstrap certificate the request proves
+    /// instead of the message's `instance_uid` (ADR-0039 clause 13), so the hosts enrolling
+    /// through one Gateway with different bootstrap certificates do not share one.
+    ///
+    /// # Errors
+    /// Answers the empty [`Bucket`]; nothing is taken then.
+    pub fn admit_enrolment(
+        &self,
+        subject: &Subject,
+        gateway: bool,
+        bootstrap: &CertId,
+    ) -> Result<(), Bucket> {
+        self.take(subject, gateway, Some(Named::Enrolment(bootstrap.clone())))
+    }
+
+    fn take(&self, subject: &Subject, gateway: bool, named: Option<Named>) -> Result<(), Bucket> {
         let now = self.clock.now_ms();
         let limits = self.limits;
         let mut tables = self.tables.lock().expect("agent rate lock");
@@ -233,8 +265,8 @@ impl AgentRate {
         if level < TOKEN {
             return Err(Bucket::Gateway);
         }
-        if let Some(uid) = agent.and_then(|uid| <[u8; 16]>::try_from(uid).ok()) {
-            let key = (host.clone(), uid);
+        if let Some(named) = named {
+            let key = (host.clone(), named);
             *tick += 1;
             if agents.level(&key, limits.messages_per_sec, limits.burst, now, *tick) < TOKEN {
                 return Err(Bucket::Agent);
@@ -414,6 +446,57 @@ mod tests {
             "a uid that is not 16 bytes names no Agent"
         );
         assert_eq!(rate.tables.lock().expect("lock").agents.len(), 0);
+    }
+
+    /// Two bootstrap certificates enrolling through one Gateway are counted in two buckets within
+    /// its aggregate, neither of them an Agent's; on a host that is no Gateway an enrolment request
+    /// is counted as the host's message.
+    /// Verifies: ADR-0039
+    #[test]
+    fn enrolments_through_a_gateway_are_counted_by_their_bootstrap_certificate() {
+        let (rate, _) = rate(16, 64);
+        let gateway = host("gateway");
+        let (one, two) = (
+            CertId {
+                issuer: "bootstrap".into(),
+                serial: "01".into(),
+            },
+            CertId {
+                issuer: "bootstrap".into(),
+                serial: "02".into(),
+            },
+        );
+        let passing_enrolment = |bootstrap: &CertId| {
+            (0..100)
+                .take_while(|_| rate.admit_enrolment(&gateway, true, bootstrap).is_ok())
+                .count()
+        };
+        assert_eq!(
+            passing_enrolment(&one),
+            3,
+            "one bootstrap certificate's burst"
+        );
+        assert_eq!(
+            rate.admit_enrolment(&gateway, true, &one),
+            Err(Bucket::Agent)
+        );
+        assert_eq!(
+            passing_enrolment(&two),
+            2,
+            "another bucket, up to the aggregate"
+        );
+        assert!(
+            rate.admit(&host("member"), false, None).is_ok(),
+            "no other host's bucket"
+        );
+        let (rate, _) = self::rate(16, 16);
+        assert_eq!(
+            (0..100)
+                .take_while(|_| rate.admit_enrolment(&host("edge"), false, &one).is_ok())
+                .count(),
+            3
+        );
+        assert_eq!(rate.admit(&host("edge"), false, None), Err(Bucket::Host));
     }
 
     /// Verifies: ADR-0013

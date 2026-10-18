@@ -46,7 +46,9 @@ pub struct Request {
     pub instance_uid: Vec<u8>,
 }
 
-/// Who asked: the bootstrap certificate the connection carried, and from where.
+/// Who asked: the bootstrap certificate the request proves (ADR-0039 clause 9), and from where — the
+/// peer address of an enrolment connection, or the Gateway's host it came through (ADR-0039
+/// clause 4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requester {
@@ -62,6 +64,9 @@ pub struct Requester {
     /// `GET /api/v1/bootstrap-certificates` lists it.
     pub bootstrap: CertId,
     pub peer: Option<IpAddr>,
+    /// The host of the Gateway the request came through, in place of a peer address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
 }
 
 /// One pending request as the REST API lists it.
@@ -645,6 +650,13 @@ mod tests {
         ) -> Result<Option<crate::revocation::Facts>, String> {
             Ok(None)
         }
+
+        fn bootstrap_proof_id(
+            &self,
+            _csr_pem: &str,
+        ) -> Result<Option<crate::revocation::CertId>, String> {
+            Ok(None)
+        }
     }
 
     fn enrolment() -> (Enrolment, Arc<Manual>) {
@@ -668,6 +680,7 @@ mod tests {
             bootstrap_fingerprint: "bf".to_string(),
             bootstrap: CertId::new(b"bootstrap CA", "b5"),
             peer: None,
+            gateway: None,
         }
     }
 
@@ -981,6 +994,13 @@ mod tests {
             &self,
             _csr_pem: &str,
         ) -> Result<Option<crate::revocation::Facts>, String> {
+            Ok(None)
+        }
+
+        fn bootstrap_proof_id(
+            &self,
+            _csr_pem: &str,
+        ) -> Result<Option<crate::revocation::CertId>, String> {
             Ok(None)
         }
     }
