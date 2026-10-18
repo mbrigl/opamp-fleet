@@ -3999,6 +3999,42 @@ async fn revoking_a_bootstrap_certificate_withdraws_the_requests_waiting_with_it
     );
 }
 
+/// The issuing route answers a password of 7 characters `400`, naming the rule, and issues a
+/// bootstrap certificate under one of 8.
+/// Verifies: ADR-0048
+#[tokio::test]
+async fn a_bootstrap_password_is_at_least_eight_characters() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("acme bootstrap CA");
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            bootstrap: Some(&bootstrap),
+            issue_bootstrap: true,
+            revocations: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let operator_client = client(&served.ca_pem, None);
+    let issue = |password: &'static str| {
+        operator_client
+            .post(operator(&served, "/api/v1/bootstrap-certificates"))
+            .json(&serde_json::json!({ "subject": customer_and_site(), "password": password }))
+            .send()
+    };
+    let refused = issue("seven c").await.expect("issue");
+    assert_eq!(refused.status(), 400);
+    let body = refused.text().await.expect("body");
+    assert!(
+        body.contains("password must be 8 to 128 characters"),
+        "{body}"
+    );
+    let issued = issue("eight ch").await.expect("issue");
+    assert_eq!(issued.status(), 201);
+}
+
 /// Issued with a password, a bootstrap certificate's key is in no answer: the Server keeps a
 /// PKCS#12 file of it under the password and hands it out as often as asked, each download on the
 /// record, until the certificate is revoked — and the file enrols like the pair. The password is

@@ -149,6 +149,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   hosts in one window: then approve them in batches, or set `max_pending_per_bootstrap` (1 to
   1024) in `[enrolment]`.
 
+- **A bootstrap PKCS#12 password is 8 to 128 characters**
+  ([ADR-0048](docs/adr/0048-a-bootstrap-pkcs12-password-of-8-to-128-characters.md)).
+  A leaked `bootstrap.p12` under a password of four characters opened offline within hours of GPU
+  time, and whoever opened it could take places in the enrolment queue. `POST
+  /api/v1/bootstrap-certificates` and the **Enrolments** tab now take 8 to 128 characters without
+  a control character, and answer anything shorter `400`. **What to do:** choose a password of at
+  least 8 characters for the next bootstrap certificate you issue, and update any script that
+  issues one with a shorter password. A file issued before keeps the password it was issued under
+  and opens with it.
+
 ### Fixed
 
 - **A Host and its bindings end with its last valid certificate, and forgetting an Agent releases

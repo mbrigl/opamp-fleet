@@ -1876,6 +1876,32 @@ async fn the_forms_mark_every_field_required_or_optional() {
     ));
 }
 
+/// The bundled UI asks for a bootstrap password of 8 to 128 characters, as the Server takes.
+/// Verifies: ADR-0048
+#[tokio::test]
+async fn the_ui_asks_for_a_bootstrap_password_of_8_to_128_characters() {
+    let server = spawn().await;
+    let html = reqwest::Client::new()
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    let at = html.find("id=\"boot-pass\"").expect("the password field");
+    let field = &html[at..at + html[at..].find("/>").expect("its end")];
+    assert!(
+        field.contains(&format!(
+            "minlength=\"{}\" maxlength=\"{}\"",
+            fleet_core::pkcs12::MIN_PASSWORD_CHARS,
+            fleet_core::pkcs12::MAX_PASSWORD_CHARS
+        )),
+        "{field}"
+    );
+    assert!(field.contains("8 to 128 characters"), "{field}");
+}
+
 /// The bundled UI's Hosts tab reads what `GET /api/v1/hosts` serves and acts on a row through the
 /// Gateway and revocation routes, and the Agents tab marks inherited labels — the fields the page
 /// reads are the ones the API documents.
