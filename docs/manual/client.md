@@ -1188,6 +1188,8 @@ them changes: the Server tells Agents apart by `instance_uid`, never by the conn
 so an Agent behind a Gateway is as manageable as one in front of it. Both transports are served
 downstream, so a polling Client works as well as a WebSocket one.
 
+![An Agent talking to the Server through a Gateway: the Gateway fetches the revocation list, checks each report's binding, forwards it unchanged under its own certificate, routes replies and pushes back by instance_uid, and serves packages from its cache](../images/communication-gateway.png)
+
 **Each Agent belongs to the host that first reported it.** An Agent's `instance_uid` is bound to
 the host of the certificate of the first report for it since the Gateway started — the host the
 certificate names (`urn:opamp-fleet:host:<id>`), or, for a certificate an operator made without
@@ -1935,6 +1937,8 @@ which build a host runs.
 polls every `poll_interval_secs`, which is the option for a host that cannot hold a long-lived
 connection. Nothing else differs: both carry the same messages, and the Server accepts both at
 once.
+
+![A Client talking to the Server directly: the handshake with the host certificate, a report and its reply, push and heartbeat over WebSocket, polling over plain HTTP, a package download, and a revocation closing the session](../images/communication-direct.png)
 
 **TLS 1.3, and plaintext on the loopback alone**. Every
 connection the Client makes off the host is TLS 1.3, so a peer that speaks only TLS 1.2 cannot
