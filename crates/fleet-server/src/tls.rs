@@ -88,21 +88,40 @@ impl Issuers {
     }
 
     /// What a bootstrap certificate (DER) an enrolment request proves says about itself
-    /// (ADR-0039 clause 9), when a CA of `bootstrap_ca_file` issued it directly — named as its
-    /// issuer and signed with its key. `None` for any other: the proof carries no chain, so a
-    /// certificate below an intermediate cannot be told from one the CA never issued.
-    #[must_use]
-    pub fn bootstrap_issued(&self, certificate: &[u8]) -> Option<Peer> {
-        let (_, parsed) = X509Certificate::from_der(certificate).ok()?;
+    /// (ADR-0039 clauses 8, 9), when a CA of `bootstrap_ca_file` issued it directly — named as its
+    /// issuer and signed with its key — and it passes what the handshake checks of one: a leaf
+    /// (no `CA:TRUE`) whose extended key usage, where it names one, includes `clientAuth`, valid
+    /// now. The proof carries no chain, so a certificate below an intermediate cannot be told from
+    /// one the CA never issued.
+    ///
+    /// # Errors
+    /// Returns why the certificate is not one, for the `BadRequest` that refuses its proof.
+    pub fn bootstrap_issued(&self, certificate: &[u8]) -> Result<Peer, String> {
+        let (_, parsed) = X509Certificate::from_der(certificate)
+            .map_err(|_| "its certificate does not parse".to_string())?;
         let issuer = parsed.issuer().as_raw();
-        self.bootstrap
-            .iter()
-            .any(|ca| {
-                ca.subject == issuer
-                    && SubjectPublicKeyInfo::from_der(&ca.key)
-                        .is_ok_and(|(_, key)| parsed.verify_signature(Some(&key)).is_ok())
-            })
-            .then(|| enrolling(certificate))
+        if !self.bootstrap.iter().any(|ca| {
+            ca.subject == issuer
+                && SubjectPublicKeyInfo::from_der(&ca.key)
+                    .is_ok_and(|(_, key)| parsed.verify_signature(Some(&key)).is_ok())
+        }) {
+            return Err("its certificate was not issued by the bootstrap CA".to_string());
+        }
+        // As webpki checks an end-entity certificate for client authentication: no CA, and an
+        // extended key usage that, where present, includes clientAuth.
+        let leaf = parsed
+            .basic_constraints()
+            .is_ok_and(|constraints| !constraints.is_some_and(|c| c.value.ca));
+        let client_auth = parsed
+            .extended_key_usage()
+            .is_ok_and(|usage| usage.is_none_or(|usage| usage.value.client_auth));
+        if !(leaf && client_auth) {
+            return Err("its certificate is no client-authentication leaf".to_string());
+        }
+        if !parsed.validity().is_valid() {
+            return Err("its certificate is not valid now".to_string());
+        }
+        Ok(enrolling(certificate))
     }
 }
 
@@ -467,5 +486,77 @@ mod tests {
             matches!(issuers.classify(&forged_leaf), Peer::Enrolling { .. }),
             "an intermediate named like the client CA lifted its certificate into the fleet"
         );
+    }
+
+    /// Through a Gateway a proven bootstrap certificate is checked as the handshake checks one on
+    /// an enrolment connection: issued directly by the bootstrap CA, no CA itself, an extended key
+    /// usage that includes `clientAuth` where it names one, and valid now (ADR-0039 clause 8).
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_proven_bootstrap_certificate_is_checked_as_the_handshake_checks_it() {
+        use rcgen::ExtendedKeyUsagePurpose as Eku;
+        let (root_der, root_subject, root_key) = ca("bootstrap CA", None);
+        let root = Issuer::from_ca_cert_der(&root_der.into(), root_key).expect("issuer");
+        let (other_der, _, other_key) = ca("bootstrap CA", None);
+        let other = Issuer::from_ca_cert_der(&other_der.into(), other_key).expect("issuer");
+        let issuers = Issuers {
+            members: Vec::new(),
+            bootstrap: vec![root_subject],
+        };
+        let issue = |edit: &dyn Fn(&mut CertificateParams), by: &Issuer<'_, KeyPair>| {
+            let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "bootstrap");
+            params.extended_key_usages = vec![Eku::ClientAuth];
+            edit(&mut params);
+            params
+                .signed_by(&KeyPair::generate().expect("key"), by)
+                .expect("certificate")
+                .der()
+                .to_vec()
+        };
+        let keep = |_: &mut CertificateParams| {};
+        assert!(issuers.bootstrap_issued(&issue(&keep, &root)).is_ok());
+        let no_usage = |params: &mut CertificateParams| params.extended_key_usages.clear();
+        assert!(
+            issuers.bootstrap_issued(&issue(&no_usage, &root)).is_ok(),
+            "the handshake takes a certificate that names no extended key usage"
+        );
+        type Edit<'a> = &'a dyn Fn(&mut CertificateParams);
+        let refused: [(Edit<'_>, &str); 4] = [
+            (
+                &|params| params.extended_key_usages = vec![Eku::ServerAuth],
+                "no client-authentication leaf",
+            ),
+            (
+                &|params| params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained),
+                "no client-authentication leaf",
+            ),
+            (
+                &|params| {
+                    params.not_before = time::OffsetDateTime::now_utc() - time::Duration::days(2);
+                    params.not_after = time::OffsetDateTime::now_utc() - time::Duration::days(1);
+                },
+                "not valid now",
+            ),
+            (
+                &|params| {
+                    params.not_before = time::OffsetDateTime::now_utc() + time::Duration::days(1);
+                    params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(2);
+                },
+                "not valid now",
+            ),
+        ];
+        for (edit, why) in refused {
+            let error = issuers
+                .bootstrap_issued(&issue(edit, &root))
+                .expect_err(why);
+            assert!(error.contains(why), "{error}");
+        }
+        let error = issuers
+            .bootstrap_issued(&issue(&keep, &other))
+            .expect_err("another key under the CA's name");
+        assert!(error.contains("not issued by the bootstrap CA"), "{error}");
     }
 }

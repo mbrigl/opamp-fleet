@@ -25,8 +25,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   it binds no `instance_uid`, is offered nothing and served no download. The Server decides the
   request as any enrolment — window, queue, the bootstrap certificate's share, approval, a new
   host — and lists it with the Gateway's host in place of a peer address, as `gateway` in
-  `GET /api/v1/enrolments` and in every audit entry of it. Enrolment requests through one Gateway
-  are rate-limited per bootstrap certificate within its aggregate. **What to do:** to let hosts
+  `GET /api/v1/enrolments` and in every audit entry of it. The Gateway relays a request only when
+  its bootstrap proof embeds the very certificate the peer presented in its handshake; one naming
+  another certificate is answered `403` and logged. Enrolment requests through a Gateway never
+  spend the aggregate its members are counted in. One whose bootstrap certificate a bootstrap CA
+  of `[enrolment]` issued takes a token from that certificate's bucket, sized by
+  `messages_per_sec` and `burst`, and one from the Gateway's enrolment aggregate, sized by
+  `gateway_messages_per_sec` and `gateway_burst`; one whose certificate fails that check takes a
+  token from the Gateway's bucket for unchecked enrolments alone, sized by `messages_per_sec` and
+  `burst`, and is answered `BadRequest`. A throttled one is audited as `agent_rate.throttled`
+  with `bucket` `bootstrap`, `enrolment` or `unchecked_enrolment`, naming the bucket that was
+  empty. **What to do:** to let hosts
   behind a Gateway enrol, copy the Server's `[enrolment] bootstrap_ca_file` — the certificate,
   never its key — to the Gateway, name it as `[gateway.tls] bootstrap_ca_file`, and point those
   hosts at the Gateway with an `https://` endpoint. A CA that is in both `client_ca_file` and
@@ -38,13 +47,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   ([ADR-0021](docs/adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 27,
   [ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)). The Server read
   one signing request with two PEM readers that can pick different blocks out of one crafted
-  input: the proof was checked against one request and the key of another was signed. In released
-  versions this affected renewal: whoever held any client certificate and a renewal request
-  another host had sent, while that host's certificate was still valid, obtained a certificate for
-  that host over a key of their own, without approval. Enrolment requests could be queued under a
-  key their proof did not cover. A request is now exactly one `CERTIFICATE REQUEST` block with
-  nothing but whitespace around it, and everything is read from that one block; anything else is
-  answered `BadRequest` and nothing is signed or queued. **What to do:** upgrade.
+  input: the proof was checked against one request and the key of another was signed. Every
+  release from 0.5.0 to 0.5.5 is affected, in renewal: whoever held any client certificate and a
+  renewal request another host had sent, while that host's certificate was still valid, obtained
+  a certificate for that host over a key of their own, without approval. A Gateway sees every
+  renewal request its members send and holds a client certificate, so a compromised or hostile
+  Gateway is the most likely attacker. A request is now exactly one `CERTIFICATE REQUEST` block
+  with a line break after its first boundary and before its last and nothing but whitespace
+  around it, and everything is read from that one block; anything else is answered `BadRequest`
+  and nothing is signed or queued. **What to do:** upgrade.
 
 - **Through a Gateway a certificate is renewed only with a renewal proof**
   ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).

@@ -4,10 +4,11 @@
 //! bucket. A bucket holds `burst` tokens and gains `messages_per_sec` of them a second, and a new
 //! one starts full. The bucket is the host the certificate names, the certificate itself where it
 //! names none, or the peer address of an enrolling host. A host marked as a Gateway carries other
-//! hosts' Agents, so a message through it takes a token from the bucket of the Agent it names — for
-//! an enrolment request, of the bootstrap certificate the request proves (ADR-0039) — and one from
-//! the Gateway's aggregate. Both tables are bounded, and a full one forgets the bucket
-//! used least recently, which can only grant tokens.
+//! hosts' Agents, so a message through it takes a token from the bucket of the Agent it names and
+//! one from the Gateway's aggregate. An enrolment request through it takes from neither but from
+//! the Gateway's enrolment aggregate and, once its bootstrap certificate is one of a bootstrap CA,
+//! from that certificate's bucket (ADR-0039 clause 13). Both tables are bounded, and a full one
+//! forgets the bucket used least recently, which can only grant tokens.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
@@ -71,6 +72,12 @@ pub enum Bucket {
     Host,
     /// A Gateway's aggregate.
     Gateway,
+    /// A Gateway's enrolment aggregate, which checked enrolment requests share.
+    Enrolment,
+    /// The bucket of one bootstrap certificate an enrolment request through a Gateway proves.
+    Bootstrap,
+    /// A Gateway's bucket for enrolment requests whose bootstrap certificate failed the check.
+    UncheckedEnrolment,
 }
 
 impl Bucket {
@@ -80,15 +87,21 @@ impl Bucket {
             Bucket::Agent => "agent",
             Bucket::Host => "host",
             Bucket::Gateway => "gateway",
+            Bucket::Enrolment => "enrolment",
+            Bucket::Bootstrap => "bootstrap",
+            Bucket::UncheckedEnrolment => "unchecked_enrolment",
         }
     }
 }
 
-/// The keys of the first table: a subject's own bucket, and a Gateway's aggregate.
+/// The keys of the first table: a subject's own bucket, a Gateway's aggregate, and its enrolment
+/// aggregate.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Key {
     Own(Subject),
     Gateway(String),
+    Enrolments(String),
+    UncheckedEnrolments(String),
 }
 
 /// A bucket's tokens, in thousandths so that a refill of a few milliseconds is not lost.
@@ -155,7 +168,7 @@ impl<K: Clone + Eq + Hash> Table<K> {
     }
 }
 
-/// What a message through a Gateway is counted for within its aggregate: the Agent it names, or —
+/// What a message through a Gateway is counted for besides an aggregate: the Agent it names, or —
 /// for an enrolment request — the bootstrap certificate the request proves (ADR-0039 clause 13).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Named {
@@ -220,10 +233,15 @@ impl AgentRate {
         self.take(subject, gateway, named)
     }
 
-    /// [`admit`](Self::admit) for a message carrying an enrolment request: through a Gateway its
-    /// bucket within the aggregate is keyed by the bootstrap certificate the request proves
-    /// instead of the message's `instance_uid` (ADR-0039 clause 13), so the hosts enrolling
-    /// through one Gateway with different bootstrap certificates do not share one.
+    /// [`admit`](Self::admit) for a message carrying an enrolment request. Through a Gateway it
+    /// takes no token of the Gateway's members (ADR-0039 clause 13). With `bootstrap` — the
+    /// certificate its proof embeds, once checked to be one of a bootstrap CA — it takes one from
+    /// that certificate's bucket, sized by `messages_per_sec` and `burst`, and one from the
+    /// Gateway's enrolment aggregate, sized by `gateway_messages_per_sec` and `gateway_burst`, so
+    /// one certificate empties its own bucket long before the aggregate. Without, it takes one from
+    /// the Gateway's bucket for unchecked enrolments alone, sized by `messages_per_sec` and `burst`,
+    /// so forged proofs spend neither the members' tokens nor the checked enrolments'. On a host
+    /// that is no Gateway it is the host's message.
     ///
     /// # Errors
     /// Answers the empty [`Bucket`]; nothing is taken then.
@@ -231,9 +249,51 @@ impl AgentRate {
         &self,
         subject: &Subject,
         gateway: bool,
-        bootstrap: &CertId,
+        bootstrap: Option<&CertId>,
     ) -> Result<(), Bucket> {
-        self.take(subject, gateway, Some(Named::Enrolment(bootstrap.clone())))
+        let (Subject::Host(host), true) = (subject, gateway) else {
+            return self.take(subject, false, None);
+        };
+        let now = self.clock.now_ms();
+        let limits = self.limits;
+        let mut tables = self.tables.lock().expect("agent rate lock");
+        let Tables { tick, own, agents } = &mut *tables;
+        *tick += 1;
+        let Some(bootstrap) = bootstrap else {
+            let unchecked = Key::UncheckedEnrolments(host.clone());
+            if own.level(
+                &unchecked,
+                limits.messages_per_sec,
+                limits.burst,
+                now,
+                *tick,
+            ) < TOKEN
+            {
+                return Err(Bucket::UncheckedEnrolment);
+            }
+            own.spend(&unchecked);
+            return Ok(());
+        };
+        let aggregate = Key::Enrolments(host.clone());
+        // The aggregate is checked first, so a full one fills no table with certificates.
+        if own.level(
+            &aggregate,
+            limits.gateway_messages_per_sec,
+            limits.gateway_burst,
+            now,
+            *tick,
+        ) < TOKEN
+        {
+            return Err(Bucket::Enrolment);
+        }
+        let key = (host.clone(), Named::Enrolment(bootstrap.clone()));
+        *tick += 1;
+        if agents.level(&key, limits.messages_per_sec, limits.burst, now, *tick) < TOKEN {
+            return Err(Bucket::Bootstrap);
+        }
+        agents.spend(&key);
+        own.spend(&aggregate);
+        Ok(())
     }
 
     fn take(&self, subject: &Subject, gateway: bool, named: Option<Named>) -> Result<(), Bucket> {
@@ -448,51 +508,67 @@ mod tests {
         assert_eq!(rate.tables.lock().expect("lock").agents.len(), 0);
     }
 
-    /// Two bootstrap certificates enrolling through one Gateway are counted in two buckets within
-    /// its aggregate, neither of them an Agent's; on a host that is no Gateway an enrolment request
-    /// is counted as the host's message.
+    /// Enrolments through a Gateway are counted in the bucket of the bootstrap certificate they
+    /// prove and in the Gateway's enrolment aggregate, and never in the aggregate its members are
+    /// counted in; one whose certificate failed the check is counted in a bucket of its own and
+    /// makes no bucket of its certificate. Each names the bucket that was empty. On a host that is
+    /// no Gateway an enrolment request is counted as the host's message.
     /// Verifies: ADR-0039
     #[test]
-    fn enrolments_through_a_gateway_are_counted_by_their_bootstrap_certificate() {
+    fn enrolments_through_a_gateway_are_counted_in_an_aggregate_of_their_own() {
         let (rate, _) = rate(16, 64);
         let gateway = host("gateway");
-        let (one, two) = (
-            CertId {
-                issuer: "bootstrap".into(),
-                serial: "01".into(),
-            },
-            CertId {
-                issuer: "bootstrap".into(),
-                serial: "02".into(),
-            },
-        );
-        let passing_enrolment = |bootstrap: &CertId| {
+        let cert = |serial: &str| CertId {
+            issuer: "bootstrap".into(),
+            serial: serial.into(),
+        };
+        let (one, two) = (cert("01"), cert("02"));
+        let enrolling = |bootstrap: Option<&CertId>| {
             (0..100)
                 .take_while(|_| rate.admit_enrolment(&gateway, true, bootstrap).is_ok())
                 .count()
         };
+        // Forged proofs: their own small bucket, no table entry, nothing of anyone else's.
+        assert_eq!(enrolling(None), 3, "the unchecked enrolments' burst");
         assert_eq!(
-            passing_enrolment(&one),
-            3,
-            "one bootstrap certificate's burst"
+            rate.admit_enrolment(&gateway, true, None),
+            Err(Bucket::UncheckedEnrolment)
         );
         assert_eq!(
-            rate.admit_enrolment(&gateway, true, &one),
-            Err(Bucket::Agent)
+            rate.tables.lock().expect("lock").agents.len(),
+            0,
+            "an unchecked certificate made a bucket"
         );
+        // One checked certificate empties its own bucket, never another's.
+        assert_eq!(enrolling(Some(&one)), 3, "one certificate's burst");
         assert_eq!(
-            passing_enrolment(&two),
-            2,
-            "another bucket, up to the aggregate"
+            rate.admit_enrolment(&gateway, true, Some(&one)),
+            Err(Bucket::Bootstrap)
         );
         assert!(
-            rate.admit(&host("member"), false, None).is_ok(),
-            "no other host's bucket"
+            rate.admit_enrolment(&gateway, true, Some(&two)).is_ok(),
+            "one certificate spent another's tokens"
         );
+        // The aggregate, `gateway_burst` 5, bounds them all together.
+        assert!(rate.admit_enrolment(&gateway, true, Some(&two)).is_ok());
+        assert_eq!(
+            rate.admit_enrolment(&gateway, true, Some(&cert("03"))),
+            Err(Bucket::Enrolment)
+        );
+        // And the Gateway's members are heard as before.
+        assert_eq!(
+            passing(&rate, &gateway, true, Some(&uid(1))),
+            3,
+            "a member behind the Gateway is heard as before"
+        );
+        assert!(rate.admit(&gateway, true, Some(&uid(2))).is_ok());
+
         let (rate, _) = self::rate(16, 16);
         assert_eq!(
             (0..100)
-                .take_while(|_| rate.admit_enrolment(&host("edge"), false, &one).is_ok())
+                .take_while(|_| rate
+                    .admit_enrolment(&host("edge"), false, Some(&one))
+                    .is_ok())
                 .count(),
             3
         );

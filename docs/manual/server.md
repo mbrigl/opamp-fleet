@@ -765,11 +765,16 @@ the public certificate of `bootstrap_ca_file` as `[gateway.tls] bootstrap_ca_fil
 [Enrolment through a Gateway](client.md#enrolment-through-a-gateway) for the Gateway's side). The
 Gateway relays the host's request over its own certificate, so a request through a Gateway is a
 certificate signing request with a bootstrap proof over the certificate of a host marked as a
-Gateway. The Server checks the proof itself, against the bootstrap CA of `[enrolment]` and the
+Gateway. The Gateway relays it only when its proof embeds the very certificate the host presented
+to the Gateway, so a host spends no other bootstrap certificate's share or tokens; a proof that
+embeds the Gateway's own certificate, byte for byte, is the Gateway's own request and no
+enrolment. The Server checks the proof itself, against the bootstrap CA of `[enrolment]` and the
 revocation list, and decides the request as any enrolment: it is answered `Unavailable` without an
 open window, counts against the queue and its bootstrap certificate's share, and waits for your
 approval, which mints a host of its own and never the Gateway's. A proof whose certificate the
-bootstrap CA did not issue directly, or which is revoked, is answered `BadRequest` and never queued.
+bootstrap CA did not issue directly, is no client-authentication leaf as the handshake requires
+one (`clientAuth` where it names an extended key usage, not a CA), is not valid now, or is revoked,
+is answered `BadRequest` and never queued.
 
 The pending request names the Gateway's host in place of a peer address — `"gateway":"0192…"` in
 `GET /api/v1/enrolments`, *via Gateway* in the **Enrolments** tab, and `gateway` in every audit
@@ -1534,11 +1539,16 @@ A message that cannot be decoded is counted too. The bucket is:
   may serve the whole fleet;
 - for a host marked as a Gateway, two buckets, and a message takes a token from both: the bucket
   of the Agent it names, sized by `messages_per_sec` and `burst`, and the Gateway's aggregate,
-  sized by the `gateway_` keys. For a message carrying an enrolment request through the Gateway
-  the first bucket is the bootstrap certificate the request names instead of the Agent, so hosts
-  enrolling with different bootstrap certificates do not share one. A message naming no valid `instance_uid`, an undecodable one and
-  a download count in the aggregate alone. Marking or unmarking a Gateway takes effect at its next
-  message.
+  sized by the `gateway_` keys. A message naming no valid `instance_uid`, an undecodable one and
+  a download count in the aggregate alone. A message carrying an enrolment request through the
+  Gateway takes from neither, so enrolments never spend what the Gateway's members need. Once the
+  bootstrap certificate its proof names parses and a bootstrap CA of `[enrolment]` issued it, it
+  takes a token from that certificate's bucket, sized by `messages_per_sec` and `burst`, and one
+  from the Gateway's enrolment aggregate, sized by the `gateway_` keys, so one bootstrap
+  certificate cannot spend another's tokens. One that fails that check takes a token from the
+  Gateway's bucket for unchecked enrolments alone, sized by `messages_per_sec` and `burst`, and is
+  answered `BadRequest`. Marking or unmarking a Gateway takes effect at its
+  next message.
 
 A message past the limit is not processed: no record changes and no certificate is signed. It is
 answered with the message's own `instance_uid` and `error_response` `Unavailable` with
@@ -1551,7 +1561,9 @@ honours the protocol's error and retry semantics as well, and answers malformed 
 `BAD_REQUEST`.
 
 Every refusal is recorded as `agent_rate.throttled`, naming the host (or the serial and the CA's
-role), the `instance_uid`, the `bucket` that was empty (`agent`, `host` or `gateway`) and the
+role), the `instance_uid`, the `bucket` that was empty (`agent`, `host` or `gateway`; for an enrolment request through a
+Gateway `bootstrap` for its certificate's bucket, `enrolment` for the Gateway's enrolment
+aggregate, `unchecked_enrolment` for its bucket for unchecked enrolments) and the
 `route` (`opamp` with its `transport`, or `download`). Past ten a second from one address they are
 counted in `agent_rate.throttled.aggregated`.
 

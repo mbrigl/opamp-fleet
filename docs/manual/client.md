@@ -1221,9 +1221,11 @@ peer whose certificate chains to the bootstrap CA alone is an **enrolling peer**
 relays one thing for it: a plain-HTTP report carrying its certificate signing request with the
 bootstrap proof (see [Enrolment](#enrolment-the-first-certificate)) and nothing a member reports,
 no description, health, configuration status, package statuses or connection-settings status.
-Anything else is answered `403` and logged, a WebSocket upgrade included, with a message that an
-enrolment through a Gateway is a plain-HTTP exchange. The Gateway does not check the proof; the
-Server does, and decides the request as any enrolment: in an open window, against the queue and
+The proof must embed, byte for byte, the certificate the peer presented in the handshake: a
+request whose proof names another certificate is answered `403` and logged, so one bootstrap
+certificate's holder spends no other's share at the Server. Anything else is answered `403` and
+logged too, a WebSocket upgrade included, with a message that an enrolment through a Gateway is a
+plain-HTTP exchange. The Gateway does not check the proof's signature; the Server does, and decides the request as any enrolment: in an open window, against the queue and
 its bootstrap certificate's share, and by an operator's approval, which mints a host of its own.
 Outside a window the request is answered `Unavailable`, which the Client waits out. The request
 binds nothing at the Gateway: its exchange is its route for its one reply, and it is offered
@@ -1316,7 +1318,8 @@ same version again does not re-send the offer.
   `[gateway.tls]` verifies the Agents connecting here, and the identity presented to the Server is
   this Client's own, from the top-level `[tls]` or issued through the CSR flow.
 - **It does not vouch for an enrolment.** It relays an enrolling peer's request, with the proof
-  in it, and the Server checks the proof and decides; a revoked bootstrap certificate is refused
+  in it, once that proof names the certificate the peer presented, and the Server checks the
+  proof and decides; a revoked bootstrap certificate is refused
   by the Server. Without `bootstrap_ca_file` its handshake refuses every bootstrap certificate.
 
 The upstream endpoint must be `wss://`, or `ws://` to `127.0.0.1` or `::1`. A polling connection

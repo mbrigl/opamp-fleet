@@ -115,8 +115,10 @@ impl Members {
 /// capabilities, and a certificate signing request carrying a bootstrap proof (ADR-0039 clause 7)
 /// — nothing a member reports, no description, health, effective configuration, configuration
 /// status, package statuses, components, connection-settings status, flags, goodbye or custom
-/// message. The Gateway does not check the proof: the Server does.
-fn not_an_enrolment(report: &AgentToServer) -> Option<&'static str> {
+/// message — whose proof embeds, byte for byte, the certificate `presented` the peer presented in
+/// the handshake, so that a peer spends no other certificate's share at the Server. The Gateway
+/// does not check the proof's signature: the Server does.
+fn not_an_enrolment(report: &AgentToServer, presented: &[u8]) -> Option<&'static str> {
     use opamp::proto::{
         CertificateRequest, ConnectionSettingsRequest, OpAmpConnectionSettingsRequest,
     };
@@ -145,11 +147,22 @@ fn not_an_enrolment(report: &AgentToServer) -> Option<&'static str> {
         return Some("an enrolling peer sends a certificate signing request and nothing else");
     }
     // Read as the Server reads it: one PEM block, nothing around it (ADR-0039).
-    match fleet_core::csr::der(&csr.csr).and_then(|der| {
+    let Ok(Some(encoded)) = fleet_core::csr::der(&csr.csr).and_then(|der| {
         fleet_core::csr::requested_uri(&der, fleet_core::bootstrap_proof::URI_PREFIX)
-    }) {
-        Ok(Some(_)) => None,
-        _ => Some("an enrolling peer's certificate signing request carries no bootstrap proof"),
+    }) else {
+        return Some("an enrolling peer's certificate signing request carries no bootstrap proof");
+    };
+    let content = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)
+    };
+    match content
+        .ok()
+        .as_deref()
+        .and_then(fleet_core::bootstrap_proof::decode)
+    {
+        Some((certificate, _)) if certificate == presented => None,
+        _ => Some("an enrolling peer's bootstrap proof does not name the certificate it presented"),
     }
 }
 
@@ -658,7 +671,7 @@ impl Forwarding {
                 "instance_uid must be 16 bytes".into(),
             );
         };
-        if let Some(why) = not_an_enrolment(&report) {
+        if let Some(why) = not_an_enrolment(&report, &downstream.certificate) {
             return refuse(why);
         }
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1002,6 +1015,18 @@ mod tests {
             .into_bytes()
     }
 
+    /// A CSR for a fresh key with a bootstrap proof embedding `certificate` (DER). Its signature
+    /// is no signature at all: the Gateway does not check it.
+    fn proof_of(certificate: &[u8]) -> Vec<u8> {
+        use base64::Engine as _;
+        csr_with_uri(&format!(
+            "{}{}",
+            fleet_core::bootstrap_proof::URI_PREFIX,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(fleet_core::bootstrap_proof::encode(certificate, b"sig"))
+        ))
+    }
+
     /// A request with a bootstrap proof is an enrolment only as exactly one PEM block, the rule
     /// the Server reads it by: behind a prefix, beside a second block, or after another request it
     /// is not forwarded.
@@ -1009,17 +1034,70 @@ mod tests {
     #[test]
     fn an_enrolment_request_is_exactly_one_pem_block() {
         let uid = InstanceUid::default();
-        let proof = || csr_with_uri(&format!("{}AAAA", fleet_core::bootstrap_proof::URI_PREFIX));
+        let presented = certificate();
+        let proof = || proof_of(&presented);
         let other = csr_with_uri("urn:example:other");
-        assert_eq!(not_an_enrolment(&enrolment(uid, proof())), None);
+        assert_eq!(not_an_enrolment(&enrolment(uid, proof()), &presented), None);
         for crafted in [
             [b"x".to_vec(), proof()].concat(),
             [b"x".to_vec(), other.clone(), proof()].concat(),
             [proof(), other.clone()].concat(),
             [other, proof()].concat(),
         ] {
-            let why = not_an_enrolment(&enrolment(uid, crafted)).expect("forwarded");
+            let why = not_an_enrolment(&enrolment(uid, crafted), &presented).expect("forwarded");
             assert!(why.contains("bootstrap proof"), "{why}");
+        }
+    }
+
+    /// An enrolling peer's request is forwarded only when its bootstrap proof embeds the very
+    /// certificate the peer presented: one naming another certificate — one with that
+    /// certificate's issuer and serial included — one whose proof does not parse, and one carrying
+    /// the presented certificate with a byte changed are answered `403` and reach no route.
+    /// Verifies: ADR-0039
+    #[tokio::test]
+    async fn an_enrolling_peer_proves_the_certificate_it_presented() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        // Two certificates of one issuer name and one serial, over keys of their own.
+        let twin = || {
+            let key = rcgen::KeyPair::generate().expect("key");
+            let mut params = rcgen::CertificateParams::new(vec!["edge".into()]).expect("params");
+            params.serial_number = Some(rcgen::SerialNumber::from_slice(&[0x2a; 8]));
+            params.self_signed(&key).expect("cert").der().to_vec()
+        };
+        let presented = twin();
+        let forged = twin();
+        assert_eq!(
+            revocations::certificate_id(&forged),
+            revocations::certificate_id(&presented)
+        );
+        let peer = Downstream {
+            enrolling: true,
+            host: None,
+            ..downstream(Transport::Http, None, presented.clone())
+        };
+        let mut altered = presented.clone();
+        let last = altered.len() - 1;
+        altered[last] ^= 0x01;
+        let uid = InstanceUid::default();
+        for csr in [
+            proof_of(&certificate()),
+            proof_of(&forged),
+            proof_of(&altered),
+            proof_of(&[presented.as_slice(), b"\0"].concat()),
+            csr_with_uri(&format!("{}AAAA", fleet_core::bootstrap_proof::URI_PREFIX)),
+        ] {
+            match forwarding
+                .forward_enrolment(&peer, enrolment(uid, csr))
+                .await
+            {
+                Reply::Refuse(status, why) => {
+                    assert_eq!(status, StatusCode::FORBIDDEN, "{why}");
+                    assert!(why.contains("the certificate it presented"), "{why}");
+                }
+                _ => panic!("a proof of another certificate was forwarded"),
+            }
+            assert!(!forwarding.registry.routes(&uid));
         }
     }
 
@@ -1047,12 +1125,13 @@ mod tests {
     async fn an_enrolling_peer_relays_one_enrolment_request_and_binds_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let forwarding = forwarding(dir.path()).await;
+        let presented = certificate();
         let peer = Downstream {
             enrolling: true,
             host: None,
-            ..downstream(Transport::Http, None, certificate())
+            ..downstream(Transport::Http, None, presented.clone())
         };
-        let proof = csr_with_uri(&format!("{}AAAA", fleet_core::bootstrap_proof::URI_PREFIX));
+        let proof = proof_of(&presented);
         let refused = |reply: Reply| match reply {
             Reply::Refuse(status, why) => {
                 assert_eq!(status, StatusCode::FORBIDDEN, "{why}");

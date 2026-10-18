@@ -5267,6 +5267,17 @@ async fn behind_a_gateway(
     audit: Option<Arc<dyn fleet_server::audit::Audit>>,
     agent_rate: Option<fleet_server::agent_rate::Limits>,
 ) -> (Served, reqwest::Client) {
+    let (served, gateway, _) = gateway_presenting(pki, bootstrap, audit, agent_rate).await;
+    (served, gateway)
+}
+
+/// [`behind_a_gateway`], and the certificate (PEM) the Gateway presents.
+async fn gateway_presenting(
+    pki: &Pki,
+    bootstrap: &Pki,
+    audit: Option<Arc<dyn fleet_server::audit::Audit>>,
+    agent_rate: Option<fleet_server::agent_rate::Limits>,
+) -> (Served, reqwest::Client, String) {
     let served = serve(
         pki,
         Setup {
@@ -5299,7 +5310,7 @@ async fn behind_a_gateway(
         .expect("enrolment")
         .open(600)
         .expect("open");
-    (served, gateway)
+    (served, gateway, gateway_cert)
 }
 
 /// A CSR with a bootstrap proof over a marked Gateway's certificate is an enrolment request: it
@@ -5486,11 +5497,43 @@ async fn a_member_does_not_enrol_and_a_gateway_needs_a_proof() {
     );
 }
 
-/// Two bootstrap certificates enrolling through one Gateway are counted in two buckets: one that
-/// spends its burst leaves the other's tokens alone.
+/// What a relayed enrolment request was answered: throttled by the rate limit, told the queue is
+/// full or its window closed, refused, or taken. Both of the first two are `Unavailable`; only the
+/// message tells them apart.
+#[derive(Debug, PartialEq)]
+enum Answered {
+    Throttled,
+    Unavailable(String),
+    BadRequest(String),
+    Taken,
+}
+
+fn answered(reply: &ServerToAgent) -> Answered {
+    match error_of(reply) {
+        None => Answered::Taken,
+        Some((kind, message)) if kind == ServerErrorResponseType::Unavailable as i32 => {
+            if message == "too many messages arrive from this sender — retry later" {
+                Answered::Throttled
+            } else {
+                Answered::Unavailable(message)
+            }
+        }
+        Some((kind, message)) if kind == ServerErrorResponseType::BadRequest as i32 => {
+            Answered::BadRequest(message)
+        }
+        Some((kind, message)) => panic!("answered {kind}: {message}"),
+    }
+}
+
+/// Enrolments through a Gateway never spend the aggregate its members are counted in. One whose
+/// certificate no bootstrap CA issued is counted in the Gateway's bucket for unchecked enrolments
+/// alone: exactly its burst is answered `BadRequest` and the rest throttled. A checked one is
+/// counted in its bootstrap certificate's bucket and the Gateway's enrolment aggregate: one
+/// certificate past its burst is throttled while a second bootstrap certificate is still taken and
+/// queued, and a member reporting through the same Gateway is still heard.
 /// Verifies: ADR-0039
 #[tokio::test]
-async fn two_bootstrap_certificates_through_one_gateway_are_two_buckets() {
+async fn enrolments_through_a_gateway_cannot_starve_its_members() {
     let pki = Pki::new();
     let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
     let (served, gateway) = behind_a_gateway(
@@ -5500,20 +5543,120 @@ async fn two_bootstrap_certificates_through_one_gateway_are_two_buckets() {
         Some(fleet_server::agent_rate::Limits {
             messages_per_sec: 1,
             burst: 3,
-            gateway_messages_per_sec: 1_000,
-            gateway_burst: 1_000,
+            gateway_messages_per_sec: 1,
+            gateway_burst: 6,
         }),
     )
     .await;
-    let throttled = |reply: &ServerToAgent| {
-        error_of(reply).is_some_and(|(kind, _)| kind == ServerErrorResponseType::Unavailable as i32)
+    let enrolment = served.enrolment.clone().expect("enrolment");
+    let relay = |csr: Vec<u8>| {
+        let gateway = gateway.clone();
+        let endpoint = served.endpoint.clone();
+        async move {
+            answered(
+                &decode(post(&gateway, &endpoint, with_csr(&InstanceUid::default(), csr)).await)
+                    .await,
+            )
+        }
     };
-    let (one, one_key) = bootstrap.issue_bootstrap("bootstrap-one");
-    let (two, two_key) = bootstrap.issue_bootstrap("bootstrap-two");
-    let mut refused = 0;
-    for _ in 0..10 {
-        // A new host each time — a new instance_uid — under the one bootstrap certificate.
-        let csr = bootstrap_csr(&one, &one_key, None);
+
+    let foreign = Pki::named("not the bootstrap CA");
+    let (forged, forged_key) = foreign.issue_bootstrap("bootstrap-forged");
+    let mut forgeries = Vec::new();
+    for _ in 0..5 {
+        forgeries.push(relay(bootstrap_csr(&forged, &forged_key, None)).await);
+    }
+    assert_eq!(
+        forgeries[3..],
+        [Answered::Throttled, Answered::Throttled],
+        "{forgeries:?}"
+    );
+    for answer in &forgeries[..3] {
+        assert!(
+            matches!(answer, Answered::BadRequest(why) if why.contains("not issued by the bootstrap CA")),
+            "{forgeries:?}"
+        );
+    }
+    assert!(enrolment.pending().is_empty(), "a forgery was queued");
+
+    let (cert, key) = bootstrap.issue_bootstrap("bootstrap-a");
+    let csr = bootstrap_csr(&cert, &key, None);
+    let mut genuine = Vec::new();
+    for _ in 0..5 {
+        genuine.push(relay(csr.clone()).await);
+    }
+    assert_eq!(
+        genuine,
+        [
+            Answered::Taken,
+            Answered::Taken,
+            Answered::Taken,
+            Answered::Throttled,
+            Answered::Throttled
+        ],
+        "its bucket's burst, and no more"
+    );
+    assert_eq!(enrolment.pending().len(), 1, "the genuine request waits");
+
+    let (other, other_key) = bootstrap.issue_bootstrap("bootstrap-b");
+    assert_eq!(
+        relay(bootstrap_csr(&other, &other_key, None)).await,
+        Answered::Taken,
+        "one bootstrap certificate spent another's tokens"
+    );
+    let pending = enrolment.pending();
+    assert_eq!(pending.len(), 2, "the second certificate's request waits");
+    assert!(pending
+        .iter()
+        .any(|request| request.requester.bootstrap.serial == cert_id(&other).serial));
+
+    let member =
+        decode(post(&gateway, &served.endpoint, report(&InstanceUid::default())).await).await;
+    assert_ne!(
+        answered(&member),
+        Answered::Throttled,
+        "enrolments spent the members' aggregate"
+    );
+}
+
+/// A bootstrap proof through a Gateway names the Gateway's own certificate only when it embeds it
+/// byte for byte: one embedding a certificate of the Gateway's issuer name and serial, made by
+/// whoever copied them, is an enrolment request whose certificate fails the check — counted in
+/// the bucket for unchecked enrolments, answered `BadRequest`, and spending nothing of the
+/// aggregate the Gateway's members are counted in.
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn a_proof_copying_the_gateways_issuer_and_serial_spends_no_members_tokens() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let (served, gateway, gateway_cert) = gateway_presenting(
+        &pki,
+        &bootstrap,
+        None,
+        Some(fleet_server::agent_rate::Limits {
+            messages_per_sec: 1,
+            burst: 3,
+            gateway_messages_per_sec: 1,
+            gateway_burst: 4,
+        }),
+    )
+    .await;
+    // A CA of the fleet's client CA's name — not its key — and a certificate of the Gateway's
+    // serial under it.
+    let impostor = Pki::new();
+    let presented = opamp::tls::certificates(gateway_cert.as_bytes()).expect("pem")[0].to_vec();
+    let (_, parsed) = x509_parser::parse_x509_certificate(&presented).expect("parses");
+    let key = KeyPair::generate().expect("key");
+    let mut params = CertificateParams::new(vec!["gw".to_string()]).expect("params");
+    params.serial_number = Some(rcgen::SerialNumber::from_slice(parsed.raw_serial()));
+    let twin = params.signed_by(&key, &impostor.issuer()).expect("signed");
+    let twin_pem = twin.pem();
+    assert_eq!(cert_id(&twin_pem), cert_id(&gateway_cert));
+    assert_ne!(twin.der().as_ref(), presented.as_slice());
+
+    let mut answers = Vec::new();
+    for _ in 0..5 {
+        let csr = bootstrap_csr(&twin_pem, &key.serialize_pem(), None);
         let reply = decode(
             post(
                 &gateway,
@@ -5523,26 +5666,21 @@ async fn two_bootstrap_certificates_through_one_gateway_are_two_buckets() {
             .await,
         )
         .await;
-        refused += usize::from(throttled(&reply));
+        answers.push(answered(&reply));
     }
-    assert!(
-        refused >= 6,
-        "one bootstrap certificate passed {} of 10",
-        10 - refused
-    );
-    let csr = bootstrap_csr(&two, &two_key, None);
-    let reply = decode(
-        post(
-            &gateway,
-            &served.endpoint,
-            with_csr(&InstanceUid::default(), csr),
-        )
-        .await,
-    )
-    .await;
-    assert!(
-        !throttled(&reply),
-        "the other bootstrap certificate was throttled"
+    assert_eq!(answers[3..], [Answered::Throttled, Answered::Throttled]);
+    for answer in &answers[..3] {
+        assert!(
+            matches!(answer, Answered::BadRequest(why) if why.contains("not issued by the bootstrap CA")),
+            "{answers:?}"
+        );
+    }
+    let member =
+        decode(post(&gateway, &served.endpoint, report(&InstanceUid::default())).await).await;
+    assert_ne!(
+        answered(&member),
+        Answered::Throttled,
+        "a copied issuer and serial spent the members' aggregate"
     );
 }
 

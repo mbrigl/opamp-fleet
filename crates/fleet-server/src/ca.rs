@@ -253,14 +253,13 @@ pub fn bootstrap_proof(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(der.to_vec()))
 }
 
-/// The issuer and serial of the bootstrap certificate a CSR's bootstrap proof names, read without
-/// checking the proof — what tells a proof of the presented certificate itself from an enrolment
-/// (ADR-0039 clause 12). `Ok(None)` for a request without a proof.
+/// The certificate (DER) a CSR's bootstrap proof embeds, read without checking the proof.
+/// `Ok(None)` for a request without a proof.
 ///
 /// # Errors
 /// Returns the `BadRequest` text for a request that is not one PEM block, or a proof that does not
 /// parse.
-pub fn bootstrap_proof_id(csr_pem: &str) -> Result<Option<CertId>, String> {
+pub fn bootstrap_proof_certificate(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
     use base64::Engine as _;
     let csr_der = fleet_core::csr::der(csr_pem.as_bytes())?;
     let Some(encoded) =
@@ -273,11 +272,18 @@ pub fn bootstrap_proof_id(csr_pem: &str) -> Result<Option<CertId>, String> {
         .decode(encoded)
         .map_err(|_| unparsed())?;
     let (der, _) = fleet_core::bootstrap_proof::decode(&content).ok_or_else(unparsed)?;
-    let (_, certificate) = X509Certificate::from_der(der).map_err(|_| unparsed())?;
-    Ok(Some(CertId::new(
+    X509Certificate::from_der(der).map_err(|_| unparsed())?;
+    Ok(Some(der.to_vec()))
+}
+
+/// The issuer and serial of the certificate (DER) `der`, or `None` when it does not parse.
+#[must_use]
+pub fn cert_id(der: &[u8]) -> Option<CertId> {
+    let (_, certificate) = X509Certificate::from_der(der).ok()?;
+    Some(CertId::new(
         certificate.issuer().as_raw(),
         &hex::encode(certificate.raw_serial()),
-    )))
+    ))
 }
 
 /// What a CSR carrying both proofs is answered (ADR-0039 clause 8).
@@ -676,7 +682,9 @@ impl crate::fleet::CertificateSigner for ClientCa {
     }
 
     fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String> {
-        bootstrap_proof_id(csr_pem)
+        Ok(bootstrap_proof_certificate(csr_pem)?
+            .as_deref()
+            .and_then(cert_id))
     }
 
     fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
@@ -1085,8 +1093,8 @@ mod tests {
             .sign(&hostile_csr(), "host-1", &SubjectValues::default())
             .expect("issued")
             .pem;
-        let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
-        let cert = pem.parse_x509().expect("der");
+        let der = cert_der(&issued);
+        let (_, cert) = X509Certificate::from_der(&der).expect("der");
 
         // Absent basic constraints means non-CA, which is fine; present, it must say non-CA.
         if let Some(bc) = cert
@@ -1128,8 +1136,8 @@ mod tests {
             .sign(&csr("edge-01"), "host-1", &SubjectValues::default())
             .expect("issued")
             .pem;
-        let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
-        let cert = pem.parse_x509().expect("der");
+        let der = cert_der(&issued);
+        let (_, cert) = X509Certificate::from_der(&der).expect("der");
         let now = time::OffsetDateTime::now_utc();
         let not_before = cert.validity().not_before.to_datetime();
         let not_after = cert.validity().not_after.to_datetime();
@@ -1391,7 +1399,8 @@ mod tests {
 
     /// `victim`'s proof, copied into a request of a key of the attacker's own.
     fn grafted(victim: &str) -> String {
-        let proof = CertificateSigningRequestParams::from_pem(victim)
+        let victim = fleet_core::csr::der(victim.as_bytes()).expect("victim");
+        let proof = CertificateSigningRequestParams::from_der(&victim.as_slice().into())
             .expect("victim")
             .params
             .subject_alt_names;
@@ -1442,7 +1451,7 @@ mod tests {
                 check_claims(&crafted, &[]),
                 enrolment_request(&crafted, &[]).map(|_| ()),
                 bootstrap_proof(&crafted).map(|_| ()),
-                bootstrap_proof_id(&crafted).map(|_| ()),
+                bootstrap_proof_certificate(&crafted).map(|_| ()),
             ];
             for refused in refusals {
                 let why = refused.expect_err("read past its first block");
@@ -1451,8 +1460,10 @@ mod tests {
         }
     }
 
-    /// Outside the tests, no code of the Server reads PEM with a reader of its own: a request is
-    /// decoded by `fleet_core::csr::der` alone, so two readers cannot read two requests from one.
+    /// No code of the Server, of `fleet-core` or of the Gateway — its tests included — reads PEM
+    /// with a reader of its own but `fleet_core::csr::der`: a request is decoded there alone, so
+    /// two readers cannot read two requests from one. A certificate's PEM is read by
+    /// `opamp::tls::certificates`, which no request reaches.
     /// Verifies: ADR-0021
     #[test]
     fn no_code_reads_a_request_through_another_pem_reader() {
@@ -1466,19 +1477,31 @@ mod tests {
                 }
             }
         }
+        // Split, so that this test does not find itself.
         let readers = [
             concat!("CertificateSigningRequestParams", "::from_pem"),
-            concat!("x509_parser", "::pem::"),
+            concat!("x509_parser", "::pem"),
+            concat!("parse_x509", "_pem"),
+            concat!("Pem", "::read"),
+            concat!("pem", "::parse"),
+            concat!("from_pem", "_slice"),
         ];
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates");
+        let the_reader = crates.join("fleet-core/src/csr.rs");
         let mut files = Vec::new();
-        walk(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-            &mut files,
-        );
+        for tree in [
+            "fleet-server/src",
+            "fleet-core/src",
+            "fleet-agent/src/gateway",
+        ] {
+            walk(&crates.join(tree), &mut files);
+        }
+        assert!(files.contains(&the_reader), "{files:#?}");
         let mut broken = Vec::new();
-        for file in files {
-            let text = std::fs::read_to_string(&file).expect("read");
-            let code = text.split("#[cfg(test)]").next().unwrap_or_default();
+        for file in files.iter().filter(|file| **file != the_reader) {
+            let code = std::fs::read_to_string(file).expect("read");
             for reader in readers {
                 if code.contains(reader) {
                     broken.push(format!("{}: {reader}", file.display()));
