@@ -17,6 +17,11 @@ use crate::proto::{any_value, AnyValue, ArrayValue, KeyValue};
 /// The Agent *type* — a Collector distribution, this Client — never an operator's name for one
 /// (ADR-0016). A package is matched against it (ADR-0026).
 pub const SERVICE_NAME: &str = "service.name";
+/// The namespace a Managed Process may state its own attributes in, and the only one it may
+/// (ADR-0041): every key it reports outside it is dropped.
+pub const SERVICE_PREFIX: &str = "service.";
+/// The Agent's identity — the Supervisor's uid, never a Managed Process's word (ADR-0041).
+pub const SERVICE_INSTANCE_ID: &str = "service.instance.id";
 /// The operator's name for one Agent (ADR-0016).
 pub const SERVICE_INSTANCE_NAME: &str = "service.instance.name";
 /// The namespace an Agent runs in, reported only where the environment uses one.

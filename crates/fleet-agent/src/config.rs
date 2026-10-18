@@ -45,10 +45,11 @@ pub struct ClientConfig {
     /// Managed Processes' programs somewhere `state_dir` cannot go — off a `noexec` mount, or
     /// onto a volume sized for a few hundred megabytes of agent rather than for state.
     pub supervisor_dir: Option<PathBuf>,
-    /// Operator-defined attributes (ADR-0023), reported as non-identifying attributes of **every**
-    /// Agent this Client presents — machine-level tags like `env = "prod"` that Selectors can
-    /// match. A `[[supervisor]]` block's own `attributes` override these per key; attributes the
-    /// code or the Managed Process reports win over configured ones.
+    /// Operator-defined attributes (ADR-0041 clause 2), reported as non-identifying attributes of
+    /// **every** Agent this Client presents — machine-level tags like `env = "prod"` that
+    /// Selectors can match. Attributes the code reports win over configured ones; a configured one
+    /// stands against whatever a Managed Process reports. A `[[supervisor]]` block carrying its own
+    /// `attributes` fails at startup: tagging one Agent is a Server label's job.
     #[serde(default)]
     pub attributes: BTreeMap<String, String>,
     /// Optional Gateway Mode (ADR-0015); absent means this Client gateways for nobody.

@@ -47,8 +47,8 @@ puts things, and every configuration key.
 - **Applies received Configurations**: writes each entry to disk under its Configuration's name,
   points the process at it, and reports the configuration applied or failed with the hash it
   applied.
-- **Reports health, effective configuration, and version** of each Managed Process, and relays what
-  a Collector carrying the `opampextension` reports about itself.
+- **Reports health, effective configuration, and version** of each Managed Process, and relays the
+  `service.*` attributes a Collector carrying the `opampextension` reports about itself.
 - **Installs Server-offered packages** over a Managed Process's binary — signed, verified,
   health-gated, and rolled back if the new version will not stay up. It takes packages only while
   `[packages] verification_key` is set.
@@ -894,7 +894,7 @@ notice.
 
 Operator-defined attributes reported by every Agent this Client presents, so the Server's Selectors
 can target them. They are reported as non-identifying attributes, and they never override
-what the code or the Managed Process reports under the same key.
+what the code reports under the same key; a Managed Process never overrides them.
 
 ```toml
 [attributes]
@@ -917,6 +917,15 @@ an Agent and where it runs: `service.name`, `service.instance.name`, `service.in
 `os.type`, `os.name`, `os.version`, `os.description`, `host.name`, `host.arch`, and `host.id` — plus
 `service.version`, which for the Client's own Agent is the Client's baked-in version and for a
 Supervisor-backed Agent is whatever the Managed Process reports about itself.
+
+A Managed Process states only its own `service.*` attributes: its type (`service.name`, a
+Collector's `dist.name`) and its version replace what the Supervisor reports. Everything else it
+reports is dropped — `host.*`, `os.*` and `supervisor.*`, and keys in a namespace of its own such as
+a Collector's `agent_description.non_identifying_attributes` and resource attributes. Where the
+Agent runs is the Supervisor's statement, since it decides which Selectors match and which
+artifact is offered. Within `service.*` the process cannot restate `service.instance.id`,
+`service.instance.name`, `service.namespace` while `service_namespace` is set, or a key
+`[attributes]` sets. To tag a Collector, use a Server label, or `[attributes]` for the whole host.
 
 The first two are the pair to keep apart: `service.name` is *what* this Agent is — the
 type, shared by every Agent of that kind — and `service.instance.name` is *which* one it is, the
@@ -1432,7 +1441,8 @@ uploading. Mind the member name: the binary inside is called after the distribut
 (`otelcol-contrib`, `otelcol`), and `binary` must say the same.
 
 A Collector **with** the `opampextension` reports its own description, health, and effective
-configuration through the Supervisor Endpoint instead of being watched from outside. The extension
+configuration through the Supervisor Endpoint instead of being watched from outside. Of its
+description, only its `service.*` attributes reach the Server (see [`[attributes]`](#attributes)). The extension
 ships only in the Contrib distribution. Pin `endpoint_port` and make sure the configuration the
 Server distributes carries the extension pointing at it:
 

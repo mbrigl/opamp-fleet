@@ -374,10 +374,17 @@ impl AgentState {
             .process_description
             .as_ref()
             .and_then(|reported| {
+                // Whichever list the process put it in, as the fold reads it (ADR-0041).
                 opamp::attributes::string_value(
                     &reported.identifying_attributes,
                     attributes::SERVICE_NAME,
                 )
+                .or_else(|| {
+                    opamp::attributes::string_value(
+                        &reported.non_identifying_attributes,
+                        attributes::SERVICE_NAME,
+                    )
+                })
             })
             .unwrap_or(&self.local.service_name)
     }
@@ -681,6 +688,7 @@ mod tests {
         }
     }
 
+    /// Verifies: ADR-0041
     #[test]
     fn configured_attributes_are_reported_but_never_shadow_reported_ones() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -784,6 +792,7 @@ mod tests {
     /// with, and folding that into the operator's name for the Supervisor would overwrite it — so
     /// every Collector of one distribution would collapse onto one name in the fleet view. Both
     /// values must survive, each in its own key, each won by the side that actually knows it.
+    /// Verifies: ADR-0041
     // Verifies: ADR-0016
     #[test]
     fn a_process_reporting_its_type_does_not_take_the_operators_name_with_it() {
@@ -834,6 +843,7 @@ mod tests {
     /// process reporting either of them among its *identifying* attributes would otherwise win
     /// every Selector — the Server resolves those before the non-identifying ones — while the fleet
     /// row, which reads the other list, went on showing the operator's value.
+    /// Verifies: ADR-0041
     #[test]
     fn the_supervisors_own_attributes_survive_whichever_list_a_process_reports_them_in() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -915,6 +925,7 @@ mod tests {
 
     /// `[supervisor.attributes]` is a fallback for keys nothing else reports, so it must not be a
     /// second way to set the two attributes the Supervisor itself owns.
+    /// Verifies: ADR-0041
     // Verifies: ADR-0016
     #[test]
     fn configured_attributes_cannot_restate_the_type_or_the_instance_name() {
@@ -1073,6 +1084,7 @@ mod tests {
     /// word where it gives one, the configured type otherwise. Two answers to "what is this Agent"
     /// would be worse than none: a series labelled `otelcol` beside a fleet row reading
     /// `otelcol-contrib` is a question, not a fact.
+    /// Verifies: ADR-0041
     #[test]
     fn the_reported_type_is_the_processs_own_word_where_it_gives_one() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1130,7 +1142,7 @@ mod tests {
         // The extension's self-report: everything but the version, which it happens not to state.
         agent.set_process_description(AgentDescription {
             identifying_attributes: vec![string_attr("service.name", "otelcol-contrib")],
-            non_identifying_attributes: vec![string_attr("host.id", "abc")],
+            non_identifying_attributes: vec![string_attr("service.team", "abc")],
         });
         // The probe, after a swap: the version and nothing else.
         agent.set_process_description(AgentDescription {
@@ -1161,7 +1173,7 @@ mod tests {
             "and does not erase what the extension reported"
         );
         assert_eq!(
-            value(&described.non_identifying_attributes, "host.id").as_deref(),
+            value(&described.non_identifying_attributes, "service.team").as_deref(),
             Some("abc")
         );
 
@@ -1173,6 +1185,183 @@ mod tests {
         assert_eq!(
             value(&agent.describe().identifying_attributes, "service.version").as_deref(),
             Some("0.159.0")
+        );
+    }
+
+    fn supervised_agent(dir: &std::path::Path) -> AgentState {
+        let storage = Storage::new(dir.to_path_buf()).expect("storage");
+        AgentState::supervised(
+            "edge-01".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent")
+    }
+
+    /// A Managed Process is code the Supervisor does not vouch for, so where the Agent runs and
+    /// what kind of Agent it is stay the Supervisor's statement, whichever list the process puts
+    /// its claim in: another host would draw that host's Configurations, another platform another
+    /// machine's artifact, and a `supervisor.kind.*` key would make a second Client Agent. Only
+    /// its `service.*` attributes are laid over the Supervisor's.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_process_states_its_own_service_attributes_and_nothing_about_the_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        let before = reported(&agent.describe());
+
+        let claims = [
+            "host.name",
+            "host.id",
+            "os.type",
+            "host.arch",
+            "os.description",
+            "supervisor.kind.collector",
+            "collector.pipeline",
+        ];
+        let claimed = |list: &str| {
+            claims
+                .iter()
+                .map(|key| string_attr(key, &format!("{list}-claim")))
+                .collect::<Vec<_>>()
+        };
+        let mut identifying = claimed("identifying");
+        identifying.push(string_attr("service.name", "otelcol-contrib"));
+        identifying.push(string_attr("service.version", "0.142.0"));
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: identifying,
+            non_identifying_attributes: claimed("non-identifying"),
+        });
+
+        let described = agent.describe();
+        let after = reported(&described);
+        for key in claims {
+            assert_eq!(
+                after.get(key),
+                before.get(key),
+                "{key} is the Supervisor's to state, or nobody's"
+            );
+        }
+        // Each list on its own as well: Selectors read the identifying list first, so a claim left
+        // there would win although the merged view above shows the Supervisor's value.
+        for (name, list) in [
+            ("identifying", &described.identifying_attributes),
+            ("non-identifying", &described.non_identifying_attributes),
+        ] {
+            let claimed: Vec<&str> = list
+                .iter()
+                .filter(|kv| {
+                    matches!(
+                        kv.value.as_ref().and_then(|v| v.value.as_ref()),
+                        Some(opamp::proto::any_value::Value::StringValue(s)) if s.ends_with("-claim")
+                    )
+                })
+                .map(|kv| kv.key.as_str())
+                .collect();
+            assert!(
+                claimed.is_empty(),
+                "the {name} list carries the process's {claimed:?}"
+            );
+        }
+        assert!(
+            after.keys().all(|key| !key.starts_with("supervisor.kind.")),
+            "a process made its Agent a Client Agent: {after:?}"
+        );
+        assert_eq!(
+            after.get("service.name").map(String::as_str),
+            Some("otelcol-contrib")
+        );
+        assert_eq!(
+            after.get("service.version").map(String::as_str),
+            Some("0.142.0")
+        );
+    }
+
+    /// The operator's values stand against the process, inside `service.*` as outside it: an
+    /// `[attributes]` entry the code does not report is the operator's word, and so is
+    /// `service.namespace` once `service_namespace` is set. Unset, the namespace is the process's
+    /// to state.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_process_never_overrides_what_the_operator_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = AgentDescription {
+            identifying_attributes: vec![string_attr("service.namespace", "the-processs")],
+            non_identifying_attributes: vec![
+                string_attr("channel", "stable"),
+                string_attr("service.team", "x"),
+            ],
+        };
+
+        let mut agent = supervised_agent(&dir.path().join("configured"))
+            .with_attributes(
+                [
+                    ("channel".to_string(), "canary".to_string()),
+                    ("service.team".to_string(), "y".to_string()),
+                ]
+                .into(),
+            )
+            .with_namespace(Some("telemetry".to_string()));
+        agent.set_process_description(report.clone());
+        let configured = reported(&agent.describe());
+        assert_eq!(
+            configured.get("channel").map(String::as_str),
+            Some("canary")
+        );
+        assert_eq!(
+            configured.get("service.team").map(String::as_str),
+            Some("y")
+        );
+        assert_eq!(
+            configured.get("service.namespace").map(String::as_str),
+            Some("telemetry")
+        );
+
+        let mut agent = supervised_agent(&dir.path().join("unset"));
+        agent.set_process_description(report);
+        let unset = reported(&agent.describe());
+        assert_eq!(
+            unset.get("service.namespace").map(String::as_str),
+            Some("the-processs")
+        );
+        assert_eq!(unset.get("service.team").map(String::as_str), Some("x"));
+        assert_eq!(unset.get("channel"), None, "outside service.*, dropped");
+    }
+
+    /// An admitted key replaces the Supervisor's value in the list the Supervisor states it in,
+    /// so it is reported once and a Selector and the fleet row read the same value.
+    /// Verifies: ADR-0041
+    #[test]
+    fn an_admitted_key_replaces_the_supervisors_value_in_the_supervisors_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![],
+            non_identifying_attributes: vec![string_attr("service.name", "otelcol-contrib")],
+        });
+
+        let description = agent.describe();
+        let named = |list: &[KeyValue]| {
+            list.iter()
+                .filter(|kv| kv.key == "service.name")
+                .map(
+                    |kv| match kv.value.as_ref().and_then(|v| v.value.as_ref()) {
+                        Some(opamp::proto::any_value::Value::StringValue(s)) => s.clone(),
+                        other => format!("{other:?}"),
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            named(&description.identifying_attributes),
+            ["otelcol-contrib"]
+        );
+        assert!(named(&description.non_identifying_attributes).is_empty());
+        assert_eq!(
+            agent.service_name(),
+            "otelcol-contrib",
+            "the accessor reads it as the fold does"
         );
     }
 

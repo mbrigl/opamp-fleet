@@ -59,6 +59,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   nobody. **What to do:** nothing; no certificate this Server or `opamp-fleetctl` makes has a
   longer serial.
 
+- **A Managed Process states only its own `service.*` attributes**
+  ([ADR-0041](docs/adr/0041-a-managed-process-states-only-its-own-service-attributes.md)).
+  What a Managed Process reported about itself was laid over the Supervisor's description for
+  every key but its identity and name. A process running a command from its configuration could
+  report another host's `host.name` or `host.id` and draw that host's Configurations, report
+  another platform and be offered another machine's binary, report a `supervisor.kind.*` key and
+  make every Agent of its host ambiguous, or overwrite an `[attributes]` entry such as `channel`.
+  The Client now takes only the process's `service.*` attributes, never `service.instance.id`,
+  `service.instance.name`, `service.namespace` while `service_namespace` is set, or a key
+  `[attributes]` sets, and drops every other key it reports. A Collector's type and version still
+  arrive; its own `agent_description.non_identifying_attributes`, its resource attributes and its
+  own `host.name` no longer do. **What to do:** if a Selector matched an attribute that only a
+  Collector reported, move that tag to a Server label, or to `[attributes]` for the whole host.
+
 ### Fixed
 
 - **The audit record is written out before the Server exits.** Entries still queued for the audit
