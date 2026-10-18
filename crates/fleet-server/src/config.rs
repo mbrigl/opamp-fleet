@@ -450,10 +450,17 @@ impl ConnectionOfferConfig {
                     .to_string(),
             );
         }
-        // The Server never offers a fleet a plaintext path off the host (ADR-0014 clause 1).
+        // An offer never moves a fleet to plaintext, on the loopback neither: whoever listens on
+        // that port would be the fleet's Server, unproven (ADR-0040 clause 1).
         if let Some(endpoint) = &self.endpoint {
             opamp::endpoint::check_url(endpoint)
                 .map_err(|e| format!("[connection_offer] endpoint {e}"))?;
+            if opamp::endpoint::is_plaintext(endpoint) {
+                return Err(format!(
+                    "[connection_offer] endpoint {endpoint}: an offer never moves a fleet to \
+                     plaintext — use wss:// or https://"
+                ));
+            }
         }
         Ok(())
     }
@@ -1337,13 +1344,16 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0014
+    /// An offer never moves a fleet to plaintext, on a loopback IP literal neither.
+    /// Verifies: ADR-0040
     #[test]
-    fn a_connection_offer_accepts_a_plaintext_endpoint_on_a_loopback_ip_literal() {
+    fn a_connection_offer_refuses_a_plaintext_endpoint_on_a_loopback_ip_literal() {
         for endpoint in ["ws://127.0.0.1:4320/v1/opamp", "http://[::1]:4320/v1/opamp"] {
             let offer: ConnectionOfferConfig =
                 toml::from_str(&format!("endpoint = \"{endpoint}\"")).expect("parse");
-            assert_eq!(offer.check(), Ok(()), "{endpoint}");
+            let err = offer.check().expect_err(endpoint);
+            assert!(err.contains("[connection_offer] endpoint"), "{err}");
+            assert!(err.contains("never moves a fleet to plaintext"), "{err}");
         }
     }
 

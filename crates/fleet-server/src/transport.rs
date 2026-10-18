@@ -971,8 +971,7 @@ impl Handler for Fleet {
             }
         }
         // The connection's own certificate, whatever the message claims to be: behind a Gateway
-        // that is the Gateway's, so revoking it reaches what was renewed through it without a
-        // renewal proof (ADR-0021 clauses 33, 42).
+        // that is the Gateway's, which renews nothing without a renewal proof (ADR-0039).
         let presented = carrier
             .proofs
             .certificate

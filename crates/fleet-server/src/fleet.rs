@@ -997,7 +997,8 @@ impl AppState {
     /// What a CSR renews, the host the new certificate is for (ADR-0021 clause 27), and the
     /// subject values it carries on (ADR-0036 clause 4). A renewal proof names the certificate
     /// whose key signed the new one — through a Gateway too — and the host and the values carry
-    /// on from it; without one, the certificate the connection presented is renewed. A
+    /// on from it; without one, the certificate the connection presented is renewed, unless its
+    /// host is marked as a Gateway (ADR-0039 clause 1). A
     /// certificate that names no host — one an operator provisioned — gets a host derived from
     /// its issuer and serial, the same on every retry.
     fn renews(
@@ -1006,12 +1007,7 @@ impl AppState {
         csr: &str,
         presented: Option<&Presented>,
     ) -> Result<(Option<CertId>, String, SubjectValues), String> {
-        let derived = |id: &CertId| {
-            use sha2::Digest as _;
-            let digest = sha2::Sha256::digest(format!("{}\n{}", id.issuer, id.serial));
-            InstanceUid::from_wire(&digest[..16])
-                .map_or_else(|| hex::encode(&digest[..16]), |uid| uid.to_string())
-        };
+        let derived = |id: &CertId| fleet_core::host::derived(&id.issuer, &id.serial);
         if let Some(old) = ca.renewal_proof(csr)? {
             if self
                 .revocations
@@ -1024,14 +1020,30 @@ impl AppState {
             return Ok((Some(old.id), host, old.subject_values));
         }
         Ok(match presented {
-            Some(presented) => (
-                Some(presented.id.clone()),
-                presented
+            Some(presented) => {
+                let host = presented
                     .host
                     .clone()
-                    .unwrap_or_else(|| derived(&presented.id)),
-                presented.subject_values.clone(),
-            ),
+                    .unwrap_or_else(|| derived(&presented.id));
+                // Behind a Gateway the presented certificate is the Gateway's, and its host carries
+                // the mark: a CSR without a proof would hand the Gateway's powers to whoever sent
+                // it (ADR-0039 clause 1).
+                if self
+                    .revocations
+                    .as_ref()
+                    .is_some_and(|revocations| revocations.is_gateway(&host))
+                {
+                    return Err(
+                        "a certificate requested through a Gateway needs a renewal proof"
+                            .to_string(),
+                    );
+                }
+                (
+                    Some(presented.id.clone()),
+                    host,
+                    presented.subject_values.clone(),
+                )
+            }
             None => (
                 None,
                 InstanceUid::default().to_string(),
@@ -1720,7 +1732,7 @@ impl AppState {
 
     /// [`process`](Self::process) for a connection that presented a certificate: the host it was
     /// issued to binds the Agents it reports for, and a CSR without a renewal proof renews it
-    /// (ADR-0021 clause 33, ADR-0021 clauses 7 and 27).
+    /// unless its host is a Gateway's (ADR-0021 clause 7, ADR-0039).
     pub fn process_presented(
         &self,
         msg: AgentToServer,
@@ -3493,6 +3505,20 @@ fn refuse_unreleasable(
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The host derived for a certificate that names none is the one this Server derived before
+    /// the derivation moved into `fleet-core`: hosts already in the register keep their ids.
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_derived_host_is_the_one_the_register_already_holds() {
+        use sha2::Digest as _;
+        let (issuer, serial) = ("5f0a", "1c");
+        let digest = sha2::Sha256::digest(format!("{issuer}\n{serial}"));
+        let before = opamp::uid::InstanceUid::from_wire(&digest[..16])
+            .expect("16 bytes")
+            .to_string();
+        assert_eq!(fleet_core::host::derived(issuer, serial), before);
+    }
 
     fn now_ms() -> u64 {
         SystemTime::now()

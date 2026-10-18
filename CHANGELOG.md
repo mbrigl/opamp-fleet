@@ -15,6 +15,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ## [0.6.0]
 
+### Security
+
+- **Through a Gateway a certificate is renewed only with a renewal proof**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
+  Behind a Gateway the Server sees the Gateway's certificate. A signing request without a renewal
+  proof was issued to the Gateway's host, so any member behind a Gateway could obtain a
+  certificate with the Gateway's powers and use it directly against the Server. Such a request is
+  now refused, nothing is signed, and the refusal is audited as `issuance.refused`. This Client
+  always sends a proof. **What to do:** nothing for Clients of this project. A third-party OpAMP
+  client behind a Gateway gets its next certificate by enrolling directly or from the operator.
+
+- **A Gateway forwards a report only for an Agent of the host that sent it**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
+  Until now any host behind a Gateway could report under another host's `instance_uid`, take
+  over its route and receive its configuration and its certificate. The binding that already
+  guarded downloads now guards every message: a report for an `instance_uid` bound to another
+  host is dropped over WebSocket, answered `403` over plain HTTP, and logged. A host past
+  `max_carried_agents` makes room among its own idle Agents and never takes another host's. A certificate without a host URI is bound
+  under the host the Server derives for it, so its Agents stay bound across its first renewal.
+  **What to do:** nothing. If a host was locked out of its own Agent, restart the Gateway; the
+  real host's next report then binds it.
+
+- **A connection-settings offer never moves a Client to plaintext**
+  ([ADR-0040](docs/adr/0040-a-connection-settings-offer-never-moves-the-client-to-plaintext.md)).
+  An offer could move a Client to `ws://` or `http://` on the loopback, where whoever listens on
+  that port became its Server, with no certificate to prove it. The Server now refuses a `ws://`
+  or `http://` `[connection_offer] endpoint` at startup, the Client refuses such an offer and
+  reports it `FAILED`, and a persisted plaintext endpoint that `supervisor.toml` does not name is
+  not applied at startup. **What to do:** a `server.toml` whose `[connection_offer] endpoint` is
+  `ws://` or `http://` no longer starts; set a `wss://` or `https://` endpoint or remove the key.
+  A development setup on the loopback names its plaintext endpoint in `supervisor.toml`.
+
 ## [0.5.5] - 2026-10-18
 
 ### Added

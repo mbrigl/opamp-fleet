@@ -178,13 +178,23 @@ pub fn unhonoured(settings: &OpAmpConnectionSettings) -> Result<(), String> {
 
 /// Applies persisted settings over the loaded `supervisor.toml` (ADR-0014): the Server's word wins
 /// where it spoke — endpoint and heartbeat (on plain HTTP the same value is the polling interval,
-/// the Baseline's MUST) — and the file's word stays everywhere else.
+/// the Baseline's MUST) — and the file's word stays everywhere else, except for a plaintext
+/// endpoint the file does not name (ADR-0040 clause 3).
 pub fn apply(config: &mut ClientConfig, stored: &ConnectionSettingsOffers) {
     let Some(settings) = &stored.opamp else {
         return;
     };
-    if !settings.destination_endpoint.is_empty() {
-        config.endpoint = settings.destination_endpoint.clone();
+    let endpoint = &settings.destination_endpoint;
+    if opamp::endpoint::is_plaintext(endpoint) && *endpoint != config.endpoint {
+        // A move to plaintext persisted before it was refused: `supervisor.toml` decides where this
+        // Client connects, so a host moved there returns at its next start (ADR-0040 clause 3).
+        warn!(
+            persisted = %endpoint,
+            configured = %config.endpoint,
+            "not applying a persisted plaintext endpoint; connecting to the configured one"
+        );
+    } else if !endpoint.is_empty() {
+        config.endpoint = endpoint.clone();
     }
     if settings.heartbeat_interval_seconds != 0 {
         config.heartbeat_interval_secs = settings.heartbeat_interval_seconds;
@@ -211,6 +221,14 @@ pub async fn verify(
     // it: under the public roots alone, a Server could move the fleet to any host a public CA
     // ever certified, and keep it there (ADR-0014 clause 5).
     let moves = endpoint != config.endpoint;
+    // Nor is a move to plaintext taken, on the loopback neither: no certificate would prove the
+    // Server, and whoever listens on that port would be it (ADR-0040 clause 2).
+    if moves && opamp::endpoint::is_plaintext(&endpoint) {
+        return Err(format!(
+            "refusing the offered endpoint {endpoint}: an offer never moves this Client to \
+             plaintext; a plaintext endpoint on the loopback is set in supervisor.toml"
+        ));
+    }
     let over_tls = endpoint.starts_with("wss://") || endpoint.starts_with("https://");
     if moves && over_tls && config.ca_file().is_none() {
         return Err(format!(
@@ -704,6 +722,73 @@ mod tests {
             assert!(error.starts_with("refusing"), "{endpoint}: {error}");
             assert!(error.contains(endpoint), "{error} names the endpoint");
         }
+    }
+
+    /// A move to plaintext is refused on a loopback IP literal too, without dialling it: whoever
+    /// listens there would be this Client's Server, unproven.
+    /// Verifies: ADR-0040
+    #[tokio::test]
+    async fn verify_refuses_a_move_to_plaintext_on_the_loopback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let config: ClientConfig = toml::from_str(
+            "endpoint = \"wss://fleet.example/v1/opamp\"\n[tls]\nca_file = \"ca.pem\"\n",
+        )
+        .expect("config");
+        for endpoint in [
+            format!("ws://127.0.0.1:{port}/v1/opamp"),
+            format!("http://127.0.0.1:{port}/v1/opamp"),
+        ] {
+            let error = verify(&endpoint_only(&endpoint), &config, never_reported)
+                .await
+                .expect_err("a move to plaintext was taken");
+            assert!(
+                error.contains("never moves this Client to plaintext"),
+                "{error}"
+            );
+            assert!(
+                error.contains(endpoint.as_str()),
+                "{error} names the endpoint"
+            );
+        }
+        let dialled =
+            tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await;
+        assert!(dialled.is_err(), "the refused endpoint was dialled");
+    }
+
+    /// A persisted plaintext endpoint that `supervisor.toml` does not name is not applied, so a
+    /// host moved there returns to its configured endpoint; one the file names, and a persisted
+    /// TLS endpoint, still are.
+    /// Verifies: ADR-0040
+    #[test]
+    fn apply_ignores_a_persisted_plaintext_endpoint_the_file_does_not_name() {
+        let configured = |endpoint: &str| ClientConfig {
+            endpoint: endpoint.to_string(),
+            ..ClientConfig::default()
+        };
+        let mut config = configured("wss://fleet.example/v1/opamp");
+        apply(
+            &mut config,
+            &offer_with(b"h1", "ws://127.0.0.1:4999/v1/opamp", None, 12),
+        );
+        assert_eq!(config.endpoint, "wss://fleet.example/v1/opamp");
+        assert_eq!(config.heartbeat_interval_secs, 12, "the rest still applies");
+
+        let mut config = configured("ws://127.0.0.1:4320/v1/opamp");
+        apply(
+            &mut config,
+            &offer_with(b"h1", "ws://127.0.0.1:4320/v1/opamp", None, 0),
+        );
+        assert_eq!(config.endpoint, "ws://127.0.0.1:4320/v1/opamp");
+
+        let mut config = configured("ws://127.0.0.1:4320/v1/opamp");
+        apply(
+            &mut config,
+            &offer_with(b"h1", "wss://fleet.example/v1/opamp", None, 0),
+        );
+        assert_eq!(config.endpoint, "wss://fleet.example/v1/opamp");
     }
 
     /// A host name never counts as the loopback, not even `localhost`: an offered plaintext

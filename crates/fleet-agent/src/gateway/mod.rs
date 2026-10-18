@@ -252,8 +252,11 @@ struct Downstream {
     /// The certificate it was admitted with, which every report is judged by again.
     certificate: Vec<u8>,
     /// The host that certificate names, which the offers relayed over it are recorded for
-    /// (ADR-0026 clause 45).
+    /// (ADR-0039 clause 6).
     host: Option<String>,
+    /// The host that certificate speaks as, which the `instance_uid`s it reports for are bound to
+    /// (ADR-0039 clause 6): the one it names, else the one the Server derives for it.
+    speaker: String,
 }
 
 /// Releases a plain-HTTP exchange's route when the exchange ends, unless its reply took it.
@@ -333,6 +336,15 @@ impl Handler for Forwarding {
                 })
             }
         }
+        // A certificate the revocation list could judge can be read, so this refuses nothing the
+        // handshake and the list admitted; it only gives the binding its host (ADR-0039 clause 6).
+        let Some(speaker) = cache::speaker_of(&certificate) else {
+            return Err(Rejection {
+                status: StatusCode::UNAUTHORIZED,
+                headers: Vec::new(),
+                message: "this certificate cannot be read".to_string(),
+            });
+        };
         // An `Authorization` the peer sends is ignored, never refused, and nothing is forwarded in
         // its place (ADR-0015 clause 11).
         let peer = request
@@ -366,6 +378,7 @@ impl Handler for Forwarding {
                 carried: HashSet::new(),
                 ended,
                 host: cache::host_of(&certificate),
+                speaker,
                 certificate,
             },
             outbound,
@@ -427,22 +440,32 @@ impl Forwarding {
             warn!(%peer, "dropping a downstream report with a malformed instance_uid");
             return Reply::Nothing;
         };
-        if !downstream.carried.contains(&uid) {
-            // Bound the routing state one connection can create: past the cap a report for a new
-            // Agent is dropped, while the Agents already carried keep being served.
-            if downstream.carried.len() >= self.max_agents {
-                warn!(
-                    %peer, agent = %uid, cap = self.max_agents,
-                    "a downstream connection reached its Agent cap; dropping a report for a new Agent"
-                );
-                return Reply::Nothing;
-            }
+        let carried = downstream.carried.contains(&uid);
+        // Bound the routing state one connection can create: past the cap a report for a new
+        // Agent is dropped, while the Agents already carried keep being served.
+        if !carried && downstream.carried.len() >= self.max_agents {
+            warn!(
+                %peer, agent = %uid, cap = self.max_agents,
+                "a downstream connection reached its Agent cap; dropping a report for a new Agent"
+            );
+            return Reply::Nothing;
+        }
+        // Forwarded only for an `instance_uid` bound to the host that sent it; the binding logs
+        // a refusal (ADR-0039 clause 5).
+        let Some(replies) = &downstream.replies else {
+            return Reply::Nothing;
+        };
+        if !self.registry.attach(
+            uid,
+            replies.clone(),
+            downstream.host.clone(),
+            &downstream.speaker,
+        ) {
+            return Reply::Nothing;
+        }
+        if !carried {
             downstream.carried.insert(uid);
             info!(agent = %uid, %peer, "carrying an Agent");
-        }
-        if let Some(replies) = &downstream.replies {
-            self.registry
-                .attach(uid, replies.clone(), downstream.host.clone());
         }
         if let Err(e) = self.pool.forward(uid, &report).await {
             warn!(agent = %uid, error = %e, "cannot forward a report upstream");
@@ -459,9 +482,17 @@ impl Forwarding {
             );
         };
         let (reply_tx, reply_rx) = oneshot::channel();
-        let exchange = self
-            .registry
-            .expect_once(uid, reply_tx, downstream.host.clone());
+        // Forwarded only for an `instance_uid` bound to the host that sent it; the binding logs
+        // a refusal (ADR-0039 clause 5).
+        let Some(exchange) =
+            self.registry
+                .expect_once(uid, reply_tx, downstream.host.clone(), &downstream.speaker)
+        else {
+            return Reply::Refuse(
+                StatusCode::FORBIDDEN,
+                "this instance_uid is not this host's to report for".into(),
+            );
+        };
         // However the exchange ends — no reply in time, no Server, or the peer gone — its route
         // goes with it.
         let _route = Abandon {
@@ -509,6 +540,7 @@ mod tests {
         addr
     }
 
+    /// A certificate that names no host: each one a host of its own.
     fn certificate() -> Vec<u8> {
         let key = rcgen::KeyPair::generate().expect("key");
         rcgen::CertificateParams::new(vec!["edge".into()])
@@ -519,6 +551,18 @@ mod tests {
             .to_vec()
     }
 
+    /// A certificate that names `host`, as one the Server issues does.
+    fn certificate_naming(host: &str) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.subject_alt_names.push(rcgen::SanType::URI(
+            format!("urn:opamp-fleet:host:{host}")
+                .try_into()
+                .expect("uri"),
+        ));
+        params.self_signed(&key).expect("cert").der().to_vec()
+    }
+
     /// A Gateway's handler in front of a silent upstream, with a fresh, empty revocation list.
     async fn forwarding(state: &std::path::Path) -> Forwarding {
         opamp::tls::install_ring_provider();
@@ -526,7 +570,7 @@ mod tests {
         let config: Arc<ClientConfig> = Arc::new(
             toml::from_str(&format!(
                 "endpoint = \"ws://{server}/v1/opamp\"\nstate_dir = {:?}\n\
-                 [gateway]\nlisten = \"127.0.0.1:9\"\n",
+                 [gateway]\nlisten = \"127.0.0.1:9\"\nmax_carried_agents = 3\n",
                 state.display().to_string()
             ))
             .expect("config"),
@@ -550,6 +594,7 @@ mod tests {
     fn downstream(
         transport: Transport,
         replies: Option<mpsc::Sender<ServerToAgent>>,
+        certificate: Vec<u8>,
     ) -> Downstream {
         Downstream {
             transport,
@@ -557,8 +602,9 @@ mod tests {
             replies,
             carried: HashSet::new(),
             ended: Arc::default(),
-            certificate: certificate(),
-            host: None,
+            host: cache::host_of(&certificate),
+            speaker: cache::speaker_of(&certificate).expect("a readable certificate"),
+            certificate,
         }
     }
 
@@ -570,15 +616,16 @@ mod tests {
     }
 
     /// A peer that goes takes its Agents' places on the upstream connections with it, so a peer
-    /// coming back under ever new `instance_uid`s grows nothing; an Agent another socket carries
-    /// by then keeps its place and its route.
+    /// coming back under ever new `instance_uid`s grows nothing; an Agent another socket of the
+    /// same host carries by then keeps its place and its route.
     /// Verifies: ADR-0015
     #[tokio::test]
     async fn the_agents_a_departed_peer_carried_are_released_from_the_pool() {
         let dir = tempfile::tempdir().expect("tempdir");
         let forwarding = forwarding(dir.path()).await;
+        let host = certificate();
         let (first_tx, _first_rx) = mpsc::channel(64);
-        let mut first = downstream(Transport::WebSocket, Some(first_tx));
+        let mut first = downstream(Transport::WebSocket, Some(first_tx), host.clone());
         let uids: Vec<InstanceUid> = (0..3).map(|_| InstanceUid::default()).collect();
         for uid in &uids {
             forwarding
@@ -586,7 +633,7 @@ mod tests {
                 .await;
         }
         let (second_tx, _second_rx) = mpsc::channel(64);
-        let mut second = downstream(Transport::WebSocket, Some(second_tx));
+        let mut second = downstream(Transport::WebSocket, Some(second_tx), host);
         forwarding
             .forward_from_socket(&mut second, report(uids[0]))
             .await;
@@ -610,7 +657,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let forwarding = forwarding(dir.path()).await;
         let uid = InstanceUid::default();
-        let peer = downstream(Transport::Http, None);
+        let peer = downstream(Transport::Http, None, certificate());
 
         let waited = tokio::time::timeout(
             std::time::Duration::from_millis(200),
@@ -620,5 +667,105 @@ mod tests {
 
         assert!(waited.is_err(), "the silent upstream sent no reply");
         assert!(!forwarding.registry.routes(&uid), "the route is gone");
+    }
+
+    /// A reply for `uid`, as the Server would send one.
+    fn reply_for(uid: InstanceUid) -> ServerToAgent {
+        ServerToAgent {
+            instance_uid: uid.as_bytes().to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// A second host reporting for an `instance_uid` bound to the first is not forwarded and takes
+    /// no route, over WebSocket and over plain HTTP (`403`): the Server's next reply still reaches
+    /// the first host. Two certificates that name no host are two hosts.
+    /// Verifies: ADR-0039
+    #[tokio::test]
+    async fn a_report_for_another_hosts_instance_uid_is_not_forwarded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let uid = InstanceUid::default();
+        let (owner_tx, mut owner_rx) = mpsc::channel(64);
+        let mut owner = downstream(Transport::WebSocket, Some(owner_tx), certificate());
+        forwarding
+            .forward_from_socket(&mut owner, report(uid))
+            .await;
+        assert!(owner.carried.contains(&uid));
+
+        let (thief_tx, mut thief_rx) = mpsc::channel(64);
+        let mut thief = downstream(Transport::WebSocket, Some(thief_tx), certificate());
+        forwarding
+            .forward_from_socket(&mut thief, report(uid))
+            .await;
+        assert!(!thief.carried.contains(&uid), "the other host carries it");
+        let exchange = downstream(Transport::Http, None, certificate());
+        match forwarding.forward_exchange(&exchange, report(uid)).await {
+            Reply::Refuse(status, _) => assert_eq!(status, StatusCode::FORBIDDEN),
+            _ => panic!("a plain-HTTP report for another host's Agent was not refused"),
+        }
+
+        forwarding.registry.deliver(uid, reply_for(uid)).await;
+        assert!(
+            owner_rx.try_recv().is_ok(),
+            "the reply reached the bound host"
+        );
+        assert!(thief_rx.try_recv().is_err(), "and not the other one");
+    }
+
+    /// A host past its `max_carried_agents` brings no further Agent upstream.
+    /// Verifies: ADR-0039
+    #[tokio::test]
+    async fn a_report_past_the_hosts_bindings_is_not_forwarded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let (tx, _rx) = mpsc::channel(64);
+        let mut peer = downstream(Transport::WebSocket, Some(tx), certificate());
+        let uids: Vec<InstanceUid> = (0..4).map(|_| InstanceUid::default()).collect();
+        for uid in &uids {
+            forwarding
+                .forward_from_socket(&mut peer, report(*uid))
+                .await;
+        }
+        assert_eq!(peer.carried.len(), 3, "max_carried_agents is 3");
+        assert!(!peer.carried.contains(&uids[3]));
+        assert!(!forwarding.registry.routes(&uids[3]));
+    }
+
+    /// A certificate that names no host and the one its renewal brings, naming the host the Server
+    /// derived for it, are one host: its Agents stay bound across the renewal.
+    /// Verifies: ADR-0039
+    #[tokio::test]
+    async fn a_renewal_naming_the_derived_host_keeps_the_agents_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let provisioned = certificate();
+        // The host the Server names in the renewal, from the certificate's issuer and serial.
+        let (issuer, serial) = revocations::certificate_id(&provisioned).expect("an id");
+        let derived = fleet_core::host::derived(&issuer, &serial);
+        assert_eq!(cache::host_of(&provisioned), None);
+        let uid = InstanceUid::default();
+        let (before_tx, _before_rx) = mpsc::channel(64);
+        let mut before = downstream(Transport::WebSocket, Some(before_tx), provisioned);
+        forwarding
+            .forward_from_socket(&mut before, report(uid))
+            .await;
+        assert!(before.carried.contains(&uid));
+
+        let (after_tx, mut after_rx) = mpsc::channel(64);
+        let mut after = downstream(
+            Transport::WebSocket,
+            Some(after_tx),
+            certificate_naming(&derived),
+        );
+        forwarding
+            .forward_from_socket(&mut after, report(uid))
+            .await;
+        assert!(
+            after.carried.contains(&uid),
+            "the renewed certificate was refused"
+        );
+        forwarding.registry.deliver(uid, reply_for(uid)).await;
+        assert!(after_rx.try_recv().is_ok());
     }
 }

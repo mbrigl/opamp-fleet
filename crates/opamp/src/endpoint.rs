@@ -113,6 +113,15 @@ pub fn check_url(url: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `url` is plaintext — `ws://` or `http://` — wherever its host is.
+#[must_use]
+pub fn is_plaintext(url: &str) -> bool {
+    matches!(
+        url.split_once("://").map(|(scheme, _)| scheme),
+        Some("ws" | "http")
+    )
+}
+
 /// The host of `url`, without credentials or port; a bracketed IPv6 host keeps its brackets off.
 #[must_use]
 pub fn host_of(url: &str) -> &str {

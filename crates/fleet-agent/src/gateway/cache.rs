@@ -121,6 +121,16 @@ pub fn host_of(der: &[u8]) -> Option<String> {
     })
 }
 
+/// The host a downstream certificate speaks as (ADR-0039 clause 6): the one it names, else the
+/// one the Server derives for it from its issuer and serial and names in its first renewal.
+#[must_use]
+pub fn speaker_of(der: &[u8]) -> Option<String> {
+    host_of(der).or_else(|| {
+        crate::gateway::revocations::certificate_id(der)
+            .map(|(issuer, serial)| fleet_core::host::derived(&issuer, &serial))
+    })
+}
+
 /// A certificate's serial in hex, for a log line.
 fn serial_of(der: &[u8]) -> Option<String> {
     let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
@@ -416,19 +426,20 @@ impl PackageCache {
     }
 
     /// Binds `uid` to `host` unless it is bound already: the first report wins, and every report
-    /// refreshes when it was last reported (ADR-0026 clause 45). A report over a certificate that
-    /// names no host binds nothing. A host binds at most `max_carried_agents`; at the global cap
-    /// the least recently reported binding whose `instance_uid` has neither a route (`routed`) nor
-    /// a current offer makes room, and without one nothing is bound.
+    /// refreshes when it was last reported (ADR-0039 clause 6). `host` is the one a downstream
+    /// certificate speaks as ([`speaker_of`]). A host binds at most `max_carried_agents`; at the
+    /// global cap the least recently reported binding whose `instance_uid` has neither a route
+    /// (`routed`) nor a current offer makes room, and without one nothing is bound.
+    ///
+    /// Whether `uid` is now bound to `host`: only then is its report forwarded and its reply
+    /// routed back (ADR-0039 clause 5). A report for an `instance_uid` bound to another host, or
+    /// one that could not be bound, is logged and answered `false`.
     pub fn bind(
         &self,
         uid: InstanceUid,
-        host: Option<&str>,
+        host: &str,
         routed: impl Fn(&InstanceUid) -> bool,
-    ) {
-        let Some(host) = host else {
-            return;
-        };
+    ) -> bool {
         let limits = Limits {
             per_host: self.per_host_bindings,
             total: self.knobs.max_bindings,
@@ -441,7 +452,21 @@ impl PackageCache {
         });
         if let Bound::Refused(why) = bound {
             if inner.refusals.note(host, Instant::now()) != Note::Count {
-                warn!(agent = %uid, %host, "not binding an instance_uid: {why}");
+                warn!(agent = %uid, %host, "not forwarding a report: not binding its instance_uid: {why}");
+            }
+            return false;
+        }
+        match inner.bindings.host_of(&uid) {
+            Some(bound) if bound == host => true,
+            bound => {
+                let bound = bound.unwrap_or("none").to_string();
+                if inner.refusals.note(host, Instant::now()) != Note::Count {
+                    warn!(
+                        agent = %uid, %host, %bound,
+                        "not forwarding a report for an instance_uid bound to another host"
+                    );
+                }
+                false
             }
         }
     }
@@ -1178,7 +1203,7 @@ mod tests {
     /// Relays an offer of `artifacts` to a new `instance_uid` bound to `h1`.
     fn offer_to_new_agent(cache: &Arc<PackageCache>, artifacts: &[&Artifact]) -> InstanceUid {
         let uid = InstanceUid::default();
-        cache.bind(uid, Some("h1"), |_| false);
+        assert!(cache.bind(uid, "h1", |_| false));
         cache.observe(uid, Some("h1".to_string()), &offer(uid, artifacts));
         uid
     }
@@ -1468,7 +1493,7 @@ mod tests {
         .expect("cache");
         let flood: Vec<InstanceUid> = (0..5).map(|_| InstanceUid::default()).collect();
         for uid in &flood {
-            cache.bind(*uid, Some("flood"), |_| false);
+            cache.bind(*uid, "flood", |_| false);
         }
         assert_eq!(
             cache.inner().bindings.count_of("flood"),
@@ -1476,11 +1501,11 @@ mod tests {
             "its share and no more"
         );
         let other = InstanceUid::default();
-        cache.bind(other, Some("other"), |_| false);
+        cache.bind(other, "other", |_| false);
         assert_eq!(cache.inner().bindings.len(), 4, "the global cap");
 
         let real = InstanceUid::default();
-        cache.bind(real, Some("real"), |uid| *uid == other);
+        cache.bind(real, "real", |uid| *uid == other);
         {
             let inner = cache.inner();
             assert_eq!(
@@ -1672,18 +1697,20 @@ mod tests {
         assert_eq!(total(), 5);
     }
 
-    /// An offer relayed over a certificate that names no host is not recorded and starts no fetch.
-    /// Verifies: ADR-0026
+    /// An offer relayed over a certificate that names no host is not recorded and starts no fetch,
+    /// although its Agent is bound under the host derived for it: that host binds for routing only.
+    /// Verifies: ADR-0039
     #[tokio::test]
     async fn an_offer_over_a_certificate_naming_no_host_records_nothing_and_fetches_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = open_cache(config("127.0.0.1:9".parse().expect("addr"), dir.path(), 16)).await;
         let uid = InstanceUid::default();
         let one = artifact("1", b"x");
-        cache.bind(uid, None, |_| false);
+        assert!(cache.bind(uid, "derived-host", |_| false));
         cache.observe(uid, None, &offer(uid, &[&one]));
         let inner = cache.inner();
-        assert!(inner.bindings.is_empty() && inner.offers.is_empty() && inner.fetching.is_empty());
+        assert_eq!(inner.bindings.host_of(&uid), Some("derived-host"));
+        assert!(inner.offers.is_empty() && inner.fetching.is_empty());
     }
 
     /// A fetch whose task ends without settling leaves no entry and no reservation behind.

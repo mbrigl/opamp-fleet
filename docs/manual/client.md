@@ -1093,6 +1093,21 @@ them changes: the Server tells Agents apart by `instance_uid`, never by the conn
 so an Agent behind a Gateway is as manageable as one in front of it. Both transports are served
 downstream, so a polling Client works as well as a WebSocket one.
 
+**Each Agent belongs to the host that first reported it.** An Agent's `instance_uid` is bound to
+the host of the certificate of the first report for it since the Gateway started — the host the
+certificate names (`urn:opamp-fleet:host:<id>`), or, for a certificate an operator made without
+one, the host the Server will give it at its first renewal, so its Agents stay bound across that
+renewal. A report for an `instance_uid` bound to another host is not forwarded: over WebSocket it is
+dropped, over plain HTTP it is answered `403`, and the log says so, the first five per host and
+minute one by one, the rest counted into one line. So one host behind a Gateway cannot take over
+another host's Agent, receive its configuration or its certificate, or speak in its name. A host
+binds at most `max_carried_agents` `instance_uid`s; past that a report for a new one takes the
+place of that host's own least recently reported Agent that has neither a connection nor an offer,
+and when it has none, the report is not forwarded. If a
+host locks another host's Agent out, restart the Gateway: the real host's next report then binds
+it. A certificate renewed through a Gateway is renewed with a renewal proof, which this Client
+always sends; the Server refuses a request without one there.
+
 `upstream_connections` is a **ceiling**. Connections are opened as Agents appear, so a Gateway in
 front of three Agents holds three, and each Agent stays on its connection while that lives. Any
 connection carries any Agent: every one presents this Gateway's own certificate upstream, so
@@ -1130,10 +1145,8 @@ crosses the Gateway's upstream link once instead of once per Agent:
   artifact only when the Gateway relayed an offer of it to an Agent carried over a connection whose
   certificate names the same host (`urn:opamp-fleet:host:<id>`) as the requesting certificate. An
   Agent's `instance_uid` belongs to the host of the first report for it since the Gateway
-  started; an offer relayed for it over another host's connection is not recorded, and the log
-  says so. If a host locks another host's Agent out this way, restart the Gateway: the real
-  host's next report then binds it. A host binds at most `max_carried_agents` `instance_uid`s;
-  at the Gateway's cap of 1 000 000 a new one replaces the least recently reported binding that
+  started, as above; an offer relayed for it over another host's connection is not recorded, and
+  the log says so. At the Gateway's cap of 1 000 000 a new one replaces the least recently reported binding that
   has neither a connection nor an offer. An offer relayed over a certificate that names no host serves nobody and is not
   fetched. Everything else is answered `404`, the same answer whatever the reason, and logged with
   the host, the certificate's serial and the path — the first five per host and minute one by one,
@@ -1775,9 +1788,12 @@ honours the Server's `UNAVAILABLE` retry hints.
 **Server-offered connection settings**. When
 the Server offers a new heartbeat interval, endpoint, or certificate, the Client
 **verifies the offer by actually connecting with it**, persists it, and only then switches —
-across transports if the offered endpoint demands it. An offered `ws://` or `http://` endpoint
-whose host is not `127.0.0.1` or `::1` is refused without connecting, and the offer is reported
-`FAILED` naming it. A failed verification leaves the current settings in force and is reported as
+across transports if the offered endpoint demands it. An offer that moves the Client to a
+`ws://` or `http://` endpoint is refused without connecting, on `127.0.0.1` and `::1` too, and the
+offer is reported `FAILED` naming it: on plaintext no certificate proves the Server. A plaintext
+endpoint on the loopback is one you write into `supervisor.toml` yourself. A persisted plaintext
+endpoint that `supervisor.toml` does not name is not applied at startup;
+the Client connects to the configured endpoint and logs a warning naming both. A failed verification leaves the current settings in force and is reported as
 such, so a bad offer cannot strand the fleet. An offered `certificate` is how an issued client
 certificate arrives. The `tls`, `proxy` and `headers` fields are not honoured: the Client applies
 everything else and reports the offer `FAILED`, naming the dropped fields, offered headers by their

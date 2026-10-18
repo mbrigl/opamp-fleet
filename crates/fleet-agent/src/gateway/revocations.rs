@@ -135,7 +135,7 @@ impl RevocationList {
 
 /// A certificate as the Server's register names it: the SHA-256 of its issuer's DER-encoded name,
 /// and its serial in lowercase hex without leading zeros.
-fn certificate_id(der: &[u8]) -> Option<(String, String)> {
+pub(crate) fn certificate_id(der: &[u8]) -> Option<(String, String)> {
     let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
     let issuer = hex::encode(sha2::Sha256::digest(cert.issuer().as_raw()));
     let serial = hex::encode(cert.raw_serial());

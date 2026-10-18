@@ -1,7 +1,7 @@
-//! Which host a Gateway takes to speak for an `instance_uid` (ADR-0026 clause 45, after ADR-0021
-//! clause 7): the host of the first report for it since the Gateway started. What the Gateway
-//! relays and passes on for an Agent is decided against this binding; the state is the core's,
-//! and the package cache holds it and asks it.
+//! Which host a Gateway takes to speak for an `instance_uid` (ADR-0039 clause 6, after ADR-0036
+//! clause 2): the host of the first report for it since the Gateway started. What the Gateway
+//! forwards, relays and passes on for an Agent is decided against this binding; the state is the
+//! core's, and the package cache holds it and asks it.
 
 use std::collections::HashMap;
 
@@ -45,9 +45,10 @@ pub struct Bindings {
 
 impl Bindings {
     /// Binds `uid` to `host` on its first report, and on every report marks it the most recently
-    /// reported. A host binds at most `limits.per_host`; at `limits.total` the least recently
-    /// reported binding whose `instance_uid` is `idle` makes room, and without one nothing is
-    /// bound.
+    /// reported. A host binds at most `limits.per_host`: past that its own least recently reported
+    /// binding whose `instance_uid` is `idle` makes room, so a host whose Agents come and go is not
+    /// shut out by its own past (ADR-0039 clause 6). At `limits.total` the least recently reported
+    /// idle binding of any host makes room. Without one nothing is bound.
     pub fn bind(
         &mut self,
         uid: InstanceUid,
@@ -62,7 +63,18 @@ impl Bindings {
             return Bound::Kept;
         }
         if self.per_host.get(host).copied().unwrap_or(0) >= limits.per_host {
-            return Bound::Refused("the host holds as many bindings as max_carried_agents allows");
+            let evicted = self
+                .bound
+                .iter()
+                .filter(|(uid, binding)| binding.host == host && idle(uid))
+                .min_by_key(|(_, binding)| binding.reported)
+                .map(|(uid, _)| *uid);
+            let Some(evicted) = evicted else {
+                return Bound::Refused(
+                    "the host holds as many bindings as max_carried_agents allows, none of them idle",
+                );
+            };
+            self.unbind(&evicted);
         }
         if self.bound.len() >= limits.total {
             let evicted = self
@@ -144,6 +156,33 @@ mod tests {
         assert_eq!(bindings.bind(uid, "b", LIMITS, |_| true), Bound::Kept);
         assert_eq!(bindings.host_of(&uid), Some("a"));
         assert_eq!(bindings.count_of("b"), 0);
+    }
+
+    /// Past its share a host gives up its own least recently reported idle binding, never another
+    /// host's, and with none of its own idle nothing is bound.
+    /// Verifies: ADR-0039
+    #[test]
+    fn past_its_share_a_host_gives_up_its_own_idle_binding() {
+        let mut bindings = Bindings::default();
+        let [first, second, other] = [(); 3].map(|()| InstanceUid::default());
+        bindings.bind(first, "a", LIMITS, |_| true);
+        bindings.bind(other, "b", LIMITS, |_| true);
+        bindings.bind(second, "a", LIMITS, |_| true);
+        let third = InstanceUid::default();
+        assert_eq!(
+            bindings.bind(third, "a", LIMITS, |uid| *uid != second),
+            Bound::New
+        );
+        assert!(
+            bindings.host_of(&first).is_none(),
+            "its own idle one made room"
+        );
+        assert_eq!(bindings.host_of(&other), Some("b"), "another host's stayed");
+        assert_eq!(bindings.count_of("a"), 2);
+        assert!(matches!(
+            bindings.bind(InstanceUid::default(), "a", LIMITS, |_| false),
+            Bound::Refused(_)
+        ));
     }
 
     /// At the total, the least recently reported idle binding makes room — a report refreshing

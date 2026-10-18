@@ -50,7 +50,9 @@ has:
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
   keeping its private key — and with the request's `basicConstraints`, `keyUsage`,
   `extendedKeyUsage`, and SANs **overwritten** rather than carried over, so a CSR cannot ask for the
-  powers of a CA ([`ca.rs`](../crates/fleet-server/src/ca.rs)).
+  powers of a CA ([`ca.rs`](../crates/fleet-server/src/ca.rs)). Through a Gateway a CSR is signed
+  only with a renewal proof, so a member behind it cannot obtain a certificate for the Gateway's
+  host and its powers (ADR-0039).
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
 - **TLS 1.3 alone, on every connection of both ends** (ADR-0010, ADR-0013): the process-wide
@@ -232,9 +234,10 @@ at all; start a kind that is not compiled in; change any key of `supervisor.toml
 root; install anything unsigned, from another origin than its own Server, or with an archive member that climbs
 out; serve a host from its download route an artifact that is not offered to an Agent the host
 speaks for, or serve a host behind a Gateway an artifact the Gateway did not relay to one of
-that host's Agents — within the residual that the Gateway binds an `instance_uid` to the host of
-its first report since the Gateway started (ADR-0026); downgrade the Client or install a program that is not the Client as the Client; switch to
-plaintext beyond the loopback; weaken TLS verification, set a proxy or plant a header; hand the Client a private
+that host's Agents, or forward a report for an `instance_uid` bound to another host behind a
+Gateway — within the residual that the Gateway binds an `instance_uid` to the host of its first
+report since the Gateway started (ADR-0039); downgrade the Client or install a program that is not the Client as the Client; switch to
+plaintext, on the loopback neither, or keep a persisted move to plaintext that `supervisor.toml` does not name; weaken TLS verification, set a proxy or plant a header; hand the Client a private
 key. Each of these is enforced in the code, and most by a test.
 
 ## Verifying a measure is in force

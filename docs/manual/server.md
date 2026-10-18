@@ -286,8 +286,8 @@ gateway_burst = 10000
 ### `[connection_offer]`
 
 See [Moving the fleet](#moving-the-fleet-connection-settings). Either key or both is valid, but
-not an empty section. The `endpoint` is `wss://` or `https://`; `ws://` or `http://` only to
-`127.0.0.1` or `::1`. The section carries no credential: `bearer_token_file`, `username`,
+not an empty section. The `endpoint` is `wss://` or `https://`; a `ws://` or `http://` endpoint
+is refused at startup, on the loopback too. The section carries no credential: `bearer_token_file`, `username`,
 `password_file`, `bearer_token` and `password` are each refused at startup by name.
 
 ```toml
@@ -482,7 +482,9 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"gateway"
 
 A Gateway's certificate speaks for any Agent; behind it, fleet membership is all the Server
 proves, and the Gateway's certificate may fetch the artifact offered to any Agent. A third-party
-client that sends no renewal proof renews the certificate it presents.
+client that sends no renewal proof renews the certificate it presents, but not through a Gateway:
+there the certificate presented is the Gateway's, and such a request is refused. A third-party
+client behind a Gateway gets its next certificate by enrolling directly or from the operator.
 
 ### Hosts
 
@@ -745,9 +747,9 @@ stays in force until the last of those renewals has expired. `GET /api/v1/bootst
 lists the serial of every bootstrap certificate the Server issued; colons, case and leading zeros
 do not matter. A renewal
 descends from the certificate its renewal proof names, through a Gateway too; a client that sends
-no proof renews from the certificate its connection presented — behind a Gateway the Gateway's, so
-revoking the Gateway revokes those renewals as well, and those Agents enrol again. A revoked
-certificate's proof renews nothing.
+no proof renews from the certificate its connection presented. Behind a Gateway that would be the
+Gateway's certificate, with the Gateway's powers, so such a request is refused there: through a
+Gateway only a renewal with a proof is signed. A revoked certificate's proof renews nothing.
 
 ```console
 $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
@@ -1635,9 +1637,11 @@ credential key in the section — `bearer_token_file`, `username`, `password_fil
 `password` — is refused at startup, naming the key. A Client that is offered `headers` by another
 Server applies the rest of the offer and reports it `FAILED`, naming the header keys.
 
-**The offered `endpoint` is never plaintext off the host**. It is
-`wss://` or `https://`; `ws://` or `http://` only when its host is `127.0.0.1` or `::1`. Any other
-`endpoint` is refused at startup with a message naming `[connection_offer] endpoint`.
+**The offered `endpoint` is never plaintext**. It is `wss://` or `https://`. A `ws://` or
+`http://` endpoint is refused at startup with a message naming `[connection_offer] endpoint`, on
+`127.0.0.1` and `::1` too: on plaintext no certificate proves the Server, so whoever listens on
+that port of a host would be the Server for its Client. A development setup on the loopback names
+its plaintext endpoint in `supervisor.toml` instead.
 
 The standing offer carries no `tls` and no `proxy`: there is no configuration surface for them. A
 `certificate` travels in an offer only as the answer to an Agent's signing request.

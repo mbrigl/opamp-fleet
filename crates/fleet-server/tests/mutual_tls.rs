@@ -1639,6 +1639,116 @@ async fn an_operator_sees_each_host_and_can_mark_a_gateway() {
     );
 }
 
+/// A CSR in `renewal` of `old_cert`, proven with `old_key` as ADR-0021 clause 27 describes.
+fn renewal_csr(old_cert: &str, old_key: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    use rcgen::{PublicKeyData as _, SigningKey as _};
+    use sha2::{Digest as _, Sha256};
+    let old_key = KeyPair::from_pem(old_key).expect("old key");
+    let new_key = KeyPair::generate().expect("new key");
+    let old_der = opamp::tls::certificates(old_cert.as_bytes()).expect("pem")[0].to_vec();
+    let signature = old_key
+        .sign(&fleet_core::renewal::statement(&Sha256::digest(
+            new_key.subject_public_key_info(),
+        )))
+        .expect("sign");
+    let proof = format!(
+        "{}{}",
+        fleet_core::renewal::URI_PREFIX,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fleet_core::renewal::encode(&old_der, &signature))
+    );
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::URI(proof.try_into().expect("uri")));
+    params
+        .serialize_request(&new_key)
+        .expect("csr")
+        .pem()
+        .expect("pem")
+        .into_bytes()
+}
+
+/// The certificate a reply issued, if it issued one.
+fn issued(reply: opamp::proto::ServerToAgent) -> Option<String> {
+    reply
+        .connection_settings
+        .and_then(|s| s.opamp)
+        .and_then(|o| o.certificate)
+        .map(|c| String::from_utf8(c.cert).expect("pem"))
+}
+
+/// Over a Gateway's certificate a CSR without a renewal proof is refused and signs nothing, so a
+/// member behind the Gateway cannot take on the Gateway's host and its mark; a CSR whose proof
+/// names a downstream certificate is still issued, to that certificate's host.
+/// Verifies: ADR-0039
+#[tokio::test]
+async fn a_csr_over_a_gateways_certificate_needs_a_renewal_proof() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let (gateway_cert, gateway_key) =
+        pki.issue_to_host_with("gw", &[(rcgen::DnType::CommonName, "gw")]);
+    let (member_cert, member_key) =
+        pki.issue_to_host_with("h-1", &[(rcgen::DnType::CommonName, "edge-01")]);
+    let gateway = client(&served.ca_pem, Some((&gateway_cert, &gateway_key)));
+    let uid = InstanceUid::default();
+    assert!(post(&gateway, &served.endpoint, report(&uid))
+        .await
+        .status()
+        .is_success());
+    let revocations = served.revocations.as_ref().expect("armed");
+    assert!(revocations.set_gateway("gw", true).expect("mark"));
+    let before = revocations.issued().len();
+
+    let (csr, _) = csr_for("edge-02");
+    let refused = decode(post(&gateway, &served.endpoint, with_csr(&uid, csr)).await).await;
+    let error = refused.error_response.clone().expect("an error response");
+    assert_eq!(error.r#type, ServerErrorResponseType::BadRequest as i32);
+    assert!(
+        error.error_message.contains("renewal proof"),
+        "{}",
+        error.error_message
+    );
+    assert!(issued(refused).is_none());
+    assert_eq!(
+        revocations.issued().len(),
+        before,
+        "a certificate was signed"
+    );
+
+    let csr = renewal_csr(&member_cert, &member_key);
+    let reply = decode(post(&gateway, &served.endpoint, with_csr(&uid, csr)).await).await;
+    let renewed = issued(reply).expect("a proven renewal through a Gateway is issued");
+    let entry = revocations
+        .issued_entry(&cert_id(&renewed))
+        .expect("registered");
+    assert_eq!(
+        entry.predecessor,
+        Some(cert_id(&member_cert)),
+        "the proven certificate is the predecessor"
+    );
+    assert_eq!(
+        fleet_server::ca::facts(
+            opamp::tls::certificates(renewed.as_bytes()).expect("pem")[0].as_ref()
+        )
+        .expect("facts")
+        .host
+        .as_deref(),
+        Some("h-1"),
+        "the proven certificate's host, never the Gateway's"
+    );
+
+    // Over a certificate whose host is not marked, a CSR without a proof still renews it.
+    let member = client(&served.ca_pem, Some((&member_cert, &member_key)));
+    let (csr, _) = csr_for("edge-01");
+    let reply = decode(post(&member, &served.endpoint, with_csr(&uid, csr)).await).await;
+    assert!(
+        issued(reply).is_some(),
+        "an unmarked host's proofless renewal"
+    );
+}
+
 // ---- Hosts (ADR-0035) ----
 
 async fn hosts(served: &Served) -> serde_json::Value {
@@ -4388,9 +4498,6 @@ async fn the_operator_plane_serves_its_own_certificate_and_the_agent_plane_keeps
 /// Verifies: ADR-0036
 #[tokio::test]
 async fn a_renewal_by_its_proof_carries_the_proven_certificates_values() {
-    use base64::Engine as _;
-    use rcgen::{PublicKeyData as _, SigningKey as _};
-    use sha2::{Digest as _, Sha256};
     let pki = Pki::new();
     let served = serve(&pki, revocations_setup(&pki)).await;
     let (old_cert, old_key) = pki.issue_to_host_with(
@@ -4409,33 +4516,11 @@ async fn a_renewal_by_its_proof_carries_the_proven_certificates_values() {
             (rcgen::DnType::CommonName, "gw"),
         ],
     );
-    let old_key = KeyPair::from_pem(&old_key).expect("old key");
-    let new_key = KeyPair::generate().expect("new key");
-    let old_der = opamp::tls::certificates(old_cert.as_bytes()).expect("pem")[0].to_vec();
-    let signature = old_key
-        .sign(&fleet_core::renewal::statement(&Sha256::digest(
-            new_key.subject_public_key_info(),
-        )))
-        .expect("sign");
-    let proof = format!(
-        "{}{}",
-        fleet_core::renewal::URI_PREFIX,
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(fleet_core::renewal::encode(&old_der, &signature))
-    );
-    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
-    params
-        .subject_alt_names
-        .push(rcgen::SanType::URI(proof.try_into().expect("uri")));
-    let csr = params
-        .serialize_request(&new_key)
-        .expect("csr")
-        .pem()
-        .expect("pem");
+    let csr = renewal_csr(&old_cert, &old_key);
 
     let http = client(&served.ca_pem, Some((&carrier_cert, &carrier_key)));
     let uid = InstanceUid::default();
-    let reply = decode(post(&http, &served.endpoint, with_csr(&uid, csr.into_bytes())).await).await;
+    let reply = decode(post(&http, &served.endpoint, with_csr(&uid, csr)).await).await;
     let new_cert = String::from_utf8(
         reply
             .connection_settings

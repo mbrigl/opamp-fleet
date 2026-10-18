@@ -870,10 +870,12 @@ version = "0.6.0"
 dependencies = [
  "der",
  "git2",
+ "hex",
  "p12-keystore",
  "pkcs12",
  "pkcs5",
  "rcgen",
+ "sha2",
  "x509-parser",
 ]
 
