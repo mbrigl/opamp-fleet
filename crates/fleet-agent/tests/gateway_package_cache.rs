@@ -670,11 +670,10 @@ async fn the_download_route_answers_503_while_the_gateway_holds_no_revocation_li
     assert_eq!(opamp.status(), 503);
 }
 
-/// Host B reports host A's `instance_uid` between A's report and the Server's reply, so the reply
-/// is relayed over B's connection. The `instance_uid` is A's, bound by A's first report: the offer is
-/// not recorded for B, which is answered exactly as for an artifact nobody was offered, and A is
-/// served once the next offer reaches it.
-/// Verifies: ADR-0026
+/// Host B reports host A's `instance_uid` while A waits for the Server's reply. The `instance_uid`
+/// is A's, bound by A's first report: B's report is answered `403` and never reaches the Server,
+/// the reply goes to A, and B is answered for the artifact exactly as for one nobody was offered.
+/// Verifies: ADR-0039
 #[tokio::test]
 async fn a_host_reporting_another_hosts_instance_uid_before_the_reply_is_not_served() {
     let (messages, seen) = tokio::sync::watch::channel(0usize);
@@ -693,49 +692,41 @@ async fn a_host_reporting_another_hosts_instance_uid_before_the_reply_is_not_ser
     let (gateway, _stop) = spawn_gateway(server, &pki, dir.path(), 1 << 20).await;
     let a = client(&pki.ca_pem, pki.issue("edge-a", Some("host-a")));
     let b = client(&pki.ca_pem, pki.issue("edge-b", Some("host-b")));
-    let reported = |n: usize| {
-        let mut seen = seen.clone();
-        async move {
-            tokio::time::timeout(DEADLINE, seen.wait_for(|count| *count >= n))
-                .await
-                .expect("the report reached the upstream")
-                .expect("watch");
-        }
-    };
 
     // A reports and waits for its reply; B reports the same `instance_uid` before the reply.
     let first = {
         let a = a.clone();
         tokio::spawn(async move { report(&a, gateway, &uid).await })
     };
-    reported(1).await;
-    let stolen = {
-        let b = b.clone();
-        tokio::spawn(async move { report(&b, gateway, &uid).await })
-    };
-    reported(2).await;
-    upstream.push(&uid);
-    let reply = tokio::time::timeout(DEADLINE, stolen)
+    tokio::time::timeout(DEADLINE, seen.clone().wait_for(|count| *count >= 1))
         .await
-        .expect("B got the reply")
-        .expect("join");
-    assert!(reply.packages_available.is_some(), "relayed to B unchanged");
-    let not_held = answer(get(&b, gateway, PATH_2).await).await;
-    assert_eq!(not_held.0, 404);
-    assert_eq!(answer(get(&b, gateway, PATH_1).await).await, not_held);
-    first.abort();
+        .expect("A's report reached the upstream")
+        .expect("watch");
+    let stolen = b
+        .post(format!("https://{gateway}/v1/opamp"))
+        .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+        .body(
+            AgentToServer {
+                instance_uid: uid.as_bytes().to_vec(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        )
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(stolen.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(*seen.borrow(), 1, "B's report reached the upstream");
 
-    // A reports again and receives the offer over its own connection.
-    let again = {
-        let a = a.clone();
-        tokio::spawn(async move { report(&a, gateway, &uid).await })
-    };
-    reported(3).await;
     upstream.push(&uid);
-    tokio::time::timeout(DEADLINE, again)
+    let reply = tokio::time::timeout(DEADLINE, first)
         .await
         .expect("A got the reply")
         .expect("join");
+    assert!(reply.packages_available.is_some(), "relayed to A unchanged");
+    let not_held = answer(get(&b, gateway, PATH_2).await).await;
+    assert_eq!(not_held.0, 404);
+    assert_eq!(answer(get(&b, gateway, PATH_1).await).await, not_held);
     let response = get(&a, gateway, PATH_1).await;
     assert_eq!(response.status(), 200);
     assert_eq!(

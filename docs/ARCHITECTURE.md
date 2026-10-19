@@ -74,8 +74,10 @@ Five crates in one workspace ([ADR-0010](adr/0010-five-crates-the-whole-opamp-co
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
-  version, the platform aliases, the statement a package signature covers, the renewal proof a
-  CSR carries, when a certificate counts as ending, and what a certificate is called — and the
+  version, the platform aliases, the statement a package signature covers, the renewal proof and
+  the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
+  certificate that names none is taken for, when a certificate counts as ending, and what a
+  certificate is called — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0029).
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
@@ -150,9 +152,11 @@ core module names an adapter or a technology, and when a module has no role.
   `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the
   Supervisors' root as an absolute path too. When a failed process is started again or held is
   `supervisor::restart`'s decision; the runner reads the clock and starts it.
-  `supervisor::agent`, an Agent's decisions, names two more ports there: `AgentStorage`, which
-  `storage::Storage` implements on the state directory, and `HostFacts`, which `host::SystemHost`
-  implements from the platform. It answers each Server message in `handle` and leaves three
+  `supervisor::agent`, an Agent's decisions, names three more ports there: `AgentStorage`, which
+  `storage::Storage` implements on the state directory, `HighWaterMarks`, which
+  `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares
+  ([ADR-0043](adr/0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md)),
+  and `HostFacts`, which `host::SystemHost` implements from the platform. It answers each Server message in `handle` and leaves three
   channels and its description each to a submodule: `packages`, `remote_config`,
   `connection_settings`, and `description`, what the Agent reports about itself.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
@@ -169,7 +173,9 @@ core module names an adapter or a technology, and when a module has no role.
   the Server's route once into the state directory, and serves it on the downstream download route
   to the hosts it was offered to ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
   Which host the Gateway takes to speak for an `instance_uid` is decided in the core module
-  `gateway::policy`; the cache holds the bindings.
+  `gateway::policy`; the cache holds the bindings. With a bootstrap CA the Gateway tells an
+  enrolling peer from a member and relays its one plain-HTTP enrolment request without a binding
+  ([ADR-0039](adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
@@ -229,7 +235,10 @@ probation that commits or rolls back.
 seal both into the PKCS#12 file it keeps, the key's only way out
 ([ADR-0028](adr/0028-one-operator-program-that-makes-the-fleets-certificates.md)).
 A fresh host presents a bootstrap certificate while an operator has
-the enrolment window open; its CSR waits until an operator approves it, and the certificate it
+the enrolment window open — to the Server, or to a Gateway that relays its request — and proves it
+in its CSR ([ADR-0039](adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md));
+the request is filed under the certificate it proves and waits until an operator approves it, and
+the certificate it
 gets names a new host and carries the subject values `tls` read from the bootstrap certificate
 and `ca` checked again, never the CSR's; every renewal carries the predecessor's
 ([ADR-0036](adr/0036-a-bootstrap-certificates-subject-is-carried-into-the-host-certificate.md)). The questionnaire of `service install --interactive` and `service config`

@@ -251,12 +251,18 @@ the approved request.
 [enrolment]
 bootstrap_ca_file = "bootstrap-ca.pem"
 bootstrap_ca_key_file = "bootstrap-ca-key.pem"   # optional: the Server issues bootstrap certificates
+max_pending_per_bootstrap = 256                  # optional: requests of one bootstrap certificate
 ```
 
 `bootstrap_ca_key_file` is the CA's key, PKCS#8 PEM. With it the Server issues bootstrap
 certificates on request ([Bootstrap certificates](#bootstrap-certificates-issued-by-the-server));
 without it, hosts enrol with bootstrap certificates made elsewhere from the same CA. A key that is
 not the CA's, or that is the client CA's, is refused at startup.
+
+`max_pending_per_bootstrap` is the most requests of one bootstrap certificate, by its issuer and
+serial, the pending queue holds at once: 256 by default, a quarter of the queue, from 1 to 1024.
+Anything else fails startup naming the key. Raise it when one bootstrap certificate enrols more
+than 256 hosts in one window and you would rather not approve them in batches.
 
 ### `[admission_throttle]`
 
@@ -286,8 +292,8 @@ gateway_burst = 10000
 ### `[connection_offer]`
 
 See [Moving the fleet](#moving-the-fleet-connection-settings). Either key or both is valid, but
-not an empty section. The `endpoint` is `wss://` or `https://`; `ws://` or `http://` only to
-`127.0.0.1` or `::1`. The section carries no credential: `bearer_token_file`, `username`,
+not an empty section. The `endpoint` is `wss://` or `https://`; a `ws://` or `http://` endpoint
+is refused at startup, on the loopback too. The section carries no credential: `bearer_token_file`, `username`,
 `password_file`, `bearer_token` and `password` are each refused at startup by name.
 
 ```toml
@@ -440,8 +446,11 @@ request from a host that holds only a bootstrap certificate waits for an operato
 section describes. The Server signs a client-authentication certificate only, and drops any
 alternative names the request asks for.
 
-A request that does not parse, or one arriving at a Server with no `[client_ca]`, is answered with
-the protocol's `BadRequest` error response.
+A request is exactly one PEM block labelled `CERTIFICATE REQUEST`, with nothing but whitespace
+around it. Anything else — text before or after the block, a second block, another label — is
+answered with the protocol's `BadRequest` error response naming that rule, as is a request that
+does not parse or one arriving at a Server with no `[client_ca]`. A Gateway forwards no enrolment
+request that breaks the rule.
 
 ### The first certificate on a host
 
@@ -456,15 +465,17 @@ A host needs a certificate before it can connect at all, and it gets one in one 
 **Behind a Gateway, the Gateway's handshake admits the Agents it carries.** Mutual TLS is per hop:
 the Gateway checks the Agents connecting to it against the client CA and the Server's revocation
 list, and presents its own certificate to the Server. It forwards no `Authorization` header. A
-Gateway trusts the client CA and never the bootstrap CA, so a host behind one enrols by connecting to the Server once, or is
-provisioned a certificate by an operator.
+Gateway that names the bootstrap CA's certificate as `[gateway.tls] bootstrap_ca_file` relays the
+enrolment request of a host behind it (see
+[Enrolment through a Gateway](#enrolment-through-a-gateway)).
 
 **A certificate names its host.** The Server puts `urn:opamp-fleet:host:<id>` into every
 certificate it signs: a host is minted when an operator approves an enrolment, a certificate an
 operator provisioned is given one on its first renewal, and every renewal keeps it — the Client
 proves with its current key which certificate it renews, through a Gateway too. An Agent belongs
-to the host that first reported it: a connection with another host's certificate that reports
-for it is given an `instance_uid` of its own instead. A host holds at most three valid
+to the host that first reported it, until it is forgotten or that host's last certificate has
+ended: a connection with another host's certificate that reports for it is given an
+`instance_uid` of its own instead. A host holds at most three valid
 certificates. A Gateway carries other hosts' Agents, so mark it once its certificate names a
 host. **A Gateway admits nobody until its host is marked:** only a marked host is handed the
 revocation list a Gateway refuses by (see
@@ -482,7 +493,13 @@ $ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' -d '{"gateway"
 
 A Gateway's certificate speaks for any Agent; behind it, fleet membership is all the Server
 proves, and the Gateway's certificate may fetch the artifact offered to any Agent. A third-party
-client that sends no renewal proof renews the certificate it presents.
+client that sends no renewal proof renews the certificate it presents, but not through a Gateway:
+there the certificate presented is the Gateway's, and a request with neither a renewal proof nor
+a bootstrap proof is refused, naming both. A third-party client behind a Gateway gets its next
+certificate by enrolling directly or from the operator. A request with a bootstrap proof over a
+member's certificate whose host is not marked as a Gateway is refused too, since a member does not
+enrol, unless the proof names the certificate the connection presents: a Client on a certificate an
+operator provisioned cannot tell it from a bootstrap certificate, and that request renews it.
 
 ### Hosts
 
@@ -494,8 +511,14 @@ organization identifier. A host certificate the Server issues carries the values
 certificate the host enrolled with, and every renewal carries them on unchanged (see
 [Bootstrap certificates](#bootstrap-certificates-issued-by-the-server)); a Host's values change
 only when it enrols again. A certificate an operator provisioned with a host id makes its Host at
-its first report, with the values of that certificate. A Host is forgotten when it holds no valid certificate, speaks for
-no Agent and is not marked as a Gateway.
+its first report, with the values of that certificate. Each Host records how long it is valid:
+the latest end of a certificate naming it that the Server issued or that the host presented, moved
+forward by every issuance and every connection. Once that has passed, nobody can speak as the host
+again, so a Host that is not marked as a Gateway is forgotten, and every Agent bound to it is
+released for whichever host reports it next. A Gateway's Host stays until its mark is taken away,
+since its certificate may be one you provisioned and the Server never saw. A Host written by an
+earlier version takes the latest end the register holds for it, and stays until it next connects
+when the register holds none.
 
 Every Agent record names the Host it last arrived over: its own on a direct connection, the
 Gateway's behind one. This places the Agent in the fleet view and decides which labels it inherits
@@ -555,7 +578,7 @@ to 90, 10 by default, and never past the bootstrap CA's end.
 
 #### The PKCS#12 file: `bootstrap.p12`
 
-The `password`, 4 to 128 characters without a control character, is required, and the key is in
+The `password`, 8 to 128 characters without a control character, is required, and the key is in
 no answer at all. The Server makes the key, signs the certificate, puts both into one PKCS#12 file
 encrypted under that password, keeps the file, and hands it out as often as it is asked, until
 the certificate ends or is revoked. It keeps the certificate's serial, subject, key fingerprint
@@ -563,10 +586,12 @@ and end beside it. The answer carries the certificate and no `private_key_pem`, 
 `Cache-Control: no-store`. A host or a tool that needs the pair as PEM takes it out of the file
 with `opamp-fleetctl pki p12-extract` ([`pki`](tools.md#pki)).
 
-A short password is quick to break offline: should the file leak, four characters fall to a GPU
-within hours. Whoever opens it can file enrolment requests while the window is open, so your
-approval of each request is then what stands in the way. Choose a longer password where you can,
-and check each host before you approve it.
+A short password is quicker to break offline. Eight characters are out of practical reach of an
+offline attack on one file, but should the file leak with a weak password, whoever opens it can
+file enrolment requests while the window is open, and your approval of each request is then what
+stands in the way. Choose a longer password where you can, and check each host before you approve
+it. The rule applies when a certificate is issued: a file issued before opens with the password it
+was issued under.
 
 ```console
 $ cat request.json        # written with an editor, so the password stays out of the shell's history
@@ -644,7 +669,7 @@ When issuing, the Server holds at most 10 000 valid ones, revoked ones included 
 are deleted, and answers a request beyond that `409`. It answers `409` too while it holds no
 `bootstrap_ca_key_file` or once the bootstrap CA has ended, `503` while the audit record cannot be
 written, since no key is handed out unrecorded, and `400` for a subject attribute it does not know, a value out of bounds,
-`validity_days` outside 1 to 90, or a password outside 4 to 128 characters.
+`validity_days` outside 1 to 90, or a password outside 8 to 128 characters.
 
 **The window is closed by default.** Open it for as long as you are enrolling hosts, from 1 to
 86400 seconds:
@@ -668,8 +693,12 @@ whose certificate its host has not collected included; that host enrols again in
 
 **While it is open, an enrolling host may send a certificate request and nothing else.** The
 Server creates no Agent record for it and offers it nothing but the issued certificate. The request
-waits in a queue of at most 1024. The Client keeps its pending key and re-sends the same request
-until it is answered.
+waits in a queue of at most 1024, of which the requests of one bootstrap certificate hold at most
+`max_pending_per_bootstrap`, 256 by default. A request beyond either bound is answered
+`Unavailable` and the host retries later; one beyond its bootstrap certificate's share is recorded
+in the audit as `enrolment.refused` with `reason` `bootstrap_share` and the certificate's serial,
+once per certificate and window. A re-sent request that already waits is never refused. The Client
+keeps its pending key and re-sends the same request until it is answered.
 
 **Match the request to the host by its fingerprint.** The enrolling Client logs the SHA-256
 fingerprint of the key it generated:
@@ -716,8 +745,45 @@ the window is closed is answered `503`, and does not count toward the throttle.
 A request whose subject or SANs name an `instance_uid` other than the host's own is answered
 `BadRequest` and never enters the queue. The same holds for a renewal.
 
+**A request proves the bootstrap certificate it rests on.** The Client adds a bootstrap proof to
+its request: the certificate it enrols with, and a signature made with that certificate's key over
+the key it asks to be certified. The Server checks the proof itself, that the certificate is valid
+now, is not revoked, and that its key signed the request, and files the request under that
+certificate: the subject values, fingerprint and serial listed are the proven certificate's. On a
+direct connection the proof must name the certificate the connection presented. A request whose
+proof names another certificate or does not verify, and one that carries a renewal proof beside
+it, is answered `BadRequest` and never enters the queue. A request without a proof, as a
+third-party OpAMP client sends it, is filed under the certificate the connection presented.
+
 The bootstrap certificate stays in the host's `supervisor.toml`, unused once the issued pair is
 stored. Approve only what you can match to a host you are setting up.
+
+### Enrolment through a Gateway
+
+A host that reaches the Server only through a Gateway enrols through it, once the Gateway names
+the public certificate of `bootstrap_ca_file` as `[gateway.tls] bootstrap_ca_file` (see
+[Enrolment through a Gateway](client.md#enrolment-through-a-gateway) for the Gateway's side). The
+Gateway relays the host's request over its own certificate, so a request through a Gateway is a
+certificate signing request with a bootstrap proof over the certificate of a host marked as a
+Gateway. The Gateway relays it only when its proof embeds the very certificate the host presented
+to the Gateway, so a host spends no other bootstrap certificate's share or tokens; a proof that
+embeds the Gateway's own certificate, byte for byte, is the Gateway's own request and no
+enrolment. The Server checks the proof itself, against the bootstrap CA of `[enrolment]` and the
+revocation list, and decides the request as any enrolment: it is answered `Unavailable` without an
+open window, counts against the queue and its bootstrap certificate's share, and waits for your
+approval, which mints a host of its own and never the Gateway's. A proof whose certificate the
+bootstrap CA did not issue directly, is no client-authentication leaf as the handshake requires
+one (`clientAuth` where it names an extended key usage, not a CA), is not valid now, or is revoked,
+is answered `BadRequest` and never queued.
+
+The pending request names the Gateway's host in place of a peer address — `"gateway":"0192…"` in
+`GET /api/v1/enrolments`, *via Gateway* in the **Enrolments** tab, and `gateway` in every audit
+entry of it: `enrolment.queued`, `enrolment.refused`, `enrolment.approved` and
+`enrolment.rejected`. The host collects its certificate in its next request after the approval,
+and then reports through the Gateway as a member. The Server does not tell a Gateway whether a
+window is open, so a holder of a bootstrap certificate reaches the Server through a Gateway that
+trusts the bootstrap CA outside a window too; it is answered `Unavailable`, and the rate limit
+bounds what that costs (see [How often a member may be heard](#how-often-a-member-may-be-heard)).
 
 ## Revocation: withdrawing a certificate
 
@@ -743,11 +809,12 @@ bootstrap CA of `[enrolment]` — and its serial. A revocation reaches every ren
 certificate too, so revoking the one a host enrolled with is enough even after it renewed, and it
 stays in force until the last of those renewals has expired. `GET /api/v1/bootstrap-certificates`
 lists the serial of every bootstrap certificate the Server issued; colons, case and leading zeros
-do not matter. A renewal
+do not matter. A serial is at most 20 octets, 40 hex digits, as RFC 5280 allows; a longer one is
+answered `400`, and a certificate with one is not admitted. A renewal
 descends from the certificate its renewal proof names, through a Gateway too; a client that sends
-no proof renews from the certificate its connection presented — behind a Gateway the Gateway's, so
-revoking the Gateway revokes those renewals as well, and those Agents enrol again. A revoked
-certificate's proof renews nothing.
+no proof renews from the certificate its connection presented. Behind a Gateway that would be the
+Gateway's certificate, with the Gateway's powers, so such a request is refused there: through a
+Gateway only a renewal with a proof is signed. A revoked certificate's proof renews nothing.
 
 ```console
 $ curl --cacert ca.pem -X POST -H 'Content-Type: application/json' \
@@ -904,7 +971,7 @@ declares the capability only while the store holds a Package. Two objects, and t
 whole of the model:
 
 - A **Package** is *what* an Agent type runs at a version. Its identity is the **Agent type and
-  the version**, and it holds one entry per platform — the Linux build, the macOS builds, the
+  the version**, the version a SemVer 2.0.0 version, and it holds one entry per platform — the Linux build, the macOS builds, the
   Windows build — each an uploaded artifact with its SHA-256 and the operator's **signature**.
   Nothing else: no name of its own, no Selector. It aims at nobody and is never rolled out.
 - A **Deployment** is *where that goes*. A name, the **channel** it aims at, one Package per Agent
@@ -1123,7 +1190,18 @@ Agent reports.
 That is what makes the rule reach a Client installed from a `.deb`, an `.rpm` or an MSI, which has
 installed no package and has none to report: no Client is offered the version it already runs, and
 none is moved backwards. A `service.version` nothing can order (`1.19`, `24.04.1`) simply says
-nothing, so an Agent whose program numbers itself its own way stays reachable.
+nothing, so an Agent whose program numbers itself its own way stays reachable. Its Packages are
+numbered in the program's own space, written as SemVer: `1.19` becomes `1.19.0`, `24.04.1` becomes
+`24.4.1`.
+
+**A Package an older Server stored under a version that is not SemVer is kept and inert.** At
+startup the Server logs one warning per such Package, naming it. It is nobody's candidate, and every
+write to it — an entry, a signature, adding it to a Deployment — is answered `400`. It can be read,
+and deleted once no assignment pins it; an assignment that already pins it stays in force and its
+offer still goes out, which an upgraded Client refuses and reports. Republish the content under a
+SemVer version, sign it again, and roll that out. The Client's own rules — no version below the
+highest it has installed for the type — are in
+[the Client's manual](client.md#a-supervisor-never-goes-back).
 
 **Where an Agent reports both, what it *runs* decides**. The Package must be greater
 than the `service.version` the Agent reports, and the package status is not read beside it —
@@ -1246,7 +1324,7 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `PUT /api/v1/configurations/{name}` | Create it, or replace its saved revision. Body: `{"body": "…", "service_name": "…", "role": "…"}` — `role` may be omitted; without `service_name` it is refused `400`, as is a `selector`. **Distributes nothing**. |
 | `DELETE /api/v1/configurations/{name}` | Remove it, and take it out of every Deployment that holds it. `409` while an Agent's assignment pins it, saying how many. |
 | `GET /api/v1/packages` | Every stored Package (never the artifact bytes), each with its entries — their hash, size, signature and `signature_state` — and the Deployments that hold it. |
-| `PUT /api/v1/packages/{agent_type}/{version}` | Create a Package. The body has no writable field — `{}`. **Distributes nothing**. |
+| `PUT /api/v1/packages/{agent_type}/{version}` | Create a Package. The body has no writable field — `{}`. **Distributes nothing**. The version is SemVer 2.0.0: any other is answered `400`, naming it — `1.19.0` for upstream's `1.19`. |
 | `GET /api/v1/packages/{agent_type}/{version}` | One Package. |
 | `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Upload one platform's artifact (the raw body); new bytes remove the entry's signature. `409` while the Package is rolled out to an Agent. The signature is written through the entry's signature route. |
 | `PUT` / `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature` | Record or remove that entry's Ed25519 signature. Body: `{"signature": "<hex>"}`. `404` for an entry that does not exist, `400` for an empty or malformed signature, `409` while the Package is rolled out to an Agent. The answer is the Package, with the entry's `signature_state`. |
@@ -1375,8 +1453,12 @@ content hash it already has — but the configuration is applied again, which fo
 one restart. That is the price of forgetting something that was not really gone.
 
 **Its labels go with it.** They are part of the Agent's record, so an Agent that comes back is
-labelled only by what its Client Agent's labels give it. The Host it arrived over stays: it is
-forgotten once it holds no valid certificate and speaks for no Agent.
+labelled only by what its Client Agent's labels give it. The Host it arrived over stays until
+no certificate naming it is valid (see [Hosts](#hosts)).
+
+**Its binding goes with it.** The Agent's `instance_uid` is released from the Host it was bound
+to, so its next report binds it to the host whose certificate carries that report. Forgetting an
+Agent that still runs elsewhere lets the next host that reports it take it.
 
 Nothing expires on its own: there is no retention sweep and no inactivity timeout, so a row stays
 until someone forgets it.
@@ -1458,8 +1540,15 @@ A message that cannot be decoded is counted too. The bucket is:
 - for a host marked as a Gateway, two buckets, and a message takes a token from both: the bucket
   of the Agent it names, sized by `messages_per_sec` and `burst`, and the Gateway's aggregate,
   sized by the `gateway_` keys. A message naming no valid `instance_uid`, an undecodable one and
-  a download count in the aggregate alone. Marking or unmarking a Gateway takes effect at its next
-  message.
+  a download count in the aggregate alone. A message carrying an enrolment request through the
+  Gateway takes from neither, so enrolments never spend what the Gateway's members need. Once the
+  bootstrap certificate its proof names parses and a bootstrap CA of `[enrolment]` issued it, it
+  takes a token from that certificate's bucket, sized by `messages_per_sec` and `burst`, and one
+  from the Gateway's enrolment aggregate, sized by the `gateway_` keys, so one bootstrap
+  certificate cannot spend another's tokens. One that fails that check takes a token from the
+  Gateway's bucket for unchecked enrolments alone, sized by `messages_per_sec` and `burst`, and is
+  answered `BadRequest`. Marking or unmarking a Gateway takes effect at its
+  next message.
 
 A message past the limit is not processed: no record changes and no certificate is signed. It is
 answered with the message's own `instance_uid` and `error_response` `Unavailable` with
@@ -1472,7 +1561,9 @@ honours the protocol's error and retry semantics as well, and answers malformed 
 `BAD_REQUEST`.
 
 Every refusal is recorded as `agent_rate.throttled`, naming the host (or the serial and the CA's
-role), the `instance_uid`, the `bucket` that was empty (`agent`, `host` or `gateway`) and the
+role), the `instance_uid`, the `bucket` that was empty (`agent`, `host` or `gateway`; for an enrolment request through a
+Gateway `bootstrap` for its certificate's bucket, `enrolment` for the Gateway's enrolment
+aggregate, `unchecked_enrolment` for its bucket for unchecked enrolments) and the
 `route` (`opamp` with its `transport`, or `download`). Past ten a second from one address they are
 counted in `agent_rate.throttled.aggregated`.
 
@@ -1635,9 +1726,11 @@ credential key in the section — `bearer_token_file`, `username`, `password_fil
 `password` — is refused at startup, naming the key. A Client that is offered `headers` by another
 Server applies the rest of the offer and reports it `FAILED`, naming the header keys.
 
-**The offered `endpoint` is never plaintext off the host**. It is
-`wss://` or `https://`; `ws://` or `http://` only when its host is `127.0.0.1` or `::1`. Any other
-`endpoint` is refused at startup with a message naming `[connection_offer] endpoint`.
+**The offered `endpoint` is never plaintext**. It is `wss://` or `https://`. A `ws://` or
+`http://` endpoint is refused at startup with a message naming `[connection_offer] endpoint`, on
+`127.0.0.1` and `::1` too: on plaintext no certificate proves the Server, so whoever listens on
+that port of a host would be the Server for its Client. A development setup on the loopback names
+its plaintext endpoint in `supervisor.toml` instead.
 
 The standing offer carries no `tls` and no `proxy`: there is no configuration surface for them. A
 `certificate` travels in an offer only as the answer to an Agent's signing request.

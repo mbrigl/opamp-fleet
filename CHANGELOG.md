@@ -13,7 +13,256 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.5.5]
+## [0.6.0]
+
+### Added
+
+- **A host behind a Gateway enrols through it**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)). A Gateway with
+  `[gateway.tls] bootstrap_ca_file` admits a bootstrap certificate in its handshake and relays one
+  thing for it: a plain-HTTP report carrying a certificate signing request with a bootstrap proof
+  and nothing else. A WebSocket upgrade or any other report of such a peer is answered `403`, and
+  it binds no `instance_uid`, is offered nothing and served no download. The Server decides the
+  request as any enrolment — window, queue, the bootstrap certificate's share, approval, a new
+  host — and lists it with the Gateway's host in place of a peer address, as `gateway` in
+  `GET /api/v1/enrolments` and in every audit entry of it. The Gateway relays a request only when
+  its bootstrap proof embeds the very certificate the peer presented in its handshake; one naming
+  another certificate is answered `403` and logged. Enrolment requests through a Gateway never
+  spend the aggregate its members are counted in. One whose bootstrap certificate a bootstrap CA
+  of `[enrolment]` issued takes a token from that certificate's bucket, sized by
+  `messages_per_sec` and `burst`, and one from the Gateway's enrolment aggregate, sized by
+  `gateway_messages_per_sec` and `gateway_burst`; one whose certificate fails that check takes a
+  token from the Gateway's bucket for unchecked enrolments alone, sized by `messages_per_sec` and
+  `burst`, and is answered `BadRequest`. A throttled one is audited as `agent_rate.throttled`
+  with `bucket` `bootstrap`, `enrolment` or `unchecked_enrolment`, naming the bucket that was
+  empty. **What to do:** to let hosts
+  behind a Gateway enrol, copy the Server's `[enrolment] bootstrap_ca_file` — the certificate,
+  never its key — to the Gateway, name it as `[gateway.tls] bootstrap_ca_file`, and point those
+  hosts at the Gateway with an `https://` endpoint. A CA that is in both `client_ca_file` and
+  `bootstrap_ca_file` fails the Gateway's startup.
+
+### Security
+
+- **A signing request is read from exactly one PEM block**
+  ([ADR-0021](docs/adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 27,
+  [ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)). The Server read
+  one signing request with two PEM readers that can pick different blocks out of one crafted
+  input: the proof was checked against one request and the key of another was signed. Every
+  release from 0.5.0 to 0.5.5 is affected, in renewal: whoever held any client certificate and a
+  renewal request another host had sent, while that host's certificate was still valid, obtained
+  a certificate for that host over a key of their own, without approval. A Gateway sees every
+  renewal request its members send and holds a client certificate, so a compromised or hostile
+  Gateway is the most likely attacker. A request is now exactly one `CERTIFICATE REQUEST` block
+  with a line break after its first boundary and before its last and nothing but whitespace
+  around it, and everything is read from that one block; anything else is answered `BadRequest`
+  and nothing is signed or queued. **What to do:** upgrade.
+
+- **Through a Gateway a certificate is renewed only with a renewal proof**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
+  Behind a Gateway the Server sees the Gateway's certificate. A signing request without a renewal
+  proof was issued to the Gateway's host, so any member behind a Gateway could obtain a
+  certificate with the Gateway's powers and use it directly against the Server. Such a request is
+  now refused, nothing is signed, and the refusal is audited as `issuance.refused`. This Client
+  always sends a proof. **What to do:** nothing for Clients of this project. A third-party OpAMP
+  client behind a Gateway gets its next certificate by enrolling directly or from the operator.
+
+- **A Gateway forwards a report only for an Agent of the host that sent it**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
+  Until now any host behind a Gateway could report under another host's `instance_uid`, take
+  over its route and receive its configuration and its certificate. The binding that already
+  guarded downloads now guards every message: a report for an `instance_uid` bound to another
+  host is dropped over WebSocket, answered `403` over plain HTTP, and logged. A host past
+  `max_carried_agents` makes room among its own idle Agents and never takes another host's. A certificate without a host URI is bound
+  under the host the Server derives for it, so its Agents stay bound across its first renewal.
+  **What to do:** nothing. If a host was locked out of its own Agent, restart the Gateway; the
+  real host's next report then binds it.
+
+- **A connection-settings offer never moves a Client to plaintext**
+  ([ADR-0040](docs/adr/0040-a-connection-settings-offer-never-moves-the-client-to-plaintext.md)).
+  An offer could move a Client to `ws://` or `http://` on the loopback, where whoever listens on
+  that port became its Server, with no certificate to prove it. The Server now refuses a `ws://`
+  or `http://` `[connection_offer] endpoint` at startup, the Client refuses such an offer and
+  reports it `FAILED`, and a persisted plaintext endpoint that `supervisor.toml` does not name is
+  not applied at startup. **What to do:** a `server.toml` whose `[connection_offer] endpoint` is
+  `ws://` or `http://` no longer starts; set a `wss://` or `https://` endpoint or remove the key.
+  A development setup on the loopback names its plaintext endpoint in `supervisor.toml`.
+
+- **A Package version is SemVer, and a Supervisor never installs one below its high-water mark**
+  ([ADR-0043](docs/adr/0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md)).
+  A compromised Server could move a Supervisor back to an old, validly signed build: by offering
+  it under a version that cannot be ordered, such as `1.19`, or by purging the Supervisor and
+  adding it back, which deleted the record its floor was read from. A Package version must now
+  be SemVer on the Server (`400` otherwise), in `opamp-fleetctl package sign` (refused before the
+  key is read) and on the Client. Each Client keeps the highest version it has installed per
+  Agent type in `<state_dir>/package-high-water.json`, which no purge touches, and every
+  Supervisor of that type refuses an offer below it. `package fetch` names the Package of an
+  upstream `1.19` as `1.19.0`. The Client's own update keeps its own rules. **What to do:** a
+  Server holding a Package under a version that is not SemVer starts, warns about each one, and
+  writes nothing to it; such a Package is no candidate, and an upgraded Client refuses its offer.
+  Republish its content under a SemVer version (`1.19` becomes `1.19.0`), sign it again and roll
+  that out; an Agent whose installed record named the old version takes it as a first rollout.
+  Scripts that create Packages under non-SemVer versions get `400`. To move a Supervisor to an
+  older version on purpose, stop the Client, remove that type's entry from
+  `package-high-water.json`, delete `installed-package.json` of every Supervisor of that type,
+  and start the Client — or publish the old content under a new, greater version.
+
+- **The Operator plane sends HSTS.** Every response carries `Strict-Transport-Security:
+  max-age=31536000`, without `includeSubDomains`, so a browser that reached the plane once by its
+  name never tries `http://` for it again, where an attacker on the network could answer and ask for the
+  Basic credentials. **What to do:** nothing; the plane serves TLS on every address already.
+
+- **A certificate serial is at most 20 octets.** `POST /api/v1/revocations` answers a longer serial
+  `400`, and a certificate whose serial is longer is neither admitted nor registered, as RFC 5280
+  allows no more. Every Gateway reads the revocation list within a bound that assumes this length,
+  so megabyte-long serials could have pushed the list past it and left every Gateway admitting
+  nobody. **What to do:** nothing; no certificate this Server or `opamp-fleetctl` makes has a
+  longer serial.
+
+- **A Managed Process states only its own `service.*` attributes**
+  ([ADR-0041](docs/adr/0041-a-managed-process-states-only-its-own-service-attributes.md)).
+  What a Managed Process reported about itself was laid over the Supervisor's description for
+  every key but its identity and name. A process running a command from its configuration could
+  report another host's `host.name` or `host.id` and draw that host's Configurations, report
+  another platform and be offered another machine's binary, report a `supervisor.kind.*` key and
+  make every Agent of its host ambiguous, or overwrite an `[attributes]` entry such as `channel`.
+  The Client now takes only the process's `service.*` attributes, never `service.instance.id`,
+  `service.instance.name`, `service.namespace` while `service_namespace` is set, or a key
+  `[attributes]` sets, and drops every other key it reports. A Collector's type and version still
+  arrive; its own `agent_description.non_identifying_attributes`, its resource attributes and its
+  own `host.name` no longer do. **What to do:** if a Selector matched an attribute that only a
+  Collector reported, move that tag to a Server label, or to `[attributes]` for the whole host.
+
+- **The Linux packages run the Client under its own account, and an upgrade keeps the account it
+  finds** ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
+  Every packaged Linux host ran the Client, and every command a Server-delivered configuration
+  names, as root. A host installed with `--run-as` went back to root at its next package upgrade,
+  without a word, because the post-install re-registered without the flag. The `.deb` and the
+  `.rpm` now create the system account `opamp-fleet` where it is missing (no password,
+  `/usr/sbin/nologin`, home `/var/lib/opamp-fleet`) and run a first installation under it. A
+  `service install` without `--run-as` keeps the account its unit or plist names; a unit that lost
+  its account, on a data root an account owns, gets that owner back. A kept account that no longer
+  exists stops the install before it writes anything, naming the unit. No package removal deletes
+  the account. **What to do:** an existing root install stays root, and the account is created on
+  it but unused. Move such a host with
+  `sudo opamp-fleet service install --run-as opamp-fleet` and
+  `sudo systemctl restart opamp-fleet`, after checking that its Agents work without root (GLPI
+  Agent's inventory and Deploy, Telegraf inputs that need `sudo`, ports below 1024, logs readable
+  only by `adm`). A file the service reads outside the data root must be readable by the account.
+
+- **A third-party GitHub Action is pinned to a commit SHA**
+  ([ADR-0044](docs/adr/0044-third-party-actions-are-pinned-to-a-commit-sha.md)). The workflows
+  that build, test and release the project ran `Swatinem/rust-cache` and `taiki-e/install-action`
+  on their mutable `v2` tag, so whoever could move that tag chose what the next run executed,
+  including the `cargo-deny` that gates every release. Both are now pinned to the commit of a named
+  release, `# vX.Y.Z` beside it, and every pull request checks that the named tag still points to
+  that commit. GitHub's own `actions/*` stay on their major tag. **What to do:** nothing; the
+  release assets are unchanged by this.
+
+- **Every release asset is attested, and every shipped program has an SBOM**
+  ([ADR-0045](docs/adr/0045-every-release-asset-carries-a-provenance-attestation-and-every-program-an-sbom.md)).
+  Until now `SHA256SUMS` proved only that a download matched the file beside it on the same
+  release page. Every asset of a release, `SHA256SUMS` included, is now a subject of one SLSA
+  build-provenance attestation, signed through Sigstore by the release workflow and recorded in
+  its public log, and the workflow verifies each asset before the release is created. A release
+  also carries nine more assets: one CycloneDX 1.5 SBOM per program and target,
+  `supervisor_<version>_<os>_<arch>.cdx.json` (five) and
+  `opamp-fleetctl_<version>_<os>_<arch>.cdx.json` (four), each listing the crates its binary is
+  built from on that target; the `.deb`, `.rpm` and `.msi` of a stem are described by its
+  archive's SBOM. **What to do:** verify a download with
+  `gh attestation verify SHA256SUMS --repo mbrigl/opamp-fleet --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml`,
+  then `sha256sum -c --ignore-missing SHA256SUMS`; the same `gh attestation verify` checks any
+  single asset. A script that downloads `supervisor_<version>_*` or `opamp-fleetctl_<version>_*`
+  without an extension now also picks up the `.cdx.json`; select `.tar.gz`. No asset carries a
+  code signature.
+
+- **One bootstrap certificate holds at most a quarter of the enrolment queue**
+  ([ADR-0046](docs/adr/0046-one-bootstrap-certificate-holds-at-most-a-quarter-of-the-enrolment-queue.md)).
+  Whoever held one bootstrap certificate could fill all 1024 places of the pending queue with
+  requests for fresh keys, and every other host was refused until the window closed. The requests
+  of one bootstrap certificate now hold at most `[enrolment] max_pending_per_bootstrap` places,
+  256 by default; a request beyond that is answered `Unavailable`, and audited as
+  `enrolment.refused` once per certificate and window. A re-sent request that already waits is
+  never refused. **What to do:** nothing, unless one bootstrap certificate enrols more than 256
+  hosts in one window: then approve them in batches, or set `max_pending_per_bootstrap` (1 to
+  1024) in `[enrolment]`.
+
+- **A bootstrap PKCS#12 password is 8 to 128 characters**
+  ([ADR-0048](docs/adr/0048-a-bootstrap-pkcs12-password-of-8-to-128-characters.md)).
+  A leaked `bootstrap.p12` under a password of four characters opened offline within hours of GPU
+  time, and whoever opened it could take places in the enrolment queue. `POST
+  /api/v1/bootstrap-certificates` and the **Enrolments** tab now take 8 to 128 characters without
+  a control character, and answer anything shorter `400`. **What to do:** choose a password of at
+  least 8 characters for the next bootstrap certificate you issue, and update any script that
+  issues one with a shorter password. A file issued before keeps the password it was issued under
+  and opens with it.
+
+### Changed
+
+- **An enrolment request proves its bootstrap certificate**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
+  The Client adds a bootstrap proof to every enrolment request: the bootstrap certificate it
+  enrols with and a signature with its key over the requested key, about 1 KiB more in the
+  request. The Server checks the proof and files the request under the certificate it names. On
+  a direct connection that must be the certificate the connection presented; a request whose proof
+  names another or does not verify, and one carrying a renewal proof beside it, is answered
+  `BadRequest` and not queued. **What to do:** nothing. A Client of an earlier release, and a
+  third-party OpAMP client, enrols as before without the proof.
+
+- **An enrolling Client on `https://` sends its request alone, and a member does not enrol**
+  ([ADR-0039](docs/adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)). A Client that holds
+  no certificate the Server issued and polls over `https://` now sends its certificate signing
+  request as its only report, before the Server's first answer, and re-sends it at every poll until
+  the certificate arrives. The Server refuses a request with a bootstrap proof over a member's
+  certificate whose host is not marked as a Gateway, unless the proof names that very certificate,
+  as a Client on a certificate an operator provisioned sends it; through a Gateway, a request with
+  neither a renewal proof nor a bootstrap proof is refused naming both. **What to do:** nothing. A
+  Client on a provisioned certificate whose request the Server refuses reports as a member again
+  until an exchange fails.
+
+- **A plain `service install` no longer returns a host to root**
+  ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
+  Without `--run-as` a re-registration keeps the account the registration names. Root is chosen
+  with `--run-as root`, which the unit records as `User=root`. The install prints the account and
+  where it came from, and on every system registration under Linux and macOS, root included, hands
+  both roots over to that account. **What to do:** a host you returned to root with a plain
+  re-install while its data root still belonged to the account comes back up under the account at
+  its next re-registration; run `sudo opamp-fleet service install --run-as root` to keep it root.
+  Windows is unchanged: the SCM keeps the logon account it holds.
+
+- **The Client writes its systemd unit itself**
+  ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)).
+  `ExecStart=` now quotes every word, so a root holding a space, a `%` or a `$` names the right
+  program. Every system unit carries `ProtectControlGroups=yes`; a unit running as root also
+  carries `ProtectKernelTunables=yes`, `LockPersonality=yes` and `RestrictRealtime=yes`. Nothing
+  that sets `no_new_privs` under an account is added, so `sudo` and setuid helpers keep working.
+  **What to do:** nothing, the next upgrade rewrites the unit. A host that needs more or less puts
+  it in a drop-in under `/etc/systemd/system/opamp-fleet.service.d/`, which no install touches. An
+  archive install that only self-updates gets the new unit at its next `service install`.
+
+### Fixed
+
+- **A Host and its bindings end with its last valid certificate, and forgetting an Agent releases
+  its binding**
+  ([ADR-0047](docs/adr/0047-a-host-and-its-bindings-end-with-its-last-valid-certificate.md)).
+  A Host with a bound Agent was never removed, even long after its last certificate expired, and
+  forgetting an Agent left its `instance_uid` bound, so the host register only ever grew. Each
+  Host now records its valid until — the latest end of a certificate naming it that the Server
+  issued or that the host presented — and a Host not marked as a Gateway is removed once it has
+  passed, its Agents released. `DELETE /api/v1/agents/{instance_uid}` releases the Agent's
+  binding, so whichever host reports it next binds it. Host files under `data_dir/hosts/` gain a
+  `valid_until_ms` field; files without it still load, take the latest end the register holds for
+  their Host, and stay until the host next connects when the register holds none. **What to do:**
+  nothing. Forget an Agent only once it no longer runs, or accept that the next host reporting it
+  takes it.
+
+- **The audit record is written out before the Server exits.** Entries still queued for the audit
+  writer at shutdown were lost with the process, without a trace in the record. The Server now
+  waits up to five seconds for them after both planes have drained, and logs an error if they
+  could not be written, or if the record was failing. The audit directory and a new audit file's
+  name are synced when they are created, so a crash cannot take the file and the entries already
+  synced into it.
+
+## [0.5.5] - 2026-10-18
 
 ### Added
 

@@ -113,7 +113,7 @@ window and your approval, and the host's private key never leaves the host.
    ```
 
 3. **The request waits in the queue.** The **Enrolments** tab lists it with its arrival time, the
-   address it came from, the key fingerprint, and the bootstrap certificate it carries: customer,
+   address it came from — or the Gateway it came through — the key fingerprint, and the bootstrap certificate it carries: customer,
    site, serial and end. A certificate the Server did not issue is marked *not issued here*.
 4. **Check two things, then approve.** The key fingerprint must match the one the host logged, and
    the bootstrap certificate must be the one you gave that host. Press **Approve**. Press **Reject**
@@ -124,8 +124,14 @@ window and your approval, and the host's private key never leaves the host.
 6. **Close the window** with **Close window** when you are done. It also closes when its time runs
    out, and when the Server restarts.
 
-A host behind a Gateway cannot enrol through it. Let it reach the Server directly once, then point
-it at the Gateway.
+![A host enrolling directly: the operator opens the window, the host sends the same request with its bootstrap proof until the operator approves it, and the certificate arrives in a connection settings offer](../images/enrolment-direct.png)
+
+A host behind a Gateway enrols through it over `https://`, once the Gateway names the bootstrap
+CA's certificate as `[gateway.tls] bootstrap_ca_file`; see
+[Enrolment through a Gateway](client.md#enrolment-through-a-gateway). The Gateway relays the
+request and nothing else, and the Server decides it as any other:
+
+![A host enrolling through a Gateway: every poll carries the request over plain HTTP to the Gateway, which relays it to the Server; the queue names the Gateway's host, and the certificate returns the same way](../images/enrolment-gateway.png)
 
 Details: [Enrol the Client](setup.md#5-enrol-the-client) and
 [Enrolment: the first certificate](client.md#enrolment-the-first-certificate).
@@ -135,6 +141,14 @@ Details: [Enrol the Client](setup.md#5-enrol-the-client) and
 A host certificate lives 30 days by default. Two thirds of the way through its life, the Client
 makes a new key, asks for a new certificate with the one it holds, and switches once it has
 connected with the new one. No window and no approval is needed.
+
+![A direct renewal: the Client sends a request with a renewal proof over its current connection, the Server signs it at once for the same host, and the Client switches once it has connected with the new certificate](../images/renewal-direct.png)
+
+Behind a Gateway the request travels as an ordinary report. The Server sees the Gateway's
+certificate on that connection, so it signs only a request with a renewal proof, and signs it for
+the host of the certificate the proof names:
+
+![A renewal through a Gateway: the request is forwarded under the Gateway's certificate, the Server requires the renewal proof, and the new certificate returns over the Agent's route](../images/renewal-gateway.png)
 
 A host that stays offline longer than its certificate lives cannot renew. It has to enrol again,
 as [Living with the certificates](setup.md#6-living-with-the-certificates) describes.

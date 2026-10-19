@@ -104,7 +104,7 @@ impl DeploymentMeta {
         check_selector(&self.selector).map_err(named)?;
         let mut packages = BTreeMap::new();
         for reference in self.packages {
-            let id = PackageId::new(&reference.agent_type, &reference.version).map_err(named)?;
+            let id = PackageId::load(&reference.agent_type, &reference.version).map_err(named)?;
             packages.insert(id.agent_type.clone(), id);
         }
         let mut configurations = BTreeSet::new();

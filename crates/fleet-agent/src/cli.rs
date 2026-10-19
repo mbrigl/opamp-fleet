@@ -228,9 +228,13 @@ pub struct InstallArgs {
     /// is no way to give it on the command line or in the environment.
     #[arg(long, value_name = "PATH")]
     pub bootstrap_password_file: Option<PathBuf>,
-    // ADR-0019.
-    /// Run the service as this account instead of root/`LocalSystem`, and hand this
-    /// installation's files — both roots — over to it.
+    // ADR-0019, ADR-0042.
+    /// Run the service as this account, and hand this installation's files — both roots — over
+    /// to it.
+    ///
+    /// Without it, a re-registration keeps the account the existing registration names, and a
+    /// first one runs as root (`LocalSystem` on Windows). `--run-as root` chooses root on Linux
+    /// and macOS, and the unit records it.
     ///
     /// System scope only: a `--user` service already runs as its user. On Linux and macOS the
     /// account must exist. On Windows only passwordless account forms are accepted — the
@@ -583,7 +587,10 @@ mod tests {
         else {
             panic!("expected service install");
         };
-        assert_eq!(args.run_as, None, "absent flag means today's behaviour");
+        assert_eq!(
+            args.run_as, None,
+            "an absent flag names nothing: the install keeps the registration's account (ADR-0042)"
+        );
     }
 
     /// ADR-0019: `--run-as` is system scope only — a `--user` service already runs as its user,

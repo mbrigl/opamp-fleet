@@ -391,8 +391,8 @@
                    title="How many days the certificate is valid: 1 to 90, cut to the bootstrap CA's end." />
           </label>
           <label class="field quarter"><span class="field-cap">Password <b class="need req">required</b></span>
-            <input required aria-required="true" id="boot-pass" type="password" placeholder="password" autocomplete="new-password"
-                   title="The Server keeps the certificate and its key as bootstrap.p12, encrypted under this password, for download until the certificate ends or is revoked. 4 to 128 characters; a short one is quick to break if the file leaks. The Server keeps the password nowhere: give it to the host by another way than the file. A host that needs the pair as PEM takes it out with opamp-fleetctl pki p12-extract." />
+            <input required aria-required="true" id="boot-pass" type="password" placeholder="password" autocomplete="new-password" minlength="8" maxlength="128"
+                   title="The Server keeps the certificate and its key as bootstrap.p12, encrypted under this password, for download until the certificate ends or is revoked. 8 to 128 characters; a short one is quicker to break if the file leaks. The Server keeps the password nowhere: give it to the host by another way than the file. A host that needs the pair as PEM takes it out with opamp-fleetctl pki p12-extract." />
           </label>
           <label class="field quarter"><span class="field-cap">Password again <b class="need req">required</b></span>
             <input required aria-required="true" id="boot-pass2" type="password" placeholder="password again" autocomplete="new-password"
@@ -2218,7 +2218,7 @@
         $("enrolments").innerHTML = enrolments.map((e) => `
           <tr>
             <td>${esc(when(e.arrived_ms))}</td>
-            <td>${esc(e.peer || "—")}</td>
+            <td>${e.gateway ? `via Gateway ${esc(e.gateway)}` : esc(e.peer || "—")}</td>
             <td><span class="fingerprint">${esc(e.key_fingerprint)}</span></td>
             <td>${bootstrapCell(e)}</td>
             <td>

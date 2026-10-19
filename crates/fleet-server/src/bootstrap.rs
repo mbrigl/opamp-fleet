@@ -971,19 +971,22 @@ mod tests {
         assert!(matches!(record.issue(&valid()), Err(IssueError::NoKey)));
     }
 
-    /// A password of four characters is taken and one of three is not.
-    /// Verifies: ADR-0030
+    /// A password of eight characters is taken and one of seven is not.
+    /// Verifies: ADR-0048
     #[test]
-    fn a_password_of_four_characters_issues_a_file_and_one_of_three_nothing() {
+    fn a_password_of_eight_characters_issues_a_file_and_one_of_seven_nothing() {
         let (record, _clock, _store) = fixture(u64::MAX);
-        let short = record.issue(&request(serde_json::json!({"password": "abc"})));
-        assert!(matches!(short, Err(IssueError::Invalid(_))));
+        let short = record.issue(&request(serde_json::json!({"password": "seven c"})));
+        assert!(
+            matches!(&short, Err(IssueError::Invalid(e)) if e == "password must be 8 to 128 characters"),
+            "{short:?}"
+        );
         assert!(record.list().is_empty(), "nothing issued");
         let sealed = record
-            .issue(&request(serde_json::json!({"password": "four"})))
+            .issue(&request(serde_json::json!({"password": "eight ch"})))
             .expect("issued");
         let (_, file) = record.p12(&sealed.serial).expect("read").expect("kept");
-        assert_eq!(file, b"sealed under four");
+        assert_eq!(file, b"sealed under eight ch");
     }
 
     /// The Server keeps the file, not the key, and hands it out until the certificate ends or a

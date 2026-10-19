@@ -89,9 +89,17 @@ impl Default for Limits {
     }
 }
 
+/// What the writer is sent: an entry, or a request to write out everything before it.
+enum Message {
+    Entry(Entry),
+    /// Answered once every entry queued before it was taken, its second's aggregates included:
+    /// `true` when all of them were written, `false` when the record was failing.
+    Drain(std::sync::mpsc::SyncSender<bool>),
+}
+
 /// The handle every decision is recorded through.
 pub struct AuditLog {
-    tx: std::sync::mpsc::SyncSender<Entry>,
+    tx: std::sync::mpsc::SyncSender<Message>,
     failing: Arc<AtomicBool>,
     /// Decisions refused because they could not be recorded, told in the next entry.
     unrecorded: Arc<AtomicU64>,
@@ -249,6 +257,32 @@ impl AuditLog {
         })
     }
 
+    /// Waits until every entry queued so far is written, for at most `timeout`; `false` when it
+    /// was not, in time or at all because the record is failing. The process exits after this at shutdown, and the writer thread with it, so what
+    /// is still queued would otherwise be lost without a trace (ADR-0022).
+    #[must_use]
+    pub fn drain(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let (done, written) = std::sync::mpsc::sync_channel(1);
+        let mut message = Message::Drain(done);
+        loop {
+            match self.tx.try_send(message) {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TrySendError::Full(back)) => {
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    message = back;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return false,
+            }
+        }
+        written
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or(false)
+    }
+
     fn unrecorded(&self) -> Unavailable {
         self.unrecorded.fetch_add(1, Ordering::SeqCst);
         Unavailable
@@ -266,7 +300,10 @@ impl Audit for AuditLog {
             return Err(self.unrecorded());
         }
         if !entry.is_refusal() {
-            return self.tx.try_send(entry).map_err(|_| self.unrecorded());
+            return self
+                .tx
+                .try_send(Message::Entry(entry))
+                .map_err(|_| self.unrecorded());
         }
         let second = self.clock.now_ms() / 1000;
         let counted = self
@@ -283,7 +320,7 @@ impl Audit for AuditLog {
             self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
             return Err(self.unrecorded());
         }
-        self.tx.try_send(entry).map_err(|_| {
+        self.tx.try_send(Message::Entry(entry)).map_err(|_| {
             self.queued_refusals.fetch_sub(1, Ordering::SeqCst);
             self.unrecorded()
         })
@@ -310,12 +347,12 @@ struct Writer {
 }
 
 impl Writer {
-    fn run(mut self, rx: &std::sync::mpsc::Receiver<Entry>) {
+    fn run(mut self, rx: &std::sync::mpsc::Receiver<Message>) {
         use std::sync::mpsc::RecvTimeoutError;
         let mut last_tick = std::time::Instant::now();
         loop {
             match rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(entry) => self.take(entry),
+                Ok(message) => self.handle(message),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     self.flush_window(u64::MAX);
@@ -329,13 +366,13 @@ impl Writer {
         }
     }
 
-    fn tick(&mut self, rx: &std::sync::mpsc::Receiver<Entry>) {
+    fn tick(&mut self, rx: &std::sync::mpsc::Receiver<Message>) {
         let second = self.clock.now_ms() / 1000;
         // What was queued before the second ended is written before its aggregates, so they
         // follow the refusals they count.
         for _ in 0..CHANNEL_CAPACITY {
             match rx.try_recv() {
-                Ok(entry) => self.take(entry),
+                Ok(message) => self.handle(message),
                 Err(_) => break,
             }
         }
@@ -344,6 +381,16 @@ impl Writer {
         // entry that lands says how much went unrecorded.
         if self.failing.load(Ordering::SeqCst) {
             self.append(Entry::new("audit.resumed", "recorded"));
+        }
+    }
+
+    fn handle(&mut self, message: Message) {
+        match message {
+            Message::Entry(entry) => self.take(entry),
+            Message::Drain(done) => {
+                self.flush_window(u64::MAX);
+                let _ = done.send(!self.failing.load(Ordering::SeqCst));
+            }
         }
     }
 
@@ -567,6 +614,59 @@ mod tests {
                 .enumerate()
                 .map(|(i, l)| (i.to_string(), l.as_str())),
         )
+    }
+
+    /// A store that takes its time over every line, as a disk under load does.
+    #[derive(Clone, Default)]
+    struct Slow(Memory);
+
+    impl AuditStore for Slow {
+        fn tail(&mut self) -> Result<Option<Tail>, String> {
+            self.0.tail()
+        }
+        fn append(&mut self, seq: u64, line: &str) -> Result<(), String> {
+            std::thread::sleep(Duration::from_millis(2));
+            self.0.append(seq, line)
+        }
+        fn current_bytes(&self) -> u64 {
+            self.0.current_bytes()
+        }
+        fn rotate(&mut self, keep: usize) -> Result<Vec<(String, String)>, String> {
+            self.0.rotate(keep)
+        }
+    }
+
+    /// Draining returns only once every entry queued before it is written, so the shutdown that
+    /// follows it loses none of them.
+    /// Verifies: ADR-0022
+    #[test]
+    fn a_drain_returns_once_everything_queued_is_written() {
+        let slow = Slow::default();
+        let audit =
+            AuditLog::start(Box::new(slow.clone()), Limits::default(), clock()).expect("start");
+        for n in 0..50 {
+            audit
+                .record(Entry::new("admission.admitted", "admitted").with("n", n))
+                .expect("record");
+        }
+        assert!(audit.drain(Duration::from_secs(10)));
+        assert_eq!(slow.0.lines().len(), 50, "an entry was still queued");
+        assert_eq!(chain_of(&slow.0), Ok(50));
+    }
+
+    /// A drain over a failing record says so, so the shutdown that follows does not pass the lost
+    /// entries over in silence.
+    /// Verifies: ADR-0022
+    #[test]
+    fn a_drain_over_a_failing_record_answers_false() {
+        let memory = Memory::default();
+        let audit =
+            AuditLog::start(Box::new(memory.clone()), Limits::default(), clock()).expect("start");
+        memory.1.store(true, Ordering::SeqCst);
+        audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .expect("queued");
+        assert!(!audit.drain(Duration::from_secs(10)));
     }
 
     /// Verifies: ADR-0022

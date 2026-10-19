@@ -208,7 +208,9 @@ fn plan(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Plan {
 }
 
 /// Deletes a removed Supervisor's directory whole — program, packages, configuration, and the
-/// `instance-uid` whose Agent has already said its goodbye (ADR-0017). Runs only after the
+/// `instance-uid` whose Agent has already said its goodbye (ADR-0017). It does not touch
+/// `<state_dir>/package-high-water.json` (ADR-0043 clause 14): whatever a re-added Supervisor
+/// installs, under the same name or another, is held to the mark of its Agent type. Runs only after the
 /// rewritten `supervisor.toml` no longer names the Supervisor: a failed write restarts the stopped
 /// set from the old file, which needs the data intact. A directory that will not delete is a
 /// warning, never a `FAILED` apply — the set the Server asked for is running; the leftover is an
@@ -290,12 +292,24 @@ fn start(
     shutdown: &Shutdown,
 ) -> Result<(), String> {
     let index = engine.next_index();
+    // The marks the startup read, so a re-added Supervisor is held to its type's mark (ADR-0043
+    // clause 14). An Engine built without them reads them from `state_dir` now.
+    let marks = match engine.high_water() {
+        Some(marks) => marks,
+        None => {
+            let marks: std::sync::Arc<dyn crate::supervisor::ports::HighWaterMarks> =
+                std::sync::Arc::new(crate::storage::HighWaterFile::open(&config.state_dir));
+            engine.set_high_water(marks.clone());
+            marks
+        }
+    };
     let agent = crate::supervisor::start_supervisor(
         config,
         block,
         index,
         &engine.events_handle(),
         shutdown,
+        &marks,
     )?;
     engine.add_supervisor(agent);
     Ok(())
@@ -1368,6 +1382,95 @@ mod tests {
             stays.join("instance-uid").is_file(),
             "a neighbour keeps its directory and identity"
         );
+    }
+
+    /// A compromised Server purges a Supervisor and adds it back to reset its floor: `a` of type
+    /// `otelcol` installs `0.110.0`, a set without `a` purges it, and sets adding `b` and then `a`
+    /// again follow. The mark file survives the purge — here with `supervisor_dir` at `state_dir`
+    /// itself — and each re-added Supervisor refuses `0.109.0` naming the mark, and takes
+    /// `0.110.0+other` and `0.111.0` (ADR-0043 clauses 8 and 14).
+    /// Verifies: ADR-0043
+    #[test]
+    fn a_purged_and_re_added_supervisor_is_held_to_its_types_mark() {
+        use crate::storage::{HighWaterFile, Storage, HIGH_WATER_FILE};
+        use crate::supervisor::agent::AgentState;
+        use crate::supervisor::ports::HighWaterMarks;
+        use opamp::proto::ServerToAgent;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let config: ClientConfig = toml::from_str(&format!(
+            "state_dir = {state:?}\nsupervisor_dir = {state:?}",
+            state = state.to_string_lossy()
+        ))
+        .expect("config");
+        let marks: Arc<dyn HighWaterMarks> = Arc::new(HighWaterFile::open(&config.state_dir));
+        let supervisor = |name: &str| {
+            let mut agent = AgentState::supervised(
+                name.to_string(),
+                "otelcol".to_string(),
+                Storage::new(config.supervisor_dir(name)).expect("storage"),
+                crate::host::SystemHost,
+            )
+            .expect("agent")
+            .with_high_water(marks.clone());
+            agent.accept_packages();
+            let _ = agent.next_report();
+            agent
+        };
+        let offer = |agent: &mut AgentState, version: &str| {
+            let handled = agent.handle(&ServerToAgent {
+                packages_available: Some(opamp::proto::PackagesAvailable {
+                    packages: [(
+                        "otelcol".to_string(),
+                        opamp::proto::PackageAvailable {
+                            version: version.to_string(),
+                            file: Some(opamp::proto::DownloadableFile {
+                                download_url: "/x".to_string(),
+                                content_hash: b"chash".to_vec(),
+                                ..Default::default()
+                            }),
+                            hash: version.as_bytes().to_vec(),
+                            ..Default::default()
+                        },
+                    )]
+                    .into(),
+                    all_packages_hash: version.as_bytes().to_vec(),
+                }),
+                ..Default::default()
+            });
+            let statuses = agent.next_report().package_statuses.expect("statuses");
+            (handled.package_download.is_some(), statuses.error_message)
+        };
+
+        let mut a = supervisor("a");
+        assert!(offer(&mut a, "0.110.0").0);
+        a.package_applied(b"0.110.0".to_vec(), Ok("0.110.0".to_string()));
+        drop(a);
+        purge_removed(&config, &["a".to_string()]);
+        assert!(!config.supervisor_dir("a").exists(), "a is purged");
+        assert!(
+            state.join(HIGH_WATER_FILE).is_file(),
+            "the purge leaves the mark file"
+        );
+
+        for name in ["b", "a"] {
+            let mut readded = supervisor(name);
+            let (downloads, why) = offer(&mut readded, "0.109.0");
+            assert!(!downloads, "{name}: nothing below the mark is fetched");
+            assert!(
+                why.contains("0.110.0"),
+                "{name}: the refusal names the mark: {why}"
+            );
+            assert!(
+                offer(&mut readded, "0.110.0+other").0,
+                "{name}: equal is taken"
+            );
+            assert!(offer(&mut readded, "0.111.0").0, "{name}: newer is taken");
+            drop(readded);
+            purge_removed(&config, &[name.to_string()]);
+        }
     }
 
     /// ADR-0017 hardening: the purge never recurses through a symlink planted where a Supervisor's

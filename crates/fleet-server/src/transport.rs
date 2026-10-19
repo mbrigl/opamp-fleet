@@ -69,6 +69,9 @@ const ADMITTED_MAX: usize = 100_000;
 #[derive(Clone, Debug, Default)]
 pub struct Proofs {
     pub certificate: Option<(CertId, u64)>,
+    /// The certificate itself (DER), which a bootstrap proof naming it must embed byte for byte
+    /// (ADR-0039 clause 12).
+    pub der: Option<Arc<[u8]>>,
     /// The host the certificate was issued to, when it names one (ADR-0021 clause 7).
     pub host: Option<String>,
     /// The certificate's subject values, which a Host made at its first report carries
@@ -337,7 +340,8 @@ async fn admit_download(
     }
     // What the certificate proves, read once: counted here, and handed to the route, which serves
     // only what is offered to an Agent of the host it names (ADR-0026 clause 37).
-    let proofs = certificate.map(|_| Proofs {
+    let proofs = certificate.map(|cert| Proofs {
+        der: Some(Arc::from(cert.as_ref())),
         host: facts.as_ref().and_then(|facts| facts.host.clone()),
         subject_values: facts
             .as_ref()
@@ -383,7 +387,8 @@ pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
             axum::routing::get(gateway_revocations),
         )
         .with_state(state.clone());
-    let mut router = opamp::server::router(Arc::new(Fleet(state)), settings).merge(gateways);
+    let fleet = Fleet(state, admission.issuers.clone());
+    let mut router = opamp::server::router(Arc::new(fleet), settings).merge(gateways);
     if admission.required() {
         // The outermost layer: every plain-HTTP POST and the upgrade GET — checked before the
         // WebSocket upgrade completes — answers 401 without a certificate that admits.
@@ -582,6 +587,7 @@ async fn admit(
     }
     if let Some(revocations) = &admission.revocations {
         let proofs = Proofs {
+            der: None,
             certificate: presented
                 .as_ref()
                 .map(|facts| (facts.id.clone(), facts.not_after_ms)),
@@ -608,6 +614,7 @@ async fn admit(
         }
     }
     let classified = certificate
+        .as_ref()
         .map(|cert| admission.issuers.classify(cert.as_ref()))
         .unwrap_or(Peer::Member);
     if let Peer::Enrolling { .. } = &classified {
@@ -656,6 +663,7 @@ async fn admit(
     }
     request.extensions_mut().insert(classified);
     request.extensions_mut().insert(Proofs {
+        der: certificate.map(|cert| Arc::from(cert.as_ref())),
         host: presented.as_ref().and_then(|facts| facts.host.clone()),
         subject_values: presented
             .as_ref()
@@ -667,8 +675,9 @@ async fn admit(
 }
 
 /// The Server's handler behind the endpoint: every report goes to the fleet, and a WebSocket is
-/// also sent what the fleet wants its Agents to have when that changes.
-struct Fleet(Arc<AppState>);
+/// also sent what the fleet wants its Agents to have when that changes. The CAs of the Agent plane
+/// tell which bootstrap certificates an enrolment request through a Gateway may prove (ADR-0039).
+struct Fleet(Arc<AppState>, Issuers);
 
 /// One connection as the fleet sees it.
 struct Carrier {
@@ -893,6 +902,7 @@ impl Handler for Fleet {
                     bootstrap_fingerprint: fingerprint.clone(),
                     bootstrap: id.clone(),
                     peer: request.peer.map(|peer| peer.ip()),
+                    gateway: None,
                 },
                 request: Arc::new(Mutex::new(None)),
                 instance_uid: Arc::new(Mutex::new(Vec::new())),
@@ -949,12 +959,22 @@ impl Handler for Fleet {
     }
 
     async fn on_message(&self, carrier: &mut Carrier, report: AgentToServer) -> Reply {
+        // An enrolment request through a Gateway (ADR-0039 clause 12); counted in the Gateway's
+        // enrolment aggregate and, once checked, by the bootstrap certificate it names (clause 6).
+        let through_gateway = self.enrolment_through_gateway(carrier, &report);
         // Before anything else: enrolment, the CSR, and the fleet lock (ADR-0013 clause 21).
-        if self.over_rate(carrier, Some(&report.instance_uid)) {
+        if self.over_rate(
+            carrier,
+            Some(&report.instance_uid),
+            through_gateway.as_ref(),
+        ) {
             return Reply::Send(unavailable(&report.instance_uid, THROTTLED));
         }
         if let Some(enrolling) = &carrier.enrolling {
             return Reply::Send(self.enrol(enrolling, &report));
+        }
+        if through_gateway.is_some() {
+            return Reply::Send(self.enrol_through_gateway(carrier, &report));
         }
         let csr = report
             .connection_settings_request
@@ -971,16 +991,16 @@ impl Handler for Fleet {
             }
         }
         // The connection's own certificate, whatever the message claims to be: behind a Gateway
-        // that is the Gateway's, so revoking it reaches what was renewed through it without a
-        // renewal proof (ADR-0021 clauses 33, 42).
+        // that is the Gateway's, which renews nothing without a renewal proof (ADR-0039).
         let presented = carrier
             .proofs
             .certificate
             .as_ref()
-            .map(|(id, _)| Presented {
+            .map(|(id, not_after_ms)| Presented {
                 id: id.clone(),
                 host: carrier.proofs.host.clone(),
                 subject_values: carrier.proofs.subject_values.clone(),
+                not_after_ms: *not_after_ms,
             });
         let outcome =
             self.0
@@ -1028,7 +1048,7 @@ impl Handler for Fleet {
 
     fn on_unreadable(&self, carrier: &mut Carrier, _error: &Unreadable) -> Reply {
         // It names no Agent, so its reply reaches none (ADR-0013 clause 25).
-        if self.over_rate(carrier, None) {
+        if self.over_rate(carrier, None, None) {
             return Reply::Send(unavailable(&[], THROTTLED));
         }
         Reply::Send(bad_request(match carrier.transport {
@@ -1051,15 +1071,42 @@ impl Handler for Fleet {
     }
 }
 
+/// An enrolment request through a Gateway, as the throttle keys it (ADR-0039 clause 13).
+enum Relayed {
+    /// Its proof embeds a certificate a bootstrap CA of `[enrolment]` issued: its own bucket.
+    Checked(CertId),
+    /// Its proof embeds no such certificate, or does not parse: the enrolment aggregate alone, and
+    /// refused.
+    Unchecked,
+}
+
 impl Fleet {
-    /// Takes the message's token (ADR-0013), and records a message past the limit.
-    fn over_rate(&self, carrier: &Carrier, instance_uid: Option<&[u8]>) -> bool {
+    /// Takes the message's token (ADR-0013) — for an enrolment request through a Gateway, from the
+    /// Gateway's enrolment aggregate and the bucket of the bootstrap certificate it names, once
+    /// checked (ADR-0039 clause 13) — and records a message past the limit.
+    fn over_rate(
+        &self,
+        carrier: &Carrier,
+        instance_uid: Option<&[u8]>,
+        enrolment: Option<&Relayed>,
+    ) -> bool {
         let Some(agent_rate) = self.0.agent_rate() else {
             return false;
         };
         let revocations = self.0.revocations();
         let gateway = is_gateway(&carrier.subject, revocations);
-        let Err(bucket) = agent_rate.admit(&carrier.subject, gateway, instance_uid) else {
+        let taken = match enrolment {
+            Some(relayed) => agent_rate.admit_enrolment(
+                &carrier.subject,
+                gateway,
+                match relayed {
+                    Relayed::Checked(bootstrap) => Some(bootstrap),
+                    Relayed::Unchecked => None,
+                },
+            ),
+            None => agent_rate.admit(&carrier.subject, gateway, instance_uid),
+        };
+        let Err(bucket) = taken else {
             return false;
         };
         debug!(bucket = bucket.as_str(), "a message past the rate limit");
@@ -1101,48 +1148,233 @@ impl Fleet {
             // The capabilities say a request may be sent; nothing else is answered.
             return self.0.enrolment_answer(&report.instance_uid, None);
         };
-        // A request claiming another identity never reaches the queue (ADR-0021).
+        // A request claiming another identity never reaches the queue (ADR-0021), nor does one
+        // proving another bootstrap certificate than the handshake's (ADR-0039 clause 9).
         let request = match String::from_utf8(csr.csr.clone())
             .map_err(|_| "the certificate signing request is not PEM".to_string())
             .and_then(|pem| {
                 crate::ca::check_claims(&pem, &report.instance_uid)?;
+                proves_the_handshake(&pem, &enrolling.requester)?;
                 crate::ca::enrolment_request(&pem, &report.instance_uid)
             }) {
             Ok(request) => request,
             Err(e) => return bad_request(&e),
         };
         *enrolling.request.lock().expect("request lock") = Some(request.clone());
+        self.file(
+            enrolment,
+            request,
+            &enrolling.requester,
+            &report.instance_uid,
+        )
+    }
+
+    /// Whether a message is an enrolment request through a Gateway (ADR-0039 clause 12): a CSR
+    /// carrying a bootstrap proof over the certificate of a host marked as a Gateway, unless the
+    /// proof names that certificate itself — then it is the Gateway's own CSR, which `renews`
+    /// decides; it names that certificate only when it embeds it byte for byte. Its certificate is
+    /// checked as cheaply as the throttle allows before it keys a bucket (clause 6): it parses, and
+    /// it is one a bootstrap CA of `[enrolment]` issued as the handshake checks one — its issuer,
+    /// that CA's signature over it, `CA:FALSE`, its validity, and the `clientAuth` extended key
+    /// usage where it names any ([`Issuers::bootstrap_issued`]). The proof itself is checked by
+    /// [`enrol_through_gateway`].
+    ///
+    /// [`enrol_through_gateway`]: Self::enrol_through_gateway
+    /// [`Issuers::bootstrap_issued`]: crate::tls::Issuers::bootstrap_issued
+    fn enrolment_through_gateway(
+        &self,
+        carrier: &Carrier,
+        report: &AgentToServer,
+    ) -> Option<Relayed> {
+        if carrier.enrolling.is_some() || !is_gateway(&carrier.subject, self.0.revocations()) {
+            return None;
+        }
+        let csr = report
+            .connection_settings_request
+            .as_ref()?
+            .opamp
+            .as_ref()?
+            .certificate_request
+            .as_ref()?;
+        // A request that is not one PEM block is refused where any CSR is.
+        let pem = std::str::from_utf8(&csr.csr).ok()?;
+        fleet_core::csr::der(pem.as_bytes()).ok()?;
+        let der = match crate::ca::bootstrap_proof_certificate(pem) {
+            Ok(None) => return None,
+            Ok(Some(der)) => der,
+            Err(_) => return Some(Relayed::Unchecked),
+        };
+        // The very certificate presented, byte for byte: an issuer and serial alone are anyone's
+        // to copy into a certificate of their own.
+        if carrier.proofs.der.as_deref() == Some(der.as_slice()) {
+            return None;
+        }
+        Some(match self.1.bootstrap_issued(&der) {
+            Ok(Peer::Enrolling { id, .. }) => Relayed::Checked(id),
+            _ => Relayed::Unchecked,
+        })
+    }
+
+    /// An enrolment request through a Gateway (ADR-0039 clause 12): decided as any enrolment. The
+    /// proof is checked — a bootstrap certificate of `[enrolment]`, valid, not revoked, its key
+    /// having signed the request's (ADR-0039 clause 8) — and the request is filed under the
+    /// certificate it proves, naming the Gateway's host in place of a peer address. Nothing in the
+    /// message is read but the certificate signing request, and no Agent record is made. Every
+    /// answer is addressed to the message's `instance_uid`, by which the Gateway routes it back.
+    fn enrol_through_gateway(&self, carrier: &Carrier, report: &AgentToServer) -> ServerToAgent {
+        let uid = &report.instance_uid;
+        let gateway = carrier.proofs.host.clone();
+        let refuse = |e: &str| {
+            info!(gateway = gateway.as_deref().unwrap_or(""), error = %e, "refused an enrolment request through a Gateway");
+            self.0.audit_refusal(
+                Entry::new("enrolment.refused", "refused")
+                    .with("gateway", gateway.clone())
+                    .with("reason", e.to_string())
+                    .with("instance_uid", hex::encode(uid)),
+            );
+            let mut reply = bad_request(e);
+            reply.instance_uid.clone_from(uid);
+            reply
+        };
+        let Some(enrolment) = self.0.enrolment() else {
+            return refuse("this Server does not enrol");
+        };
+        if self
+            .0
+            .revocations()
+            .is_some_and(|revocations| carrier.proofs.revoked(revocations))
+        {
+            return refuse("this connection is no longer admitted");
+        }
+        let Some(csr) = report
+            .connection_settings_request
+            .as_ref()
+            .and_then(|request| request.opamp.as_ref())
+            .and_then(|opamp| opamp.certificate_request.as_ref())
+        else {
+            return refuse("the message carries no certificate signing request");
+        };
+        let filed = String::from_utf8(csr.csr.clone())
+            .map_err(|_| "the certificate signing request is not PEM".to_string())
+            .and_then(|pem| {
+                crate::ca::check_claims(&pem, uid)?;
+                let der = crate::ca::bootstrap_proof(&pem)?
+                    .ok_or_else(|| "the bootstrap proof does not parse".to_string())?;
+                let Peer::Enrolling {
+                    subject,
+                    carried,
+                    fingerprint,
+                    id,
+                } = self
+                    .1
+                    .bootstrap_issued(&der)
+                    .map_err(|why| format!("the bootstrap proof does not hold: {why}"))?
+                else {
+                    return Err("the bootstrap proof does not hold".to_string());
+                };
+                if self
+                    .0
+                    .revocations()
+                    .is_some_and(|revocations| revocations.is_certificate_revoked(&id))
+                {
+                    return Err(
+                        "the bootstrap proof does not hold: its certificate is revoked".to_string(),
+                    );
+                }
+                let requester = Requester {
+                    bootstrap_subject: subject,
+                    carried: *carried,
+                    bootstrap_fingerprint: fingerprint,
+                    bootstrap: id,
+                    peer: None,
+                    gateway: gateway.clone(),
+                };
+                Ok((crate::ca::enrolment_request(&pem, uid)?, requester))
+            });
+        match filed {
+            Ok((request, requester)) => self.file(enrolment, request, &requester, uid),
+            Err(e) => refuse(&e),
+        }
+    }
+
+    /// Takes in an enrolment request, or answers it once it has been decided (ADR-0021 clauses
+    /// 21, 22): what both an enrolment connection and a Gateway's relay are answered.
+    fn file(
+        &self,
+        enrolment: &Enrolment,
+        request: crate::enrolment::Request,
+        requester: &Requester,
+        instance_uid: &[u8],
+    ) -> ServerToAgent {
         let key = request.key_fingerprint.clone();
         let new = !enrolment.pending().iter().any(|pending| pending.id == key);
         let subject = request.subject.clone();
-        match enrolment.submit(request, enrolling.requester.clone()) {
+        let answer = match enrolment.submit(request, requester.clone()) {
             Submitted::Waiting => {
                 info!(key = %key, "an enrolment request waits for an operator");
                 if let (true, Some(audit)) = (new, self.0.audit()) {
                     audit.refusal(
                         Entry::new("enrolment.queued", "queued")
-                            .peer(enrolling.requester.peer)
+                            .peer(requester.peer)
+                            .with("gateway", requester.gateway.clone())
                             .with("id", key.clone())
                             .with("subject", subject)
-                            .with(
-                                "bootstrap_subject",
-                                enrolling.requester.bootstrap_subject.clone(),
-                            )
-                            .with("instance_uid", hex::encode(&report.instance_uid)),
+                            .with("bootstrap_subject", requester.bootstrap_subject.clone())
+                            .with("instance_uid", hex::encode(instance_uid)),
                     );
                 }
-                self.0.enrolment_answer(&report.instance_uid, None)
+                self.0.enrolment_answer(instance_uid, None)
             }
             Submitted::Issued(cert) => {
                 info!(key = %key, "handed an enrolling host its certificate");
-                self.0.enrolment_answer(&report.instance_uid, Some(cert))
+                self.0.enrolment_answer(instance_uid, Some(cert))
             }
             Submitted::Rejected => bad_request("an operator rejected this enrolment request"),
-            Submitted::Full => unavailable(
-                &report.instance_uid,
-                "the enrolment queue is full — retry later",
-            ),
-            Submitted::Closed => unavailable(&report.instance_uid, "no enrolment window is open"),
+            Submitted::Full => {
+                unavailable(instance_uid, "the enrolment queue is full — retry later")
+            }
+            Submitted::OverShare { first } => {
+                // Audited once per certificate and window (ADR-0046): a host re-sending its
+                // refused request does not flood the record.
+                if let (true, Some(audit)) = (first, self.0.audit()) {
+                    audit.refusal(
+                        Entry::new("enrolment.refused", "refused")
+                            .peer(requester.peer)
+                            .with("gateway", requester.gateway.clone())
+                            .with("reason", "bootstrap_share")
+                            .with("bootstrap_serial", requester.bootstrap.serial.clone())
+                            .with("bootstrap_subject", requester.bootstrap_subject.clone()),
+                    );
+                }
+                unavailable(
+                    instance_uid,
+                    "this bootstrap certificate holds its share of the enrolment queue — retry \
+                     later",
+                )
+            }
+            Submitted::Closed => unavailable(instance_uid, "no enrolment window is open"),
+        };
+        // Addressed to the message, so a Gateway routes even a refusal back (ADR-0039 clause 5).
+        ServerToAgent {
+            instance_uid: instance_uid.to_vec(),
+            ..answer
         }
+    }
+}
+
+/// Whether a request on an enrolment connection proves the certificate of its handshake (ADR-0039
+/// clause 3): a bootstrap proof there must name that certificate, and hold; a request without one
+/// proves the handshake's certificate alone.
+///
+/// # Errors
+/// Returns the `BadRequest` text for a proof that does not hold or names another certificate.
+fn proves_the_handshake(csr_pem: &str, handshake: &Requester) -> Result<(), String> {
+    use sha2::{Digest as _, Sha256};
+    match crate::ca::bootstrap_proof(csr_pem)? {
+        Some(der) if hex::encode(Sha256::digest(&der)) != handshake.bootstrap_fingerprint => Err(
+            "the bootstrap proof names another certificate than the one this connection presented"
+                .to_string(),
+        ),
+        _ => Ok(()),
     }
 }

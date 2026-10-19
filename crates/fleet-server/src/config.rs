@@ -274,6 +274,14 @@ pub struct EnrolmentConfig {
     /// (ADR-0021 clause 19).
     #[serde(default)]
     pub bootstrap_ca_key_file: Option<PathBuf>,
+    /// The most requests of one bootstrap certificate the pending queue holds at once, 1 to
+    /// [`MAX_PENDING`](crate::enrolment::MAX_PENDING) (ADR-0046).
+    #[serde(default = "default_max_pending_per_bootstrap")]
+    pub max_pending_per_bootstrap: usize,
+}
+
+fn default_max_pending_per_bootstrap() -> usize {
+    crate::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP
 }
 
 /// The `[admission_throttle]` section (ADR-0021 clause 24).
@@ -450,10 +458,17 @@ impl ConnectionOfferConfig {
                     .to_string(),
             );
         }
-        // The Server never offers a fleet a plaintext path off the host (ADR-0014 clause 1).
+        // An offer never moves a fleet to plaintext, on the loopback neither: whoever listens on
+        // that port would be the fleet's Server, unproven (ADR-0040 clause 1).
         if let Some(endpoint) = &self.endpoint {
             opamp::endpoint::check_url(endpoint)
                 .map_err(|e| format!("[connection_offer] endpoint {e}"))?;
+            if opamp::endpoint::is_plaintext(endpoint) {
+                return Err(format!(
+                    "[connection_offer] endpoint {endpoint}: an offer never moves a fleet to \
+                     plaintext — use wss:// or https://"
+                ));
+            }
         }
         Ok(())
     }
@@ -849,6 +864,15 @@ impl ServerConfig {
             return Err(
                 "[enrolment] needs [client_ca]: an approved request is signed by it".to_string(),
             );
+        }
+        if let Some(enrolment) = &self.enrolment {
+            let max = crate::enrolment::MAX_PENDING;
+            if !(1..=max).contains(&enrolment.max_pending_per_bootstrap) {
+                return Err(format!(
+                    "[enrolment] max_pending_per_bootstrap must be between 1 and {max}, not {}",
+                    enrolment.max_pending_per_bootstrap
+                ));
+            }
         }
         if self.audit.max_file_bytes == 0 || self.audit.keep_files == 0 {
             return Err(
@@ -1337,13 +1361,16 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0014
+    /// An offer never moves a fleet to plaintext, on a loopback IP literal neither.
+    /// Verifies: ADR-0040
     #[test]
-    fn a_connection_offer_accepts_a_plaintext_endpoint_on_a_loopback_ip_literal() {
+    fn a_connection_offer_refuses_a_plaintext_endpoint_on_a_loopback_ip_literal() {
         for endpoint in ["ws://127.0.0.1:4320/v1/opamp", "http://[::1]:4320/v1/opamp"] {
             let offer: ConnectionOfferConfig =
                 toml::from_str(&format!("endpoint = \"{endpoint}\"")).expect("parse");
-            assert_eq!(offer.check(), Ok(()), "{endpoint}");
+            let err = offer.check().expect_err(endpoint);
+            assert!(err.contains("[connection_offer] endpoint"), "{err}");
+            assert!(err.contains("never moves a fleet to plaintext"), "{err}");
         }
     }
 
@@ -1380,6 +1407,50 @@ mod tests {
         .expect("write");
         let err = ServerConfig::load(&path).expect_err("enrolment without a CA");
         assert!(err.contains("[enrolment] needs [client_ca]"), "{err}");
+    }
+
+    /// The share of the enrolment queue one bootstrap certificate may hold runs from 1 to 1024,
+    /// 256 by default; anything else fails startup naming the key.
+    /// Verifies: ADR-0046
+    #[test]
+    fn max_pending_per_bootstrap_runs_from_1_to_1024() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        // `[enrolment]` needs a `[client_ca]` whose files exist; their content is not read here.
+        let (cert, key) = (dir.path().join("ca.pem"), dir.path().join("ca-key.pem"));
+        std::fs::write(&cert, "").expect("write");
+        std::fs::write(&key, "").expect("write");
+        let with = |line: &str| {
+            format!(
+                "{TLS}[client_ca]\ncert_file = {:?}\nkey_file = {:?}\n\
+                 [enrolment]\nbootstrap_ca_file = \"boot.pem\"\n{line}",
+                cert.display().to_string(),
+                key.display().to_string(),
+            )
+        };
+        std::fs::write(&path, with("")).expect("write");
+        let config = ServerConfig::load(&path).expect("the default");
+        assert_eq!(
+            config
+                .enrolment
+                .expect("enrolment")
+                .max_pending_per_bootstrap,
+            256
+        );
+        for ok in [1, 1024] {
+            std::fs::write(&path, with(&format!("max_pending_per_bootstrap = {ok}\n")))
+                .expect("write");
+            ServerConfig::load(&path).expect("within bounds");
+        }
+        for bad in [0, 1025] {
+            std::fs::write(&path, with(&format!("max_pending_per_bootstrap = {bad}\n")))
+                .expect("write");
+            let err = ServerConfig::load(&path).expect_err("out of bounds");
+            assert!(
+                err.contains("[enrolment] max_pending_per_bootstrap"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     /// Verifies: ADR-0013

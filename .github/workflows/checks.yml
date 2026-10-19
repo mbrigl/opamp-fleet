@@ -14,9 +14,11 @@ name: Checks
 # - Dev Container: no host Docker socket, Features pinned and locked, the container-management
 #   extension on the host side (ADR-0002), checked by scripts/check-devcontainer.sh after its own
 #   self-test has passed.
-# - Action references: every action a workflow uses is referenced by its major version tag and
-#   Dependabot is configured to raise the major bump (ADR-0007), checked by
-#   scripts/check-action-refs.sh after its own self-test has passed. The same job runs
+# - Action references: every third-party action a workflow uses is pinned to a commit SHA with
+#   its release in a comment, and that release's tag still points to the pinned commit; every
+#   first-party action (actions/*) is on its major version tag; Dependabot is configured to raise
+#   both (ADR-0044). Checked by scripts/check-action-refs.sh --resolve, which reads the tags with
+#   git ls-remote, after its own self-test has passed. The same job runs
 #   scripts/check-build-hardening.sh after its self-test: no checkout keeps the token, the release
 #   is gated on advisories and built uncached with pinned tools, and the compiler, the release
 #   profile's overflow checks and the crates that forbid unsafe code are as that script lists.
@@ -114,8 +116,8 @@ jobs:
       # The check's own tests run first: a check that is wrong passes nothing worth trusting.
       - name: Self-test the action reference check
         run: bash scripts/test-check-action-refs.sh
-      - name: Check that actions are referenced by major version tag and Dependabot covers them
-        run: bash scripts/check-action-refs.sh
+      - name: Check that third-party actions are pinned to a commit SHA, first-party ones to their major tag, and Dependabot covers them
+        run: bash scripts/check-action-refs.sh --resolve
       - name: Self-test the build hardening check
         run: bash scripts/test-check-build-hardening.sh
       - name: Check that checkouts keep no token and the release is gated, uncached and pinned
@@ -165,6 +167,6 @@ jobs:
         with:
           persist-credentials: false
       # rustup honours rust-toolchain.toml (the pinned release + rustfmt + clippy) on first use.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build, test and lint the workspace
         run: bash scripts/check-rust.sh

@@ -1035,8 +1035,9 @@ async fn a_post_from_a_foreign_origin_without_fetch_metadata_is_refused() {
 }
 
 /// Every response of the Operator plane — the UI, the API, the API docs and a miss alike —
-/// forbids framing and content sniffing and sends no referrer, and an `/api/v1` answer is never
-/// cached.
+/// forbids framing and content sniffing, sends no referrer and tells a browser to come back over
+/// TLS only, and an `/api/v1` answer is never cached.
+/// Verifies: Q-1
 #[tokio::test]
 async fn every_operator_response_carries_the_security_headers() {
     let server = spawn().await;
@@ -1073,6 +1074,11 @@ async fn every_operator_response_carries_the_security_headers() {
         assert_eq!(header("x-frame-options"), "DENY", "{path}");
         assert_eq!(header("x-content-type-options"), "nosniff", "{path}");
         assert_eq!(header("referrer-policy"), "no-referrer", "{path}");
+        assert_eq!(
+            header("strict-transport-security"),
+            "max-age=31536000",
+            "{path}"
+        );
         if path.starts_with("/api/v1/") {
             assert_eq!(header("cache-control"), "no-store", "{path}");
         }
@@ -1868,6 +1874,32 @@ async fn the_forms_mark_every_field_required_or_optional() {
     assert!(html.contains(
         "<label class=\"field-cap\" for=\"config\">Body <b class=\"need req\">required</b></label>"
     ));
+}
+
+/// The bundled UI asks for a bootstrap password of 8 to 128 characters, as the Server takes.
+/// Verifies: ADR-0048
+#[tokio::test]
+async fn the_ui_asks_for_a_bootstrap_password_of_8_to_128_characters() {
+    let server = spawn().await;
+    let html = reqwest::Client::new()
+        .get(url(server.rest_addr, "/"))
+        .send()
+        .await
+        .expect("get the UI")
+        .text()
+        .await
+        .expect("html");
+    let at = html.find("id=\"boot-pass\"").expect("the password field");
+    let field = &html[at..at + html[at..].find("/>").expect("its end")];
+    assert!(
+        field.contains(&format!(
+            "minlength=\"{}\" maxlength=\"{}\"",
+            fleet_core::pkcs12::MIN_PASSWORD_CHARS,
+            fleet_core::pkcs12::MAX_PASSWORD_CHARS
+        )),
+        "{field}"
+    );
+    assert!(field.contains("8 to 128 characters"), "{field}");
 }
 
 /// The bundled UI's Hosts tab reads what `GET /api/v1/hosts` serves and acts on a row through the

@@ -320,7 +320,11 @@ static CONTENT_SECURITY_POLICY: std::sync::LazyLock<header::HeaderValue> =
     });
 
 /// The response headers of the Operator plane: its policy, no framing, no content sniffing, no
-/// referrer, and no cached `/api/v1` answer.
+/// referrer, no cached `/api/v1` answer, and HSTS. The plane serves TLS on every address
+/// (ADR-0013), so a browser that once reached it by name never tries `http://` for it again,
+/// where an active attacker could answer and ask for the Basic credentials; browsers ignore the
+/// header for an IP address. It names no subdomains: what else runs on the plane's domain is not
+/// the plane's to bind.
 async fn security_headers(request: Request, next: Next) -> Response {
     let api = request.uri().path().starts_with("/api/v1/");
     let mut response = next.run(request).await;
@@ -340,6 +344,10 @@ async fn security_headers(request: Request, next: Next) -> Response {
     headers.insert(
         header::REFERRER_POLICY,
         header::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        header::HeaderValue::from_static("max-age=31536000"),
     );
     if api {
         headers.insert(
@@ -961,7 +969,8 @@ async fn rollout_to_agent(
 /// Forgets what the Server knows about an Agent, dropping its row from the fleet view.
 ///
 /// Reaches no host: nothing is stopped, nothing is uninstalled, and no certificate is revoked —
-/// a certificate is the host's, not the Agent's. A Client that is still running reappears on its next report.
+/// a certificate is the host's, not the Agent's. Its `instance_uid` is released from the Host it
+/// was bound to (ADR-0047 clause 2). A Client that is still running reappears on its next report.
 #[utoipa::path(
     delete,
     path = "/api/v1/agents/{instance_uid}",
@@ -970,8 +979,11 @@ async fn rollout_to_agent(
     description = "Forget this Agent: the Server drops what it knows and the row leaves the fleet \
                    view (ADR-0024). Nothing happens on the host — no process is stopped, nothing \
                    is uninstalled, and no certificate is revoked, because a certificate here \
-                   proves fleet membership and its host rather than one Agent's identity. A Client still configured \
-                   for this Server therefore comes back on its next report. Refused while the \
+                   proves fleet membership and its host rather than one Agent's identity. The \
+                   Instance UID is released from the Host it was bound to (ADR-0047), so its \
+                   next report binds it to the host whose certificate carries that report. A \
+                   Client still configured for this Server therefore comes back on its next \
+                   report. Refused while the \
                    Agent is still reporting, since forgetting it would have its configuration \
                    offered again and a managed process restarted with it.",
     responses(
@@ -1442,7 +1454,7 @@ async fn get_package_set(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
-    match PackageId::new(&agent_type, &version) {
+    match PackageId::load(&agent_type, &version) {
         Ok(id) => set_response(&state, &id),
         Err(e) => error(StatusCode::BAD_REQUEST, e),
     }
@@ -1458,11 +1470,11 @@ async fn get_package_set(
     tag = "packages",
     params(
         ("agent_type" = String, Path, description = "The Agent type the Set is built for, compared raw against the `service.name` Agents report"),
-        ("version" = String, Path, description = "The Set's version — every entry shares it")
+        ("version" = String, Path, description = "The Set's version — every entry shares it. A SemVer 2.0.0 version, such as `1.19.0` for upstream's `1.19` (ADR-0043)")
     ),
     responses(
         (status = 200, description = "The stored Set", body = PackageSetView),
-        (status = 400, description = "Invalid identity", body = ErrorBody),
+        (status = 400, description = "Invalid identity, or a version that is not SemVer", body = ErrorBody),
         (status = 404, description = "Package delivery is not configured", body = ErrorBody),
         (status = 500, description = "The Set could not be persisted", body = ErrorBody)
     )
@@ -1504,7 +1516,8 @@ async fn delete_package_set(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
-    let id = match PackageId::new(&agent_type, &version) {
+    // A Package stored under a non-SemVer version is deleted like any other (ADR-0043 clause 3).
+    let id = match PackageId::load(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -1765,7 +1778,9 @@ async fn download_package(
     Query(query): Query<PlatformQuery>,
     request: Request,
 ) -> Response {
-    let id = match PackageId::new(&agent_type, &version) {
+    // A read: a pinned Package an older Server stored under a non-SemVer version is still offered
+    // (ADR-0043 clause 3), so its bytes are still served.
+    let id = match PackageId::load(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -2287,7 +2302,8 @@ async fn delete_deployment_package(
     State(state): State<Arc<AppState>>,
     Path((name, agent_type, version)): Path<(String, String, String)>,
 ) -> Response {
-    let id = match PackageId::new(&agent_type, &version) {
+    // Taking a Package out writes nothing to it, so an older non-SemVer one may leave too.
+    let id = match PackageId::load(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
@@ -2427,13 +2443,17 @@ struct PendingEnrolment {
     /// What `approve` and `reject` name: the SHA-256 fingerprint of the requested public key.
     id: String,
     arrived_ms: u64,
-    /// The address the request came from.
+    /// The address the request came from, on a direct connection.
     #[serde(skip_serializing_if = "Option::is_none")]
     peer: Option<String>,
+    /// The host of the Gateway the request came through, in place of a peer address (ADR-0039
+    /// clause 4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway: Option<String>,
     /// The SHA-256 fingerprint of the requested public key, hex — the Client logs the same value,
     /// so an operator can match a request to a host.
     key_fingerprint: String,
-    /// The six subject values of the bootstrap certificate the connection carried: what an
+    /// The six subject values of the bootstrap certificate the request proves: what an
     /// approval carries into the host certificate (ADR-0036 clause 5). The request's own subject
     /// is not listed, because it is neither trusted nor carried. Absent when that certificate's
     /// subject cannot be carried — `subject_refusal` then says why.
@@ -2462,7 +2482,7 @@ struct IssueBootstrapRequest {
     /// 1 to 90; 10 when absent. Cut to the bootstrap CA's end.
     #[serde(default)]
     validity_days: Option<u32>,
-    /// 4 to 128 characters without a control character. Required: the Server keeps a PKCS#12
+    /// 8 to 128 characters without a control character (ADR-0048). Required: the Server keeps a PKCS#12
     /// file of the certificate and its key under this password, to be downloaded until the
     /// certificate ends or is revoked; the key is never answered in PEM. The password is kept
     /// nowhere. Read as absent when it is missing, so the refusal names it.
@@ -2567,7 +2587,7 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
     request_body = IssueBootstrapRequest,
     responses(
         (status = 201, description = "Issued; the certificate, its key kept in the PKCS#12 file only", body = IssuedBootstrap),
-        (status = 400, description = "No organization, organizational_unit or password, a subject attribute this route does not know, a country that is not two upper-case letters, another value out of bounds, validity_days outside 1 to 90, or a password outside 4 to 128 characters", body = ErrorBody),
+        (status = 400, description = "No organization, organizational_unit or password, a subject attribute this route does not know, a country that is not two upper-case letters, another value out of bounds, validity_days outside 1 to 90, or a password outside 8 to 128 characters", body = ErrorBody),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "Enrolment is not configured", body = ErrorBody),
         (status = 409, description = "No bootstrap_ca_key_file is configured, the bootstrap CA has ended, or the record is full", body = ErrorBody),
@@ -2919,6 +2939,7 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
             id: p.id,
             arrived_ms: p.arrived_ms,
             peer: p.requester.peer.map(|ip| ip.to_string()),
+            gateway: p.requester.gateway.clone(),
             key_fingerprint: p.key_fingerprint,
             bootstrap_subject: p.requester.carried.clone().ok().map(Into::into),
             subject_refusal: p.requester.carried.err(),
@@ -2927,6 +2948,18 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
         })
         .collect();
     Json(pending).into_response()
+}
+
+/// The host of the Gateway a pending request came through, which every audit entry of it names
+/// (ADR-0039 clause 12).
+fn through_gateway(state: &AppState, id: &str) -> Option<String> {
+    state
+        .enrolment()?
+        .pending()
+        .into_iter()
+        .find(|pending| pending.id == id)?
+        .requester
+        .gateway
 }
 
 /// Approves one enrolment request: the client CA signs it, and the host is handed its certificate.
@@ -2948,12 +2981,15 @@ async fn approve_enrolment(
     _csrf: SameOrigin,
     Path(id): Path<String>,
 ) -> Response {
+    let gateway = through_gateway(&state, &id);
     match state.approve_enrolment(&id) {
         Ok(()) => {
             info!(request = %id, "enrolment request approved");
             note(
                 &state,
-                crate::audit::Entry::new("enrolment.approved", "approved").with("id", id.clone()),
+                crate::audit::Entry::new("enrolment.approved", "approved")
+                    .with("id", id.clone())
+                    .with("gateway", gateway),
             );
             StatusCode::NO_CONTENT.into_response()
         }
@@ -2999,12 +3035,15 @@ async fn reject_enrolment(
     let Some(enrolment) = state.enrolment() else {
         return enrolment_off();
     };
+    let gateway = through_gateway(&state, &id);
     match enrolment.reject(&id) {
         Ok(()) => {
             info!(request = %id, "enrolment request rejected");
             note(
                 &state,
-                crate::audit::Entry::new("enrolment.rejected", "rejected").with("id", id.clone()),
+                crate::audit::Entry::new("enrolment.rejected", "rejected")
+                    .with("id", id.clone())
+                    .with("gateway", gateway),
             );
             StatusCode::NO_CONTENT.into_response()
         }

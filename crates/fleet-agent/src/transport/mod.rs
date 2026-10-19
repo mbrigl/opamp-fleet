@@ -31,33 +31,88 @@ pub(crate) struct Upstream<'a> {
     pub config: &'a mut ClientConfig,
     pub shutdown: Shutdown,
     pub telemetry: &'a crate::telemetry::Telemetry,
+    /// An enrolment report was answered `BadRequest` on this run: the Client reports as a member
+    /// until an exchange fails, since the certificate it presents may be one an operator
+    /// provisioned rather than a bootstrap certificate.
+    pub enrolment_refused: bool,
+}
+
+/// Whether this Client enrols over plain HTTP (ADR-0039 clause 11): it holds no certificate the
+/// Server issued, it presents one — the bootstrap certificate, or one an operator provisioned,
+/// which it cannot tell apart — and its endpoint is `https://` or `http://`. It then sends one
+/// report, its certificate signing request and nothing else, which is what a Gateway relays for an
+/// enrolling peer and all a Server reads on an enrolment connection. Over WebSocket it enrols as
+/// before.
+fn enrols_over_http(config: &ClientConfig) -> bool {
+    !config.is_enrolled()
+        && (config.bootstrap_identity.is_some() || config.client_identity().is_some())
+        && (config.endpoint.starts_with("https://") || config.endpoint.starts_with("http://"))
+}
+
+impl Upstream<'_> {
+    fn enrolling(&self) -> bool {
+        !self.enrolment_refused && enrols_over_http(self.config)
+    }
+
+    /// The enrolment report, while this Client enrols over plain HTTP: the request in flight, or a
+    /// new one — whatever the Server has declared, since behind a Gateway nothing else reaches it.
+    fn enrolment(&mut self) -> Option<Vec<AgentToServer>> {
+        if !self.enrolling() {
+            return None;
+        }
+        let csr = crate::csr::request(self.config)?;
+        Some(self.engine.enrolment_report(csr).into_iter().collect())
+    }
 }
 
 impl Session for Upstream<'_> {
     fn connected(&mut self) -> Vec<AgentToServer> {
         self.engine.force_full_all();
+        if let Some(enrolment) = self.enrolment() {
+            return enrolment;
+        }
         self.engine.poll_reports()
     }
 
     fn routine(&mut self) -> Vec<AgentToServer> {
+        if let Some(enrolment) = self.enrolment() {
+            return enrolment;
+        }
         self.engine.poll_reports()
     }
 
     fn owed(&mut self) -> Vec<AgentToServer> {
+        // An enrolling Client owes nothing but its request, which the next poll re-sends.
+        if self.enrolling() {
+            return Vec::new();
+        }
         self.engine.owed_reports()
     }
 
     fn on_reply(&mut self, reply: &ServerToAgent) -> Option<Duration> {
+        if self.enrolling()
+            && reply.error_response.as_ref().is_some_and(|error| {
+                error.r#type == opamp::proto::ServerErrorResponseType::BadRequest as i32
+            })
+        {
+            tracing::warn!(
+                "the Server refused the enrolment request; reporting as a member until an \
+                 exchange fails"
+            );
+            self.enrolment_refused = true;
+        }
         self.engine.handle(reply).retry_after
     }
 
     async fn after_reply<S: ReportSink>(&mut self, sink: &mut S) -> AfterReply {
+        let enrolling = self.enrolling();
         after_reply(
             self.engine,
             self.config,
             &self.shutdown,
             self.telemetry,
             sink,
+            enrolling,
         )
         .await
     }
@@ -67,6 +122,8 @@ impl Session for Upstream<'_> {
     }
 
     fn exchange_failed(&mut self) {
+        // A refusal is judged again: a Gateway marked since, or a window opened, may take it now.
+        self.enrolment_refused = false;
         self.engine.force_full_all();
     }
 
@@ -100,12 +157,15 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 ///    package step just owed is the last thing this version says (ADR-0018). It ends the run, so
 ///    `AfterReply::End` means exactly this.
 /// 5. The self-Agent's Supervisor set (ADR-0017), whose retired Agents' goodbyes go out with it.
+///
+/// While `enrolling` over plain HTTP the request rides the enrolment report instead (ADR-0039).
 pub async fn after_reply<S: ReportSink>(
     engine: &mut Engine,
     config: &mut ClientConfig,
     shutdown: &Shutdown,
     telemetry: &crate::telemetry::Telemetry,
     sink: &mut S,
+    enrolling: bool,
 ) -> AfterReply {
     match process_connection_offer(engine, config, telemetry).await {
         OfferOutcome::Reconnect => return AfterReply::Reconnect,
@@ -120,7 +180,9 @@ pub async fn after_reply<S: ReportSink>(
     // request queued before it would ride the next connection and be signed a second time. A
     // request queued after an earlier reply has left already: an offer always owes a report, which
     // goes out before this runs on WebSocket and is the report the offer answers on plain HTTP.
-    engine.request_certificate(|| crate::csr::request(config));
+    if !enrolling {
+        engine.request_certificate(|| crate::csr::request(config));
+    }
     if flush_owed(engine, sink).await.is_err() {
         return AfterReply::ConnectionLost;
     }
@@ -417,6 +479,7 @@ pub async fn run(
         config,
         shutdown: shutdown.clone(),
         telemetry,
+        enrolment_refused: false,
     };
     Ok(
         match opamp::client::connection::run(&connection, &mut session, shutdown).await? {

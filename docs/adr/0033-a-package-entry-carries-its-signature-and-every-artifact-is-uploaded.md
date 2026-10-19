@@ -1,6 +1,6 @@
 # ADR-0033: A Package entry carries its own signature, every artifact is uploaded to the Server, and the Server checks a signature as feedback while the Agent's check decides
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clause 5 superseded by [ADR-0043](0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md)
 - **Date:** 2026-10-17
 - **Deciders:** Markus Brigl
 - **Applies to:** the entries and their signatures in `crates/fleet-server/src/packages.rs` and `crates/fleet-server/src/fs/packages.rs`, the signatures in `crates/fleet-server/src/deployments.rs`, the package and signature routes of `crates/fleet-server/src/api.rs`, the `[packages]` section and the `advertised_url` key of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, the Packages and Deployments tabs of the bundled UI in `crates/fleet-server/static/index.html`, the signing-file import, the download source rules and the `[packages]` section of `supervisor.toml` in `crates/fleet-agent/src/packages.rs` and `crates/fleet-agent/src/config.rs`, the Gateway's rule for what it caches in `crates/fleet-agent/src/gateway/cache.rs`, and every document that tells an operator how to add, sign or reference an artifact

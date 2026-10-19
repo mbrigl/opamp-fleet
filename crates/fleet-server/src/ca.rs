@@ -93,8 +93,7 @@ impl ClientCa {
         host: &str,
         subject: &SubjectValues,
     ) -> Result<Signed, String> {
-        let mut request = CertificateSigningRequestParams::from_pem(csr_pem)
-            .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+        let (_, mut request) = read(csr_pem)?;
         // The life starts now, less a few minutes for clocks that disagree: a start in the past
         // would put a fresh certificate into its renewal window at once (ADR-0021 clause 11), and
         // would lengthen what a stolen one is good for.
@@ -168,8 +167,9 @@ impl ClientCa {
     pub fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String> {
         use base64::Engine as _;
         use sha2::{Digest, Sha256};
-        let request = CertificateSigningRequestParams::from_pem(csr_pem)
-            .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+        // The proof and the key it covers come from the one request this CSR is (ADR-0021
+        // clause 27), and so does the key `sign` certifies.
+        let (csr_der, request) = read(csr_pem)?;
         let Some(encoded) = request
             .params
             .subject_alt_names
@@ -181,6 +181,13 @@ impl ClientCa {
         else {
             return Ok(None);
         };
+        // Neither proof stands beside the other (ADR-0039 clause 8).
+        if request.params.subject_alt_names.iter().any(|san| {
+            matches!(san, SanType::URI(uri)
+                if uri.as_str().starts_with(fleet_core::bootstrap_proof::URI_PREFIX))
+        }) {
+            return Err(BOTH_PROOFS.to_string());
+        }
         let refused = |why: &str| format!("the renewal proof does not hold: {why}");
         let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
@@ -196,11 +203,7 @@ impl ClientCa {
         if !old.validity().is_valid() {
             return Err(refused("its certificate is not valid now"));
         }
-        let csr_der = pem_der(csr_pem)?;
-        let (_, csr) =
-            x509_parser::certification_request::X509CertificationRequest::from_der(&csr_der)
-                .map_err(|_| refused("the request does not parse"))?;
-        let new_key = Sha256::digest(csr.certification_request_info.subject_pki.raw);
+        let new_key = Sha256::digest(requested_key(&csr_der)?);
         let statement = fleet_core::renewal::statement(&new_key);
         verify_with(old.public_key(), &statement, signature)
             .map_err(|()| refused("its signature does not verify with the certificate's key"))?;
@@ -211,6 +214,81 @@ impl ClientCa {
         self.validity_days
     }
 }
+
+/// The bootstrap certificate (DER) a CSR proves it enrols with, when it carries a bootstrap proof
+/// (ADR-0039 clauses 7, 8): the certificate must be valid now, and its key must have signed the
+/// request's own key. Which CA issued it and whether it is revoked are the caller's to check, against
+/// `[enrolment]` and the register. `Ok(None)` for a request that carries no proof.
+///
+/// # Errors
+/// Returns the `BadRequest` text for a proof that does not hold, and for a request that carries a
+/// renewal proof beside it.
+pub fn bootstrap_proof(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let csr_der = fleet_core::csr::der(csr_pem.as_bytes())?;
+    let Some(encoded) =
+        fleet_core::csr::requested_uri(&csr_der, fleet_core::bootstrap_proof::URI_PREFIX)?
+    else {
+        return Ok(None);
+    };
+    if fleet_core::csr::requested_uri(&csr_der, fleet_core::renewal::URI_PREFIX)?.is_some() {
+        return Err(BOTH_PROOFS.to_string());
+    }
+    let refused = |why: &str| format!("the bootstrap proof does not hold: {why}");
+    let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| refused("it is not base64url"))?;
+    let (der, signature) = fleet_core::bootstrap_proof::decode(&content)
+        .ok_or_else(|| refused("it does not parse"))?;
+    let (_, certificate) =
+        X509Certificate::from_der(der).map_err(|_| refused("its certificate does not parse"))?;
+    if !certificate.validity().is_valid() {
+        return Err(refused("its certificate is not valid now"));
+    }
+    let new_key = Sha256::digest(requested_key(&csr_der)?);
+    let statement = fleet_core::bootstrap_proof::statement(&new_key);
+    verify_with(certificate.public_key(), &statement, signature)
+        .map_err(|()| refused("its signature does not verify with the certificate's key"))?;
+    Ok(Some(der.to_vec()))
+}
+
+/// The certificate (DER) a CSR's bootstrap proof embeds, read without checking the proof.
+/// `Ok(None)` for a request without a proof.
+///
+/// # Errors
+/// Returns the `BadRequest` text for a request that is not one PEM block, or a proof that does not
+/// parse.
+pub fn bootstrap_proof_certificate(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
+    use base64::Engine as _;
+    let csr_der = fleet_core::csr::der(csr_pem.as_bytes())?;
+    let Some(encoded) =
+        fleet_core::csr::requested_uri(&csr_der, fleet_core::bootstrap_proof::URI_PREFIX)?
+    else {
+        return Ok(None);
+    };
+    let unparsed = || "the bootstrap proof does not hold: it does not parse".to_string();
+    let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| unparsed())?;
+    let (der, _) = fleet_core::bootstrap_proof::decode(&content).ok_or_else(unparsed)?;
+    X509Certificate::from_der(der).map_err(|_| unparsed())?;
+    Ok(Some(der.to_vec()))
+}
+
+/// The issuer and serial of the certificate (DER) `der`, or `None` when it does not parse.
+#[must_use]
+pub fn cert_id(der: &[u8]) -> Option<CertId> {
+    let (_, certificate) = X509Certificate::from_der(der).ok()?;
+    Some(CertId::new(
+        certificate.issuer().as_raw(),
+        &hex::encode(certificate.raw_serial()),
+    ))
+}
+
+/// What a CSR carrying both proofs is answered (ADR-0039 clause 8).
+pub const BOTH_PROOFS: &str =
+    "the certificate signing request carries both a renewal proof and a bootstrap proof";
 
 /// 16 bytes from the system's secure random source, the top bit cleared so the serial is a
 /// positive integer (RFC 5280 §4.1.2.2).
@@ -233,6 +311,12 @@ pub fn facts(der: &[u8]) -> Result<Facts, String> {
     use sha2::{Digest, Sha256};
     let (_, cert) = X509Certificate::from_der(der)
         .map_err(|e| format!("the certificate does not parse: {e}"))?;
+    // RFC 5280 4.1.2.2: at most 20 octets, the length the register and every Gateway's list are
+    // bounded on (Q-2). A certificate with a longer serial — only a foreign CA could issue one —
+    // is not taken.
+    if cert.raw_serial().len() > crate::revocation::MAX_SERIAL_HEX / 2 {
+        return Err("the certificate's serial is longer than 20 octets".to_string());
+    }
     let not_after = cert.validity().not_after.timestamp();
     let host = cert
         .subject_alternative_name()
@@ -393,8 +477,7 @@ fn distinguished_name(
 /// # Errors
 /// Returns the `BadRequest` text for a request that does not parse or claims another identity.
 pub fn check_claims(csr_pem: &str, sender: &[u8]) -> Result<(), String> {
-    let request = CertificateSigningRequestParams::from_pem(csr_pem)
-        .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+    let (_, request) = read(csr_pem)?;
     let mut values: Vec<String> = request
         .params
         .distinguished_name
@@ -406,6 +489,11 @@ pub fn check_claims(csr_pem: &str, sender: &[u8]) -> Result<(), String> {
             SanType::DnsName(name) => values.push(name.as_str().to_string()),
             // A renewal proof is base64 this project wrote, never a claim (ADR-0021).
             SanType::URI(uri) if uri.as_str().starts_with(fleet_core::renewal::URI_PREFIX) => {}
+            // So is a bootstrap proof (ADR-0039).
+            SanType::URI(uri)
+                if uri
+                    .as_str()
+                    .starts_with(fleet_core::bootstrap_proof::URI_PREFIX) => {}
             SanType::URI(uri) => values.push(uri.as_str().to_string()),
             SanType::Rfc822Name(mail) => values.push(mail.as_str().to_string()),
             _ => {}
@@ -466,11 +554,25 @@ fn uuid_claims(value: &str) -> Vec<[u8; 16]> {
     claims
 }
 
-/// The DER of a PEM block.
-fn pem_der(pem: &str) -> Result<Vec<u8>, String> {
-    let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
-        .map_err(|e| format!("the certificate signing request is not PEM: {e}"))?;
-    Ok(block.contents)
+/// A PEM certificate signing request, decoded once and strictly ([`fleet_core::csr::der`]): its
+/// DER, and what rcgen reads from those bytes — the request's self-signature verified. Every proof,
+/// claim, and signed key is read from one request this way, never through a second PEM reader.
+///
+/// # Errors
+/// Returns the `BadRequest` text for a request that is not exactly one PEM block, does not parse,
+/// or whose signature does not verify.
+fn read(csr_pem: &str) -> Result<(Vec<u8>, CertificateSigningRequestParams), String> {
+    let der = fleet_core::csr::der(csr_pem.as_bytes())?;
+    let request = CertificateSigningRequestParams::from_der(&der.as_slice().into())
+        .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+    Ok((der, request))
+}
+
+/// The SubjectPublicKeyInfo (DER) a certificate signing request (DER) asks to be certified.
+fn requested_key(csr_der: &[u8]) -> Result<Vec<u8>, String> {
+    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(csr_der)
+        .map_err(|_| "the certificate signing request does not parse".to_string())?;
+    Ok(csr.certification_request_info.subject_pki.raw.to_vec())
 }
 
 /// Verifies `signature` over `message` with the key of `spki`: ECDSA P-256 or P-384 with the
@@ -524,8 +626,7 @@ pub fn enrolment_request(
 ) -> Result<crate::enrolment::Request, String> {
     use rcgen::PublicKeyData as _;
     use sha2::{Digest, Sha256};
-    let request = CertificateSigningRequestParams::from_pem(csr_pem)
-        .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+    let (_, request) = read(csr_pem)?;
     let subject = match request
         .params
         .distinguished_name
@@ -578,6 +679,12 @@ impl crate::fleet::CertificateSigner for ClientCa {
 
     fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String> {
         ClientCa::renewal_proof(self, csr_pem)
+    }
+
+    fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String> {
+        Ok(bootstrap_proof_certificate(csr_pem)?
+            .as_deref()
+            .and_then(cert_id))
     }
 
     fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
@@ -771,6 +878,24 @@ mod tests {
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let cert = params.self_signed(&key).expect("self-signed ca");
         (cert.pem(), key.serialize_pem())
+    }
+
+    /// A certificate whose serial is longer than RFC 5280's 20 octets is not taken; one of 20 is.
+    /// Verifies: Q-2
+    #[test]
+    fn a_certificate_with_a_serial_past_twenty_octets_is_not_taken() {
+        let with_serial = |octets: usize| {
+            let key = KeyPair::generate().expect("key");
+            let mut params =
+                rcgen::CertificateParams::new(vec!["edge".to_string()]).expect("params");
+            let mut serial = vec![0x11; octets];
+            serial[0] = 0x01;
+            params.serial_number = Some(rcgen::SerialNumber::from(serial));
+            params.self_signed(&key).expect("cert").der().to_vec()
+        };
+        assert!(facts(&with_serial(20)).is_ok());
+        let refused = facts(&with_serial(21)).expect_err("21 octets");
+        assert!(refused.contains("20 octets"), "{refused}");
     }
 
     fn csr(common_name: &str) -> String {
@@ -968,8 +1093,8 @@ mod tests {
             .sign(&hostile_csr(), "host-1", &SubjectValues::default())
             .expect("issued")
             .pem;
-        let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
-        let cert = pem.parse_x509().expect("der");
+        let der = cert_der(&issued);
+        let (_, cert) = X509Certificate::from_der(&der).expect("der");
 
         // Absent basic constraints means non-CA, which is fine; present, it must say non-CA.
         if let Some(bc) = cert
@@ -1011,8 +1136,8 @@ mod tests {
             .sign(&csr("edge-01"), "host-1", &SubjectValues::default())
             .expect("issued")
             .pem;
-        let (_, pem) = x509_parser::pem::parse_x509_pem(issued.as_bytes()).expect("pem");
-        let cert = pem.parse_x509().expect("der");
+        let der = cert_der(&issued);
+        let (_, cert) = X509Certificate::from_der(&der).expect("der");
         let now = time::OffsetDateTime::now_utc();
         let not_before = cert.validity().not_before.to_datetime();
         let not_after = cert.validity().not_after.to_datetime();
@@ -1171,7 +1296,7 @@ mod tests {
         use rcgen::{PublicKeyData as _, SigningKey as _};
         use sha2::{Digest, Sha256};
         let new_key = KeyPair::generate().expect("new key");
-        let old_der = pem_der(old_cert_pem).expect("der");
+        let old_der = cert_der(old_cert_pem);
         let signature = old_key
             .sign(&fleet_core::renewal::statement(&Sha256::digest(
                 new_key.subject_public_key_info(),
@@ -1227,7 +1352,7 @@ mod tests {
                 &SubjectValues::default(),
             )
             .expect("sign");
-        let renewed_der = pem_der(&renewed.pem).expect("der");
+        let renewed_der = cert_der(&renewed.pem);
         let (_, cert) = X509Certificate::from_der(&renewed_der).expect("parse");
         let names = cert
             .subject_alternative_name()
@@ -1267,6 +1392,125 @@ mod tests {
         assert!(ca.renewal_proof(&renewing(&foreign.pem, &old_key)).is_err());
     }
 
+    /// The DER of a PEM certificate.
+    fn cert_der(pem: &str) -> Vec<u8> {
+        opamp::tls::certificates(pem.as_bytes()).expect("pem")[0].to_vec()
+    }
+
+    /// `victim`'s proof, copied into a request of a key of the attacker's own.
+    fn grafted(victim: &str) -> String {
+        let victim = fleet_core::csr::der(victim.as_bytes()).expect("victim");
+        let proof = CertificateSigningRequestParams::from_der(&victim.as_slice().into())
+            .expect("victim")
+            .params
+            .subject_alt_names;
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.subject_alt_names = proof;
+        params
+            .serialize_request(&KeyPair::generate().expect("attacker key"))
+            .expect("csr")
+            .pem()
+            .expect("pem")
+    }
+
+    /// A request is read from exactly one PEM block. A proof copied from another host's renewal
+    /// request into one of the attacker's, with that request after it — behind a prefix one PEM
+    /// reader skips and another does not, or as a second block — is refused on every path, never
+    /// read as the victim's proof over the attacker's key; and the copy alone does not hold.
+    /// Verifies: ADR-0021
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_proof_and_the_key_it_signs_come_from_one_pem_block() {
+        let ca = client_ca(30);
+        let old_key = KeyPair::generate().expect("old key");
+        let old = ca
+            .sign(
+                &rcgen::CertificateParams::new(Vec::<String>::new())
+                    .expect("params")
+                    .serialize_request(&old_key)
+                    .expect("csr")
+                    .pem()
+                    .expect("pem"),
+                "host-7",
+                &SubjectValues::default(),
+            )
+            .expect("sign");
+        let victim = renewing(&old.pem, &old_key);
+        let attacker = grafted(&victim);
+        let copy = ca.renewal_proof(&attacker).expect_err("a copied proof");
+        assert!(copy.contains("does not verify"), "{copy}");
+
+        for crafted in [
+            format!("x{attacker}{victim}"),
+            format!("{attacker}{victim}"),
+        ] {
+            let refusals = [
+                ca.renewal_proof(&crafted).map(|_| ()),
+                ca.sign(&crafted, "host-7", &SubjectValues::default())
+                    .map(|_| ()),
+                check_claims(&crafted, &[]),
+                enrolment_request(&crafted, &[]).map(|_| ()),
+                bootstrap_proof(&crafted).map(|_| ()),
+                bootstrap_proof_certificate(&crafted).map(|_| ()),
+            ];
+            for refused in refusals {
+                let why = refused.expect_err("read past its first block");
+                assert!(why.contains("exactly one PEM block"), "{why}");
+            }
+        }
+    }
+
+    /// No code of the Server, of `fleet-core` or of the Gateway — its tests included — reads PEM
+    /// with a reader of its own but `fleet_core::csr::der`: a request is decoded there alone, so
+    /// two readers cannot read two requests from one. A certificate's PEM is read by
+    /// `opamp::tls::certificates`, which no request reaches.
+    /// Verifies: ADR-0021
+    #[test]
+    fn no_code_reads_a_request_through_another_pem_reader() {
+        fn walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("src") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        // Split, so that this test does not find itself.
+        let readers = [
+            concat!("CertificateSigningRequestParams", "::from_pem"),
+            concat!("x509_parser", "::pem"),
+            concat!("parse_x509", "_pem"),
+            concat!("Pem", "::read"),
+            concat!("pem", "::parse"),
+            concat!("from_pem", "_slice"),
+        ];
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates");
+        let the_reader = crates.join("fleet-core/src/csr.rs");
+        let mut files = Vec::new();
+        for tree in [
+            "fleet-server/src",
+            "fleet-core/src",
+            "fleet-agent/src/gateway",
+        ] {
+            walk(&crates.join(tree), &mut files);
+        }
+        assert!(files.contains(&the_reader), "{files:#?}");
+        let mut broken = Vec::new();
+        for file in files.iter().filter(|file| **file != the_reader) {
+            let code = std::fs::read_to_string(file).expect("read");
+            for reader in readers {
+                if code.contains(reader) {
+                    broken.push(format!("{}: {reader}", file.display()));
+                }
+            }
+        }
+        assert!(broken.is_empty(), "{broken:#?}");
+    }
+
     /// Writes a CA's files and the `[enrolment]` naming them.
     fn enrolment_with(
         dir: &std::path::Path,
@@ -1278,6 +1522,7 @@ mod tests {
         crate::config::EnrolmentConfig {
             bootstrap_ca_file: dir.join("bootstrap-ca.pem"),
             bootstrap_ca_key_file: Some(dir.join("bootstrap-ca-key.pem")),
+            max_pending_per_bootstrap: crate::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
         }
     }
 

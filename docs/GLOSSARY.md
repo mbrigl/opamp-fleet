@@ -26,6 +26,9 @@ ones it uses without defining.
 - **Entry** — one platform's artifact in a Package: operating system and architecture, content hash,
   size and signature.
   _Avoid:_ file, asset, build.
+- **High-water mark** — the highest Package version a Client has installed for one Agent type; a
+  Supervisor of that type refuses any offer below it.
+  _Avoid:_ floor, minimum version.
 - **Blob** — the bytes of an Entry's artifact as the Server stores them, named by their SHA-256;
   identical bytes are one blob, whichever Entries name it.
   _Avoid:_ artifact file, binary.
@@ -38,5 +41,8 @@ ones it uses without defining.
 - **Enrolment** — the time-limited, operator-approved exchange in which a host holding a bootstrap
   certificate obtains its client certificate and becomes a Host.
   _Avoid:_ registration, onboarding, enrollment.
+- **Enrolling peer** — a peer of a Gateway whose certificate chains to the bootstrap CA alone; the
+  Gateway relays one plain-HTTP enrolment request of it and nothing else.
+  _Avoid:_ bootstrap client, enrolling Agent.
 - **Rollout** — the explicit act that releases a Deployment to Agents and pins what each receives.
   _Avoid:_ publish, push, deploy.

@@ -13,6 +13,10 @@ name: Release
 # is also a valid package artifact for a fleet self-update (ADR-0026, ADR-0018) — the file an operator
 # downloads is the file they hand the Server. The operator tool's archives are not packages of the
 # fleet: they are downloaded, never uploaded (ADR-0028 clause 19).
+#
+# Every published asset is a subject of one build-provenance attestation, made and verified in
+# `publish` before the release exists, and each shipped program has a CycloneDX SBOM per target
+# beside its archive (ADR-0045).
 
 on:
   workflow_dispatch:
@@ -55,7 +59,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@0.20.2
       - name: No known advisory in the dependency graph
@@ -183,6 +187,58 @@ jobs:
           # The name carries the base version; the full string, build metadata and all, is what an
           # operator must type into `?version=` for a self-update to pass its probe.
           echo "full=$full" >> "$GITHUB_OUTPUT"
+
+  # ADR-0045: one CycloneDX SBOM per shipped program and target, from the lockfile the build uses.
+  # A job of its own: the dependency graph of a target needs no runner of that target, and the tool
+  # is installed once. It runs on a dry run too, with the top-level read-only token, no kept
+  # credentials and no cache.
+  sbom:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the SBOM tool
+        # An exact version, raised by a reviewed commit: the SBOM ships beside the binaries.
+        run: cargo install --locked cargo-cyclonedx@0.5.9
+      - name: Write the SBOMs
+        run: |
+          set -euo pipefail
+          v='${{ needs.version.outputs.version }}'
+          # <package dir> <bin> <stem>: keep one binary's SBOM under its archive's stem.
+          keep() {
+            mv "$1/$2_bin.cdx.json" "$3.cdx.json"
+            sha256sum "$3.cdx.json" > "$3.cdx.json.sha256"
+          }
+          # The rows of the build matrix: target, os, arch, operator_tool. One run per target
+          # writes `<bin>_bin.cdx.json` beside the Cargo.toml of every workspace member, one per
+          # binary, with the default features the release builds with; the two that ship are kept
+          # and the rest (the Server, the test stubs) are removed before the next target.
+          while read -r triple os arch tool; do
+            cargo cyclonedx --describe binaries --target "$triple" --format json --spec-version 1.5
+            keep crates/fleet-agent supervisor "${ARTIFACT}_${v}_${os}_${arch}"
+            if [ "$tool" = true ]; then
+              keep crates/fleet-tools opamp-fleetctl "${OPERATOR_TOOL}_${v}_${os}_${arch}"
+            fi
+            rm -f crates/*/*_bin.cdx.json
+          done <<'EOF'
+          x86_64-unknown-linux-gnu linux amd64 true
+          aarch64-unknown-linux-gnu linux arm64 true
+          aarch64-apple-darwin darwin arm64 true
+          x86_64-apple-darwin darwin amd64 true
+          x86_64-pc-windows-msvc windows amd64 false
+          EOF
+          # The SBOMs describe the committed lockfile, not one cargo rewrote on the way.
+          git diff --exit-code Cargo.lock
+          ls -l ./*.cdx.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: |
+            *.cdx.json
+            *.cdx.json.sha256
+          if-no-files-found: error
 
   build:
     needs: version
@@ -343,6 +399,11 @@ jobs:
           # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
           grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
           grep -qF 'rm -rf "$data_root"' <<<"$scripts"
+          # ADR-0042 clause 5: the account is created, a first registration names it, and the
+          # package requires what creates it.
+          grep -q 'useradd --system' <<<"$scripts"
+          grep -q -- '--run-as opamp-fleet' <<<"$scripts"
+          rpm -qp --requires "$STEM.rpm" | grep -q '^/usr/sbin/useradd'
           # And the arch inside the package is the ecosystem's, not the file name's (ADR-0019).
           test "$(rpm -qp --qf '%{ARCH}' "$STEM.rpm")" = "$([ '${{ matrix.arch }}' = amd64 ] && echo x86_64 || echo aarch64)"
 
@@ -399,12 +460,19 @@ jobs:
           if-no-files-found: error
 
   publish:
-    # A dry run builds and packs everything and stops here.
+    # A dry run builds and packs everything and stops here, so it attests nothing (ADR-0045).
     if: needs.version.outputs.publish == 'true'
-    needs: [version, build]
+    needs: [version, build, sbom]
     runs-on: ubuntu-latest
+    # The only job that may attest (ADR-0045 clause 5). It checks out no code and builds nothing;
+    # its only actions are download-artifact and attest, and every other step is shell and gh.
     permissions:
+      # Creating the release and uploading its assets.
       contents: write
+      # The short-lived Sigstore certificate the attestation is signed with.
+      id-token: write
+      # Storing the attestation in the repository's attestation store, and reading it back.
+      attestations: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -416,6 +484,31 @@ jobs:
           cat *.sha256 | sort -k2 > SHA256SUMS
           rm -f *.sha256
           ls -l
+      # ADR-0045: one SLSA build-provenance attestation over every published asset, SHA256SUMS
+      # included, its digests computed from the files themselves.
+      - name: Attest the assets
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.msi
+            artifacts/*.cdx.json
+            artifacts/SHA256SUMS
+      # Nothing is published that does not verify as an operator will verify it (ADR-0045 clause 7).
+      - name: Every asset verifies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+          for f in *.tar.gz *.deb *.rpm *.msi *.cdx.json SHA256SUMS; do
+            gh attestation verify "$f" --repo "${{ github.repository }}" \
+              --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
+              --deny-self-hosted-runners > /dev/null
+            echo "verified $f"
+          done
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -425,14 +518,15 @@ jobs:
           Client ${{ needs.version.outputs.version }} for Linux, macOS and Windows, and the operator tool
           \`${{ env.OPERATOR_TOOL }}\` for Linux and macOS.
 
-          The assets come in three kinds, and picking the wrong one is the only way to get this wrong
-          (ADR-0019, ADR-0028):
+          The assets come in four kinds, and picking the wrong one is the only way to get this wrong
+          (ADR-0019, ADR-0028, ADR-0045):
 
           | you want to | take |
           |---|---|
           | install this on a host | the \`.deb\`, \`.rpm\` or \`.msi\` |
           | update a fleet from its Server | the \`${{ env.ARTIFACT }}_*.tar.gz\` |
           | make the fleet's certificates, a signing key and signed packages | the \`${{ env.OPERATOR_TOOL }}_*.tar.gz\` for your machine |
+          | check what a binary is built from | the \`<stem>.cdx.json\` |
 
           ## The operator tool
 
@@ -455,6 +549,27 @@ jobs:
           \`${{ env.OPERATOR_TOOL }} pki <command> …\` with the same options; the Server keeps
           \`server pki status --config\`. A script that uploads a release's \`*_<version>_*.tar.gz\`
           now also catches the operator tool's archives: select \`${{ env.ARTIFACT }}_<version>_*.tar.gz\`.
+
+          ## Verifying a download
+
+          Every asset is a subject of one build-provenance attestation, made by this repository's
+          release workflow on a GitHub-hosted runner and recorded in the public Sigstore log
+          (ADR-0045). Verify \`SHA256SUMS\` with the GitHub CLI, then every file you downloaded
+          against it:
+
+          \`\`\`console
+          gh attestation verify SHA256SUMS --repo ${{ github.repository }} \\
+            --signer-workflow ${{ github.repository }}/.github/workflows/release.yml
+          sha256sum -c --ignore-missing SHA256SUMS   # shasum -a 256 -c on macOS
+          \`\`\`
+
+          The same \`gh attestation verify <file>\`, with the same two options, checks any single asset
+          directly.
+
+          Each \`<stem>.cdx.json\` is the CycloneDX SBOM of the program in \`<stem>.tar.gz\` and of the
+          installers of the same stem, for that target: every crate the binary is built from, from the
+          committed lockfile. Feed it to your vulnerability scanner. A script that downloads
+          \`${{ env.ARTIFACT }}_<version>_*\` without an extension now also picks up the SBOMs.
 
           ## Installing on a host
 
@@ -547,10 +662,10 @@ jobs:
           \`\`\`
 
           The installers carry no code signature: Windows will show an unknown publisher, and \`rpm\` reports no
-          signature. \`SHA256SUMS\` covers every asset above.
+          signature. Every asset is attested, and \`SHA256SUMS\` covers every asset above.
           EOF
           gh release create "version/${{ needs.version.outputs.version }}" \
             --repo "${{ github.repository }}" \
             --title "${{ needs.version.outputs.version }}" \
             --notes-file notes.md \
-            *.tar.gz *.deb *.rpm *.msi SHA256SUMS
+            *.tar.gz *.deb *.rpm *.msi *.cdx.json SHA256SUMS

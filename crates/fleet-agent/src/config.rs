@@ -45,10 +45,11 @@ pub struct ClientConfig {
     /// Managed Processes' programs somewhere `state_dir` cannot go — off a `noexec` mount, or
     /// onto a volume sized for a few hundred megabytes of agent rather than for state.
     pub supervisor_dir: Option<PathBuf>,
-    /// Operator-defined attributes (ADR-0023), reported as non-identifying attributes of **every**
-    /// Agent this Client presents — machine-level tags like `env = "prod"` that Selectors can
-    /// match. A `[[supervisor]]` block's own `attributes` override these per key; attributes the
-    /// code or the Managed Process reports win over configured ones.
+    /// Operator-defined attributes (ADR-0041 clause 2), reported as non-identifying attributes of
+    /// **every** Agent this Client presents — machine-level tags like `env = "prod"` that
+    /// Selectors can match. Attributes the code reports win over configured ones; a configured one
+    /// stands against whatever a Managed Process reports. A `[[supervisor]]` block carrying its own
+    /// `attributes` fails at startup: tagging one Agent is a Server label's job.
     #[serde(default)]
     pub attributes: BTreeMap<String, String>,
     /// Optional Gateway Mode (ADR-0015); absent means this Client gateways for nobody.
@@ -759,6 +760,11 @@ pub struct GatewayTlsConfig {
     /// PEM bundle a downstream Agent's client certificate must chain to, required (ADR-0015): a
     /// peer without one fails the handshake. An `Option` only so its absence can be named.
     pub client_ca_file: Option<PathBuf>,
+    /// The public certificate of the Server's `[enrolment] bootstrap_ca_file`, optional (ADR-0039
+    /// clause 1): a peer whose certificate chains to it alone passes the handshake as an enrolling
+    /// peer, which may relay one plain-HTTP enrolment request and nothing else.
+    #[serde(default)]
+    pub bootstrap_ca_file: Option<PathBuf>,
 }
 
 impl GatewayConfig {

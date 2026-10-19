@@ -1,7 +1,10 @@
 # OpAMP Fleet
 
+[![Release](https://img.shields.io/github/v/release/mbrigl/opamp-fleet?display_name=release&label=release)](https://github.com/mbrigl/opamp-fleet/releases/latest)
 [![CI](https://github.com/mbrigl/opamp-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/ci.yml)
 [![Checks](https://github.com/mbrigl/opamp-fleet/actions/workflows/checks.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/checks.yml)
+[![Audit](https://github.com/mbrigl/opamp-fleet/actions/workflows/audit.yml/badge.svg)](https://github.com/mbrigl/opamp-fleet/actions/workflows/audit.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 **OpAMP Fleet** is a Rust implementation of OpenTelemetry [OpAMP](https://opentelemetry.io/docs/specs/opamp/)-based
 fleet management: an API-first **Server** that manages a fleet over the protocol and exposes an
@@ -180,7 +183,13 @@ macOS and release-builds the Client for Linux, Windows, and macOS and the Server
 `version/*` tag from it before it builds — so bumping the version is an ordinary reviewed commit and
 nobody types a tag. Running it publishes one archive per platform,
 `supervisor_<version>_<os>_<arch>.tar.gz` for Linux, macOS and Windows on the architectures each
-ships on, plus a `SHA256SUMS` file. The files are named after the **Set** an operator uploads them
+ships on, a CycloneDX SBOM `<stem>.cdx.json` beside each archive of the Client and of the operator
+tool, and a `SHA256SUMS` file. Every asset is a subject of one build-provenance attestation, which
+the workflow verifies before it creates the release
+([ADR-0045](docs/adr/0045-every-release-asset-carries-a-provenance-attestation-and-every-program-an-sbom.md));
+an operator checks a download with
+`gh attestation verify SHA256SUMS --repo mbrigl/opamp-fleet --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml`
+and then `sha256sum -c --ignore-missing SHA256SUMS`. The files are named after the **Set** an operator uploads them
 to, not after the product inside them
 ([ADR-0019](docs/adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)) — and the program inside them and its configuration
 file are called `supervisor` too. The dpkg/rpm/MSI package and the service carry
@@ -337,7 +346,10 @@ What still needs a human, per platform: starting at **boot** (a runner never reb
 (`journalctl -u opamp-fleet` on Linux, Console/`log show` on macOS), the Agent in
 the fleet UI, and an **SELinux-enforcing host** (Fedora, RHEL, or SUSE 16 with `getenforce`
 answering `Enforcing`): the `.rpm` install must start — a service dying with `status=203/EXEC` and
-an AVC denial in `ausearch -m avc` is the failure ADR-0019 clause 8 exists to prevent. Known platform gaps (tracked in the ADR):
+an AVC denial in `ausearch -m avc` is the failure ADR-0019 clause 8 exists to prevent. Each wrapped
+kind — Telegraf, Icinga 2 with its plugins, GLPI Agent with its tasks — under the packaged account
+`opamp-fleet` and under `--run-as root`: it starts, reports, and its `sudo` or setuid helpers still
+work ([ADR-0042](docs/adr/0042-the-linux-packages-run-the-client-under-its-own-account.md)). Known platform gaps (tracked in the ADR):
 launchd `status` is advisory and `install` does not auto-start there. The SCM still discards a
 Windows service's stderr, but the service now writes its own rotating log under
 `<state_dir>/logs` on every platform (ADR-0019), which is where to look when the manager shows a

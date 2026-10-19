@@ -47,8 +47,8 @@ puts things, and every configuration key.
 - **Applies received Configurations**: writes each entry to disk under its Configuration's name,
   points the process at it, and reports the configuration applied or failed with the hash it
   applied.
-- **Reports health, effective configuration, and version** of each Managed Process, and relays what
-  a Collector carrying the `opampextension` reports about itself.
+- **Reports health, effective configuration, and version** of each Managed Process, and relays the
+  `service.*` attributes a Collector carrying the `opampextension` reports about itself.
 - **Installs Server-offered packages** over a Managed Process's binary — signed, verified,
   health-gated, and rolled back if the new version will not stay up. It takes packages only while
   `[packages] verification_key` is set.
@@ -223,7 +223,9 @@ and a Package assigned to any Agent is immutable. In full: [Package updates](#pa
 **Versions.** An Agent reports two numbers that can disagree — the version its package record claims
 and the version the program says it is. A Package must move the Agent forward from the **lower** of
 the two and never below what the record claims, so each number is used only in the direction it is
-trustworthy for. A version that cannot be ordered blocks nothing on its own.
+trustworthy for. A version an Agent reports that cannot be ordered blocks nothing on its own. A
+Package's own version is SemVer, and a Supervisor takes nothing below the highest version this
+Client has installed for its type: [A Supervisor never goes back](#a-supervisor-never-goes-back).
 
 **Updating itself.** The same machinery, with two differences that exist because the thing being
 replaced is the thing doing the replacing: the staged binary is asked what version it is before
@@ -306,24 +308,53 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 | `--data-root <dir>` | `service install`, `service config` | The data root — `supervisor.toml` and `state/` — when it is to differ from the layout root. A packaged install, the MSI included, passes neither flag and takes the platform defaults. |
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess, write or edit the configuration file, and enrol a host that holds no certificate yet, before registering the service. See below. |
 | `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file untouched. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: it takes them from [beside the program](#files-beside-the-program), or they are files the operator names in the file. |
-| `--run-as <account>` | `service install` | Run the service as this account instead of root/`LocalSystem`, and hand its files over to it. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
+| `--run-as <account>` | `service install` | Run the service as this account, and hand its files over to it. Without it, a re-registration keeps the account the existing registration names. `--run-as root` chooses root. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
 
 ### Running it under its own account
 
-By default the system service runs as root (systemd, launchd) or `LocalSystem` (Windows).
-`--run-as` drops that:
-the service — and every Managed Process its Supervisors spawn — runs as the account you name, and
-the install hands its files over to it: the configuration file, the state directory, **and the
-executable layout**. The layout too because
-the self-update runs *inside* the service — a layout the account cannot write would silently end
-[server-driven updates](#updating-the-client-itself) for that host.
+The system service — and every Managed Process its Supervisors spawn — runs as one account, and the
+install hands its files over to it: the configuration file, the state directory, **and the
+executable layout**. The layout too because the self-update runs *inside* the service — a layout the
+account cannot write would silently end [server-driven updates](#updating-the-client-itself) for
+that host. The account is the most a Server-delivered command, such as a Telegraf `inputs.exec`,
+reaches on the host.
 
-On Linux and macOS the account must already exist; the install refuses early if it does not:
+Which account it is:
+
+| `service install` … | runs as |
+|---|---|
+| `--run-as <account>` | that account |
+| `--run-as root` (Linux, macOS) | root, written as `User=root` / `UserName` `root`, so the next re-registration keeps root |
+| no flag, the unit or plist names an account | that account, kept |
+| no flag, the unit names none, the data root belongs to an account | the data root's owner, and the install says so |
+| no flag, first registration | root (systemd, launchd), `LocalSystem` (Windows) |
+
+The Linux packages create the account `opamp-fleet` and name it on a first installation — see
+[Installing from a native package](#installing-from-a-native-package). A re-registration reads the
+account from the file the Client wrote, `/etc/systemd/system/opamp-fleet.service` or
+`/Library/LaunchDaemons/opamp-fleet.plist`, not from a drop-in. Windows keeps the logon account the
+SCM holds. The install prints the account and where it came from:
 
 ```console
-# useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin opamp-fleet
+# opamp-fleet service install
+installed opamp-fleet
+  …
+  runs as:   opamp-fleet (kept from /etc/systemd/system/opamp-fleet.service)
+```
+
+On Linux and macOS the account must already exist, named or kept; the install refuses before it
+writes anything if it does not, and names the file a kept account came from. The binary never
+creates an account:
+
+```console
+# useradd --system --user-group --no-create-home --home-dir /var/lib/opamp-fleet \
+    --shell /usr/sbin/nologin opamp-fleet
 # opamp-fleet service install --run-as opamp-fleet
 ```
+
+The hand-over never follows a link: each directory is opened as itself and re-owned through that
+handle, a symbolic link is re-owned as a link, and a file with a second hard link is left as it is
+and named in a warning.
 
 On Windows only **passwordless** account forms are accepted — there is deliberately no password
 flag: a flag stands in the shell history and the process list. The recommended form is the service's
@@ -345,11 +376,51 @@ Two consequences to weigh before using it:
 - **The account is a trust boundary.** Whoever holds it can replace the binary in the layout, and
   the packaged `/usr/bin/opamp-fleet` symlink resolves through that layout's `current`
   pointer — an administrator invoking the CLI executes account-owned code.
-- **The account's limits are the fleet's.** Anything under this Client that needs a port below
-  1024 or root-only telemetry sources will fail — that trade-off is the point of the flag.
+- **The account's limits are the fleet's.** Under an account other than root, GLPI Agent's full
+  inventory and its Deploy task, a Telegraf input without a `sudo` rule, a listener on a port below
+  1024, and a log receiver reading `root:adm` files fail — that trade-off is the point. Grant what
+  is missing (a `sudoers` entry, `usermod -aG adm opamp-fleet`, or a drop-in, below), or choose
+  root with `opamp-fleet service install --run-as root`.
 
-Re-running `install` with a different `--run-as` re-registers and re-owns the same directories;
-without the flag it registers exactly as before — root/`LocalSystem`, no handover.
+Re-running `install` with a different `--run-as` re-registers and re-owns the same directories.
+Without the flag it keeps the account; a plain re-install does not return a host to root.
+
+#### The systemd unit, and what a drop-in adds
+
+On Linux the Client writes its system unit itself. It quotes every word of `ExecStart=`, so a root
+holding a space, a `%` or a `$` works, and it carries only the sandboxing that leaves `sudo`,
+setuid helpers and every supported agent working. Most of systemd's sandboxing directives set
+`no_new_privs` for a unit that does not run as root, and with it set `sudo` and every setuid
+helper stop working for the service and every Managed Process.
+
+| unit runs as | carries |
+|---|---|
+| any account | `ProtectControlGroups=yes` |
+| root | also `ProtectKernelTunables=yes`, `LockPersonality=yes`, `RestrictRealtime=yes` |
+
+`NoNewPrivileges=`, `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`, `CapabilityBoundingSet=` and
+the rest are left out, because a supported agent needs what each takes away. A re-registration
+rewrites the unit; `service install` never touches `/etc/systemd/system/opamp-fleet.service.d/`, so
+what a host can take, or must not have, goes into a drop-in there and survives every upgrade:
+
+```ini
+# /etc/systemd/system/opamp-fleet.service.d/host.conf
+[Service]
+# Nothing on this host uses sudo or a setuid helper:
+NoNewPrivileges=yes
+# A receiver listens on a port below 1024:
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Log files readable by group adm:
+SupplementaryGroups=adm
+```
+
+```console
+# systemctl daemon-reload && systemctl restart opamp-fleet
+```
+
+A drop-in that removes a directive the unit sets assigns it its default, for example
+`ProtectKernelTunables=no`. A `User=` in a drop-in governs the process, but the install hands the
+roots to the account the unit names; name the account with `--run-as` instead.
 
 ### Files beside the program
 
@@ -538,6 +609,16 @@ $ sudo systemctl start opamp-fleet
 The first asks for the endpoint, the client certificate and its key, and the verification key.
 `--endpoint` alone writes a file the Client refuses until you add the certificate and its key. An upgrade of a host whose service was running restarts it on the delivered
 binary.
+
+**The `.deb` and the `.rpm` run the service under the system account `opamp-fleet`.** The
+post-install creates it where it is missing — no password, `/usr/sbin/nologin`, the data root as its
+home — and passes `--run-as opamp-fleet` only when no unit is registered yet. Every upgrade runs
+`service install` without the flag, which keeps the account the unit names, so a host moved to
+another account or to root with `--run-as` stays there. A host that already ran as root before the
+packages created the account stays root; move it with
+`sudo opamp-fleet service install --run-as opamp-fleet` and a restart. No removal, not even a purge,
+deletes the account. See [Running it under its own account](#running-it-under-its-own-account) for
+what an account cannot do and how to grant it.
 
 **Without a terminal**, as configuration management installs a host, the package is installed first
 and the host enrolled in a step after it — the package's own install never enrols, so `apt` and
@@ -780,6 +861,7 @@ and macOS, and a directory junction on Windows, where junctions need no special 
     remote-config.pb        the last configuration it received
     connection-settings.pb  Server-offered settings, if any
     installed-package.json  the update it last installed, if any
+    package-high-water.json the highest version installed per Agent type — see "A Supervisor never goes back"
     packages/               staging for its own update
     logs/                   the service's rotating log
     supervisors/            one directory per Agent — see below
@@ -894,7 +976,7 @@ notice.
 
 Operator-defined attributes reported by every Agent this Client presents, so the Server's Selectors
 can target them. They are reported as non-identifying attributes, and they never override
-what the code or the Managed Process reports under the same key.
+what the code reports under the same key; a Managed Process never overrides them.
 
 ```toml
 [attributes]
@@ -917,6 +999,15 @@ an Agent and where it runs: `service.name`, `service.instance.name`, `service.in
 `os.type`, `os.name`, `os.version`, `os.description`, `host.name`, `host.arch`, and `host.id` — plus
 `service.version`, which for the Client's own Agent is the Client's baked-in version and for a
 Supervisor-backed Agent is whatever the Managed Process reports about itself.
+
+A Managed Process states only its own `service.*` attributes: its type (`service.name`, a
+Collector's `dist.name`) and its version replace what the Supervisor reports. Everything else it
+reports is dropped — `host.*`, `os.*` and `supervisor.*`, and keys in a namespace of its own such as
+a Collector's `agent_description.non_identifying_attributes` and resource attributes. Where the
+Agent runs is the Supervisor's statement, since it decides which Selectors match and which
+artifact is offered. Within `service.*` the process cannot restate `service.instance.id`,
+`service.instance.name`, `service.namespace` while `service_namespace` is set, or a key
+`[attributes]` sets. To tag a Collector, use a Server label, or `[attributes]` for the whole host.
 
 The first two are the pair to keep apart: `service.name` is *what* this Agent is — the
 type, shared by every Agent of that kind — and `service.instance.name` is *which* one it is, the
@@ -974,7 +1065,8 @@ starts. Enrolment runs the same either way:
    [the Server](server.md#enrolment-a-new-host-approved-by-an-operator)).
 2. The Client connects with the bootstrap certificate. It generates a key,
    which never leaves the host, and sends a certificate signing request for it as soon as the
-   Server's first answer says it signs certificates.
+   Server's first answer says it signs certificates. The request proves the bootstrap certificate
+   with a signature made with its key, and the Server files it under that certificate.
 3. The Client logs the SHA-256 fingerprint of that key:
 
    ```text
@@ -990,8 +1082,9 @@ closed window is answered `503`, which the Client retries with its usual backoff
 count toward the Server's admission throttle. The issued
 certificate is renewed the same way once it is two thirds through its validity, with no operator
 involved. The private key is written `0600`; on Windows the state directory's ACL is what protects
-it. A host behind a Gateway enrols by connecting to the Server directly once, or is given a
-certificate by an operator.
+it. Over an `https://` endpoint the enrolling Client sends its request alone, before the Server's
+first answer, and re-sends it at every poll. A host behind a Gateway enrols through it over
+`https://` (see [Enrolment through a Gateway](#enrolment-through-a-gateway)).
 
 ### A leftover `[auth]`
 
@@ -1081,17 +1174,71 @@ package_cache_bytes = 10737418240  # the package cache's bound, 10 GiB
 cert_file = "gateway.pem"          # what this Gateway presents to its Agents
 key_file = "gateway-key.pem"
 client_ca_file = "client-ca.pem"   # the CA every downstream Agent's certificate chains to
+# bootstrap_ca_file = "bootstrap-ca.pem"  # optional: relays enrolments, see below
 ```
 
 A Gateway without `[gateway.tls]`, or without `client_ca_file`, is refused at startup, on a
 loopback `listen` too. There is no plaintext Gateway. The downstream handshake requires a client
-certificate that chains to `client_ca_file`, so a peer without one never reaches OpAMP.
+certificate that chains to `client_ca_file`, or to `bootstrap_ca_file` where it is set, so a peer
+without one never reaches OpAMP.
 
 Point the Clients behind it at this address instead of the Server's, as a `wss://` or `https://`
 endpoint. Each of them still needs its client certificate. Nothing else about
 them changes: the Server tells Agents apart by `instance_uid`, never by the connection that carried them,
 so an Agent behind a Gateway is as manageable as one in front of it. Both transports are served
 downstream, so a polling Client works as well as a WebSocket one.
+
+![An Agent talking to the Server through a Gateway: the Gateway fetches the revocation list, checks each report's binding, forwards it unchanged under its own certificate, routes replies and pushes back by instance_uid, and serves packages from its cache](../images/communication-gateway.png)
+
+**Each Agent belongs to the host that first reported it.** An Agent's `instance_uid` is bound to
+the host of the certificate of the first report for it since the Gateway started — the host the
+certificate names (`urn:opamp-fleet:host:<id>`), or, for a certificate an operator made without
+one, the host the Server will give it at its first renewal, so its Agents stay bound across that
+renewal. A report for an `instance_uid` bound to another host is not forwarded: over WebSocket it is
+dropped, over plain HTTP it is answered `403`, and the log says so, the first five per host and
+minute one by one, the rest counted into one line. So one host behind a Gateway cannot take over
+another host's Agent, receive its configuration or its certificate, or speak in its name. A host
+binds at most `max_carried_agents` `instance_uid`s; past that a report for a new one takes the
+place of that host's own least recently reported Agent that has neither a connection nor an offer,
+and when it has none, the report is not forwarded. If a
+host locks another host's Agent out, restart the Gateway: the real host's next report then binds
+it. A certificate renewed through a Gateway is renewed with a renewal proof, which this Client
+always sends; the Server refuses a request without one there.
+
+### Enrolment through a Gateway
+
+A host that reaches the Server only through a Gateway enrols through it. Give the Gateway the
+public certificate of the Server's bootstrap CA, the file `[enrolment] bootstrap_ca_file` names on
+the Server, and never its key:
+
+```toml
+[gateway.tls]
+bootstrap_ca_file = "bootstrap-ca.pem"
+```
+
+A CA that is in both `client_ca_file` and `bootstrap_ca_file` fails startup naming both keys. A
+peer whose certificate chains to the bootstrap CA alone is an **enrolling peer**, and the Gateway
+relays one thing for it: a plain-HTTP report carrying its certificate signing request with the
+bootstrap proof (see [Enrolment](#enrolment-the-first-certificate)) and nothing a member reports,
+no description, health, configuration status, package statuses or connection-settings status.
+The proof must embed, byte for byte, the certificate the peer presented in the handshake: a
+request whose proof names another certificate is answered `403` and logged, so one bootstrap
+certificate's holder spends no other's share at the Server. Anything else is answered `403` and
+logged too, a WebSocket upgrade included, with a message that an enrolment through a Gateway is a
+plain-HTTP exchange. The Gateway does not check the proof's signature; the Server does, and decides the request as any enrolment: in an open window, against the queue and
+its bootstrap certificate's share, and by an operator's approval, which mints a host of its own.
+Outside a window the request is answered `Unavailable`, which the Client waits out. The request
+binds nothing at the Gateway: its exchange is its route for its one reply, and it is offered
+nothing and served no download. So once its certificate arrives, the host reports through the
+Gateway as a member under its own `instance_uid`. The enrolling Client polls, so it collects its
+certificate at its next request after the approval.
+
+Point an enrolling host behind a Gateway at an `https://` endpoint. The Client enrols over plain
+HTTP whenever its endpoint is `https://` and it holds no certificate the Server issued: it then
+sends its request alone until the certificate arrives. Over `wss://` it enrols as before, which
+reaches a Server directly but not through a Gateway. Switch it to `wss://` once it is enrolled, if
+it should hear the Server's pushes at once. An enrolment through a Gateway behind another Gateway
+is not relayed.
 
 `upstream_connections` is a **ceiling**. Connections are opened as Agents appear, so a Gateway in
 front of three Agents holds three, and each Agent stays on its connection while that lives. Any
@@ -1130,10 +1277,8 @@ crosses the Gateway's upstream link once instead of once per Agent:
   artifact only when the Gateway relayed an offer of it to an Agent carried over a connection whose
   certificate names the same host (`urn:opamp-fleet:host:<id>`) as the requesting certificate. An
   Agent's `instance_uid` belongs to the host of the first report for it since the Gateway
-  started; an offer relayed for it over another host's connection is not recorded, and the log
-  says so. If a host locks another host's Agent out this way, restart the Gateway: the real
-  host's next report then binds it. A host binds at most `max_carried_agents` `instance_uid`s;
-  at the Gateway's cap of 1 000 000 a new one replaces the least recently reported binding that
+  started, as above; an offer relayed for it over another host's connection is not recorded, and
+  the log says so. At the Gateway's cap of 1 000 000 a new one replaces the least recently reported binding that
   has neither a connection nor an offer. An offer relayed over a certificate that names no host serves nobody and is not
   fetched. Everything else is answered `404`, the same answer whatever the reason, and logged with
   the host, the certificate's serial and the path — the first five per host and minute one by one,
@@ -1156,7 +1301,8 @@ same version again does not re-send the offer.
 ### What a Gateway does not do
 
 - **It makes no authentication decision of its own.** A downstream peer is admitted by its
-  handshake against `client_ca_file`, which must be the fleet's client CA, never a bootstrap CA.
+  handshake against `client_ca_file`, which must be the fleet's client CA, never a bootstrap CA,
+  or against `bootstrap_ca_file` as an enrolling peer.
   The Gateway forwards no `Authorization` header: one a downstream peer sends is ignored, never
   refused, and nothing is sent upstream in its place. The one admission refusal it makes beyond
   its handshake is the Server's: it fetches the revoked certificates every 30 seconds and refuses a peer whose certificate is on that list with
@@ -1171,9 +1317,10 @@ same version again does not re-send the offer.
 - **It does not carry a downstream client certificate upstream.** Mutual TLS is per hop:
   `[gateway.tls]` verifies the Agents connecting here, and the identity presented to the Server is
   this Client's own, from the top-level `[tls]` or issued through the CSR flow.
-- **It does not carry an enrolment.** Its downstream handshake trusts the fleet's client CA and
-  never the bootstrap CA. A host behind a Gateway enrols by connecting to the Server once, or is
-  given a certificate by an operator.
+- **It does not vouch for an enrolment.** It relays an enrolling peer's request, with the proof
+  in it, once that proof names the certificate the peer presented, and the Server checks the
+  proof and decides; a revoked bootstrap certificate is refused
+  by the Server. Without `bootstrap_ca_file` its handshake refuses every bootstrap certificate.
 
 The upstream endpoint must be `wss://`, or `ws://` to `127.0.0.1` or `::1`. A polling connection
 cannot carry the Server's pushes to the Agents behind a Gateway, and the configuration refuses it
@@ -1419,7 +1566,8 @@ uploading. Mind the member name: the binary inside is called after the distribut
 (`otelcol-contrib`, `otelcol`), and `binary` must say the same.
 
 A Collector **with** the `opampextension` reports its own description, health, and effective
-configuration through the Supervisor Endpoint instead of being watched from outside. The extension
+configuration through the Supervisor Endpoint instead of being watched from outside. Of its
+description, only its `service.*` attributes reach the Server (see [`[attributes]`](#attributes)). The extension
 ships only in the Contrib distribution. Pin `endpoint_port` and make sure the configuration the
 Server distributes carries the extension pointing at it:
 
@@ -1575,6 +1723,44 @@ land.
 One limit worth knowing before you plan a rollout: only a **top-level** package is installed. An
 addon is something a Supervisor has no way to apply, so it is refused with `InstallFailed` rather
 than written over the binary it was meant to extend.
+
+### A Supervisor never goes back
+
+A signature binds an artifact to its version, but says nothing about how that version orders
+against another, and an old build stays validly signed forever. So before anything is downloaded a
+Supervisor refuses an offer:
+
+- for another Agent type than its own;
+- whose version is not SemVer 2.0.0 (`1.19`, `24.04.1`, `nightly`);
+- whose version is below the one its `installed-package.json` names;
+- whose version is below the **high-water mark** of its Agent type: the highest version this
+  Client has ever installed for that type.
+
+An offer equal to either is taken. Each refusal is reported in the Agent's package status, naming
+the offered version and the one it was compared against.
+
+The marks live in `<state_dir>/package-high-water.json`, a JSON object from Agent type to version,
+written owner-only. They are kept per Agent type, not per Supervisor, so every Supervisor of a type
+on this Client shares one mark, and removing a Supervisor and adding it back — under its old name
+or a new one — does not reset it: the purge deletes the Supervisor's directory and never this file.
+A mark rises when a Supervisor reports a package `Installed`, after its apply grace; a failed apply
+and its rollback move nothing. At every start each Supervisor's installed record raises its type's
+mark again, so a Client upgraded from a release without the file, or one whose file was deleted,
+starts with the marks its Supervisors already run. An installed record whose version is not SemVer
+is dropped at startup with a warning; the program keeps running, and the Agent reports no version
+for it.
+
+A mark file that exists but does not parse, or that maps a type to a value that is not SemVer, is
+never read as empty: the startup logs an error naming it, and every Supervisor package offer is
+refused, naming the file, until you repair or delete it. The connection, the configurations and the
+Client's own update are unaffected. The Client's own Agent keeps no mark: its floor is the binary
+that runs ([Updating the Client itself](#updating-the-client-itself)).
+
+**Only the host lowers a mark.** To move a Supervisor to an older version on purpose: stop the
+Client, remove that type's entry from `package-high-water.json` (or delete the file, which resets
+every type no remaining record names), delete `installed-package.json` of every Supervisor of that
+type, and start the Client. The path that needs no host access is to publish the old content as a
+new, greater version.
 
 ### Package updates: rollback and retention
 
@@ -1755,6 +1941,8 @@ polls every `poll_interval_secs`, which is the option for a host that cannot hol
 connection. Nothing else differs: both carry the same messages, and the Server accepts both at
 once.
 
+![A Client talking to the Server directly: the handshake with the host certificate, a report and its reply, push and heartbeat over WebSocket, polling over plain HTTP, a package download, and a revocation closing the session](../images/communication-direct.png)
+
 **TLS 1.3, and plaintext on the loopback alone**. Every
 connection the Client makes off the host is TLS 1.3, so a peer that speaks only TLS 1.2 cannot
 be reached. `ws://` and `http://` are accepted only when the endpoint's host is the IP literal
@@ -1775,9 +1963,12 @@ honours the Server's `UNAVAILABLE` retry hints.
 **Server-offered connection settings**. When
 the Server offers a new heartbeat interval, endpoint, or certificate, the Client
 **verifies the offer by actually connecting with it**, persists it, and only then switches —
-across transports if the offered endpoint demands it. An offered `ws://` or `http://` endpoint
-whose host is not `127.0.0.1` or `::1` is refused without connecting, and the offer is reported
-`FAILED` naming it. A failed verification leaves the current settings in force and is reported as
+across transports if the offered endpoint demands it. An offer that moves the Client to a
+`ws://` or `http://` endpoint is refused without connecting, on `127.0.0.1` and `::1` too, and the
+offer is reported `FAILED` naming it: on plaintext no certificate proves the Server. A plaintext
+endpoint on the loopback is one you write into `supervisor.toml` yourself. A persisted plaintext
+endpoint that `supervisor.toml` does not name is not applied at startup;
+the Client connects to the configured endpoint and logs a warning naming both. A failed verification leaves the current settings in force and is reported as
 such, so a bad offer cannot strand the fleet. An offered `certificate` is how an issued client
 certificate arrives. The `tls`, `proxy` and `headers` fields are not honoured: the Client applies
 everything else and reports the offer `FAILED`, naming the dropped fields, offered headers by their

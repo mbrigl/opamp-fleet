@@ -221,6 +221,12 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
         let uri = rcgen::string::Ia5String::try_from(proof)
             .map_err(|e| format!("cannot build a renewal proof: {e}"))?;
         params.subject_alt_names.push(rcgen::SanType::URI(uri));
+    } else if let Some(proof) = bootstrap_proof(config, &key) {
+        // An enrolment says which bootstrap certificate it enrols with, signed with its key
+        // (ADR-0039): the Server files the request under it, directly or through a Gateway.
+        let uri = rcgen::string::Ia5String::try_from(proof)
+            .map_err(|e| format!("cannot build a bootstrap proof: {e}"))?;
+        params.subject_alt_names.push(rcgen::SanType::URI(uri));
     }
     let csr = params
         .serialize_request(&key)
@@ -273,6 +279,36 @@ fn renewal_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
         fleet_core::renewal::URI_PREFIX,
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(fleet_core::renewal::encode(&block.contents, &signature))
+    ))
+}
+
+/// The bootstrap proof for `new_key` (ADR-0039), while this Client holds no certificate the Server
+/// issued: the certificate it presents — the bootstrap certificate it enrols with — and a signature
+/// with that certificate's key. `None` with nothing to present, or when the pair cannot be read or
+/// its key cannot sign; the Server then reads the certificate from the handshake of a direct
+/// connection. A certificate an operator provisioned cannot be told apart from a bootstrap one
+/// here, so it is proved the same way, and the Server renews it as one without a proof.
+fn bootstrap_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
+    use base64::Engine as _;
+    use rcgen::{PublicKeyData as _, SigningKey as _};
+    use sha2::{Digest as _, Sha256};
+    if config.is_enrolled() {
+        return None;
+    }
+    let identity = crate::tls::client_tls(config).ok()?.identity?;
+    let certificate = opamp::tls::certificates(&identity.cert_pem).ok()?;
+    let leaf = certificate.first()?;
+    let key = KeyPair::from_pem(std::str::from_utf8(&identity.key_pem).ok()?).ok()?;
+    let new_key_sha256 = Sha256::digest(new_key.subject_public_key_info());
+    let signature = key
+        .sign(&fleet_core::bootstrap_proof::statement(&new_key_sha256))
+        .ok()?;
+    Some(format!(
+        "{}{}",
+        fleet_core::bootstrap_proof::URI_PREFIX,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            fleet_core::bootstrap_proof::encode(leaf.as_ref(), &signature)
+        )
     ))
 }
 
@@ -534,6 +570,97 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let error = accept(dir.path(), b"-----BEGIN CERTIFICATE-----").expect_err("refused");
         assert!(error.contains("no key to go with it"), "{error}");
+    }
+
+    /// The bootstrap proof `csr` carries: its certificate, and whether its signature verifies with
+    /// that certificate's key over the request's own key.
+    fn bootstrap_proof_of(csr: &[u8]) -> Option<(Vec<u8>, bool)> {
+        use base64::Engine as _;
+        use sha2::{Digest as _, Sha256};
+        let der = fleet_core::csr::der(csr).expect("one PEM block");
+        let encoded = fleet_core::csr::requested_uri(&der, fleet_core::bootstrap_proof::URI_PREFIX)
+            .expect("a request")?;
+        let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .expect("base64url");
+        let (cert, signature) = fleet_core::bootstrap_proof::decode(&content).expect("a proof");
+        let (_, request) = <x509_parser::certification_request::X509CertificationRequest as
+            x509_parser::prelude::FromDer<'_, _>>::from_der(&der)
+        .expect("csr");
+        let new_key = Sha256::digest(request.certification_request_info.subject_pki.raw);
+        let (_, parsed) =
+            <x509_parser::certificate::X509Certificate as x509_parser::prelude::FromDer<'_, _>>::from_der(cert)
+                .expect("certificate");
+        let verifies = ring::signature::UnparsedPublicKey::new(
+            &ring::signature::ECDSA_P256_SHA256_ASN1,
+            parsed.public_key().subject_public_key.data.as_ref(),
+        )
+        .verify(&fleet_core::bootstrap_proof::statement(&new_key), signature)
+        .is_ok();
+        Some((cert.to_vec(), verifies))
+    }
+
+    /// An enrolling Client proves in its request the bootstrap certificate it presents — from the
+    /// configured pair, and from the identity a `bootstrap.p12` opened to — signed with its key;
+    /// once it holds a certificate the Server issued, its renewal carries a renewal proof alone.
+    /// Verifies: ADR-0039
+    #[test]
+    fn an_enrolment_request_proves_its_bootstrap_certificate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = KeyPair::generate().expect("key");
+        let cert = CertificateParams::new(vec!["bootstrap".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert");
+        std::fs::write(dir.path().join("bootstrap.pem"), cert.pem()).expect("write");
+        std::fs::write(dir.path().join("bootstrap-key.pem"), key.serialize_pem()).expect("write");
+        let state_dir = dir.path().join("state");
+        let enrolling = ClientConfig {
+            tls: Some(crate::config::TlsConfig {
+                ca_file: None,
+                cert_file: Some(dir.path().join("bootstrap.pem")),
+                key_file: Some(dir.path().join("bootstrap-key.pem")),
+            }),
+            ..config(&state_dir)
+        };
+        let csr = request(&enrolling).expect("a request");
+        assert_eq!(
+            bootstrap_proof_of(&csr),
+            Some((cert.der().to_vec(), true)),
+            "the proof names the bootstrap certificate and its key signed the request's"
+        );
+
+        let p12_state = dir.path().join("p12-state");
+        let from_p12 = ClientConfig {
+            bootstrap_identity: Some(crate::config::BootstrapIdentity {
+                cert_pem: cert.pem().into_bytes(),
+                key_pem: key.serialize_pem().into_bytes(),
+            }),
+            ..config(&p12_state)
+        };
+        let csr = request(&from_p12).expect("a request");
+        assert_eq!(bootstrap_proof_of(&csr), Some((cert.der().to_vec(), true)));
+
+        accept(
+            &state_dir,
+            sign(request(&enrolling).expect("pending")).as_bytes(),
+        )
+        .expect("accept");
+        let renewal = generate(&enrolling).expect("a renewal request");
+        assert_eq!(
+            bootstrap_proof_of(&renewal),
+            None,
+            "a renewal is no enrolment"
+        );
+        assert!(
+            fleet_core::csr::requested_uri(
+                &fleet_core::csr::der(&renewal).expect("one PEM block"),
+                fleet_core::renewal::URI_PREFIX
+            )
+            .expect("a request")
+            .is_some(),
+            "it carries the renewal proof"
+        );
     }
 
     /// The renewal window: a certificate two thirds through its life is asked for again, and the

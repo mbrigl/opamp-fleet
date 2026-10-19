@@ -817,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-agent"
-version = "0.5.5"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -866,20 +866,22 @@ dependencies = [
 
 [[package]]
 name = "fleet-core"
-version = "0.5.5"
+version = "0.6.0"
 dependencies = [
  "der",
  "git2",
+ "hex",
  "p12-keystore",
  "pkcs12",
  "pkcs5",
  "rcgen",
+ "sha2",
  "x509-parser",
 ]
 
 [[package]]
 name = "fleet-server"
-version = "0.5.5"
+version = "0.6.0"
 dependencies = [
  "argon2",
  "axum",
@@ -913,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-tools"
-version = "0.5.5"
+version = "0.6.0"
 dependencies = [
  "clap",
  "dialoguer",

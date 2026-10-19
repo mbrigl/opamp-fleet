@@ -27,6 +27,10 @@ pub const MAX_WINDOW_SECS: u64 = 86_400;
 /// The most requests the queue holds at once.
 pub const MAX_PENDING: usize = 1024;
 
+/// The most requests of one bootstrap certificate the queue holds at once, unless
+/// `[enrolment] max_pending_per_bootstrap` says otherwise (ADR-0046): a quarter of the queue.
+pub const DEFAULT_MAX_PENDING_PER_BOOTSTRAP: usize = MAX_PENDING / 4;
+
 /// What a request says about itself, read from the CSR by the adapter that parses it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
@@ -42,7 +46,9 @@ pub struct Request {
     pub instance_uid: Vec<u8>,
 }
 
-/// Who asked: the bootstrap certificate the connection carried, and from where.
+/// Who asked: the bootstrap certificate the request proves (ADR-0039 clause 9), and from where — the
+/// peer address of an enrolment connection, or the Gateway's host it came through (ADR-0039
+/// clause 4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requester {
@@ -58,6 +64,9 @@ pub struct Requester {
     /// `GET /api/v1/bootstrap-certificates` lists it.
     pub bootstrap: CertId,
     pub peer: Option<IpAddr>,
+    /// The host of the Gateway the request came through, in place of a peer address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
 }
 
 /// One pending request as the REST API lists it.
@@ -83,6 +92,10 @@ pub enum Submitted {
     Rejected,
     /// The queue is full; the Client is told to come back later.
     Full,
+    /// Its bootstrap certificate holds its share of the queue already (ADR-0046); the Client is
+    /// told to come back later. `first` is set for the first such refusal of that certificate in
+    /// the window, the one that is audited.
+    OverShare { first: bool },
     /// No window is open.
     Closed,
 }
@@ -177,6 +190,9 @@ struct State {
     window_until_ms: Option<u64>,
     /// Keyed by the id, which is the key fingerprint.
     entries: BTreeMap<String, Entry>,
+    /// The bootstrap certificates refused for their share in this window, each audited once
+    /// (ADR-0046). Not persisted: a restart may audit a certificate once more.
+    over_share: std::collections::BTreeSet<CertId>,
 }
 
 impl State {
@@ -222,6 +238,7 @@ impl State {
         Ok(State {
             window_until_ms: persisted.window_until_ms,
             entries,
+            over_share: std::collections::BTreeSet::new(),
         })
     }
 }
@@ -230,6 +247,8 @@ impl State {
 pub struct Enrolment {
     clock: Arc<dyn Clock>,
     state: Mutex<State>,
+    /// The most requests of one bootstrap certificate the queue holds (ADR-0046).
+    max_per_bootstrap: usize,
     /// Where the window and its queue persist; `None` keeps them in memory, as a test does.
     store: Option<Box<dyn EnrolmentStore>>,
     changes: watch::Sender<u64>,
@@ -244,6 +263,7 @@ impl Enrolment {
         Enrolment {
             clock,
             state: Mutex::new(State::default()),
+            max_per_bootstrap: DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
             store: None,
             changes: watch::channel(0).0,
             audit: std::sync::OnceLock::new(),
@@ -272,10 +292,19 @@ impl Enrolment {
         Ok(Enrolment {
             clock,
             state: Mutex::new(state),
+            max_per_bootstrap: DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
             store: Some(store),
             changes: watch::channel(0).0,
             audit: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Holds at most `max` requests of one bootstrap certificate in the queue (ADR-0046), clamped
+    /// to 1 to [`MAX_PENDING`]; the configuration refuses anything else at startup.
+    #[must_use]
+    pub fn with_max_pending_per_bootstrap(mut self, max: usize) -> Self {
+        self.max_per_bootstrap = max.clamp(1, MAX_PENDING);
+        self
     }
 
     /// Persists `state`, when a store is armed.
@@ -331,6 +360,7 @@ impl Enrolment {
         let mut state = self.state.lock().expect("enrolment lock");
         state.window_until_ms = None;
         state.entries.clear();
+        state.over_share.clear();
         let saved = self.save(&state);
         drop(state);
         self.changed();
@@ -363,6 +393,17 @@ impl Enrolment {
         }
         if state.entries.len() >= MAX_PENDING {
             return Submitted::Full;
+        }
+        // A re-sent request has its entry and was answered above; only a new one is counted
+        // against its bootstrap certificate's share (ADR-0046).
+        let held = state
+            .entries
+            .values()
+            .filter(|entry| entry.pending.requester.bootstrap == requester.bootstrap)
+            .count();
+        if held >= self.max_per_bootstrap {
+            let first = state.over_share.insert(requester.bootstrap.clone());
+            return Submitted::OverShare { first };
         }
         let id = request.key_fingerprint.clone();
         let key = id.clone();
@@ -539,6 +580,7 @@ impl Enrolment {
             return Some(until);
         }
         state.window_until_ms = None;
+        state.over_share.clear();
         let expired = state
             .entries
             .values()
@@ -608,6 +650,13 @@ mod tests {
         ) -> Result<Option<crate::revocation::Facts>, String> {
             Ok(None)
         }
+
+        fn bootstrap_proof_id(
+            &self,
+            _csr_pem: &str,
+        ) -> Result<Option<crate::revocation::CertId>, String> {
+            Ok(None)
+        }
     }
 
     fn enrolment() -> (Enrolment, Arc<Manual>) {
@@ -631,6 +680,7 @@ mod tests {
             bootstrap_fingerprint: "bf".to_string(),
             bootstrap: CertId::new(b"bootstrap CA", "b5"),
             peer: None,
+            gateway: None,
         }
     }
 
@@ -849,9 +899,14 @@ mod tests {
     fn the_queue_is_bounded() {
         let (enrolment, _) = enrolment();
         enrolment.open(600).expect("open");
+        // One bootstrap certificate per request, so only the queue's own bound applies (ADR-0046).
         for n in 0..MAX_PENDING {
+            let one_each = Requester {
+                bootstrap: CertId::new(b"bootstrap CA", &format!("{n:x}")),
+                ..requester()
+            };
             assert_eq!(
-                enrolment.submit(request(&n.to_string()), requester()),
+                enrolment.submit(request(&n.to_string()), one_each),
                 Submitted::Waiting
             );
         }
@@ -859,6 +914,63 @@ mod tests {
             enrolment.submit(request("one more"), requester()),
             Submitted::Full
         );
+    }
+
+    /// The requests of one bootstrap certificate hold at most their share of the queue; a re-sent
+    /// one joins its entry all the same, another certificate's is still queued, and the first
+    /// refusal of a certificate in a window is the one marked for the audit.
+    /// Verifies: ADR-0046
+    #[test]
+    fn one_bootstrap_certificate_holds_at_most_its_share() {
+        let (enrolment, _) = enrolment();
+        let enrolment = enrolment.with_max_pending_per_bootstrap(2);
+        enrolment.open(600).expect("open");
+        assert_eq!(
+            enrolment.submit(request("a"), requester()),
+            Submitted::Waiting
+        );
+        assert_eq!(
+            enrolment.submit(request("b"), requester()),
+            Submitted::Waiting
+        );
+        assert_eq!(
+            enrolment.submit(request("c"), requester()),
+            Submitted::OverShare { first: true }
+        );
+        assert_eq!(
+            enrolment.submit(request("d"), requester()),
+            Submitted::OverShare { first: false },
+            "audited once per certificate and window"
+        );
+        assert_eq!(
+            enrolment.submit(request("a"), requester()),
+            Submitted::Waiting,
+            "a re-sent request is never refused"
+        );
+        let other = Requester {
+            bootstrap: CertId::new(b"bootstrap CA", "c6"),
+            ..requester()
+        };
+        assert_eq!(enrolment.submit(request("e"), other), Submitted::Waiting);
+        assert_eq!(enrolment.pending().len(), 3);
+
+        enrolment.close().expect("close");
+        enrolment.open(600).expect("open again");
+        enrolment.submit(request("a"), requester());
+        enrolment.submit(request("b"), requester());
+        assert_eq!(
+            enrolment.submit(request("c"), requester()),
+            Submitted::OverShare { first: true },
+            "a new window audits again"
+        );
+    }
+
+    /// The default share is a quarter of the queue.
+    /// Verifies: ADR-0046
+    #[test]
+    fn the_default_share_is_a_quarter_of_the_queue() {
+        assert_eq!(DEFAULT_MAX_PENDING_PER_BOOTSTRAP, 256);
+        assert_eq!(DEFAULT_MAX_PENDING_PER_BOOTSTRAP * 4, MAX_PENDING);
     }
 
     /// A signer that fails the test if it is ever asked.
@@ -882,6 +994,13 @@ mod tests {
             &self,
             _csr_pem: &str,
         ) -> Result<Option<crate::revocation::Facts>, String> {
+            Ok(None)
+        }
+
+        fn bootstrap_proof_id(
+            &self,
+            _csr_pem: &str,
+        ) -> Result<Option<crate::revocation::CertId>, String> {
             Ok(None)
         }
     }

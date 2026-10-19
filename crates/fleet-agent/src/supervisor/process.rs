@@ -986,22 +986,7 @@ fn find_semver(text: &str) -> Option<String> {
     text.split_whitespace().find_map(|token| {
         let token = token.strip_prefix(['v', 'V']).unwrap_or(token);
         let token = token.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
-        is_semver(token).then(|| token.to_string())
-    })
-}
-
-/// Strict SemVer 2.0.0: `MAJOR.MINOR.PATCH`, optional `-prerelease`, optional `+build`.
-///
-/// The project's own parse (ADR-0012) already holds the core and both identifier sets to SemVer.
-/// The one rule it does not check is added here: a numeric pre-release identifier must not have
-/// leading zeros (SemVer 2.0.0 §9).
-fn is_semver(s: &str) -> bool {
-    let leading_zero =
-        |id: &str| id.len() > 1 && id.starts_with('0') && id.bytes().all(|b| b.is_ascii_digit());
-    fleet_core::version::parse(s).is_some_and(|version| {
-        version
-            .prerelease
-            .is_none_or(|pre| !pre.split('.').any(leading_zero))
+        fleet_core::version::is_semver(token).then(|| token.to_string())
     })
 }
 

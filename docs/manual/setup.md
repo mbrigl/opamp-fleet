@@ -329,6 +329,11 @@ holds the `[tls]` section that names them there.
 
 **Install the Client** from the release's `.deb`, `.rpm` or `.msi`. The package registers the
 service and leaves it stopped (see [Installing from a native package](client.md#installing-from-a-native-package)).
+On Linux the service runs as the system account `opamp-fleet`, which the package creates. The
+install hands the files under the data root to it; a file you name elsewhere, such as under
+`/etc/opamp/`, the service reads only if that account may — give the key to the account, not to
+root alone, or choose root with `--run-as root`
+([Running it under its own account](client.md#running-it-under-its-own-account)).
 Then let it write its configuration by asking you. The questions end with the host's enrolment,
 so first **open the enrolment window** as [step 5](#5-enrol-the-client) shows, and have the
 **Enrolments** tab at hand to approve the request the install waits for:
@@ -444,9 +449,12 @@ closes on its own when its time runs out, and on a Server restart:
 $ curl --cacert server-ca.pem -X DELETE https://127.0.0.1:4321/api/v1/enrolment/window
 ```
 
-**A host behind a Gateway cannot enrol through it**, because a Gateway trusts only the client CA,
-never the bootstrap CA. Let the host reach the Server directly once to enrol, then point it at the
-Gateway. Gateways are described in [Gateway Mode](client.md#gateway-mode-carrying-other-clients).
+**A host behind a Gateway enrols through it** once the Gateway trusts the bootstrap CA: copy the
+Server's `bootstrap-ca.pem` — the certificate, never its key — to the Gateway and name it as
+`[gateway.tls] bootstrap_ca_file`. Point the host at the Gateway with an `https://` endpoint. Its
+request then waits in the **Enrolments** tab like any other, naming the Gateway's host where a
+direct one names its address, and the window, the queue and your approval apply as above. See
+[Enrolment through a Gateway](client.md#enrolment-through-a-gateway).
 
 ## 6. Living with the certificates
 

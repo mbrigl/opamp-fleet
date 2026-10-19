@@ -50,7 +50,11 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
         "fleet-core",
         &[
             ("", Root),
+            ("bootstrap_proof", Core),
+            // Reading what a CSR asks for, with `x509-parser`.
+            ("csr", Adapter),
             ("ending", Core),
+            ("host", Core),
             ("naming", Core),
             ("package", Core),
             // The bootstrap PKCS#12 file (ADR-0029): its rule, and its binding to `p12-keystore`.

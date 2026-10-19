@@ -23,7 +23,7 @@ use opamp::proto::{
 use opamp::uid::InstanceUid;
 use tracing::{info, warn};
 
-use crate::supervisor::ports::{AgentStorage, HostFacts, InstalledPackage};
+use crate::supervisor::ports::{AgentStorage, HighWaterMarks, HostFacts, InstalledPackage};
 
 use connection_settings::{carries_settings, settings_status};
 use opamp::client::protocol::{AgentProtocol, ReportContent};
@@ -201,6 +201,10 @@ struct Local {
     namespace: Option<String>,
     /// Handling an offer changed the package status; the protocol is told once it is done.
     package_status_owed: bool,
+    /// The high-water marks every Supervisor of this Client shares (ADR-0043 clause 8): an offer
+    /// below its Agent type's mark is refused, and an `Installed` raises it. `None` for the
+    /// Client's own Agent, which keeps no mark (clause 13).
+    high_water: Option<std::sync::Arc<dyn HighWaterMarks>>,
 }
 
 impl AgentState {
@@ -282,6 +286,7 @@ impl AgentState {
                 configured_attributes: Vec::new(),
                 namespace: None,
                 package_status_owed: false,
+                high_water: None,
             },
             storage: Box::new(storage),
             pending_apply: None,
@@ -374,10 +379,17 @@ impl AgentState {
             .process_description
             .as_ref()
             .and_then(|reported| {
+                // Whichever list the process put it in, as the fold reads it (ADR-0041).
                 opamp::attributes::string_value(
                     &reported.identifying_attributes,
                     attributes::SERVICE_NAME,
                 )
+                .or_else(|| {
+                    opamp::attributes::string_value(
+                        &reported.non_identifying_attributes,
+                        attributes::SERVICE_NAME,
+                    )
+                })
             })
             .unwrap_or(&self.local.service_name)
     }
@@ -414,6 +426,11 @@ impl AgentState {
     /// hold is this Agent's (ADR-0010).
     pub fn next_report(&mut self) -> AgentToServer {
         self.protocol.next_report(&self.local)
+    }
+
+    /// A report carrying `csr` alone, as an enrolling host sends it (ADR-0039 clause 11).
+    pub fn csr_report(&mut self, csr: Vec<u8>) -> AgentToServer {
+        self.protocol.csr_report(csr)
     }
 
     /// The final message of a connection: the Baseline requires `agent_disconnect` in it.
@@ -681,6 +698,7 @@ mod tests {
         }
     }
 
+    /// Verifies: ADR-0041
     #[test]
     fn configured_attributes_are_reported_but_never_shadow_reported_ones() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -784,6 +802,7 @@ mod tests {
     /// with, and folding that into the operator's name for the Supervisor would overwrite it — so
     /// every Collector of one distribution would collapse onto one name in the fleet view. Both
     /// values must survive, each in its own key, each won by the side that actually knows it.
+    /// Verifies: ADR-0041
     // Verifies: ADR-0016
     #[test]
     fn a_process_reporting_its_type_does_not_take_the_operators_name_with_it() {
@@ -834,6 +853,7 @@ mod tests {
     /// process reporting either of them among its *identifying* attributes would otherwise win
     /// every Selector — the Server resolves those before the non-identifying ones — while the fleet
     /// row, which reads the other list, went on showing the operator's value.
+    /// Verifies: ADR-0041
     #[test]
     fn the_supervisors_own_attributes_survive_whichever_list_a_process_reports_them_in() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -915,6 +935,7 @@ mod tests {
 
     /// `[supervisor.attributes]` is a fallback for keys nothing else reports, so it must not be a
     /// second way to set the two attributes the Supervisor itself owns.
+    /// Verifies: ADR-0041
     // Verifies: ADR-0016
     #[test]
     fn configured_attributes_cannot_restate_the_type_or_the_instance_name() {
@@ -1073,6 +1094,7 @@ mod tests {
     /// word where it gives one, the configured type otherwise. Two answers to "what is this Agent"
     /// would be worse than none: a series labelled `otelcol` beside a fleet row reading
     /// `otelcol-contrib` is a question, not a fact.
+    /// Verifies: ADR-0041
     #[test]
     fn the_reported_type_is_the_processs_own_word_where_it_gives_one() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1130,7 +1152,7 @@ mod tests {
         // The extension's self-report: everything but the version, which it happens not to state.
         agent.set_process_description(AgentDescription {
             identifying_attributes: vec![string_attr("service.name", "otelcol-contrib")],
-            non_identifying_attributes: vec![string_attr("host.id", "abc")],
+            non_identifying_attributes: vec![string_attr("service.team", "abc")],
         });
         // The probe, after a swap: the version and nothing else.
         agent.set_process_description(AgentDescription {
@@ -1161,7 +1183,7 @@ mod tests {
             "and does not erase what the extension reported"
         );
         assert_eq!(
-            value(&described.non_identifying_attributes, "host.id").as_deref(),
+            value(&described.non_identifying_attributes, "service.team").as_deref(),
             Some("abc")
         );
 
@@ -1173,6 +1195,183 @@ mod tests {
         assert_eq!(
             value(&agent.describe().identifying_attributes, "service.version").as_deref(),
             Some("0.159.0")
+        );
+    }
+
+    fn supervised_agent(dir: &std::path::Path) -> AgentState {
+        let storage = Storage::new(dir.to_path_buf()).expect("storage");
+        AgentState::supervised(
+            "edge-01".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent")
+    }
+
+    /// A Managed Process is code the Supervisor does not vouch for, so where the Agent runs and
+    /// what kind of Agent it is stay the Supervisor's statement, whichever list the process puts
+    /// its claim in: another host would draw that host's Configurations, another platform another
+    /// machine's artifact, and a `supervisor.kind.*` key would make a second Client Agent. Only
+    /// its `service.*` attributes are laid over the Supervisor's.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_process_states_its_own_service_attributes_and_nothing_about_the_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        let before = reported(&agent.describe());
+
+        let claims = [
+            "host.name",
+            "host.id",
+            "os.type",
+            "host.arch",
+            "os.description",
+            "supervisor.kind.collector",
+            "collector.pipeline",
+        ];
+        let claimed = |list: &str| {
+            claims
+                .iter()
+                .map(|key| string_attr(key, &format!("{list}-claim")))
+                .collect::<Vec<_>>()
+        };
+        let mut identifying = claimed("identifying");
+        identifying.push(string_attr("service.name", "otelcol-contrib"));
+        identifying.push(string_attr("service.version", "0.142.0"));
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: identifying,
+            non_identifying_attributes: claimed("non-identifying"),
+        });
+
+        let described = agent.describe();
+        let after = reported(&described);
+        for key in claims {
+            assert_eq!(
+                after.get(key),
+                before.get(key),
+                "{key} is the Supervisor's to state, or nobody's"
+            );
+        }
+        // Each list on its own as well: Selectors read the identifying list first, so a claim left
+        // there would win although the merged view above shows the Supervisor's value.
+        for (name, list) in [
+            ("identifying", &described.identifying_attributes),
+            ("non-identifying", &described.non_identifying_attributes),
+        ] {
+            let claimed: Vec<&str> = list
+                .iter()
+                .filter(|kv| {
+                    matches!(
+                        kv.value.as_ref().and_then(|v| v.value.as_ref()),
+                        Some(opamp::proto::any_value::Value::StringValue(s)) if s.ends_with("-claim")
+                    )
+                })
+                .map(|kv| kv.key.as_str())
+                .collect();
+            assert!(
+                claimed.is_empty(),
+                "the {name} list carries the process's {claimed:?}"
+            );
+        }
+        assert!(
+            after.keys().all(|key| !key.starts_with("supervisor.kind.")),
+            "a process made its Agent a Client Agent: {after:?}"
+        );
+        assert_eq!(
+            after.get("service.name").map(String::as_str),
+            Some("otelcol-contrib")
+        );
+        assert_eq!(
+            after.get("service.version").map(String::as_str),
+            Some("0.142.0")
+        );
+    }
+
+    /// The operator's values stand against the process, inside `service.*` as outside it: an
+    /// `[attributes]` entry the code does not report is the operator's word, and so is
+    /// `service.namespace` once `service_namespace` is set. Unset, the namespace is the process's
+    /// to state.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_process_never_overrides_what_the_operator_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = AgentDescription {
+            identifying_attributes: vec![string_attr("service.namespace", "the-processs")],
+            non_identifying_attributes: vec![
+                string_attr("channel", "stable"),
+                string_attr("service.team", "x"),
+            ],
+        };
+
+        let mut agent = supervised_agent(&dir.path().join("configured"))
+            .with_attributes(
+                [
+                    ("channel".to_string(), "canary".to_string()),
+                    ("service.team".to_string(), "y".to_string()),
+                ]
+                .into(),
+            )
+            .with_namespace(Some("telemetry".to_string()));
+        agent.set_process_description(report.clone());
+        let configured = reported(&agent.describe());
+        assert_eq!(
+            configured.get("channel").map(String::as_str),
+            Some("canary")
+        );
+        assert_eq!(
+            configured.get("service.team").map(String::as_str),
+            Some("y")
+        );
+        assert_eq!(
+            configured.get("service.namespace").map(String::as_str),
+            Some("telemetry")
+        );
+
+        let mut agent = supervised_agent(&dir.path().join("unset"));
+        agent.set_process_description(report);
+        let unset = reported(&agent.describe());
+        assert_eq!(
+            unset.get("service.namespace").map(String::as_str),
+            Some("the-processs")
+        );
+        assert_eq!(unset.get("service.team").map(String::as_str), Some("x"));
+        assert_eq!(unset.get("channel"), None, "outside service.*, dropped");
+    }
+
+    /// An admitted key replaces the Supervisor's value in the list the Supervisor states it in,
+    /// so it is reported once and a Selector and the fleet row read the same value.
+    /// Verifies: ADR-0041
+    #[test]
+    fn an_admitted_key_replaces_the_supervisors_value_in_the_supervisors_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        agent.set_process_description(AgentDescription {
+            identifying_attributes: vec![],
+            non_identifying_attributes: vec![string_attr("service.name", "otelcol-contrib")],
+        });
+
+        let description = agent.describe();
+        let named = |list: &[KeyValue]| {
+            list.iter()
+                .filter(|kv| kv.key == "service.name")
+                .map(
+                    |kv| match kv.value.as_ref().and_then(|v| v.value.as_ref()) {
+                        Some(opamp::proto::any_value::Value::StringValue(s)) => s.clone(),
+                        other => format!("{other:?}"),
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            named(&description.identifying_attributes),
+            ["otelcol-contrib"]
+        );
+        assert!(named(&description.non_identifying_attributes).is_empty());
+        assert_eq!(
+            agent.service_name(),
+            "otelcol-contrib",
+            "the accessor reads it as the fold does"
         );
     }
 
@@ -1788,6 +1987,130 @@ mod tests {
             handled.package_download.is_some(),
             "a newer one of its own type is taken"
         );
+    }
+
+    /// A Supervisor of type `otelcol` over its own directory, holding `marks`, taking packages.
+    fn supervisor_with_marks(
+        dir: &std::path::Path,
+        marks: &std::sync::Arc<dyn HighWaterMarks>,
+    ) -> AgentState {
+        let mut agent = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            Storage::new(dir.to_path_buf()).expect("storage"),
+            crate::host::SystemHost,
+        )
+        .expect("agent")
+        .with_high_water(marks.clone());
+        agent.accept_packages();
+        let _ = agent.next_report();
+        agent
+    }
+
+    /// Offers `version` and answers whether a download was scheduled, and the reported refusal.
+    fn offered(agent: &mut AgentState, version: &str, hash: &[u8]) -> (bool, String) {
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", version, hash)),
+            ..Default::default()
+        });
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        (handled.package_download.is_some(), statuses.error_message)
+    }
+
+    /// A Supervisor with no installed record and no mark refuses an offer at `1.19`: nothing is
+    /// downloaded, and the reason names the version (ADR-0043 clause 7).
+    /// Verifies: ADR-0043
+    #[test]
+    fn a_supervisor_refuses_an_offer_whose_version_is_not_semver() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marks: std::sync::Arc<dyn HighWaterMarks> =
+            std::sync::Arc::new(crate::storage::HighWaterFile::open(dir.path()));
+        let mut agent = supervisor_with_marks(&dir.path().join("otelcol"), &marks);
+        for version in ["1.19", "24.04.1", "nightly"] {
+            let (downloads, why) = offered(&mut agent, version, version.as_bytes());
+            assert!(!downloads, "{version}: nothing is fetched");
+            assert!(
+                why.contains(&format!("{version:?}")) && why.contains("SemVer"),
+                "{version}: {why}"
+            );
+        }
+        assert!(
+            offered(&mut agent, "1.19.0", b"semver").0,
+            "1.19.0 is taken"
+        );
+    }
+
+    /// The mark rises on `Installed` and on nothing else: a failed apply, which rolled back to the
+    /// predecessor, leaves it and the version reported where they were; an `Installed` raises it
+    /// and writes the file owner-only (ADR-0043 clause 8).
+    /// Verifies: ADR-0043
+    #[test]
+    fn the_mark_rises_only_when_a_package_is_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join(crate::storage::HIGH_WATER_FILE);
+        let marks: std::sync::Arc<dyn HighWaterMarks> =
+            std::sync::Arc::new(crate::storage::HighWaterFile::open(dir.path()));
+        let mut agent = supervisor_with_marks(&dir.path().join("otelcol"), &marks);
+
+        assert!(offered(&mut agent, "0.110.0", b"v110").0);
+        agent.package_applied(b"v110".to_vec(), Ok("0.110.0".to_string()));
+        assert_eq!(marks.mark("otelcol"), Ok(Some("0.110.0".to_string())));
+        let on_disk: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&std::fs::read(&file).expect("the mark file")).expect("json");
+        assert_eq!(on_disk["otelcol"], "0.110.0");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&file).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "owner-only");
+        }
+
+        assert!(offered(&mut agent, "0.111.0", b"v111").0);
+        agent.package_applied(b"v111".to_vec(), Err("would not stay up".to_string()));
+        assert_eq!(
+            marks.mark("otelcol"),
+            Ok(Some("0.110.0".to_string())),
+            "a rollback moves nothing"
+        );
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        assert_eq!(
+            statuses.packages["otelcol"].agent_has_version, "0.110.0",
+            "the predecessor runs"
+        );
+    }
+
+    /// An installed record an older Client wrote under `1.19` is dropped at load: the Agent
+    /// reports no `agent_has_version`, and nothing enters the mark (ADR-0043 clause 10).
+    /// Verifies: ADR-0043
+    #[test]
+    fn an_installed_record_whose_version_is_not_semver_is_dropped_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let supervisor = dir.path().join("otelcol");
+        Storage::new(supervisor.clone())
+            .expect("storage")
+            .store_package(&InstalledPackage {
+                name: "otelcol".to_string(),
+                version: "1.19".to_string(),
+                hash_hex: hex::encode(b"old"),
+            })
+            .expect("store");
+        let marks: std::sync::Arc<dyn HighWaterMarks> =
+            std::sync::Arc::new(crate::storage::HighWaterFile::open(dir.path()));
+        let mut agent = supervisor_with_marks(&supervisor, &marks);
+
+        assert!(
+            !supervisor.join("installed-package.json").exists(),
+            "the record is deleted"
+        );
+        assert_eq!(marks.mark("otelcol"), Ok(None));
+        // The first offer keys the status; it reports nothing installed.
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "1.19.0", b"republished")),
+            ..Default::default()
+        });
+        assert!(handled.package_download.is_some(), "a first rollout");
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        assert_eq!(statuses.packages["otelcol"].agent_has_version, "");
     }
 
     /// A reply declaring a Capability Set, so a test can say what the Server accepts.

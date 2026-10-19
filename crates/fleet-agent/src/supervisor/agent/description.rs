@@ -1,5 +1,5 @@
 //! What an Agent reports about itself (ADR-0016): its configured attributes, the host's facts,
-//! and a Managed Process's own description folded in.
+//! and the `service.*` attributes of a Managed Process's own description folded in (ADR-0041).
 
 use opamp::attributes::{self, string_array_attr, string_attr};
 use opamp::proto::{AgentDescription, KeyValue};
@@ -8,8 +8,9 @@ use opamp::uid::InstanceUid;
 use super::{AgentState, Local};
 
 impl AgentState {
-    /// The Managed Process reported its own description (through the Supervisor Endpoint); fold
-    /// it into ours — identity stays the Supervisor's (goal 16).
+    /// The Managed Process reported its own description (through the Supervisor Endpoint or the
+    /// version probe); fold its `service.*` attributes into ours — identity and where the Agent
+    /// runs stay the Supervisor's (goal 16, ADR-0041).
     pub fn set_process_description(&mut self, description: AgentDescription) {
         // Merged per attribute, not replaced wholesale: two sources describe the same process —
         // the version probe, which reports `service.version` and nothing else, and the
@@ -29,7 +30,7 @@ impl AgentState {
         self.protocol.force_full();
     }
 
-    /// Attaches the operator-defined attributes this Agent reports (ADR-0016 clause 9).
+    /// Attaches the operator-defined attributes this Agent reports (ADR-0041 clause 2).
     #[must_use]
     pub fn with_attributes(
         mut self,
@@ -72,7 +73,10 @@ impl Local {
                 fleet_core::version::current(),
             ));
         }
-        identifying_attributes.push(string_attr("service.instance.id", &uid.to_string()));
+        identifying_attributes.push(string_attr(
+            attributes::SERVICE_INSTANCE_ID,
+            &uid.to_string(),
+        ));
         // The rest of what the Baseline asks for "to describe where the Agent runs": `os.*` and
         // `host.*`. Every one of them is best effort, and what the platform cannot answer is left
         // out rather than filled in — an absent attribute says "unknown", where one carrying a
@@ -115,8 +119,10 @@ impl Local {
             identifying_attributes,
             non_identifying_attributes,
         };
-        // Operator-defined attributes (ADR-0023) — added only where nothing is reported under the
-        // same key, so what the code (and below, the Managed Process) reports always wins.
+        // Operator-defined attributes (ADR-0041 clause 2) — added only where nothing is reported
+        // under the same key, so what the code reports always wins. A key added here stands
+        // against the Managed Process: the fold below leaves it alone.
+        let mut operators_keys = Vec::new();
         for (key, value) in &self.configured_attributes {
             let taken = |list: &[KeyValue]| list.iter().any(|kv| kv.key == *key);
             if !taken(&description.identifying_attributes)
@@ -125,37 +131,62 @@ impl Local {
                 description
                     .non_identifying_attributes
                     .push(string_attr(key, value));
+                operators_keys.push(key.as_str());
             }
         }
-        // Fold in what the Managed Process reported about itself — except the two attributes that
-        // are the Supervisor's to state: the Agent the Server sees is the Supervisor, keyed by the
-        // Supervisor's uid (goal 16) and called what the operator called it (ADR-0016). A process
-        // cannot know either, so a value it reports under those keys is not an improvement. Its
-        // `service.name` deliberately *does* win — a Collector's `dist.name` is a better type than
-        // anything this file can infer.
+        // Fold in what the Managed Process reported about itself (ADR-0041 clause 1) — its
+        // `service.*` attributes alone. A process is code the Supervisor does not vouch for, and
+        // where the Agent runs (`host.*`, `os.*`) and what kind of Agent it is (`supervisor.*`)
+        // decide which Selectors match and which artifact is offered; those stay the
+        // Supervisor's statement, and every key outside `service.*` is dropped. Within it, the
+        // Supervisor keeps its identity (`service.instance.id`, goal 16) and the operator's name
+        // (`service.instance.name`), and the operator keeps every value they set:
+        // `service.namespace` where `service_namespace` is set, and each `[attributes]` key added
+        // above. The process's `service.name` deliberately *does* win — a Collector's `dist.name`
+        // is a better type than anything this file can infer — and its `service.version` is the
+        // Agent's version.
         //
-        // The exemption is by *key*, in both lists, and not by the list the Supervisor happens to
-        // put each one in: the Server resolves a Selector against the identifying attributes first
-        // and the non-identifying ones only after (`configs.rs`), so a process reporting either key
-        // among the other list's would win every Selector while the fleet row went on showing the
-        // Supervisor's value.
+        // The rule is by *key*, in both lists: the Server resolves a Selector against the
+        // identifying attributes first and the non-identifying ones only after (`configs.rs`), so
+        // an admitted key replaces the Supervisor's value in whichever list already holds it, and
+        // is added to the list the process used only where the Supervisor states no such key. A
+        // key is therefore reported once, and a Selector and the fleet row read the same value.
         if let Some(reported) = &self.process_description {
-            let supervisors_own = |key: &str| {
-                key == "service.instance.id" || key == attributes::SERVICE_INSTANCE_NAME
+            let admitted = |key: &str| {
+                key.starts_with(attributes::SERVICE_PREFIX)
+                    && key != attributes::SERVICE_INSTANCE_ID
+                    && key != attributes::SERVICE_INSTANCE_NAME
+                    && !(key == attributes::SERVICE_NAMESPACE && self.namespace.is_some())
+                    && !operators_keys.contains(&key)
             };
-            for attr in &reported.identifying_attributes {
-                if !supervisors_own(&attr.key) {
-                    upsert_attr(&mut description.identifying_attributes, attr);
-                }
-            }
-            for attr in &reported.non_identifying_attributes {
-                if !supervisors_own(&attr.key) {
-                    upsert_attr(&mut description.non_identifying_attributes, attr);
+            // The identifying list is folded last, so where a process states one key in both
+            // lists its identifying value is the one reported — as `service_name()` reads it.
+            let lists = [
+                (&reported.non_identifying_attributes, false),
+                (&reported.identifying_attributes, true),
+            ];
+            for (list, identifying) in lists {
+                for attr in list.iter().filter(|attr| admitted(&attr.key)) {
+                    fold_attr(&mut description, attr, identifying);
                 }
             }
         }
         description
     }
+}
+
+/// Lays one admitted attribute over the description: it replaces the value in whichever list
+/// already holds its key, and only where neither does is it added to the list it was reported in.
+fn fold_attr(description: &mut AgentDescription, attr: &KeyValue, identifying: bool) {
+    let held = |list: &[KeyValue]| list.iter().any(|kv| kv.key == attr.key);
+    let list = if held(&description.identifying_attributes) {
+        &mut description.identifying_attributes
+    } else if held(&description.non_identifying_attributes) || !identifying {
+        &mut description.non_identifying_attributes
+    } else {
+        &mut description.identifying_attributes
+    };
+    upsert_attr(list, attr);
 }
 
 fn upsert_attr(attrs: &mut Vec<KeyValue>, attr: &KeyValue) {

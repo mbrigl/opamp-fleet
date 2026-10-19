@@ -84,6 +84,9 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
 
+/// The extension's report reaches the Server on its Supervisor's Agent, but only its `service.*`
+/// attributes do: where the Agent runs and what kind of Agent it is stay the Supervisor's word.
+/// Verifies: ADR-0041
 // Verifies: G-16, ADR-0015
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_agent() {
@@ -151,6 +154,15 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
                 .map(|a| (a.service_name.clone(), a.instance_uid.clone()))
         })
         .await;
+    // The version probe has answered for the staged program, so the version the extension states
+    // below is the one that arrives, not one the probe could still overwrite.
+    let host_name = wait_until("the version probe to report the program's version", || {
+        let agents = state.snapshot();
+        let agent = view(&agents, "otelcol")?;
+        (agent.service_version == "9.9.9")
+            .then(|| agent.non_identifying_attributes.get("host.name").cloned())
+    })
+    .await;
     common::save(&state, "collector", "receivers: {}\n", &collector_type);
     common::release_to_every_agent(&state, &["collector"]);
 
@@ -182,8 +194,14 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
             identifying_attributes: vec![
                 string_attr("service.instance.id", "the-extensions-own-id"),
                 string_attr("service.instance.name", "the-extensions-own-name"),
+                string_attr("service.version", "0.142.0"),
             ],
-            non_identifying_attributes: vec![string_attr("collector.pipeline", "traces/otlp")],
+            // And, as a process the Supervisor does not vouch for may, another host and the
+            // attribute only a Client's own Agent reports (ADR-0041).
+            non_identifying_attributes: vec![
+                string_attr("host.name", "elsewhere"),
+                string_attr("supervisor.kind.collector", "true"),
+            ],
         }),
         health: Some(ComponentHealth {
             healthy: true,
@@ -215,14 +233,11 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
         .await
         .expect("the extension reports");
 
-    // All three reach the fleet, on the Supervisor's own Agent.
+    // Its version, health and configuration reach the fleet, on the Supervisor's own Agent.
     let reported_on = wait_until("the extension's report to reach the Server", || {
         let agents = state.snapshot();
         let agent = view(&agents, "otelcol")?;
-        let reached = agent
-            .non_identifying_attributes
-            .get("collector.pipeline")
-            .is_some_and(|value| value == "traces/otlp")
+        let reached = agent.service_version == "0.142.0"
             && agent.health_status == "pipelines running"
             && agent.effective_config.contains("receivers: {otlp: {}}");
         reached.then(|| agent.instance_uid.clone())
@@ -235,6 +250,21 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
         "the report moved the Supervisor's identity"
     );
     let agents = state.snapshot();
+    let agent = view(&agents, "otelcol").expect("the Supervisor's Agent");
+    assert_eq!(
+        agent.non_identifying_attributes.get("host.name"),
+        host_name.as_ref(),
+        "the host stays the one the Supervisor states"
+    );
+    assert!(
+        agent
+            .identifying_attributes
+            .keys()
+            .chain(agent.non_identifying_attributes.keys())
+            .all(|key| !key.starts_with("supervisor.kind.")),
+        "the process made its Agent a Client Agent: {:?}",
+        agent.non_identifying_attributes
+    );
     assert_eq!(
         agents.len(),
         2,

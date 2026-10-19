@@ -14,7 +14,8 @@ use std::path::PathBuf;
 
 use service_manager::{
     RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceLevel as SmLevel, ServiceManager,
-    ServiceStartCtx, ServiceStatus, ServiceStatusCtx, ServiceStopCtx, ServiceUninstallCtx,
+    ServiceManagerKind, ServiceStartCtx, ServiceStatus, ServiceStatusCtx, ServiceStopCtx,
+    ServiceUninstallCtx,
 };
 
 use super::{ServiceControl, ServiceLevel, ServiceState};
@@ -105,8 +106,10 @@ pub struct InstallSpec {
     /// Absolute state directory baked into the unit (a service's working directory is `/` or
     /// `System32`; relative paths would be meaningless).
     pub state_dir: PathBuf,
-    /// The account the service runs as instead of root/`LocalSystem` (ADR-0019) — already
-    /// resolved by [`run_as`](super::run_as), so what arrives here exists and needs no password.
+    /// The account the service runs as (ADR-0042 clause 2) — already resolved by
+    /// [`run_as`](super::run_as), so what arrives here exists and needs no password. On Linux and
+    /// macOS a system registration always names one, `root` included; on Windows `None` leaves the
+    /// logon account the SCM holds, `LocalSystem` on a first registration.
     pub run_as: Option<String>,
 }
 
@@ -114,7 +117,9 @@ pub struct InstallSpec {
 /// marker is what routes into the Windows SCM dispatcher; it is ignored on Unix.
 ///
 /// Both paths are absolute and both are baked in, which is what makes an upgrade a re-registration
-/// rather than a migration (ADR-0019 clause 10): only `ExecStart` changes.
+/// rather than a migration (ADR-0042 clause 1): the program path and the rest of the unit are
+/// rewritten from the version that registers, and the configuration, identity and state stay
+/// where they are.
 fn service_args(spec: &InstallSpec) -> Vec<OsString> {
     vec![
         OsString::from("run"),
@@ -147,14 +152,25 @@ pub fn install(spec: &InstallSpec) -> Result<(), String> {
 }
 
 fn install_service(spec: &InstallSpec) -> Result<(), String> {
+    let contents = unit_contents(
+        spec,
+        cfg!(target_os = "linux")
+            && matches!(
+                ServiceManagerKind::native(),
+                Ok(ServiceManagerKind::Systemd)
+            ),
+    )?;
     manager(spec.level)?
         .install(ServiceInstallCtx {
             label: label(),
             program: spec.program.clone(),
             args: service_args(spec),
-            contents: None,
-            // systemd `User=` / launchd `UserName` (ADR-0019). The Windows backend ignores this
-            // field, which is why `install` sets the logon account through `windows_config`.
+            // The systemd system unit is the Client's own text (ADR-0042 clause 6); the user
+            // scope and every other manager keep the crate's rendering.
+            contents,
+            // launchd `UserName` (ADR-0042 clause 2); the systemd system unit carries `User=`
+            // itself. The Windows backend ignores this field, which is why `install` sets the
+            // logon account through `windows_config`.
             username: spec.run_as.clone(),
             working_directory: None,
             // The Client is file-configured (ADR-0010): the unit carries the config path in the
@@ -172,6 +188,193 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
         .map_err(|e| {
             format!("cannot install the service (system scope needs root/Administrator): {e}")
         })
+}
+
+/// What `service-manager` is handed as the unit's text: the Client's own systemd **system** unit
+/// (ADR-0042 clause 6) where systemd is the native manager, and nothing — the crate's own
+/// rendering — for the user scope and every other manager.
+fn unit_contents(spec: &InstallSpec, systemd: bool) -> Result<Option<String>, String> {
+    if !systemd || spec.level != ServiceLevel::System {
+        return Ok(None);
+    }
+    systemd_unit(spec, spec.run_as.as_deref().unwrap_or(ROOT)).map(Some)
+}
+
+/// The account that is root, and that decides the unit's directive tier (ADR-0042 clause 7).
+const ROOT: &str = "root";
+
+/// What every system unit carries (ADR-0042 clause 7): `/sys/fs/cgroup` becomes read-only. It does
+/// not imply `NoNewPrivileges=`, and no supported agent writes the cgroup tree itself.
+const EVERY_SYSTEM_UNIT: &[&str] = &["ProtectControlGroups=yes"];
+
+/// What a unit that runs as root carries on top (ADR-0042 clause 7). Root holds `CAP_SYS_ADMIN`,
+/// so none of these implies `no_new_privs` there; under any other account each one would, and
+/// `sudo` and every setuid helper a Managed Process uses would stop working.
+const ROOT_UNIT: &[&str] = &[
+    "ProtectKernelTunables=yes",
+    "LockPersonality=yes",
+    "RestrictRealtime=yes",
+];
+
+/// The systemd system unit the Client registers for `account` (ADR-0042 clauses 6 and 7).
+///
+/// `ExecStart=` quotes the program and every argument, so any absolute path reaches the program as
+/// it was given. `Restart=` and `RestartSec=` say what [`RESTART_POLICY`] says. `User=` always
+/// names the account, `root` included, so the unit records what was chosen and a re-registration
+/// keeps it. What an operator adds or removes goes into a drop-in under
+/// `/etc/systemd/system/<PRODUCT_NAME>.service.d/`, which nothing here touches.
+///
+/// # Errors
+/// Returns an error if a path is not UTF-8 (a unit file is text), or if the account name holds a
+/// character that would change what the unit says.
+pub fn systemd_unit(spec: &InstallSpec, account: &str) -> Result<String, String> {
+    use std::fmt::Write as _;
+    if account.is_empty()
+        || account
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '%' | '\\' | '"'))
+    {
+        return Err(format!(
+            "the account {account:?} cannot be written into a systemd unit"
+        ));
+    }
+    let mut exec = vec![exec_word(spec.program.as_os_str())?];
+    for arg in service_args(spec) {
+        exec.push(exec_word(&arg)?);
+    }
+    let mut unit = String::new();
+    let _ = writeln!(unit, "[Unit]");
+    let _ = writeln!(unit, "Description={}", service_name());
+    let _ = writeln!(unit);
+    let _ = writeln!(unit, "[Service]");
+    let _ = writeln!(unit, "ExecStart={}", exec.join(" "));
+    let _ = writeln!(unit, "Restart=on-failure");
+    let _ = writeln!(unit, "RestartSec={RESTART_DELAY_SECS}");
+    let _ = writeln!(unit, "User={account}");
+    let tier: &[&str] = if account == ROOT { ROOT_UNIT } else { &[] };
+    for directive in EVERY_SYSTEM_UNIT.iter().chain(tier) {
+        let _ = writeln!(unit, "{directive}");
+    }
+    let _ = writeln!(unit);
+    let _ = writeln!(unit, "[Install]");
+    let _ = writeln!(unit, "WantedBy=multi-user.target");
+    Ok(unit)
+}
+
+/// One word of `ExecStart=`, in double quotes: `\` and `"` are escaped, a control character is
+/// written as a C escape, `%` as `%%` (no specifier) and `$` as `$$` (no variable).
+fn exec_word(word: &std::ffi::OsStr) -> Result<String, String> {
+    use std::fmt::Write as _;
+    let text = word
+        .to_str()
+        .ok_or_else(|| format!("{} is not UTF-8, which a unit file must be", word.display()))?;
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for c in text.chars() {
+        match c {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '%' => quoted.push_str("%%"),
+            '$' => quoted.push_str("$$"),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            c if c.is_control() => {
+                let mut bytes = [0; 4];
+                for byte in c.encode_utf8(&mut bytes).bytes() {
+                    let _ = write!(quoted, "\\x{byte:02x}");
+                }
+            }
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    Ok(quoted)
+}
+
+/// A system registration of this service as the Client wrote it: the file, and the account it
+/// names (ADR-0042 clause 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Registration {
+    /// The systemd unit or the launchd plist.
+    pub file: PathBuf,
+    /// Its `User=` or `UserName`; `None` where it names none.
+    pub account: Option<String>,
+}
+
+/// The registration a re-registration finds (ADR-0042 clause 2): the file the Client wrote —
+/// `/etc/systemd/system/<PRODUCT_NAME>.service` or `/Library/LaunchDaemons/<PRODUCT_NAME>.plist` —
+/// never a drop-in and never the loaded state of the service manager. `None` at user scope, where
+/// no account is named; on Windows, where the SCM keeps the logon account itself; and where no
+/// file exists.
+///
+/// # Errors
+/// Returns an error if the file exists and cannot be read.
+pub fn registration(level: ServiceLevel) -> Result<Option<Registration>, String> {
+    if level == ServiceLevel::User {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    return read_registration(
+        &service_manager::systemd_global_dir_path().join(format!("{}.service", service_name())),
+        unit_account,
+    );
+    #[cfg(target_os = "macos")]
+    return read_registration(
+        &Path::new("/Library/LaunchDaemons").join(format!("{}.plist", service_name())),
+        plist_account,
+    );
+    #[cfg(windows)]
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn read_registration(
+    file: &Path,
+    account: fn(&str) -> Option<String>,
+) -> Result<Option<Registration>, String> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Ok(Some(Registration {
+            file: file.to_path_buf(),
+            account: account(&text),
+        })),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", file.display())),
+    }
+}
+
+/// The last `User=` of a unit's `[Service]` section; an empty one resets it, as systemd reads it.
+#[cfg(any(target_os = "linux", test))]
+fn unit_account(unit: &str) -> Option<String> {
+    let mut section = "";
+    let mut account = None;
+    for line in unit.lines().map(str::trim) {
+        if line.starts_with('[') {
+            section = line;
+        } else if section == "[Service]" {
+            if let Some(value) = line.strip_prefix("User=") {
+                let value = value.trim();
+                account = (!value.is_empty()).then(|| value.to_string());
+            }
+        }
+    }
+    account
+}
+
+/// The `UserName` of a plist as `service-manager` writes it: XML, the key followed by its string.
+/// No plist parser is linked for this. The job's dictionary holds no other `UserName` key, because
+/// the Client sets no environment.
+#[cfg(any(target_os = "macos", test))]
+fn plist_account(plist: &str) -> Option<String> {
+    let (_, after) = plist.split_once("<key>UserName</key>")?;
+    let value = after.trim_start().strip_prefix("<string>")?;
+    let (value, _) = value.split_once("</string>")?;
+    let value = value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&");
+    (!value.is_empty()).then_some(value)
 }
 
 /// Deregister the service. The install layout and state are never deleted.
@@ -419,6 +622,235 @@ mod tests {
             }
             other => panic!("the Client restarts only on failure (ADR-0019), got {other:?}"),
         }
+        // The systemd system unit is the Client's own text now (ADR-0042 clause 6), so its
+        // restart delay is a third place that reads the constant.
+        let unit = systemd_unit(&system_spec("/opt/opamp-fleet"), "opamp-fleet").expect("unit");
+        assert!(unit.lines().any(|l| l == "Restart=on-failure"), "{unit}");
+        assert!(
+            unit.lines()
+                .any(|l| l == format!("RestartSec={RESTART_DELAY_SECS}")),
+            "{unit}"
+        );
+    }
+
+    fn system_spec(layout: &str) -> InstallSpec {
+        InstallSpec {
+            level: ServiceLevel::System,
+            program: PathBuf::from(format!("{layout}/current/supervisor")),
+            config_path: PathBuf::from("/var/lib/opamp-fleet/supervisor.toml"),
+            state_dir: PathBuf::from("/var/lib/opamp-fleet/state"),
+            run_as: Some("opamp-fleet".to_string()),
+        }
+    }
+
+    /// The directive name of each line of `unit` that sets one.
+    fn directives(unit: &str) -> Vec<&str> {
+        unit.lines()
+            .filter_map(|line| line.split_once('=').map(|(key, _)| key.trim()))
+            .collect()
+    }
+
+    /// The unit the Client writes holds what `service-manager` rendered before, in the Client's own
+    /// text: the product's name as `Description`, a quoted `ExecStart` with the marker and absolute
+    /// paths, the restart policy, the account, and the target.
+    /// Verifies: ADR-0042
+    #[test]
+    fn the_system_unit_is_the_clients_own_text() {
+        let unit = systemd_unit(&system_spec("/opt/opamp-fleet"), "opamp-fleet").expect("unit");
+        let lines: Vec<&str> = unit.lines().collect();
+        assert_eq!(lines[0], "[Unit]");
+        assert!(lines.contains(&"Description=opamp-fleet"), "{unit}");
+        assert!(lines.contains(&"[Service]"), "{unit}");
+        assert!(
+            lines.contains(
+                &"ExecStart=\"/opt/opamp-fleet/current/supervisor\" \"run\" \"--service\" \
+                  \"--config\" \"/var/lib/opamp-fleet/supervisor.toml\" \"--state-dir\" \
+                  \"/var/lib/opamp-fleet/state\""
+            ),
+            "{unit}"
+        );
+        assert!(lines.contains(&"Restart=on-failure"), "{unit}");
+        assert!(lines.contains(&"RestartSec=5"), "{unit}");
+        assert!(lines.contains(&"User=opamp-fleet"), "{unit}");
+        assert!(lines.contains(&"[Install]"), "{unit}");
+        assert!(lines.contains(&"WantedBy=multi-user.target"), "{unit}");
+        let service = unit.find("[Service]").expect("service section");
+        let install = unit.find("[Install]").expect("install section");
+        assert!(service < unit.find("ExecStart=").expect("exec") && install > service);
+    }
+
+    /// systemd splits `ExecStart=` at spaces and expands `%` and `$`, so a root holding any of them
+    /// named the wrong program or the wrong file. Quoted and escaped, it reaches the program as it
+    /// was given.
+    /// Verifies: ADR-0042
+    #[test]
+    fn exec_start_survives_spaces_percent_and_dollar() {
+        let unit =
+            systemd_unit(&system_spec("/srv/my fleet/100%/$HOME"), "opamp-fleet").expect("unit");
+        let exec = unit
+            .lines()
+            .find(|l| l.starts_with("ExecStart="))
+            .expect("ExecStart");
+        assert!(
+            exec.starts_with("ExecStart=\"/srv/my fleet/100%%/$$HOME/current/supervisor\" \"run\""),
+            "{exec}"
+        );
+        assert_eq!(
+            exec_word(std::ffi::OsStr::new(r#"a\b"c"#)).expect("utf-8"),
+            r#""a\\b\"c""#
+        );
+        assert_eq!(
+            exec_word(std::ffi::OsStr::new("a\nb")).expect("utf-8"),
+            "\"a\\nb\"",
+            "a newline must not end the directive"
+        );
+    }
+
+    /// Under an account, the unit sets nothing that implies `no_new_privs`, because that would
+    /// break `sudo` and every setuid helper the agents use; it carries `ProtectControlGroups=`.
+    /// Verifies: ADR-0042
+    #[test]
+    fn an_account_unit_sets_nothing_that_implies_no_new_privs() {
+        let unit = systemd_unit(&system_spec("/opt/opamp-fleet"), "opamp-fleet").expect("unit");
+        let set = directives(&unit);
+        assert!(
+            unit.lines().any(|l| l == "ProtectControlGroups=yes"),
+            "{unit}"
+        );
+        for implies in [
+            "NoNewPrivileges",
+            "ProtectKernelTunables",
+            "ProtectKernelModules",
+            "ProtectKernelLogs",
+            "ProtectClock",
+            "ProtectHostname",
+            "PrivateDevices",
+            "RestrictAddressFamilies",
+            "LockPersonality",
+            "RestrictRealtime",
+            "RestrictSUIDSGID",
+            "RestrictNamespaces",
+            "MemoryDenyWriteExecute",
+            "SystemCallFilter",
+            "SystemCallArchitectures",
+            "DynamicUser",
+        ] {
+            assert!(!set.contains(&implies), "{implies} in {unit}");
+        }
+    }
+
+    /// Under root the three directives that would imply `no_new_privs` for an account imply
+    /// nothing, and the unit carries them.
+    /// Verifies: ADR-0042
+    #[test]
+    fn a_root_unit_carries_the_root_tier() {
+        let unit = systemd_unit(&system_spec("/opt/opamp-fleet"), "root").expect("unit");
+        for directive in [
+            "User=root",
+            "ProtectControlGroups=yes",
+            "ProtectKernelTunables=yes",
+            "LockPersonality=yes",
+            "RestrictRealtime=yes",
+        ] {
+            assert!(
+                unit.lines().any(|l| l == directive),
+                "{directive} in {unit}"
+            );
+        }
+    }
+
+    /// No unit, under any account, carries a directive that takes from a supported agent what it
+    /// needs: writing the system for a package install, `/home` for a log receiver, a socket under
+    /// `/tmp`, or root's capabilities.
+    /// Verifies: ADR-0042
+    #[test]
+    fn no_unit_carries_what_breaks_a_supported_agent() {
+        for account in ["root", "opamp-fleet"] {
+            let unit = systemd_unit(&system_spec("/opt/opamp-fleet"), account).expect("unit");
+            let set = directives(&unit);
+            for breaks in [
+                "ProtectSystem",
+                "ProtectHome",
+                "PrivateTmp",
+                "CapabilityBoundingSet",
+                "NoNewPrivileges",
+                "RestrictSUIDSGID",
+                "ProtectProc",
+            ] {
+                assert!(!set.contains(&breaks), "{breaks} under {account}: {unit}");
+            }
+        }
+        assert!(
+            systemd_unit(
+                &system_spec("/opt/opamp-fleet"),
+                "evil\nExecStartPre=/bin/sh"
+            )
+            .is_err(),
+            "an account name cannot add a directive"
+        );
+    }
+
+    /// The Client writes the systemd **system** unit only; the user scope and every other manager
+    /// keep `service-manager`'s rendering.
+    /// Verifies: ADR-0042
+    #[test]
+    fn a_user_unit_is_left_to_service_manager() {
+        let mut spec = system_spec("/opt/opamp-fleet");
+        assert!(unit_contents(&spec, true).expect("system").is_some());
+        assert_eq!(unit_contents(&spec, false).expect("not systemd"), None);
+        spec.level = ServiceLevel::User;
+        spec.run_as = None;
+        assert_eq!(unit_contents(&spec, true).expect("user"), None);
+        spec.level = ServiceLevel::System;
+        let unit = unit_contents(&spec, true)
+            .expect("no account")
+            .expect("unit");
+        assert!(
+            unit.lines().any(|l| l == "User=root"),
+            "a system unit always names its account: {unit}"
+        );
+    }
+
+    /// A re-registration reads the account from the unit the Client wrote: the last `User=` in
+    /// `[Service]`, as systemd reads it.
+    /// Verifies: ADR-0042
+    #[test]
+    fn the_units_account_is_its_last_service_user() {
+        let unit = "[Unit]\nDescription=opamp-fleet\n\n[Service]\nExecStart=/x\nUser=telegraf\n\
+                    \n[Install]\nWantedBy=multi-user.target\n";
+        assert_eq!(unit_account(unit).as_deref(), Some("telegraf"));
+        assert_eq!(
+            unit_account("[Service]\nUser=a\nUser=b\n").as_deref(),
+            Some("b")
+        );
+        assert_eq!(unit_account("[Service]\nUser=a\nUser=\n"), None);
+        assert_eq!(
+            unit_account("[Unit]\nUser=a\n[Service]\nExecStart=/x\n"),
+            None
+        );
+        assert_eq!(
+            unit_account(&systemd_unit(&system_spec("/opt/opamp-fleet"), "root").expect("unit"))
+                .as_deref(),
+            Some("root"),
+            "what the Client writes, it reads back"
+        );
+    }
+
+    /// The plist's `UserName`, in the XML `service-manager` writes.
+    /// Verifies: ADR-0042
+    #[test]
+    fn a_plists_user_name_is_kept() {
+        let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \
+                     \"-//Apple//DTD PLIST 1.0//EN\" \
+                     \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist \
+                     version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>opamp-fleet</string>\
+                     \n\t<key>UserName</key>\n\t<string>_opamp&amp;fleet</string>\n</dict>\n\
+                     </plist>";
+        assert_eq!(plist_account(plist).as_deref(), Some("_opamp&fleet"));
+        assert_eq!(
+            plist_account("<dict><key>Label</key><string>x</string></dict>"),
+            None
+        );
     }
 
     /// One level under the platform's base, named after the product — no `client` level asserting

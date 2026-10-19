@@ -22,11 +22,17 @@ deliberately does not do.
 ## Getting it
 
 Every release publishes it for Linux and macOS, on amd64 and arm64, as
-`opamp-fleetctl_<version>_<os>_<arch>.tar.gz` beside the Client's assets and covered by the same
-`SHA256SUMS`; compare the archive's hash with its line there (`sha256sum`, or `shasum -a 256` on
-macOS). The archive holds the one program, executable:
+`opamp-fleetctl_<version>_<os>_<arch>.tar.gz` beside the Client's assets, with its CycloneDX SBOM
+`opamp-fleetctl_<version>_<os>_<arch>.cdx.json`, covered by the same `SHA256SUMS` and by the
+release's build-provenance attestation. Verify the archive before you run it, since this program makes the fleet's keys: the attestation
+proves it was built by this repository's release workflow, and its hash must match its line in
+`SHA256SUMS` (`sha256sum`, or `shasum -a 256` on macOS). The archive holds the one program,
+executable:
 
 ```console
+$ gh attestation verify opamp-fleetctl_<version>_linux_amd64.tar.gz --repo mbrigl/opamp-fleet \
+    --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml
+$ sha256sum -c --ignore-missing SHA256SUMS
 $ tar xzf opamp-fleetctl_<version>_linux_amd64.tar.gz
 $ ./opamp-fleetctl --version
 ```
@@ -136,6 +142,12 @@ $ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
 
 `--version` names the *release to fetch*, not this tool's own version — `--version 1.19`, not a
 bare `--version`.
+
+The release is fetched under upstream's own tag, and the Package is named with the version written
+as SemVer, because a Package version is SemVer: a number with fewer than three components is
+completed with `.0`, and a leading zero is dropped from a component. `--version 1.19` fetches tag
+`v1.19` and uploads Package `1.19.0`; `24.04.1` becomes `24.4.1`. Both keep upstream's order. A
+number that cannot be written so is refused before anything is downloaded, naming it.
 
 ### What it prints at the end
 
@@ -261,6 +273,10 @@ $ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtai
 | `public-key --key <file>` | the public key (hex) | recovering it from an existing private key |
 | `sign --key <file> --signing-info <file> [--out <file>]` | the signing file, with every entry signed | a Package's **Signing info** from the Packages tab, signed whole and imported there — see [Signing a whole Package at once](#signing-a-whole-package-at-once) |
 | `sha256 <artifact>` | the SHA-256 (hex) | comparing a file you hold with the `content_hash` the Server shows for its entry, before you sign |
+
+Both forms of `sign` sign only a SemVer 2.0.0 version. A `--version`, or a signing file, whose
+version is not SemVer (`1.19`, `24.04.1`) is refused before the key is read, naming the version:
+a Client refuses such a package, so the key never signs one.
 
 The options of `pack`, and why a `.tar.gz` packed twice gives the same bytes, are in
 [step 2 of the rollout walkthrough](rollout.md#2-build-the-artifact), which runs the whole path

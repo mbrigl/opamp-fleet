@@ -1,9 +1,10 @@
-//! Where a `ServerToAgent` goes on its way down (ADR-0015 clause 13).
+//! Where a `ServerToAgent` goes on its way down (ADR-0039 clause 5).
 //!
-//! The Gateway routes by `instance_uid` and nothing else, in both directions. Upward that needs no
-//! lookup — a report leaves on its own Agent's connection. Downward it does: the pool's reader
-//! tasks see replies for every Agent the Gateway carries, and each has to reach the downstream
-//! connection that Agent is actually on.
+//! The Gateway routes by `instance_uid`, for the host it is bound to (ADR-0039 clause 5). Upward
+//! that needs no lookup — a report leaves on its own Agent's connection, once its `instance_uid`
+//! is bound to the host that sent it. Downward it does: the pool's reader tasks see replies for
+//! every Agent the Gateway carries, and each has to reach the downstream connection that Agent is
+//! actually on, which is always one of its bound host's.
 //!
 //! Two shapes of downstream connection, because there are two transports. A WebSocket peer holds a
 //! channel open for as long as it is connected; a plain-HTTP peer is a single exchange waiting for
@@ -55,20 +56,32 @@ impl Registry {
         }
     }
 
-    /// A WebSocket peer claims an Agent. Claiming again replaces the route: an Agent that
-    /// reconnects through a second socket is reachable on the new one, which is the same
-    /// last-writer-wins the Server applies to its own connection ownership.
+    /// The package cache, which holds the bindings and logs the Gateway's refusals.
+    pub fn cache(&self) -> &PackageCache {
+        &self.cache
+    }
+
+    /// A WebSocket peer whose certificate speaks as `speaker` claims an Agent, and gets it only
+    /// when the Agent's `instance_uid` is bound to `speaker`: then the route is its, and `false`
+    /// leaves the route where it was (ADR-0039 clause 5). Claiming again from the same host
+    /// replaces the route: an Agent that reconnects through a second socket is reachable on the
+    /// new one.
     pub fn attach(
         &self,
         uid: InstanceUid,
         sink: mpsc::Sender<ServerToAgent>,
         host: Option<String>,
-    ) {
-        // A report binds its `instance_uid` to its host, the first one only (ADR-0026 clause 45);
+        speaker: &str,
+    ) -> bool {
+        // A report binds its `instance_uid` to its host, the first one only (ADR-0039 clause 6);
         // an `instance_uid` with a route here is never the binding that makes room.
         let mut routes = self.routes.lock().expect("registry lock");
-        self.cache
-            .bind(uid, host.as_deref(), |uid| routes.contains_key(uid));
+        if !self
+            .cache
+            .bind(uid, speaker, |uid| routes.contains_key(uid))
+        {
+            return false;
+        }
         routes.insert(
             uid,
             Route {
@@ -76,20 +89,28 @@ impl Registry {
                 host,
             },
         );
+        true
     }
 
-    /// A plain-HTTP peer waits for exactly one reply for this Agent. Returns the number that
-    /// [`Registry::abandon`] takes once the exchange ends without one.
+    /// A plain-HTTP peer whose certificate speaks as `speaker` waits for exactly one reply for
+    /// this Agent, when the Agent's `instance_uid` is bound to `speaker` (ADR-0039 clause 5).
+    /// Returns the number that [`Registry::abandon`] takes once the exchange ends without one, and
+    /// `None` for an `instance_uid` that is not the host's.
     pub fn expect_once(
         &self,
         uid: InstanceUid,
         reply: oneshot::Sender<ServerToAgent>,
         host: Option<String>,
-    ) -> u64 {
-        let exchange = self.exchanges.fetch_add(1, Ordering::Relaxed);
+        speaker: &str,
+    ) -> Option<u64> {
         let mut routes = self.routes.lock().expect("registry lock");
-        self.cache
-            .bind(uid, host.as_deref(), |uid| routes.contains_key(uid));
+        if !self
+            .cache
+            .bind(uid, speaker, |uid| routes.contains_key(uid))
+        {
+            return None;
+        }
+        let exchange = self.exchanges.fetch_add(1, Ordering::Relaxed);
         routes.insert(
             uid,
             Route {
@@ -97,7 +118,31 @@ impl Registry {
                 host,
             },
         );
-        exchange
+        Some(exchange)
+    }
+
+    /// An enrolling peer's plain-HTTP exchange waits for exactly one reply for `uid`, binding
+    /// nothing (ADR-0039 clause 5): its exchange is its route for that reply alone. `None` — the
+    /// report is not forwarded — for an `instance_uid` bound to a host or routed already, so an
+    /// enrolling peer never takes another Agent's replies.
+    pub fn expect_enrolment(
+        &self,
+        uid: InstanceUid,
+        reply: oneshot::Sender<ServerToAgent>,
+    ) -> Option<u64> {
+        let mut routes = self.routes.lock().expect("registry lock");
+        if routes.contains_key(&uid) || self.cache.is_bound(&uid) {
+            return None;
+        }
+        let exchange = self.exchanges.fetch_add(1, Ordering::Relaxed);
+        routes.insert(
+            uid,
+            Route {
+                downstream: Downstream::Exchange(reply, exchange),
+                host: None,
+            },
+        );
+        Some(exchange)
     }
 
     /// Releases the route of a plain-HTTP exchange that ended without its reply, unless a later

@@ -188,9 +188,11 @@ Use these exact words in code, comments, documentation, and ADRs.
   a small number of connections. A Gateway forwards messages unchanged and holds **no authentication
   policy of its own**: it admits a connecting Client by a client certificate from the fleet's client
   CA in its handshake, as the Server would, and the one admission refusal it makes beyond that is
-  the Server's — a certificate the Server has revoked. It passes on a package it holds for the
-  Agents behind it only to the host whose Agent the Server offered it to through the Gateway.
-  Agents behind a Gateway remain distinct Agents.
+  the Server's — a certificate the Server has revoked. It forwards a Client's reports only for the
+  Agents its host first reported, and passes on a package it holds for the Agents behind it only to
+  the host whose Agent the Server offered it to through the Gateway. Where the operator gives it the
+  bootstrap CA, it also relays a host's enrolment, which the Server decides as any other. Agents
+  behind a Gateway remain distinct Agents.
 - **Supervisor Endpoint** — the OpAMP endpoint a Supervisor exposes on the loopback interface so that
   a Managed Process carrying an OpAMP client of its own can report to it. It exists because such a
   client — notably the OpenTelemetry Collector's `opampextension` — is a **client only** and therefore
@@ -336,12 +338,15 @@ Use these exact words in code, comments, documentation, and ADRs.
     through a Client in Gateway Mode appear as their own Agents, fully manageable, while sharing a
     small Connection Pool — and the Gateway makes no authentication decision of its own: it admits
     a Client by a certificate from the fleet's client CA, as the Server does, refuses what the
-    Server has revoked, admits no one while it cannot learn what that is, and passes on a package
-    the Server offered through it only to the host it was offered to.
+    Server has revoked, admits no one while it cannot learn what that is, forwards a Client's
+    reports only for its own host's Agents, and passes on a package the Server offered through it
+    only to the host it was offered to. A host that only a Gateway connects enrols through it.
 16. **G-16** — **A Collector reports through its own OpAMP client.** A Collector carrying the
-    `opampextension` connects to its Supervisor's Supervisor Endpoint, which relays its description,
-    health, and effective configuration upstream — so the Collector's own reporting, rather than
-    external observation, is what makes it visible in the fleet.
+    `opampextension` connects to its Supervisor's Supervisor Endpoint, which relays the Collector's
+    statement of what it is (its `service.*` description), its health, and its effective
+    configuration upstream — so the Collector's own reporting, rather than external observation, is
+    what makes it visible in the fleet. What the host is stays the Supervisor's and the operator's
+    to state.
 17. **G-17** — **The connection is secured and the Agent is identified.** Client-to-Server traffic
     is TLS-protected on both ends, mutual TLS is required, and the Server accepts only
     authenticated Agent identities.

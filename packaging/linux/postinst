@@ -15,11 +15,17 @@
 #
 # The paths name the default system roots (`default_layout_root` and `default_root` in
 # crates/fleet-agent/src/service/manager.rs), the only roots a packaged install ever uses: this script
-# calls plain `service install`. They are two roots on Linux — the executable layout under `/opt`,
-# because SELinux never lets systemd execute a binary labeled `var_lib_t`; the configuration and
-# state under `/var/lib`, where data belongs (ADR-0019 clause 8).
+# never passes `--root`. They are two roots on Linux — the executable layout under `/opt`, because
+# SELinux never lets systemd execute a binary labeled `var_lib_t`; the configuration and state under
+# `/var/lib`, where data belongs (ADR-0019 clause 8).
 #
-# There is no migration branch here, and that is ADR-0019 clause 10: an upgrade is a
+# The service runs under the system account `opamp-fleet` (ADR-0042 clause 5). It is created here
+# where it is missing — on every run, also on a host that stays root, so that moving such a host is
+# one command — and never modified or removed. Only a first registration, where no unit exists, is
+# told the account; every later one runs `service install` without `--run-as`, which keeps the
+# account the unit names (ADR-0042 clause 2). A host that chose root with `--run-as root` stays root.
+#
+# There is no migration branch here, and that is ADR-0042 clause 1: an upgrade is a
 # re-registration, so there is nothing to carry across.
 #
 # dpkg calls this as `postinst configure <old-version>`, rpm as `%post <count>`. The two argument
@@ -40,7 +46,22 @@ if command -v systemctl >/dev/null 2>&1 &&
 	running=yes
 fi
 
-/usr/libexec/opamp-fleet/supervisor service install
+if ! getent passwd opamp-fleet >/dev/null 2>&1; then
+	# A group of that name without its account is joined, since `--user-group` would refuse it.
+	if getent group opamp-fleet >/dev/null 2>&1; then
+		useradd --system --gid opamp-fleet --no-create-home --home-dir /var/lib/opamp-fleet \
+			--shell /usr/sbin/nologin opamp-fleet
+	else
+		useradd --system --user-group --no-create-home --home-dir /var/lib/opamp-fleet \
+			--shell /usr/sbin/nologin opamp-fleet
+	fi
+fi
+
+if [ -e /etc/systemd/system/opamp-fleet.service ]; then
+	/usr/libexec/opamp-fleet/supervisor service install
+else
+	/usr/libexec/opamp-fleet/supervisor service install --run-as opamp-fleet
+fi
 
 # `-n`: without it, ln would place the link *inside* the directory an existing link resolves to.
 # On rpm upgrades the erasure of the old package's files deletes this link again; `%posttrans`
@@ -86,4 +107,11 @@ service enrols when it starts:
 The configuration lets the Server update this Client itself, from signed packages only
 — the fleet then patches its own agent like any other program. Write `self_update = false` under
 [packages] in supervisor.toml to keep that one update manual.
+
+A new installation runs the service, and every Agent it supervises, as the system account
+opamp-fleet, and every upgrade keeps the account the unit names. An Agent that needs root (GLPI
+Agent's full inventory, a Telegraf input without a sudo rule, a port below 1024) needs a sudo rule,
+a drop-in under /etc/systemd/system/opamp-fleet.service.d/, or root, chosen with:
+
+  opamp-fleet service install --run-as root
 EOF
