@@ -1,7 +1,7 @@
 # ADR-0043: A Package version is SemVer, and a Supervisor never installs one below the highest version its Agent type has had on the host
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-18
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** the version rule of `crates/fleet-core/src/version.rs` and its callers, the Package identity and the store's reading of it in `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/fs/packages.rs` and `crates/fleet-server/src/migrate.rs`, the package routes of `crates/fleet-server/src/api.rs`, the candidate test of `crates/fleet-server/src/packages.rs`, the `package sign` and `package fetch` commands of `opamp-fleetctl` in `crates/fleet-tools/`, the Supervisor's check of a package offer in `crates/fleet-agent/src/supervisor/agent/packages.rs`, the installed-package record in `crates/fleet-agent/src/storage.rs`, the file `package-high-water.json` under the Client's `state_dir`, the purge in `crates/fleet-agent/src/reconfigure.rs`, and every document that tells an operator how a Package is numbered or how a Supervisor is moved to an older version
 - **Supersedes:** [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clause 34; [ADR-0025](0025-rollout-and-what-reaches-an-agent.md) clauses 9 and 14; [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 65; [ADR-0033](0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md) clause 5

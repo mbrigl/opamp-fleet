@@ -1,7 +1,7 @@
 # ADR-0042: The Linux packages run the Client under its own account, a re-registration keeps the account it finds, and the Client writes its systemd unit with the sandboxing every supported agent tolerates
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-18
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** `packaging/linux/postinst` and `packaging/linux/postrm`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, the `--run-as` flag of `service install` and the account a registration takes in `crates/fleet-agent/src/main.rs` and `crates/fleet-agent/src/service/run_as.rs`, the systemd unit and the launchd plist `crates/fleet-agent/src/service/manager.rs` registers, the ownership handover, and every document that tells an operator which account an installed Client runs as
 - **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 10, 13, 36 and 38

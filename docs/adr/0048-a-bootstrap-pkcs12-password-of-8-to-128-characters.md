@@ -1,7 +1,7 @@
 # ADR-0048: A bootstrap PKCS#12 password is 8 to 128 characters
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-18
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** the password rule of `crates/fleet-core/src/pkcs12.rs` and its callers, the password field of the Enrolments tab of the bundled UI in `crates/fleet-server/static/index.html`, the `400` text of `POST /api/v1/bootstrap-certificates`, and every document that states how long a bootstrap password is
 - **Supersedes:** [ADR-0030](0030-a-pkcs12-password-of-4-to-128-characters.md)

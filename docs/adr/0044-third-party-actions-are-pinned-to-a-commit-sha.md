@@ -1,7 +1,7 @@
 # ADR-0044: A third-party GitHub Action is pinned to a commit SHA with its version in a comment, a first-party one to its major tag, and Dependabot keeps both current
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-18
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** every `uses:` reference in `.github/workflows/`, `.github/dependabot.yml`, `scripts/check-action-refs.sh` and `scripts/test-check-action-refs.sh`, the `actions` job of `.github/workflows/checks.yml`, and the section *Actions in the workflows* of `SECURITY.md`
 - **Supersedes:** [ADR-0007](0007-action-references.md)

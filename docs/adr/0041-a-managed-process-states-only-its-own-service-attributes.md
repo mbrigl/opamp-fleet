@@ -1,7 +1,7 @@
 # ADR-0041: A Managed Process states only its own `service.*` attributes, and never the host's, the Supervisor's or the operator's
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-18
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** the fold of a Managed Process's description and the operator attributes in `crates/fleet-agent/src/supervisor/agent/description.rs`, the attribute keys in `crates/opamp/src/attributes.rs`, the `[attributes]` table of `supervisor.toml`, and every document that tells an operator what a Managed Process or `[attributes]` contributes to an Agent's description
 - **Supersedes:** [ADR-0016](0016-what-an-agent-reports-about-itself.md) clauses 8 and 9

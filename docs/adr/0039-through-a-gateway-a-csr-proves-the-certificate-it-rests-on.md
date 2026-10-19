@@ -1,6 +1,6 @@
 # ADR-0039: Through a Gateway a CSR proves the certificate it rests on, a report is forwarded only for its host's Agents, and an enrolment is relayed over plain HTTP
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** the CSR handling on a member connection in `crates/fleet-server/src/fleet.rs` (the host and predecessor a CSR is issued to), the certificate register in `crates/fleet-server/src/revocation.rs`, the renewal and bootstrap proofs and the reading of a CSR in `crates/fleet-core/` and `crates/fleet-server/src/ca.rs`, the Client's renewal and enrolment CSR in `crates/fleet-agent/src/csr.rs` and `crates/fleet-agent/src/service/enrol.rs`, the requester an enrolment request is filed under in `crates/fleet-server/src/enrolment.rs` and `crates/fleet-server/src/transport.rs`, the admission throttle's buckets in `crates/fleet-server/src/transport.rs` and `crates/fleet-server/src/agent_rate.rs`, the downstream admission, the enrolling peer, the forwarding and routing of reports and replies and the bindings in `crates/fleet-agent/src/gateway/`, the host derived for a certificate that names none in `crates/fleet-core/src/host.rs`, the `[gateway.tls]` section of `supervisor.toml` and its parsing in `crates/fleet-agent/src/config.rs`, and every document that tells an operator what a Gateway passes on, how an Agent behind one renews its certificate, or how a host behind one enrols

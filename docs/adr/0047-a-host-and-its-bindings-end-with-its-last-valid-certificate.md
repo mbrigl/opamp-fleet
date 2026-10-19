@@ -1,7 +1,7 @@
 # ADR-0047: A Host and its bindings end with its last valid certificate, and forgetting an Agent releases its binding
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-18
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** the host register in `crates/fleet-server/src/revocation.rs` and its filesystem adapter, the forgetting of an Agent in `crates/fleet-server/src/fleet.rs` and the `DELETE /api/v1/agents/{instance_uid}` route of `crates/fleet-server/src/api.rs`, and every document that tells an operator when a Host or a binding ends
 - **Supersedes:** [ADR-0035](0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md) clause 1; [ADR-0024](0024-the-fleet-record.md) clause 11

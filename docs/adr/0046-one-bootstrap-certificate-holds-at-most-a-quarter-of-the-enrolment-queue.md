@@ -1,7 +1,7 @@
 # ADR-0046: One bootstrap certificate holds at most a quarter of the enrolment queue
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-18
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** the pending queue in `crates/fleet-server/src/enrolment.rs` and its answer on an enrolment connection in `crates/fleet-server/src/transport.rs`, the `[enrolment]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, and every document that tells an operator how many requests may wait
 - **Supersedes:** [ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md) clause 21

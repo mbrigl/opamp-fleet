@@ -1,7 +1,7 @@
 # ADR-0040: A connection-settings offer never moves the Client to plaintext
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-18
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** the `endpoint` of the `[connection_offer]` section of `server.toml` and its startup check in `crates/fleet-server/src/config.rs`, the Client's verification of an offered endpoint in `crates/fleet-agent/src/connection.rs`, the loading of its persisted `connection-settings.pb`, and every document that tells an operator where an offer may move a fleet
 - **Supersedes:** [ADR-0014](0014-connection-settings-offered-without-a-credential-and-server-capabilities.md) clauses 1, 5 and 9
