@@ -13,7 +13,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.5.5]
+## [0.5.6]
+
+### Security
+
+- **A renewal request is read from exactly one PEM block, so a member cannot renew another host's
+  certificate over its own key**
+  ([ADR-0021](docs/adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)
+  clause 27). The Server read one certificate signing request with two PEM readers: the renewal
+  proof and the key it covers through one, the key it signs through the other. The two disagree on
+  a request with text before its first boundary on the same line, so a request built from two —
+  the attacker's own, carrying a renewal proof copied from another host's renewal request, followed
+  by that genuine request — passed the proof check against the other host's key and was signed
+  over the attacker's key, as a renewal of the other host's certificate, without approval. Anyone
+  holding a client certificate of the client CA and a copy of another host's renewal request could
+  do this; a Gateway, which relays the renewal request of every host behind it and holds a client
+  certificate, is the one most likely placed to. Releases 0.5.0 to 0.5.5 are affected. A request is now decoded once, and anything
+  but exactly one `CERTIFICATE REQUEST` block, each boundary on a line of its own and nothing but
+  whitespace around it, is answered `BadRequest` — saying it is not exactly one PEM block, or that
+  the request does not parse — and nothing is signed. The Client's own requests are unchanged. A
+  third-party OpAMP client that sends the legacy label `NEW CERTIFICATE REQUEST`, text before or
+  after the block, or PEM headers is now refused and must send the plain form. **What to do:** upgrade every Server. Then consider revoking certificates
+  whose register entry shows a renewal you cannot account for: `GET /api/v1/certificates` lists
+  each with its `predecessor`, and the audit record has an `issuance.signed` line of `kind`
+  `renewal` with its `predecessor_serial` and the `instance_uid` of the message that carried it.
+  A renewal whose `instance_uid` is not one of the renewed host's own Agents deserves a look; two
+  renewals of one certificate alone can also be a retry after a lost reply. Revoke
+  the one you cannot account for by its serial (`POST /api/v1/revocations` with
+  `{"certificate": {"authority": "client", "serial": "…"}}`); when you cannot tell which it is,
+  revoke the certificate both renew, which reaches every renewal of it, and enrol that host again.
+
+## [0.5.5] - 2026-10-18
 
 ### Added
 
