@@ -4830,3 +4830,120 @@ async fn a_renewal_carries_the_predecessors_values_unchanged() {
     assert_eq!(values_of(&new_cert), values_of(&old_cert));
     assert_eq!(values_of(&new_cert).organization_identifier, "K-4711");
 }
+
+// ---- One request, one PEM block (ADR-0021 clause 27) ----
+
+/// A CSR in renewal of `old_cert`, proven with `old_key` as ADR-0021 clause 27 describes.
+fn renewal_csr(old_cert: &str, old_key: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    use rcgen::{PublicKeyData as _, SigningKey as _};
+    use sha2::{Digest as _, Sha256};
+    let old_key = KeyPair::from_pem(old_key).expect("old key");
+    let new_key = KeyPair::generate().expect("new key");
+    let old_der = opamp::tls::certificates(old_cert.as_bytes()).expect("pem")[0].to_vec();
+    let signature = old_key
+        .sign(&fleet_core::renewal::statement(&Sha256::digest(
+            new_key.subject_public_key_info(),
+        )))
+        .expect("sign");
+    let proof = format!(
+        "{}{}",
+        fleet_core::renewal::URI_PREFIX,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(fleet_core::renewal::encode(&old_der, &signature))
+    );
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::URI(proof.try_into().expect("uri")));
+    params
+        .serialize_request(&new_key)
+        .expect("csr")
+        .pem()
+        .expect("pem")
+        .into_bytes()
+}
+
+/// `victim`'s renewal proof, copied into a request of a key of the attacker's own — and the
+/// attacker's key.
+fn grafted(victim: &[u8]) -> (String, KeyPair) {
+    let proof = rcgen::CertificateSigningRequestParams::from_pem(
+        std::str::from_utf8(victim).expect("utf-8"),
+    )
+    .expect("victim")
+    .params
+    .subject_alt_names;
+    let key = KeyPair::generate().expect("attacker key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    params.subject_alt_names = proof;
+    let csr = params
+        .serialize_request(&key)
+        .expect("csr")
+        .pem()
+        .expect("pem");
+    (csr, key)
+}
+
+/// What a reply that should have refused handed out instead, for the failure message.
+fn handed_out(reply: &ServerToAgent, attacker: &KeyPair) -> String {
+    use rcgen::PublicKeyData as _;
+    use sha2::{Digest as _, Sha256};
+    let Some(certificate) = reply
+        .connection_settings
+        .as_ref()
+        .and_then(|s| s.opamp.as_ref())
+        .and_then(|o| o.certificate.as_ref())
+    else {
+        return format!("no certificate, {:?}", reply.error_response);
+    };
+    let der = opamp::tls::certificates(&certificate.cert).expect("pem")[0].to_vec();
+    let facts = fleet_server::ca::facts(&der).expect("facts");
+    let owner = if facts.key_fingerprint == hex::encode(Sha256::digest(attacker.der_bytes())) {
+        "the attacker's"
+    } else {
+        "another"
+    };
+    format!("a certificate for host {:?} over {owner} key", facts.host)
+}
+
+/// Another host's renewal proof cannot be carried over to a key of the sender's: a renewal
+/// request read from anything but exactly one PEM block — the attacker's request with the proof
+/// copied into it, behind a prefix one PEM reader skips the line of and another does not, or as
+/// the first of two blocks, the victim's genuine request after it — is answered `BadRequest`
+/// naming it, and nothing is signed.
+/// Verifies: ADR-0021
+#[tokio::test]
+async fn a_renewal_request_is_read_from_exactly_one_pem_block() {
+    let pki = Pki::new();
+    let served = serve(&pki, revocations_setup(&pki)).await;
+    let revocations = served.revocations.clone().expect("armed");
+    let (victim_cert, victim_key) = pki.issue_to_host("h-1");
+    let (attacker_cert, attacker_key) = pki.issue_to_host("h-2");
+    let sender = client(&served.ca_pem, Some((&attacker_cert, &attacker_key)));
+    let uid = InstanceUid::default();
+    assert!(post(&sender, &served.endpoint, report(&uid))
+        .await
+        .status()
+        .is_success());
+    let before = revocations.issued().len();
+    let victim = renewal_csr(&victim_cert, &victim_key);
+    let (attacker, key) = grafted(&victim);
+    let victim = std::str::from_utf8(&victim).expect("utf-8");
+    for (csr, what) in [
+        (format!("x{attacker}{victim}"), "prefixed"),
+        (format!("{attacker}{victim}"), "two blocks"),
+    ] {
+        let reply =
+            decode(post(&sender, &served.endpoint, with_csr(&uid, csr.into_bytes())).await).await;
+        let refused = reply.error_response.as_ref().is_some_and(|error| {
+            error.r#type == ServerErrorResponseType::BadRequest as i32
+                && error.error_message.contains("exactly one PEM block")
+        });
+        assert!(refused, "{what}: {}", handed_out(&reply, &key));
+    }
+    assert_eq!(
+        revocations.issued().len(),
+        before,
+        "a certificate was signed"
+    );
+}

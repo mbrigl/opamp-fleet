@@ -93,8 +93,7 @@ impl ClientCa {
         host: &str,
         subject: &SubjectValues,
     ) -> Result<Signed, String> {
-        let mut request = CertificateSigningRequestParams::from_pem(csr_pem)
-            .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+        let (_, mut request) = read_request(csr_pem)?;
         // The life starts now, less a few minutes for clocks that disagree: a start in the past
         // would put a fresh certificate into its renewal window at once (ADR-0021 clause 11), and
         // would lengthen what a stolen one is good for.
@@ -168,8 +167,7 @@ impl ClientCa {
     pub fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String> {
         use base64::Engine as _;
         use sha2::{Digest, Sha256};
-        let request = CertificateSigningRequestParams::from_pem(csr_pem)
-            .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+        let (csr_der, request) = read_request(csr_pem)?;
         let Some(encoded) = request
             .params
             .subject_alt_names
@@ -196,7 +194,6 @@ impl ClientCa {
         if !old.validity().is_valid() {
             return Err(refused("its certificate is not valid now"));
         }
-        let csr_der = pem_der(csr_pem)?;
         let (_, csr) =
             x509_parser::certification_request::X509CertificationRequest::from_der(&csr_der)
                 .map_err(|_| refused("the request does not parse"))?;
@@ -393,8 +390,7 @@ fn distinguished_name(
 /// # Errors
 /// Returns the `BadRequest` text for a request that does not parse or claims another identity.
 pub fn check_claims(csr_pem: &str, sender: &[u8]) -> Result<(), String> {
-    let request = CertificateSigningRequestParams::from_pem(csr_pem)
-        .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+    let (_, request) = read_request(csr_pem)?;
     let mut values: Vec<String> = request
         .params
         .distinguished_name
@@ -466,11 +462,70 @@ fn uuid_claims(value: &str) -> Vec<[u8; 16]> {
     claims
 }
 
-/// The DER of a PEM block.
-fn pem_der(pem: &str) -> Result<Vec<u8>, String> {
-    let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
-        .map_err(|e| format!("the certificate signing request is not PEM: {e}"))?;
-    Ok(block.contents)
+/// The one PEM label a certificate signing request is taken under.
+const CSR_LABEL: &str = "CERTIFICATE REQUEST";
+
+/// The DER of a PEM certificate signing request: exactly one `CERTIFICATE REQUEST` block with
+/// nothing but whitespace around it and nothing on its boundaries' lines, whose content parses as
+/// a request with nothing after it.
+///
+/// Two PEM readers can pick different blocks out of one input, and a renewal proof read through
+/// one would then cover a key the other hands on to be signed. So a request is decoded here once,
+/// strictly, and every proof, claim, and signed key is read from these same bytes (ADR-0021
+/// clause 27).
+///
+/// # Errors
+/// Returns the `BadRequest` text for anything else: text before or after the block or on a
+/// boundary's line, a second block, another label, or content that does not parse.
+fn csr_der(csr_pem: &[u8]) -> Result<Vec<u8>, String> {
+    let begin = format!("-----BEGIN {CSR_LABEL}-----");
+    let end = format!("-----END {CSR_LABEL}-----");
+    let not_one = || {
+        format!(
+            "the certificate signing request is not exactly one PEM block labelled {CSR_LABEL} \
+             with nothing but whitespace around it"
+        )
+    };
+    let text = csr_pem.trim_ascii();
+    let body = text
+        .strip_prefix(begin.as_bytes())
+        .and_then(|rest| rest.strip_suffix(end.as_bytes()))
+        .ok_or_else(not_one)?;
+    // A line break straight after the BEGIN boundary and straight before the END boundary: no
+    // text on either boundary's line.
+    let line_break = |b: &u8| matches!(b, b'\n' | b'\r');
+    if !body.first().is_some_and(line_break) || !body.last().is_some_and(line_break) {
+        return Err(not_one());
+    }
+    // Base64 and line breaks only: no second boundary, no header, no other text.
+    if !body.iter().all(|b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=') || b.is_ascii_whitespace()
+    }) {
+        return Err(not_one());
+    }
+    let unparsed = || "the certificate signing request does not parse".to_string();
+    let (rest, block) = x509_parser::pem::parse_x509_pem(text).map_err(|_| unparsed())?;
+    if block.label != CSR_LABEL || !rest.trim_ascii().is_empty() {
+        return Err(not_one());
+    }
+    match x509_parser::certification_request::X509CertificationRequest::from_der(&block.contents) {
+        Ok(([], _)) => Ok(block.contents),
+        _ => Err(unparsed()),
+    }
+}
+
+/// A PEM certificate signing request, decoded once and strictly ([`csr_der`]): its DER, and what
+/// rcgen reads from those same bytes. Every proof, claim, and signed key is read from one request
+/// this way, never through a second PEM reader.
+///
+/// # Errors
+/// Returns the `BadRequest` text for a request that is not exactly one PEM block or does not
+/// parse.
+fn read_request(csr_pem: &str) -> Result<(Vec<u8>, CertificateSigningRequestParams), String> {
+    let der = csr_der(csr_pem.as_bytes())?;
+    let request = CertificateSigningRequestParams::from_der(&der.as_slice().into())
+        .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+    Ok((der, request))
 }
 
 /// Verifies `signature` over `message` with the key of `spki`: ECDSA P-256 or P-384 with the
@@ -524,8 +579,7 @@ pub fn enrolment_request(
 ) -> Result<crate::enrolment::Request, String> {
     use rcgen::PublicKeyData as _;
     use sha2::{Digest, Sha256};
-    let request = CertificateSigningRequestParams::from_pem(csr_pem)
-        .map_err(|e| format!("the certificate signing request does not parse: {e}"))?;
+    let (_, request) = read_request(csr_pem)?;
     let subject = match request
         .params
         .distinguished_name
@@ -1171,7 +1225,7 @@ mod tests {
         use rcgen::{PublicKeyData as _, SigningKey as _};
         use sha2::{Digest, Sha256};
         let new_key = KeyPair::generate().expect("new key");
-        let old_der = pem_der(old_cert_pem).expect("der");
+        let old_der = cert_der(old_cert_pem);
         let signature = old_key
             .sign(&fleet_core::renewal::statement(&Sha256::digest(
                 new_key.subject_public_key_info(),
@@ -1227,7 +1281,7 @@ mod tests {
                 &SubjectValues::default(),
             )
             .expect("sign");
-        let renewed_der = pem_der(&renewed.pem).expect("der");
+        let renewed_der = cert_der(&renewed.pem);
         let (_, cert) = X509Certificate::from_der(&renewed_der).expect("parse");
         let names = cert
             .subject_alternative_name()
@@ -1265,6 +1319,109 @@ mod tests {
             .sign(&old_csr, "host-7", &SubjectValues::default())
             .expect("sign");
         assert!(ca.renewal_proof(&renewing(&foreign.pem, &old_key)).is_err());
+    }
+
+    /// The DER of a PEM certificate.
+    fn cert_der(pem: &str) -> Vec<u8> {
+        opamp::tls::certificates(pem.as_bytes()).expect("pem")[0].to_vec()
+    }
+
+    /// One block with whitespace around it is read; text before or after it or on a boundary's
+    /// line, a second block, another label, a header, and content that is no request are refused.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_request_is_exactly_one_pem_block() {
+        let one = csr("one");
+        let other = csr("other");
+        assert!(csr_der(one.as_bytes()).is_ok());
+        assert!(csr_der(format!("\n  {one}\r\n\n").as_bytes()).is_ok());
+        assert!(csr_der(one.replace('\n', "\r\n").as_bytes()).is_ok());
+        let begin = "-----BEGIN CERTIFICATE REQUEST-----";
+        let end = "-----END CERTIFICATE REQUEST-----";
+        let certificate = one.replace("CERTIFICATE REQUEST", "CERTIFICATE");
+        let header = one.replacen("-----\n", "-----\nProc-Type: 4,ENCRYPTED\n\n", 1);
+        for refused in [
+            format!("x{one}"),
+            format!("x{one}{other}"),
+            format!("{one}{other}"),
+            format!("{one}\n{other}"),
+            format!("{one}trailing"),
+            certificate,
+            header,
+            one.replacen(begin, &format!("{begin} junk"), 1),
+            one.replacen(&format!("{begin}\n"), &format!("{begin}AAAA\n"), 1),
+            one.replacen(&format!("\n{end}"), end, 1),
+            one.replacen(&format!("\n{end}"), &format!("\n{end} junk"), 1),
+            format!("{begin}\nAAAA\n{end}"),
+            "not pem".to_string(),
+        ] {
+            assert!(csr_der(refused.as_bytes()).is_err(), "{refused}");
+        }
+    }
+
+    /// `victim`'s renewal proof, copied into a request of a key of the attacker's own.
+    fn grafted(victim: &str) -> String {
+        let victim = csr_der(victim.as_bytes()).expect("victim");
+        let proof = CertificateSigningRequestParams::from_der(&victim.as_slice().into())
+            .expect("victim")
+            .params
+            .subject_alt_names;
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.subject_alt_names = proof;
+        params
+            .serialize_request(&KeyPair::generate().expect("attacker key"))
+            .expect("csr")
+            .pem()
+            .expect("pem")
+    }
+
+    /// A renewal proof and the key it signs come from one PEM block. A proof copied from another
+    /// host's renewal request into one of the attacker's, with the victim's request after it —
+    /// behind a prefix one PEM reader skips the line of and another does not, or as a second
+    /// block — or with text on a boundary's line or after the block, is refused by every reader of
+    /// a request, never read as the victim's proof over the attacker's key; and the copy alone
+    /// does not hold.
+    /// Verifies: ADR-0021
+    #[test]
+    fn every_reader_of_a_request_reads_exactly_one_pem_block() {
+        let ca = client_ca(30);
+        let old_key = KeyPair::generate().expect("old key");
+        let old = ca
+            .sign(
+                &rcgen::CertificateParams::new(Vec::<String>::new())
+                    .expect("params")
+                    .serialize_request(&old_key)
+                    .expect("csr")
+                    .pem()
+                    .expect("pem"),
+                "host-7",
+                &SubjectValues::default(),
+            )
+            .expect("sign");
+        let victim = renewing(&old.pem, &old_key);
+        let attacker = grafted(&victim);
+        let copy = ca.renewal_proof(&attacker).expect_err("a copied proof");
+        assert!(copy.contains("does not verify"), "{copy}");
+
+        let begin = "-----BEGIN CERTIFICATE REQUEST-----";
+        for crafted in [
+            format!("x{attacker}{victim}"),
+            format!("{attacker}{victim}"),
+            victim.replacen(begin, &format!("{begin} junk"), 1),
+            format!("{victim}trailing"),
+        ] {
+            let refusals = [
+                ca.renewal_proof(&crafted).map(|_| ()),
+                ca.sign(&crafted, "host-7", &SubjectValues::default())
+                    .map(|_| ()),
+                check_claims(&crafted, &[]),
+                enrolment_request(&crafted, &[]).map(|_| ()),
+            ];
+            for refused in refusals {
+                let why = refused.expect_err("read past its one block");
+                assert!(why.contains("exactly one PEM block"), "{crafted}: {why}");
+            }
+        }
     }
 
     /// Writes a CA's files and the `[enrolment]` naming them.
