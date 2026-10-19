@@ -914,7 +914,6 @@ dependencies = [
  "opamp",
  "prost",
  "rcgen",
- "reqwest",
  "ring",
  "rustls",
  "serde",
