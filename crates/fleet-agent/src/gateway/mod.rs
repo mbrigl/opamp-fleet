@@ -633,12 +633,14 @@ impl Forwarding {
         let Some(replies) = &downstream.replies else {
             return Reply::Nothing;
         };
-        if !self.registry.attach(
+        let attached = self.registry.attach(
             uid,
             replies.clone(),
             downstream.host.clone(),
             &downstream.speaker,
-        ) {
+        );
+        self.pool.release_unbound();
+        if !attached {
             return Reply::Nothing;
         }
         if !carried {
@@ -714,11 +716,13 @@ impl Forwarding {
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         // Forwarded only for an `instance_uid` bound to the host that sent it; the binding logs
-        // a refusal (ADR-0039 clause 5).
-        let Some(exchange) =
+        // a refusal (ADR-0039 clause 5). A binding that made room for it takes its Agent's place
+        // upstream along: no socket going releases a plain-HTTP Agent's.
+        let exchange =
             self.registry
-                .expect_once(uid, reply_tx, downstream.host.clone(), &downstream.speaker)
-        else {
+                .expect_once(uid, reply_tx, downstream.host.clone(), &downstream.speaker);
+        self.pool.release_unbound();
+        let Some(exchange) = exchange else {
             return Reply::Refuse(
                 StatusCode::FORBIDDEN,
                 "this instance_uid is not this host's to report for".into(),
@@ -908,6 +912,35 @@ mod tests {
             instance_uid: uid.as_bytes().to_vec(),
             ..Default::default()
         }
+    }
+
+    /// A plain-HTTP peer that polls under ever new `instance_uid`s holds no more places on the
+    /// upstream connections than its host holds bindings: the place of an Agent whose binding made
+    /// room goes with it, and the Agents still bound keep theirs.
+    /// Verifies: ADR-0015, ADR-0039
+    #[tokio::test]
+    async fn a_polling_peer_under_new_instance_uids_holds_no_more_places_than_bindings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let peer = downstream(Transport::Http, None, certificate());
+        let uids: Vec<InstanceUid> = (0..10).map(|_| InstanceUid::default()).collect();
+        for uid in &uids {
+            let answer = async {
+                while !forwarding.registry.routes(uid) {
+                    tokio::task::yield_now().await;
+                }
+                forwarding.registry.deliver(*uid, reply_for(*uid)).await;
+            };
+            let (reply, ()) =
+                tokio::join!(forwarding.forward_exchange(&peer, report(*uid)), answer);
+            assert!(matches!(reply, Reply::Send(_)), "the exchange was answered");
+        }
+
+        assert_eq!(
+            forwarding.pool.assignments(),
+            (uids[7..].iter().copied().collect(), 3),
+            "max_carried_agents is 3"
+        );
     }
 
     /// A second host reporting for an `instance_uid` bound to the first is not forwarded and takes

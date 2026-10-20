@@ -879,6 +879,12 @@ impl PackageCache {
         Ok(len)
     }
 
+    /// Takes the `instance_uid`s whose bindings made room for another since the last call
+    /// (ADR-0039 clause 6).
+    pub fn take_released(&self) -> Vec<InstanceUid> {
+        self.inner().bindings.take_released()
+    }
+
     /// Whether `uid` is bound to a host (ADR-0039 clause 6).
     pub fn is_bound(&self, uid: &InstanceUid) -> bool {
         self.inner().bindings.host_of(uid).is_some()

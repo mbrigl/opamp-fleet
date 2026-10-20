@@ -213,8 +213,8 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     WebSocket and anything but one enrolment request `403`, binds nothing, and its place upstream
     goes with its exchange (ADR-0039)
   - ✅ an Agent's place in the upstream pool is released when the socket that carried it goes ·
-    ⚠️ a plain-HTTP Agent's place is released only when its upstream connection drops, so a peer
-    that polls under ever new `instance_uid`s grows the pool's assignments until then
+    ✅ a plain-HTTP Agent's place goes with its binding, so a peer that polls under ever new
+    `instance_uid`s holds no more places than its host's `max_carried_agents` bindings (ADR-0039)
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
   - ✅ headers ≤ 30 s (HTTP/1), from the same listener · ✅ connections served concurrently ·
     ✅ message size in both directions

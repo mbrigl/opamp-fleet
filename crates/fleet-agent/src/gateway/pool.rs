@@ -2,9 +2,9 @@
 //!
 //! Two rules do the work. The pool **grows lazily** to its configured cap — a Gateway in front of
 //! three Agents holds three connections, not ten — and an Agent is **stuck to its connection** by
-//! `instance_uid` for as long as that connection lives. Nothing in the protocol requires the
-//! stickiness; it keeps one Agent's `sequence_num` stream and its `ReportFullState` exchanges on a
-//! single socket, which is what makes a fleet debuggable.
+//! `instance_uid` for as long as that connection lives and the Agent stays bound. Nothing in the
+//! protocol requires the stickiness; it keeps one Agent's `sequence_num` stream and its
+//! `ReportFullState` exchanges on a single socket, which is what makes a fleet debuggable.
 //!
 //! The pool is WebSocket-only, and the configuration refuses anything else at startup: a polling
 //! upstream could not carry the Server's pushes to the Agents behind the Gateway.
@@ -247,6 +247,17 @@ impl Pool {
                     connection.carries.retain(|carried| *carried != uid);
                 }
             }
+        }
+    }
+
+    /// Releases the places of Agents whose bindings made room for another (ADR-0039 clause 6): an
+    /// Agent the Gateway no longer binds is no longer one it carries, and its next report binds and
+    /// is assigned anew. This is what bounds the places of plain-HTTP Agents, whose exchanges end
+    /// with no socket to release them: by the bindings their hosts may hold.
+    pub fn release_unbound(&self) {
+        let released = self.registry.cache().take_released();
+        if !released.is_empty() {
+            self.release(released);
         }
     }
 

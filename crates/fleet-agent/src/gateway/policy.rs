@@ -41,6 +41,9 @@ pub struct Bindings {
     per_host: HashMap<String, usize>,
     /// Orders the reports, so the least recently reported binding is known.
     tick: u64,
+    /// The `instance_uid`s whose bindings made room since [`Bindings::take_released`] last took
+    /// them, so their places on the upstream connections go too.
+    released: Vec<InstanceUid>,
 }
 
 impl Bindings {
@@ -111,6 +114,12 @@ impl Bindings {
                 self.per_host.remove(&binding.host);
             }
         }
+        self.released.push(*uid);
+    }
+
+    /// Takes the `instance_uid`s whose bindings made room since the last call.
+    pub fn take_released(&mut self) -> Vec<InstanceUid> {
+        std::mem::take(&mut self.released)
     }
 
     /// The host `uid` is bound to.
@@ -179,6 +188,8 @@ mod tests {
         );
         assert_eq!(bindings.host_of(&other), Some("b"), "another host's stayed");
         assert_eq!(bindings.count_of("a"), 2);
+        assert_eq!(bindings.take_released(), vec![first], "and is released");
+        assert!(bindings.take_released().is_empty());
         assert!(matches!(
             bindings.bind(InstanceUid::default(), "a", LIMITS, |_| false),
             Bound::Refused(_)
