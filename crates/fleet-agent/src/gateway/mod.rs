@@ -856,7 +856,7 @@ mod tests {
     /// A peer that goes takes its Agents' places on the upstream connections with it, so a peer
     /// coming back under ever new `instance_uid`s grows nothing; an Agent another socket of the
     /// same host carries by then keeps its place and its route.
-    /// Verifies: ADR-0015
+    /// Verifies: ADR-0015, ADR-0058
     #[tokio::test]
     async fn the_agents_a_departed_peer_carried_are_released_from_the_pool() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -930,7 +930,7 @@ mod tests {
     /// A plain-HTTP peer that polls under ever new `instance_uid`s holds no more places on the
     /// upstream connections than its host holds bindings: the place of an Agent whose binding made
     /// room goes with it, and the Agents still bound keep theirs, on the same connection.
-    /// Verifies: ADR-0015, ADR-0039
+    /// Verifies: ADR-0039, ADR-0058
     #[tokio::test]
     async fn a_polling_peer_under_new_instance_uids_holds_no_more_places_than_bindings() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -960,7 +960,7 @@ mod tests {
 
     /// A WebSocket peer whose report makes room among its host's bindings frees the place of the
     /// plain-HTTP Agent whose binding went.
-    /// Verifies: ADR-0015, ADR-0039
+    /// Verifies: ADR-0039, ADR-0058
     #[tokio::test]
     async fn a_binding_a_socket_makes_room_with_frees_the_place_of_the_agent_it_displaced() {
         let dir = tempfile::tempdir().expect("tempdir");

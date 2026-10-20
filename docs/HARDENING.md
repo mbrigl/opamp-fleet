@@ -215,7 +215,7 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
   - ✅ an Agent's place in the upstream pool is released when the socket that carried it goes ·
     ✅ a plain-HTTP Agent's place goes when its binding makes room for another, so a peer that
     polls under ever new `instance_uid`s holds no more places than its host's `max_carried_agents`
-    bindings (ADR-0039)
+    bindings (ADR-0039, ADR-0058)
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
   - ✅ headers ≤ 30 s (HTTP/1), from the same listener · ✅ connections served concurrently ·
     ✅ message size in both directions
