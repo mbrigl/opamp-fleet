@@ -1,0 +1,219 @@
+# ADR-0053: Managed Processes run under a process account of their own, started by a second service that runs under it
+
+- **Status:** 🟡 proposed
+- **Date:** 2026-10-20
+- **Deciders:** Markus Brigl
+- **Applies to:** the `--process-account` flag of `service install` and the second service it registers in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/windows_config.rs` and `crates/fleet-agent/src/service/windows_rights.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel between the Client and the second service, the modes and ownership of the Supervisors' directories in `crates/fleet-agent/src/storage.rs`, and every document that tells an operator which account a Managed Process runs as
+- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 3
+
+## Context
+
+[ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) runs the Client as a
+system service under an account of its own. "The same account runs every Managed Process its
+Supervisors start" (ADR-0042, Context). Every Managed Process can therefore read everything the
+Client can: the whole `state_dir` with the Client's private key `client-key.pem`
+(`crates/fleet-agent/src/tls.rs:20`), the `config/` of every other Supervisor, and the Client's
+own environment through `/proc`. It can also rewrite its own `program/` and so outlast the next
+package. With the Client's key a process can present itself to the Server for any `instance_uid`
+of its host ([ADR-0021](0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md)).
+A Managed Process is code the Supervisor does not vouch for
+([ADR-0041](0041-a-managed-process-states-only-its-own-service-attributes.md), Context), and a
+Configuration's language can run commands as it: a Telegraf `inputs.exec`, an Icinga
+`CheckCommand`, a GLPI deploy task.
+
+A Supervisor starts programs in three places
+(`crates/fleet-agent/src/supervisor/process.rs`): the Managed Process (`:868`), the version probe
+(`:944`) and the preflight of a staged package (`:1043`), which runs a package before it is
+trusted. All three run as the Client today.
+
+Separating the accounts needs something that may start a process under another account. The
+sources below show:
+
+- On Linux, `CAP_SETUID` and `CAP_SETGID` permit "arbitrary manipulations" of a process's user and
+  group IDs, uid and gid 0 included (capabilities(7)). A Client that holds them is root in all but
+  name, and SafeSetID still allows arbitrary `setgroups()`. A process can signal another account's
+  process only with `CAP_KILL` (kill(2)), so the process-group stop of
+  [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) breaks
+  without it.
+- On macOS a non-root process cannot change its user ID (setuid(2)), and launchd's `UserName`
+  applies only in the system domain (launchd.plist(5)).
+- On Windows a service can start a child under a restricted version of its own token without
+  `SeAssignPrimaryTokenPrivilege` (CreateProcessAsUserW), but whether the supported agents still
+  reach the network and RPC under such a token is unverified. A second service under its own
+  virtual account needs no password. Every Managed Process today also inherits
+  `SeImpersonatePrivilege` from a `LocalService`-like account.
+
+## Decision
+
+We will run every Managed Process, and every program a Supervisor starts, under one process
+account that the operator names, through a second service that runs under that account and starts,
+signals and stops those programs on the Client's request.
+
+1. **The process account is named at registration, and kept.** `service install --process-account
+   <account>` names it, at system scope only; it conflicts with `--user`. A re-registration without
+   the flag keeps the account the second service's registration names (clause 2), read the way
+   ADR-0042 clause 2 reads the Client's. Without the flag and without such a registration, there is
+   no process account and no second service, and the Client starts its programs itself, as before.
+   - **The operator creates the account.** On Linux and macOS it must exist, and an install naming
+     one that does not is refused before anything is written, with a message that shows the
+     `useradd --system` line, and on macOS the `sysadminctl -roleAccount` line, that creates it. The
+     binary never creates an account (ADR-0042 clause 2).
+   - **Windows accepts only passwordless forms**, as ADR-0042 clause 2 does: the second service's
+     own virtual account `NT SERVICE\<PRODUCT_NAME>-agents` (recommended), a gMSA, or
+     `NT AUTHORITY\LocalService` / `NetworkService`.
+   - **It is never root and never the Client's account.** `--process-account root`,
+     `LocalSystem` or the account the Client runs as is refused, naming `--run-as root` as the way
+     to run everything as root. A host whose agents need root runs as root as a whole (ADR-0042
+     clause 2), with no second service.
+
+2. **Restates ADR-0019 clause 3. The service is `PRODUCT_NAME`, with no suffix, on every platform,
+   and the second service is `<PRODUCT_NAME>-agents`.** The label is a single token — no
+   qualifier, no organization — so `service-manager` renders the same string for systemd, launchd
+   and the SCM, and the name never contains a dot. The second service exists only where a process
+   account is named (clause 1); its label is the product's with the suffix `-agents`. The `PATH`
+   symlink is `/usr/bin/<PRODUCT_NAME>`, so two variants never collide on one `PATH` entry. On
+   Windows the SCM additionally carries each service's display name and a Description that says
+   what the program does.
+   - **It is the same program.** The second service runs `supervisor run --agents` from the same
+     layout and `current` (ADR-0019 clause 9), under the process account. The package still
+     delivers one file (ADR-0042 clause 3).
+   - **The two are registered, started, stopped and deregistered together.** `service install`,
+     `start`, `stop` and `uninstall` act on both, the second service first on start and last on
+     stop. The self-update stops and starts both around the switch of `current`. Its unit carries
+     the directives ADR-0042 clause 7 sets for its account; its plist names the account in
+     `UserName`. On Windows its required privileges are limited to `SeChangeNotifyPrivilege`, so no
+     Managed Process holds `SeImpersonatePrivilege`, and the Client's service depends on it.
+
+3. **Every program a Supervisor starts is started by the second service.** Where a process account
+   is registered, the Managed Process, the version probe and the preflight of a staged package run
+   under the process account, through the second service. The Client starts none of them itself.
+
+4. **The channel admits the Client's account alone, and ends with it.** On Linux and macOS the
+   second service listens on a Unix socket, on Windows on a named pipe whose DACL grants the
+   Client's account and nobody else. Every connection is checked by the peer's credentials
+   (`SO_PEERCRED`, `getpeereid`, the pipe client's token) and refused unless its user is the
+   Client's account. One connection is served at a time. When it closes, the second service stops
+   every program it started, by its process group on Unix and by a job object with
+   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` on Windows, so a Client that restarts finds no process it
+   did not start, as today.
+
+5. **The requests are what the Supervisor does today, and both ends are one build.** The Client
+   asks the second service to start a program with its arguments, environment and working
+   directory, to signal or stop one, and to report its exit; the second service streams each
+   program's output back. The messages are private to the build: both ends run from `current`, and
+   a peer that states another version is refused.
+
+6. **The process account reads what it runs and writes only its own data.** The process account's
+   primary group is made a supplementary group of the Client's account by the operator, and the
+   install refuses to register where it is not. Then:
+
+   | Path | Owner : group | Mode |
+   |---|---|---|
+   | `state_dir`, each Supervisor's directory | Client : process group | `0710` |
+   | the Client's key, certificates, `remote-config.pb`, `instance-uid`, package state and staging | Client | `0600` / `0700`, as today |
+   | `program/` and its files | Client : process group | `0750`, files without group or other write |
+   | the preflight's staging directory | Client : process group | `0750` |
+   | `config/` and its files | Client : process group | `0750` / `0640` |
+   | a kind's data directories | Client : process group | `2770` |
+
+   On Windows the same split is made by ACL grants to the process account's SID instead of the
+   group.
+
+7. **A program inherits nothing of the Client's.** Its environment is the second service's own,
+   with the block's `env` and the Supervisor Endpoint's token laid over it, the token last
+   ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)
+   clause 16); `HOME`, `USER` and `LOGNAME` are the process account's.
+
+**Out of scope:** an account per Supervisor; making a process account the default where none is
+named; job objects for a host without a process account; what the Managed Processes can read of
+one another, which they share by this decision; a compromised Client, which can place any program
+under `program/`.
+
+## Alternatives considered
+
+- **Let the Client switch accounts itself.** On Linux it needs `CAP_SETUID`, `CAP_SETGID` and
+  `CAP_KILL` in its unit, which permit uid and gid 0, so a compromised Client is root; every child
+  must also clear the ambient and inheritable sets, or it inherits them. On macOS the Client must
+  be root. On Windows a restricted token is unproven for the agents' network and RPC use. Rejected
+  for making the Client root-equivalent.
+- **A setuid-root helper bound to the process account.** It is a second file in the package,
+  against ADR-0042 clause 3, lives outside the layout the self-update rewrites, and is the classic
+  target. Rejected.
+- **A root parent that keeps privileges and drops them for the Client and the processes**, as nginx
+  and postfix do. It brings back the long-running root process ADR-0042 removed. Rejected.
+- **Transient units through systemd's D-Bus API, or `sudo -u`.** The first needs the polkit right
+  to manage units, which cannot be narrowed to one account and exists on Linux only; the second
+  does not relay `SIGKILL` (sudo(8)). Rejected.
+- **An account per Supervisor.** It also separates the Supervisors from one another, but needs one
+  service or one privilege per account. Not taken now.
+- **Keep the key out of the processes' reach instead** (kernel keyring, TPM, a key helper). It
+  protects the key alone, and leaves every other Supervisor's `config/` and the program directories
+  writable. Rejected.
+- **Create the process account in the packages and by `service install`.** The packages could
+  create it as they create the Client's (ADR-0042 clause 5). Not taken: the operator names and
+  creates it.
+
+## Sources / Prior art
+
+- [capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html): `CAP_SETUID`,
+  `CAP_SETGID`, `CAP_KILL`, and the ambient set across `execve`.
+- [kill(2)](https://man7.org/linux/man-pages/man2/kill.2.html): who may signal whom.
+- [SafeSetID](https://docs.kernel.org/admin-guide/LSM/SafeSetID.html): `setgroups()` stays
+  unrestricted.
+- [systemd.exec(5)](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html):
+  `AmbientCapabilities=`, `NoNewPrivileges=`, `ProtectControlGroups=`.
+- [sudo(8)](https://www.sudo.ws/docs/man/sudo.man/): `SIGSTOP` and `SIGKILL` are not relayed.
+- [nginx `user`](https://nginx.org/en/docs/ngx_core_module.html#user): worker credentials.
+- [Elastic Agent, unprivileged mode](https://www.elastic.co/docs/reference/fleet/elastic-agent-unprivileged)
+  and [Datadog's `ddagentuser`](https://docs.datadoghq.com/agent/guide/windows-agent-ddagent-user/):
+  how two fleet agents run without root, the latter with a stored password.
+- [launchd.plist(5)](https://keith.github.io/xcode-man-pages/launchd.plist.5.html) and
+  [setuid(2)](https://keith.github.io/xcode-man-pages/setuid.2.html) on macOS; Apple DTS on
+  [role accounts](https://developer.apple.com/forums/thread/692593).
+- [CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw),
+  [Restricted tokens](https://learn.microsoft.com/en-us/windows/win32/secauthz/restricted-tokens),
+  [LocalService](https://learn.microsoft.com/en-us/windows/win32/services/localservice-account),
+  [service accounts](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-service-accounts).
+- Recalled, not re-read for this record: that the SCM removes every privilege not listed in a
+  service's required privileges, that `SeImpersonatePrivilege` opens paths to `SYSTEM`, and the
+  behaviour of job objects.
+- `crates/fleet-agent/src/supervisor/process.rs:868`, `:944`, `:1043`: the three places a program
+  is started; `:869-873`: the token is set last. `crates/fleet-agent/src/storage.rs:354`, `:368`:
+  directories `0700` and files `0600` for the Client. `crates/fleet-agent/src/service/run_as.rs`:
+  the account resolution and the hand-over that follows no link.
+
+## Consequences
+
+- Positive: a Managed Process, and anything it starts, can no longer read the Client's key, its
+  certificates and package state, or the Client's environment, and can no longer rewrite the
+  program it runs. A staged package's preflight runs under the process account too. No process on
+  the host holds a privilege it did not have before, and on Windows no Managed Process holds
+  `SeImpersonatePrivilege`.
+- Negative / trade-offs: a second service and a private protocol between two processes of one
+  build. A restart of the second service stops every Managed Process. The Managed Processes still
+  share one account, so they read one another's `config/` and environment. Grants that name the
+  Client's account for an agent — a sudoers rule for Telegraf's `use_sudo`, the rights Icinga 2
+  needs on its directories — must name the process account instead; the manual and the changelog
+  say so. The separation is opt-in, so a host gains it only once its operator creates the account
+  and names it.
+- Follow-ups: an account per Supervisor; making the separation the default; job objects for the
+  process tree on a host without a process account.
+
+## Enforcement
+
+Tests that will carry `Verifies: ADR-0053`:
+
+- In `crates/fleet-agent/src/service/`: `--process-account` with `--user`, with `root`,
+  `LocalSystem` or the Client's account, and with an account that does not exist is refused before
+  anything is written; a re-registration without the flag keeps the account the second service
+  names; the rendered unit and plist of the second service carry its account and the directives of
+  ADR-0042 clause 7; on Windows its required privileges are `SeChangeNotifyPrivilege` alone.
+- In `crates/fleet-agent/src/supervisor/`: with a process account registered, the Managed Process,
+  the version probe and the preflight are started through the second service and none by the
+  Client; a connection whose peer is not the Client's account is refused; closing the Client's
+  connection stops every program the second service started.
+- In `crates/fleet-agent/src/storage.rs`: the modes and owners of clause 6, and that the Client's
+  key stays `0600` and owned by the Client.
+- A Linux integration test in `.github/workflows/service-smoke.yml`, run under `sudo`, in which a
+  Managed Process under the process account fails to read `client-key.pem` and to write its
+  `program/`.
