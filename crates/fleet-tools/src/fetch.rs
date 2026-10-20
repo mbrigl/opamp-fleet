@@ -924,7 +924,11 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 )]
 fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
     let mut members = Vec::new();
-    collect_members(root, Path::new(""), &mut members, &mut Vec::new())?;
+    // The root is the first ancestor: a link back up to it is a cycle like any other.
+    let real_root = root
+        .canonicalize()
+        .map_err(|e| format!("cannot read {}: {e}", root.display()))?;
+    collect_members(root, Path::new(""), &mut members, &mut vec![real_root])?;
     members.sort();
     if members.len() > MAX_TREE_MEMBERS {
         return Err(format!(
@@ -1660,6 +1664,52 @@ mod tests {
         // The cycle is a directory that stops rather than a walk that never ends; it is only its
         // presence that matters here, since arriving at all means the pack returned.
         assert!(summary.files >= 3, "{summary:?}");
+    }
+
+    /// A link leading back up the tree is not followed when what it leads to is the root itself:
+    /// the root is the first ancestor of the walk, so a link right under it to `..` or to the root
+    /// packs no second copy of the tree.
+    ///
+    /// Verifies: ADR-0026
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_the_root_is_not_followed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("lib")).expect("create");
+        std::fs::write(tree.join("AppRun"), b"the-entry-point").expect("write");
+        std::fs::write(tree.join("lib/Universal.pm"), b"a-module").expect("write");
+        std::os::unix::fs::symlink("..", tree.join("lib/up")).expect("link the root from below");
+        std::os::unix::fs::symlink(".", tree.join("self")).expect("link the root from itself");
+        std::os::unix::fs::symlink(&tree, tree.join("absolute")).expect("link the root by path");
+
+        let artifact = dir.path().join("packed.tar.gz");
+        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
+            std::fs::File::open(&artifact).expect("open"),
+        ));
+        let files: Vec<String> = archive
+            .entries()
+            .expect("entries")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .path()
+                    .expect("path")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|path| path.ends_with("Universal.pm") || path.ends_with("AppRun"))
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                "wrapper/AppRun".to_string(),
+                "wrapper/lib/Universal.pm".to_string()
+            ],
+            "the tree is packed once, not again under a link to its root"
+        );
     }
 
     /// Both checksum shapes, read the way each source publishes them — including the `*` a
