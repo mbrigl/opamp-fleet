@@ -250,15 +250,15 @@ impl Pool {
         }
     }
 
-    /// Releases the places of Agents whose bindings made room for another (ADR-0039 clause 6): an
-    /// Agent the Gateway no longer binds is no longer one it carries, and its next report binds and
-    /// is assigned anew. This is what bounds the places of plain-HTTP Agents, whose exchanges end
-    /// with no socket to release them: by the bindings their hosts may hold.
-    pub fn release_unbound(&self) {
-        let released = self.registry.cache().take_released();
-        if !released.is_empty() {
-            self.release(released);
-        }
+    /// The connection an Agent is assigned to, by index.
+    #[cfg(test)]
+    pub(crate) fn connection_of(&self, uid: &InstanceUid) -> Option<usize> {
+        self.inner
+            .lock()
+            .expect("pool lock")
+            .assigned
+            .get(uid)
+            .copied()
     }
 
     /// The Agents assigned to a connection, and how many entries the connections' `carries` hold.
