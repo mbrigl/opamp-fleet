@@ -992,8 +992,8 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 /// single module. So the contents are packed under both names, exactly as `tar -h` writes them.
 ///
 /// Following links makes a cycle possible, and the guard has to be the *ancestors* of the walk
-/// rather than everywhere it has already been: a link pointing back up is a cycle and is dropped,
-/// while a second path to the same directory is legitimate duplication and must be packed again.
+/// rather than everywhere it has already been: a link pointing back up is a cycle and is not followed —
+/// it is packed as an empty directory under its name — while a second path to the same directory is legitimate duplication and must be packed again.
 /// Deduplicating by real path instead would leave one of the two names empty — and which one, on
 /// directory-read order, which is nobody's guarantee.
 #[cfg_attr(
@@ -1625,8 +1625,8 @@ mod tests {
     /// contents — the regression this exists for. The GLPI AppImage reaches its Perl library
     /// through `usr/share/perl/5.26`, a link to `5.26.1`; packing that name as an empty directory
     /// produced a tree whose agent could not find a single module, and packing only one of the two
-    /// names left which one to directory-read order. A cycle is still refused, and a link pointing
-    /// at nothing is dropped.
+    /// names left which one to directory-read order. A cycle is still not followed, and a link
+    /// pointing at nothing is dropped.
     #[cfg(unix)]
     #[test]
     fn a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang() {
@@ -1668,7 +1668,7 @@ mod tests {
 
     /// A link leading back up the tree is not followed when what it leads to is the root itself:
     /// the root is the first ancestor of the walk, so a link right under it to `..` or to the root
-    /// packs no second copy of the tree.
+    /// packs no second copy of the tree; each such link is packed as an empty directory.
     ///
     /// Verifies: ADR-0026
     #[cfg(unix)]
@@ -1689,25 +1689,39 @@ mod tests {
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
             std::fs::File::open(&artifact).expect("open"),
         ));
-        let files: Vec<String> = archive
+        let entries: Vec<(String, tar::EntryType)> = archive
             .entries()
             .expect("entries")
             .map(|entry| {
-                entry
-                    .expect("entry")
-                    .path()
-                    .expect("path")
-                    .to_string_lossy()
-                    .into_owned()
+                let entry = entry.expect("entry");
+                let path = entry.path().expect("path").into_owned();
+                let path = path.to_string_lossy();
+                (
+                    path.trim_end_matches('/').to_string(),
+                    entry.header().entry_type(),
+                )
             })
+            .collect();
+        for link in ["wrapper/lib/up", "wrapper/self", "wrapper/absolute"] {
+            assert!(
+                entries.contains(&(link.to_string(), tar::EntryType::Directory)),
+                "{link} is packed as a directory: {entries:?}"
+            );
+            assert!(
+                !entries
+                    .iter()
+                    .any(|(path, _)| path.starts_with(&format!("{link}/"))),
+                "{link} is packed empty: {entries:?}"
+            );
+        }
+        let files: Vec<&str> = entries
+            .iter()
+            .map(|(path, _)| path.as_str())
             .filter(|path| path.ends_with("Universal.pm") || path.ends_with("AppRun"))
             .collect();
         assert_eq!(
             files,
-            vec![
-                "wrapper/AppRun".to_string(),
-                "wrapper/lib/Universal.pm".to_string()
-            ],
+            vec!["wrapper/AppRun", "wrapper/lib/Universal.pm"],
             "the tree is packed once, not again under a link to its root"
         );
     }
