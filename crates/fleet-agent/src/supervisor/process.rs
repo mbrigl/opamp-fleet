@@ -148,6 +148,10 @@ impl Spawner {
     /// Returns why the program did not start, keeping the OS error either way, so a missing
     /// program and one momentarily busy are still told apart.
     pub async fn spawn(&self, supervisor: &str, launch: Launch) -> std::io::Result<ManagedChild> {
+        // The name is for the channel, which logs a program's output under it; a program the
+        // Client starts itself writes to the Client's own streams.
+        #[cfg(not(unix))]
+        let _ = supervisor;
         match self {
             Spawner::Local => spawn_local(&launch).map(ManagedChild::Local),
             #[cfg(unix)]
