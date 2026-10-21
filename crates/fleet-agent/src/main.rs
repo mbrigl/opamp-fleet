@@ -208,6 +208,7 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     // no second service, and nothing changes.
     let process = run_as::decide_process_account(
         args.process_account.as_deref(),
+        args.no_process_account,
         manager::agents_registration(level)?.as_ref(),
         run_as.as_ref(),
         manager::agents_supported(level),
@@ -326,6 +327,9 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         run_as: run_as.as_ref().map(|r| r.account().to_string()),
         agents: agents_spec(process.as_ref(), run_as.as_ref()),
     })?;
+    // Dropped (ADR-0053 clause 1): the Client's unit no longer names the second service, which is
+    // stopped and deregistered after it.
+    let dropped = args.no_process_account && manager::remove_agents(level)?;
 
     // The handover (ADR-0042 clause 2), on every registration that runs under an account — a kept
     // one and root included: both roots belong to it — config and state because the service reads
@@ -383,6 +387,13 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
             "  processes: {} ({}), started by {}",
             process.account(),
             process.describe(),
+            manager::agents_service_name()
+        );
+    }
+    if dropped {
+        println!(
+            "  processes: started by the Client itself once it restarts; {} was stopped and \
+             removed",
             manager::agents_service_name()
         );
     }

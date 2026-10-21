@@ -443,9 +443,10 @@ pub struct Ids {
 }
 
 /// Decide the process account of a `service install` (ADR-0053 clause 1) and check it against the
-/// Client's account `client`, before anything is written: `--process-account`, else the account
-/// `registration` — the second service's unit — names, else none, and no second service.
-/// `supported` says whether this host can register the second service at all.
+/// Client's account `client`, before anything is written: none where `dropped`
+/// (`--no-process-account`), else `--process-account`, else the account `registration` — the
+/// second service's unit — names, else none, and no second service. `supported` says whether this
+/// host can register the second service at all.
 ///
 /// # Errors
 /// Returns why the account is refused: where a second service cannot be registered, root, a
@@ -454,10 +455,14 @@ pub struct Ids {
 /// one whose primary group the Client's account is not in.
 pub fn decide_process_account(
     flag: Option<&str>,
+    dropped: bool,
     registration: Option<&Registration>,
     client: Option<&RunAs>,
     supported: bool,
 ) -> Result<Option<ProcessAccount>, String> {
+    if dropped {
+        return Ok(None);
+    }
     let Some((account, kept_from)) = choose_process_account(flag, registration)? else {
         return Ok(None);
     };
@@ -528,12 +533,15 @@ fn choose_process_account(
             account: None,
         }) => Err(format!(
             "{} names no account for the second service. Name one with --process-account \
-             <account>. Nothing has been installed or written.",
+             <account>, or drop it with {DROP} Nothing has been installed or written.",
             file.display()
         )),
         None => Ok(None),
     }
 }
+
+/// How a refusal that a kept process account causes names the way to drop it (ADR-0053 clause 1).
+const DROP: &str = "--no-process-account, and the Client starts its Managed Processes itself.";
 
 /// The checks of ADR-0053 clause 1 on the process account `account` — `found` as `id(1)` answers
 /// for it, `None` where it does not exist — against the Client's account `client_name` with
@@ -548,7 +556,24 @@ pub fn check_process_account(
     client: &Ids,
     kept_from: Option<&Path>,
 ) -> Result<(), String> {
-    const NOTHING: &str = "Nothing has been installed or written.";
+    refuse_process_account(account, found, client_name, client, kept_from).map_err(|refusal| {
+        // A kept account was not asked for in this install: the refusal says how to drop it.
+        match (kept_from, refusal.strip_suffix(NOTHING)) {
+            (Some(_), Some(reason)) => format!("{reason}Or drop it with {DROP} {NOTHING}"),
+            _ => refusal,
+        }
+    })
+}
+
+const NOTHING: &str = "Nothing has been installed or written.";
+
+fn refuse_process_account(
+    account: &str,
+    found: Option<&Ids>,
+    client_name: &str,
+    client: &Ids,
+    kept_from: Option<&Path>,
+) -> Result<(), String> {
     let named = match kept_from {
         Some(unit) => format!(
             "the process account {account}, which {} names,",
@@ -1363,6 +1388,58 @@ mod tests {
         );
     }
 
+    /// `--no-process-account` drops a kept process account; a refusal that a kept one causes —
+    /// here `--run-as root` beside a registered second service — names that flag, and one an
+    /// install named does not (ADR-0053 clause 1).
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_kept_process_account_can_be_dropped_and_its_refusals_say_so() {
+        let unit = Registration {
+            file: PathBuf::from(AGENTS_UNIT),
+            account: Some("opamp-fleet-agents".to_string()),
+        };
+        assert!(
+            decide_process_account(None, true, Some(&unit), None, false)
+                .expect("dropped")
+                .is_none(),
+            "dropped before anything else is asked"
+        );
+        let root = Ids {
+            uid: 0,
+            gid: 0,
+            group: "root".to_string(),
+            groups: vec![0],
+        };
+        let kept = check_process_account(
+            "opamp-fleet-agents",
+            Some(&agents_ids()),
+            "root",
+            &root,
+            Some(Path::new(AGENTS_UNIT)),
+        )
+        .expect_err("a root Client");
+        assert!(kept.contains("--no-process-account"), "{kept}");
+        assert!(
+            kept.ends_with("Nothing has been installed or written."),
+            "{kept}"
+        );
+        let named = check_process_account(
+            "opamp-fleet-agents",
+            Some(&agents_ids()),
+            "root",
+            &root,
+            None,
+        )
+        .expect_err("a root Client");
+        assert!(!named.contains("--no-process-account"), "{named}");
+        let lost = Registration {
+            file: PathBuf::from(AGENTS_UNIT),
+            account: None,
+        };
+        let err = choose_process_account(None, Some(&lost)).expect_err("no account to keep");
+        assert!(err.contains("--no-process-account"), "{err}");
+    }
+
     /// The process account's primary group is neither root's nor the Client's own, and the
     /// account is not in the Client's primary group (ADR-0053 clause 6): what that group may read
     /// is what every Managed Process may.
@@ -1420,16 +1497,16 @@ mod tests {
     fn a_process_account_is_decided_before_anything_is_written() {
         let me = RunAs::resolve(&me(), "supervisor", &Source::Flag, Path::new(DATA_ROOT))
             .expect("own account resolves");
-        assert!(decide_process_account(None, None, Some(&me), true)
+        assert!(decide_process_account(None, false, None, Some(&me), true)
             .expect("none named")
             .is_none());
-        let err = decide_process_account(Some("opamp-fleet-agents"), None, Some(&me), false)
+        let err = decide_process_account(Some("opamp-fleet-agents"), false, None, Some(&me), false)
             .expect_err("no second service here");
         assert!(err.contains("systemd"), "{err}");
-        let err = decide_process_account(Some("opamp-fleet-agents"), None, None, true)
+        let err = decide_process_account(Some("opamp-fleet-agents"), false, None, None, true)
             .expect_err("a user service names none");
         assert!(err.contains("systemd"), "{err}");
-        let err = decide_process_account(Some("bad\"account"), None, Some(&me), true)
+        let err = decide_process_account(Some("bad\"account"), false, None, Some(&me), true)
             .expect_err("not writable into a unit");
         assert!(
             err.contains("cannot be written into a systemd unit"),
@@ -1439,13 +1516,14 @@ mod tests {
             err.contains("Nothing has been installed or written"),
             "{err}"
         );
-        let err = decide_process_account(Some("no-such-account-0053"), None, Some(&me), true)
-            .expect_err("missing");
+        let err =
+            decide_process_account(Some("no-such-account-0053"), false, None, Some(&me), true)
+                .expect_err("missing");
         if me.uid() == 0 {
             assert!(err.contains("the Client runs as root"), "{err}");
         } else {
             assert!(err.contains("does not exist"), "{err}");
-            let err = decide_process_account(Some(&me.account), None, Some(&me), true)
+            let err = decide_process_account(Some(&me.account), false, None, Some(&me), true)
                 .expect_err("the Client's own");
             assert!(err.contains("the Client runs as"), "{err}");
         }

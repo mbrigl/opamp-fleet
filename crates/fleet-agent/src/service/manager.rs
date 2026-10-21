@@ -597,6 +597,28 @@ pub fn uninstall(level: ServiceLevel) -> Result<(), String> {
     Ok(())
 }
 
+/// Stops and deregisters the second service, where one is registered (ADR-0053 clause 1,
+/// `--no-process-account`). Returns whether there was one.
+///
+/// # Errors
+/// Returns an error if the manager cannot stop or uninstall it.
+pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
+    if !agents_registered(level) {
+        return Ok(false);
+    }
+    manager(level)?
+        .stop(ServiceStopCtx {
+            label: agents_label(),
+        })
+        .map_err(|e| format!("cannot stop the second service: {e}"))?;
+    manager(level)?
+        .uninstall(ServiceUninstallCtx {
+            label: agents_label(),
+        })
+        .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
+    Ok(true)
+}
+
 /// The installed service, implementing the [`ServiceControl`] seam.
 pub struct NativeService {
     level: ServiceLevel,
