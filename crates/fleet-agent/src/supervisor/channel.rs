@@ -117,19 +117,29 @@ fn this_build() -> &'static str {
     fleet_core::version::current()
 }
 
+/// One message as it goes on the wire: its length, then its body.
+///
+/// # Errors
+/// Returns `InvalidInput` for a message larger than [`MAX_FRAME`], which no peer would read.
+pub(crate) fn encode<T: Serialize>(message: &T) -> io::Result<Zeroizing<Vec<u8>>> {
+    // A start carries the Supervisor Endpoint's token, so every frame is wiped (ADR-0057).
+    let mut frame = Zeroizing::new(vec![0; 4]);
+    serde_json::to_writer(&mut *frame, message).map_err(io::Error::other)?;
+    let len = u32::try_from(frame.len() - 4)
+        .ok()
+        .filter(|len| *len <= MAX_FRAME)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "message too large"))?;
+    frame[..4].copy_from_slice(&len.to_be_bytes());
+    Ok(frame)
+}
+
 pub(crate) async fn write_frame<W, T>(writer: &mut W, message: &T) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
-    // A start carries the Supervisor Endpoint's token, so every frame is wiped (ADR-0057).
-    let body = Zeroizing::new(serde_json::to_vec(message).map_err(io::Error::other)?);
-    let len = u32::try_from(body.len())
-        .ok()
-        .filter(|len| *len <= MAX_FRAME)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "message too large"))?;
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&body).await?;
+    let frame = encode(message)?;
+    writer.write_all(&frame).await?;
     writer.flush().await
 }
 
@@ -331,7 +341,15 @@ async fn serve_connection<F: Future<Output = ()>>(
     let (reply_tx, mut reply_rx) = mpsc::channel::<Reply>(256);
     let writer = tokio::spawn(async move {
         while let Some(reply) = reply_rx.recv().await {
-            if write_frame(&mut write, &reply).await.is_err() {
+            // A reply too large to send is lost alone; only a broken connection ends the writer.
+            let frame = match encode(&reply) {
+                Ok(frame) => frame,
+                Err(e) => {
+                    warn!(error = %e, "cannot send a reply to the Client");
+                    continue;
+                }
+            };
+            if write.write_all(&frame).await.is_err() {
                 break;
             }
         }
@@ -582,7 +600,8 @@ pub struct Channel {
 }
 
 struct Inner {
-    requests: mpsc::UnboundedSender<Request>,
+    /// Requests, encoded: one too large for a message is refused before it is queued.
+    requests: mpsc::UnboundedSender<Zeroizing<Vec<u8>>>,
     next_id: AtomicU64,
     routes: Mutex<Routes>,
 }
@@ -631,7 +650,7 @@ impl Channel {
             None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, CLOSED)),
         }
 
-        let (requests, mut outgoing) = mpsc::unbounded_channel::<Request>();
+        let (requests, mut outgoing) = mpsc::unbounded_channel::<Zeroizing<Vec<u8>>>();
         let inner = Arc::new(Inner {
             requests,
             next_id: AtomicU64::new(1),
@@ -640,8 +659,8 @@ impl Channel {
         // Ends when every sender is gone — the last `Channel` and `RemoteChild` dropped — and
         // dropping the write half then tells the service the Client is gone.
         tokio::spawn(async move {
-            while let Some(request) = outgoing.recv().await {
-                if write_frame(&mut write, &request).await.is_err() {
+            while let Some(frame) = outgoing.recv().await {
+                if write.write_all(&frame).await.is_err() {
                     break;
                 }
             }
@@ -682,10 +701,9 @@ impl Channel {
                 },
             );
         }
-        let sent = self.inner.requests.send(Request::Start { id, launch });
-        if sent.is_err() {
+        if let Err(e) = self.send(&Request::Start { id, launch }) {
             self.inner.routes().by_id.remove(&id);
-            return Err(closed());
+            return Err(e);
         }
         let pid = started.await.map_err(|_| closed())??;
         Ok(RemoteChild {
@@ -697,8 +715,11 @@ impl Channel {
         })
     }
 
-    fn send(&self, request: Request) -> io::Result<()> {
-        self.inner.requests.send(request).map_err(|_| closed())
+    /// Queues `request`. A request too large for a message fails here, with `InvalidInput`, and
+    /// the connection carries on.
+    fn send(&self, request: &Request) -> io::Result<()> {
+        let frame = encode(request)?;
+        self.inner.requests.send(frame).map_err(|_| closed())
     }
 }
 
@@ -813,7 +834,7 @@ impl RemoteChild {
         if self.outcome.is_some() {
             return Ok(());
         }
-        self.channel.send(Request::Signal {
+        self.channel.send(&Request::Signal {
             id: self.id,
             signal,
             group,
@@ -826,7 +847,7 @@ impl RemoteChild {
     /// Returns an error when the channel closed before the exit was reported.
     pub async fn kill(&mut self) -> io::Result<()> {
         if self.outcome.is_none() {
-            self.channel.send(Request::Stop { id: self.id })?;
+            self.channel.send(&Request::Stop { id: self.id })?;
         }
         self.wait().await.map(|_| ())
     }
@@ -836,7 +857,7 @@ impl Drop for RemoteChild {
     /// Takes the program along, as `kill_on_drop` does for a program the Client started itself.
     fn drop(&mut self) {
         if self.outcome.is_none() {
-            let _ = self.channel.send(Request::Stop { id: self.id });
+            let _ = self.channel.send(&Request::Stop { id: self.id });
         }
     }
 }
@@ -1012,6 +1033,36 @@ mod tests {
         launch.program = PathBuf::from("/nonexistent/program");
         let error = channel.start(launch).await.err().expect("a start failure");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// A start too large for one message fails alone, with `InvalidInput`: the connection, and every
+    /// program it runs, carries on.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_start_too_large_for_a_message_fails_alone() {
+        let service = service(own_uid());
+        let channel = Channel::connect(&service.socket).await.expect("connect");
+        let mut running = channel.start(sh("sleep 300")).await.expect("start");
+
+        let mut huge = sh("true");
+        huge.env = vec![("BULK".to_string(), "x".repeat(2 << 20))];
+        let error = channel.start(huge).await.err().expect("refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        let mut next = channel
+            .start(sh("exit 4"))
+            .await
+            .expect("a later start still runs");
+        let status = tokio::time::timeout(Duration::from_secs(10), next.wait())
+            .await
+            .expect("in time")
+            .expect("a status");
+        assert_eq!(status.code(), Some(4));
+        assert!(
+            running.id().is_some(),
+            "the running program was reported ended"
+        );
+        running.kill().await.expect("kill");
     }
 
     /// Closing the Client's connection stops every program the service started, with everything
