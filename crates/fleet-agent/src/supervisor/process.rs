@@ -232,6 +232,38 @@ impl Waiting {
             None => std::future::pending().await,
         }
     }
+
+    /// Whether the last start did not reach the second service.
+    fn armed(&self) -> bool {
+        self.due.is_some()
+    }
+}
+
+/// The outcomes of an apply whose start did not reach the second service, or whose program went
+/// with the service during the apply grace: neither applied nor failed, so the core is told
+/// nothing yet and the Agent stays `APPLYING` or `Installing`. The start that reaches the service
+/// again is gated in their place, and its verdict is theirs; a package is neither rolled back nor
+/// reported failed before that (ADR-0059 clause 2).
+#[derive(Default)]
+struct Owed {
+    /// A configuration's hash and the span of its apply.
+    config: Option<(Vec<u8>, tracing::Span)>,
+    package: Option<OwedPackage>,
+}
+
+/// A package swapped in whose gate is owed.
+struct OwedPackage {
+    hash: Vec<u8>,
+    version: String,
+    /// Whether a predecessor was set aside, which a failed gate rolls back to.
+    has_backup: bool,
+    span: tracing::Span,
+}
+
+impl Owed {
+    fn is_empty(&self) -> bool {
+        self.config.is_none() && self.package.is_none()
+    }
 }
 
 /// A running Managed Process, whichever [`Spawner`] started it.
@@ -556,6 +588,7 @@ impl Runner {
         // its own version, and one that is not configured yet never even starts.
         self.probe_version();
         let mut waiting = Waiting::new();
+        let mut owed = Owed::default();
         // A start through the second service may wait for it to come back; a shutdown does not.
         let mut child = tokio::select! {
             child = self.spawn_if_due(&mut waiting) => child,
@@ -584,15 +617,20 @@ impl Runner {
                         started = self.spawn_if_due(&mut waiting) => started,
                         _ = shutdown.requested() => break,
                     };
-                    child = started;
-                    if child.is_some() {
-                        policy.started(Instant::now());
+                    if self
+                        .started(started, &mut child, &mut owed, &mut policy, &mut backoff, &mut waiting, &mut shutdown)
+                        .await
+                    {
+                        break;
                     }
                 }
                 command = self.commands.recv() => match command {
                     Some(ProcessCommand::ApplyConfig { config, span }) => {
                         policy.fresh_chance(); // a new configuration (ADR-0026)
                         backoff.reset();
+                        // A configuration still owed its verdict is superseded by this one, whose
+                        // status the Agent reports from now on.
+                        owed.config = None;
                         // In place first (ADR-0017): a kind that declared a reload keeps its
                         // process — and its in-flight state — across the change; anything short
                         // of a survived grace falls back to the restart below.
@@ -629,7 +667,9 @@ impl Runner {
                         // right away has rejected its configuration the only way a process can.
                         let started = child.take();
                         let ran = started.is_some();
-                        let outcome = if !ran && (self.build)().is_none() {
+                        let outcome = if !ran && waiting.armed() {
+                            GraceOutcome::Unreachable
+                        } else if !ran && (self.build)().is_none() {
                             GraceOutcome::Ok // nothing should run; that is the config
                         } else {
                             self.gate(started, &mut child, &mut shutdown)
@@ -642,7 +682,16 @@ impl Runner {
                             // Shutting down mid-grace: no acknowledgement — the goodbyes carry no
                             // status anyway — just stop gracefully on the way out.
                             GraceOutcome::ShuttingDown => break,
+                            // Neither applied nor failed: the start that reaches the second
+                            // service again is gated in its place (ADR-0059 clause 2).
+                            GraceOutcome::Unreachable => {
+                                waiting.arm();
+                                owed.config = Some((config.config_hash, span));
+                                continue;
+                            }
                         };
+                        // The same start decides a package still owed its verdict.
+                        self.settle(&mut owed, result.as_ref().err()).await;
                         // A process that started and then failed the gate exited within the grace.
                         let exited_in_grace = ran && result.is_err();
                         match &result {
@@ -690,15 +739,35 @@ impl Runner {
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         policy.fresh_chance(); // a new package (ADR-0026)
                         backoff.reset();
-                        let result = self
+                        // A package still owed its gate is superseded by this one: what it set
+                        // aside goes back first, so this one's predecessor is a program that ran.
+                        if let Some(superseded) = owed.package.take() {
+                            self.abandon(&superseded);
+                        }
+                        let (result, has_backup) = self
                             .swap_and_gate(prepared, &version, &mut child, &mut shutdown)
                             .instrument(span.clone())
                             .await;
-                        if child.is_none() && !matches!(result, GraceOutcome::ShuttingDown) {
+                        if child.is_none()
+                            && !matches!(result, GraceOutcome::ShuttingDown | GraceOutcome::Unreachable)
+                        {
                             child = self.spawn_if_due(&mut waiting).await;
                             policy.started(Instant::now());
                         }
+                        // The same start decides a configuration still owed its verdict.
+                        match &result {
+                            GraceOutcome::Ok => self.settle(&mut owed, None).await,
+                            GraceOutcome::Failed(e) => self.settle(&mut owed, Some(e)).await,
+                            GraceOutcome::ShuttingDown | GraceOutcome::Unreachable => {}
+                        }
                         match result {
+                            // Neither installed nor failed: the package stays in place, not rolled
+                            // back, and the start that reaches the second service again is gated
+                            // in its place (ADR-0059 clause 2).
+                            GraceOutcome::Unreachable => {
+                                waiting.arm();
+                                owed.package = Some(OwedPackage { hash, version, has_backup, span });
+                            }
                             GraceOutcome::Ok => {
                                 policy.started(Instant::now());
                                 // A new binary is a new version, and the Agent's `service.version`
@@ -732,8 +801,13 @@ impl Runner {
                         stop(&mut child, self.stop_timeout, &self.name).await;
                         policy.fresh_chance(); // an operator restart (ADR-0026)
                         backoff.reset();
-                        child = self.spawn_if_due(&mut waiting).await;
-                        policy.started(Instant::now());
+                        let started = self.spawn_if_due(&mut waiting).await;
+                        if self
+                            .started(started, &mut child, &mut owed, &mut policy, &mut backoff, &mut waiting, &mut shutdown)
+                            .await
+                        {
+                            break;
+                        }
                     }
                     Some(ProcessCommand::Uninstall) => {
                         // Retired for good (ADR-0017): the generic uninstall is exactly the
@@ -827,10 +901,13 @@ impl Runner {
         version: &str,
         child: &mut Option<ManagedChild>,
         shutdown: &mut Shutdown,
-    ) -> GraceOutcome {
+    ) -> (GraceOutcome, bool) {
         let Some(target) = &self.install else {
-            return GraceOutcome::Failed(
-                "this supervisor manages nothing a package can replace".to_string(),
+            return (
+                GraceOutcome::Failed(
+                    "this supervisor manages nothing a package can replace".to_string(),
+                ),
+                false,
             );
         };
         // Move what runs today aside — a rename, so it is atomic and costs nothing — and it is
@@ -839,7 +916,7 @@ impl Runner {
             Ok(has_backup) => has_backup,
             Err(e) => {
                 target.discard(&staged);
-                return GraceOutcome::Failed(e);
+                return (GraceOutcome::Failed(e), false);
             }
         };
         if let Err(e) = target.commit(&staged) {
@@ -848,11 +925,18 @@ impl Runner {
                 let _ = target.restore();
             }
             target.discard(&staged);
-            return GraceOutcome::Failed(e);
+            return (GraceOutcome::Failed(e), false);
         }
         info!(supervisor = %self.name, version = %version, program = %target.live().display(), "package staged; restarting");
 
         let started = self.try_spawn().await;
+        // Not started because the second service was not reached: the package rejected nothing,
+        // so it stays in place, unconcluded, for the start that reaches the service again
+        // (ADR-0059 clause 2).
+        if started.as_ref().is_err_and(is_unreachable) {
+            info!(supervisor = %self.name, version = %version, "package in place; the second service cannot be reached, so it starts once the service is back");
+            return (GraceOutcome::Unreachable, has_backup);
+        }
         // "Nothing started" has two meanings, and only one of them is a failed install. A plugin
         // with no process to run — a Collector that has not been configured yet — has not rejected
         // the artifact: the binary is in place and will be started by the configuration when it
@@ -873,7 +957,16 @@ impl Runner {
         } else {
             self.gate(started.ok(), child, shutdown).await
         };
-        match (&outcome, has_backup) {
+        self.conclude(target, has_backup, &outcome);
+        (outcome, has_backup)
+    }
+
+    /// Concludes a swap on its gate's `outcome` (ADR-0026): rolls back to the predecessor after a
+    /// failure, keeps it for the retention window after a success. An outcome the second service
+    /// left open concludes nothing.
+    fn conclude(&self, target: &InstallTarget, has_backup: bool, outcome: &GraceOutcome) {
+        match (outcome, has_backup) {
+            (GraceOutcome::Unreachable, _) => {}
             // Roll back to what ran before, so the next respawn is the old, known one.
             (GraceOutcome::Failed(_), true) => {
                 // A phase of its own in the trace (ADR-0016): a rollback is the part of a failed
@@ -898,7 +991,109 @@ impl Runner {
             (_, true) => self.retain_backup(target),
             (_, false) => {}
         }
-        outcome
+    }
+
+    /// A package still owed its gate, superseded by the next one: what it set aside goes back, as
+    /// it would have on a failed gate, and nothing is reported for it — the Agent reports the
+    /// package that superseded it.
+    fn abandon(&self, superseded: &OwedPackage) {
+        let Some(target) = &self.install else {
+            return;
+        };
+        info!(supervisor = %self.name, version = %superseded.version, "a package whose start never reached the second service is superseded by the next");
+        if superseded.has_backup {
+            if let Err(e) = target.restore() {
+                warn!(supervisor = %self.name, error = %e, "cannot put back the program the superseded package replaced");
+            }
+        }
+    }
+
+    /// Sends the outcomes `owed` holds, decided by the gate of the start that reached the second
+    /// service again: `failed` is that gate's reason, `None` that it was survived. A package is
+    /// concluded on it first — rolled back after a failure — as its own gate would have.
+    async fn settle(&self, owed: &mut Owed, failed: Option<&String>) {
+        if let Some((hash, span)) = owed.config.take() {
+            let result = failed.map_or(Ok(()), |e| Err(e.clone()));
+            match &result {
+                Ok(()) => crate::telemetry::succeeded(&span),
+                Err(e) => crate::telemetry::failed(&span, e),
+            }
+            self.events
+                .send(ProcessEvent::ConfigApplied { hash, result })
+                .await;
+        }
+        if let Some(package) = owed.package.take() {
+            let outcome = failed.map_or(GraceOutcome::Ok, |e| GraceOutcome::Failed(e.clone()));
+            if let Some(target) = &self.install {
+                let _swap = package.span.enter();
+                self.conclude(target, package.has_backup, &outcome);
+            }
+            let result = match failed {
+                None => {
+                    self.probe_version();
+                    crate::telemetry::succeeded(&package.span);
+                    Ok(package.version)
+                }
+                Some(e) => {
+                    crate::telemetry::failed(&package.span, e);
+                    Err(e.clone())
+                }
+            };
+            self.events
+                .send(ProcessEvent::PackageApplied {
+                    hash: package.hash,
+                    result,
+                })
+                .await;
+        }
+    }
+
+    /// Takes in a program started outside an apply — after the second service was not reached,
+    /// or on a restart command — and, where an apply is still owed its verdict, gates it in that
+    /// apply's place and settles it. Returns `true` when shutdown was requested meanwhile.
+    #[allow(clippy::too_many_arguments)]
+    async fn started(
+        &self,
+        started: Option<ManagedChild>,
+        child: &mut Option<ManagedChild>,
+        owed: &mut Owed,
+        policy: &mut RestartPolicy,
+        backoff: &mut Backoff,
+        waiting: &mut Waiting,
+        shutdown: &mut Shutdown,
+    ) -> bool {
+        let ran = started.is_some();
+        if ran {
+            policy.started(Instant::now());
+        }
+        if owed.is_empty() {
+            *child = started;
+            return false;
+        }
+        let outcome = if !ran && waiting.armed() {
+            return false; // still away: owed on
+        } else if !ran && (self.build)().is_none() {
+            GraceOutcome::Ok // nothing should run, as the apply itself would have found
+        } else {
+            self.gate(started, child, shutdown).await
+        };
+        let failed = match outcome {
+            GraceOutcome::Ok => None,
+            GraceOutcome::Failed(e) => Some(e),
+            GraceOutcome::ShuttingDown => return true,
+            GraceOutcome::Unreachable => {
+                waiting.arm();
+                return false;
+            }
+        };
+        self.settle(owed, failed.as_ref()).await;
+        if failed.is_some() {
+            // As after a failed apply: supervised still, and held once it keeps failing.
+            return self
+                .respawn_or_hold(child, policy, backoff, waiting, shutdown)
+                .await;
+        }
+        false
     }
 
     /// Keeps the version a successful update superseded, or drops it now (ADR-0026). With retention
@@ -991,6 +1186,18 @@ impl Runner {
             Some(mut proc) if !self.apply_grace.is_zero() => {
                 tokio::select! {
                     status = proc.wait() => {
+                        // The program went with the second service: it rejected nothing, and the
+                        // start that reaches the service again decides (ADR-0059 clause 2).
+                        if status.as_ref().is_err_and(is_unreachable) {
+                            warn!(supervisor = %self.name, "the second service went during the apply grace, and the program with it");
+                            self.events
+                                .send(ProcessEvent::Health(unhealthy(
+                                    UNREACHABLE.to_string(),
+                                    "the second service went, and the program with it".to_string(),
+                                )))
+                                .await;
+                            return GraceOutcome::Unreachable;
+                        }
                         let describe = describe_exit(status);
                         warn!(supervisor = %self.name, status = %describe, "process exited during the apply grace");
                         self.events
@@ -1461,6 +1668,10 @@ enum GraceOutcome {
     Failed(String),
     /// A shutdown was requested mid-grace; the caller stops without an acknowledgement.
     ShuttingDown,
+    /// The start did not reach the second service, or the program went with it during the grace:
+    /// neither applied nor failed, and the start that reaches the service again decides
+    /// (ADR-0059 clause 2).
+    Unreachable,
 }
 
 /// Installs a downloaded artifact as `path`: put in place beside it, made executable, then renamed

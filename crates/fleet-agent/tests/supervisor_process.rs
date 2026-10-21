@@ -1630,3 +1630,300 @@ async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+
+// ── An apply while the second service is away (ADR-0059 clause 2) ───────────
+
+/// An apply that does not reach the second service, or whose program goes with the service during
+/// the apply grace, is neither applied nor failed: nothing is reported, a package is neither
+/// rolled back nor refused, and the start that reaches the service again is gated in its place.
+#[cfg(unix)]
+mod an_apply_while_the_second_service_is_away {
+    use super::*;
+    use fleet_agent::supervisor::channel::{bind, serve, Channel, Served};
+    use tokio::sync::oneshot;
+
+    /// What a Supervisor reports while the second service cannot be reached.
+    const UNREACHABLE: &str = "the second service cannot be reached";
+
+    fn own_uid() -> u32 {
+        // SAFETY: getuid(2) cannot fail and touches no memory.
+        unsafe { libc::getuid() }
+    }
+
+    /// The second service on `socket`, in this process, until [`Service::stop`].
+    struct Service {
+        stop: Option<oneshot::Sender<()>>,
+        task: tokio::task::JoinHandle<Served>,
+    }
+
+    impl Service {
+        fn up(socket: &Path) -> Service {
+            let listener = bind(socket).expect("bind the agents socket");
+            let (stop, stopped) = oneshot::channel::<()>();
+            let task = tokio::spawn(serve(listener, own_uid(), || false, async {
+                let _ = stopped.await;
+            }));
+            Service {
+                stop: Some(stop),
+                task,
+            }
+        }
+
+        /// Stops it as its service manager does, with every program it started.
+        async fn stop(mut self) {
+            let _ = self.stop.take().expect("running").send(());
+            assert_eq!(
+                (&mut self.task).await.expect("the service ended"),
+                Served::Stopped
+            );
+        }
+    }
+
+    struct Away {
+        dir: tempfile::TempDir,
+        binary: PathBuf,
+        socket: PathBuf,
+        harness: Harness,
+    }
+
+    /// A Runner that swaps one file holding `program`'s bytes and runs it through the second
+    /// service, which is up; started and running.
+    async fn running(program: &Path, apply_grace: Duration) -> (Away, Service) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("agent");
+        write_executable(&binary, &bytes_of(program));
+        let socket = dir.path().join("agents.sock");
+        let service = Service::up(&socket);
+        let (event_tx, events) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown) = shutdown_channel();
+        let live = binary.clone();
+        let runner = Runner {
+            endpoint_token: zeroize::Zeroizing::default(),
+            name: "test".to_string(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace,
+            retain_previous: Duration::ZERO,
+            install: Some(InstallTarget::Binary(binary.clone())),
+            archive_key: None,
+            version_probe: None,
+            preflight: None,
+            reload_signal: None,
+            spawner: Spawner::Channel(Channel::new(&socket, own_uid())),
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || Some(spec(&live))),
+        };
+        let task = tokio::spawn(runner.run(shutdown));
+        let mut away = Away {
+            dir,
+            binary,
+            socket,
+            harness: Harness {
+                commands,
+                events,
+                shutdown_tx,
+                task,
+                _service: None,
+            },
+        };
+        let health = next_health(&mut away.harness.events).await;
+        assert_eq!(health.status, "running", "{health:?}");
+        (away, service)
+    }
+
+    fn write_executable(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, bytes).expect("write");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    /// `stub_agent`, told apart from the program it replaces by bytes it never reads.
+    fn another_build_of_the_agent() -> Vec<u8> {
+        let mut bytes = bytes_of(&stub_agent());
+        bytes.extend_from_slice(b"another build");
+        bytes
+    }
+
+    /// Events until the next health, none of them an outcome of an apply.
+    async fn next_health_and_no_outcome(
+        events: &mut mpsc::Receiver<(usize, ProcessEvent)>,
+        within: Duration,
+    ) -> ComponentHealth {
+        loop {
+            let (_, event) = tokio::time::timeout(within, events.recv())
+                .await
+                .expect("an event in time")
+                .expect("an open channel");
+            match event {
+                ProcessEvent::Health(health) => return health,
+                ProcessEvent::ConfigApplied { result, .. } => {
+                    panic!("a configuration reported while the second service is away: {result:?}")
+                }
+                ProcessEvent::PackageApplied { result, .. } => {
+                    panic!("a package reported while the second service is away: {result:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The second service goes, and the program with it: the Supervisor says so.
+    async fn the_service_goes(away: &mut Away, service: Service) {
+        service.stop().await;
+        let gone = next_health(&mut away.harness.events).await;
+        assert_eq!(gone.status, UNREACHABLE, "{gone:?}");
+    }
+
+    /// The start an apply makes does not reach the service: the Supervisor says so, and reports
+    /// no outcome. That start waits out the reconnect window first.
+    async fn the_apply_finds_it_away(away: &mut Away) {
+        let health =
+            next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(30)).await;
+        assert_eq!(health.status, UNREACHABLE, "{health:?}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while let Ok((_, event)) = away.harness.events.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    ProcessEvent::ConfigApplied { .. } | ProcessEvent::PackageApplied { .. }
+                ),
+                "an outcome reported while the second service is away: {event:?}"
+            );
+        }
+    }
+
+    async fn shut_down(away: Away) {
+        away.harness.shutdown_tx.send(true).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(10), away.harness.task)
+            .await
+            .expect("the Runner ends on the shutdown")
+            .expect("cleanly");
+    }
+
+    /// A package swapped in while the second service is away stays in place, unreported; once the
+    /// service is back it is started and gated as its own start would have been — here it fails
+    /// the grace, and only now is it rolled back and reported `InstallFailed`.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_package_is_kept_while_the_service_is_away_and_gated_once_it_is_back() {
+        let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
+        let good = bytes_of(&stub_agent());
+        the_service_goes(&mut away, service).await;
+
+        let staged = away.dir.path().join("downloaded.staged");
+        std::fs::write(&staged, bytes_of(&stub_crasher())).expect("stage");
+        away.harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged,
+                version: "9.9.9".to_string(),
+                hash: b"9.9.9".to_vec(),
+                span: tracing::Span::current(),
+            })
+            .await
+            .expect("send");
+        the_apply_finds_it_away(&mut away).await;
+        assert_eq!(
+            std::fs::read(&away.binary).expect("read"),
+            bytes_of(&stub_crasher()),
+            "the package stays in place, not rolled back"
+        );
+
+        let _service = Service::up(&away.socket);
+        let (hash, result) = next_package_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"9.9.9".to_vec());
+        let error = result.expect_err("the package fails the grace once it runs");
+        assert!(error.contains("apply grace"), "{error}");
+        assert_eq!(
+            std::fs::read(&away.binary).expect("read"),
+            good,
+            "rolled back once it failed"
+        );
+        shut_down(away).await;
+    }
+
+    /// A configuration applied while the second service is away is reported `APPLIED` once the
+    /// program has run on it, after the service is back, and not `FAILED` before.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_configuration_applied_while_the_service_is_away_is_gated_once_it_is_back() {
+        let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
+        the_service_goes(&mut away, service).await;
+
+        apply(&away.harness, b"cfg").await;
+        the_apply_finds_it_away(&mut away).await;
+
+        let _service = Service::up(&away.socket);
+        let (hash, result) = next_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"cfg".to_vec());
+        assert_eq!(result, Ok(()));
+        shut_down(away).await;
+    }
+
+    /// The second service goes during a package's apply grace, and the program with it: the
+    /// program rejected nothing, so the package is neither rolled back nor refused, and the start
+    /// once the service is back decides — here it survives, and is `Installed`.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_package_whose_service_goes_in_the_grace_is_gated_once_it_is_back() {
+        let (mut away, service) = running(&stub_agent(), Duration::from_secs(3)).await;
+        let new_bytes = another_build_of_the_agent();
+        let staged = away.dir.path().join("downloaded.staged");
+        std::fs::write(&staged, &new_bytes).expect("stage");
+        away.harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged,
+                version: "2.0.0".to_string(),
+                hash: b"2.0.0".to_vec(),
+                span: tracing::Span::current(),
+            })
+            .await
+            .expect("send");
+        let started =
+            next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(10)).await;
+        assert_eq!(started.status, "running", "{started:?}");
+
+        // Within the grace.
+        service.stop().await;
+        let gone =
+            next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(10)).await;
+        assert_eq!(gone.status, UNREACHABLE, "{gone:?}");
+        assert_eq!(std::fs::read(&away.binary).expect("read"), new_bytes);
+
+        let _service = Service::up(&away.socket);
+        let (hash, result) = next_package_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"2.0.0".to_vec());
+        assert_eq!(result, Ok("2.0.0".to_string()));
+        assert_eq!(
+            std::fs::read(&away.binary).expect("read"),
+            new_bytes,
+            "not rolled back"
+        );
+        shut_down(away).await;
+    }
+
+    /// The second service goes during a configuration's apply grace: no `FAILED` for a program
+    /// that went with the service; `APPLIED` once it has run on the configuration after.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_configuration_whose_service_goes_in_the_grace_is_gated_once_it_is_back() {
+        let (mut away, service) = running(&stub_agent(), Duration::from_secs(3)).await;
+        apply(&away.harness, b"cfg").await;
+        let started =
+            next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(10)).await;
+        assert_eq!(started.status, "running", "{started:?}");
+
+        service.stop().await;
+        let gone =
+            next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(10)).await;
+        assert_eq!(gone.status, UNREACHABLE, "{gone:?}");
+
+        let _service = Service::up(&away.socket);
+        let (hash, result) = next_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"cfg".to_vec());
+        assert_eq!(result, Ok(()));
+        shut_down(away).await;
+    }
+}
