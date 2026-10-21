@@ -141,10 +141,14 @@ pub(crate) enum Reply {
         stream: Stream,
         line: String,
     },
-    /// The program ended: its raw wait status, or why waiting for it failed.
+    /// The program ended: its raw wait status, or why waiting for it failed. `closing` says that
+    /// the service stopped it because the connection or the service itself ends: the program went
+    /// with the service and did not exit on its own (ADR-0059 clause 2).
     Exited {
         id: u64,
         status: Result<i32, String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        closing: bool,
     },
 }
 
@@ -770,9 +774,9 @@ async fn supervise(
         .stderr
         .take()
         .map(|pipe| tokio::spawn(relay(id, Stream::Stderr, pipe, replies.clone())));
-    let status = loop {
+    let (status, closing) = loop {
         tokio::select! {
-            status = child.wait() => break status,
+            status = child.wait() => break (status, false),
             Some(request) = control.recv() => match request {
                 Control::Signal { signal, group } => {
                     let sent = match child.id() {
@@ -793,7 +797,7 @@ async fn supervise(
                     }
                     let _ = child.start_kill();
                 }
-                Control::Close => break close(&mut child, group).await,
+                Control::Close => break (close(&mut child, group).await, true),
             },
         }
     };
@@ -805,7 +809,11 @@ async fn supervise(
         }
     }
     let status = status.map(ExitStatus::into_raw).map_err(|e| e.to_string());
-    replies.send(Reply::Exited { id, status });
+    replies.send(Reply::Exited {
+        id,
+        status,
+        closing,
+    });
     Supervised {
         id,
         unanswered: control,
@@ -1280,14 +1288,24 @@ impl Connection {
             }
             Reply::Signalled { id } => self.answer_signal(id, Ok(())),
             Reply::SignalFailed { id, error } => self.answer_signal(id, Err(error)),
-            Reply::Exited { id, status } => {
+            Reply::Exited {
+                id,
+                status,
+                closing,
+            } => {
                 if let Some(exited) = self
                     .routes()
                     .by_id
                     .get_mut(&id)
                     .and_then(|route| route.exited.take())
                 {
-                    let _ = exited.send(status);
+                    // Stopped because the service goes: no exit of the program's, but the same
+                    // as the channel closing under it, which a Supervisor waits out.
+                    let _ = exited.send(if closing {
+                        Err(CLOSED.to_string())
+                    } else {
+                        status
+                    });
                 }
             }
             Reply::Hello { .. } | Reply::Refused { .. } => {
@@ -1431,8 +1449,9 @@ impl RemoteChild {
     /// Waits for the program to end. Cancel-safe; once it has ended, answers at once.
     ///
     /// # Errors
-    /// Returns an error when the service could not wait for it, or the channel closed first —
-    /// the service went, and the program with it, which [`is_unreachable`] says.
+    /// Returns an error when the service could not wait for it, or the channel closed first or
+    /// the service stopped the program on going — the service went, and the program with it,
+    /// which [`is_unreachable`] says.
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
         if self.outcome.is_none() {
             let reported = match self.exited.as_mut() {
@@ -1575,6 +1594,7 @@ pub(crate) mod peer {
             Request::Stop { id } => vec![Reply::Exited {
                 id,
                 status: Ok(libc::SIGKILL),
+                closing: false,
             }],
             _ => Vec::new(),
         }
@@ -2152,7 +2172,7 @@ mod tests {
                     assert_eq!(id, 7);
                     output.push((stream, line));
                 }
-                Reply::Exited { id, status } => {
+                Reply::Exited { id, status, .. } => {
                     assert_eq!(id, 7);
                     break ExitStatus::from_raw(status.expect("a status"));
                 }
@@ -2203,7 +2223,7 @@ mod tests {
             .await
             .expect("stop");
         match next(&mut stream).await {
-            Some(Reply::Exited { id: 1, status }) => assert_eq!(
+            Some(Reply::Exited { id: 1, status, .. }) => assert_eq!(
                 ExitStatus::from_raw(status.expect("a status")).signal(),
                 Some(libc::SIGKILL),
                 "the stop reached another program"
@@ -2567,7 +2587,8 @@ mod tests {
         })
     }
 
-    /// The shutdown of the service is a close too: what it started does not outlive it.
+    /// The shutdown of the service is a close too: what it started does not outlive it, and its
+    /// end is the service's going, not an exit of the program's own (ADR-0059 clause 2).
     /// Verifies: ADR-0059
     #[tokio::test]
     async fn the_service_stops_its_programs_when_it_shuts_down() {
@@ -2577,11 +2598,11 @@ mod tests {
             .expect("connect");
         let mut child = channel.start("test", sh("sleep 300")).await.expect("start");
         let _ = service.stop.take().expect("stop").send(());
-        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        let gone = tokio::time::timeout(Duration::from_secs(15), child.wait())
             .await
             .expect("the program ended in time")
-            .expect("a status");
-        assert_eq!(status.signal(), Some(libc::SIGTERM));
+            .expect_err("no exit of the program's own");
+        assert!(is_unreachable(&gone), "{gone}");
         tokio::time::timeout(Duration::from_secs(5), &mut service.task)
             .await
             .expect("the service ended")
