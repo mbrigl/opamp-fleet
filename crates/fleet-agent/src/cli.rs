@@ -304,17 +304,12 @@ pub struct InstallArgs {
     /// primary group must be a supplementary group of the Client's account; the Client must not
     /// run as root. A re-registration without the flag keeps the account the second service's
     /// unit names. System scope on Linux with systemd only, for now.
-    ///
-    /// Hidden while the Managed Processes' files are not yet split from the Client's (ADR-0053
-    /// clause 6), so no operator relies on a separation that does not hold yet.
-    #[arg(long, value_name = "ACCOUNT", conflicts_with = "user", hide = true)]
+    #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub process_account: Option<String>,
     // ADR-0053.
     /// Drop the process account: stop and deregister the second service, and let the Client
     /// start its Managed Processes itself again.
-    ///
-    /// Hidden with `--process-account`.
-    #[arg(long, conflicts_with = "process_account", hide = true)]
+    #[arg(long, conflicts_with = "process_account")]
     pub no_process_account: bool,
 }
 
@@ -622,11 +617,11 @@ mod tests {
         .is_err());
     }
 
-    /// The process account's flags stay out of the help until the Managed Processes' files are
-    /// split from the Client's (ADR-0053 clause 6).
+    /// The process account's flags are in the help: the Managed Processes' files are split from
+    /// the Client's (ADR-0053 clause 6), so the separation they name holds.
     /// Verifies: ADR-0053
     #[test]
-    fn the_process_account_flags_are_hidden_for_now() {
+    fn the_process_account_flags_are_shown() {
         let mut command = <Cli as clap::CommandFactory>::command();
         let install = command
             .find_subcommand_mut("service")
@@ -637,7 +632,7 @@ mod tests {
                 .get_arguments()
                 .find(|arg| arg.get_id() == flag)
                 .unwrap_or_else(|| panic!("no {flag}"));
-            assert!(arg.is_hide_set(), "{flag} is shown");
+            assert!(!arg.is_hide_set(), "{flag} is hidden");
         }
     }
 
