@@ -753,46 +753,12 @@ impl Runner {
                         // which is what this one is here for.
                         let restart = tracing::info_span!(parent: &span, "restart");
                         stop(&mut s.child, self.stop_timeout, &self.name).await;
-                        s.child = self.spawn_if_due(&mut s.waiting).await;
+                        let started = self.spawn_if_due(&mut s.waiting).await;
                         drop(restart);
-                        s.policy.started(Instant::now());
-                        // Applying means running on the new files — and surviving the apply
-                        // grace (ADR-0017's health-gated acknowledgement): a process that exits
-                        // right away has rejected its configuration the only way a process can.
-                        let started = s.child.take();
-                        let ran = started.is_some();
-                        let outcome = if !ran && s.waiting.armed() {
-                            GraceOutcome::Unreachable
-                        } else if !ran && (self.build)().is_none() {
-                            GraceOutcome::Ok // nothing should run; that is the config
-                        } else {
-                            self.gate(started, &mut s.child, &mut shutdown)
-                                .instrument(span.clone())
-                                .await
-                        };
-                        let result = match outcome {
-                            GraceOutcome::Ok => Ok(()),
-                            GraceOutcome::Failed(e) => Err(e),
-                            // Shutting down mid-grace: no acknowledgement — the goodbyes carry no
-                            // status anyway — just stop gracefully on the way out.
-                            GraceOutcome::ShuttingDown => break,
-                            // Neither applied nor failed: the start that reaches the second
-                            // service again decides it (ADR-0059 clause 2).
-                            GraceOutcome::Unreachable => {
-                                if !s.waiting.armed() {
-                                    s.waiting.arm();
-                                }
-                                s.owed = Some(OwedConfig { hash: config.config_hash, span });
-                                continue;
-                            }
-                        };
-                        // A process that started and then failed the gate exited within the grace.
-                        let exited_in_grace = ran && result.is_err();
-                        self.settle(OwedConfig { hash: config.config_hash, span }, result).await;
-                        // Stay supervised: a flaky-but-valid configuration is retried with
-                        // backoff — but not forever (ADR-0026): a configuration that will not
-                        // start is held after a few tries rather than spun on.
-                        if exited_in_grace && self.respawn_or_hold(&mut s, &mut shutdown).await {
+                        // The configuration is owed its acknowledgement until its start decides
+                        // it, exactly as one that waits for the second service is.
+                        s.owed = Some(OwedConfig { hash: config.config_hash, span });
+                        if self.started(started, &mut s, &mut shutdown).await {
                             break;
                         }
                     }
@@ -1212,10 +1178,17 @@ impl Runner {
             .await;
     }
 
-    /// Takes in a program started outside an apply — the retry after the second service was not
-    /// reached, or the start after a failed package — and, where a configuration is owed its
-    /// acknowledgement, gates it in that apply's place and settles it. A start that did not reach
-    /// the service leaves it owed. Returns `true` when shutdown was requested meanwhile.
+    /// Takes in a program just started — by an apply, by the retry after the second service was
+    /// not reached, or after a failed package — and, where a configuration is owed its
+    /// acknowledgement, gates it and settles it (ADR-0017's health-gated acknowledgement): applying
+    /// means running on the new files and surviving the apply grace. A start that did not reach
+    /// the service leaves it owed (ADR-0059 clause 2). Returns `true` when shutdown was requested
+    /// meanwhile.
+    ///
+    /// Only a program that ran and exited within the grace is started again (ADR-0026 clause 63):
+    /// a start that did not happen — the program is not there, or cannot be executed — has
+    /// already said why in its health, and starting the same files again would only say so once
+    /// more.
     async fn started(
         &self,
         started: Option<ManagedChild>,
@@ -1243,17 +1216,23 @@ impl Runner {
         let result = match outcome {
             GraceOutcome::Ok => Ok(()),
             GraceOutcome::Failed(e) => Err(e),
+            // Shutting down mid-grace: no acknowledgement — the goodbyes carry no status anyway —
+            // just stop gracefully on the way out.
             GraceOutcome::ShuttingDown => return true,
+            // Neither applied nor failed: the start that reaches the second service again decides
+            // it (ADR-0059 clause 2).
             GraceOutcome::Unreachable => {
                 s.waiting.arm();
                 s.owed = Some(config);
                 return false;
             }
         };
-        let failed = result.is_err();
+        let exited_in_grace = ran && result.is_err();
         self.settle(config, result).await;
-        // As after a failed apply: supervised still, and held once it keeps failing.
-        failed && self.respawn_or_hold(s, shutdown).await
+        // Stay supervised: a flaky-but-valid configuration is retried with backoff — but not
+        // forever (ADR-0026): a configuration that will not start is held after a few tries
+        // rather than spun on.
+        exited_in_grace && self.respawn_or_hold(s, shutdown).await
     }
 
     /// Keeps the version a successful update superseded, or drops it now (ADR-0026). With retention
