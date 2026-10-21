@@ -480,10 +480,12 @@ fn user_of(pid: &str) -> String {
 
 /// A Managed Process under a process account (ADR-0053): installed with `--run-as` and
 /// `--process-account` naming two real accounts, the Client starts its program through the second
-/// service, and the program runs as the process account. It reads its `config/`, and can neither
-/// read the Client's `client-key.pem` nor write its own `program/`. After a restart of the second
-/// service the Client reaches it again and the program runs again, and `--no-process-account`
-/// returns the program to the Client's account. The in-process tests stand in for the second
+/// service, and the program runs as the process account. It reads its `config/`, writes into its
+/// data directory, and can neither read the Client's `client-key.pem` nor write its own
+/// `program/`. After a restart of the second service the Client reaches it again and the program
+/// runs again. A re-registration without either flag, as every package upgrade makes, keeps both
+/// accounts and leaves the program its data: what it wrote is still its own, and it writes there
+/// again. `--no-process-account` returns the program to the Client's account. The in-process tests stand in for the second
 /// service under the test's own uid; this is the one place the shipped binary starts a program
 /// over the socket under another account.
 /// Verifies: ADR-0053
@@ -510,8 +512,22 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     let supervisor = state.join("supervisors").join("probe");
     let program = supervisor.join("program");
     let config_dir = supervisor.join("config");
+    let data = supervisor.join("data");
     std::fs::create_dir_all(&program).expect("program/");
     std::fs::create_dir_all(&config_dir).expect("config/");
+    // A data directory as clause 6 gives it: the process account's group, `2770`. The command
+    // kind names none, so the test makes it as a kind would.
+    std::fs::create_dir_all(&data).expect("data/");
+    let chgrp = Command::new("chgrp")
+        .arg(process_account.0)
+        .arg(&data)
+        .status()
+        .expect("run chgrp");
+    assert!(
+        chgrp.success(),
+        "cannot give data/ to the process account's group"
+    );
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o2770)).expect("chmod data/");
     // Where the Managed Process says what it found: writable by anyone, outside every root.
     let out = dir.path().join("out");
     std::fs::create_dir(&out).expect("out/");
@@ -538,6 +554,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
              echo \"user=$(id -un)\"\n\
              if cat {key} >/dev/null 2>&1; then echo key=read; else echo key=denied; fi\n\
              if (: > {program}/written) 2>/dev/null; then echo program=written; else echo program=denied; fi\n\
+             if (echo $$ >> {data}/written) 2>/dev/null; then echo data=written; else echo data=denied; fi\n\
              echo \"config=$(cat {config}/settings 2>/dev/null)\"\n\
              }} > \"$tmp\"\n\
              mv \"$tmp\" {out}/result\n\
@@ -545,6 +562,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
             out = out.display(),
             key = key.display(),
             program = program.display(),
+            data = data.display(),
             config = config_dir.display(),
         ),
     )
@@ -595,6 +613,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(first["key"], "denied", "{first:?}");
     assert_eq!(first["program"], "denied", "{first:?}");
     assert_eq!(first["config"], "from the config", "{first:?}");
+    assert_eq!(first["data"], "written", "{first:?}");
 
     // The second service restarts, and its programs with it: the Client reaches it again and
     // starts the program again, under the process account.
@@ -613,8 +632,40 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     let again = reported(&result, Some(first_pid));
     assert_eq!(user_of(&again["pid"]), process_account.0, "{again:?}");
 
-    // Dropped: the Client starts its program itself again, under its own account.
+    // Re-registered without either flag, as every package upgrade does: both accounts are kept,
+    // and the hand-over leaves the process account its data (ADR-0053 clause 10).
     let again_pid: u32 = again["pid"].parse().expect("a pid");
+    client(&["service", "stop"], &config).expect("stop the service");
+    let reinstalled = client(&["service", "install", "--root", &root_arg], &config)
+        .expect("re-install without --run-as and --process-account");
+    assert!(
+        reinstalled.contains(&format!("processes: {} (kept from", process_account.0)),
+        "{reinstalled}"
+    );
+    let written = Command::new("stat")
+        .args(["-c", "%U %G %a"])
+        .arg(data.join("written"))
+        .arg(&data)
+        .output()
+        .expect("run stat");
+    assert_eq!(
+        String::from_utf8_lossy(&written.stdout),
+        format!(
+            "{p} {p} 664\n{} {p} 2770\n",
+            client_account.0,
+            p = process_account.0
+        ),
+        "the hand-over took the data from the process account"
+    );
+    client(&["service", "start"], &config).expect("start the service again");
+    let upgraded = reported(&result, Some(again_pid));
+    assert_eq!(user_of(&upgraded["pid"]), process_account.0, "{upgraded:?}");
+    assert_eq!(upgraded["data"], "written", "{upgraded:?}");
+    assert_eq!(upgraded["config"], "from the config", "{upgraded:?}");
+    assert_eq!(upgraded["key"], "denied", "{upgraded:?}");
+
+    // Dropped: the Client starts its program itself again, under its own account.
+    let again_pid: u32 = upgraded["pid"].parse().expect("a pid");
     client(&["service", "stop"], &config).expect("stop the service");
     client(
         &[
