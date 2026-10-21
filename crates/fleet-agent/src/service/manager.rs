@@ -339,11 +339,11 @@ pub fn systemd_unit(spec: &InstallSpec, account: &str) -> Result<String, String>
     let mut unit = String::new();
     let _ = writeln!(unit, "[Unit]");
     let _ = writeln!(unit, "Description={}", service_name());
-    // The second service is started first and stopped last (ADR-0053 clause 2): `After=` orders
-    // both, and `Wants=` pulls it in at boot. Not `Requires=`: a second service that fails, or is
-    // stopped on its own, leaves the Client running — it still reports to the Server, its
-    // Supervisors report that their programs do not start, and it reaches the service again once
-    // the manager has restarted it.
+    // The second service is started first (ADR-0053 clause 2): `After=` orders both, and `Wants=`
+    // pulls it in at boot and on every start of the Client. Not `Requires=`: a second service that
+    // fails, or is stopped on its own, leaves the Client running — it still reports to the Server,
+    // its Supervisors report that their programs do not start, and it reaches the service again
+    // once the manager has restarted it.
     if spec.agents.is_some() {
         let agents = agents_service_name();
         let _ = writeln!(unit, "Wants={agents}.service");
@@ -632,35 +632,51 @@ impl NativeService {
     }
 }
 
-/// Where a second service is registered, every verb acts on it too: it is started first and
-/// stopped last (ADR-0053 clause 2). The state is the Client's.
+/// What `start` starts: the Client alone. Where a second service is registered, the Client's unit
+/// wants it (`Wants=`), so the manager starts it with the Client, and neither waits for the other
+/// (ADR-0053 clause 2).
+fn started() -> Vec<ServiceLabel> {
+    vec![label()]
+}
+
+/// What `stop` stops, in order: the Client, then the second service where one is registered —
+/// `Wants=` pulls it in on a start but takes it down on no stop (ADR-0053 clause 2).
+fn stopped(agents: bool) -> Vec<ServiceLabel> {
+    let mut labels = vec![label()];
+    if agents {
+        labels.push(agents_label());
+    }
+    labels
+}
+
+/// The state is the Client's.
 impl ServiceControl for NativeService {
     fn start(&self) -> Result<(), String> {
-        if agents_registered(self.level) {
+        for label in started() {
             manager(self.level)?
-                .start(ServiceStartCtx {
-                    label: agents_label(),
-                })
-                .map_err(|e| format!("cannot start the second service: {e}"))?;
+                .start(ServiceStartCtx { label })
+                .map_err(|e| format!("cannot start the service: {e}"))?;
         }
-        manager(self.level)?
-            .start(ServiceStartCtx { label: label() })
-            .map_err(|e| format!("cannot start the service: {e}"))
+        Ok(())
     }
 
     fn stop(&self) -> Result<(), String> {
-        let stopped = manager(self.level)?
-            .stop(ServiceStopCtx { label: label() })
-            .map_err(|e| format!("cannot stop the service: {e}"));
-        // Stopped even when the Client's stop failed: a stop leaves nothing running it can stop.
-        if agents_registered(self.level) {
-            manager(self.level)?
-                .stop(ServiceStopCtx {
-                    label: agents_label(),
-                })
-                .map_err(|e| format!("cannot stop the second service: {e}"))?;
+        let mut result = Ok(());
+        // Each one even when the one before failed: a stop leaves nothing running it can stop.
+        for label in stopped(agents_registered(self.level)) {
+            let which = if label == agents_label() {
+                "the second service"
+            } else {
+                "the service"
+            };
+            let stopped = manager(self.level)?
+                .stop(ServiceStopCtx { label })
+                .map_err(|e| format!("cannot stop {which}: {e}"));
+            if result.is_ok() {
+                result = stopped;
+            }
         }
-        stopped
+        result
     }
 
     fn state(&self) -> Result<ServiceState, String> {
@@ -1166,6 +1182,16 @@ mod tests {
             std::time::Duration::from_secs(u64::from(AGENTS_STOP_TIMEOUT_SECS))
                 > CLOSE_GRACE + OUTPUT_DRAIN
         );
+    }
+
+    /// `start` starts the Client alone, whose unit wants the second service, and `stop` stops the
+    /// Client and then the second service (ADR-0053 clause 2).
+    /// Verifies: ADR-0053
+    #[test]
+    fn start_starts_the_client_and_stop_stops_both() {
+        assert_eq!(started(), vec![label()]);
+        assert_eq!(stopped(true), vec![label(), agents_label()]);
+        assert_eq!(stopped(false), vec![label()]);
     }
 
     /// Where a process account is registered, the Client's unit wants the second service and starts
