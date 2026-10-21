@@ -1866,27 +1866,6 @@ mod an_apply_while_the_second_service_is_away {
         }
     }
 
-    /// What waits for the second service, and why, as the Runner next says: `(true, hash, reason)`
-    /// for a package, `(false, hash, reason)` for a configuration. No outcome comes first.
-    async fn next_waiting(
-        events: &mut mpsc::Receiver<(usize, ProcessEvent)>,
-    ) -> (bool, Vec<u8>, String) {
-        loop {
-            let (_, event) = tokio::time::timeout(Duration::from_secs(30), events.recv())
-                .await
-                .expect("an event in time")
-                .expect("an open channel");
-            match event {
-                ProcessEvent::PackageWaiting { hash, reason } => return (true, hash, reason),
-                ProcessEvent::ConfigWaiting { hash, reason } => return (false, hash, reason),
-                ProcessEvent::ConfigApplied { .. } | ProcessEvent::PackageApplied { .. } => {
-                    panic!("an outcome reported while the second service is away: {event:?}")
-                }
-                _ => {}
-            }
-        }
-    }
-
     async fn shut_down(away: Away) {
         away.harness.shutdown_tx.send(true).expect("shutdown");
         tokio::time::timeout(Duration::from_secs(10), away.harness.task)
@@ -1918,11 +1897,6 @@ mod an_apply_while_the_second_service_is_away {
             })
             .await
             .expect("send");
-        assert_eq!(
-            next_waiting(&mut away.harness.events).await,
-            (true, b"9.9.9".to_vec(), UNREACHABLE.to_string()),
-            "still Installing, naming the second service"
-        );
         staged_beside(&away, &bytes_of(&stub_crasher())).await;
         assert_eq!(
             std::fs::read(&away.binary).expect("read"),
@@ -1952,11 +1926,7 @@ mod an_apply_while_the_second_service_is_away {
         the_service_goes(&mut away, service).await;
 
         apply(&away.harness, b"cfg").await;
-        assert_eq!(
-            next_waiting(&mut away.harness.events).await,
-            (false, b"cfg".to_vec(), UNREACHABLE.to_string()),
-            "still APPLYING, naming the second service"
-        );
+        the_apply_finds_it_away(&mut away).await;
 
         let _service = Service::up(&away.socket);
         let (hash, result) = next_ack(&mut away.harness.events).await;
@@ -2034,6 +2004,50 @@ mod an_apply_while_the_second_service_is_away {
         let (hash, result) = next_ack(&mut away.harness.events).await;
         assert_eq!(hash, b"cfg".to_vec());
         assert_eq!(result, Ok(()));
+        shut_down(away).await;
+    }
+
+    /// A restart command while a configuration and a package wait for the second service respawns
+    /// on the current files and does no more (ADR-0017 clause 8): its start, though it reaches the
+    /// service, acknowledges nothing and swaps nothing in. The retry it makes due at once does
+    /// both, with a start of its own that is gated.
+    /// Verifies: ADR-0017, ADR-0053
+    #[tokio::test]
+    async fn a_restart_while_something_waits_only_respawns_and_the_retry_decides() {
+        let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
+        the_service_goes(&mut away, service).await;
+        apply(&away.harness, b"cfg").await;
+        the_apply_finds_it_away(&mut away).await;
+        let new = another_build_of_the_agent();
+        offer(&away, &new, "2.0.0").await;
+        staged_beside(&away, &new).await;
+        // A retry finds the service away too; the next one is at least a second off.
+        let again =
+            next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(30)).await;
+        assert_eq!(again.status, UNREACHABLE, "{again:?}");
+
+        let _service = Service::up(&away.socket);
+        away.harness
+            .commands
+            .send(ProcessCommand::Restart)
+            .await
+            .expect("send");
+        let restarted =
+            next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(10)).await;
+        assert_eq!(restarted.status, "running", "{restarted:?}");
+        let retried =
+            next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(10)).await;
+        assert_eq!(
+            retried.status, "running",
+            "the restart's start decided: {retried:?}"
+        );
+        let ((package, installed), (config, applied)) =
+            both_outcomes(&mut away.harness.events).await;
+        assert_eq!(package, b"2.0.0".to_vec());
+        assert_eq!(installed, Ok("2.0.0".to_string()));
+        assert_eq!(config, b"cfg".to_vec());
+        assert_eq!(applied, Ok(()));
+        assert_eq!(std::fs::read(&away.binary).expect("read"), new);
         shut_down(away).await;
     }
 
@@ -2188,8 +2202,8 @@ mod an_apply_while_the_second_service_is_away {
     }
 
     /// A second service that is reached and refused — here its socket is served by another
-    /// account than the process account — is named as such while a configuration and a package
-    /// wait for it.
+    /// account than the process account — is what the Supervisor's health names while a
+    /// configuration and a package wait for it, and so what the Agent names as their reason.
     /// Verifies: ADR-0053
     #[tokio::test]
     async fn what_waits_for_a_refused_service_names_the_refusal() {
@@ -2236,10 +2250,8 @@ mod an_apply_while_the_second_service_is_away {
             })
             .await
             .expect("send");
-        assert_eq!(
-            next_waiting(&mut events).await,
-            (false, b"cfg".to_vec(), REFUSED.to_string())
-        );
+        let health = next_health_and_no_outcome(&mut events, Duration::from_secs(30)).await;
+        assert_eq!(health.status, REFUSED, "{health:?}");
         let staged = dir.path().join("downloaded");
         std::fs::write(&staged, another_build_of_the_agent()).expect("stage");
         commands
@@ -2251,10 +2263,8 @@ mod an_apply_while_the_second_service_is_away {
             })
             .await
             .expect("send");
-        assert_eq!(
-            next_waiting(&mut events).await,
-            (true, b"2.0.0".to_vec(), REFUSED.to_string())
-        );
+        let health = next_health_and_no_outcome(&mut events, Duration::from_secs(30)).await;
+        assert_eq!(health.status, REFUSED, "{health:?}");
         shutdown_tx.send(true).expect("shutdown");
         tokio::time::timeout(Duration::from_secs(30), task)
             .await
@@ -2286,10 +2296,7 @@ mod an_apply_while_the_second_service_is_away {
 
         let new = another_build_of_the_agent();
         offer(&away, &new, "2.0.0").await;
-        assert_eq!(
-            next_waiting(&mut away.harness.events).await,
-            (true, b"2.0.0".to_vec(), UNREACHABLE.to_string())
-        );
+        staged_beside(&away, &new).await;
         let _service = Service::up(&away.socket);
         let (hash, result) = next_package_ack(&mut away.harness.events).await;
         assert_eq!(hash, b"2.0.0".to_vec());

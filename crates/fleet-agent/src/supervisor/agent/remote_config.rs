@@ -32,22 +32,22 @@ impl AgentState {
         });
     }
 
-    /// The configuration of `hash` waits for the second service (ADR-0053 clause 2): it stays
-    /// `APPLYING`, and the status names `reason`. Nothing changes for a configuration another has
-    /// superseded meanwhile.
-    pub fn config_waiting(&mut self, hash: &[u8], reason: String) {
-        let current = self
-            .local
-            .applied
-            .as_ref()
-            .is_some_and(|applied| applied.config_hash == hash);
-        if self.local.managed && current {
-            self.protocol.set_remote_config_status(config_status(
-                hash.to_vec(),
-                RemoteConfigStatuses::Applying,
-                reason,
-            ));
+    /// A configuration still `APPLYING` names `reason` as what it waits for, the second service,
+    /// or nothing once `reason` is empty (ADR-0053 clause 2). Any other status stays as it is.
+    pub(super) fn config_waits(&mut self, reason: &str) {
+        let Some(status) = self.protocol.remote_config_status() else {
+            return;
+        };
+        let applying = status.status == RemoteConfigStatuses::Applying as i32;
+        if !self.local.managed || !applying || status.error_message == reason {
+            return;
         }
+        let hash = status.last_remote_config_hash.clone();
+        self.protocol.set_remote_config_status(config_status(
+            hash,
+            RemoteConfigStatuses::Applying,
+            reason.to_string(),
+        ));
     }
 
     /// Takes an offered configuration in and reports `APPLYING`; the outcome closes the
@@ -92,6 +92,7 @@ impl AgentState {
             )
         };
         self.protocol.set_remote_config_status(status);
+        self.name_the_wait();
     }
 }
 

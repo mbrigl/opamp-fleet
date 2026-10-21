@@ -119,17 +119,20 @@ impl AgentState {
     pub fn package_downloaded(&mut self) {
         self.local.downloading = None;
         self.protocol.package_status_changed();
+        self.name_the_wait();
     }
 
-    /// The package of `hash` waits for the second service, staged and not swapped in (ADR-0053
-    /// clause 2): it stays `Installing`, and its status names `reason` until the outcome replaces
-    /// it. Nothing changes for a package a newer offer has replaced meanwhile.
-    pub fn package_waiting(&mut self, hash: &[u8], reason: String) {
+    /// A package `Installing` names `reason` as what it waits for, the second service, or nothing
+    /// once `reason` is empty (ADR-0053 clause 2); the outcome replaces it. A package still
+    /// downloading, and a status other than `Installing`, stay as they are.
+    pub(super) fn package_waits(&mut self, reason: &str) {
         let local = &mut self.local;
-        if local.installing.as_ref().is_some_and(|d| d.hash == hash) {
-            local.package_error = reason;
-            self.protocol.package_status_changed();
+        let installing = local.installing.is_some() && local.downloading.is_none();
+        if !installing || local.package_error == reason {
+            return;
         }
+        local.package_error = reason.to_string();
+        self.protocol.package_status_changed();
     }
 
     /// Closes a package's lifecycle the Supervisor applied (ADR-0026): `Ok(version)` records it

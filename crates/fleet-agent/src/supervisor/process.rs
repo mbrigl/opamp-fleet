@@ -163,8 +163,6 @@ struct Waiting {
     /// When the next start is due; `None` while nothing waits for the service.
     due: Option<tokio::time::Instant>,
     backoff: Backoff,
-    /// Why the service was not reached: [`UNREACHABLE`] or [`REFUSED`].
-    reason: &'static str,
 }
 
 impl Waiting {
@@ -172,14 +170,18 @@ impl Waiting {
         Waiting {
             due: None,
             backoff: Backoff::new(),
-            reason: UNREACHABLE,
         }
     }
 
-    /// The service was not reached, for `reason`: the next start is due after the backoff.
-    fn arm(&mut self, reason: &'static str) {
-        self.reason = reason;
+    /// The service was not reached: the next start is due after the backoff.
+    fn arm(&mut self) {
         self.due = Some(tokio::time::Instant::now() + self.backoff.advance());
+    }
+
+    /// The service was reached by a start that decided nothing that waits for it: the start that
+    /// does is due now.
+    fn due_now(&mut self) {
+        self.due = Some(tokio::time::Instant::now());
     }
 
     /// The service was reached, or nothing is to start: nothing waits.
@@ -581,7 +583,9 @@ impl Runner {
         sweep.tick().await; // the first tick is immediate; the startup sweep above already ran
 
         loop {
-            let idle = s.child.is_none();
+            // The retry is the start for what waits for the second service, so it is due with a
+            // program running too: one a restart command started on the current files.
+            let retry = s.child.is_none() || s.owed.is_some() || s.parked.is_some();
             let exited = async {
                 match s.child.as_mut() {
                     Some(c) => c.wait().await,
@@ -591,14 +595,17 @@ impl Runner {
             tokio::select! {
                 _ = sweep.tick() => self.sweep_backup(),
                 // The second service was not reached: try again, as long as no shutdown comes
-                // first (ADR-0053 clause 2). A package that waits for it is what is started then.
-                () = s.waiting.due(), if idle => {
+                // first (ADR-0053 clause 2). A package that waits for it is what is started then,
+                // and a configuration owed its acknowledgement is decided by this start.
+                () = s.waiting.due(), if retry => {
                     if let Some(package) = s.parked.take() {
                         if self.install(package, &mut s, &mut shutdown).await {
                             break;
                         }
                         continue;
                     }
+                    // What a restart command started acknowledges nothing (ADR-0017 clause 8).
+                    stop(&mut s.child, self.stop_timeout, &self.name).await;
                     let started = tokio::select! {
                         started = self.spawn_if_due(&mut s.waiting) => started,
                         _ = shutdown.requested() => break,
@@ -678,11 +685,9 @@ impl Runner {
                             // service again decides it (ADR-0053 clause 2).
                             GraceOutcome::Unreachable => {
                                 if !s.waiting.armed() {
-                                    s.waiting.arm(UNREACHABLE);
+                                    s.waiting.arm();
                                 }
-                                let config = OwedConfig { hash: config.config_hash, span };
-                                self.report_waiting(Some(&config), None, s.waiting.reason).await;
-                                s.owed = Some(config);
+                                s.owed = Some(OwedConfig { hash: config.config_hash, span });
                                 continue;
                             }
                         };
@@ -732,7 +737,6 @@ impl Runner {
                         // clause 2).
                         if s.waiting.armed() {
                             info!(supervisor = %self.name, version = %package.version, "package staged; it is swapped in once the second service is back");
-                            self.report_waiting(None, Some(&package), s.waiting.reason).await;
                             s.parked = Some(package);
                             continue;
                         }
@@ -740,19 +744,20 @@ impl Runner {
                             break;
                         }
                     }
+                    // A respawn on the current files, and nothing more (ADR-0017 clause 8): it
+                    // acknowledges no configuration and swaps in no package that waits for the
+                    // second service. Unless it found the service away, the retry for what waits
+                    // is due at once (ADR-0053 clause 2).
                     Some(ProcessCommand::Restart) => {
                         stop(&mut s.child, self.stop_timeout, &self.name).await;
                         s.policy.fresh_chance(); // an operator restart (ADR-0026)
                         s.backoff.reset();
-                        if let Some(package) = s.parked.take() {
-                            if self.install(package, &mut s, &mut shutdown).await {
-                                break;
-                            }
-                            continue;
+                        s.child = self.spawn_if_due(&mut s.waiting).await;
+                        if s.child.is_some() {
+                            s.policy.started(Instant::now());
                         }
-                        let started = self.spawn_if_due(&mut s.waiting).await;
-                        if self.started(started, &mut s, &mut shutdown).await {
-                            break;
+                        if !s.waiting.armed() && (s.owed.is_some() || s.parked.is_some()) {
+                            s.waiting.due_now();
                         }
                     }
                     Some(ProcessCommand::Uninstall) => {
@@ -780,7 +785,7 @@ impl Runner {
                                 "the second service went, and the program with it".to_string(),
                             )))
                             .await;
-                        s.waiting.arm(UNREACHABLE);
+                        s.waiting.arm();
                         continue;
                     }
                     let describe = describe_exit(status);
@@ -867,8 +872,6 @@ impl Runner {
                     hash,
                     span,
                 };
-                self.report_waiting(s.owed.as_ref(), Some(&package), s.waiting.reason)
-                    .await;
                 s.parked = Some(package);
                 return false;
             }
@@ -995,7 +998,7 @@ impl Runner {
             // Not started because the second service was not reached: the package rejected
             // nothing, and waits for the service out of the way (ADR-0053 clause 2).
             Err(e) if is_unreachable(&e) => {
-                waiting.arm(why_unreached(&e));
+                waiting.arm();
                 GraceOutcome::Unreachable
             }
             // "Nothing started" has two meanings, and only one of them is a failed install. A
@@ -1018,7 +1021,7 @@ impl Runner {
                 waiting.clear();
                 let outcome = self.gate(Some(proc), child, shutdown).await;
                 if matches!(outcome, GraceOutcome::Unreachable) {
-                    waiting.arm(UNREACHABLE);
+                    waiting.arm();
                 }
                 outcome
             }
@@ -1086,32 +1089,6 @@ impl Runner {
         Swapped::Gated(outcome)
     }
 
-    /// Tells the Agent what waits for the second service, and `reason`, why: the configuration
-    /// stays `APPLYING` and the package `Installing`, each naming it (ADR-0053 clause 2).
-    async fn report_waiting(
-        &self,
-        config: Option<&OwedConfig>,
-        package: Option<&Parked>,
-        reason: &str,
-    ) {
-        if let Some(config) = config {
-            self.events
-                .send(ProcessEvent::ConfigWaiting {
-                    hash: config.hash.clone(),
-                    reason: reason.to_string(),
-                })
-                .await;
-        }
-        if let Some(package) = package {
-            self.events
-                .send(ProcessEvent::PackageWaiting {
-                    hash: package.hash.clone(),
-                    reason: reason.to_string(),
-                })
-                .await;
-        }
-    }
-
     /// Reports the acknowledgement of a configuration: `APPLIED`, or `FAILED` with the reason.
     async fn settle(&self, config: OwedConfig, result: Result<(), String>) {
         match &result {
@@ -1126,8 +1103,8 @@ impl Runner {
             .await;
     }
 
-    /// Takes in a program started outside an apply — after the second service was not reached,
-    /// on a restart command, or after a failed package — and, where a configuration is owed its
+    /// Takes in a program started outside an apply — the retry after the second service was not
+    /// reached, or the start after a failed package — and, where a configuration is owed its
     /// acknowledgement, gates it in that apply's place and settles it. A start that did not reach
     /// the service leaves it owed. Returns `true` when shutdown was requested meanwhile.
     async fn started(
@@ -1145,11 +1122,8 @@ impl Runner {
             return false;
         };
         let outcome = if !ran && s.waiting.armed() {
-            // Still away: owed on.
-            self.report_waiting(Some(&config), None, s.waiting.reason)
-                .await;
             s.owed = Some(config);
-            return false;
+            return false; // still away: owed on
         } else if !ran && (self.build)().is_none() {
             GraceOutcome::Ok // nothing should run, as the apply itself would have found
         } else {
@@ -1162,9 +1136,7 @@ impl Runner {
             GraceOutcome::Failed(e) => Err(e),
             GraceOutcome::ShuttingDown => return true,
             GraceOutcome::Unreachable => {
-                s.waiting.arm(UNREACHABLE);
-                self.report_waiting(Some(&config), None, s.waiting.reason)
-                    .await;
+                s.waiting.arm();
                 s.owed = Some(config);
                 return false;
             }
@@ -1380,7 +1352,7 @@ impl Runner {
                 Some(child)
             }
             Err(e) if is_unreachable(&e) => {
-                waiting.arm(why_unreached(&e));
+                waiting.arm();
                 None
             }
             Err(_) => {
@@ -1507,13 +1479,22 @@ impl Runner {
 }
 
 /// What a Supervisor reports while the second service cannot be reached (ADR-0053 clause 2).
-const UNREACHABLE: &str = "the second service cannot be reached";
+pub(crate) const UNREACHABLE: &str = "the second service cannot be reached";
 
 /// What a Supervisor reports while the second service is reached and refused: another account
 /// serves its socket, it is another build, or it refuses the Client (ADR-0053 clauses 4 and 5).
 /// Not an outage that ends by itself, so it is told apart from [`UNREACHABLE`].
-const REFUSED: &str =
+pub(crate) const REFUSED: &str =
     "the second service is refused: another account, another build, or it refuses this Client";
+
+/// Why `health` says that the second service is not reached — [`UNREACHABLE`] or [`REFUSED`] —
+/// or `None` where it says nothing of the kind. While it says so, a configuration that is applied
+/// and a package that is installed wait for the service, and the Agent names it as the reason
+/// (ADR-0053 clause 2).
+pub(crate) fn waiting_reason(health: &ComponentHealth) -> Option<&str> {
+    let waits = !health.healthy && (health.status == UNREACHABLE || health.status == REFUSED);
+    waits.then_some(health.status.as_str())
+}
 
 /// Why a start that did not reach the second service did not: [`REFUSED`] or [`UNREACHABLE`].
 fn why_unreached(error: &std::io::Error) -> &'static str {
