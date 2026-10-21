@@ -56,8 +56,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 - **An `rpm -U` beside a second installed instance no longer stops the Client.** The `.rpm`'s
   pre-removal took any count but `1` for a removal, so an upgrade while another instance of the
-  package stayed installed ran `service uninstall` and left the Client stopped. Only `0` is a
-  removal now.
+  package stayed installed stopped the Client and removed the unit the new package had just
+  registered. Only `0` is a removal now.
 
 ## [0.6.1]
 

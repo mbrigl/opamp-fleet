@@ -1,6 +1,9 @@
-//! What the Linux post-install prints (`packaging/linux/postinst`), read as text the way
-//! `msi_exe_command.rs` reads the WiX source: the package is not built here, so the guidance it
-//! shows an operator is checked by `cargo test` on every platform.
+//! What the Linux maintainer scripts say and do (`packaging/linux/`), read as text the way
+//! `msi_exe_command.rs` reads the WiX source: the package is not built here, so the guidance the
+//! post-install shows an operator is checked by `cargo test` on every platform. The pre-removal is
+//! also run, on Unix, against a stub `systemctl`; its `service uninstall` names the installed
+//! payload, which a host without the package does not have — run as root on a host with the
+//! package installed, that test would unregister its service.
 
 use std::path::Path;
 
