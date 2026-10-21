@@ -300,9 +300,10 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 pub enum Served {
     /// `SIGTERM` or `SIGINT`: a clean exit, and the service manager leaves it stopped.
     Stopped,
-    /// The Client is another build, and `current` no longer names the version this service runs:
-    /// the self-update switched it. The process exits non-zero so the service manager starts the
-    /// version `current` names, as it does for the Client (ADR-0053 clause 2).
+    /// The Client's connection ended — it is another build, or the self-update restarts it — and
+    /// `current` no longer names the version this service runs: the self-update switched it. The
+    /// process exits non-zero so the service manager starts the version `current` names, as it does
+    /// for the Client (ADR-0053 clause 2).
     Superseded,
 }
 
@@ -363,9 +364,11 @@ async fn terminated() {
 /// Serves the Client on `listener` until `shutdown` resolves, one connection at a time. When a
 /// connection closes, or at the shutdown, every program it started is stopped.
 ///
-/// A Client of another build is refused; when `superseded` then says that this service is the one
-/// a self-update left behind, it ends with [`Served::Superseded`], so the version the Client runs
-/// takes its place. A Client left behind is only refused, until it is restarted itself.
+/// A Client of another build is refused. When a connection of the Client's account has ended —
+/// refused for another build, or closed because the self-update restarts the Client — and
+/// `superseded` says that this service is the one a self-update left behind, it ends with
+/// [`Served::Superseded`], so the version `current` names takes its place. A peer of another
+/// account is refused before it is served, and ends nothing.
 pub async fn serve(
     listener: UnixListener,
     client_uid: u32,
@@ -397,7 +400,10 @@ pub async fn serve(
         }
         match serve_connection(stream, &listener, shutdown.as_mut(), &mut refusals).await {
             Ended::Shutdown => return Served::Stopped,
-            Ended::OtherBuild if superseded() => return Served::Superseded,
+            // The Client's connection closed — the self-update restarts it — or it is another
+            // build: either way a service that `current` no longer names makes way for the one it
+            // does, beside the Client rather than after it.
+            Ended::Closed | Ended::OtherBuild if superseded() => return Served::Superseded,
             Ended::Closed | Ended::OtherBuild => {}
         }
     }
@@ -1679,6 +1685,24 @@ mod tests {
             Some(Reply::Refused { .. })
         ));
         let served = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the service ended")
+            .expect("cleanly");
+        assert_eq!(served, Served::Superseded);
+    }
+
+    /// The self-update restarts the Client, whose connection closes: a service that `current` no
+    /// longer names ends then, beside the Client, rather than only once the new Client has met it.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_superseded_service_ends_when_the_clients_connection_closes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let (_stop, task) = listen(&socket, own_uid(), || true);
+        let mut stream = connect_raw(&socket, this_build()).await;
+        assert!(matches!(next(&mut stream).await, Some(Reply::Hello { .. })));
+        drop(stream);
+        let served = tokio::time::timeout(Duration::from_secs(15), task)
             .await
             .expect("the service ended")
             .expect("cleanly");
