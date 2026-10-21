@@ -438,14 +438,7 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// The process account's primary group, where a process account is registered (ADR-0059 clause 6).
-/// What the Client shares with the Managed Processes belongs to this group, and nothing else does.
-///
-/// Resolved from the `--process-uid` of the Client's command line when it starts, never from the
-/// configuration file: the registration that names the process account is the only place it is
-/// stated (ADR-0059 clause 8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessGroup(pub u32);
+pub use crate::supervisor::ports::ProcessGroup;
 
 /// How a directory the Client creates is shared with the process group (ADR-0059 clause 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
