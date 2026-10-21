@@ -279,7 +279,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // What the Client shares with the Managed Processes belongs to the process account's group
     // (ADR-0059 clause 6), from before anything is written.
     if let Some(agents) = &spec.agents {
-        config.process_group = Some(process_group(agents.process_uid)?);
+        config.process_account_group = Some(process_account_group(agents.process_uid)?);
     }
     // A certificate swap a crash cut short is completed before the identity in force is read.
     crate::csr::recover(&config.state_dir)?;
@@ -511,9 +511,9 @@ fn heal_torn_pointer() {
 /// Returns an error when the database names no account for `uid`, or cannot be read: the Client
 /// does not start rather than share its files with a group it cannot name.
 #[cfg(unix)]
-fn process_group(uid: u32) -> Result<crate::storage::ProcessGroup, String> {
+fn process_account_group(uid: u32) -> Result<crate::storage::ProcessAccountGroup, String> {
     match crate::service::run_as::account_of(uid) {
-        Ok(Some(account)) => Ok(crate::storage::ProcessGroup(account.gid)),
+        Ok(Some(account)) => Ok(crate::storage::ProcessAccountGroup(account.gid)),
         Ok(None) => Err(format!(
             "the process account (uid {uid}) the registration names does not exist; create it, or \
              drop it with `service install --no-process-account`"
@@ -525,7 +525,7 @@ fn process_group(uid: u32) -> Result<crate::storage::ProcessGroup, String> {
 }
 
 #[cfg(not(unix))]
-fn process_group(_uid: u32) -> Result<crate::storage::ProcessGroup, String> {
+fn process_account_group(_uid: u32) -> Result<crate::storage::ProcessAccountGroup, String> {
     Err("the second service is not available on this platform".to_string())
 }
 
