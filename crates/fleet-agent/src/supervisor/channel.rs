@@ -113,8 +113,14 @@ pub(crate) enum Request {
 pub(crate) enum Reply {
     /// The answer to [`Request::Hello`]: the service's build, the same as the Client's.
     Hello { version: String },
-    /// The connection is not served, and why. The service closes it after this.
-    Refused { reason: String },
+    /// The connection is not served, and why. The service closes it after this. `version` is the
+    /// service's build where the Client is refused for being another; one of the few messages a
+    /// peer of another build reads, so it may be absent.
+    Refused {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
     /// The program runs, as `pid`.
     Started { id: u64, pid: u32 },
     /// The program did not start. `os_error` keeps the kind of failure — a missing file, a program
@@ -418,7 +424,13 @@ fn refuse(stream: UnixStream, reason: String, refusals: &mut Refusals) {
     }
     // Written straight to the socket: a stream just accepted has no readiness yet, so tokio's own
     // `try_write` would only ever answer that it would block.
-    if let (Ok(frame), Ok(stream)) = (encode(&Reply::Refused { reason }), stream.into_std()) {
+    if let (Ok(frame), Ok(stream)) = (
+        encode(&Reply::Refused {
+            reason,
+            version: None,
+        }),
+        stream.into_std(),
+    ) {
         use std::io::Write as _;
         let _ = (&stream).write(&frame);
     }
@@ -497,7 +509,8 @@ async fn serve_connection<F: Future<Output = ()>>(
     };
     if let Some((reason, ended)) = refusal {
         warn!(reason = %reason, "refused a connection");
-        let _ = write_frame(&mut write, &Reply::Refused { reason }).await;
+        let version = (ended == Ended::OtherBuild).then(|| this_build().to_string());
+        let _ = write_frame(&mut write, &Reply::Refused { reason, version }).await;
         return ended;
     }
     let welcome = Reply::Hello {
@@ -880,6 +893,11 @@ struct Shared {
     /// The uid the socket must be served by: the process account's (ADR-0053 clause 4).
     service_uid: u32,
     state: tokio::sync::Mutex<State>,
+    /// Whether `current` names a version other than the one this Client runs from.
+    superseded: fn() -> bool,
+    /// Set once the second service is another build and `current` no longer names this Client's
+    /// version: the self-update left this Client behind (ADR-0053 clause 2).
+    left_behind: tokio::sync::watch::Sender<bool>,
 }
 
 #[derive(Default)]
@@ -923,13 +941,29 @@ impl Channel {
     /// connected until the first start.
     #[must_use]
     pub fn new(socket: &Path, service_uid: u32) -> Channel {
+        Channel::with_superseded(socket, service_uid, superseded)
+    }
+
+    /// [`Channel::new`], told by `superseded` whether a self-update switched `current`.
+    fn with_superseded(socket: &Path, service_uid: u32, superseded: fn() -> bool) -> Channel {
         Channel {
             shared: Arc::new(Shared {
                 socket: socket.to_path_buf(),
                 service_uid,
                 state: tokio::sync::Mutex::new(State::default()),
+                superseded,
+                left_behind: tokio::sync::watch::channel(false).0,
             }),
         }
+    }
+
+    /// Resolves once the second service turned out to be another build while `current` no longer
+    /// names the version this Client runs: the self-update left the Client behind, and it ends for
+    /// the restart that starts the version `current` names, as the service does in its place
+    /// (ADR-0053 clause 2). Only the process account's socket can tell it so (clause 4).
+    pub async fn left_behind(&self) {
+        let mut left_behind = self.shared.left_behind.subscribe();
+        let _ = left_behind.wait_for(|left| *left).await;
     }
 
     /// [`Channel::new`], connected now, once.
@@ -998,6 +1032,16 @@ impl Channel {
                     state.connection = Some(Arc::clone(&connection));
                     return Ok(connection);
                 }
+                Err(e) if is_other_build(&e) && (self.shared.superseded)() => {
+                    info!(
+                        error = %e,
+                        "the second service is another build and current names another version; \
+                         this Client is the one left behind"
+                    );
+                    self.shared.left_behind.send_replace(true);
+                    state.gave_up = Some(Instant::now());
+                    return Err(e);
+                }
                 Err(e) if Instant::now() < deadline => {
                     debug!(socket = %self.shared.socket.display(), error = %e, "the second service cannot be reached yet");
                     tokio::time::sleep(RECONNECT_EVERY).await;
@@ -1047,12 +1091,21 @@ impl Connection {
         match answer {
             Some(Reply::Hello { version }) if version == this_build() => {}
             Some(Reply::Hello { version }) => {
-                return Err(io::Error::other(format!(
+                return Err(io::Error::other(OtherBuild(format!(
                     "the second service is build {version}, this Client is build {}",
                     this_build()
-                )))
+                ))))
             }
-            Some(Reply::Refused { reason }) => {
+            Some(Reply::Refused {
+                reason,
+                version: Some(version),
+            }) if version != this_build() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    OtherBuild(reason),
+                ))
+            }
+            Some(Reply::Refused { reason, .. }) => {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason))
             }
             Some(_) => return Err(io::Error::other("the second service skipped the handshake")),
@@ -1260,6 +1313,25 @@ impl std::error::Error for Unreachable {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.0)
     }
+}
+
+/// The second service is another build: it said so, or named another in its handshake.
+#[derive(Debug)]
+struct OtherBuild(String);
+
+impl std::fmt::Display for OtherBuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OtherBuild {}
+
+/// Whether `error` is the handshake's refusal of another build.
+fn is_other_build(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<OtherBuild>())
 }
 
 /// `error`, marked as the second service not reached; its kind is kept.
@@ -1709,6 +1781,59 @@ mod tests {
         assert_eq!(served, Served::Superseded);
     }
 
+    /// A stand-in for a second service of another build: it answers every handshake with the
+    /// refusal the real one sends.
+    fn another_build(socket: &Path) -> JoinHandle<()> {
+        let listener = UnixListener::bind(socket).expect("bind");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let _ = read_frame::<_, Request>(&mut stream).await;
+                let refused = Reply::Refused {
+                    reason: "the Client is build a, this service is build b".to_string(),
+                    version: Some("0.0.0-another-build".to_string()),
+                };
+                let _ = write_frame(&mut stream, &refused).await;
+            }
+        })
+    }
+
+    /// A Client that meets a second service of another build while `current` no longer names its
+    /// own version is the one a self-update left behind, and is told so; one that `current` still
+    /// names is only refused (ADR-0053 clause 2).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_client_left_behind_by_a_self_update_is_told_so() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let service = another_build(&socket);
+
+        // Refused, and trying again for as long as a start waits for the service.
+        let current = Channel::with_superseded(&socket, own_uid(), || false);
+        let trying = current.clone();
+        let start = tokio::spawn(async move { trying.start("test", sh("true")).await.err() });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), current.left_behind())
+                .await
+                .is_err(),
+            "a Client current still names is not left behind"
+        );
+        assert!(!start.is_finished(), "the start waits for the service");
+        start.abort();
+
+        let behind = Channel::with_superseded(&socket, own_uid(), || true);
+        let refused =
+            tokio::time::timeout(Duration::from_secs(5), behind.start("test", sh("true")))
+                .await
+                .expect("a Client left behind gives up at once")
+                .err()
+                .expect("refused");
+        assert!(refused.to_string().contains("build"), "{refused}");
+        tokio::time::timeout(Duration::from_secs(1), behind.left_behind())
+            .await
+            .expect("the Client left behind is told so");
+        service.abort();
+    }
+
     /// A process that left its program's group — through `setsid` — and holds its pipe open
     /// keeps no relay and no descriptor of the service's once the connection has ended.
     /// Verifies: ADR-0053
@@ -1784,7 +1909,7 @@ mod tests {
         let service = service(own_uid().wrapping_add(1));
         let mut stream = connect_raw(&service.socket, this_build()).await;
         match next(&mut stream).await {
-            Some(Reply::Refused { reason }) => {
+            Some(Reply::Refused { reason, .. }) => {
                 assert!(reason.contains("not the Client"), "{reason}")
             }
             other => panic!("expected a refusal, got {other:?}"),
@@ -1865,7 +1990,10 @@ mod tests {
         let service = service(own_uid());
         let mut stream = connect_raw(&service.socket, "0.0.0-another-build").await;
         match next(&mut stream).await {
-            Some(Reply::Refused { reason }) => assert!(reason.contains("build"), "{reason}"),
+            Some(Reply::Refused { reason, version }) => {
+                assert!(reason.contains("build"), "{reason}");
+                assert_eq!(version.as_deref(), Some(this_build()), "it names its own");
+            }
             other => panic!("expected a refusal, got {other:?}"),
         }
         // And the service still serves the right build afterwards.

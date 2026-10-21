@@ -6,7 +6,11 @@
 //! `agent_disconnect` goodbye (the Baseline's final message) fires on every stop path, not only
 //! on Ctrl-C.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::shutdown::{shutdown_channel, Shutdown};
 
@@ -303,8 +307,15 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         crate::update::installer::Startup::RolledBack(_) => return Ok(Exit::RestartForUpdate),
     };
 
+    // A Client the self-update left behind ends as for its own update, through the shutdown that
+    // stops its Supervisors and says goodbye (ADR-0053 clause 2).
+    let left_behind = Arc::new(AtomicBool::new(false));
     let spawner = match &spec.agents {
-        Some(agents) => through_the_second_service(agents)?,
+        Some(agents) => {
+            let (spawner, told) = through_the_second_service(agents)?;
+            shutdown = or_left_behind(shutdown, told, Arc::clone(&left_behind));
+            spawner
+        }
         None => supervisor::process::Spawner::Local,
     };
     let mut engine = supervisor::build_engine(&config, &shutdown, spawner)?;
@@ -389,6 +400,9 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             // the last records are worth having — a crash-and-restart is what they explain.
             RunOutcome::Shutdown => {
                 telemetry.shutdown();
+                if left_behind.load(Ordering::SeqCst) {
+                    return Ok(Exit::RestartForUpdate);
+                }
                 return Ok(Exit::Normal);
             }
             RunOutcome::RestartForUpdate => {
@@ -484,13 +498,17 @@ fn heal_torn_pointer() {
     }
 }
 
+/// What resolves once the second service tells this Client that a self-update left it behind.
+type LeftBehind = Pin<Box<dyn Future<Output = ()> + Send>>;
+
 /// Every Managed Process of this run is started by the second service (ADR-0053 clause 3). The
 /// channel connects at the first start; a Client that cannot reach the service reports it per
-/// Supervisor and never starts a program itself.
+/// Supervisor and never starts a program itself. Beside the spawner: what resolves once the
+/// service turns out to be the build `current` names while this Client is not.
 #[cfg(unix)]
 fn through_the_second_service(
     agents: &AgentsChannel,
-) -> Result<supervisor::process::Spawner, String> {
+) -> Result<(supervisor::process::Spawner, LeftBehind), String> {
     use crate::supervisor::channel::Channel;
     use crate::supervisor::process::Spawner;
     tracing::info!(
@@ -498,10 +516,37 @@ fn through_the_second_service(
         process_uid = agents.process_uid,
         "starting every Managed Process through the second service"
     );
-    Ok(Spawner::Channel(Channel::new(
-        &agents.socket,
-        agents.process_uid,
-    )))
+    let channel = Channel::new(&agents.socket, agents.process_uid);
+    let watched = channel.clone();
+    Ok((
+        Spawner::Channel(channel),
+        Box::pin(async move { watched.left_behind().await }),
+    ))
+}
+
+/// The run's shutdown where the second service starts its programs: `shutdown`, or `told`
+/// resolving — the self-update left this Client behind, and `left_behind` then says so, which
+/// ends the run for the restart that starts the version `current` names (ADR-0053 clause 2).
+fn or_left_behind(
+    mut shutdown: Shutdown,
+    told: LeftBehind,
+    left_behind: Arc<AtomicBool>,
+) -> Shutdown {
+    let (stop, run) = shutdown_channel();
+    tokio::spawn(async move {
+        tokio::select! {
+            () = shutdown.requested() => {}
+            () = told => {
+                tracing::info!(
+                    "the second service runs the version current names and this Client does \
+                     not; ending for the restart"
+                );
+                left_behind.store(true, Ordering::SeqCst);
+            }
+        }
+        let _ = stop.send(true);
+    });
+    run
 }
 
 /// No second service runs here yet (ADR-0053): a Client told of one refuses to start rather
@@ -509,7 +554,7 @@ fn through_the_second_service(
 #[cfg(not(unix))]
 fn through_the_second_service(
     _agents: &AgentsChannel,
-) -> Result<supervisor::process::Spawner, String> {
+) -> Result<(supervisor::process::Spawner, LeftBehind), String> {
     Err("the second service is not available on this platform".to_string())
 }
 
@@ -552,6 +597,41 @@ pub(crate) fn ignore_sighup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Client the second service tells it was left behind ends its run as for its own update;
+    /// one the operator stops ends as stopped (ADR-0053 clause 2).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_client_left_behind_ends_its_run_for_the_restart() {
+        let (_operator, shutdown) = shutdown_channel();
+        let (tell, told) = tokio::sync::oneshot::channel::<()>();
+        let left_behind = Arc::new(AtomicBool::new(false));
+        let mut run = or_left_behind(
+            shutdown,
+            Box::pin(async move {
+                let _ = told.await;
+            }),
+            Arc::clone(&left_behind),
+        );
+        tell.send(()).expect("tell");
+        tokio::time::timeout(std::time::Duration::from_secs(5), run.requested())
+            .await
+            .expect("the run ends");
+        assert!(left_behind.load(Ordering::SeqCst));
+
+        let (operator, shutdown) = shutdown_channel();
+        let left_behind = Arc::new(AtomicBool::new(false));
+        let mut run = or_left_behind(
+            shutdown,
+            Box::pin(std::future::pending()),
+            Arc::clone(&left_behind),
+        );
+        operator.send(true).expect("stop");
+        tokio::time::timeout(std::time::Duration::from_secs(5), run.requested())
+            .await
+            .expect("the run ends");
+        assert!(!left_behind.load(Ordering::SeqCst));
+    }
 
     /// A destination that comes into force while the connection holds is sampled from then on —
     /// not from the next reconnect, which on a healthy connection never comes.
