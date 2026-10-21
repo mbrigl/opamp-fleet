@@ -460,8 +460,9 @@ pub struct Ids {
 ///
 /// # Errors
 /// Returns why the account is refused: where a second service cannot be registered, root, a
-/// Client that runs as root, an account that does not exist, the Client's own account, or one
-/// whose primary group the Client's account is not in.
+/// Client that runs as root, an account that does not exist, the Client's own account, one whose
+/// primary group is root's or the Client's primary group, one in the Client's primary group, or
+/// one whose primary group the Client's account is not in.
 pub fn decide_process_account(
     flag: Option<&str>,
     registration: Option<&Registration>,
@@ -587,6 +588,32 @@ pub fn check_process_account(
         return Err(format!(
             "{named} is the account the Client runs as ({client_name}). The process account is \
              another account, which the Client's does not share. {NOTHING}"
+        ));
+    }
+    // What the process account's primary group may read is what the Managed Processes may read
+    // (ADR-0059 clause 6): never root's group, and never a group that reaches the Client's files.
+    if found.gid == 0 {
+        return Err(format!(
+            "{named} has the primary group {} (gid 0), and a process account's group is never \
+             root's. Give it a group of its own (`useradd --user-group`), then install again. \
+             {NOTHING}",
+            found.group
+        ));
+    }
+    if found.gid == client.gid {
+        return Err(format!(
+            "{named} has the primary group {}, which is the primary group of the Client's account \
+             {client_name}: the Managed Processes would read what the Client's group may. Give it \
+             a group of its own (`useradd --user-group`), then install again. {NOTHING}",
+            found.group
+        ));
+    }
+    if found.groups.contains(&client.gid) {
+        return Err(format!(
+            "{named} is a member of the primary group of the Client's account {client_name}: the \
+             Managed Processes would read what the Client's group may. Remove it from that group \
+             (`gpasswd --delete {account} {}`), then install again. {NOTHING}",
+            client.group
         ));
     }
     if !client.groups.contains(&found.gid) {
@@ -1409,6 +1436,53 @@ mod tests {
         .expect_err("not in the group");
         assert!(
             err.contains("usermod --append --groups opamp-fleet-agents opamp-fleet"),
+            "{err}"
+        );
+        assert!(
+            err.contains("Nothing has been installed or written"),
+            "{err}"
+        );
+    }
+
+    /// The process account's primary group is neither root's nor the Client's own, and the
+    /// account is not in the Client's primary group (ADR-0059 clause 6): what that group may read
+    /// is what every Managed Process may.
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_process_account_whose_group_reaches_the_clients_files_is_refused() {
+        let refused = |agents: Ids, client: Ids| {
+            check_process_account(
+                "opamp-fleet-agents",
+                Some(&agents),
+                "opamp-fleet",
+                &client,
+                None,
+            )
+            .expect_err("refused")
+        };
+        let mut wheel = agents_ids();
+        wheel.gid = 0;
+        wheel.group = "root".to_string();
+        let mut client = client_ids();
+        client.groups.push(0);
+        let err = refused(wheel, client);
+        assert!(err.contains("gid 0"), "{err}");
+
+        let mut shared = agents_ids();
+        shared.gid = 998;
+        shared.group = "opamp-fleet".to_string();
+        let err = refused(shared, client_ids());
+        assert!(
+            err.contains("primary group of the Client's account"),
+            "{err}"
+        );
+
+        let mut member = agents_ids();
+        member.groups.push(998);
+        let err = refused(member, client_ids());
+        assert!(err.contains("is a member of the primary group"), "{err}");
+        assert!(
+            err.contains("gpasswd --delete opamp-fleet-agents opamp-fleet"),
             "{err}"
         );
         assert!(
