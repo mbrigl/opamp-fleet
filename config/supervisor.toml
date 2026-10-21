@@ -284,8 +284,8 @@ state_dir = "client-state"
 # type = "collector"
 # name = "otelcol"
 # binary = "otelcol"
-# service_name = "otelcol"   # without the extension nothing reports a type, so state one here;
-#                            # left out, the program's file name ("otelcol") is used anyway.
+# service_name = "otelcol"   # the Agent type is this block's either way, with the extension or
+#                            # without; left out, the program's file name ("otelcol") is used.
 # [supervisor.env]           # optional environment for the process; same variable as in the
 #                            # block above, its own value here — the receiver port is offset so
 #                            # both collectors can run on one host (see config/examples/)
