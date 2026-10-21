@@ -125,6 +125,15 @@ pub struct RunArgs {
     /// watching, which is what turns on the log file (ADR-0019).
     #[arg(long, hide = true)]
     pub service: bool,
+    /// Run as the second service instead of the Client (ADR-0053): listen on this socket and
+    /// start, signal and stop programs for the Client alone. Hidden, because the registration
+    /// writes it and no operator types it.
+    #[arg(long, hide = true, value_name = "SOCKET", requires = "client_uid")]
+    pub agents: Option<PathBuf>,
+    /// The uid of the Client's account, the one peer the second service serves (ADR-0053
+    /// clause 4).
+    #[arg(long, hide = true, value_name = "UID", requires = "agents")]
+    pub client_uid: Option<u32>,
 }
 
 /// Service-lifecycle actions (`service install|config|uninstall|start|stop|status`).
@@ -375,6 +384,31 @@ mod tests {
             cli.state_dir,
             Some(PathBuf::from("/var/lib/opamp-fleet/state"))
         );
+    }
+
+    /// The second service is `run` with a flag, not a subcommand of its own (ADR-0053 clause 2),
+    /// and names the one uid it serves; neither half parses without the other.
+    /// Verifies: ADR-0053
+    #[test]
+    fn the_agents_service_is_run_with_its_socket_and_the_clients_uid() {
+        let cli = parse(&[
+            "client",
+            "run",
+            "--agents",
+            "/run/opamp-fleet-agents/agents.sock",
+            "--client-uid",
+            "998",
+        ]);
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected run");
+        };
+        assert_eq!(
+            args.agents,
+            Some(PathBuf::from("/run/opamp-fleet-agents/agents.sock"))
+        );
+        assert_eq!(args.client_uid, Some(998));
+        assert!(Cli::try_parse_from(["client", "run", "--agents", "/x.sock"]).is_err());
+        assert!(Cli::try_parse_from(["client", "run", "--client-uid", "998"]).is_err());
     }
 
     /// Verifies: ADR-0019

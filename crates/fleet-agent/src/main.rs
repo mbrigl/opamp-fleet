@@ -93,12 +93,28 @@ fn main() {
 /// marker set by `service install` routes into the dispatcher shim (ADR-0019). The runtime (or
 /// the shim) owns the tokio runtime; `main` stays synchronous.
 fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
+    // The second service (ADR-0053): it reads neither the configuration nor the state directory.
+    if let (Some(socket), Some(client_uid)) = (&args.agents, args.client_uid) {
+        return agents_service(socket, client_uid);
+    }
     #[cfg(windows)]
     if args.service {
         return fleet_agent::service::windows::run_as_service(spec);
     }
     let _ = args;
     runtime::run_foreground(spec)
+}
+
+/// `run --agents`: the second service, which starts the Managed Processes under the process
+/// account (ADR-0053). Its channel is a Unix socket; Windows has none of it here.
+#[cfg(unix)]
+fn agents_service(socket: &Path, client_uid: u32) -> Result<(), String> {
+    fleet_agent::supervisor::channel::run_service(socket, client_uid)
+}
+
+#[cfg(not(unix))]
+fn agents_service(_socket: &Path, _client_uid: u32) -> Result<(), String> {
+    Err("the agents service is not available on this platform".to_string())
 }
 
 /// Dispatch a `service` verb (ADR-0019).

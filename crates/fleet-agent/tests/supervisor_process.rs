@@ -17,10 +17,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fleet_agent::config::TREE_DIR;
-use fleet_agent::shutdown::shutdown_channel;
+use fleet_agent::shutdown::{shutdown_channel, Shutdown};
 use fleet_agent::supervisor::ports::{EventSender, InstallTarget, ProcessCommand, ProcessEvent};
 use fleet_agent::supervisor::process::{
-    probe_version, Preflight, ProcessSpec, Runner, VersionProbe,
+    probe_version, Preflight, ProcessSpec, Runner, Spawner, VersionProbe,
 };
 use opamp::proto::{AgentRemoteConfig, ComponentHealth};
 use tokio::sync::mpsc;
@@ -58,25 +58,115 @@ fn spec(program: &Path) -> ProcessSpec {
     }
 }
 
+/// Who starts the Managed Process under test (ADR-0053): the Client itself, or the second service
+/// through its channel. The supervision is the same either way, so every case that runs a process
+/// runs against both — [`both!`] makes the pair.
+#[derive(Debug, Clone, Copy)]
+enum Via {
+    Local,
+    #[cfg(unix)]
+    Channel,
+}
+
+/// Runs the case `$name(via)` once per [`Via`], as `$name::local` and `$name::channel`. The channel
+/// case runs the second service in this process on a socket in a temporary directory, under this
+/// test's own uid, which is the uid it admits.
+/// Verifies: ADR-0053
+macro_rules! both {
+    ($(#[$attr:meta])* $name:ident) => {
+        $(#[$attr])*
+        mod $name {
+            #[tokio::test]
+            async fn local() {
+                super::$name(super::Via::Local).await;
+            }
+            #[cfg(unix)]
+            #[tokio::test]
+            async fn channel() {
+                super::$name(super::Via::Channel).await;
+            }
+        }
+    };
+}
+
+/// The second service a channel case runs against; stopped, with whatever it still runs, when the
+/// case ends.
+struct AgentsService {
+    _dir: tempfile::TempDir,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for AgentsService {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Starts `runner` with the spawner `via` names, the second service first where it is one.
+fn launch(
+    via: Via,
+    runner: Runner,
+    shutdown: Shutdown,
+) -> (tokio::task::JoinHandle<()>, Option<AgentsService>) {
+    match via {
+        Via::Local => (tokio::spawn(runner.run(shutdown)), None),
+        #[cfg(unix)]
+        Via::Channel => {
+            use fleet_agent::supervisor::channel::{bind, serve, Channel};
+            let dir = tempfile::tempdir().expect("tempdir");
+            let socket = dir.path().join("agents.sock");
+            let listener = bind(&socket).expect("bind the agents socket");
+            // SAFETY: getuid(2) cannot fail and touches no memory.
+            let uid = unsafe { libc::getuid() };
+            let service = tokio::spawn(serve(listener, uid, std::future::pending()));
+            let mut runner = runner;
+            let task = tokio::spawn(async move {
+                let channel = Channel::connect(&socket)
+                    .await
+                    .expect("connect to the agents service");
+                runner.spawner = Spawner::Channel(channel);
+                runner.run(shutdown).await;
+            });
+            (
+                task,
+                Some(AgentsService {
+                    _dir: dir,
+                    task: service,
+                }),
+            )
+        }
+    }
+}
+
 struct Harness {
     commands: mpsc::Sender<ProcessCommand>,
     events: mpsc::Receiver<(usize, ProcessEvent)>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    _service: Option<AgentsService>,
 }
 
 /// A `Runner` with everything the test does not care about filled in. `install` and `apply_grace`
 /// are what the package tests vary; `version_probe` is set only where the probe is the subject.
 fn runner(
+    via: Via,
     install: Option<InstallTarget>,
     apply_grace: Duration,
     version_probe: Option<VersionProbe>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
-    runner_retaining(install, apply_grace, Duration::ZERO, version_probe, build)
+    runner_retaining(
+        via,
+        install,
+        apply_grace,
+        Duration::ZERO,
+        version_probe,
+        build,
+    )
 }
 
 fn runner_retaining(
+    via: Via,
     install: Option<InstallTarget>,
     apply_grace: Duration,
     retain_previous: Duration,
@@ -84,6 +174,7 @@ fn runner_retaining(
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
     runner_full(
+        via,
         install,
         apply_grace,
         retain_previous,
@@ -94,7 +185,9 @@ fn runner_retaining(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn runner_full(
+    via: Via,
     install: Option<InstallTarget>,
     apply_grace: Duration,
     retain_previous: Duration,
@@ -117,28 +210,32 @@ fn runner_full(
         version_probe,
         preflight,
         reload_signal,
+        spawner: Spawner::Local,
         events: EventSender::new(0, event_tx),
         commands: command_rx,
         build: Box::new(build),
     };
+    let (task, service) = launch(via, runner, shutdown);
     Harness {
         commands,
         events,
         shutdown_tx,
-        task: tokio::spawn(runner.run(shutdown)),
+        task,
+        _service: service,
     }
 }
 
 /// Zero grace: the pre-grace instant acknowledgement most supervision tests exercise.
-fn start(build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static) -> Harness {
-    runner(None, Duration::ZERO, None, build)
+fn start(via: Via, build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static) -> Harness {
+    runner(via, None, Duration::ZERO, None, build)
 }
 
 fn start_with_grace(
+    via: Via,
     apply_grace: Duration,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
-    runner(None, apply_grace, None, build)
+    runner(via, None, apply_grace, None, build)
 }
 
 async fn next_health(events: &mut mpsc::Receiver<(usize, ProcessEvent)>) -> ComponentHealth {
@@ -221,8 +318,7 @@ async fn apply_package(
 /// project wraps create nothing themselves: Icinga 2 exits when `DataDir` is absent, the GLPI Agent
 /// exits when `--vardir` is. So the kind names what its agent writes into and the spawn makes it —
 /// otherwise a correct installation ends in a crash loop over a missing directory.
-#[tokio::test]
-async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
+async fn the_directories_an_agent_writes_into_are_made_before_it_runs(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     // Two levels deep and nested under a parent that does not exist either, because the failure
     // this prevents is exactly the one nobody created a parent for.
@@ -231,7 +327,7 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
     let marker = dir.path().join("started");
     assert!(!state.exists());
 
-    let mut harness = start({
+    let mut harness = start(via, {
         let (state, program, marker) = (state.clone(), program.clone(), marker.clone());
         move || {
             Some(ProcessSpec {
@@ -265,6 +361,7 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
     harness.shutdown_tx.send(true).expect("shutdown");
     harness.task.await.expect("join");
 }
+both!(the_directories_an_agent_writes_into_are_made_before_it_runs);
 
 /// A program named by a **relative** path starts, though the process begins in its own directory
 /// (ADR-0017).
@@ -274,8 +371,7 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs() {
 /// default makes this the ordinary case rather than a corner — `state_dir = "client-state"` is
 /// relative, so every Managed Process under a default configuration would fail to spawn, with a
 /// bare `No such file or directory` naming a file that is plainly there.
-#[tokio::test]
-async fn a_program_named_by_a_relative_path_still_starts_in_its_own_directory() {
+async fn a_program_named_by_a_relative_path_still_starts_in_its_own_directory(via: Via) {
     // **Under** this test's working directory, so the relative path is a plain descent with no
     // `..` in it — which is what a Client's own `state_dir = "client-state"` looks like, and what
     // makes the fixture mean the same thing on every platform. Counting `..` to the root does not:
@@ -301,7 +397,7 @@ async fn a_program_named_by_a_relative_path_still_starts_in_its_own_directory() 
     );
 
     let marker = dir.path().join("started");
-    let mut harness = start({
+    let mut harness = start(via, {
         let (relative, marker) = (relative.clone(), marker.clone());
         move || {
             Some(ProcessSpec {
@@ -320,6 +416,7 @@ async fn a_program_named_by_a_relative_path_still_starts_in_its_own_directory() 
     harness.shutdown_tx.send(true).expect("shutdown");
     harness.task.await.expect("join");
 }
+both!(a_program_named_by_a_relative_path_still_starts_in_its_own_directory);
 
 // ── The version probe ────────────────────────────────────────────────────────
 
@@ -395,8 +492,7 @@ async fn next_probed_version(events: &mut mpsc::Receiver<(usize, ProcessEvent)>)
 /// proves is that the swap asked at all, which is the whole of the regression. Draining the
 /// startup probe's answer first is what makes "the second one" mean something: one probe emits at
 /// most one event, so anything arriving after it was asked by the swap.
-#[tokio::test]
-async fn a_swapped_binary_is_probed_again_for_its_version() {
+async fn a_swapped_binary_is_probed_again_for_its_version(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     std::fs::write(&binary, bytes_of(&stub_agent())).expect("write");
@@ -409,6 +505,7 @@ async fn a_swapped_binary_is_probed_again_for_its_version() {
     std::fs::write(&staged, bytes_of(&stub_agent())).expect("stage");
 
     let mut harness = runner(
+        via,
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
         Some(VersionProbe {
@@ -434,6 +531,67 @@ async fn a_swapped_binary_is_probed_again_for_its_version() {
 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
+}
+both!(a_swapped_binary_is_probed_again_for_its_version);
+
+// ── The second service (ADR-0053) ────────────────────────────────────────────
+
+/// The shipped program is the second service under `run --agents`: a Managed Process started
+/// through its socket runs and reports its exit, and the service ends cleanly on `SIGTERM`.
+/// Verifies: ADR-0053
+#[cfg(unix)]
+#[tokio::test]
+async fn the_shipped_program_serves_as_the_second_service() {
+    use fleet_agent::supervisor::channel::Channel;
+    use fleet_agent::supervisor::process::Launch;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("agents.sock");
+    // SAFETY: getuid(2) cannot fail and touches no memory.
+    let uid = unsafe { libc::getuid() };
+    let mut service = tokio::process::Command::new(env!("CARGO_BIN_EXE_supervisor"))
+        .args(["run", "--agents"])
+        .arg(&socket)
+        .args(["--client-uid", &uid.to_string()])
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start the second service");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let channel = loop {
+        match Channel::connect(&socket).await {
+            Ok(channel) => break channel,
+            Err(e) => {
+                assert!(std::time::Instant::now() < deadline, "never listened: {e}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+
+    let mut child = Spawner::Channel(channel)
+        .spawn(Launch {
+            program: stub_crasher(),
+            args: Vec::new(),
+            env: Vec::new(),
+            working_dir: None,
+            own_process_group: false,
+        })
+        .await
+        .expect("started through the channel");
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("an exit in time")
+        .expect("a status");
+    assert_eq!(status.code(), Some(1), "the crasher's own exit comes back");
+
+    let pid = service.id().expect("running") as libc::pid_t;
+    // SAFETY: plain kill(2) on the service's pid; no memory is touched.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let ended = tokio::time::timeout(Duration::from_secs(15), service.wait())
+        .await
+        .expect("the service ended in time")
+        .expect("a status");
+    assert!(ended.success(), "{ended}");
+    assert!(!socket.exists(), "the service removes its socket");
 }
 
 // ── Reload and uninstall (ADR-0017) ──────────────────────────────────────────
@@ -493,8 +651,7 @@ async fn wait_until_started(marker: &Path) {
 /// The Managed Process finds the Supervisor Endpoint's token in its environment, and no block's
 /// `env` can put another one in its place.
 /// Verifies: ADR-0015
-#[tokio::test]
-async fn the_managed_process_is_handed_the_endpoint_token() {
+async fn the_managed_process_is_handed_the_endpoint_token(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("running");
     let program = stub_agent();
@@ -513,6 +670,7 @@ async fn the_managed_process_is_handed_the_endpoint_token() {
         version_probe: None,
         preflight: None,
         reload_signal: None,
+        spawner: Spawner::Local,
         events: EventSender::new(0, event_tx),
         commands: command_rx,
         build: Box::new(move || {
@@ -529,23 +687,24 @@ async fn the_managed_process_is_handed_the_endpoint_token() {
             })
         }),
     };
-    let task = tokio::spawn(runner.run(shutdown));
+    let (task, _service) = launch(via, runner, shutdown);
     wait_until_started(&marker).await;
     let text = std::fs::read_to_string(&marker).expect("marker");
     assert!(text.contains("token=the-token\n"), "{text}");
     task.abort();
 }
+both!(the_managed_process_is_handed_the_endpoint_token);
 
 /// A kind that declared a reload applies a configuration in place (ADR-0017): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_declared_reload_applies_without_a_restart() {
+async fn a_declared_reload_applies_without_a_restart(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("started");
     let marker_arg = marker.clone();
     let mut harness = runner_full(
+        via,
         None,
         Duration::from_millis(300),
         Duration::ZERO,
@@ -582,15 +741,19 @@ async fn a_declared_reload_applies_without_a_restart() {
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(
+    #[cfg(unix)]
+    a_declared_reload_applies_without_a_restart
+);
 
 /// `reload-or-restart` (ADR-0017): a process that dies on its reload signal — the stub without
 /// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
 /// files, and the apply is acknowledged from that restart rather than failed.
 // Verifies: ADR-0017
 #[cfg(unix)]
-#[tokio::test]
-async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead() {
+async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead(via: Via) {
     let mut harness = runner_full(
+        via,
         None,
         Duration::from_millis(300),
         Duration::ZERO,
@@ -612,13 +775,16 @@ async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead() {
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(
+    #[cfg(unix)]
+    a_process_that_dies_on_the_reload_signal_is_restarted_instead
+);
 
 /// The generic uninstall (ADR-0017): the graceful stop plus the answer, which is the adapter's
 /// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
 /// coming last is what lets the core purge the directory only after the kind is done (ADR-0017).
-#[tokio::test]
-async fn an_uninstall_stops_the_process_answers_and_exits() {
-    let mut harness = start(|| Some(spec(&stub_agent())));
+async fn an_uninstall_stops_the_process_answers_and_exits(via: Via) {
+    let mut harness = start(via, || Some(spec(&stub_agent())));
     let health = next_health(&mut harness.events).await;
     assert!(health.healthy);
 
@@ -642,12 +808,12 @@ async fn an_uninstall_stops_the_process_answers_and_exits() {
         .expect("the adapter exits on the command itself")
         .expect("no panic");
 }
+both!(an_uninstall_stops_the_process_answers_and_exits);
 
 // ── Supervision ──────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn a_long_running_process_reports_healthy_and_stops_on_shutdown() {
-    let mut harness = start(|| Some(spec(&stub_agent())));
+async fn a_long_running_process_reports_healthy_and_stops_on_shutdown(via: Via) {
+    let mut harness = start(via, || Some(spec(&stub_agent())));
     let health = next_health(&mut harness.events).await;
     assert!(health.healthy);
     harness.shutdown_tx.send(true).expect("signal shutdown");
@@ -656,10 +822,10 @@ async fn a_long_running_process_reports_healthy_and_stops_on_shutdown() {
         .expect("the runner exits in time")
         .expect("no panic");
 }
+both!(a_long_running_process_reports_healthy_and_stops_on_shutdown);
 
-#[tokio::test]
-async fn an_exiting_process_turns_unhealthy_and_is_restarted() {
-    let mut harness = start(|| Some(spec(&stub_crasher())));
+async fn an_exiting_process_turns_unhealthy_and_is_restarted(via: Via) {
+    let mut harness = start(via, || Some(spec(&stub_crasher())));
     let first = next_health(&mut harness.events).await;
     assert!(first.healthy, "the spawn itself succeeds");
     let exited = next_health(&mut harness.events).await;
@@ -671,14 +837,16 @@ async fn an_exiting_process_turns_unhealthy_and_is_restarted() {
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(an_exiting_process_turns_unhealthy_and_is_restarted);
 
 /// A Supervisor whose program is not on the machine keeps running and says so. The wording is the
 /// point: what the Server should read is the situation — there is no process — not the syscall that
 /// reported it. This is the state a failed *first* install leaves behind, once the artifact it could
 /// not run has been removed again.
-#[tokio::test]
-async fn a_missing_program_is_reported_as_no_process_not_fatal() {
-    let mut harness = start(|| Some(spec(Path::new("nonexistent-definitely-not-here"))));
+async fn a_missing_program_is_reported_as_no_process_not_fatal(via: Via) {
+    let mut harness = start(via, || {
+        Some(spec(Path::new("nonexistent-definitely-not-here")))
+    });
     let health = next_health(&mut harness.events).await;
     assert!(!health.healthy);
     assert_eq!(health.status, "no process installed");
@@ -690,12 +858,12 @@ async fn a_missing_program_is_reported_as_no_process_not_fatal() {
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(a_missing_program_is_reported_as_no_process_not_fatal);
 
 /// A program that exists but cannot be executed is a different situation, and keeps the wording
 /// that describes it. Unix says so through the mode, Windows through the file not being a program
 /// at all; both reach the same branch, which is what this asserts.
-#[tokio::test]
-async fn an_unexecutable_program_is_reported_as_a_spawn_failure() {
+async fn an_unexecutable_program_is_reported_as_a_spawn_failure(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let program = dir.path().join(program_name("not-executable"));
     std::fs::write(&program, b"data").expect("write");
@@ -705,29 +873,31 @@ async fn an_unexecutable_program_is_reported_as_a_spawn_failure() {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).expect("chmod");
     }
 
-    let mut harness = start(move || Some(spec(&program)));
+    let mut harness = start(via, move || Some(spec(&program)));
     let health = next_health(&mut harness.events).await;
     assert!(!health.healthy);
     assert_eq!(health.status, "spawn failed");
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(an_unexecutable_program_is_reported_as_a_spawn_failure);
 
-#[tokio::test]
-async fn nothing_to_run_reports_awaiting_configuration() {
-    let mut harness = start(|| None);
+async fn nothing_to_run_reports_awaiting_configuration(via: Via) {
+    let mut harness = start(via, || None);
     let health = next_health(&mut harness.events).await;
     assert!(!health.healthy);
     assert_eq!(health.status, "awaiting configuration");
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(nothing_to_run_reports_awaiting_configuration);
 
 // ── The health-gated configuration apply ─────────────────────────────────────
 
-#[tokio::test]
-async fn a_process_surviving_the_apply_grace_is_acknowledged_applied() {
-    let mut harness = start_with_grace(Duration::from_millis(200), || Some(spec(&stub_agent())));
+async fn a_process_surviving_the_apply_grace_is_acknowledged_applied(via: Via) {
+    let mut harness = start_with_grace(via, Duration::from_millis(200), || {
+        Some(spec(&stub_agent()))
+    });
     apply(&harness, b"h1").await;
     let (hash, result) = next_ack(&mut harness.events).await;
     assert_eq!(hash, b"h1".to_vec());
@@ -735,10 +905,12 @@ async fn a_process_surviving_the_apply_grace_is_acknowledged_applied() {
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(a_process_surviving_the_apply_grace_is_acknowledged_applied);
 
-#[tokio::test]
-async fn a_process_exiting_within_the_grace_fails_the_apply_and_stays_supervised() {
-    let mut harness = start_with_grace(Duration::from_millis(500), || Some(spec(&stub_crasher())));
+async fn a_process_exiting_within_the_grace_fails_the_apply_and_stays_supervised(via: Via) {
+    let mut harness = start_with_grace(via, Duration::from_millis(500), || {
+        Some(spec(&stub_crasher()))
+    });
     apply(&harness, b"h1").await;
     let (hash, result) = next_ack(&mut harness.events).await;
     assert_eq!(hash, b"h1".to_vec());
@@ -750,10 +922,10 @@ async fn a_process_exiting_within_the_grace_fails_the_apply_and_stays_supervised
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(a_process_exiting_within_the_grace_fails_the_apply_and_stays_supervised);
 
-#[tokio::test]
-async fn shutdown_during_the_grace_stops_promptly_without_an_ack() {
-    let mut harness = start_with_grace(Duration::from_secs(600), || Some(spec(&stub_agent())));
+async fn shutdown_during_the_grace_stops_promptly_without_an_ack(via: Via) {
+    let mut harness = start_with_grace(via, Duration::from_secs(600), || Some(spec(&stub_agent())));
     apply(&harness, b"h1").await;
     // The spawn health event arrives; then the runner sits in the grace.
     let started = next_health(&mut harness.events).await;
@@ -771,10 +943,10 @@ async fn shutdown_during_the_grace_stops_promptly_without_an_ack() {
         );
     }
 }
+both!(shutdown_during_the_grace_stops_promptly_without_an_ack);
 
-#[tokio::test]
-async fn a_restart_command_cycles_the_process_without_a_config_ack() {
-    let mut harness = start(|| Some(spec(&stub_agent())));
+async fn a_restart_command_cycles_the_process_without_a_config_ack(via: Via) {
+    let mut harness = start(via, || Some(spec(&stub_agent())));
     let first = next_health(&mut harness.events).await;
     assert!(first.healthy);
 
@@ -795,10 +967,10 @@ async fn a_restart_command_cycles_the_process_without_a_config_ack() {
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(a_restart_command_cycles_the_process_without_a_config_ack);
 
-#[tokio::test]
-async fn apply_config_restarts_and_acknowledges() {
-    let mut harness = start(|| Some(spec(&stub_agent())));
+async fn apply_config_restarts_and_acknowledges(via: Via) {
+    let mut harness = start(via, || Some(spec(&stub_agent())));
     let _ = next_health(&mut harness.events).await;
 
     apply(&harness, b"h1").await;
@@ -809,13 +981,15 @@ async fn apply_config_restarts_and_acknowledges() {
     harness.shutdown_tx.send(true).expect("signal shutdown");
     let _ = harness.task.await;
 }
+both!(apply_config_restarts_and_acknowledges);
 
 // ── The binary swap (ADR-0026) ───────────────────────────────────────────────
 
 /// A Runner that swaps one file and runs whatever is at it.
-fn binary_harness(binary: &Path, apply_grace: Duration) -> Harness {
+fn binary_harness(via: Via, binary: &Path, apply_grace: Duration) -> Harness {
     let program = binary.to_path_buf();
     runner(
+        via,
         Some(InstallTarget::Binary(binary.to_path_buf())),
         apply_grace,
         None,
@@ -827,8 +1001,7 @@ fn binary_harness(binary: &Path, apply_grace: Duration) -> Harness {
 /// nothing is swapped and — the point of the whole exercise — the running process is never stopped
 /// for an artifact that could never have worked. Before this, the sequence was stop, swap, fail to
 /// start, roll back, restart: an outage bought for nothing.
-#[tokio::test]
-async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() {
+async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     let good = bytes_of(&stub_agent());
@@ -841,6 +1014,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() 
     let marker = dir.path().join("running");
     let program = binary.clone();
     let mut harness = runner_full(
+        via,
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
         Duration::ZERO,
@@ -891,17 +1065,17 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs() 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(a_package_that_cannot_run_here_is_refused_without_stopping_what_runs);
 
 /// Verifies: ADR-0026
-#[tokio::test]
-async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
+async fn apply_package_swaps_the_binary_and_acknowledges_installed(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     // The host holds a program that will not stay up — the situation a package is sent to fix, and
     // what makes the assertion below say something: the bytes on disk afterwards are not the ones
     // that were there before.
     std::fs::write(&binary, bytes_of(&stub_crasher())).expect("write");
-    let mut harness = binary_harness(&binary, Duration::from_millis(200));
+    let mut harness = binary_harness(via, &binary, Duration::from_millis(200));
     let _ = next_health(&mut harness.events).await; // initial spawn
 
     // The new version arrives as a downloaded *file*, the way the transport stages one.
@@ -923,12 +1097,12 @@ async fn apply_package_swaps_the_binary_and_acknowledges_installed() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(apply_package_swaps_the_binary_and_acknowledges_installed);
 
 /// The case ADR-0026 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
 /// Supervisor takes the member named after its own binary and installs that.
 /// Verifies: ADR-0026
-#[tokio::test]
-async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
+async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     std::fs::write(&binary, bytes_of(&stub_crasher())).expect("write");
@@ -947,7 +1121,7 @@ async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
         ],
     );
 
-    let mut harness = binary_harness(&binary, Duration::from_millis(200));
+    let mut harness = binary_harness(via, &binary, Duration::from_millis(200));
     let _ = next_health(&mut harness.events).await;
 
     let (hash, result) = apply_package(&mut harness, &staged, "2.0.0").await;
@@ -966,14 +1140,14 @@ async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(a_package_delivered_as_a_tar_gz_is_unpacked_and_installed);
 
 /// Bringing a host into the fleet the other way round: the Supervisor is configured, the program is
 /// not installed yet, and the Server delivers it. A plugin with nothing to run — a Collector
 /// awaiting its configuration — must not turn that into a failed install, which would delete the
 /// binary that was just put in place.
 /// Verifies: ADR-0026
-#[tokio::test]
-async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
+async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("otelcol"));
     assert!(
@@ -986,6 +1160,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
 
     // No configuration yet, so the plugin has nothing to run.
     let mut harness = runner(
+        via,
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
         None,
@@ -1005,10 +1180,10 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds);
 
 // Verifies: ADR-0026, G-10
-#[tokio::test]
-async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
+async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     let good = bytes_of(&stub_agent());
@@ -1019,7 +1194,7 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
-    let mut harness = binary_harness(&binary, Duration::from_millis(500));
+    let mut harness = binary_harness(via, &binary, Duration::from_millis(500));
     let _ = next_health(&mut harness.events).await;
 
     // A binary that exits at once: it fails the grace and must be rolled back.
@@ -1034,17 +1209,17 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(a_package_that_will_not_stay_up_is_rolled_back_and_fails);
 
 /// ADR-0026: a *first* install that will not start has nothing to roll back to, so it is **kept**
 /// rather than discarded — the verified binary stays in `program/`. Discarding it would empty the
 /// directory and set the Server re-offering the same artifact in a loop.
 /// Verifies: ADR-0026
-#[tokio::test]
-async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
+async fn a_first_install_that_will_not_start_is_kept_not_discarded(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     // Nothing on disk yet: a first install onto an empty program directory.
-    let mut harness = binary_harness(&binary, Duration::from_millis(200));
+    let mut harness = binary_harness(via, &binary, Duration::from_millis(200));
 
     let staged = dir.path().join("downloaded.staged");
     let crasher = bytes_of(&stub_crasher());
@@ -1065,16 +1240,16 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(a_first_install_that_will_not_start_is_kept_not_discarded);
 
 /// ADR-0026: a program that keeps failing to start is **held** after a few tries, not restarted
 /// forever — the loop that hammered the Server with re-downloads is bounded. A held Supervisor
 /// reports it plainly.
 // Verifies: ADR-0026
-#[tokio::test]
-async fn a_program_that_keeps_crashing_is_held_not_looped() {
+async fn a_program_that_keeps_crashing_is_held_not_looped(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
-    let mut harness = binary_harness(&binary, Duration::from_millis(100));
+    let mut harness = binary_harness(via, &binary, Duration::from_millis(100));
 
     // Install a crasher as a first install: kept (no predecessor), and it keeps crashing.
     let staged = dir.path().join("downloaded.staged");
@@ -1098,12 +1273,12 @@ async fn a_program_that_keeps_crashing_is_held_not_looped() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(a_program_that_keeps_crashing_is_held_not_looped);
 
 /// ADR-0026: a successful update does not delete the version it superseded — it is retained for the
 /// window, with a marker recording the deadline, so an operator has a fallback.
 /// Verifies: ADR-0026
-#[tokio::test]
-async fn a_successful_update_keeps_the_previous_version_for_the_window() {
+async fn a_successful_update_keeps_the_previous_version_for_the_window(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     // A predecessor that stays up.
@@ -1115,6 +1290,7 @@ async fn a_successful_update_keeps_the_previous_version_for_the_window() {
     }
     let program = binary.clone();
     let mut harness = runner_retaining(
+        via,
         Some(InstallTarget::Binary(binary.clone())),
         Duration::from_millis(200),
         Duration::from_secs(3600), // keep the predecessor an hour
@@ -1145,6 +1321,7 @@ async fn a_successful_update_keeps_the_previous_version_for_the_window() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(a_successful_update_keeps_the_previous_version_for_the_window);
 
 // ── The tree install (ADR-0026) ──────────────────────────────────────────────
 
@@ -1181,10 +1358,11 @@ fn tree_release(path: &Path, wrapper: &str, program: &Path, library: &[u8]) {
 }
 
 /// A Runner installing into a tree, spawning whatever sits at `program/tree/bin/agent`.
-fn tree_harness(root: &Path) -> Harness {
+fn tree_harness(via: Via, root: &Path) -> Harness {
     let inside = PathBuf::from("bin").join(program_name("agent"));
     let program = root.join(TREE_DIR).join(&inside);
     runner(
+        via,
         Some(InstallTarget::Tree {
             root: root.to_path_buf(),
             program_path: inside,
@@ -1198,15 +1376,14 @@ fn tree_harness(root: &Path) -> Harness {
 /// The case ADR-0026 exists for: an agent that is a program *plus* what it loads, arriving with
 /// nothing on the host first — and then being replaced the same way.
 /// Verifies: ADR-0026
-#[tokio::test]
-async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
+async fn a_tree_package_lands_whole_and_replaces_the_one_before_it(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("program");
     std::fs::create_dir_all(&root).expect("create the program directory");
 
     let first = dir.path().join("agent-1.0.0.tar.gz");
     tree_release(&first, "agent-1.0.0", &stub_agent(), b"v1-library");
-    let mut harness = tree_harness(&root);
+    let mut harness = tree_harness(via, &root);
     let _ = next_health(&mut harness.events).await; // nothing installed yet
 
     assert_eq!(
@@ -1249,19 +1426,19 @@ async fn a_tree_package_lands_whole_and_replaces_the_one_before_it() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(a_tree_package_lands_whole_and_replaces_the_one_before_it);
 
 /// The health gate, one level up: a tree whose program will not stay up puts the *whole* previous
 /// tree back — libraries included, since half of each would run nothing.
 /// Verifies: ADR-0026
-#[tokio::test]
-async fn a_tree_that_will_not_stay_up_is_rolled_back_whole() {
+async fn a_tree_that_will_not_stay_up_is_rolled_back_whole(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("program");
     std::fs::create_dir_all(&root).expect("create the program directory");
 
     let good = dir.path().join("agent-1.0.0.tar.gz");
     tree_release(&good, "agent-1.0.0", &stub_agent(), b"v1-library");
-    let mut harness = tree_harness(&root);
+    let mut harness = tree_harness(via, &root);
     let _ = next_health(&mut harness.events).await;
     assert_eq!(
         apply_package(&mut harness, &good, "1.0.0").await.1,
@@ -1295,19 +1472,19 @@ async fn a_tree_that_will_not_stay_up_is_rolled_back_whole() {
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(a_tree_that_will_not_stay_up_is_rolled_back_whole);
 
 /// The archive names a member the configuration does not — refused, with the old tree left exactly
 /// where it was.
 /// Verifies: ADR-0026
-#[tokio::test]
-async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing() {
+async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("program");
     std::fs::create_dir_all(&root).expect("create the program directory");
 
     let good = dir.path().join("agent-1.0.0.tar.gz");
     tree_release(&good, "agent-1.0.0", &stub_agent(), b"v1-library");
-    let mut harness = tree_harness(&root);
+    let mut harness = tree_harness(via, &root);
     let _ = next_health(&mut harness.events).await;
     assert_eq!(
         apply_package(&mut harness, &good, "1.0.0").await.1,
@@ -1336,6 +1513,7 @@ async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing() 
     harness.shutdown_tx.send(true).expect("shutdown");
     let _ = harness.task.await;
 }
+both!(a_tree_missing_the_configured_program_is_refused_and_changes_nothing);
 
 // ── The trace an install leaves (ADR-0016) ───────────────────────────────────
 
@@ -1415,7 +1593,7 @@ async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     std::fs::write(&binary, bytes_of(&stub_crasher())).expect("write");
-    let mut harness = binary_harness(&binary, Duration::from_millis(200));
+    let mut harness = binary_harness(Via::Local, &binary, Duration::from_millis(200));
     let _ = next_health(&mut harness.events).await; // initial spawn
 
     let staged = dir.path().join("downloaded.staged");
