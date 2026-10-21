@@ -85,15 +85,20 @@ Process reports, and warn when the dropped value differs from the type.
    claim nobody checks, and it decides which Selectors match and which artifact is offered. The
    rule applies **by key and in both lists**, whichever list the process reports a key in. An
    admitted key replaces the Supervisor's value in the list the Supervisor states it in. Only where
-   the Supervisor states no such key is it added to the list the process reported it in. A key is
-   therefore reported once, and a Selector and the fleet row read the same value. The process's
+   the Supervisor states no such key is it added to the list the process reported it in, and a key
+   the process reports in both lists is added once, among the identifying attributes, with its
+   identifying value, because the Server reads `service.version` from there. A key is therefore
+   reported once, and a Selector and the fleet row read the same value. The process's
    `service.version` is the Agent's version (ADR-0016 clause 4).
 
 3. **A type the process reports that differs from the Supervisor's is named in a warning.** When
    the merged report carries a `service.name` that is not the Agent's type, the Client logs a
    warning naming the Supervisor, both values and the block key `service_name`, which is how an
-   operator who wants a Collector's `dist.name` as the type sets it. It warns once for each value
-   the process starts to report, not for every report. The Agent stays healthy: a Collector whose
+   operator who wants a Collector's `dist.name` as the type sets it. It warns when the reported
+   value changes to one that differs from the type, not for every report: a process that keeps
+   reporting one value is named once, and one that alternates is named at each change. The warning
+   quotes the reported value escaped and cut short, so a process can neither forge a log line nor
+   flood the log with one. The Agent stays healthy: a Collector whose
    `dist.name` differs from its file name runs as before, under the Supervisor's type. A process
    that reports the Supervisor's type, or no `service.name`, causes no warning.
 
