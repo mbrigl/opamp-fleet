@@ -777,7 +777,13 @@ async fn supervise(
                     }
                     let _ = child.start_kill();
                 }
-                Control::Close => break (close(&mut child, group).await, true),
+                // A program that has already ended exited on its own, whichever of the two the
+                // select saw first: the stop at the connection's end never passes a crash off as
+                // one it caused.
+                Control::Close => match child.try_wait() {
+                    Ok(Some(status)) => break (Ok(status), false),
+                    _ => break (close(&mut child, group).await, true),
+                },
             },
         }
     };
@@ -1270,9 +1276,11 @@ impl Connection {
                     started
                 };
                 if let Some(started) = started {
+                    // Quoted as a refusal is: whoever serves the socket says it (ADR-0053
+                    // clauses 4 and 5), and from here it reaches the log and the Server.
                     let error = match os_error {
                         Some(code) => io::Error::from_raw_os_error(code),
-                        None => io::Error::other(error),
+                        None => io::Error::other(peer_text(&error)),
                     };
                     let _ = started.send(Err(error));
                 }
@@ -1296,7 +1304,7 @@ impl Connection {
                 }
             }
             Reply::Signalled { id } => self.answer_signal(id, Ok(())),
-            Reply::SignalFailed { id, error } => self.answer_signal(id, Err(error)),
+            Reply::SignalFailed { id, error } => self.answer_signal(id, Err(peer_text(&error))),
             Reply::Exited {
                 id,
                 status,
@@ -1313,7 +1321,7 @@ impl Connection {
                     let _ = exited.send(if closing {
                         Err(CLOSED.to_string())
                     } else {
-                        status
+                        status.map_err(|e| peer_text(&e))
                     });
                 }
             }
@@ -2238,6 +2246,114 @@ mod tests {
         );
         assert!(text.len() < 2 * PEER_TEXT + 200, "{} bytes", text.len());
         assert!(text.contains("forged log line\\n"), "{text}");
+    }
+
+    /// What a peer says of a program — why it did not start, why waiting for it failed, why a
+    /// signal was not sent — reaches the Client's errors bounded and escaped: whoever serves the
+    /// socket says it, a program of the process account among them.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn what_a_peer_says_of_a_program_is_quoted_bounded_and_escaped() {
+        const FORGED: &str = "\u{1b}[2Jforged log line\nsecond line";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let _ = read_frame::<_, Request>(&mut stream).await;
+            let hello = Reply::Hello {
+                version: this_build().to_string(),
+            };
+            write_frame(&mut stream, &hello).await.expect("hello");
+            while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
+                let replies = match request {
+                    Request::Start { id: 1, .. } => vec![Reply::StartFailed {
+                        id: 1,
+                        error: FORGED.to_string(),
+                        os_error: None,
+                    }],
+                    Request::Start { id, .. } => vec![Reply::Started { id, pid: 4242 }],
+                    Request::Signal { id, .. } => vec![
+                        Reply::SignalFailed {
+                            id,
+                            error: FORGED.to_string(),
+                        },
+                        Reply::Exited {
+                            id,
+                            status: Err(FORGED.to_string()),
+                            closing: false,
+                        },
+                    ],
+                    Request::Hello { .. } | Request::Stop { .. } => Vec::new(),
+                };
+                for reply in replies {
+                    write_frame(&mut stream, &reply).await.expect("reply");
+                }
+            }
+        });
+        let quoted = |text: String| {
+            assert!(
+                !text.contains('\n') && !text.contains('\u{1b}'),
+                "unescaped: {text}"
+            );
+            assert!(text.contains("forged log line\\n"), "{text}");
+        };
+        let channel = Channel::new(&socket, own_uid());
+
+        let not_started = channel
+            .start("test", sh("true"))
+            .await
+            .err()
+            .expect("the start fails");
+        assert!(!is_unreachable(&not_started), "{not_started}");
+        quoted(not_started.to_string());
+
+        let mut child = channel.start("test", sh("true")).await.expect("started");
+        let not_signalled = child
+            .signal(libc::SIGHUP, false)
+            .await
+            .expect_err("the signal fails");
+        quoted(not_signalled.to_string());
+        let not_waited = child.wait().await.expect_err("waiting fails");
+        assert!(!is_unreachable(&not_waited), "{not_waited}");
+        quoted(not_waited.to_string());
+    }
+
+    /// A program that has ended by the time the connection closes is reported as the exit it is,
+    /// never as one the close caused: the close cannot pass a crash off as a stop.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn an_exit_that_meets_the_close_is_the_programs_own() {
+        for _ in 0..32 {
+            let child = start(&sh("exit 3")).expect("start");
+            let pid = child.id().expect("a pid");
+            // Until it has ended, without reaping it.
+            // SAFETY: waitid(2) on our own child with WNOWAIT writes only into `info`.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let waited =
+                unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
+            assert_eq!(waited, 0, "{}", io::Error::last_os_error());
+            let (control, unanswered) = mpsc::unbounded_channel();
+            assert!(control.send(Control::Close).is_ok(), "queued");
+            let (replies, mut queued) = Replies::new();
+            supervise(1, child, false, unanswered, replies).await;
+            loop {
+                match queued.recv().await.expect("a reply").reply {
+                    Reply::Exited {
+                        status, closing, ..
+                    } => {
+                        assert!(!closing, "the close was taken for the exit");
+                        assert_eq!(
+                            ExitStatus::from_raw(status.expect("a status")).code(),
+                            Some(3)
+                        );
+                        break;
+                    }
+                    Reply::Output { .. } => {}
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        }
     }
 
     /// One connection is served at a time; a second is refused while the first is open.
