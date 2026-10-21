@@ -914,6 +914,8 @@ struct State {
     /// When the last wait for the service ended without reaching it: a start in the same outage
     /// tries once rather than waiting out [`RECONNECT`] again behind every Supervisor before it.
     gave_up: Option<Instant>,
+    /// The refusals met so far, logged sparingly: a start meets one every [`RECONNECT_EVERY`].
+    refusals: Refusals,
 }
 
 /// One connection to the second service.
@@ -1050,13 +1052,22 @@ impl Channel {
                     state.gave_up = Some(Instant::now());
                     return Err(e);
                 }
-                Err(e) if Instant::now() < deadline => {
+                Err(e) => {
+                    // Not an outage that ends by itself: the operator is to hear of it.
+                    if is_refusal(&e) {
+                        if let Some(unlogged) = state.refusals.note(std::time::Instant::now()) {
+                            warn!(
+                                socket = %self.shared.socket.display(), error = %e, unlogged,
+                                "the second service is refused; no program starts until the process account serves this build on its socket"
+                            );
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        state.gave_up = Some(Instant::now());
+                        return Err(e);
+                    }
                     debug!(socket = %self.shared.socket.display(), error = %e, "the second service cannot be reached yet");
                     tokio::time::sleep(RECONNECT_EVERY).await;
-                }
-                Err(e) => {
-                    state.gave_up = Some(Instant::now());
-                    return Err(e);
                 }
             }
         }
@@ -1077,7 +1088,8 @@ impl Connection {
     /// the process account is told (ADR-0053 clause 4).
     async fn open(socket: &Path, service_uid: u32) -> io::Result<Arc<Connection>> {
         let stream = UnixStream::connect(socket).await?;
-        check_service(stream.peer_cred()?.uid(), service_uid, socket)?;
+        check_service(stream.peer_cred()?.uid(), service_uid, socket)
+            .map_err(|e| io::Error::new(e.kind(), Refusal(e.to_string())))?;
         let (mut read, mut write) = stream.into_split();
         let hello = Request::Hello {
             version: this_build().to_string(),
@@ -1098,9 +1110,13 @@ impl Connection {
         };
         match answer {
             Some(Reply::Hello { version }) if version == this_build() => {}
+            // What the peer says is quoted, bounded and escaped: whoever serves the socket says it,
+            // a Managed Process of the process account among them, and it reaches the Server in
+            // the Supervisor's health.
             Some(Reply::Hello { version }) => {
                 return Err(io::Error::other(OtherBuild(format!(
-                    "the second service is build {version}, this Client is build {}",
+                    "the second service is build {}, this Client is build {}",
+                    peer_text(&version),
                     this_build()
                 ))))
             }
@@ -1110,11 +1126,20 @@ impl Connection {
             }) if version != this_build() => {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    OtherBuild(reason),
+                    OtherBuild(format!(
+                        "the second service refused this Client: {}",
+                        peer_text(&reason)
+                    )),
                 ))
             }
             Some(Reply::Refused { reason, .. }) => {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason))
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    Refusal(format!(
+                        "the second service refused this Client: {}",
+                        peer_text(&reason)
+                    )),
+                ))
             }
             Some(_) => return Err(io::Error::other("the second service skipped the handshake")),
             None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, CLOSED)),
@@ -1317,20 +1342,66 @@ impl Connection {
 }
 
 /// Why the second service was not reached, wrapped so that a program that did not start — whose
-/// error may carry the same kind, `NotFound` for one — is told apart from it.
+/// error may carry the same kind, `NotFound` for one — is told apart from it. `refused` where it
+/// was reached and one end refused the other: a socket of another account, a service of another
+/// build, or a refusal of the Client — a cause of its own, which no restart of the service mends.
 #[derive(Debug)]
-struct Unreachable(io::Error);
+struct Unreachable {
+    error: io::Error,
+    refused: bool,
+}
 
 impl std::fmt::Display for Unreachable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the second service cannot be reached: {}", self.0)
+        if self.refused {
+            write!(f, "the second service is refused: {}", self.error)
+        } else {
+            write!(f, "the second service cannot be reached: {}", self.error)
+        }
     }
 }
 
 impl std::error::Error for Unreachable {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
+        Some(&self.error)
     }
+}
+
+/// The socket is served by another account than the process account's, or the service refused
+/// the Client.
+#[derive(Debug)]
+struct Refusal(String);
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// Whether `error` is a refusal by either end of the handshake: the peer is another account or
+/// another build, or it refused the Client.
+fn is_refusal(error: &io::Error) -> bool {
+    is_other_build(error) || error.get_ref().is_some_and(|inner| inner.is::<Refusal>())
+}
+
+/// At most this many characters of what a peer says go into an error.
+const PEER_TEXT: usize = 120;
+
+/// What a peer said, quoted for an error: at most [`PEER_TEXT`] characters, and everything but
+/// printable ASCII escaped, so that it can neither pass off a line of its own in the Client's log
+/// nor carry a long text of its own choosing to the Server.
+fn peer_text(text: &str) -> String {
+    let mut quoted: String = text
+        .chars()
+        .take(PEER_TEXT)
+        .flat_map(char::escape_default)
+        .collect();
+    if text.chars().nth(PEER_TEXT).is_some() {
+        quoted.push_str("...");
+    }
+    format!("\"{quoted}\"")
 }
 
 /// The second service is another build: it said so, or named another in its handshake.
@@ -1357,7 +1428,8 @@ fn unreachable(error: io::Error) -> io::Error {
     if is_unreachable(&error) {
         return error;
     }
-    io::Error::new(error.kind(), Unreachable(error))
+    let refused = is_refusal(&error);
+    io::Error::new(error.kind(), Unreachable { error, refused })
 }
 
 /// Whether `error` says that the second service was not reached, rather than that a program did
@@ -1368,6 +1440,17 @@ pub fn is_unreachable(error: &io::Error) -> bool {
     error
         .get_ref()
         .is_some_and(|inner| inner.is::<Unreachable>())
+}
+
+/// Whether `error` says that the second service was reached and one end refused the other — a
+/// socket of another account, another build, or a refusal of the Client — rather than that it
+/// is down. [`is_unreachable`] holds for it too: it is no failure of the program's either.
+#[must_use]
+pub fn is_refused(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Unreachable>())
+        .is_some_and(|unreachable| unreachable.refused)
 }
 
 /// Whether the socket is served by the process account (ADR-0053 clause 4). Its directory belongs
@@ -2115,6 +2198,42 @@ mod tests {
         Channel::connect(&service.socket, own_uid())
             .await
             .expect("the Client's own build");
+    }
+
+    /// A refusal is told apart from an outage, and what the refusing peer says reaches the error —
+    /// and through it the Supervisor's health on the Server — bounded and escaped: a Managed
+    /// Process of the process account can put a socket of its own in the service's place, and
+    /// say up to a handshake's worth of anything.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_refusal_is_no_outage_and_quotes_the_peer_bounded_and_escaped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let _ = read_frame::<_, Request>(&mut stream).await;
+                let refused = Reply::Refused {
+                    reason: "\u{1b}[2Jforged log line\n".repeat(150),
+                    version: None,
+                };
+                let _ = write_frame(&mut stream, &refused).await;
+            }
+        });
+        let refused = Channel::new(&socket, own_uid())
+            .start("test", sh("true"))
+            .await
+            .err()
+            .expect("refused");
+        assert!(is_unreachable(&refused), "{refused}");
+        assert!(is_refused(&refused), "{refused}");
+        let text = refused.to_string();
+        assert!(
+            !text.contains('\n') && !text.contains('\u{1b}'),
+            "unescaped: {text}"
+        );
+        assert!(text.len() < 2 * PEER_TEXT + 200, "{} bytes", text.len());
+        assert!(text.contains("forged log line\\n"), "{text}");
     }
 
     /// One connection is served at a time; a second is refused while the first is open.
