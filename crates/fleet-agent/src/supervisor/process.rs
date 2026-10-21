@@ -1701,11 +1701,28 @@ mod tests {
     fn through_the_second_service(
         socket: &std::path::Path,
     ) -> (Runner, mpsc::Receiver<(usize, ProcessEvent)>) {
+        let (runner, events, commands) =
+            running_through_the_second_service(socket, PathBuf::from("/bin/true"), Vec::new());
+        // Never sent on: an end of the commands would end the Runner.
+        std::mem::forget(commands);
+        (runner, events)
+    }
+
+    /// A Runner whose every start goes to a second service at `socket`, and runs `program`; the
+    /// sender of its commands.
+    #[cfg(unix)]
+    fn running_through_the_second_service(
+        socket: &std::path::Path,
+        program: PathBuf,
+        args: Vec<String>,
+    ) -> (
+        Runner,
+        mpsc::Receiver<(usize, ProcessEvent)>,
+        mpsc::Sender<ProcessCommand>,
+    ) {
         use crate::supervisor::channel::{peer, Channel};
         let (event_tx, events) = mpsc::channel(256);
         let (commands, command_rx) = mpsc::channel(16);
-        // Never sent on: an end of the commands would end the Runner.
-        std::mem::forget(commands);
         let runner = Runner {
             endpoint_token: String::new(),
             name: "test".to_string(),
@@ -1720,10 +1737,10 @@ mod tests {
             spawner: Spawner::Channel(Channel::new(socket, peer::own_uid())),
             events: EventSender::new(0, event_tx),
             commands: command_rx,
-            build: Box::new(|| {
+            build: Box::new(move || {
                 Some(ProcessSpec {
-                    program: PathBuf::from("/bin/true"),
-                    args: Vec::new(),
+                    program: program.clone(),
+                    args: args.clone(),
                     env: Vec::new(),
                     working_dir: None,
                     ensure_dirs: Vec::new(),
@@ -1731,7 +1748,86 @@ mod tests {
                 })
             }),
         };
-        (runner, events)
+        (runner, events, commands)
+    }
+
+    /// The real second service on `socket`, until the sender is used or dropped.
+    #[cfg(unix)]
+    fn second_service(
+        socket: &std::path::Path,
+    ) -> (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<crate::supervisor::channel::Served>,
+    ) {
+        use crate::supervisor::channel::{bind, peer, serve};
+        let listener = bind(socket).expect("bind");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve(listener, peer::own_uid(), || false, async {
+            let _ = stopped.await;
+        }));
+        (stop, task)
+    }
+
+    /// The next health the Runner reports, within `within`.
+    #[cfg(unix)]
+    async fn next_health(
+        events: &mut mpsc::Receiver<(usize, ProcessEvent)>,
+        within: Duration,
+    ) -> ComponentHealth {
+        loop {
+            let (_, event) = tokio::time::timeout(within, events.recv())
+                .await
+                .expect("a health report in time")
+                .expect("an event");
+            if let ProcessEvent::Health(health) = event {
+                return health;
+            }
+        }
+    }
+
+    /// The second service stopped — its service manager restarts it, an operator stops it, the
+    /// host goes down — and stops the programs it started on the way: none of them exited on its
+    /// own, so however often the service goes, no exit is counted and the Supervisor is never
+    /// held; it starts the program again once the service is back (ADR-0053 clause 2).
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_of_the_second_service_is_no_exit_of_the_programs() {
+        use crate::supervisor::restart::MAX_CRASH_RESTARTS;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let mut service = second_service(&socket);
+        let (runner, mut events, _commands) = running_through_the_second_service(
+            &socket,
+            PathBuf::from("/bin/sleep"),
+            vec!["300".to_string()],
+        );
+        let (shutdown_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let run = tokio::spawn(runner.run(shutdown));
+        for _ in 0..=MAX_CRASH_RESTARTS {
+            let running = next_health(&mut events, Duration::from_secs(30)).await;
+            assert_eq!(running.status, "running", "{running:?}");
+            let (stop, task) = service;
+            let _ = stop.send(());
+            assert_eq!(
+                task.await.expect("the service ended"),
+                crate::supervisor::channel::Served::Stopped
+            );
+            let gone = next_health(&mut events, Duration::from_secs(30)).await;
+            assert_eq!(
+                gone.status, UNREACHABLE,
+                "counted as the program's own exit"
+            );
+            service = second_service(&socket);
+        }
+        let running = next_health(&mut events, Duration::from_secs(30)).await;
+        assert_eq!(running.status, "running", "held: {running:?}");
+        shutdown_tx.send(true).expect("request the shutdown");
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("the Runner ends on the shutdown")
+            .expect("cleanly");
+        drop(service);
     }
 
     /// A start that finds the second service unreachable is no failed start: the Supervisor says
