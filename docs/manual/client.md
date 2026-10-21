@@ -309,7 +309,6 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess, write or edit the configuration file, and enrol a host that holds no certificate yet, before registering the service. See below. |
 | `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file untouched. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: it takes them from [beside the program](#files-beside-the-program), or they are files the operator names in the file. |
 | `--run-as <account>` | `service install` | Run the service as this account, and hand its files over to it. Without it, a re-registration keeps the account the existing registration names. `--run-as root` chooses root. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
-| `--process-account <account>` | `service install` | Run every Managed Process under this account, through a second service. Without it, a re-registration keeps the account the second service's unit names. See [Running the Managed Processes under a process account](#running-the-managed-processes-under-a-process-account). System scope on Linux with systemd only. |
 
 ### Running it under its own account
 
@@ -385,35 +384,6 @@ Two consequences to weigh before using it:
 
 Re-running `install` with a different `--run-as` re-registers and re-owns the same directories.
 Without the flag it keeps the account; a plain re-install does not return a host to root.
-
-### Running the Managed Processes under a process account
-
-`service install --process-account <account>` separates the Managed Processes from the Client: a
-second service, `opamp-fleet-agents`, runs under that account and starts, signals and stops every
-Managed Process on the Client's request, over a socket under `/run/opamp-fleet-agents/` that admits
-the Client's account alone. The Client then starts no Managed Process itself. Linux with systemd
-only, so far.
-
-The operator creates the account, and makes its group one of the Client's account's groups; the
-install refuses before it writes anything when the account does not exist, is root or the Client's
-own, when the Client runs as root, or when the Client's account is not in the account's group. The
-refusal shows the lines to run:
-
-```console
-# useradd --system --user-group --no-create-home --shell /usr/sbin/nologin opamp-fleet-agents
-# usermod --append --groups opamp-fleet-agents opamp-fleet
-# opamp-fleet service install --run-as opamp-fleet --process-account opamp-fleet-agents
-installed opamp-fleet
-  …
-  runs as:   opamp-fleet (named with --run-as)
-  processes: opamp-fleet-agents (named with --process-account), started by opamp-fleet-agents
-```
-
-A re-registration without the flag keeps the account `/etc/systemd/system/opamp-fleet-agents.service`
-names. `service start`, `stop` and `uninstall` act on both services, the second one first on start
-and last on stop. The Client's unit wants the second service and starts after it; a second service
-that fails leaves the Client running and reporting, and the Client reaches it again once systemd has
-restarted it. When the second service stops, so does every program it started.
 
 #### The systemd unit, and what a drop-in adds
 

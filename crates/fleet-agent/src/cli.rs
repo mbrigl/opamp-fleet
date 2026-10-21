@@ -304,12 +304,17 @@ pub struct InstallArgs {
     /// primary group must be a supplementary group of the Client's account; the Client must not
     /// run as root. A re-registration without the flag keeps the account the second service's
     /// unit names. System scope on Linux with systemd only, for now.
-    #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
+    ///
+    /// Hidden while the Managed Processes' files are not yet split from the Client's (ADR-0053
+    /// clause 6), so no operator relies on a separation that does not hold yet.
+    #[arg(long, value_name = "ACCOUNT", conflicts_with = "user", hide = true)]
     pub process_account: Option<String>,
     // ADR-0053.
     /// Drop the process account: stop and deregister the second service, and let the Client
     /// start its Managed Processes itself again.
-    #[arg(long, conflicts_with = "process_account")]
+    ///
+    /// Hidden with `--process-account`.
+    #[arg(long, conflicts_with = "process_account", hide = true)]
     pub no_process_account: bool,
 }
 
@@ -615,6 +620,25 @@ mod tests {
             "opamp-fleet-agents"
         ])
         .is_err());
+    }
+
+    /// The process account's flags stay out of the help until the Managed Processes' files are
+    /// split from the Client's (ADR-0053 clause 6).
+    /// Verifies: ADR-0053
+    #[test]
+    fn the_process_account_flags_are_hidden_for_now() {
+        let mut command = <Cli as clap::CommandFactory>::command();
+        let install = command
+            .find_subcommand_mut("service")
+            .and_then(|service| service.find_subcommand_mut("install"))
+            .expect("service install");
+        for flag in ["process_account", "no_process_account"] {
+            let arg = install
+                .get_arguments()
+                .find(|arg| arg.get_id() == flag)
+                .unwrap_or_else(|| panic!("no {flag}"));
+            assert!(arg.is_hide_set(), "{flag} is shown");
+        }
     }
 
     /// Verifies: ADR-0019
