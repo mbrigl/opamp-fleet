@@ -404,7 +404,10 @@ pub fn agents_unit(spec: &InstallSpec, agents: &Agents) -> Result<String, String
 }
 
 /// Refuses an account name that would change what a unit says.
-fn check_unit_account(account: &str) -> Result<(), String> {
+///
+/// # Errors
+/// Returns the refusal, naming the account.
+pub fn check_unit_account(account: &str) -> Result<(), String> {
     if account.is_empty()
         || account
             .chars()

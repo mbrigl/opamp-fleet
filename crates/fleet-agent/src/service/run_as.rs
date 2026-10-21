@@ -471,6 +471,10 @@ pub fn decide_process_account(
             ))
         }
     };
+    // The account goes into the second service's unit: one that cannot be written there is
+    // refused here, before the install writes anything, not when the unit is rendered.
+    super::manager::check_unit_account(&account)
+        .map_err(|e| format!("{e}. Nothing has been installed or written."))?;
     #[cfg(unix)]
     {
         let found = account_ids(&account)?;
@@ -1408,8 +1412,8 @@ mod tests {
 
     /// Where no second service can be registered — the user scope, another service manager, or
     /// another platform for now — a named process account is refused; with none named, nothing
-    /// changes. Against the accounts of this host: a missing one, and the test's own named as the
-    /// Client's.
+    /// changes. A name no unit can hold is refused here too, before the install writes anything.
+    /// Against the accounts of this host: a missing one, and the test's own named as the Client's.
     /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
@@ -1425,6 +1429,16 @@ mod tests {
         let err = decide_process_account(Some("opamp-fleet-agents"), None, None, true)
             .expect_err("a user service names none");
         assert!(err.contains("systemd"), "{err}");
+        let err = decide_process_account(Some("bad\"account"), None, Some(&me), true)
+            .expect_err("not writable into a unit");
+        assert!(
+            err.contains("cannot be written into a systemd unit"),
+            "{err}"
+        );
+        assert!(
+            err.contains("Nothing has been installed or written"),
+            "{err}"
+        );
         let err = decide_process_account(Some("no-such-account-0053"), None, Some(&me), true)
             .expect_err("missing");
         if me.uid() == 0 {
