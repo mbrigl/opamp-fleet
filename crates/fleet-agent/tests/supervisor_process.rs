@@ -1277,6 +1277,109 @@ async fn a_program_that_keeps_crashing_is_held_not_looped(via: Via) {
 }
 both!(a_program_that_keeps_crashing_is_held_not_looped);
 
+/// Sends a package of `bytes` as `version`, staged in `dir`.
+async fn offer_package(harness: &Harness, dir: &Path, bytes: &[u8], version: &str) {
+    let staged = dir.join("downloaded.staged");
+    std::fs::write(&staged, bytes).expect("stage");
+    harness
+        .commands
+        .send(ProcessCommand::ApplyPackage {
+            staged,
+            version: version.to_string(),
+            hash: version.as_bytes().to_vec(),
+            span: tracing::Span::current(),
+        })
+        .await
+        .expect("send");
+}
+
+/// ADR-0026 clause 63: a failed package is a failed start like any other. Where the predecessor it
+/// is rolled back to will not start either, the Supervisor holds after three failed starts in a
+/// row — the package's and two of the predecessor's — rather than granting the predecessor three
+/// of its own after the package's.
+/// Verifies: ADR-0026
+async fn a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_too(via: Via) {
+    use fleet_agent::supervisor::restart::MAX_CRASH_RESTARTS;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binary = dir.path().join(program_name("agent"));
+    std::fs::write(&binary, bytes_of(&stub_crasher())).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let mut harness = binary_harness(via, &binary, Duration::from_millis(300));
+    // The predecessor keeps crashing from the start, and is held.
+    loop {
+        let health = next_health(&mut harness.events).await;
+        if health.status.contains("not restarting") {
+            break;
+        }
+    }
+
+    offer_package(&harness, dir.path(), &bytes_of(&stub_crasher()), "9.9.9").await;
+    let (mut starts, mut outcome) = (0, None);
+    loop {
+        let (_, event) = tokio::time::timeout(Duration::from_secs(20), harness.events.recv())
+            .await
+            .expect("the Supervisor holds in time")
+            .expect("an open channel");
+        match event {
+            ProcessEvent::Health(health) if health.status == "running" => starts += 1,
+            ProcessEvent::Health(health) if health.status.contains("not restarting") => break,
+            ProcessEvent::PackageApplied { result, .. } => outcome = Some(result),
+            _ => {}
+        }
+    }
+    assert!(outcome.expect("an outcome").is_err());
+    assert_eq!(
+        starts, MAX_CRASH_RESTARTS,
+        "the package's start is one of the failed starts"
+    );
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    let _ = harness.task.await;
+}
+both!(a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_too);
+
+/// ADR-0026 clause 62: the predecessor a failed package is rolled back to is started once, and
+/// that process stays; no second respawn replaces it while it runs.
+/// Verifies: ADR-0026
+async fn a_failed_package_starts_its_predecessor_exactly_once(via: Via) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binary = dir.path().join(program_name("agent"));
+    std::fs::write(&binary, bytes_of(&stub_agent())).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let mut harness = binary_harness(via, &binary, Duration::from_millis(300));
+    let running = next_health(&mut harness.events).await;
+    assert_eq!(running.status, "running", "{running:?}");
+
+    offer_package(&harness, dir.path(), &bytes_of(&stub_crasher()), "9.9.9").await;
+    let (_, result) = next_package_ack(&mut harness.events).await;
+    assert!(result.is_err(), "{result:?}");
+    // Longer than the backoff a second respawn would have waited.
+    let mut healths = Vec::new();
+    let until = tokio::time::Instant::now() + Duration::from_millis(2500);
+    while let Ok(Some((_, event))) = tokio::time::timeout_at(until, harness.events.recv()).await {
+        if let ProcessEvent::Health(health) = event {
+            healths.push(health.status);
+        }
+    }
+    assert_eq!(
+        healths,
+        vec!["running".to_string()],
+        "one start, which stays"
+    );
+
+    harness.shutdown_tx.send(true).expect("shutdown");
+    let _ = harness.task.await;
+}
+both!(a_failed_package_starts_its_predecessor_exactly_once);
+
 /// ADR-0026: a successful update does not delete the version it superseded — it is retained for the
 /// window, with a marker recording the deadline, so an operator has a fallback.
 /// Verifies: ADR-0026

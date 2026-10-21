@@ -1003,10 +1003,15 @@ impl Runner {
                         result: Err(error),
                     })
                     .await;
-                // What runs now — the predecessor, rolled back, or a first install kept in place
-                // — is started again, and stays supervised exactly as after a failed
-                // ApplyConfig (ADR-0026). That start, not the package's, decides an owed
-                // configuration.
+                // The package's start failed, and counts as a failed start (ADR-0026 clause 63):
+                // what runs now — the predecessor, rolled back, or a first install kept in place
+                // — is started again once, unless the streak holds it, and stays supervised
+                // exactly as after a failed ApplyConfig. That start, not the package's, decides
+                // an owed configuration.
+                if let AfterFailure::Hold(failures) = s.policy.failed() {
+                    self.hold(failures, s).await;
+                    return false;
+                }
                 let started = tokio::select! {
                     started = self.spawn_if_due(&mut s.waiting) => started,
                     _ = shutdown.requested() => return true,
@@ -1280,17 +1285,7 @@ impl Runner {
         let delay = match s.policy.failed() {
             AfterFailure::Retry => s.backoff.advance(),
             AfterFailure::Hold(failures) => {
-                warn!(
-                    supervisor = %self.name, restarts = failures,
-                    "not restarting: the program keeps failing to start — holding until a new configuration, package, or restart"
-                );
-                self.events
-                    .send(ProcessEvent::Health(unhealthy(
-                        "not restarting: the program keeps failing to start".to_string(),
-                        format!("held after {failures} failed starts in a row"),
-                    )))
-                    .await;
-                s.child = None;
+                self.hold(failures, s).await;
                 return false;
             }
         };
@@ -1307,6 +1302,22 @@ impl Runner {
             }
             _ = shutdown.requested() => true,
         }
+    }
+
+    /// Holds the program down after `failures` failed starts in a row, and says so (ADR-0026
+    /// clause 63): it is not started again until a new configuration, package, or restart.
+    async fn hold(&self, failures: usize, s: &mut Supervision) {
+        warn!(
+            supervisor = %self.name, restarts = failures,
+            "not restarting: the program keeps failing to start — holding until a new configuration, package, or restart"
+        );
+        self.events
+            .send(ProcessEvent::Health(unhealthy(
+                "not restarting: the program keeps failing to start".to_string(),
+                format!("held after {failures} failed starts in a row"),
+            )))
+            .await;
+        s.child = None;
     }
 
     /// The `gate` phase: the apply-grace health gate a configuration apply and a package swap
