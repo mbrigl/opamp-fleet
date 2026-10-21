@@ -757,10 +757,15 @@ impl Replies {
 
 /// Starts a program as the leader of a process group of its own, always: whatever its own
 /// [`Launch::own_process_group`] says, the stop at the connection's end takes its whole tree.
+///
+/// Its environment is the service's own, with the process account's `HOME`, `USER` and `LOGNAME`,
+/// and the request's environment laid over it — the block's `env`, then the Supervisor Endpoint's
+/// token (ADR-0059 clause 7).
 fn start(launch: &Launch) -> io::Result<Child> {
     let mut command = Command::new(&launch.program);
     command
         .args(&launch.args)
+        .envs(account_env().iter().cloned())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -771,6 +776,33 @@ fn start(launch: &Launch) -> io::Result<Child> {
         command.current_dir(dir);
     }
     command.spawn()
+}
+
+/// `HOME`, `USER` and `LOGNAME` of the account this service runs as — the process account — from
+/// the password database, whatever the environment the service was started with says. Empty
+/// where the database names no such account.
+fn account_env() -> &'static [(String, std::ffi::OsString)] {
+    static ACCOUNT: std::sync::OnceLock<Vec<(String, std::ffi::OsString)>> =
+        std::sync::OnceLock::new();
+    ACCOUNT.get_or_init(|| {
+        // SAFETY: geteuid(2) cannot fail and touches no memory.
+        let uid = unsafe { libc::geteuid() };
+        match crate::service::run_as::account_of(uid) {
+            Ok(Some(account)) => vec![
+                ("HOME".to_string(), account.home.into_os_string()),
+                ("USER".to_string(), account.name.clone().into()),
+                ("LOGNAME".to_string(), account.name.into()),
+            ],
+            Ok(None) => {
+                warn!(uid, "the password database names no account for this service's uid; its programs keep HOME, USER and LOGNAME as the service has them");
+                Vec::new()
+            }
+            Err(e) => {
+                warn!(uid, error = %e, "cannot look up this service's account; its programs keep HOME, USER and LOGNAME as the service has them");
+                Vec::new()
+            }
+        }
+    })
 }
 
 /// A program that has ended, as its supervision hands it back to the connection.
@@ -1866,6 +1898,62 @@ mod tests {
             .await
             .expect("a reply in time")
             .expect("a readable reply")
+    }
+
+    /// A program the service starts has the process account's `HOME`, `USER` and `LOGNAME` from
+    /// the password database, the block's `env` over the service's own environment, and the
+    /// Supervisor Endpoint's token last, so no `env` can replace it (ADR-0059 clause 7). Its output
+    /// comes back to the one who ran it.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_program_has_the_process_accounts_home_and_the_token_last() {
+        let account = crate::service::run_as::account_of(own_uid())
+            .expect("look up this test's account")
+            .expect("this test's account has an entry");
+        let service = service(own_uid());
+        let channel = Channel::connect(&service.socket, own_uid())
+            .await
+            .expect("connect");
+        let mut launch = sh("echo \"$HOME|$USER|$LOGNAME|$KEPT|$OPAMP_SUPERVISOR_TOKEN\"");
+        launch.env = vec![
+            ("KEPT".to_string(), "from the block".to_string()),
+            (
+                "OPAMP_SUPERVISOR_TOKEN".to_string(),
+                "from the block".to_string(),
+            ),
+            (
+                "OPAMP_SUPERVISOR_TOKEN".to_string(),
+                "the token".to_string(),
+            ),
+        ];
+        let output = channel.output("test", launch).await.expect("ran");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!(
+                "{}|{}|{}|from the block|the token\n",
+                account.home.display(),
+                account.name,
+                account.name
+            )
+        );
+    }
+
+    /// What a program run to its end writes is kept up to its last [`CAPTURED`] bytes per stream,
+    /// so a program that writes without end costs the Client no more than that.
+    /// Verifies: ADR-0059
+    #[test]
+    fn what_a_program_run_to_its_end_writes_is_kept_to_its_tail() {
+        let mut captured = Captured::default();
+        let line = "x".repeat(1000);
+        for _ in 0..200 {
+            captured.push(Stream::Stdout, &line);
+        }
+        captured.push(Stream::Stdout, "the last line");
+        captured.push(Stream::Stderr, "said on stderr");
+        assert_eq!(captured.stdout.len(), CAPTURED);
+        assert!(captured.stdout.ends_with(b"the last line\n"));
+        assert_eq!(captured.stderr, b"said on stderr\n");
     }
 
     /// The admission rule itself: the Client's uid, and nobody else's — root included.
