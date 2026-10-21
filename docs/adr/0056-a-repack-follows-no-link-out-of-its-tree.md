@@ -24,9 +24,9 @@ operator's files into an artifact the operator then signs and the fleet installs
 is offered to. Three things follow:
 
 - **Disclosure.** Whatever the operator's account can read under the named path travels to the
-  fleet, inside a signature that vouches for it. An upstream whose release is compromised, or an
-  AppImage extracted from a hostile download before its hash is checked against what the operator
-  expects, chooses which of the operator's files ship.
+  fleet, inside a signature that vouches for it. An upstream whose release is compromised, and
+  whose download therefore matches the checksum published beside it, chooses which of the
+  operator's files ship.
 - **Determinism.** The bytes depend on the operator's host: the same release repacked on two hosts,
   or on one host before and after a change under `/etc`, gives two hashes, and clause 67's promise
   — the same release yields the same bytes and no accidental rollout — does not hold. Even a link
