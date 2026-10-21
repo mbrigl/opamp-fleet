@@ -305,6 +305,9 @@ pub struct SupervisorContext {
     /// The key that opens an encrypted `.7z` package artifact (ADR-0026); `None` when none is
     /// configured. Client-wide, like the package verification key.
     pub archive_key: Option<zeroize::Zeroizing<String>>,
+    /// The process account's primary group, where a process account is registered: what the
+    /// Supervisor shares with its Managed Process belongs to it (ADR-0059 clause 6).
+    pub process_group: Option<crate::storage::ProcessGroup>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.
@@ -521,6 +524,7 @@ mod tests {
             apply_grace: Duration::from_secs(0),
             retain_previous: Duration::from_secs(0),
             archive_key: None,
+            process_group: None,
             settings: toml::Table::new(),
             events: EventSender::new(0, event_tx),
             shutdown,
