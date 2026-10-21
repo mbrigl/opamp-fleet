@@ -223,6 +223,25 @@ pub fn admit(peer_uid: u32, client_uid: u32) -> Result<(), String> {
     }
 }
 
+/// Whether the service, running as `own_uid`, may serve `client_uid` as the Client's account
+/// (ADR-0053 clause 1): the Client's account is never root, and never the process account the
+/// service runs as — a service that served its own account would separate nothing.
+///
+/// # Errors
+/// Returns why the service does not start.
+pub fn check_client_uid(client_uid: u32, own_uid: u32) -> Result<(), String> {
+    if client_uid == 0 {
+        return Err("--client-uid 0: the Client's account is never root".to_string());
+    }
+    if client_uid == own_uid {
+        return Err(format!(
+            "--client-uid {client_uid} is the account this service runs as: the process account \
+             is never the Client's"
+        ));
+    }
+    Ok(())
+}
+
 /// Binds the second service's socket at `path`.
 ///
 /// A socket left behind by an earlier run is removed first; anything else at that path is not, and
@@ -253,8 +272,11 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 /// default disposition would end the service and leave its programs running.
 ///
 /// # Errors
-/// Returns an error when the runtime cannot be built or the socket cannot be bound.
+/// Returns an error when `client_uid` is root's or the service's own, the runtime cannot be built,
+/// or the socket cannot be bound.
 pub fn run_service(socket: &Path, client_uid: u32) -> Result<(), String> {
+    // SAFETY: geteuid(2) cannot fail and touches no memory.
+    check_client_uid(client_uid, unsafe { libc::geteuid() })?;
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| format!("cannot start the async runtime: {e}"))?;
     runtime.block_on(async {
@@ -1149,6 +1171,15 @@ mod tests {
         assert!(admit(1000, 1000).is_ok());
         assert!(admit(1001, 1000).is_err());
         assert!(admit(0, 1000).is_err(), "not even root");
+    }
+
+    /// The service serves neither root nor its own account as the Client's.
+    /// Verifies: ADR-0053
+    #[test]
+    fn the_client_uid_is_neither_root_nor_the_services_own() {
+        assert!(check_client_uid(998, 997).is_ok());
+        assert!(check_client_uid(0, 997).is_err());
+        assert!(check_client_uid(997, 997).is_err());
     }
 
     /// A peer whose uid is not the Client's is refused at the socket, before any request. Run

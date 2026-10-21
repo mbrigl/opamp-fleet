@@ -536,55 +536,54 @@ both!(a_swapped_binary_is_probed_again_for_its_version);
 
 // ── The second service (ADR-0053) ────────────────────────────────────────────
 
-/// The shipped program is the second service under `run --agents`: a Managed Process started
-/// through its socket runs and reports its exit, and the service ends cleanly on `SIGTERM`.
+/// The shipped program is the second service under `run --agents`. It will not serve its own
+/// account as the Client's (ADR-0053 clause 1); serving another, it refuses this test at the socket
+/// and ends cleanly on `SIGTERM`. A program started through it needs a second account to connect
+/// from; the cases above run the same service in-process, under this test's own uid.
 /// Verifies: ADR-0053
 #[cfg(unix)]
 #[tokio::test]
 async fn the_shipped_program_serves_as_the_second_service() {
     use fleet_agent::supervisor::channel::Channel;
-    use fleet_agent::supervisor::process::Launch;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("agents.sock");
     // SAFETY: getuid(2) cannot fail and touches no memory.
     let uid = unsafe { libc::getuid() };
-    let mut service = tokio::process::Command::new(env!("CARGO_BIN_EXE_supervisor"))
+
+    let own = tokio::process::Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .args(["run", "--agents"])
         .arg(&socket)
         .args(["--client-uid", &uid.to_string()])
+        .output()
+        .await
+        .expect("run the second service");
+    assert!(!own.status.success(), "it served its own account");
+    assert!(
+        String::from_utf8_lossy(&own.stderr).contains("process account"),
+        "{}",
+        String::from_utf8_lossy(&own.stderr)
+    );
+    assert!(!socket.exists(), "it listened anyway");
+
+    let mut service = tokio::process::Command::new(env!("CARGO_BIN_EXE_supervisor"))
+        .args(["run", "--agents"])
+        .arg(&socket)
+        .args(["--client-uid", &uid.wrapping_add(1).max(1).to_string()])
         .kill_on_drop(true)
         .spawn()
         .expect("start the second service");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let channel = loop {
+    loop {
         match Channel::connect(&socket).await {
-            Ok(channel) => break channel,
+            Ok(_) => panic!("a connection from another uid was served"),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => break,
             Err(e) => {
                 assert!(std::time::Instant::now() < deadline, "never listened: {e}");
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }
-    };
-
-    let mut child = Spawner::Channel(channel)
-        .spawn(
-            "crasher",
-            Launch {
-                program: stub_crasher(),
-                args: Vec::new(),
-                env: Vec::new(),
-                working_dir: None,
-                own_process_group: false,
-            },
-        )
-        .await
-        .expect("started through the channel");
-    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
-        .await
-        .expect("an exit in time")
-        .expect("a status");
-    assert_eq!(status.code(), Some(1), "the crasher's own exit comes back");
+    }
 
     let pid = service.id().expect("running") as libc::pid_t;
     // SAFETY: plain kill(2) on the service's pid; no memory is touched.

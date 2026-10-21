@@ -75,10 +75,18 @@ where
 {
     let matches = Cli::command().try_get_matches_from(args)?;
     let config_named = config_named(&matches);
-    Ok(Parsed {
-        cli: Cli::from_arg_matches(&matches)?,
-        config_named,
-    })
+    let cli = Cli::from_arg_matches(&matches)?;
+    // Clap sees a conflict only on the level a flag was written on; a global one written before
+    // `run` is caught here.
+    if let Some(Command::Run(run)) = &cli.command {
+        if run.agents.is_some() && (config_named || cli.state_dir.is_some()) {
+            return Err(Cli::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--agents runs the second service, which reads neither --config nor --state-dir",
+            ));
+        }
+    }
+    Ok(Parsed { cli, config_named })
 }
 
 /// Whether `--config` was given on the command line. A global argument may be parsed at the level
@@ -128,11 +136,25 @@ pub struct RunArgs {
     /// Run as the second service instead of the Client (ADR-0053): listen on this socket and
     /// start, signal and stop programs for the Client alone. Hidden, because the registration
     /// writes it and no operator types it.
-    #[arg(long, hide = true, value_name = "SOCKET", requires = "client_uid")]
+    /// It reads neither the configuration nor the state directory and is no Client, so the flags
+    /// that would say otherwise are refused alongside it rather than ignored.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "SOCKET",
+        requires = "client_uid",
+        conflicts_with_all = ["service", "config", "state_dir"]
+    )]
     pub agents: Option<PathBuf>,
     /// The uid of the Client's account, the one peer the second service serves (ADR-0053
-    /// clause 4).
-    #[arg(long, hide = true, value_name = "UID", requires = "agents")]
+    /// clause 4). Never root's (ADR-0053 clause 1); the service refuses its own as well.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "UID",
+        requires = "agents",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
     pub client_uid: Option<u32>,
 }
 
@@ -409,6 +431,45 @@ mod tests {
         assert_eq!(args.client_uid, Some(998));
         assert!(Cli::try_parse_from(["client", "run", "--agents", "/x.sock"]).is_err());
         assert!(Cli::try_parse_from(["client", "run", "--client-uid", "998"]).is_err());
+    }
+
+    /// The second service is no Client: a flag that only means something to the Client is
+    /// refused next to `--agents`, not silently ignored, and root is never the Client's account
+    /// it serves (ADR-0053 clause 1).
+    /// Verifies: ADR-0053
+    #[test]
+    fn the_agents_service_refuses_the_clients_flags_and_root() {
+        let agents = [
+            "client",
+            "run",
+            "--agents",
+            "/x.sock",
+            "--client-uid",
+            "998",
+        ];
+        for extra in [
+            &["--service"][..],
+            &["--config", "/etc/supervisor.toml"],
+            &["--state-dir", "/var/lib/x"],
+        ] {
+            let mut args = agents.to_vec();
+            args.extend_from_slice(extra);
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "{extra:?} was accepted"
+            );
+            // A global flag counts before the subcommand too.
+            if extra != ["--service"] {
+                let mut args = vec!["client"];
+                args.extend_from_slice(extra);
+                args.extend_from_slice(&agents[1..]);
+                assert!(parse_from(&args).is_err(), "{extra:?} was accepted");
+            }
+        }
+        assert!(
+            Cli::try_parse_from(["client", "run", "--agents", "/x.sock", "--client-uid", "0"])
+                .is_err()
+        );
     }
 
     /// Verifies: ADR-0019
