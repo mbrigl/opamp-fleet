@@ -151,7 +151,7 @@ impl Plugin for CommandPlugin {
             // The Client itself, or the second service where a process account is registered
             // (ADR-0059 clause 3): the registry says which.
             spawner: self.spawner.clone(),
-            process_group: ctx.process_group,
+            process_account_group: ctx.process_account_group,
             events: ctx.events,
             commands: command_rx,
             // A Foreign Agent has its own configuration until told otherwise: it always runs.

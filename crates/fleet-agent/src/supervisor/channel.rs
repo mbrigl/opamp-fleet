@@ -1955,8 +1955,8 @@ mod tests {
     }
 
     /// A program the second service starts creates what its group may write, so the Client — a
-    /// member of the process group — can purge what it left under a data directory, nested
-    /// directories included (ADR-0059 clause 6, ADR-0017 clause 34).
+    /// member of the process account's group — can purge what it left under a data directory,
+    /// nested directories included (ADR-0059 clause 6, ADR-0017 clause 34).
     /// Verifies: ADR-0059
     #[tokio::test]
     async fn a_program_creates_what_its_group_may_write() {
