@@ -18,7 +18,7 @@ pub mod process;
 pub mod restart;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -31,6 +31,7 @@ use crate::storage::{DroppedRemoteConfig, DroppedStoredSet, HighWaterFile, Stora
 use agent::AgentState;
 use block::{find_plugin, resolve, take_program, Resolved};
 use ports::{EventSender, HighWaterMarks, Plugin, ProcessEvent, SupervisorContext};
+use process::Spawner;
 
 pub use crate::engine::SELF_AGENT_INDEX;
 
@@ -42,11 +43,33 @@ pub const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
 /// line here — the supervision core stays untouched (goal 8). A wrapped kind is there only when
 /// its feature is, so what a build carries, reports (clause 18) and refuses as unknown all follow
 /// from this one list.
+///
+/// Every plugin is handed the [`Spawner`] this run starts its Managed Processes with.
 fn registry() -> Vec<Box<dyn Plugin>> {
+    let spawner = SPAWNER.get().cloned().unwrap_or_default();
     vec![
-        Box::new(collector::CollectorPlugin),
-        Box::new(command::CommandPlugin),
+        Box::new(collector::CollectorPlugin {
+            spawner: spawner.clone(),
+        }),
+        Box::new(command::CommandPlugin { spawner }),
     ]
+}
+
+/// Who starts this run's Managed Processes (ADR-0059 clause 3). A fact of the process, like the
+/// command line it comes from: every Supervisor started at startup and every one a Supervisor-set
+/// apply starts later takes it through the [`registry`].
+static SPAWNER: OnceLock<Spawner> = OnceLock::new();
+
+/// Starts every Managed Process of this run through `spawner` — the second service where a process
+/// account is registered. The composition root calls it once, before the first Supervisor starts;
+/// without it the Client starts its programs itself.
+///
+/// # Errors
+/// Returns an error when the spawner was already chosen.
+pub fn use_spawner(spawner: Spawner) -> Result<(), String> {
+    SPAWNER
+        .set(spawner)
+        .map_err(|_| "the Managed Processes' spawner was already chosen".to_string())
 }
 
 /// The kinds this Client was compiled with, as attributes of its own Agent (ADR-0017 clause 18).

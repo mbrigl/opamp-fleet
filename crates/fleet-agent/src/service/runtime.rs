@@ -27,6 +27,17 @@ pub struct RunSpec {
     /// hidden `--service` marker `service install` writes into the command line on every platform,
     /// and the whole of the condition for writing the log file: it says no terminal is watching.
     pub service: bool,
+    /// The second service every Managed Process is started through, where a process account is
+    /// registered (ADR-0059 clause 3): from the hidden `--agents-socket` and `--process-uid` that
+    /// `service install --process-account` writes into the command line.
+    pub agents: Option<AgentsChannel>,
+}
+
+/// Where the second service listens, and the uid it must answer as (ADR-0059 clause 4).
+#[derive(Debug, Clone)]
+pub struct AgentsChannel {
+    pub socket: PathBuf,
+    pub process_uid: u32,
 }
 
 /// How a daemon run ended, which decides how the process leaves.
@@ -292,6 +303,9 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         crate::update::installer::Startup::RolledBack(_) => return Ok(Exit::RestartForUpdate),
     };
 
+    if let Some(agents) = &spec.agents {
+        start_through_the_second_service(agents)?;
+    }
     let mut engine = supervisor::build_engine(&config, &shutdown)?;
     if config.self_update_package().is_some() {
         engine.arm_self_update(crate::update::installer::Installer::new(
@@ -469,6 +483,31 @@ fn heal_torn_pointer() {
     }
 }
 
+/// Every Managed Process of this run is started by the second service (ADR-0059 clause 3). The
+/// channel connects at the first start; a Client that cannot reach the service reports it per
+/// Supervisor and never starts a program itself.
+#[cfg(unix)]
+fn start_through_the_second_service(agents: &AgentsChannel) -> Result<(), String> {
+    use crate::supervisor::channel::Channel;
+    use crate::supervisor::process::Spawner;
+    tracing::info!(
+        socket = %agents.socket.display(),
+        process_uid = agents.process_uid,
+        "starting every Managed Process through the second service"
+    );
+    supervisor::use_spawner(Spawner::Channel(Channel::new(
+        &agents.socket,
+        agents.process_uid,
+    )))
+}
+
+/// No second service runs here yet (ADR-0059): a Client told of one refuses to start rather
+/// than start its programs itself.
+#[cfg(not(unix))]
+fn start_through_the_second_service(_agents: &AgentsChannel) -> Result<(), String> {
+    Err("the second service is not available on this platform".to_string())
+}
+
 /// Resolve to the platform shutdown signal: `SIGTERM` or `SIGINT` on Unix (what systemd and
 /// launchd send on stop), Ctrl-C on Windows (a console run; the SCM path never comes through
 /// here).
@@ -579,6 +618,7 @@ mod tests {
             config_path: config.to_path_buf(),
             state_dir,
             service: false,
+            agents: None,
         };
         assert_eq!(
             recovery_state_dir(&spec(Some(flagged.clone()), &config_path)),
@@ -625,6 +665,7 @@ mod tests {
                 config_path: dir.path().join("supervisor.toml"),
                 state_dir: Some(state_dir.clone()),
                 service: true,
+                agents: None,
             },
             "supervisor \"x\": `main_config` is no longer a supervisor key".to_string(),
         );
