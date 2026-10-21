@@ -303,6 +303,14 @@ fn start(
             marks
         }
     };
+    // The plugins the startup started its Supervisors with, so this one starts its Managed
+    // Process the same way (ADR-0053 clause 3). Only an Engine not built by `build_engine` has
+    // none, and then the Client starts the program itself, as there is nothing else it was told.
+    let plugins = engine.plugins().unwrap_or_else(|| {
+        std::sync::Arc::new(crate::supervisor::Registry::new(
+            crate::supervisor::process::Spawner::Local,
+        ))
+    });
     let agent = crate::supervisor::start_supervisor(
         config,
         block,
@@ -310,6 +318,7 @@ fn start(
         &engine.events_handle(),
         shutdown,
         &marks,
+        &*plugins,
     )?;
     engine.add_supervisor(agent);
     Ok(())
@@ -972,7 +981,12 @@ mod tests {
         .expect("write");
         let mut config = ClientConfig::load(&path).expect("load");
         let (_tx, shutdown) = crate::shutdown::shutdown_channel();
-        let mut engine = crate::supervisor::build_engine(&config, &shutdown).expect("build");
+        let mut engine = crate::supervisor::build_engine(
+            &config,
+            &shutdown,
+            crate::supervisor::process::Spawner::Local,
+        )
+        .expect("build");
         let accepts = |report: &AgentToServer| {
             report.capabilities & AgentCapabilities::AcceptsRemoteConfig as u64 != 0
         };

@@ -303,10 +303,11 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         crate::update::installer::Startup::RolledBack(_) => return Ok(Exit::RestartForUpdate),
     };
 
-    if let Some(agents) = &spec.agents {
-        start_through_the_second_service(agents)?;
-    }
-    let mut engine = supervisor::build_engine(&config, &shutdown)?;
+    let spawner = match &spec.agents {
+        Some(agents) => through_the_second_service(agents)?,
+        None => supervisor::process::Spawner::Local,
+    };
+    let mut engine = supervisor::build_engine(&config, &shutdown, spawner)?;
     if config.self_update_package().is_some() {
         engine.arm_self_update(crate::update::installer::Installer::new(
             config.state_dir.clone(),
@@ -487,7 +488,9 @@ fn heal_torn_pointer() {
 /// channel connects at the first start; a Client that cannot reach the service reports it per
 /// Supervisor and never starts a program itself.
 #[cfg(unix)]
-fn start_through_the_second_service(agents: &AgentsChannel) -> Result<(), String> {
+fn through_the_second_service(
+    agents: &AgentsChannel,
+) -> Result<supervisor::process::Spawner, String> {
     use crate::supervisor::channel::Channel;
     use crate::supervisor::process::Spawner;
     tracing::info!(
@@ -495,7 +498,7 @@ fn start_through_the_second_service(agents: &AgentsChannel) -> Result<(), String
         process_uid = agents.process_uid,
         "starting every Managed Process through the second service"
     );
-    supervisor::use_spawner(Spawner::Channel(Channel::new(
+    Ok(Spawner::Channel(Channel::new(
         &agents.socket,
         agents.process_uid,
     )))
@@ -504,7 +507,9 @@ fn start_through_the_second_service(agents: &AgentsChannel) -> Result<(), String
 /// No second service runs here yet (ADR-0053): a Client told of one refuses to start rather
 /// than start its programs itself.
 #[cfg(not(unix))]
-fn start_through_the_second_service(_agents: &AgentsChannel) -> Result<(), String> {
+fn through_the_second_service(
+    _agents: &AgentsChannel,
+) -> Result<supervisor::process::Spawner, String> {
     Err("the second service is not available on this platform".to_string())
 }
 

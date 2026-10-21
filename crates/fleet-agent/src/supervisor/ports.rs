@@ -376,6 +376,15 @@ impl KindDefaults {
     }
 }
 
+/// The plugins a run starts its Supervisors with (ADR-0017 clause 2), as the composition root
+/// made them: every one starts its Managed Process the way the run does (ADR-0053 clause 3). The
+/// Engine keeps it, so a Supervisor that a Supervisor-set apply starts later is started the same
+/// way as those started with the Client.
+pub trait PluginRegistry: Send + Sync {
+    /// Every compiled-in plugin.
+    fn plugins(&self) -> Vec<Box<dyn Plugin>>;
+}
+
 /// A compiled-in Supervisor Plugin (ADR-0017): the adapter factory on the Managed-Process side.
 /// A new process kind is a new implementation and one line in
 /// [`registry`](crate::supervisor::registry).
