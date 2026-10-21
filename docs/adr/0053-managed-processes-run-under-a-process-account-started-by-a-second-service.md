@@ -98,7 +98,10 @@ signals and stops those programs on the Client's request.
      and kept, never swapped in: it is swapped in, and its apply grace runs, once the second service
      is reached again, so the previous program stays in place and a rollback only ever goes back to
      a program that ran. A delivered Configuration is written as today, and its acknowledgement is
-     given by the first start that reaches the second service and survives the apply grace. Until
+     given by the first start of an apply or of the retry that reaches the second service and
+     survives the apply grace; a restart command's start acknowledges nothing and swaps nothing in
+     (ADR-0017 clause 8), and the retry follows it at once. A Supervisor held after a package that
+     failed leaves no Configuration waiting: it is reported `FAILED`. Until
      then the package stays `Installing` and the Configuration `APPLYING`, each naming the second
      service as the reason. A newer offer or Configuration replaces the waiting one, and a Client
      that stops while one waits leaves its files as the record names them.
