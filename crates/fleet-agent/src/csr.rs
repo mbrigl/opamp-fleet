@@ -79,14 +79,15 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
 }
 
 /// Writes `contents` to `path` through a temporary file, synced before it is renamed into place,
-/// so `path` holds either nothing or all of it.
+/// so `path` holds either nothing or all of it. Owner-only, as every file of the Client's in a state
+/// directory the process account's group may pass through (ADR-0053 clause 6).
 fn stage(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
     let tmp = path.with_extension("tmp");
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    drop(file);
+    crate::storage::write_private(&tmp, contents)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)?
+        .sync_all()?;
     std::fs::rename(&tmp, path)
 }
 
@@ -249,7 +250,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
         key.serialize_pem().as_bytes(),
     )
     .map_err(|e| format!("cannot store the private key: {e}"))?;
-    std::fs::write(config.state_dir.join(PENDING_CSR_FILE), csr.as_bytes())
+    crate::storage::write_private(&config.state_dir.join(PENDING_CSR_FILE), csr.as_bytes())
         .map_err(|e| format!("cannot store the certificate request: {e}"))?;
     // What the operator matches in the enrolment queue (ADR-0021 clause 22): the same SHA-256 the
     // Server lists as the request's key fingerprint.
@@ -384,6 +385,37 @@ mod tests {
             0o700,
             "the state directory must be owner-only"
         );
+    }
+
+    /// Where a process account is registered, its group passes through the state directory, and
+    /// the request and the certificate are the Client's alone: `0600`, beside the key.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn with_a_process_account_the_request_and_the_certificate_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        let mut config = config(&state_dir);
+        // SAFETY: getegid(2) cannot fail and touches no memory.
+        let group = unsafe { libc::getegid() };
+        config.process_group = Some(crate::supervisor::ports::ProcessGroup(group));
+        let signed = sign(request(&config).expect("a request"));
+        let mode = |name: &str| {
+            state_dir
+                .join(name)
+                .metadata()
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        assert_eq!(mode(""), 0o710, "passed through by the process group");
+        assert_eq!(mode(PENDING_CSR_FILE), 0o600);
+        accept(&state_dir, signed.as_bytes()).expect("accept");
+        assert_eq!(mode(ISSUED_CERT_FILE), 0o600);
+        assert_eq!(mode(ISSUED_KEY_FILE), 0o600);
     }
 
     /// Signs `csr` the way a Server does.
