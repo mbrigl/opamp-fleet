@@ -46,6 +46,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   is a reparse point is refused. **What to do:** move such a directory to its real path, or name
   the real path with `--state-dir`, `--root` or `--data-root`, before upgrading.
 
+- **A secret written as a multi-line TOML string is masked whole.** The effective configuration
+  the Client reports carried the rest of an `archive_key = """…"""` or `'''…'''` value, and the
+  Server stored it. Every value of `archive_key`, `bearer_token` and `password` is now masked
+  whatever its spelling, and a configuration text that does not parse is not reported.
+
 ## [0.6.1]
 
 ### Added
