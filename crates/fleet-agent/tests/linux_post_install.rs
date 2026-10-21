@@ -219,3 +219,25 @@ fn no_maintainer_script_removes_the_account() {
         }
     }
 }
+
+/// A removal runs `service stop`, then `service uninstall` (ADR-0042 clause 3), and stops nothing
+/// by its unit name: the stop takes down the second service too, where a process account is
+/// registered (ADR-0053).
+/// Verifies: ADR-0042, ADR-0053
+#[test]
+fn the_pre_removal_stops_both_services_before_it_deregisters() {
+    let commands = commands(&maintainer_script("prerm"));
+    let position = |needle: &str| {
+        commands
+            .iter()
+            .position(|c| c.starts_with(needle))
+            .unwrap_or_else(|| panic!("no {needle} in {commands:#?}"))
+    };
+    let stop = position("/usr/libexec/opamp-fleet/supervisor service stop");
+    let uninstall = position("/usr/libexec/opamp-fleet/supervisor service uninstall");
+    assert!(stop < uninstall, "{commands:#?}");
+    assert!(
+        !commands.iter().any(|c| c.contains("systemctl stop")),
+        "{commands:#?}"
+    );
+}
