@@ -510,18 +510,25 @@ fn through_the_second_service(
     agents: &AgentsChannel,
 ) -> Result<(supervisor::process::Spawner, LeftBehind), String> {
     use crate::supervisor::channel::Channel;
-    use crate::supervisor::process::Spawner;
     tracing::info!(
         socket = %agents.socket.display(),
         process_uid = agents.process_uid,
         "starting every Managed Process through the second service"
     );
-    let channel = Channel::new(&agents.socket, agents.process_uid);
+    Ok(watched(Channel::new(&agents.socket, agents.process_uid)))
+}
+
+/// The spawner that starts every Managed Process through `channel`, and what resolves once the
+/// channel says that the self-update left this Client behind.
+#[cfg(unix)]
+fn watched(
+    channel: crate::supervisor::channel::Channel,
+) -> (supervisor::process::Spawner, LeftBehind) {
     let watched = channel.clone();
-    Ok((
-        Spawner::Channel(channel),
+    (
+        supervisor::process::Spawner::Channel(channel),
         Box::pin(async move { watched.left_behind().await }),
-    ))
+    )
 }
 
 /// The run's shutdown where the second service starts its programs: `shutdown`, or `told`
@@ -598,22 +605,48 @@ pub(crate) fn ignore_sighup() {
 mod tests {
     use super::*;
 
-    /// A Client the second service tells it was left behind ends its run as for its own update;
-    /// one the operator stops ends as stopped (ADR-0059 clause 2).
+    /// A Client whose start meets a second service of another build, while `current` no longer
+    /// names its own version, ends its run as for its own update; one the operator stops ends as
+    /// stopped (ADR-0059 clause 2). From the start through the Spawner the run hands its
+    /// Supervisors to the end of the run's shutdown; what the run returns on it is the one line
+    /// after, reached only by a whole run against a Server.
     /// Verifies: ADR-0059
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_client_left_behind_ends_its_run_for_the_restart() {
+        use crate::supervisor::channel::{peer, read_frame, write_frame, Channel, Reply, Request};
+        use crate::supervisor::process::Launch;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        // The second service `current` names, which this Client is not.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let _ = read_frame::<_, Request>(&mut stream).await;
+                let hello = Reply::Hello {
+                    version: "0.0.0-the-build-current-names".to_string(),
+                };
+                let _ = write_frame(&mut stream, &hello).await;
+            }
+        });
+        let (spawner, told) = watched(Channel::with_superseded(&socket, peer::own_uid(), || true));
         let (_operator, shutdown) = shutdown_channel();
-        let (tell, told) = tokio::sync::oneshot::channel::<()>();
         let left_behind = Arc::new(AtomicBool::new(false));
-        let mut run = or_left_behind(
-            shutdown,
-            Box::pin(async move {
-                let _ = told.await;
-            }),
-            Arc::clone(&left_behind),
-        );
-        tell.send(()).expect("tell");
+        let mut run = or_left_behind(shutdown, told, Arc::clone(&left_behind));
+        let started = spawner
+            .spawn(
+                "test",
+                Launch {
+                    program: PathBuf::from("/bin/true"),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    endpoint_token: None,
+                    working_dir: None,
+                    own_process_group: false,
+                },
+            )
+            .await;
+        assert!(started.is_err(), "started through another build");
         tokio::time::timeout(std::time::Duration::from_secs(5), run.requested())
             .await
             .expect("the run ends");

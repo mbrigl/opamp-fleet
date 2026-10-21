@@ -975,7 +975,11 @@ impl Channel {
     }
 
     /// [`Channel::new`], told by `superseded` whether a self-update switched `current`.
-    fn with_superseded(socket: &Path, service_uid: u32, superseded: fn() -> bool) -> Channel {
+    pub(crate) fn with_superseded(
+        socket: &Path,
+        service_uid: u32,
+        superseded: fn() -> bool,
+    ) -> Channel {
         Channel {
             shared: Arc::new(Shared {
                 socket: socket.to_path_buf(),
