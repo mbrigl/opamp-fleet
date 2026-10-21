@@ -287,7 +287,7 @@ pub struct Runner {
     /// an operator has a fallback window. Zero deletes it on success.
     pub retain_previous: Duration,
     /// Opens an encrypted `.7z` artifact (ADR-0026); `None` when no key is configured.
-    pub archive_key: Option<String>,
+    pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
     /// How to prove a staged package runs before it replaces what does (ADR-0017 clause 57). `None` proves
@@ -526,7 +526,7 @@ impl Runner {
             .install
             .as_ref()
             .ok_or_else(|| "this supervisor manages nothing a package can replace".to_string())?;
-        let staged = target.stage(artifact, self.archive_key.as_deref())?;
+        let staged = target.stage(artifact, self.archive_key.as_deref().map(String::as_str))?;
         if let Some(preflight) = &self.preflight {
             if let Err(e) = run_preflight(&staged, preflight).await {
                 target.discard(&staged);

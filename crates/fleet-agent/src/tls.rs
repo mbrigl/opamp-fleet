@@ -288,7 +288,8 @@ mod tests {
     }
 
     /// The Client's secrets are held in buffers wiped when they are dropped: the key of a
-    /// bootstrap identity, a key file, a bootstrap password and the Supervisor Endpoint token.
+    /// bootstrap identity, a key file, a bootstrap password, the Supervisor Endpoint token and
+    /// `[packages] archive_key`.
     /// Were any of them a plain buffer again, this would not compile.
     /// Verifies: ADR-0057
     #[test]
@@ -300,6 +301,9 @@ mod tests {
         }
         fn endpoint_token(context: SupervisorContext) -> Zeroizing<String> {
             context.endpoint_token
+        }
+        fn archive_key(packages: crate::config::PackagesConfig) -> Option<Zeroizing<String>> {
+            packages.archive_key
         }
         let _: fn(SupervisorContext) -> Zeroizing<String> = endpoint_token;
         let reads_key: fn(&Path) -> Result<Zeroizing<Vec<u8>>, String> = key_file;
@@ -330,5 +334,11 @@ mod tests {
             key_pem: Zeroizing::new(b"key".to_vec()),
         };
         assert_eq!(*bootstrap_key(identity), b"key");
+        let packages: crate::config::PackagesConfig =
+            toml::from_str("archive_key = \"a-long-secret\"\n").expect("parses");
+        assert_eq!(
+            archive_key(packages).expect("a key").as_str(),
+            "a-long-secret"
+        );
     }
 }

@@ -280,7 +280,7 @@ pub struct SupervisorContext {
     pub retain_previous: Duration,
     /// The key that opens an encrypted `.7z` package artifact (ADR-0026); `None` when none is
     /// configured. Client-wide, like the package verification key.
-    pub archive_key: Option<String>,
+    pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.

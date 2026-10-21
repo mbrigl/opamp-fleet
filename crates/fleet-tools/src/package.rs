@@ -221,6 +221,9 @@ pub fn run(command: Command) -> Result<(), String> {
             program_name,
             archive_key,
         } => {
+            // Moved into a buffer wiped when it is dropped; what `clap` keeps of the command line
+            // is its own (ADR-0057).
+            let archive_key = archive_key.map(Zeroizing::new);
             if !program.is_file() {
                 return Err(format!(
                     "{} is not a file — a package delivers exactly one program, and an agent that \
@@ -244,7 +247,12 @@ pub fn run(command: Command) -> Result<(), String> {
                     }
                     pack_tar_gz(&program, &member, &out)?;
                 }
-                Format::SevenZ => pack_7z(&program, &member, &out, archive_key.as_deref())?,
+                Format::SevenZ => pack_7z(
+                    &program,
+                    &member,
+                    &out,
+                    archive_key.as_deref().map(String::as_str),
+                )?,
             }
             eprintln!(
                 "wrote {} holding {member:?} — a Supervisor whose program is named {member:?} \
