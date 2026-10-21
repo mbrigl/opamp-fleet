@@ -276,6 +276,11 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         // and the host would stay on a version that never reaches the Server to say so.
         Err(error) => return unreadable_config(&spec, error),
     };
+    // What the Client shares with the Managed Processes belongs to the process account's group
+    // (ADR-0059 clause 6), from before anything is written.
+    if let Some(agents) = &spec.agents {
+        config.process_group = Some(process_group(agents.process_uid)?);
+    }
     // A certificate swap a crash cut short is completed before the identity in force is read.
     crate::csr::recover(&config.state_dir)?;
     // Without a client certificate the Server refuses this Client; it says so and stops rather
@@ -496,6 +501,32 @@ fn heal_torn_pointer() {
         Ok(false) => {}
         Err(e) => tracing::warn!(error = %e, "cannot verify the current pointer"),
     }
+}
+
+/// The primary group of the process account `uid` names, from the password database: the group
+/// the Client shares what the Managed Processes read with (ADR-0059 clause 6). The registration
+/// names the account by its uid alone.
+///
+/// # Errors
+/// Returns an error when the database names no account for `uid`, or cannot be read: the Client
+/// does not start rather than share its files with a group it cannot name.
+#[cfg(unix)]
+fn process_group(uid: u32) -> Result<crate::storage::ProcessGroup, String> {
+    match crate::service::run_as::account_of(uid) {
+        Ok(Some(account)) => Ok(crate::storage::ProcessGroup(account.gid)),
+        Ok(None) => Err(format!(
+            "the process account (uid {uid}) the registration names does not exist; create it, or \
+             drop it with `service install --no-process-account`"
+        )),
+        Err(e) => Err(format!(
+            "cannot look up the process account (uid {uid}): {e}"
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn process_group(_uid: u32) -> Result<crate::storage::ProcessGroup, String> {
+    Err("the second service is not available on this platform".to_string())
 }
 
 /// What resolves once the second service tells this Client that a self-update left it behind.

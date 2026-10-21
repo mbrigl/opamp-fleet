@@ -250,9 +250,15 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
 
     // Held without following a link at its name, and each file written whole over a link at its
     // own: an install enrols as root in a directory that belongs to the service's account
-    // (ADR-0054).
-    let dir = HeldDir::create(&config.state_dir, 0o700)
-        .map_err(|e| format!("cannot create {}: {e}", config.state_dir.display()))?;
+    // (ADR-0054). Passed through by the process group where one is registered (ADR-0059 clause 6).
+    crate::storage::create_shared_dir(
+        &config.state_dir,
+        config.process_group,
+        crate::storage::Shared::Traversed,
+    )
+    .map_err(|e| format!("cannot create {}: {e}", config.state_dir.display()))?;
+    let dir = HeldDir::open(&config.state_dir)
+        .map_err(|e| format!("cannot open {}: {e}", config.state_dir.display()))?;
     // The key is written no wider than its owner, the mode set in the open call so it is never on
     // disk at the umask default even briefly; it replaces a key file a prior enrolment left at a
     // wider mode. On Windows the state directory's ACL under `%ProgramData%` protects it
