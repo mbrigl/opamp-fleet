@@ -3065,4 +3065,47 @@ mod tests {
         };
         assert!(reason.contains("GLIBC_2.39"), "{reason}");
     }
+
+    /// What the Client asks the second service to start carries no environment of the Client's:
+    /// the block's `env` and the Supervisor Endpoint's token, last, and nothing else — the program
+    /// takes the rest from the second service (ADR-0059 clause 7).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_through_the_second_service_carries_only_the_blocks_env_and_the_token() {
+        use crate::supervisor::channel::Stream;
+        let (peer, mut asked) = answering(Stream::Stdout, "", 0).await;
+        let (event_tx, _events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(1);
+        let mut runner = package_runner(
+            PathBuf::from("/nowhere/agent"),
+            Duration::ZERO,
+            event_tx,
+            command_rx,
+        );
+        runner.endpoint_token = zeroize::Zeroizing::new("the token".to_string());
+        runner.spawner = Spawner::Channel(peer.channel.clone());
+        runner.build = Box::new(|| {
+            Some(ProcessSpec {
+                program: PathBuf::from("/nowhere/agent"),
+                args: Vec::new(),
+                env: vec![("FROM_THE_BLOCK".to_string(), "1".to_string())],
+                working_dir: None,
+                ensure_dirs: Vec::new(),
+                own_process_group: false,
+            })
+        });
+        runner.try_spawn().await.expect("started");
+        let launch = asked
+            .try_recv()
+            .expect("the start was asked of the service");
+        assert_eq!(
+            launch.env,
+            vec![("FROM_THE_BLOCK".to_string(), "1".to_string())]
+        );
+        assert_eq!(
+            launch.endpoint_token.as_deref().map(String::as_str),
+            Some("the token")
+        );
+    }
 }
