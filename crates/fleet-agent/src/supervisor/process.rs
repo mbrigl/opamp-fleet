@@ -126,7 +126,9 @@ impl Spawner {
     }
 
     /// Runs `launch` to its end, as the version probe and the preflight do, within
-    /// [`PROBE_TIMEOUT`]: `None` when it does not end in time, and is stopped. Its output is what it
+    /// [`PROBE_TIMEOUT`] once the second service is reached: `None` when it does not end in time,
+    /// and is stopped. A second service that is not reached is an error [`is_unreachable`] holds
+    /// for. Its output is what it
     /// wrote, the last [`crate::supervisor::channel::CAPTURED`] bytes of each stream where the
     /// second service relays it.
     ///
@@ -140,6 +142,11 @@ impl Spawner {
     ) -> Option<std::io::Result<std::process::Output>> {
         #[cfg(not(unix))]
         let _ = supervisor;
+        // Reached first, outside the bound: a start may wait for the second service to come back,
+        // and a wait for it that the bound cut short would read as a program that did not answer.
+        if let Err(e) = self.reach().await {
+            return Some(Err(e));
+        }
         let mut attempt = 0;
         loop {
             let run = async {
@@ -3133,5 +3140,31 @@ mod tests {
         });
         runner.try_spawn().await.expect("started");
         assert_eq!(mode(&data), (0o2770, group.0));
+    }
+
+    /// A preflight that does not reach the second service refuses nothing, however long the wait
+    /// for the service takes: that wait is no program failing to answer in time, and the package
+    /// waits for the service instead of being refused (ADR-0053 clauses 2 and 3).
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_preflight_that_does_not_reach_the_second_service_refuses_nothing() {
+        use crate::supervisor::channel::{peer, Channel};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let channel = Channel::new(&dir.path().join("agents.sock"), peer::own_uid());
+        let staged = Staged {
+            root: dir.path().to_path_buf(),
+            program: dir.path().join("agent.staged"),
+            temp: dir.path().join("agent.staged"),
+        };
+        let preflight = Preflight {
+            args: vec!["--version".to_string()],
+            env: Vec::new(),
+        };
+        let outcome = run_preflight(&Spawner::Channel(channel), "test", &staged, &preflight).await;
+        let Preflighted::Unreached(e) = outcome else {
+            panic!("a preflight that did not reach the service refused or passed the package");
+        };
+        assert!(is_unreachable(&e), "{e}");
     }
 }
