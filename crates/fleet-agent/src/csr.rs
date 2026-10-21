@@ -234,8 +234,12 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
         .pem()
         .map_err(|e| format!("cannot encode the certificate request: {e}"))?;
 
-    crate::storage::create_private_dir(&config.state_dir)
-        .map_err(|e| format!("cannot create {}: {e}", config.state_dir.display()))?;
+    crate::storage::create_shared_dir(
+        &config.state_dir,
+        config.process_group,
+        crate::storage::Shared::Traversed,
+    )
+    .map_err(|e| format!("cannot create {}: {e}", config.state_dir.display()))?;
     // The key is written no wider than its owner, the mode set in the open call so it is never on
     // disk at the umask default even briefly; a key file left at a wider mode by a prior enrolment
     // is narrowed too. On Windows the state directory's ACL under `%ProgramData%` protects it

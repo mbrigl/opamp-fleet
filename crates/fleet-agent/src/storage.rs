@@ -42,12 +42,80 @@ pub const SUPPLEMENTARY_FILE: &str = ".supplementary";
 
 pub struct Storage {
     dir: PathBuf,
+    /// The process group, where a process account is registered (ADR-0053 clause 6): the
+    /// directory is passed through by it, and what is stored is kept from it.
+    group: Option<ProcessGroup>,
+    /// Whether `config/` is read by the Managed Process, and so shared with the process group: a
+    /// Supervisor's, never the Client's own.
+    config_shared: bool,
 }
 
 impl Storage {
+    /// The storage in `dir`, kept to the Client alone, as where no process account is registered.
     pub fn new(dir: PathBuf) -> io::Result<Self> {
-        create_private_dir(&dir)?;
-        Ok(Storage { dir })
+        Storage::open(dir, None, false)
+    }
+
+    /// The Client's own storage in the state directory: passed through by the process group on the
+    /// way to the Supervisors' directories, and nothing in it shared (ADR-0053 clause 6).
+    pub fn client(dir: PathBuf, group: Option<ProcessGroup>) -> io::Result<Self> {
+        Storage::open(dir, group, false)
+    }
+
+    /// A Supervisor's storage in its own directory: passed through by the process group, with
+    /// `config/` read by its Managed Process and the rest kept from it (ADR-0053 clause 6).
+    pub fn supervised(dir: PathBuf, group: Option<ProcessGroup>) -> io::Result<Self> {
+        Storage::open(dir, group, true)
+    }
+
+    fn open(dir: PathBuf, group: Option<ProcessGroup>, config_shared: bool) -> io::Result<Self> {
+        create_shared_dir(&dir, group, Shared::Traversed)?;
+        let storage = Storage {
+            dir,
+            group,
+            config_shared,
+        };
+        storage.share_config()?;
+        Ok(storage)
+    }
+
+    /// Shares what `config/` already holds with the process group — files written before a process
+    /// account was registered, or placed there by the operator — so the Managed Process reads them
+    /// before the next configuration is written. Nothing where `config/` is not shared, or does
+    /// not exist yet.
+    fn share_config(&self) -> io::Result<()> {
+        let Some(group) = self.config_group() else {
+            return Ok(());
+        };
+        let config_dir = self.config_dir();
+        if !config_dir.is_dir() {
+            return Ok(());
+        }
+        create_shared_dir(&config_dir, Some(group), Shared::Read)?;
+        #[cfg(unix)]
+        for entry in std::fs::read_dir(&config_dir)? {
+            let entry = entry?;
+            // Never through a link, and never a directory: only what the Client writes there.
+            if entry.file_type()?.is_file() {
+                share_file(&entry.path(), group)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The process group `config/` is shared with, if it is.
+    fn config_group(&self) -> Option<ProcessGroup> {
+        self.group.filter(|_| self.config_shared)
+    }
+
+    /// Writes one of the Client's own records. In a directory the process group passes through it
+    /// is kept from that group, `0600`; elsewhere it is written as it always was, at the umask.
+    fn write_record(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        if self.group.is_some() {
+            write_private(path, contents)
+        } else {
+            std::fs::write(path, contents)
+        }
     }
 
     /// Where [`store_remote_config`](Self::store_remote_config) writes the plain entry files —
@@ -206,7 +274,7 @@ impl AgentStorage for Storage {
     /// Persists a Server-assigned identity (AgentIdentification) so the reassignment survives a
     /// restart.
     fn save_uid(&self, uid: &InstanceUid) -> io::Result<()> {
-        std::fs::write(self.dir.join(UID_FILE), format!("{uid}\n"))
+        self.write_record(&self.dir.join(UID_FILE), format!("{uid}\n").as_bytes())
     }
 
     /// The last stored remote configuration, if any survived a previous run.
@@ -236,8 +304,11 @@ impl AgentStorage for Storage {
         check_entry_names(config).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         // The protobuf and the entry files can carry secret material (a roled `${file:...}` entry
         // that is a certificate or key), so both the config directory and the files are owner-only.
+        // Where a process account is registered, a Supervisor's `config/` is what its Managed
+        // Process reads: shared with the process group to read, never to write (ADR-0053
+        // clause 6).
         let config_dir = self.dir.join(CONFIG_DIR);
-        create_private_dir(&config_dir)?;
+        create_shared_dir(&config_dir, self.config_group(), Shared::Read)?;
         for entry in std::fs::read_dir(&config_dir)? {
             let path = entry?.path();
             if path.is_file() {
@@ -245,7 +316,7 @@ impl AgentStorage for Storage {
             }
         }
         for (file_name, body) in written_files(config) {
-            write_private(&config_dir.join(file_name), &body)?;
+            write_shared(&config_dir.join(file_name), &body, self.config_group())?;
         }
         // Last: a store cut short leaves the previous `.pb`, never a new one beside the previous
         // offer's files, which `drop_remote_config` would keep as the operator's (ADR-0017
@@ -268,7 +339,7 @@ impl AgentStorage for Storage {
     /// Records the installed package, so a restarted Client reports what it runs.
     fn store_package(&self, package: &InstalledPackage) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(package).expect("an InstalledPackage serializes");
-        std::fs::write(self.dir.join(PACKAGE_FILE), json)
+        self.write_record(&self.dir.join(PACKAGE_FILE), &json)
     }
 
     /// Drops the record: this Agent does not have that package. No record to drop is the state
@@ -349,8 +420,9 @@ pub fn entry_roles(config_dir: &std::path::Path) -> BTreeMap<String, String> {
 /// The state directory holds the Agent's identity and the Server-pushed configuration, and a
 /// config-map entry read by path (`${file:...}`) can be a certificate or a key (ADR-0023). At the
 /// umask default the directory is world-listable, so on a multi-user host another local user could
-/// read that material; owner-only closes it. The Managed Process runs as this same user, so it still
-/// reads its own config. On Windows the `%ProgramData%` ACL is what protects it (ADR-0019).
+/// read that material; owner-only closes it. Where no process account is registered the Managed
+/// Process runs as this same user, so it still reads its own config; where one is, what it reads
+/// is shared with its group instead ([`create_shared_dir`]). On Windows the `%ProgramData%` ACL is what protects it (ADR-0019).
 pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -359,6 +431,116 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+/// The process account's primary group, where a process account is registered (ADR-0053 clause 6).
+/// What the Client shares with the Managed Processes belongs to this group, and nothing else does.
+///
+/// Resolved from the `--process-uid` of the Client's command line when it starts, never from the
+/// configuration file: the registration that names the process account is the only place it is
+/// stated (ADR-0053 clause 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessGroup(pub u32);
+
+/// How a directory the Client creates is shared with the process group (ADR-0053 clause 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shared {
+    /// Passed through on the way to what is shared, never listed: `0710`. The state directory, the
+    /// Supervisors' root and each Supervisor's directory.
+    Traversed,
+    /// Read, never written: `0750`. `program/`, the preflight's staging, `config/`.
+    Read,
+    /// Written by the Managed Processes: `2770`, so what they create there keeps the group and
+    /// the Client can remove it. A kind's data directories.
+    Written,
+}
+
+impl Shared {
+    #[cfg(unix)]
+    fn mode(self) -> u32 {
+        match self {
+            Shared::Traversed => 0o710,
+            Shared::Read => 0o750,
+            Shared::Written => 0o2770,
+        }
+    }
+}
+
+/// Create `dir` (and its parents) shared with `group` as `shared` says: owned by the group, at the
+/// mode of ADR-0053 clause 6. Without a process group it is [`create_private_dir`], exactly as
+/// where none is registered.
+///
+/// The parents this creates are not shared: each that must be is named by its own call.
+pub(crate) fn create_shared_dir(
+    dir: &Path,
+    group: Option<ProcessGroup>,
+    shared: Shared,
+) -> io::Result<()> {
+    let Some(group) = group else {
+        return create_private_dir(dir);
+    };
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Never through a link: what is shared is the directory the Client made.
+        if !std::fs::symlink_metadata(dir)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} is not a directory", dir.display()),
+            ));
+        }
+        // The group first: a change of group may clear the set-group-ID bit the mode sets.
+        std::os::unix::fs::lchown(dir, None, Some(group.0))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(shared.mode()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (group, shared);
+    Ok(())
+}
+
+/// Makes the regular file at `path` readable by `group` and no wider: `0640`, owned by the group.
+#[cfg(unix)]
+fn share_file(path: &Path, group: ProcessGroup) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    std::os::unix::fs::fchown(&file, None, Some(group.0))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o640))
+}
+
+/// Write `contents` to `path` readable by `group`: `0640`, owned by the group (ADR-0053 clause 6).
+/// Without a process group it is [`write_private`].
+pub(crate) fn write_shared(
+    path: &Path,
+    contents: &[u8],
+    group: Option<ProcessGroup>,
+) -> io::Result<()> {
+    let Some(group) = group else {
+        return write_private(path, contents);
+    };
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        std::os::unix::fs::fchown(&file, None, Some(group.0))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o640))?;
+        file.write_all(contents)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = group;
+        std::fs::write(path, contents)
+    }
 }
 
 /// Write `contents` to `path`, owner-only on Unix — for the files that can carry secret material
@@ -622,6 +804,142 @@ mod tests {
             0o600,
             "a config entry — which may be a certificate or key — is owner-only"
         );
+    }
+
+    /// The group this test may share with: its own primary group, of which it is a member as the
+    /// Client is of the process account's.
+    #[cfg(unix)]
+    fn own_group() -> ProcessGroup {
+        // SAFETY: getegid(2) cannot fail and touches no memory.
+        ProcessGroup(unsafe { libc::getegid() })
+    }
+
+    #[cfg(unix)]
+    fn mode_and_group(path: &Path) -> (u32, u32) {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = std::fs::symlink_metadata(path).expect("metadata");
+        (meta.mode() & 0o7777, meta.gid())
+    }
+
+    /// Where a process account is registered, the Client shares with the process group what the
+    /// Managed Process reads and nothing else: the state directory and a Supervisor's directory
+    /// are passed through, `0710`; a Supervisor's `config/` and its entries are read, `0750` and
+    /// `0640`; a data directory is written, `2770`. The Client's own `config/`, the stored
+    /// protobuf, the identity and the package record stay the Client's, `0700` and `0600`.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn with_a_process_account_the_process_group_reads_only_what_it_runs_on() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let group = own_group();
+        let state = dir.path().join("state");
+        let client = Storage::client(state.clone(), Some(group)).expect("the Client's storage");
+        client
+            .store_remote_config(&roled_offer(&[("set", b"[[supervisor]]\n", "")]))
+            .expect("store the Client's own");
+        client
+            .save_uid(&InstanceUid::default())
+            .expect("the Client's identity");
+        assert_eq!(mode_and_group(&state), (0o710, group.0));
+        assert_eq!(mode_and_group(&client.config_dir()).0, 0o700);
+        assert_eq!(mode_and_group(&client.config_dir().join("set")).0, 0o600);
+        assert_eq!(mode_and_group(&state.join(UID_FILE)).0, 0o600);
+
+        let supervisor = state.join("supervisors").join("agent");
+        let storage =
+            Storage::supervised(supervisor.clone(), Some(group)).expect("a Supervisor's storage");
+        storage
+            .store_remote_config(&roled_offer(&[("certs", b"PEM\n", "supplementary")]))
+            .expect("store");
+        storage
+            .save_uid(&InstanceUid::default())
+            .expect("the Supervisor's identity");
+        storage
+            .store_package(&InstalledPackage {
+                name: "agent".to_string(),
+                version: "1.0.0".to_string(),
+                hash_hex: "01".to_string(),
+            })
+            .expect("the package record");
+        assert_eq!(mode_and_group(&supervisor), (0o710, group.0));
+        assert_eq!(mode_and_group(&storage.config_dir()), (0o750, group.0));
+        assert_eq!(
+            mode_and_group(&storage.config_dir().join("certs")),
+            (0o640, group.0)
+        );
+        assert_eq!(
+            mode_and_group(&storage.config_dir().join(SUPPLEMENTARY_FILE)),
+            (0o640, group.0)
+        );
+        assert_eq!(mode_and_group(&supervisor.join(CONFIG_PB_FILE)).0, 0o600);
+        assert_eq!(mode_and_group(&supervisor.join(UID_FILE)).0, 0o600);
+        assert_eq!(mode_and_group(&supervisor.join(PACKAGE_FILE)).0, 0o600);
+
+        let data = supervisor.join("data");
+        create_shared_dir(&data, Some(group), Shared::Written).expect("a data directory");
+        assert_eq!(mode_and_group(&data), (0o2770, group.0));
+    }
+
+    /// What `config/` held before a process account was registered is shared when the
+    /// Supervisor's storage opens, so its Managed Process reads it before the next configuration
+    /// arrives; a link there is left alone.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn what_config_held_before_is_shared_when_the_storage_opens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let supervisor = dir.path().join("agent");
+        let before = Storage::new(supervisor.clone()).expect("without a process account");
+        before
+            .store_remote_config(&roled_offer(&[("fleet", b"service: {}\n", "")]))
+            .expect("store");
+        std::os::unix::fs::symlink("/etc/hostname", before.config_dir().join("link"))
+            .expect("a link the operator placed");
+        assert_eq!(mode_and_group(&before.config_dir().join("fleet")).0, 0o600);
+
+        let group = own_group();
+        let after = Storage::supervised(supervisor, Some(group)).expect("with one");
+        assert_eq!(mode_and_group(&after.config_dir()), (0o750, group.0));
+        assert_eq!(
+            mode_and_group(&after.config_dir().join("fleet")),
+            (0o640, group.0)
+        );
+    }
+
+    /// Without a process account every mode is what it was before there was one: directories
+    /// `0700`, the stored configuration `0600`, and the identity and the package record at the
+    /// umask, as a plain write leaves them.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn without_a_process_account_every_mode_stays_as_it_was() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reference = dir.path().join("reference");
+        std::fs::write(&reference, b"x").expect("a plain write");
+        let at_umask = mode_and_group(&reference);
+
+        let supervisor = dir.path().join("agent");
+        let storage = Storage::supervised(supervisor.clone(), None).expect("storage");
+        storage
+            .store_remote_config(&roled_offer(&[("certs", b"PEM\n", "")]))
+            .expect("store");
+        storage.save_uid(&InstanceUid::default()).expect("identity");
+        storage
+            .store_package(&InstalledPackage {
+                name: "agent".to_string(),
+                version: "1.0.0".to_string(),
+                hash_hex: "01".to_string(),
+            })
+            .expect("package");
+        assert_eq!(mode_and_group(&supervisor).0, 0o700);
+        assert_eq!(mode_and_group(&storage.config_dir()).0, 0o700);
+        assert_eq!(mode_and_group(&storage.config_dir().join("certs")).0, 0o600);
+        assert_eq!(mode_and_group(&supervisor.join(CONFIG_PB_FILE)).0, 0o600);
+        assert_eq!(mode_and_group(&supervisor.join(UID_FILE)), at_umask);
+        assert_eq!(mode_and_group(&supervisor.join(PACKAGE_FILE)), at_umask);
+        let data = supervisor.join("data");
+        create_shared_dir(&data, None, Shared::Written).expect("a data directory");
+        assert_eq!(mode_and_group(&data).0, 0o700);
     }
 
     #[test]

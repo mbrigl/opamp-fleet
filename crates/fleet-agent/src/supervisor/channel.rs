@@ -755,8 +755,23 @@ fn start(launch: &Launch) -> io::Result<Child> {
     if let Some(dir) = &launch.working_dir {
         command.current_dir(dir);
     }
+    // What the program creates is writable by its group, so that what it makes under a data
+    // directory — set-group-ID and shared with the Client (ADR-0053 clause 6) — is the Client's to
+    // remove when it purges a Supervisor (ADR-0017 clause 34), subdirectories included. Others
+    // keep what a default umask leaves them.
+    // SAFETY: umask(2) is async-signal-safe, allocates nothing, and cannot fail.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(PROGRAM_UMASK);
+            Ok(())
+        });
+    }
     command.spawn()
 }
+
+/// The umask a program the second service starts runs with: group-writable, and nothing more
+/// for others than the usual `022` gives them.
+const PROGRAM_UMASK: libc::mode_t = 0o002;
 
 /// `HOME`, `USER` and `LOGNAME` of the account this service runs as — the process account — from
 /// the password database, whatever the environment the service was started with says. Empty
@@ -1915,6 +1930,27 @@ mod tests {
                 account.name
             )
         );
+    }
+
+    /// A program the second service starts creates what its group may write, so the Client — a
+    /// member of the process group — can purge what it left under a data directory, nested
+    /// directories included (ADR-0053 clause 6, ADR-0017 clause 34).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_program_creates_what_its_group_may_write() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = service(own_uid());
+        let channel = Channel::connect(&service.socket, own_uid())
+            .await
+            .expect("connect");
+        let made = dir.path().join("made");
+        let launch = sh(&format!("mkdir {0} && : > {0}/file", made.display()));
+        let output = channel.output("test", launch).await.expect("ran");
+        assert!(output.status.success(), "{output:?}");
+        let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode(&made), 0o775);
+        assert_eq!(mode(&made.join("file")), 0o664);
     }
 
     /// What a program run to its end writes is kept up to its last [`CAPTURED`] bytes per stream,

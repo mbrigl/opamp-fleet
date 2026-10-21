@@ -422,16 +422,22 @@ impl InstallTarget {
     ///
     /// # Errors
     /// Returns an error when the directory cannot be created.
-    pub fn prepare(&self) -> Result<(), String> {
+    ///
+    /// Where a process account is registered, that directory is `program/`, read by the process
+    /// group and written by the Client alone (ADR-0053 clause 6).
+    pub fn prepare(&self, group: Option<crate::storage::ProcessGroup>) -> Result<(), String> {
         let dir = match self {
             InstallTarget::Binary(path) => path.parent().map(std::path::Path::to_path_buf),
             InstallTarget::Tree { root, .. } => Some(root.clone()),
         };
-        match dir {
-            Some(dir) => std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("cannot prepare {}: {e}", dir.display())),
-            None => Ok(()),
-        }
+        let Some(dir) = dir else {
+            return Ok(());
+        };
+        let prepared = match group {
+            Some(_) => crate::storage::create_shared_dir(&dir, group, crate::storage::Shared::Read),
+            None => std::fs::create_dir_all(&dir),
+        };
+        prepared.map_err(|e| format!("cannot prepare {}: {e}", dir.display()))
     }
 
     /// Moves what runs today aside, so a failed install has something to go back to. `false` means
@@ -454,10 +460,14 @@ impl InstallTarget {
     /// Splitting this from [`commit`](Self::commit) is what buys the preflight of ADR-0017 clause 57: the
     /// staged program can be proved to run *before* the running one is stopped, so a package that
     /// could never have worked costs no downtime at all.
+    ///
+    /// A tree is staged in a directory the process group reads, where a process account is
+    /// registered, so the preflight it runs can reach it (ADR-0053 clause 6).
     fn stage(
         &self,
         artifact: &std::path::Path,
         archive_key: Option<&str>,
+        group: Option<crate::storage::ProcessGroup>,
     ) -> Result<Staged, String> {
         match self {
             InstallTarget::Binary(path) => {
@@ -472,7 +482,7 @@ impl InstallTarget {
                 })
             }
             InstallTarget::Tree { root, program_path } => {
-                let staging = stage_tree(artifact, root, program_path, archive_key)?;
+                let staging = stage_tree(artifact, root, program_path, archive_key, group)?;
                 Ok(Staged {
                     program: staging.join(program_path),
                     root: staging.clone(),
@@ -655,6 +665,10 @@ pub struct Runner {
     pub reload_signal: Option<i32>,
     /// Who starts the Managed Process (ADR-0053).
     pub spawner: Spawner,
+    /// The process account's primary group, where a process account is registered: the
+    /// directories the Managed Process writes into and the preflight's staging belong to it
+    /// (ADR-0053 clause 6).
+    pub process_group: Option<crate::storage::ProcessGroup>,
     pub events: EventSender,
     pub commands: mpsc::Receiver<ProcessCommand>,
     pub build: Box<dyn Fn() -> Option<ProcessSpec> + Send + Sync>,
@@ -902,7 +916,7 @@ impl Runner {
             .install
             .as_ref()
             .ok_or_else(|| "this supervisor manages nothing a package can replace".to_string())?;
-        let staged = target.stage(artifact, self.archive_key.as_deref())?;
+        let staged = target.stage(artifact, self.archive_key.as_deref(), self.process_group)?;
         match self.check(&staged).await {
             Preflighted::Passed => Ok((staged, true)),
             Preflighted::Refused(e) => {
@@ -1585,7 +1599,13 @@ impl Runner {
         // package, or restart — rather than the process starting and exiting on a directory nobody
         // made.
         for dir in &spec.ensure_dirs {
-            if let Err(e) = crate::storage::create_private_dir(dir) {
+            // Written by the Managed Process, so shared with its group where a process account
+            // is registered (ADR-0053 clause 6).
+            if let Err(e) = crate::storage::create_shared_dir(
+                dir,
+                self.process_group,
+                crate::storage::Shared::Written,
+            ) {
                 warn!(supervisor = %self.name, dir = %dir.display(), error = %e, "cannot prepare a directory the agent writes into");
                 return Err(std::io::Error::other(format!(
                     "cannot prepare {}: {e}",
@@ -1992,12 +2012,16 @@ fn stage_tree(
     root: &std::path::Path,
     program_path: &std::path::Path,
     archive_key: Option<&str>,
+    group: Option<crate::storage::ProcessGroup>,
 ) -> Result<PathBuf, String> {
     let staging = root.join(".staging");
     // A previous attempt that died between unpacking and the rename would leave this behind.
     let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging)
-        .map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
+    let created = match group {
+        Some(_) => crate::storage::create_shared_dir(&staging, group, crate::storage::Shared::Read),
+        None => std::fs::create_dir_all(&staging),
+    };
+    created.map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
 
     let unpack = |staging: &std::path::Path| -> Result<(), String> {
         let summary = match crate::archive::detect(artifact)? {
@@ -2148,7 +2172,7 @@ mod tests {
         let target = InstallTarget::Binary(live.clone());
         let artifact = dir.path().join("downloaded");
         std::fs::copy("/bin/false", &artifact).expect("a program that exits at once");
-        let staged = target.stage(&artifact, None).expect("stage");
+        let staged = target.stage(&artifact, None, None).expect("stage");
         let (event_tx, mut events) = mpsc::channel(64);
         let (_commands, command_rx) = mpsc::channel(1);
         let (_shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
@@ -2207,7 +2231,7 @@ mod tests {
         let target = InstallTarget::Binary(live.clone());
         let artifact = dir.path().join("downloaded");
         std::fs::copy("/bin/false", &artifact).expect("a program that exits at once");
-        let staged = target.stage(&artifact, None).expect("stage");
+        let staged = target.stage(&artifact, None, None).expect("stage");
         let (event_tx, mut events) = mpsc::channel(64);
         let (_commands, command_rx) = mpsc::channel(1);
         let (_shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
@@ -2265,6 +2289,7 @@ mod tests {
             preflight: None,
             reload_signal: None,
             spawner: Spawner::Local,
+            process_group: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || {
@@ -2368,6 +2393,7 @@ mod tests {
             preflight: None,
             reload_signal: Some(libc::SIGHUP),
             spawner: Spawner::Channel(peer.channel.clone()),
+            process_group: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(|| None),
@@ -2431,6 +2457,7 @@ mod tests {
             preflight: None,
             reload_signal: None,
             spawner: Spawner::Channel(Channel::new(socket, peer::own_uid())),
+            process_group: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || {
@@ -2720,7 +2747,7 @@ mod tests {
         let program = dir.path().join("program/agent");
         std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
         let target = InstallTarget::Binary(program.clone());
-        let staged = target.stage(&artifact, None).expect("stage");
+        let staged = target.stage(&artifact, None, None).expect("stage");
         target.commit(&staged).expect("commit");
 
         assert_eq!(std::fs::read(&program).expect("read"), b"the-program");
@@ -2770,7 +2797,7 @@ mod tests {
 
         let program = dir.path().join("agent");
         let target = InstallTarget::Binary(program.clone());
-        let staged = target.stage(&artifact, None).expect("stage");
+        let staged = target.stage(&artifact, None, None).expect("stage");
         target.commit(&staged).expect("commit");
 
         assert_eq!(std::fs::read(&program).expect("read"), b"the-member");
@@ -3047,5 +3074,64 @@ mod tests {
                 (ENDPOINT_TOKEN_ENV.to_string(), "the token".to_string()),
             ]
         );
+    }
+
+    /// Where a process account is registered, a tree is staged in a directory its group reads, so
+    /// the preflight the second service runs reaches it, and a data directory the agent writes
+    /// into is made set-group-ID and group-writable (ADR-0053 clause 6). Without one, the staging
+    /// is made as it always was.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_staging_and_the_data_directories_are_shared_with_the_process_group() {
+        use std::os::unix::fs::MetadataExt as _;
+        let mode = |path: &std::path::Path| {
+            let meta = std::fs::metadata(path).expect("metadata");
+            (meta.mode() & 0o7777, meta.gid())
+        };
+        // SAFETY: getegid(2) cannot fail and touches no memory.
+        let group = crate::storage::ProcessGroup(unsafe { libc::getegid() });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("downloaded");
+        std::fs::copy("/bin/true", &artifact).expect("a bare program");
+        let root = dir.path().join("program");
+        let target = InstallTarget::Tree {
+            root: root.clone(),
+            program_path: PathBuf::from("bin/agent"),
+        };
+        target.prepare(Some(group)).expect("prepare");
+        assert_eq!(mode(&root), (0o750, group.0));
+        let staged = target.stage(&artifact, None, Some(group)).expect("staged");
+        assert_eq!(mode(&staged.root), (0o750, group.0));
+        target.discard(&staged);
+
+        let reference = dir.path().join("reference");
+        std::fs::create_dir(&reference).expect("a plain directory");
+        let staged = target.stage(&artifact, None, None).expect("staged");
+        assert_eq!(mode(&staged.root), mode(&reference));
+
+        let data = dir.path().join("data").join("inventory");
+        let (event_tx, _events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(1);
+        let mut runner = package_runner(
+            PathBuf::from("/bin/true"),
+            Duration::ZERO,
+            event_tx,
+            command_rx,
+        );
+        runner.process_group = Some(group);
+        let made = data.clone();
+        runner.build = Box::new(move || {
+            Some(ProcessSpec {
+                program: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+                env: Vec::new(),
+                working_dir: None,
+                ensure_dirs: vec![made.clone()],
+                own_process_group: false,
+            })
+        });
+        runner.try_spawn().await.expect("started");
+        assert_eq!(mode(&data), (0o2770, group.0));
     }
 }
