@@ -1495,8 +1495,9 @@ impl Runner {
             return Err(std::io::Error::other("nothing to run"));
         };
         // What the agent writes into, guaranteed before it runs. A failure here is a spawn failure
-        // like any other: the Runner reports it and retries with backoff, rather than the process
-        // starting and exiting on a directory nobody made.
+        // like any other — reported in the health, and tried again with the next configuration,
+        // package, or restart — rather than the process starting and exiting on a directory nobody
+        // made.
         for dir in &spec.ensure_dirs {
             if let Err(e) = crate::storage::create_private_dir(dir) {
                 warn!(supervisor = %self.name, dir = %dir.display(), error = %e, "cannot prepare a directory the agent writes into");
