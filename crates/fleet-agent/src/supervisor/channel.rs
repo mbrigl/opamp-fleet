@@ -679,6 +679,9 @@ impl Channel {
 
     /// Asks the service to start `launch`, and waits until it runs or did not start.
     ///
+    /// Cancel-safe: a start dropped before the answer asks the service to stop the program it may
+    /// have started, as dropping its [`RemoteChild`] would.
+    ///
     /// # Errors
     /// Returns the service's reason the program did not start, keeping its OS error, or that the
     /// channel is closed.
@@ -703,7 +706,10 @@ impl Channel {
             self.inner.routes().by_id.remove(&id);
             return Err(e);
         }
-        let pid = started.await.map_err(|_| closed())??;
+        let pending = Pending { channel: self, id };
+        let answer = started.await;
+        std::mem::forget(pending);
+        let pid = answer.map_err(|_| closed())??;
         Ok(RemoteChild {
             channel: self.clone(),
             id,
@@ -718,6 +724,20 @@ impl Channel {
     fn send(&self, request: &Request) -> io::Result<()> {
         let frame = encode(request)?;
         self.inner.requests.send(frame).map_err(|_| closed())
+    }
+}
+
+/// A start sent and not yet answered. Dropped — the start abandoned — it stops the program the
+/// service may already run and forgets its route; an answered start forgets the guard instead.
+struct Pending<'a> {
+    channel: &'a Channel,
+    id: u64,
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        self.channel.inner.routes().by_id.remove(&self.id);
+        let _ = self.channel.send(&Request::Stop { id: self.id });
     }
 }
 
@@ -1060,6 +1080,78 @@ mod tests {
             "the running program was reported ended"
         );
         running.kill().await.expect("kill");
+    }
+
+    /// A start abandoned before the service answered leaves nothing behind: the program it may
+    /// have started is stopped, and its route is gone.
+    /// Verifies: ADR-0053
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_abandoned_start_stops_its_program() {
+        let service = service(own_uid());
+        let channel = Channel::connect(&service.socket).await.expect("connect");
+        // A duration no other process on the host sleeps for, to find this one by.
+        let marker = format!(
+            "299.{}{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .subsec_nanos()
+        );
+        let launch = Launch {
+            program: PathBuf::from("sleep"),
+            args: vec![marker.clone()],
+            ..sh("")
+        };
+        {
+            let mut start = std::pin::pin!(channel.start(launch));
+            // One poll sends the request; the answer cannot be there yet.
+            std::future::poll_fn(|cx| {
+                assert!(start.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        assert!(
+            channel.inner.routes().by_id.is_empty(),
+            "the abandoned start kept its route"
+        );
+        // The service answers in order: once a later start is answered, the abandoned one has run
+        // and been asked to stop.
+        let mut later = channel.start(sh("exit 0")).await.expect("a later start");
+        later.wait().await.expect("the later program ended");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while running_with_arg(&marker) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the abandoned start's program kept running"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Whether a live process has `arg` among its arguments.
+    #[cfg(target_os = "linux")]
+    fn running_with_arg(arg: &str) -> bool {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                return false;
+            };
+            std::fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| {
+                cmdline
+                    .split(|b| *b == 0)
+                    .any(|word| word == arg.as_bytes())
+            }) && alive(pid)
+        })
     }
 
     /// Closing the Client's connection stops every program the service started, with everything
