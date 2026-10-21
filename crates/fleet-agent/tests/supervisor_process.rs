@@ -2229,6 +2229,35 @@ mod an_apply_while_the_second_service_is_away {
         shut_down(away).await;
     }
 
+    /// A configuration whose retry reaches the second service but whose program does not start —
+    /// it is not there — is `FAILED`, as the apply itself would have been, and is not started
+    /// again: a respawn is for a program that ran and exited within the grace (ADR-0026 clause
+    /// 63), and a start that did not happen has nothing to respawn.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_retry_whose_program_does_not_start_fails_the_configuration_and_respawns_nothing() {
+        let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
+        the_service_goes(&mut away, service).await;
+        apply(&away.harness, b"cfg").await;
+        the_apply_finds_it_away(&mut away).await;
+        std::fs::remove_file(&away.binary).expect("remove the program");
+
+        let _service = Service::up(&away.socket);
+        let (hash, result) = next_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"cfg".to_vec());
+        let error = result.expect_err("the program did not start");
+        assert!(error.contains("did not start"), "{error}");
+        // A respawn would be due within a second.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        while let Ok((_, event)) = away.harness.events.try_recv() {
+            assert!(
+                !matches!(event, ProcessEvent::Health(_)),
+                "a start after the configuration failed: {event:?}"
+            );
+        }
+        shut_down(away).await;
+    }
+
     /// The second service goes during a package's apply grace, and the program with it: the
     /// program rejected nothing, so the package is neither installed nor refused; it is taken back
     /// out to wait, what ran before is put back, and the swap once the service is back decides —
