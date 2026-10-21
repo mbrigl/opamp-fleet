@@ -2350,6 +2350,16 @@ mod tests {
         );
     }
 
+    /// The health a Supervisor reports while the second service is not reached, for the reason
+    /// `status` names.
+    fn waiting_for(status: &str) -> ComponentHealth {
+        ComponentHealth {
+            healthy: false,
+            status: status.to_string(),
+            ..Default::default()
+        }
+    }
+
     /// A configuration that waits for the second service stays `APPLYING` and names why, as the
     /// Supervisor's health says it — down or refused; once a start reaches the service the reason
     /// goes, and the acknowledgement closes it. A health that comes after it changes nothing.
@@ -2357,11 +2367,10 @@ mod tests {
     #[test]
     fn a_configuration_that_waits_for_the_second_service_stays_applying_and_says_why() {
         use crate::supervisor::ports::{REFUSED, UNREACHABLE};
-        use crate::supervisor::process::unhealthy;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut agent = supervised_agent(dir.path());
         let _ = agent.next_report();
-        agent.set_process_health(unhealthy(UNREACHABLE.to_string(), String::new()));
+        agent.set_process_health(waiting_for(UNREACHABLE));
         let _ = agent.next_report();
         agent.handle(&ServerToAgent {
             remote_config: Some(remote_config(b"x: 1\n", b"hash-1")),
@@ -2374,7 +2383,7 @@ mod tests {
             "it waits from its receipt"
         );
 
-        agent.set_process_health(unhealthy(REFUSED.to_string(), String::new()));
+        agent.set_process_health(waiting_for(REFUSED));
         let status = agent.next_report().remote_config_status.expect("a status");
         assert_eq!(status.status, RemoteConfigStatuses::Applying as i32);
         assert_eq!(status.last_remote_config_hash, b"hash-1");
@@ -2394,7 +2403,7 @@ mod tests {
         assert_eq!(status.status, RemoteConfigStatuses::Applied as i32);
         assert!(status.error_message.is_empty(), "{status:?}");
 
-        agent.set_process_health(unhealthy(UNREACHABLE.to_string(), String::new()));
+        agent.set_process_health(waiting_for(UNREACHABLE));
         assert!(
             agent.next_report().remote_config_status.is_none(),
             "an applied configuration waits for nothing"
@@ -2408,7 +2417,6 @@ mod tests {
     #[test]
     fn a_package_that_waits_for_the_second_service_stays_installing_and_says_why() {
         use crate::supervisor::ports::UNREACHABLE;
-        use crate::supervisor::process::unhealthy;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut agent = supervised_agent(dir.path());
         agent.accept_packages();
@@ -2431,7 +2439,7 @@ mod tests {
                 .clone()
         };
 
-        agent.set_process_health(unhealthy(UNREACHABLE.to_string(), String::new()));
+        agent.set_process_health(waiting_for(UNREACHABLE));
         let downloading = status(&mut agent);
         assert_eq!(
             downloading.status,

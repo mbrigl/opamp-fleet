@@ -29,9 +29,9 @@ pub const REFUSED: &str =
     "the second service is refused: another account, another build, or it refuses this Client";
 
 /// Why `health` says that the second service is not reached — [`UNREACHABLE`] or [`REFUSED`] —
-/// or `None` where it says nothing of the kind. While it says so, a configuration that is applied
-/// and a package that is installed wait for the service, and the Agent names it as the reason
-/// (ADR-0053 clause 2).
+/// or `None` where it says nothing of the kind. While it says so, a configuration that is
+/// `APPLYING` and a package that is `Installing` wait for the service, and the Agent names it as the
+/// reason (ADR-0053 clause 2).
 #[must_use]
 pub fn waiting_reason(health: &ComponentHealth) -> Option<&str> {
     let waits = !health.healthy && (health.status == UNREACHABLE || health.status == REFUSED);
