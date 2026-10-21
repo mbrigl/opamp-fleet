@@ -63,6 +63,11 @@ const REFUSAL_LOG_EVERY: Duration = Duration::from_secs(60);
 /// group is killed.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
 
+/// How long the Client waits for the service to answer a signal. The service sends one at once;
+/// it answers late only while it stops its programs, on shutting down, and a stop or a reload that
+/// waited for that would wait out [`CLOSE_GRACE`] before its own bound began.
+pub(crate) const SIGNAL_ANSWER: Duration = Duration::from_secs(2);
+
 /// How many lines of output may wait to be written to the Client. A program that writes faster
 /// than they go out waits on its pipe, as it would on a slow terminal; nothing else waits on it.
 const OUTPUT_QUEUE: usize = 256;
@@ -1053,10 +1058,12 @@ impl RemoteChild {
     }
 
     /// Sends `signal` to the program, or with `group` to its process group where it leads one, and
-    /// waits for the service's answer. Once the program has ended there is nothing to signal.
+    /// waits for the service's answer, up to [`SIGNAL_ANSWER`]. Once the program has ended there is
+    /// nothing to signal.
     ///
     /// # Errors
-    /// Returns why the service could not send the signal, or that the channel is closed.
+    /// Returns why the service could not send the signal, that it did not answer in time, or that
+    /// the channel is closed.
     pub async fn signal(&self, signal: i32, group: bool) -> io::Result<()> {
         if self.outcome.is_some() {
             return Ok(());
@@ -1074,10 +1081,15 @@ impl RemoteChild {
             })?;
             route.signals.push_back(signalled);
         }
-        match answer.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(io::Error::other(e)),
-            Err(_) => Err(closed()),
+        // A late answer still finds its place in the queue, and goes nowhere; the order holds.
+        match tokio::time::timeout(SIGNAL_ANSWER, answer).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(io::Error::other(e)),
+            Ok(Err(_)) => Err(closed()),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the agents service did not answer the signal in time",
+            )),
         }
     }
 
@@ -1099,6 +1111,59 @@ impl Drop for RemoteChild {
         self.channel.inner.routes().by_id.remove(&self.id);
         if self.outcome.is_none() {
             let _ = self.channel.send(&Request::Stop { id: self.id });
+        }
+    }
+}
+
+/// A stand-in for the second service, for the cases its real behaviour cannot be steered into: it
+/// shakes hands, then answers each request with what `answer` makes of it.
+#[cfg(test)]
+pub(crate) mod peer {
+    use super::*;
+
+    /// A connection to the stand-in, and the directory its socket lives in.
+    pub(crate) struct Peer {
+        pub(crate) channel: Channel,
+        _dir: tempfile::TempDir,
+    }
+
+    /// Serves one connection with `answer` and connects the Client's end to it.
+    pub(crate) async fn connect(
+        mut answer: impl FnMut(Request) -> Vec<Reply> + Send + 'static,
+    ) -> Peer {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
+                let replies = match request {
+                    Request::Hello { .. } => vec![Reply::Hello {
+                        version: this_build().to_string(),
+                    }],
+                    request => answer(request),
+                };
+                for reply in replies {
+                    if write_frame(&mut stream, &reply).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        let channel = Channel::connect(&socket).await.expect("connect");
+        Peer { channel, _dir: dir }
+    }
+
+    /// Starts every program as a pid nobody has, kills it on a stop, and never answers a signal —
+    /// as the second service does not while it stops its programs on shutting down.
+    pub(crate) fn mute(request: Request) -> Vec<Reply> {
+        match request {
+            Request::Start { id, .. } => vec![Reply::Started { id, pid: u32::MAX }],
+            Request::Stop { id } => vec![Reply::Exited {
+                id,
+                status: Ok(libc::SIGKILL),
+            }],
+            _ => Vec::new(),
         }
     }
 }
@@ -1434,6 +1499,19 @@ mod tests {
             .signal(libc::SIGTERM, false)
             .await
             .expect("nothing to do");
+    }
+
+    /// A signal the service does not answer — it is stopping its programs on shutting down — fails
+    /// after [`SIGNAL_ANSWER`] instead of holding up the stop or the reload that sent it.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_signal_the_service_does_not_answer_fails_in_time() {
+        let peer = peer::connect(peer::mute).await;
+        let child = peer.channel.start("test", sh("true")).await.expect("start");
+        let sent = tokio::time::timeout(SIGNAL_ANSWER * 3, child.signal(libc::SIGTERM, true))
+            .await
+            .expect("the signal gives up in time");
+        assert!(sent.is_err(), "an unanswered signal is not taken as sent");
     }
 
     /// A program that cannot start is reported with its OS error, so the Client still tells a
