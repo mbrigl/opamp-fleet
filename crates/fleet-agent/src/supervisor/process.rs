@@ -233,6 +233,9 @@ pub fn is_refused(error: &std::io::Error) -> bool {
 struct Waiting {
     /// When the next start is due; `None` while nothing waits for the service.
     due: Option<tokio::time::Instant>,
+    /// Whether the last start did not reach the second service. A start made due at once by one
+    /// that did reach it (`due_now`) is due without the service being away.
+    away: bool,
     backoff: Backoff,
 }
 
@@ -240,6 +243,7 @@ impl Waiting {
     fn new() -> Self {
         Waiting {
             due: None,
+            away: false,
             backoff: Backoff::new(),
         }
     }
@@ -247,17 +251,20 @@ impl Waiting {
     /// The service was not reached: the next start is due after the backoff.
     fn arm(&mut self) {
         self.due = Some(tokio::time::Instant::now() + self.backoff.advance());
+        self.away = true;
     }
 
     /// The service was reached by a start that decided nothing that waits for it: the start that
-    /// does is due now.
+    /// does is due now, and the service is not away.
     fn due_now(&mut self) {
         self.due = Some(tokio::time::Instant::now());
+        self.away = false;
     }
 
     /// The service was reached, or nothing is to start: nothing waits.
     fn clear(&mut self) {
         self.due = None;
+        self.away = false;
         self.backoff.reset();
     }
 
@@ -271,7 +278,7 @@ impl Waiting {
 
     /// Whether the last start did not reach the second service.
     fn armed(&self) -> bool {
-        self.due.is_some()
+        self.away
     }
 }
 
@@ -1992,6 +1999,23 @@ mod tests {
             .expect("in time")
             .expect("run once the writer let go");
         assert!(output.status.success());
+    }
+
+    /// A retry made due at once by a start that reached the second service — a restart command's —
+    /// is due without the service being away: a package offered before it runs is swapped in, not
+    /// parked for a service that is back (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_retry_due_at_once_does_not_say_the_service_is_away() {
+        let mut waiting = Waiting::new();
+        waiting.arm();
+        assert!(waiting.armed(), "a start that did not reach the service");
+        waiting.clear();
+        waiting.due_now();
+        assert!(!waiting.armed(), "the service was reached");
+        tokio::time::timeout(Duration::from_secs(1), waiting.due())
+            .await
+            .expect("the retry is due at once");
     }
 
     /// What the stand-in for the second service is asked to start; it runs nothing.
