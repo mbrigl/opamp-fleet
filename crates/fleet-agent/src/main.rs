@@ -220,6 +220,15 @@ fn install(
         manager::service_name(),
     )?;
     let run_as = account.run_as;
+    // The process account, decided and checked by the same rule (ADR-0059 clause 1):
+    // `--process-account`, else the account the second service's unit names, else none — and then
+    // no second service, and nothing changes.
+    let process = run_as::decide_process_account(
+        args.process_account.as_deref(),
+        manager::agents_registration(level)?.as_ref(),
+        run_as.as_ref(),
+        manager::agents_supported(level),
+    )?;
 
     // Everything baked into the unit is absolute: a service's working directory is `/` or
     // `System32`, so a relative path would silently point nowhere. An operator who named no path
@@ -365,6 +374,7 @@ fn install(
         config_path: config_path.clone(),
         state_dir: state_dir.clone(),
         run_as: run_as.as_ref().map(|r| r.account().to_string()),
+        agents: agents_spec(process.as_ref(), run_as.as_ref()),
     })?;
 
     // The handover (ADR-0042 clause 2), on every registration that runs under an account — a kept
@@ -419,11 +429,43 @@ fn install(
             account.source.describe()
         );
     }
+    if let Some(process) = &process {
+        println!(
+            "  processes: {} ({}), started by {}",
+            process.account(),
+            process.describe(),
+            manager::agents_service_name()
+        );
+    }
     // Since service-manager 0.10, launchd installs do not auto-start; say the next step instead
     // of pretending.
     let user = if args.scope.user { " --user" } else { "" };
     println!("start it with: supervisor service start{user}");
     Ok(())
+}
+
+/// The second service a registration names, where a process account was decided (ADR-0059): it
+/// serves the Client's account, and the Client accepts the process account as its peer.
+#[cfg(unix)]
+fn agents_spec(
+    process: Option<&run_as::ProcessAccount>,
+    client: Option<&run_as::RunAs>,
+) -> Option<manager::Agents> {
+    let (process, client) = (process?, client?);
+    Some(manager::Agents {
+        account: process.account().to_string(),
+        uid: process.uid(),
+        client_uid: client.uid(),
+    })
+}
+
+/// No second service is registered here yet (ADR-0059).
+#[cfg(not(unix))]
+fn agents_spec(
+    _process: Option<&run_as::ProcessAccount>,
+    _client: Option<&run_as::RunAs>,
+) -> Option<manager::Agents> {
+    None
 }
 
 /// `service config`: the questionnaire of `install --interactive` against an installed Client, and

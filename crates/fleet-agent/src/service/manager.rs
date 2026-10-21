@@ -3,8 +3,10 @@
 //! `service-manager` targets the platform's native manager (systemd, launchd, Windows SCM) behind
 //! one API. This module wraps it in the project's vocabulary. There is **one service per build**
 //! (ADR-0019): it is named after the product, takes no suffix, and nothing has to be looked up to
-//! address it. The installed program is the layout's `current` pointer, so a self-update is a
-//! pointer switch — never a re-registration.
+//! address it. Where a process account is registered, a second service, `<PRODUCT_NAME>-agents`,
+//! runs beside it under that account (ADR-0059), and every verb acts on both. The installed
+//! program is the layout's `current` pointer, so a self-update is a pointer switch — never a
+//! re-registration.
 
 use std::ffi::OsString;
 // `Path` is used only by the Unix `default_base` variants; Windows builds with -D warnings.
@@ -47,6 +49,27 @@ pub fn service_name() -> &'static str {
     PRODUCT_NAME
 }
 
+/// The name of the second service, which starts the Managed Processes under the process account
+/// (ADR-0059 clause 2): the product's, with the suffix `-agents`.
+#[must_use]
+pub fn agents_service_name() -> String {
+    format!("{PRODUCT_NAME}-agents")
+}
+
+/// The second service's socket, in the runtime directory systemd creates for it, named after it
+/// (`RuntimeDirectory=`), and removes when it stops.
+#[must_use]
+pub fn agents_socket() -> PathBuf {
+    PathBuf::from("/run")
+        .join(agents_service_name())
+        .join("agents.sock")
+}
+
+/// How long systemd waits for the second service to stop before it kills it: longer than the
+/// service's own grace for its programs and the drain of their output after it, so a stop ends
+/// them through the service rather than through the manager.
+pub const AGENTS_STOP_TIMEOUT_SECS: u32 = 30;
+
 /// The name a human reads where the platform has somewhere to put one (ADR-0019): the Windows
 /// services list. systemd shows the unit name as its `Description`, and a launchd job *is* its
 /// label — neither has a second name to give.
@@ -81,6 +104,15 @@ fn label() -> ServiceLabel {
     }
 }
 
+/// The second service's label, built as [`label`] is.
+fn agents_label() -> ServiceLabel {
+    ServiceLabel {
+        qualifier: None,
+        organization: None,
+        application: agents_service_name(),
+    }
+}
+
 /// Build the native service manager, selecting user-level when requested.
 fn manager(level: ServiceLevel) -> Result<Box<dyn ServiceManager>, String> {
     let mut manager = <dyn ServiceManager>::native()
@@ -111,6 +143,20 @@ pub struct InstallSpec {
     /// macOS a system registration always names one, `root` included; on Windows `None` leaves the
     /// logon account the SCM holds, `LocalSystem` on a first registration.
     pub run_as: Option<String>,
+    /// The second service, where a process account is registered (ADR-0059); already decided and
+    /// checked by [`run_as`](super::run_as).
+    pub agents: Option<Agents>,
+}
+
+/// The second service a registration names (ADR-0059 clause 2).
+#[derive(Debug, Clone)]
+pub struct Agents {
+    /// The process account it runs under.
+    pub account: String,
+    /// That account's uid, which the Client accepts as the socket's peer.
+    pub uid: u32,
+    /// The uid of the Client's account, the one peer the second service serves.
+    pub client_uid: u32,
 }
 
 /// The installed command line: `run --service --config … --state-dir …`. The hidden `--service`
@@ -120,14 +166,39 @@ pub struct InstallSpec {
 /// rather than a migration (ADR-0053 clause 2): the program path and the rest of the unit are
 /// rewritten from the version that registers, and the configuration, identity and state stay
 /// where they are.
+///
+/// Where a process account is registered, the line also names the second service's socket and the
+/// process account's uid: that is how the running Client learns that it starts every Managed
+/// Process through the second service, and whom to accept as its peer (ADR-0059 clauses 3, 4).
 fn service_args(spec: &InstallSpec) -> Vec<OsString> {
-    vec![
+    let mut args = vec![
         OsString::from("run"),
         OsString::from("--service"),
         OsString::from("--config"),
         spec.config_path.clone().into_os_string(),
         OsString::from("--state-dir"),
         spec.state_dir.clone().into_os_string(),
+    ];
+    if let Some(agents) = &spec.agents {
+        args.extend([
+            OsString::from("--agents-socket"),
+            agents_socket().into_os_string(),
+            OsString::from("--process-uid"),
+            OsString::from(agents.uid.to_string()),
+        ]);
+    }
+    args
+}
+
+/// The second service's command line: `run --agents <socket> --client-uid <uid>` (ADR-0059
+/// clause 2). It reads neither the configuration nor the state directory.
+fn agents_args(agents: &Agents) -> Vec<OsString> {
+    vec![
+        OsString::from("run"),
+        OsString::from("--agents"),
+        agents_socket().into_os_string(),
+        OsString::from("--client-uid"),
+        OsString::from(agents.client_uid.to_string()),
     ]
 }
 
@@ -140,6 +211,10 @@ fn service_args(spec: &InstallSpec) -> Vec<OsString> {
 /// Returns an error if the manager rejects the install (commonly: not running as
 /// root/Administrator for a system-level service), or if the recovery actions cannot be set.
 pub fn install(spec: &InstallSpec) -> Result<(), String> {
+    // The second service first: the Client's unit names it as what it wants and starts after.
+    if let Some(agents) = &spec.agents {
+        install_agents(spec, agents)?;
+    }
     install_service(spec)?;
     // What `service-manager` does not do on Windows, done here (see `windows_config`) — since
     // ADR-0019 that includes the logon account, which its `sc.exe` backend ignores.
@@ -190,6 +265,36 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
         })
 }
 
+/// Registers the second service (ADR-0059 clause 2): a systemd system unit of the Client's own text,
+/// which only a host where [`agents_supported`] holds gets.
+fn install_agents(spec: &InstallSpec, agents: &Agents) -> Result<(), String> {
+    manager(spec.level)?
+        .install(ServiceInstallCtx {
+            label: agents_label(),
+            program: spec.program.clone(),
+            args: agents_args(agents),
+            contents: Some(agents_unit(spec, agents)?),
+            username: Some(agents.account.clone()),
+            working_directory: None,
+            environment: None,
+            autostart: true,
+            restart_policy: RESTART_POLICY,
+        })
+        .map_err(|e| format!("cannot install the second service: {e}"))
+}
+
+/// Whether this host can register the second service: a system service under systemd on Linux,
+/// so far (ADR-0059).
+#[must_use]
+pub fn agents_supported(level: ServiceLevel) -> bool {
+    level == ServiceLevel::System
+        && cfg!(target_os = "linux")
+        && matches!(
+            ServiceManagerKind::native(),
+            Ok(ServiceManagerKind::Systemd)
+        )
+}
+
 /// What `service-manager` is handed as the unit's text: the Client's own systemd **system** unit
 /// (ADR-0042 clause 6) where systemd is the native manager, and nothing — the crate's own
 /// rendering — for the user scope and every other manager.
@@ -229,25 +334,24 @@ const ROOT_UNIT: &[&str] = &[
 /// character that would change what the unit says.
 pub fn systemd_unit(spec: &InstallSpec, account: &str) -> Result<String, String> {
     use std::fmt::Write as _;
-    if account.is_empty()
-        || account
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '%' | '\\' | '"'))
-    {
-        return Err(format!(
-            "the account {account:?} cannot be written into a systemd unit"
-        ));
-    }
-    let mut exec = vec![exec_word(spec.program.as_os_str())?];
-    for arg in service_args(spec) {
-        exec.push(exec_word(&arg)?);
-    }
+    check_unit_account(account)?;
+    let exec = exec_line(&spec.program, service_args(spec))?;
     let mut unit = String::new();
     let _ = writeln!(unit, "[Unit]");
     let _ = writeln!(unit, "Description={}", service_name());
+    // The second service is started first and stopped last (ADR-0059 clause 2): `After=` orders
+    // both, and `Wants=` pulls it in at boot. Not `Requires=`: a second service that fails, or is
+    // stopped on its own, leaves the Client running — it still reports to the Server, its
+    // Supervisors report that their programs do not start, and it reaches the service again once
+    // the manager has restarted it.
+    if spec.agents.is_some() {
+        let agents = agents_service_name();
+        let _ = writeln!(unit, "Wants={agents}.service");
+        let _ = writeln!(unit, "After={agents}.service");
+    }
     let _ = writeln!(unit);
     let _ = writeln!(unit, "[Service]");
-    let _ = writeln!(unit, "ExecStart={}", exec.join(" "));
+    let _ = writeln!(unit, "ExecStart={exec}");
     let _ = writeln!(unit, "Restart=on-failure");
     let _ = writeln!(unit, "RestartSec={RESTART_DELAY_SECS}");
     let _ = writeln!(unit, "User={account}");
@@ -259,6 +363,67 @@ pub fn systemd_unit(spec: &InstallSpec, account: &str) -> Result<String, String>
     let _ = writeln!(unit, "[Install]");
     let _ = writeln!(unit, "WantedBy=multi-user.target");
     Ok(unit)
+}
+
+/// The second service's systemd system unit (ADR-0059 clause 2): the same program as the Client's,
+/// under the process account, with the directives ADR-0042 clause 7 sets for that account.
+///
+/// `RuntimeDirectory=` is where its socket lives: systemd creates it for the process account at
+/// every start, `0750`, so only that account and its group — the Client's account is in it
+/// (ADR-0059 clause 6) — reach the socket, and removes it at the stop. `TimeoutStopSec=` outlasts
+/// the service's own stop of its programs.
+///
+/// # Errors
+/// Returns an error if a path is not UTF-8, or if the account name holds a character that would
+/// change what the unit says.
+pub fn agents_unit(spec: &InstallSpec, agents: &Agents) -> Result<String, String> {
+    use std::fmt::Write as _;
+    check_unit_account(&agents.account)?;
+    let exec = exec_line(&spec.program, agents_args(agents))?;
+    let name = agents_service_name();
+    let mut unit = String::new();
+    let _ = writeln!(unit, "[Unit]");
+    let _ = writeln!(unit, "Description={name}");
+    let _ = writeln!(unit);
+    let _ = writeln!(unit, "[Service]");
+    let _ = writeln!(unit, "ExecStart={exec}");
+    let _ = writeln!(unit, "Restart=on-failure");
+    let _ = writeln!(unit, "RestartSec={RESTART_DELAY_SECS}");
+    let _ = writeln!(unit, "User={}", agents.account);
+    let _ = writeln!(unit, "RuntimeDirectory={name}");
+    let _ = writeln!(unit, "RuntimeDirectoryMode=0750");
+    let _ = writeln!(unit, "TimeoutStopSec={AGENTS_STOP_TIMEOUT_SECS}");
+    // Never root (ADR-0059 clause 1), so never the root tier.
+    for directive in EVERY_SYSTEM_UNIT {
+        let _ = writeln!(unit, "{directive}");
+    }
+    let _ = writeln!(unit);
+    let _ = writeln!(unit, "[Install]");
+    let _ = writeln!(unit, "WantedBy=multi-user.target");
+    Ok(unit)
+}
+
+/// Refuses an account name that would change what a unit says.
+fn check_unit_account(account: &str) -> Result<(), String> {
+    if account.is_empty()
+        || account
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '%' | '\\' | '"'))
+    {
+        return Err(format!(
+            "the account {account:?} cannot be written into a systemd unit"
+        ));
+    }
+    Ok(())
+}
+
+/// `ExecStart=`'s value: the program and every argument, each quoted by [`exec_word`].
+fn exec_line(program: &std::path::Path, args: Vec<OsString>) -> Result<String, String> {
+    let mut exec = vec![exec_word(program.as_os_str())?];
+    for arg in args {
+        exec.push(exec_word(&arg)?);
+    }
+    Ok(exec.join(" "))
 }
 
 /// One word of `ExecStart=`, in double quotes: `\` and `"` are escaped, a control character is
@@ -339,6 +504,39 @@ fn read_registration(
         })),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("cannot read {}: {e}", file.display())),
+    }
+}
+
+/// The second service's registration as the Client wrote it (ADR-0059 clause 1):
+/// `/etc/systemd/system/<PRODUCT_NAME>-agents.service` and the account its `User=` names, read
+/// as [`registration`] reads the Client's. `None` wherever no second service can be registered,
+/// and where no file exists.
+///
+/// # Errors
+/// Returns an error if the file exists and cannot be read.
+pub fn agents_registration(level: ServiceLevel) -> Result<Option<Registration>, String> {
+    if level == ServiceLevel::User {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    return read_registration(&agents_unit_path(), unit_account);
+    #[cfg(not(target_os = "linux"))]
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn agents_unit_path() -> PathBuf {
+    service_manager::systemd_global_dir_path().join(format!("{}.service", agents_service_name()))
+}
+
+/// Whether a second service is registered at `level`.
+fn agents_registered(level: ServiceLevel) -> bool {
+    #[cfg(target_os = "linux")]
+    return level == ServiceLevel::System && agents_unit_path().exists();
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = level;
+        false
     }
 }
 
@@ -594,7 +792,16 @@ fn command_line_arguments(line: &str) -> Vec<String> {
 pub fn uninstall(level: ServiceLevel) -> Result<(), String> {
     manager(level)?
         .uninstall(ServiceUninstallCtx { label: label() })
-        .map_err(|e| format!("cannot uninstall the service: {e}"))
+        .map_err(|e| format!("cannot uninstall the service: {e}"))?;
+    // The second service last, as it is stopped last (ADR-0059 clause 2).
+    if agents_registered(level) {
+        manager(level)?
+            .uninstall(ServiceUninstallCtx {
+                label: agents_label(),
+            })
+            .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
+    }
+    Ok(())
 }
 
 /// The installed service, implementing the [`ServiceControl`] seam.
@@ -610,17 +817,35 @@ impl NativeService {
     }
 }
 
+/// Where a second service is registered, every verb acts on it too: it is started first and
+/// stopped last (ADR-0059 clause 2). The state is the Client's.
 impl ServiceControl for NativeService {
     fn start(&self) -> Result<(), String> {
+        if agents_registered(self.level) {
+            manager(self.level)?
+                .start(ServiceStartCtx {
+                    label: agents_label(),
+                })
+                .map_err(|e| format!("cannot start the second service: {e}"))?;
+        }
         manager(self.level)?
             .start(ServiceStartCtx { label: label() })
             .map_err(|e| format!("cannot start the service: {e}"))
     }
 
     fn stop(&self) -> Result<(), String> {
-        manager(self.level)?
+        let stopped = manager(self.level)?
             .stop(ServiceStopCtx { label: label() })
-            .map_err(|e| format!("cannot stop the service: {e}"))
+            .map_err(|e| format!("cannot stop the service: {e}"));
+        // Stopped even when the Client's stop failed: a stop leaves nothing running it can stop.
+        if agents_registered(self.level) {
+            manager(self.level)?
+                .stop(ServiceStopCtx {
+                    label: agents_label(),
+                })
+                .map_err(|e| format!("cannot stop the second service: {e}"))?;
+        }
+        stopped
     }
 
     fn state(&self) -> Result<ServiceState, String> {
@@ -798,6 +1023,7 @@ mod tests {
             config_path: PathBuf::from("/var/lib/opamp-fleet/supervisor.toml"),
             state_dir: PathBuf::from("/var/lib/opamp-fleet/state"),
             run_as: Some("opamp-fleet".to_string()),
+            agents: None,
         };
         let args = service_args(&spec);
         assert!(
@@ -850,6 +1076,7 @@ mod tests {
             config_path: PathBuf::from("/var/lib/opamp-fleet/supervisor.toml"),
             state_dir: PathBuf::from("/var/lib/opamp-fleet/state"),
             run_as: Some("opamp-fleet".to_string()),
+            agents: None,
         }
     }
 
@@ -1019,6 +1246,162 @@ mod tests {
             unit.lines().any(|l| l == "User=root"),
             "a system unit always names its account: {unit}"
         );
+    }
+
+    fn agents() -> Agents {
+        Agents {
+            account: "opamp-fleet-agents".to_string(),
+            uid: 997,
+            client_uid: 998,
+        }
+    }
+
+    fn with_agents() -> InstallSpec {
+        InstallSpec {
+            agents: Some(agents()),
+            ..system_spec("/opt/opamp-fleet")
+        }
+    }
+
+    /// The second service is the product's name with `-agents`, one token that every backend
+    /// renders alike, and its socket lives in the runtime directory named after it.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_second_service_is_named_after_the_product() {
+        assert_eq!(agents_service_name(), format!("{PRODUCT_NAME}-agents"));
+        let label = agents_label();
+        assert_eq!(label.to_qualified_name(), agents_service_name());
+        assert_eq!(label.to_script_name(), agents_service_name());
+        assert_eq!(
+            agents_socket(),
+            PathBuf::from("/run/opamp-fleet-agents/agents.sock")
+        );
+    }
+
+    /// The second service runs the same program under the process account, as `run --agents`
+    /// serving the Client's uid, with its socket in a runtime directory only the account and its
+    /// group reach, and the directives ADR-0042 clause 7 gives a unit that is not root.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_second_services_unit_runs_the_program_under_the_process_account() {
+        let unit = agents_unit(&with_agents(), &agents()).expect("unit");
+        let lines: Vec<&str> = unit.lines().collect();
+        for line in [
+            "[Unit]",
+            "Description=opamp-fleet-agents",
+            "[Service]",
+            "ExecStart=\"/opt/opamp-fleet/current/supervisor\" \"run\" \"--agents\" \
+             \"/run/opamp-fleet-agents/agents.sock\" \"--client-uid\" \"998\"",
+            "Restart=on-failure",
+            "RestartSec=5",
+            "User=opamp-fleet-agents",
+            "RuntimeDirectory=opamp-fleet-agents",
+            "RuntimeDirectoryMode=0750",
+            "ProtectControlGroups=yes",
+            "[Install]",
+            "WantedBy=multi-user.target",
+        ] {
+            assert!(lines.contains(&line), "{line} in {unit}");
+        }
+        let set = directives(&unit);
+        for absent in [
+            "NoNewPrivileges",
+            "ProtectKernelTunables",
+            "LockPersonality",
+            "RestrictRealtime",
+            "ProtectSystem",
+            "ProtectHome",
+            "PrivateTmp",
+            "Wants",
+            "After",
+        ] {
+            assert!(!set.contains(&absent), "{absent} in {unit}");
+        }
+        let mut evil = agents();
+        evil.account = "evil\nExecStartPre=/bin/sh".to_string();
+        assert!(
+            agents_unit(&with_agents(), &evil).is_err(),
+            "an account name cannot add a directive"
+        );
+    }
+
+    /// A re-registration keeps the process account the second service's unit names: what the
+    /// Client writes there, it reads back.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_second_services_account_is_read_back_from_its_unit() {
+        let unit = agents_unit(&with_agents(), &agents()).expect("unit");
+        assert_eq!(unit_account(&unit).as_deref(), Some("opamp-fleet-agents"));
+    }
+
+    /// systemd waits longer for the second service to stop than the service gives its programs,
+    /// so a stop ends them through the service.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_second_service_stops_before_systemd_kills_it() {
+        use crate::supervisor::channel::{CLOSE_GRACE, OUTPUT_DRAIN};
+        let unit = agents_unit(&with_agents(), &agents()).expect("unit");
+        assert!(
+            unit.lines()
+                .any(|l| l == format!("TimeoutStopSec={AGENTS_STOP_TIMEOUT_SECS}")),
+            "{unit}"
+        );
+        assert!(
+            std::time::Duration::from_secs(u64::from(AGENTS_STOP_TIMEOUT_SECS))
+                > CLOSE_GRACE + OUTPUT_DRAIN
+        );
+    }
+
+    /// Where a process account is registered, the Client's unit wants the second service and starts
+    /// after it, and its command line names the socket and the process account's uid; the CLI
+    /// takes both lines as written.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_clients_unit_names_the_second_service() {
+        let unit = systemd_unit(&with_agents(), "opamp-fleet").expect("unit");
+        let header = &unit[..unit.find("[Service]").expect("service section")];
+        assert!(
+            header
+                .lines()
+                .any(|l| l == "Wants=opamp-fleet-agents.service"),
+            "{unit}"
+        );
+        assert!(
+            header
+                .lines()
+                .any(|l| l == "After=opamp-fleet-agents.service"),
+            "{unit}"
+        );
+        assert!(
+            unit.contains(
+                "\"--agents-socket\" \"/run/opamp-fleet-agents/agents.sock\" \"--process-uid\" \
+                 \"997\""
+            ),
+            "{unit}"
+        );
+        let plain = systemd_unit(&system_spec("/opt/opamp-fleet"), "opamp-fleet").expect("unit");
+        assert!(!plain.contains("agents"), "{plain}");
+
+        let words = |args: Vec<OsString>| {
+            std::iter::once(OsString::from("supervisor"))
+                .chain(args)
+                .collect::<Vec<_>>()
+        };
+        let client = crate::cli::parse_from(words(service_args(&with_agents())))
+            .expect("the Client's line parses");
+        let Some(crate::cli::Command::Run(run)) = client.cli.command else {
+            panic!("run");
+        };
+        assert_eq!(run.agents_socket, Some(agents_socket()));
+        assert_eq!(run.process_uid, Some(997));
+        let second = crate::cli::parse_from(words(agents_args(&agents())))
+            .expect("the second service's line parses");
+        let Some(crate::cli::Command::Run(run)) = second.cli.command else {
+            panic!("run");
+        };
+        assert_eq!(run.agents, Some(agents_socket()));
+        assert_eq!(run.client_uid, Some(998));
     }
 
     /// A re-registration reads the account from the unit the Client wrote: the last `User=` in

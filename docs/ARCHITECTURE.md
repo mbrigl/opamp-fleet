@@ -50,7 +50,9 @@ than anywhere else, and none beats one that has stopped being true.
   ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md),
   [ADR-0033](adr/0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)).
 - **The service manager** starts the Client and restarts it after a self-update
-  ([ADR-0018](adr/0018-the-client-updates-itself-under-its-own-agent-type.md)).
+  ([ADR-0018](adr/0018-the-client-updates-itself-under-its-own-agent-type.md)). Where a process
+  account is registered, it also runs the second service, which starts the Managed Processes
+  under that account (ADR-0059).
 - **Upstream**, the opamp-spec release named as the Protocol Baseline in
   [`CONFORMANCE.md`](CONFORMANCE.md) fixes the wire format.
 
