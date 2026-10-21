@@ -1031,6 +1031,14 @@ impl Channel {
         }
     }
 
+    /// Reaches the service: the open connection, or a new one once the last is gone.
+    ///
+    /// # Errors
+    /// Returns why the service was not reached, an error [`is_unreachable`] holds for.
+    pub(crate) async fn reach(&self) -> io::Result<()> {
+        self.connection().await.map(|_| ()).map_err(unreachable)
+    }
+
     /// The open connection, or a new one once the last is gone.
     async fn connection(&self) -> io::Result<Arc<Connection>> {
         let mut state = self.shared.state.lock().await;

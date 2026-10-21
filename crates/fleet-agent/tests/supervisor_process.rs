@@ -1866,6 +1866,27 @@ mod an_apply_while_the_second_service_is_away {
         }
     }
 
+    /// For `span`, the program live is `bytes` at every look, and no apply reports an outcome.
+    async fn stays_live(away: &mut Away, bytes: &[u8], span: Duration) {
+        let until = tokio::time::Instant::now() + span;
+        while tokio::time::Instant::now() < until {
+            assert!(
+                std::fs::read(&away.binary).ok().as_deref() == Some(bytes),
+                "another program is live"
+            );
+            while let Ok((_, event)) = away.harness.events.try_recv() {
+                assert!(
+                    !matches!(
+                        event,
+                        ProcessEvent::ConfigApplied { .. } | ProcessEvent::PackageApplied { .. }
+                    ),
+                    "an outcome reported while the second service is away: {event:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     async fn shut_down(away: Away) {
         away.harness.shutdown_tx.send(true).expect("shutdown");
         tokio::time::timeout(Duration::from_secs(10), away.harness.task)
@@ -1898,11 +1919,8 @@ mod an_apply_while_the_second_service_is_away {
             .await
             .expect("send");
         staged_beside(&away, &bytes_of(&stub_crasher())).await;
-        assert_eq!(
-            std::fs::read(&away.binary).expect("read"),
-            good,
-            "what ran stays in place"
-        );
+        // What ran stays in place, and nothing is reported.
+        stays_live(&mut away, &good, Duration::from_secs(1)).await;
 
         let _service = Service::up(&away.socket);
         let (hash, result) = next_package_ack(&mut away.harness.events).await;
@@ -1913,6 +1931,70 @@ mod an_apply_while_the_second_service_is_away {
             std::fs::read(&away.binary).expect("read"),
             good,
             "rolled back once it failed"
+        );
+        shut_down(away).await;
+    }
+
+    /// A retry that does not reach the second service never swaps the package that waits in, not
+    /// even for the time it waits for the service: what ran is live throughout, so a Client that
+    /// ends meanwhile, however it ends, leaves the program the record names.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_retry_without_the_service_never_puts_the_waiting_package_live() {
+        let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
+        let old = bytes_of(&stub_agent());
+        the_service_goes(&mut away, service).await;
+        let new = another_build_of_the_agent();
+        offer(&away, &new, "2.0.0").await;
+        staged_beside(&away, &new).await;
+        // The first retry is due within a second, and waits for the service for longer than this.
+        stays_live(&mut away, &old, Duration::from_secs(3)).await;
+        shut_down(away).await;
+    }
+
+    /// The predecessor a successful update retained (ADR-0026 clause 64) outlasts the retries a
+    /// package that waits for the second service makes: one that does not reach the service sets
+    /// nothing aside. The swap once the service is back replaces it, as any next update does.
+    /// Verifies: ADR-0026, ADR-0053
+    #[tokio::test]
+    async fn a_retained_predecessor_outlasts_the_retries_while_a_package_waits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = bytes_of(&stub_agent());
+        write_executable(&dir.path().join("agent"), &first);
+        let service = Service::up(&dir.path().join("agents.sock"));
+        let mut away = on(dir, Duration::from_millis(500), Duration::from_secs(3600));
+        let health = next_health(&mut away.harness.events).await;
+        assert_eq!(health.status, "running", "{health:?}");
+        let second = another_build_of_the_agent();
+        offer(&away, &second, "2.0.0").await;
+        let (_, result) = next_package_ack(&mut away.harness.events).await;
+        assert_eq!(result, Ok("2.0.0".to_string()));
+        let backup = away.binary.with_extension("rollback");
+        let marker = away.dir.path().join("agent.rollback.until");
+        assert!(std::fs::read(&backup).expect("retained") == first);
+        assert!(marker.exists(), "the window is recorded");
+
+        the_service_goes(&mut away, service).await;
+        let mut third = another_build_of_the_agent();
+        third.extend_from_slice(b", and a third");
+        offer(&away, &third, "3.0.0").await;
+        staged_beside(&away, &third).await;
+        // The first retry is due within a second, and waits for the service for longer than this.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            std::fs::read(&backup).expect("still retained") == first,
+            "a retry set the retained predecessor aside"
+        );
+        assert!(marker.exists(), "the window is kept");
+
+        let _service = Service::up(&away.socket);
+        let (hash, result) = next_package_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"3.0.0".to_vec());
+        assert_eq!(result, Ok("3.0.0".to_string()));
+        assert!(std::fs::read(&away.binary).expect("read") == third);
+        assert!(
+            std::fs::read(&backup).expect("retained") == second,
+            "the swap replaces the retained predecessor"
         );
         shut_down(away).await;
     }
