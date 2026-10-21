@@ -385,12 +385,14 @@ fn install(
     // one and root included: both roots belong to it — config and state because the service reads
     // and rewrites them (ADR-0017), the executable layout because the self-update that stages into
     // it *is* the service (ADR-0018). The state directory is created first: the daemon must not
-    // need rights on its parent to begin.
+    // need rights on its parent to begin. Where a process account is registered, what it keeps
+    // there stays its own (ADR-0059 clause 10): every package upgrade re-registers.
     if let Some(run_as) = &run_as {
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
+        let kept = process.as_ref();
         let mut skipped =
-            run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path])?;
+            run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path], kept)?;
         // A Supervisors' root this install created and cut on Windows is the service's to write
         // too (ADR-0017 clause 21); none is created on Unix.
         skipped.extend(
@@ -400,6 +402,7 @@ fn install(
                     .filter(|dir| **dir != state_dir)
                     .map(PathBuf::as_path)
                     .collect::<Vec<_>>(),
+                kept,
             )?,
         );
         // The copy beside a configuration named outside the data root is not under it.
@@ -410,6 +413,7 @@ fn install(
                     .iter()
                     .map(PathBuf::as_path)
                     .collect::<Vec<_>>(),
+                kept,
             )?,
         );
         for file in skipped {

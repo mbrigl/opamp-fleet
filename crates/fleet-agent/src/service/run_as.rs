@@ -297,13 +297,22 @@ impl RunAs {
     /// failure here), and a path inside one handed over before it in the same call, which that
     /// walk covered without following a link. The handover is idempotent.
     ///
+    /// Where `process` names a process account, its data is left alone (ADR-0059 clause 10): an
+    /// entry it owns is skipped with everything beneath it, and an entry in its primary group
+    /// keeps that group, a directory its mode too, so a re-registration takes from no Managed
+    /// Process what it wrote or reads. Without one, everything is re-owned, group included.
+    ///
     /// Returns the regular files left as they were because they have a second hard link (Unix):
     /// another name for the file may stand outside the roots, and re-owning it would hand that
     /// over too.
     ///
     /// # Errors
     /// Returns an error naming the first path that could not be handed over.
-    pub fn hand_over(&self, paths: &[&Path]) -> Result<Vec<PathBuf>, String> {
+    pub fn hand_over(
+        &self,
+        paths: &[&Path],
+        process: Option<&ProcessAccount>,
+    ) -> Result<Vec<PathBuf>, String> {
         let mut skipped = Vec::new();
         let mut walked: Vec<&Path> = Vec::new();
         for path in paths {
@@ -312,7 +321,7 @@ impl RunAs {
             {
                 continue;
             }
-            self.own(path, &mut skipped).map_err(|e| {
+            self.own(path, process, &mut skipped).map_err(|e| {
                 format!(
                     "cannot hand {} over to {}: {e}",
                     path.display(),
@@ -325,12 +334,27 @@ impl RunAs {
     }
 
     #[cfg(unix)]
-    fn own(&self, path: &Path, skipped: &mut Vec<PathBuf>) -> std::io::Result<()> {
-        walk::chown_tree(path, self.uid, self.gid, skipped)
+    fn own(
+        &self,
+        path: &Path,
+        process: Option<&ProcessAccount>,
+        skipped: &mut Vec<PathBuf>,
+    ) -> std::io::Result<()> {
+        let kept = process.map(|process| walk::Kept {
+            uid: process.uid,
+            gid: process.gid,
+        });
+        walk::chown_tree(path, self.uid, self.gid, kept, skipped)
     }
 
+    /// No process account is registered on Windows yet (ADR-0059), so there is nothing to keep.
     #[cfg(not(unix))]
-    fn own(&self, path: &Path, _skipped: &mut Vec<PathBuf>) -> Result<(), String> {
+    fn own(
+        &self,
+        path: &Path,
+        _process: Option<&ProcessAccount>,
+        _skipped: &mut Vec<PathBuf>,
+    ) -> Result<(), String> {
         // Asked of the entry itself: a link or junction is never a directory to walk.
         let is_dir = std::fs::symlink_metadata(path)
             .map(|m| m.is_dir())
@@ -438,6 +462,9 @@ fn missing_account(
 pub struct ProcessAccount {
     account: String,
     uid: u32,
+    /// The primary group: what the Client shares with the Managed Processes belongs to it
+    /// (ADR-0059 clause 6).
+    gid: u32,
     /// The second service's unit it was kept from; `None` where `--process-account` named it.
     kept_from: Option<PathBuf>,
 }
@@ -532,10 +559,11 @@ pub fn decide_process_account(
             &client_ids,
             kept_from.as_deref(),
         )?;
-        let uid = found.map_or(0, |ids| ids.uid);
+        let (uid, gid) = found.map_or((0, 0), |ids| (ids.uid, ids.gid));
         Ok(Some(ProcessAccount {
             account,
             uid,
+            gid,
             kept_from,
         }))
     }
@@ -743,15 +771,25 @@ mod walk {
     const DIRECTORY: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
+    /// What the walk leaves to the process account (ADR-0059 clause 10): an entry `uid` owns is
+    /// not re-owned and not entered, and an entry in the group `gid` keeps it.
+    #[derive(Debug, Clone, Copy)]
+    pub(super) struct Kept {
+        pub(super) uid: u32,
+        pub(super) gid: u32,
+    }
+
     /// Re-own `path` and, if it is a directory, everything under it, without following a link.
     /// The top is the one name resolved as a path, and its last component is never followed.
+    /// What `kept` names is left as [`Kept`] says.
     pub(super) fn chown_tree(
         path: &Path,
         uid: u32,
         gid: u32,
+        kept: Option<Kept>,
         skipped: &mut Vec<PathBuf>,
     ) -> io::Result<()> {
-        chown_tree_with(path, uid, gid, skipped, &|_| {})
+        chown_tree_with(path, uid, gid, kept, skipped, &|_| {})
     }
 
     /// `chown_tree`, calling `between` with each entry's path after its name was read from the
@@ -760,6 +798,7 @@ mod walk {
         path: &Path,
         uid: u32,
         gid: u32,
+        kept: Option<Kept>,
         skipped: &mut Vec<PathBuf>,
         between: &dyn Fn(&Path),
     ) -> io::Result<()> {
@@ -767,6 +806,7 @@ mod walk {
         let mut walk = Walk {
             uid,
             gid,
+            kept,
             skipped,
             between,
         };
@@ -804,6 +844,7 @@ mod walk {
     struct Walk<'a> {
         uid: u32,
         gid: u32,
+        kept: Option<Kept>,
         skipped: &'a mut Vec<PathBuf>,
         between: &'a dyn Fn(&Path),
     }
@@ -812,7 +853,8 @@ mod walk {
         /// Re-own the entry `name` in `dir` through a handle on the entry itself. Its type and its
         /// link count are read from that handle, and its owner is changed through it, so a name
         /// swapped after it was read changes only what the handle holds. A directory is walked;
-        /// anything else with a second hard link is skipped.
+        /// anything else with a second hard link is skipped. What the process account owns is
+        /// neither re-owned nor walked, and what is in its group keeps that group.
         fn entry(&mut self, dir: RawFd, name: &CStr, path: &Path) -> io::Result<()> {
             let handle = match open(dir, name, ENTRY) {
                 Ok(handle) => handle,
@@ -820,18 +862,24 @@ mod walk {
                 Err(e) => return Err(e),
             };
             let st = fstat(&handle)?;
+            let gid = match self.kept {
+                Some(kept) if st.st_uid == kept.uid => return Ok(()),
+                Some(kept) if st.st_gid == kept.gid => kept.gid,
+                _ => self.gid,
+            };
             if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
-                return self.directory(handle, path);
+                return self.directory(handle, gid, path);
             }
             if st.st_nlink > 1 {
                 self.skipped.push(path.to_path_buf());
                 return Ok(());
             }
-            chown(&handle, self.uid, self.gid)
+            chown(&handle, self.uid, gid)
         }
 
-        /// Re-own the directory `handle` holds, then its entries, read from the handle.
-        fn directory(&mut self, handle: OwnedFd, path: &Path) -> io::Result<()> {
+        /// Re-own the directory `handle` holds to the group `gid`, then its entries, read from the
+        /// handle.
+        fn directory(&mut self, handle: OwnedFd, gid: u32, path: &Path) -> io::Result<()> {
             // The path-only handle cannot list entries; `.` through it is that same directory.
             #[cfg(target_os = "linux")]
             let handle = match open(handle.as_raw_fd(), c".", DIRECTORY) {
@@ -839,7 +887,7 @@ mod walk {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
                 Err(e) => return Err(e),
             };
-            chown(&handle, self.uid, self.gid)?;
+            chown(&handle, self.uid, gid)?;
             for name in entries(&handle)? {
                 let child = path.join(OsStr::from_bytes(name.as_bytes()));
                 (self.between)(&child);
@@ -1373,6 +1421,7 @@ mod tests {
         let kept = ProcessAccount {
             account: "opamp-fleet-agents".to_string(),
             uid: 997,
+            gid: 997,
             kept_from: Some(PathBuf::from(AGENTS_UNIT)),
         };
         assert!(kept.describe().contains(AGENTS_UNIT), "{}", kept.describe());
@@ -1662,6 +1711,121 @@ mod tests {
         (me, other)
     }
 
+    /// A tree as a Supervisor's directory stands where a process account is registered: the
+    /// directories clause 6 gives the process account's group — the state directory passed
+    /// through, a data directory written — and a configuration entry, all in `group`, beside a
+    /// record of the Client's left in the group it was created with. Returns the entries in
+    /// `group` with their modes, and the record.
+    #[cfg(unix)]
+    fn shared_tree(root: &Path, group: u32) -> (Vec<(PathBuf, u32)>, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let state = root.join("state");
+        let data = state.join("data");
+        let entry = state.join("config.yaml");
+        std::fs::create_dir_all(&data).expect("mkdir");
+        std::fs::write(&entry, b"x").expect("write");
+        let record = state.join("package.json");
+        std::fs::write(&record, b"{}").expect("write");
+        let shared = vec![(state, 0o710), (data, 0o2770), (entry, 0o640)];
+        for (path, mode) in &shared {
+            std::os::unix::fs::chown(path, None, Some(group)).expect("chgrp");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(*mode)).expect("chmod");
+        }
+        (shared, record)
+    }
+
+    #[cfg(unix)]
+    fn mode_and_group(path: &Path) -> (u32, u32) {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = std::fs::symlink_metadata(path).expect("metadata");
+        (meta.mode() & 0o7777, meta.gid())
+    }
+
+    /// Where a process account is registered, the hand-over leaves its group where clause 6 put
+    /// it: a directory in the process account's group keeps that group and its mode, and so does
+    /// an entry in it, while the rest is handed over as before. A re-registration — every package
+    /// upgrade — takes from no Managed Process what it reads or writes.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_handover_keeps_the_process_accounts_group_and_its_modes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let (me, other) = me_with_another_group(&root);
+        let Some(group) = other else {
+            return;
+        };
+        let (shared, record) = shared_tree(&root, group);
+        // Another account's: nothing the test owns is skipped for its owner.
+        let process = ProcessAccount {
+            account: "agents".to_string(),
+            uid: me.uid.wrapping_add(1),
+            gid: group,
+            kept_from: None,
+        };
+        let skipped = me.hand_over(&[&root], Some(&process)).expect("handover");
+        assert!(skipped.is_empty(), "{skipped:?}");
+        for (path, mode) in &shared {
+            assert_eq!(mode_and_group(path), (*mode, group), "{}", path.display());
+        }
+        assert_eq!(mode_and_group(&record).1, me.gid);
+        assert_eq!(mode_and_group(&root).1, me.gid);
+    }
+
+    /// An entry the process account owns is skipped with everything beneath it, whatever its
+    /// group: the hand-over re-owns nothing of what a Managed Process wrote. The test's own
+    /// account stands in for the process account, so the top and every entry beneath it are
+    /// the process account's.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_handover_skips_what_the_process_account_owns_with_everything_beneath_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let (mut me, other) = me_with_another_group(&root);
+        let Some(group) = other else {
+            return;
+        };
+        let before = mode_and_group(&root).1;
+        let (shared, record) = shared_tree(&root, before);
+        me.gid = group;
+        let process = ProcessAccount {
+            account: "agents".to_string(),
+            uid: me.uid,
+            gid: group.wrapping_add(1),
+            kept_from: None,
+        };
+        me.hand_over(&[&root], Some(&process)).expect("handover");
+        for path in [&root, &record] {
+            assert_eq!(mode_and_group(path).1, before, "{}", path.display());
+        }
+        for (path, mode) in &shared {
+            assert_eq!(mode_and_group(path), (*mode, before), "{}", path.display());
+        }
+    }
+
+    /// Without a process account the hand-over is what it always was: every entry, in whatever
+    /// group, is handed to the Client's account and group.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn without_a_process_account_the_handover_re_owns_every_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let (me, other) = me_with_another_group(&root);
+        let Some(group) = other else {
+            return;
+        };
+        let (shared, record) = shared_tree(&root, group);
+        me.hand_over(&[&root], None).expect("handover");
+        for path in shared.iter().map(|(path, _)| path).chain([&record, &root]) {
+            assert_eq!(mode_and_group(path).1, me.gid, "{}", path.display());
+        }
+    }
+
     /// The handover re-owns a tree including a symlink as a link, and skips what is missing.
     /// Verifies: ADR-0019
     #[cfg(unix)]
@@ -1683,7 +1847,7 @@ mod tests {
         }
         let missing = root.join("supervisor.toml");
         let skipped = me
-            .hand_over(&[root, &missing])
+            .hand_over(&[root, &missing], None)
             .expect("a missing config file is skipped, the tree is walked");
         assert!(skipped.is_empty(), "{skipped:?}");
         for reached in [root.to_path_buf(), versions, binary, root.join("current")] {
@@ -1714,7 +1878,7 @@ mod tests {
         if let Some(group) = other {
             me.gid = group;
         }
-        me.hand_over(&[&root, &root.join("state")])
+        me.hand_over(&[&root, &root.join("state")], None)
             .expect("handover");
         for untouched in [
             outside.clone(),
@@ -1758,7 +1922,7 @@ mod tests {
         if let Some(group) = other {
             me.gid = group;
         }
-        let skipped = me.hand_over(&[&root]).expect("handover");
+        let skipped = me.hand_over(&[&root], None).expect("handover");
         assert_eq!(skipped, vec![linked.clone()]);
         assert_eq!(std::fs::metadata(&outside).expect("outside").gid(), before);
         assert_eq!(
@@ -1788,7 +1952,7 @@ mod tests {
             me.gid = group;
         }
         let mut skipped = Vec::new();
-        super::walk::chown_tree_with(&root, me.uid, me.gid, &mut skipped, &|entry| {
+        super::walk::chown_tree_with(&root, me.uid, me.gid, None, &mut skipped, &|entry| {
             if entry == state {
                 std::fs::remove_dir(&state).expect("rmdir");
                 std::os::unix::fs::symlink(&outside, &state).expect("symlink");
@@ -1838,7 +2002,7 @@ mod tests {
             me.gid = group;
         }
         let mut skipped = Vec::new();
-        super::walk::chown_tree_with(&root, me.uid, me.gid, &mut skipped, &|entry| {
+        super::walk::chown_tree_with(&root, me.uid, me.gid, None, &mut skipped, &|entry| {
             if entry == swapped {
                 std::fs::remove_file(&swapped).expect("unlink");
                 std::fs::hard_link(&outside, &swapped).expect("hard link");
