@@ -892,7 +892,16 @@ impl Runner {
             *child = Some(proc);
             return Reloaded::NotApplied;
         }
-        if let Err(e) = proc.signal(signal, false).await {
+        // The second service answers a signal at once, but not while it shuts down: a shutdown
+        // requested meanwhile does not wait for that answer.
+        let sent = tokio::select! {
+            sent = proc.signal(signal, false) => sent,
+            _ = shutdown.requested() => {
+                *child = Some(proc);
+                return Reloaded::ShuttingDown;
+            }
+        };
+        if let Err(e) = sent {
             warn!(supervisor = %self.name, signal, error = %e, "cannot signal a reload; restarting instead");
             *child = Some(proc);
             return Reloaded::NotApplied;
@@ -1461,6 +1470,94 @@ mod tests {
             .expect("in time")
             .expect("run once the writer let go");
         assert!(output.status.success());
+    }
+
+    /// What the stand-in for the second service is asked to start; it runs nothing.
+    #[cfg(unix)]
+    fn shell(script: &str) -> Launch {
+        Launch {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), script.to_string()],
+            env: Vec::new(),
+            working_dir: None,
+            own_process_group: true,
+        }
+    }
+
+    /// The stop's bound holds for a program the second service runs even when the service does not
+    /// answer its signals — as while it stops its programs on shutting down: the stop does not wait
+    /// out the service's own grace before its timeout begins.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_is_not_held_up_by_a_signal_the_service_does_not_answer() {
+        use crate::supervisor::channel::{peer, SIGNAL_ANSWER};
+        let peer = peer::connect(peer::mute).await;
+        let child = peer
+            .channel
+            .start("test", shell("true"))
+            .await
+            .expect("start");
+        let timeout = Duration::from_millis(100);
+        let mut child = Some(ManagedChild::Remote(child));
+        tokio::time::timeout(
+            SIGNAL_ANSWER * 2 + timeout + Duration::from_secs(2),
+            stop(&mut child, timeout, "test"),
+        )
+        .await
+        .expect("the stop ends within its bound");
+        assert!(child.is_none());
+    }
+
+    /// A shutdown requested while a reload waits for its signal to be answered ends the reload at
+    /// once, without the restart a signal that failed would bring.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shutdown_ends_a_reload_waiting_on_its_signal() {
+        use crate::supervisor::channel::peer;
+        let peer = peer::connect(peer::mute).await;
+        let child = peer
+            .channel
+            .start("test", shell("true"))
+            .await
+            .expect("start");
+        let (event_tx, _events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(16);
+        let runner = Runner {
+            endpoint_token: String::new(),
+            name: "test".to_string(),
+            stop_timeout: Duration::from_millis(100),
+            apply_grace: Duration::from_secs(60),
+            retain_previous: Duration::ZERO,
+            install: None,
+            archive_key: None,
+            version_probe: None,
+            preflight: None,
+            reload_signal: Some(libc::SIGHUP),
+            spawner: Spawner::Channel(peer.channel.clone()),
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(|| None),
+        };
+        let (shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
+        let mut child = Some(ManagedChild::Remote(child));
+        let reloaded = {
+            let reload = runner.try_reload(&mut child, &mut shutdown);
+            tokio::pin!(reload);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), reload.as_mut())
+                    .await
+                    .is_err(),
+                "the reload waits for the signal's answer"
+            );
+            shutdown_tx.send(true).expect("request the shutdown");
+            tokio::time::timeout(Duration::from_millis(500), reload)
+                .await
+                .expect("the shutdown is seen at once")
+        };
+        assert!(matches!(reloaded, Reloaded::ShuttingDown));
+        assert!(child.is_some(), "the process is left for the stop");
     }
 
     // What remains here are the cases that reach *into* this module — a private helper and the
