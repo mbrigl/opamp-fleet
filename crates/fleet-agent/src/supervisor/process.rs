@@ -142,16 +142,19 @@ pub enum Spawner {
 }
 
 impl Spawner {
-    /// Starts `launch`.
+    /// Starts `launch` for the Supervisor named `supervisor`.
     ///
     /// # Errors
     /// Returns why the program did not start, keeping the OS error either way, so a missing
     /// program and one momentarily busy are still told apart.
-    pub async fn spawn(&self, launch: Launch) -> std::io::Result<ManagedChild> {
+    pub async fn spawn(&self, supervisor: &str, launch: Launch) -> std::io::Result<ManagedChild> {
         match self {
             Spawner::Local => spawn_local(&launch).map(ManagedChild::Local),
             #[cfg(unix)]
-            Spawner::Channel(channel) => channel.start(launch).await.map(ManagedChild::Remote),
+            Spawner::Channel(channel) => channel
+                .start(supervisor, launch)
+                .await
+                .map(ManagedChild::Remote),
         }
     }
 }
@@ -1062,7 +1065,7 @@ impl Runner {
             working_dir: working_dir.map(std::path::Path::to_path_buf),
             own_process_group: spec.own_process_group,
         };
-        match self.spawner.spawn(launch).await {
+        match self.spawner.spawn(&self.name, launch).await {
             Ok(child) => {
                 info!(supervisor = %self.name, program = %spec.program.display(), "process started");
                 // Before the health report, so a sampler that wakes on it already has the pid.

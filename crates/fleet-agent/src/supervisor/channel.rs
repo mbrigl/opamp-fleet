@@ -129,6 +129,15 @@ pub(crate) enum Stream {
     Stderr,
 }
 
+impl Stream {
+    fn name(self) -> &'static str {
+        match self {
+            Stream::Stdout => "stdout",
+            Stream::Stderr => "stderr",
+        }
+    }
+}
+
 /// The build both ends must share (ADR-0059 clause 5).
 fn this_build() -> &'static str {
     fleet_core::version::current()
@@ -747,6 +756,8 @@ struct Routes {
 
 /// Where the replies about one program go, for as long as its [`RemoteChild`] lives.
 struct Route {
+    /// The Supervisor the program runs for, which its output is logged under.
+    supervisor: String,
     started: Option<oneshot::Sender<io::Result<u32>>>,
     exited: Option<oneshot::Sender<Result<i32, String>>>,
     /// The signals sent and not yet answered, in the order they were sent.
@@ -823,7 +834,8 @@ impl Channel {
         Ok(Channel { inner })
     }
 
-    /// Asks the service to start `launch`, and waits until it runs or did not start.
+    /// Asks the service to start `launch` for the Supervisor named `supervisor`, and waits until it
+    /// runs or did not start.
     ///
     /// Cancel-safe: a start dropped before the answer asks the service to stop the program it may
     /// have started, as dropping its [`RemoteChild`] would.
@@ -831,7 +843,7 @@ impl Channel {
     /// # Errors
     /// Returns the service's reason the program did not start, keeping its OS error, or that the
     /// channel is closed.
-    pub(crate) async fn start(&self, launch: Launch) -> io::Result<RemoteChild> {
+    pub(crate) async fn start(&self, supervisor: &str, launch: Launch) -> io::Result<RemoteChild> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (started_tx, started) = oneshot::channel();
         let (exited_tx, exited) = oneshot::channel();
@@ -843,6 +855,7 @@ impl Channel {
             routes.by_id.insert(
                 id,
                 Route {
+                    supervisor: supervisor.to_string(),
                     started: Some(started_tx),
                     exited: Some(exited_tx),
                     signals: VecDeque::new(),
@@ -921,14 +934,23 @@ impl Inner {
                     let _ = started.send(Err(error));
                 }
             }
-            // Where the program's output went when the Client started it itself: the Client's own
-            // streams, which the service manager collects.
-            Reply::Output { stream, line, .. } => {
-                use std::io::Write as _;
-                let _ = match stream {
-                    Stream::Stdout => writeln!(std::io::stdout().lock(), "{line}"),
-                    Stream::Stderr => writeln!(std::io::stderr().lock(), "{line}"),
-                };
+            // Logged, not written to the Client's own streams: under the Supervisor it belongs to,
+            // and escaped, so a program cannot pass a line of its own off as one of the Client's.
+            Reply::Output { id, stream, line } => {
+                let supervisor = self
+                    .routes()
+                    .by_id
+                    .get(&id)
+                    .map(|route| route.supervisor.clone());
+                match supervisor {
+                    Some(supervisor) => {
+                        info!(supervisor = %supervisor, stream = %stream.name(), line = ?line, "output");
+                    }
+                    // A process the program left behind, still writing after the program's end.
+                    None => {
+                        info!(program = id, stream = %stream.name(), line = ?line, "output after the program ended");
+                    }
+                }
             }
             Reply::Signalled { id } => self.answer_signal(id, Ok(())),
             Reply::SignalFailed { id, error } => self.answer_signal(id, Err(error)),
@@ -1323,6 +1345,47 @@ mod tests {
         }
     }
 
+    /// A program's output reaches the Client's log as events of the Supervisor it runs for, one
+    /// per line and escaped, so no line a program writes reads as one of the Client's.
+    /// Verifies: ADR-0059
+    #[test]
+    fn output_is_logged_under_its_supervisor_and_escaped() {
+        // A current-thread runtime: every task of the test runs on this thread, whose log
+        // `capture_logs` keeps.
+        let ((), log) = crate::test_support::capture_logs(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async {
+                    let service = service(own_uid());
+                    let channel = Channel::connect(&service.socket).await.expect("connect");
+                    let forged =
+                        r#"printf 'plain\n'; printf 'ERROR fleet_agent: forged\033[0m\r\n' >&2"#;
+                    let mut child = channel
+                        .start("telegraf-1", sh(forged))
+                        .await
+                        .expect("start");
+                    child.wait().await.expect("ended");
+                });
+        });
+
+        let output: Vec<&str> = log.lines().filter(|l| l.contains(" output ")).collect();
+        assert_eq!(output.len(), 2, "{log}");
+        assert!(
+            output.iter().any(|l| l.contains("supervisor=telegraf-1")
+                && l.contains("stream=stdout")
+                && l.contains(r#"line="plain""#)),
+            "{log}"
+        );
+        assert!(
+            output.iter().any(|l| l.contains("stream=stderr")
+                && l.contains(r#"line="ERROR fleet_agent: forged\u{1b}[0m\r""#)),
+            "{log}"
+        );
+        assert!(!log.contains('\u{1b}'), "an escape reached the log raw");
+    }
+
     /// A signal the service could not send is an error at the Client, as it is when the Client
     /// signals a program itself, so a reload that cannot be signalled falls back to the restart.
     /// Verifies: ADR-0059
@@ -1330,7 +1393,7 @@ mod tests {
     async fn a_signal_that_cannot_be_sent_is_an_error() {
         let service = service(own_uid());
         let channel = Channel::connect(&service.socket).await.expect("connect");
-        let mut child = channel.start(sh("sleep 300")).await.expect("start");
+        let mut child = channel.start("test", sh("sleep 300")).await.expect("start");
         child.signal(0, false).await.expect("signal 0 is sent");
         // No such signal: kill(2) fails with EINVAL.
         assert!(child.signal(999, false).await.is_err());
@@ -1351,7 +1414,11 @@ mod tests {
         let channel = Channel::connect(&service.socket).await.expect("connect");
         let mut launch = sh("");
         launch.program = PathBuf::from("/nonexistent/program");
-        let error = channel.start(launch).await.err().expect("a start failure");
+        let error = channel
+            .start("test", launch)
+            .await
+            .err()
+            .expect("a start failure");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
@@ -1362,15 +1429,15 @@ mod tests {
     async fn a_start_too_large_for_a_message_fails_alone() {
         let service = service(own_uid());
         let channel = Channel::connect(&service.socket).await.expect("connect");
-        let mut running = channel.start(sh("sleep 300")).await.expect("start");
+        let mut running = channel.start("test", sh("sleep 300")).await.expect("start");
 
         let mut huge = sh("true");
         huge.env = vec![("BULK".to_string(), "x".repeat(2 << 20))];
-        let error = channel.start(huge).await.err().expect("refused");
+        let error = channel.start("test", huge).await.err().expect("refused");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 
         let mut next = channel
-            .start(sh("exit 4"))
+            .start("test", sh("exit 4"))
             .await
             .expect("a later start still runs");
         let status = tokio::time::timeout(Duration::from_secs(10), next.wait())
@@ -1401,7 +1468,7 @@ mod tests {
             ..sh("")
         };
         {
-            let mut start = std::pin::pin!(channel.start(launch));
+            let mut start = std::pin::pin!(channel.start("test", launch));
             // One poll sends the request; the answer cannot be there yet.
             std::future::poll_fn(|cx| {
                 assert!(start.as_mut().poll(cx).is_pending());
@@ -1415,7 +1482,10 @@ mod tests {
         );
         // The service answers in order: once a later start is answered, the abandoned one has run
         // and been asked to stop.
-        let mut later = channel.start(sh("exit 0")).await.expect("a later start");
+        let mut later = channel
+            .start("test", sh("exit 0"))
+            .await
+            .expect("a later start");
         later.wait().await.expect("the later program ended");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1570,7 +1640,7 @@ mod tests {
     async fn the_service_stops_its_programs_when_it_shuts_down() {
         let mut service = service(own_uid());
         let channel = Channel::connect(&service.socket).await.expect("connect");
-        let mut child = channel.start(sh("sleep 300")).await.expect("start");
+        let mut child = channel.start("test", sh("sleep 300")).await.expect("start");
         let _ = service.stop.take().expect("stop").send(());
         let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
             .await
