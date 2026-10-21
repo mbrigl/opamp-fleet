@@ -178,6 +178,54 @@ impl Spawner {
             Spawner::Channel(channel) => channel.reach().await,
         }
     }
+
+    /// Runs `launch` to its end, as the version probe and the preflight do, within
+    /// [`PROBE_TIMEOUT`]: `None` when it does not end in time, and is stopped. Its output is what it
+    /// wrote, the last [`crate::supervisor::channel::CAPTURED`] bytes of each stream where the
+    /// second service relays it.
+    ///
+    /// A program written moments ago may fail to exec with `ETXTBSY` while another thread's fork
+    /// still holds it open for writing ([`install::is_text_file_busy`] states why); that is
+    /// retried briefly, as a spawn is, rather than taken for a program that cannot run.
+    pub(crate) async fn output(
+        &self,
+        supervisor: &str,
+        launch: &Launch,
+    ) -> Option<std::io::Result<std::process::Output>> {
+        #[cfg(not(unix))]
+        let _ = supervisor;
+        let mut attempt = 0;
+        loop {
+            let run = async {
+                match self {
+                    Spawner::Local => local_command(launch).output().await,
+                    #[cfg(unix)]
+                    Spawner::Channel(channel) => channel.output(supervisor, launch.clone()).await,
+                }
+            };
+            match tokio::time::timeout(PROBE_TIMEOUT, run).await {
+                Err(_) => return None,
+                Ok(Err(e)) if install::is_text_file_busy(&e) && attempt < install::BUSY_RETRIES => {
+                    attempt += 1;
+                    tokio::time::sleep(install::BUSY_DELAY).await;
+                }
+                Ok(result) => return Some(result),
+            }
+        }
+    }
+}
+
+/// `launch` as the Client runs it to its end itself.
+fn local_command(launch: &Launch) -> Command {
+    let mut command = Command::new(&launch.program);
+    command
+        .args(&launch.args)
+        .envs(launch.env.iter().cloned())
+        .kill_on_drop(true);
+    if let Some(dir) = &launch.working_dir {
+        command.current_dir(dir);
+    }
+    command
 }
 
 fn spawn_local(launch: &Launch) -> std::io::Result<Child> {
@@ -298,6 +346,9 @@ struct OwedConfig {
 /// then the Agent reports it `Installing`.
 struct Parked {
     staged: Staged,
+    /// Whether the preflight has run on it. One that did not reach the second service is run by
+    /// the start that reaches it, before the swap (ADR-0059 clauses 2 and 3).
+    checked: bool,
     version: String,
     hash: Vec<u8>,
     span: tracing::Span,
@@ -318,6 +369,14 @@ struct Supervision {
     owed: Option<OwedConfig>,
     /// A package that waits for the second service to be swapped in (ADR-0059 clause 2).
     parked: Option<Parked>,
+}
+
+/// What the preflight of a package that waited for the second service came to.
+enum Checked {
+    /// Proved, or nothing to prove: the swap goes ahead.
+    Ready(Parked),
+    /// Refused, or still waiting; `true` when shutdown was requested meanwhile.
+    Done(bool),
 }
 
 /// What a swap came to: gated, or taken back out to wait for the second service.
@@ -799,7 +858,8 @@ impl Runner {
                         };
                         s.policy.fresh_chance(); // a new package (ADR-0026)
                         s.backoff.reset();
-                        let package = Parked { staged: prepared, version, hash, span };
+                        let (staged, checked) = prepared;
+                        let package = Parked { staged, checked, version, hash, span };
                         // The second service is away: staged and kept, never swapped in, so what
                         // ran stays in place until a start can reach the service (ADR-0059
                         // clause 2).
@@ -888,20 +948,36 @@ impl Runner {
     /// Unpacks the artifact beside what runs and — when the plugin said how — proves the staged
     /// program starts. Nothing that runs is touched here; that is the whole point (ADR-0017).
     /// The `stage` phase of an install's trace (ADR-0016); the preflight below is its own child.
+    ///
+    /// Beside the staged package: whether the preflight ran. One that did not reach the second
+    /// service proves nothing either way, and the package waits for the service unchecked
+    /// (ADR-0059 clause 2).
     #[instrument(name = "stage", skip_all, fields(supervisor = %self.name))]
-    async fn stage_and_check(&self, artifact: &std::path::Path) -> Result<Staged, String> {
+    async fn stage_and_check(&self, artifact: &std::path::Path) -> Result<(Staged, bool), String> {
         let target = self
             .install
             .as_ref()
             .ok_or_else(|| "this supervisor manages nothing a package can replace".to_string())?;
         let staged = target.stage(artifact, self.archive_key.as_deref().map(String::as_str))?;
-        if let Some(preflight) = &self.preflight {
-            if let Err(e) = run_preflight(&staged, preflight).await {
+        match self.check(&staged).await {
+            Preflighted::Passed => Ok((staged, true)),
+            Preflighted::Refused(e) => {
                 target.discard(&staged);
-                return Err(e);
+                Err(e)
+            }
+            Preflighted::Unreached(e) => {
+                info!(supervisor = %self.name, error = %e, "the second service cannot be reached for the preflight; the package waits for it");
+                Ok((staged, false))
             }
         }
-        Ok(staged)
+    }
+
+    /// Runs the plugin's preflight on `staged`, where it has one (ADR-0017 clause 57).
+    async fn check(&self, staged: &Staged) -> Preflighted {
+        match &self.preflight {
+            Some(preflight) => run_preflight(&self.spawner, &self.name, staged, preflight).await,
+            None => Preflighted::Passed,
+        }
     }
 
     /// Throws away what was staged for a package that will not be swapped in.
@@ -942,8 +1018,14 @@ impl Runner {
             s.parked = Some(package);
             return false;
         }
+        // The preflight the second service was away for runs now, before anything is stopped.
+        let package = match self.check_parked(package, s, shutdown).await {
+            Checked::Ready(package) => package,
+            Checked::Done(shutting_down) => return shutting_down,
+        };
         let Parked {
             staged,
+            checked: _,
             version,
             hash,
             span,
@@ -960,6 +1042,7 @@ impl Runner {
             Swapped::Parked(staged) => {
                 let package = Parked {
                     staged,
+                    checked: true,
                     version,
                     hash,
                     span,
@@ -1021,6 +1104,63 @@ impl Runner {
             // Does not occur: the swap returns its gate's `Unreachable` as `Swapped::Parked`,
             // handled above. Nothing to do were it to.
             GraceOutcome::Unreachable => false,
+        }
+    }
+
+    /// Runs the preflight on a package that waited for the second service without one, now that
+    /// the service is reached (ADR-0059 clause 3). A package it refuses is reported failed and
+    /// thrown away, and a configuration owed its acknowledgement is decided by a start on the
+    /// current program instead, as an apply would decide it; one it cannot run for want of the
+    /// service waits on.
+    async fn check_parked(
+        &self,
+        package: Parked,
+        s: &mut Supervision,
+        shutdown: &mut Shutdown,
+    ) -> Checked {
+        if package.checked {
+            return Checked::Ready(package);
+        }
+        match self
+            .check(&package.staged)
+            .instrument(package.span.clone())
+            .await
+        {
+            Preflighted::Passed => Checked::Ready(Parked {
+                checked: true,
+                ..package
+            }),
+            Preflighted::Unreached(e) => {
+                s.waiting.arm();
+                self.events
+                    .send(ProcessEvent::Health(unhealthy(
+                        why_unreached(&e).to_string(),
+                        format!("a package waits for it: {e}"),
+                    )))
+                    .await;
+                s.parked = Some(package);
+                Checked::Done(false)
+            }
+            Preflighted::Refused(e) => {
+                warn!(supervisor = %self.name, version = %package.version, error = %e, "refusing a package that will not run here");
+                self.discard(&package);
+                crate::telemetry::failed(&package.span, &e);
+                self.events
+                    .send(ProcessEvent::PackageApplied {
+                        hash: package.hash,
+                        result: Err(e),
+                    })
+                    .await;
+                if s.owed.is_none() {
+                    return Checked::Done(false);
+                }
+                stop(&mut s.child, self.stop_timeout, &self.name).await;
+                let started = tokio::select! {
+                    started = self.spawn_if_due(&mut s.waiting) => started,
+                    _ = shutdown.requested() => return Checked::Done(true),
+                };
+                Checked::Done(self.started(started, s, shutdown).await)
+            }
         }
     }
 
@@ -1434,6 +1574,8 @@ impl Runner {
     fn probe_version(&self) {
         if let Some(probe) = &self.version_probe {
             tokio::spawn(probe_version(
+                self.spawner.clone(),
+                self.name.clone(),
                 probe.program.clone(),
                 probe.args.clone(),
                 probe.parse,
@@ -1599,15 +1741,26 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 /// versionless output is logged and otherwise ignored — probing must never break supervision.
 ///
 /// A later self-report through the Supervisor Endpoint replaces the probed value.
+///
+/// `spawner` runs it, as it starts the Managed Process: under the process account where one is
+/// registered (ADR-0059 clause 3), for the Supervisor named `supervisor`.
 pub async fn probe_version(
+    spawner: Spawner,
+    supervisor: String,
     program: PathBuf,
     args: Vec<String>,
     parse: Option<fn(&str) -> Option<String>>,
     events: EventSender,
 ) {
-    let mut command = Command::new(&program);
-    command.args(&args).kill_on_drop(true);
-    let output = match bounded_output(&mut command).await {
+    let launch = Launch {
+        program: program.clone(),
+        args,
+        env: Vec::new(),
+        endpoint_token: None,
+        working_dir: None,
+        own_process_group: false,
+    };
+    let output = match spawner.output(&supervisor, &launch).await {
         Some(Ok(output)) => output,
         Some(Err(e)) => {
             warn!(program = %program.display(), error = %e, "version probe cannot run");
@@ -1677,48 +1830,52 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
     info!(supervisor = %name, "process stopped");
 }
 
-/// Runs `command` to completion within [`PROBE_TIMEOUT`]; `None` when it does not finish in time.
-///
-/// A program written moments ago may fail to exec with `ETXTBSY` while another thread's fork still
-/// holds it open for writing ([`install::is_text_file_busy`] states why); that is retried briefly,
-/// as a spawn is, rather than taken for a program that cannot run.
-async fn bounded_output(command: &mut Command) -> Option<std::io::Result<std::process::Output>> {
-    let mut attempt = 0;
-    loop {
-        match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
-            Err(_) => return None,
-            Ok(Err(e)) if install::is_text_file_busy(&e) && attempt < install::BUSY_RETRIES => {
-                attempt += 1;
-                tokio::time::sleep(install::BUSY_DELAY).await;
-            }
-            Ok(result) => return Some(result),
-        }
-    }
-}
-
 /// Runs a plugin's preflight against a staged package (ADR-0017 clause 57).
 ///
 /// Bounded like the version probe, because this is the same shape of question asked of a program
 /// nobody has run yet. The message on failure is the program's own — a linker error names the
 /// library or the symbol version, which is exactly what an operator needs and what an exit status
 /// alone destroys.
+///
+/// Run by `spawner`, as the Managed Process is started: under the process account where one is
+/// registered (ADR-0059 clause 3). A preflight that does not reach the second service rejects
+/// nothing: [`Preflighted::Unreached`].
 #[instrument(name = "preflight", skip_all)]
-async fn run_preflight(staged: &Staged, preflight: &Preflight) -> Result<(), String> {
-    let mut command = Command::new(&staged.program);
-    command.args(&preflight.args).kill_on_drop(true);
-    for (key, value) in &preflight.env {
-        command.env(
-            key,
-            value.replace("${staged}", &staged.root.to_string_lossy()),
-        );
-    }
-    let output = match bounded_output(&mut command).await {
+async fn run_preflight(
+    spawner: &Spawner,
+    supervisor: &str,
+    staged: &Staged,
+    preflight: &Preflight,
+) -> Preflighted {
+    let launch = Launch {
+        program: staged.program.clone(),
+        args: preflight.args.clone(),
+        env: preflight
+            .env
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    value.replace("${staged}", &staged.root.to_string_lossy()),
+                )
+            })
+            .collect(),
+        endpoint_token: None,
+        working_dir: None,
+        own_process_group: false,
+    };
+    let output = match spawner.output(supervisor, &launch).await {
         Some(Ok(output)) => output,
-        Some(Err(e)) => return Err(format!("the packaged program cannot be run: {e}")),
-        None => return Err("the packaged program did not answer in time".to_string()),
+        Some(Err(e)) if is_unreachable(&e) => return Preflighted::Unreached(e),
+        Some(Err(e)) => {
+            return Preflighted::Refused(format!("the packaged program cannot be run: {e}"))
+        }
+        None => {
+            return Preflighted::Refused("the packaged program did not answer in time".to_string())
+        }
     };
     if output.status.success() {
-        return Ok(());
+        return Preflighted::Passed;
     }
     let said = format!(
         "{}{}",
@@ -1732,9 +1889,20 @@ async fn run_preflight(staged: &Staged, preflight: &Preflight) -> Result<(), Str
         .map(str::trim)
         .unwrap_or("no output")
         .to_string();
-    Err(format!(
+    Preflighted::Refused(format!(
         "the packaged program does not run on this host: {reason}"
     ))
+}
+
+/// What a preflight came to.
+enum Preflighted {
+    /// The staged program ran and succeeded, or there was nothing to prove.
+    Passed,
+    /// It does not run here, and why: the package is refused.
+    Refused(String),
+    /// The second service was not reached: nothing was proved either way, and the package waits
+    /// for the service, as one offered while it is away does (ADR-0059 clause 2).
+    Unreached(std::io::Error),
 }
 
 /// Signals the Managed Process — **or its whole process group**, when the child leads one.
@@ -1993,7 +2161,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(120)).await;
             drop(writer);
         });
-        let output = bounded_output(&mut Command::new(&program))
+        let launch = Launch {
+            program: program.clone(),
+            args: Vec::new(),
+            env: Vec::new(),
+            endpoint_token: None,
+            working_dir: None,
+            own_process_group: false,
+        };
+        let output = Spawner::Local
+            .output("test", &launch)
             .await
             .expect("in time")
             .expect("run once the writer let go");
@@ -2051,6 +2228,7 @@ mod tests {
             assert_eq!(s.policy.failed(), AfterFailure::Retry);
         }
         let package = Parked {
+            checked: true,
             staged,
             version: "9.9.9".to_string(),
             hash: b"9.9.9".to_vec(),
@@ -2102,6 +2280,7 @@ mod tests {
             parked: None,
         };
         let package = Parked {
+            checked: true,
             staged,
             version: "9.9.9".to_string(),
             hash: b"9.9.9".to_vec(),
@@ -2755,5 +2934,135 @@ mod tests {
         target.drop_backup();
         assert!(!target.backup().exists());
         assert!(!target.backup_marker().exists());
+    }
+
+    /// A stand-in for the second service that runs nothing: every start is reported to `asked`,
+    /// writes `line` to `stream` and exits with the raw wait status `status`.
+    #[cfg(unix)]
+    async fn answering(
+        stream: crate::supervisor::channel::Stream,
+        line: &'static str,
+        status: i32,
+    ) -> (
+        crate::supervisor::channel::peer::Peer,
+        mpsc::UnboundedReceiver<Launch>,
+    ) {
+        use crate::supervisor::channel::{peer, Reply, Request};
+        let (asked_tx, asked) = mpsc::unbounded_channel();
+        let peer = peer::connect(move |request| match request {
+            Request::Start { id, launch } => {
+                let _ = asked_tx.send(launch);
+                vec![
+                    Reply::Started { id, pid: 4242 },
+                    Reply::Output {
+                        id,
+                        stream,
+                        line: line.to_string(),
+                    },
+                    Reply::Exited {
+                        id,
+                        status: Ok(status),
+                        closing: false,
+                    },
+                ]
+            }
+            _ => Vec::new(),
+        })
+        .await;
+        (peer, asked)
+    }
+
+    /// With a process account registered, the version probe is run by the second service, not by
+    /// the Client — the program it names is not even on this host — and what the service relays
+    /// of its output is what the version is read from (ADR-0059 clause 3).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_version_probe_runs_through_the_second_service() {
+        use crate::supervisor::channel::Stream;
+        let (peer, mut asked) = answering(Stream::Stdout, "agent version 1.2.3", 0).await;
+        let (event_tx, mut events) = mpsc::channel(4);
+        probe_version(
+            Spawner::Channel(peer.channel.clone()),
+            "test".to_string(),
+            PathBuf::from("/nowhere/agent"),
+            vec!["--version".to_string()],
+            None,
+            EventSender::new(0, event_tx),
+        )
+        .await;
+        let launch = asked
+            .try_recv()
+            .expect("the probe was asked of the service");
+        assert_eq!(launch.program, PathBuf::from("/nowhere/agent"));
+        assert_eq!(launch.args, vec!["--version".to_string()]);
+        let (_, event) = events.try_recv().expect("a probed version");
+        let ProcessEvent::Description(description) = event else {
+            panic!("expected a Description event, got {event:?}");
+        };
+        let version = description.identifying_attributes[0]
+            .value
+            .clone()
+            .and_then(|v| v.value);
+        assert_eq!(
+            version,
+            Some(opamp::proto::any_value::Value::StringValue(
+                "1.2.3".to_string()
+            ))
+        );
+    }
+
+    /// With a process account registered, the preflight of a staged package is run by the second
+    /// service, with `${staged}` resolved in its environment, and what the program said through the
+    /// service is the reason it is refused (ADR-0059 clause 3).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_preflight_runs_through_the_second_service() {
+        use crate::supervisor::channel::Stream;
+        let staged = Staged {
+            root: PathBuf::from("/nowhere/program/.staging"),
+            program: PathBuf::from("/nowhere/program/.staging/bin/agent"),
+            temp: PathBuf::from("/nowhere/program/.staging"),
+        };
+        let preflight = Preflight {
+            args: vec!["--version".to_string()],
+            env: vec![("LD_LIBRARY_PATH".to_string(), "${staged}/lib".to_string())],
+        };
+
+        let (peer, mut asked) = answering(Stream::Stdout, "agent 2.0.0", 0).await;
+        let passed = run_preflight(
+            &Spawner::Channel(peer.channel.clone()),
+            "test",
+            &staged,
+            &preflight,
+        )
+        .await;
+        assert!(matches!(passed, Preflighted::Passed));
+        let launch = asked
+            .try_recv()
+            .expect("the preflight was asked of the service");
+        assert_eq!(launch.program, staged.program);
+        assert_eq!(
+            launch.env,
+            vec![(
+                "LD_LIBRARY_PATH".to_string(),
+                "/nowhere/program/.staging/lib".to_string()
+            )]
+        );
+
+        let (peer, _asked) =
+            answering(Stream::Stderr, "version GLIBC_2.39 not found", 1 << 8).await;
+        let refused = run_preflight(
+            &Spawner::Channel(peer.channel.clone()),
+            "test",
+            &staged,
+            &preflight,
+        )
+        .await;
+        let Preflighted::Refused(reason) = refused else {
+            panic!("a program that exited 1 passed the preflight");
+        };
+        assert!(reason.contains("GLIBC_2.39"), "{reason}");
     }
 }
