@@ -949,7 +949,8 @@ impl Runner {
                 // what runs now — the predecessor, rolled back, or a first install kept in place
                 // — is started again once, unless the streak holds it, and stays supervised
                 // exactly as after a failed ApplyConfig. That start, not the package's, decides
-                // an owed configuration.
+                // an owed configuration, and one that does not happen is not tried again, whether
+                // a configuration is owed or not (see `started`).
                 if let AfterFailure::Hold(failures) = s.policy.failed() {
                     self.hold(failures, s).await;
                     return false;
@@ -958,18 +959,7 @@ impl Runner {
                     started = self.spawn_if_due(&mut s.waiting) => started,
                     _ = shutdown.requested() => return true,
                 };
-                if s.owed.is_some() {
-                    return self.started(started, s, shutdown).await;
-                }
-                s.child = started;
-                if s.child.is_some() {
-                    s.policy.started(Instant::now());
-                    false
-                } else if s.waiting.armed() {
-                    false
-                } else {
-                    self.respawn_or_hold(s, shutdown).await
-                }
+                self.started(started, s, shutdown).await
             }
             GraceOutcome::ShuttingDown => true,
             // Does not occur: the swap returns its gate's `Unreachable` as `Swapped::Parked`,
@@ -1988,32 +1978,7 @@ mod tests {
         let (_commands, command_rx) = mpsc::channel(1);
         let (_shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
         let apply_grace = Duration::from_millis(300);
-        let program = live.clone();
-        let runner = Runner {
-            name: "test".to_string(),
-            endpoint_token: String::new(),
-            stop_timeout: Duration::from_secs(5),
-            apply_grace,
-            install: Some(target),
-            retain_previous: Duration::ZERO,
-            archive_key: None,
-            version_probe: None,
-            preflight: None,
-            reload_signal: None,
-            spawner: Spawner::Local,
-            events: EventSender::new(0, event_tx),
-            commands: command_rx,
-            build: Box::new(move || {
-                Some(ProcessSpec {
-                    program: program.clone(),
-                    args: Vec::new(),
-                    env: Vec::new(),
-                    working_dir: None,
-                    ensure_dirs: Vec::new(),
-                    own_process_group: false,
-                })
-            }),
-        };
+        let runner = package_runner(live, apply_grace, event_tx, command_rx);
         let mut s = Supervision {
             child: None,
             policy: RestartPolicy::new(apply_grace, Instant::now()),
@@ -2048,6 +2013,91 @@ mod tests {
         assert_eq!(hash, b"cfg".to_vec());
         let error = result.expect_err("FAILED");
         assert!(error.contains("held after"), "{error}");
+    }
+
+    /// After a package that failed, only a predecessor that ran and exited within the grace is
+    /// started again: one that does not start at all — its interpreter is missing — has said why
+    /// in its health, and is not tried again, with no configuration owed just as with one
+    /// (ADR-0026 clause 63).
+    /// Verifies: ADR-0026
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_predecessor_that_does_not_start_after_a_failed_package_is_not_started_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("agent");
+        std::fs::write(&live, "#!/nonexistent/interpreter\n").expect("a predecessor");
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let target = InstallTarget::Binary(live.clone());
+        let artifact = dir.path().join("downloaded");
+        std::fs::copy("/bin/false", &artifact).expect("a program that exits at once");
+        let staged = target.stage(&artifact, None).expect("stage");
+        let (event_tx, mut events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(1);
+        let (_shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
+        let apply_grace = Duration::from_millis(300);
+        let runner = package_runner(live, apply_grace, event_tx, command_rx);
+        let mut s = Supervision {
+            child: None,
+            policy: RestartPolicy::new(apply_grace, Instant::now()),
+            backoff: Backoff::new(),
+            waiting: Waiting::new(),
+            owed: None,
+            parked: None,
+        };
+        let package = Parked {
+            staged,
+            version: "9.9.9".to_string(),
+            hash: b"9.9.9".to_vec(),
+            span: tracing::Span::none(),
+        };
+        assert!(!runner.install(package, &mut s, &mut shutdown).await);
+        assert!(s.child.is_none(), "nothing runs");
+        let mut not_started = 0;
+        while let Ok((_, event)) = events.try_recv() {
+            if let ProcessEvent::Health(health) = event {
+                if health.status == "no process installed" {
+                    not_started += 1;
+                }
+            }
+        }
+        assert_eq!(not_started, 1, "the predecessor is started once, after the package");
+    }
+
+    /// A Runner that installs packages over `live` and runs what is there.
+    #[cfg(unix)]
+    fn package_runner(
+        live: PathBuf,
+        apply_grace: Duration,
+        event_tx: mpsc::Sender<(usize, ProcessEvent)>,
+        command_rx: mpsc::Receiver<ProcessCommand>,
+    ) -> Runner {
+        let program = live.clone();
+        Runner {
+            name: "test".to_string(),
+            endpoint_token: String::new(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace,
+            install: Some(InstallTarget::Binary(live)),
+            retain_previous: Duration::ZERO,
+            archive_key: None,
+            version_probe: None,
+            preflight: None,
+            reload_signal: None,
+            spawner: Spawner::Local,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || {
+                Some(ProcessSpec {
+                    program: program.clone(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: None,
+                    ensure_dirs: Vec::new(),
+                    own_process_group: false,
+                })
+            }),
+        }
     }
 
     /// What the stand-in for the second service is asked to start; it runs nothing.
