@@ -91,7 +91,17 @@ signals and stops those programs on the Client's request.
      while the second service is down the Client stays reported to the Server, its Supervisors say
      that their programs do not start, and they start again once it is back. A Supervisor whose
      start finds the second service unreachable is not held for failing to start; it tries again
-     with backoff. The Client connects again whenever the second service has restarted.
+     with backoff. The Client connects again whenever the second service has restarted. A
+     program the second service stops because it is stopping itself has not exited on its own,
+     and counts for no restart policy.
+   - **What arrives while the second service is away waits for it.** An offered package is staged
+     and kept, never swapped in: it is swapped in, and its apply grace runs, once the second service
+     is reached again, so the previous program stays in place and a rollback only ever goes back to
+     a program that ran. A delivered Configuration is written as today, and its acknowledgement is
+     given by the first start that reaches the second service and survives the apply grace. Until
+     then the package stays `Installing` and the Configuration `APPLYING`, each naming the second
+     service as the reason. A newer offer or Configuration replaces the waiting one, and a Client
+     that stops while one waits leaves its files as the record names them.
    - **A self-update restarts whichever end is behind.** The self-update switches `current` and
      restarts the Client as before. A second service that meets a Client of another build while
      `current` no longer names its own version exits, so that its service manager starts it from
