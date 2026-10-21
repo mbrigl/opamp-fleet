@@ -184,7 +184,8 @@ struct Local {
     /// `server_offered_version`/`server_offered_hash` (the Baseline requires them while
     /// installing or after a failure).
     server_offered: Option<(String, Vec<u8>)>,
-    /// The last install failure for this Agent's package, reported alongside the status.
+    /// The last install failure for this Agent's package, reported alongside the status — or,
+    /// while it is `Installing`, why it waits for the second service (ADR-0059 clause 2).
     package_error: String,
     /// A failure in processing the *offer itself* rather than one package — the Baseline's
     /// `PackageStatuses.error_message`, "set if the Agent encountered an error when processing the
@@ -2379,6 +2380,89 @@ mod tests {
             download.headers,
             vec![("X-Api-Key".to_string(), "operator-secret".to_string())]
         );
+    }
+
+    /// A configuration that waits for the second service stays `APPLYING` and names why; a wait
+    /// reported for a configuration since superseded changes nothing, and the acknowledgement
+    /// clears the reason.
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_configuration_that_waits_for_the_second_service_stays_applying_and_says_why() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        let _ = agent.next_report();
+        agent.handle(&ServerToAgent {
+            remote_config: Some(remote_config(b"x: 1\n", b"hash-1")),
+            ..Default::default()
+        });
+        let _ = agent.next_report();
+
+        agent.config_waiting(b"hash-0", "stale".to_string());
+        assert!(agent.next_report().remote_config_status.is_none());
+
+        agent.config_waiting(
+            b"hash-1",
+            "the second service cannot be reached".to_string(),
+        );
+        let status = agent.next_report().remote_config_status.expect("a status");
+        assert_eq!(status.status, RemoteConfigStatuses::Applying as i32);
+        assert_eq!(status.last_remote_config_hash, b"hash-1");
+        assert_eq!(status.error_message, "the second service cannot be reached");
+
+        agent.config_applied(b"hash-1".to_vec(), Ok(()));
+        let status = agent.next_report().remote_config_status.expect("a status");
+        assert_eq!(status.status, RemoteConfigStatuses::Applied as i32);
+        assert!(status.error_message.is_empty(), "{status:?}");
+    }
+
+    /// A package that waits for the second service stays `Installing` and names why; a wait
+    /// reported for a package a newer offer replaced changes nothing, and the outcome replaces the
+    /// reason.
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_package_that_waits_for_the_second_service_stays_installing_and_says_why() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        agent.accept_packages();
+        agent.local.installing = Some(PackageDownload {
+            name: "otelcol".to_string(),
+            version: "2.0.0".to_string(),
+            hash: b"new".to_vec(),
+            download_url: String::new(),
+            content_hash: Vec::new(),
+            signature: Vec::new(),
+            headers: Vec::new(),
+        });
+        let status = |agent: &mut AgentState| {
+            agent
+                .next_report()
+                .package_statuses
+                .expect("statuses")
+                .packages["otelcol"]
+                .clone()
+        };
+
+        agent.package_waiting(b"replaced", "stale".to_string());
+        assert!(status(&mut agent).error_message.is_empty());
+
+        agent.package_waiting(b"new", "the second service cannot be reached".to_string());
+        let waiting = status(&mut agent);
+        assert_eq!(
+            waiting.status,
+            opamp::proto::PackageStatusEnum::Installing as i32
+        );
+        assert_eq!(
+            waiting.error_message,
+            "the second service cannot be reached"
+        );
+
+        agent.package_applied(b"new".to_vec(), Ok("2.0.0".to_string()));
+        let installed = status(&mut agent);
+        assert_eq!(
+            installed.status,
+            opamp::proto::PackageStatusEnum::Installed as i32
+        );
+        assert!(installed.error_message.is_empty(), "{installed:?}");
     }
 
     /// Verifies: ADR-0026

@@ -121,6 +121,17 @@ impl AgentState {
         self.protocol.package_status_changed();
     }
 
+    /// The package of `hash` waits for the second service, staged and not swapped in (ADR-0059
+    /// clause 2): it stays `Installing`, and its status names `reason` until the outcome replaces
+    /// it. Nothing changes for a package a newer offer has replaced meanwhile.
+    pub fn package_waiting(&mut self, hash: &[u8], reason: String) {
+        let local = &mut self.local;
+        if local.installing.as_ref().is_some_and(|d| d.hash == hash) {
+            local.package_error = reason;
+            self.protocol.package_status_changed();
+        }
+    }
+
     /// Closes a package's lifecycle the Supervisor applied (ADR-0026): `Ok(version)` records it
     /// Installed and persists it; `Err` reports InstallFailed (the binary was rolled back). Either
     /// way the offered aggregate is echoed, so the Server stops re-offering the same bytes — a

@@ -1702,6 +1702,16 @@ mod an_apply_while_the_second_service_is_away {
     /// A Runner over `dir`'s `agent`, started through the second service on `dir`'s socket,
     /// keeping a predecessor for `retain_previous`.
     fn on(dir: tempfile::TempDir, apply_grace: Duration, retain_previous: Duration) -> Away {
+        on_with(dir, apply_grace, retain_previous, None)
+    }
+
+    /// [`on`], proving a staged package with `preflight` first.
+    fn on_with(
+        dir: tempfile::TempDir,
+        apply_grace: Duration,
+        retain_previous: Duration,
+        preflight: Option<Preflight>,
+    ) -> Away {
         let binary = dir.path().join("agent");
         let socket = dir.path().join("agents.sock");
         let (event_tx, events) = mpsc::channel(64);
@@ -1717,7 +1727,7 @@ mod an_apply_while_the_second_service_is_away {
             install: Some(InstallTarget::Binary(binary.clone())),
             archive_key: None,
             version_probe: None,
-            preflight: None,
+            preflight,
             reload_signal: None,
             spawner: Spawner::Channel(Channel::new(&socket, own_uid())),
             events: EventSender::new(0, event_tx),
@@ -1856,6 +1866,27 @@ mod an_apply_while_the_second_service_is_away {
         }
     }
 
+    /// What waits for the second service, and why, as the Runner next says: `(true, hash, reason)`
+    /// for a package, `(false, hash, reason)` for a configuration. No outcome comes first.
+    async fn next_waiting(
+        events: &mut mpsc::Receiver<(usize, ProcessEvent)>,
+    ) -> (bool, Vec<u8>, String) {
+        loop {
+            let (_, event) = tokio::time::timeout(Duration::from_secs(30), events.recv())
+                .await
+                .expect("an event in time")
+                .expect("an open channel");
+            match event {
+                ProcessEvent::PackageWaiting { hash, reason } => return (true, hash, reason),
+                ProcessEvent::ConfigWaiting { hash, reason } => return (false, hash, reason),
+                ProcessEvent::ConfigApplied { .. } | ProcessEvent::PackageApplied { .. } => {
+                    panic!("an outcome reported while the second service is away: {event:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+
     async fn shut_down(away: Away) {
         away.harness.shutdown_tx.send(true).expect("shutdown");
         tokio::time::timeout(Duration::from_secs(10), away.harness.task)
@@ -1887,6 +1918,11 @@ mod an_apply_while_the_second_service_is_away {
             })
             .await
             .expect("send");
+        assert_eq!(
+            next_waiting(&mut away.harness.events).await,
+            (true, b"9.9.9".to_vec(), UNREACHABLE.to_string()),
+            "still Installing, naming the second service"
+        );
         staged_beside(&away, &bytes_of(&stub_crasher())).await;
         assert_eq!(
             std::fs::read(&away.binary).expect("read"),
@@ -1916,7 +1952,11 @@ mod an_apply_while_the_second_service_is_away {
         the_service_goes(&mut away, service).await;
 
         apply(&away.harness, b"cfg").await;
-        the_apply_finds_it_away(&mut away).await;
+        assert_eq!(
+            next_waiting(&mut away.harness.events).await,
+            (false, b"cfg".to_vec(), UNREACHABLE.to_string()),
+            "still APPLYING, naming the second service"
+        );
 
         let _service = Service::up(&away.socket);
         let (hash, result) = next_ack(&mut away.harness.events).await;
@@ -2144,6 +2184,116 @@ mod an_apply_while_the_second_service_is_away {
             std::fs::read(&away.binary).expect("read"),
             bytes_of(&stub_agent())
         );
+        shut_down(away).await;
+    }
+
+    /// A second service that is reached and refused — here its socket is served by another
+    /// account than the process account — is named as such while a configuration and a package
+    /// wait for it.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn what_waits_for_a_refused_service_names_the_refusal() {
+        const REFUSED: &str =
+            "the second service is refused: another account, another build, or it refuses this Client";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("agent");
+        write_executable(&binary, &bytes_of(&stub_agent()));
+        let socket = dir.path().join("agents.sock");
+        let _service = Service::up(&socket);
+        let (event_tx, mut events) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let (shutdown_tx, shutdown) = shutdown_channel();
+        let live = binary.clone();
+        let runner = Runner {
+            endpoint_token: zeroize::Zeroizing::default(),
+            name: "test".to_string(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace: Duration::from_millis(500),
+            retain_previous: Duration::ZERO,
+            install: Some(InstallTarget::Binary(binary.clone())),
+            archive_key: None,
+            version_probe: None,
+            preflight: None,
+            reload_signal: None,
+            // The process account is another uid than the one that serves the socket.
+            spawner: Spawner::Channel(Channel::new(&socket, own_uid() + 1)),
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || Some(spec(&live))),
+        };
+        let task = tokio::spawn(runner.run(shutdown));
+        // A refusal is met again until the reconnect window ends.
+        let health = next_health_and_no_outcome(&mut events, Duration::from_secs(30)).await;
+        assert_eq!(health.status, REFUSED, "{health:?}");
+
+        commands
+            .send(ProcessCommand::ApplyConfig {
+                config: AgentRemoteConfig {
+                    config_hash: b"cfg".to_vec(),
+                    ..Default::default()
+                },
+                span: tracing::Span::current(),
+            })
+            .await
+            .expect("send");
+        assert_eq!(
+            next_waiting(&mut events).await,
+            (false, b"cfg".to_vec(), REFUSED.to_string())
+        );
+        let staged = dir.path().join("downloaded");
+        std::fs::write(&staged, another_build_of_the_agent()).expect("stage");
+        commands
+            .send(ProcessCommand::ApplyPackage {
+                staged,
+                version: "2.0.0".to_string(),
+                hash: b"2.0.0".to_vec(),
+                span: tracing::Span::current(),
+            })
+            .await
+            .expect("send");
+        assert_eq!(
+            next_waiting(&mut events).await,
+            (true, b"2.0.0".to_vec(), REFUSED.to_string())
+        );
+        shutdown_tx.send(true).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("the Runner ends on the shutdown")
+            .expect("cleanly");
+    }
+
+    /// The preflight runs the staged program as the Client in this slice and needs no second
+    /// service: a package that passes it while the service is away waits, and is not refused.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_preflight_passed_while_the_service_is_away_leaves_the_package_waiting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_executable(&dir.path().join("agent"), &bytes_of(&stub_agent()));
+        let service = Service::up(&dir.path().join("agents.sock"));
+        let preflight = Preflight {
+            args: vec!["--version".to_string()],
+            env: Vec::new(),
+        };
+        let mut away = on_with(
+            dir,
+            Duration::from_millis(500),
+            Duration::ZERO,
+            Some(preflight),
+        );
+        let health = next_health(&mut away.harness.events).await;
+        assert_eq!(health.status, "running", "{health:?}");
+        the_service_goes(&mut away, service).await;
+
+        let new = another_build_of_the_agent();
+        offer(&away, &new, "2.0.0").await;
+        assert_eq!(
+            next_waiting(&mut away.harness.events).await,
+            (true, b"2.0.0".to_vec(), UNREACHABLE.to_string())
+        );
+        let _service = Service::up(&away.socket);
+        let (hash, result) = next_package_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"2.0.0".to_vec());
+        assert_eq!(result, Ok("2.0.0".to_string()));
         shut_down(away).await;
     }
 }
