@@ -38,9 +38,10 @@ pub enum ProcessCommand {
     /// does — a binary that will not stay up is rolled back to the previous one. Answered with
     /// [`ProcessEvent::PackageApplied`]. `staged` is the path of the verified artifact — a file,
     /// not its bytes, since a program is too big to carry through the core; `hash` is the package
-    /// hash the status refers to; `version` is what the Agent then reports it has. Where the
-    /// start does not reach the second service, the package stays in place and the answer follows
-    /// the start that does (ADR-0059 clause 2).
+    /// hash the status refers to; `version` is what the Agent then reports it has. While the
+    /// second service cannot be reached, the package is staged and kept, never swapped in, and
+    /// the answer follows its swap once a start reaches the service; a newer package replaces it
+    /// unanswered (ADR-0059 clause 2).
     ApplyPackage {
         staged: PathBuf,
         version: String,
