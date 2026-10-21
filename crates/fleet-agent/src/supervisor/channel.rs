@@ -92,6 +92,33 @@ const RECONNECT: Duration =
 /// How often a start tries to reach the second service again while it waits for it.
 const RECONNECT_EVERY: Duration = Duration::from_millis(200);
 
+/// How much of each stream a program run to its end keeps — the version probe, the preflight: the
+/// last bytes, where a version banner is short and the reason a program did not run is its last
+/// line.
+pub(crate) const CAPTURED: usize = 64 * 1024;
+
+/// What a program run to its end wrote, kept rather than logged.
+#[derive(Default)]
+struct Captured {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl Captured {
+    fn push(&mut self, stream: Stream, line: &str) {
+        let kept = match stream {
+            Stream::Stdout => &mut self.stdout,
+            Stream::Stderr => &mut self.stderr,
+        };
+        kept.extend_from_slice(line.as_bytes());
+        kept.push(b'\n');
+        if kept.len() > CAPTURED {
+            let excess = kept.len() - CAPTURED;
+            kept.drain(..excess);
+        }
+    }
+}
+
 /// What the Client asks of the second service.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -970,6 +997,8 @@ struct Route {
     exited: Option<oneshot::Sender<Result<i32, String>>>,
     /// The signals sent and not yet answered, in the order they were sent.
     signals: VecDeque<oneshot::Sender<Result<(), String>>>,
+    /// Where the output of a program run to its end is kept instead of logged.
+    captured: Option<Arc<Mutex<Captured>>>,
 }
 
 impl Channel {
@@ -1032,9 +1061,51 @@ impl Channel {
     /// goes during the start as well as before it — fails with an error [`is_unreachable`] tells
     /// apart from a program that did not start.
     pub(crate) async fn start(&self, supervisor: &str, launch: Launch) -> io::Result<RemoteChild> {
+        self.start_keeping(supervisor, launch, None).await
+    }
+
+    /// Asks the service to run `launch` for the Supervisor named `supervisor` to its end, and
+    /// returns what it wrote — the last [`CAPTURED`] bytes of each stream — with how it ended: the
+    /// version probe and the preflight, run under the process account (ADR-0059 clause 3).
+    ///
+    /// Cancel-safe: dropped before the end, it asks the service to stop the program.
+    ///
+    /// # Errors
+    /// Returns what [`Channel::start`] returns, or that the service went before the program
+    /// ended.
+    pub(crate) async fn output(
+        &self,
+        supervisor: &str,
+        launch: Launch,
+    ) -> io::Result<std::process::Output> {
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let mut child = self
+            .start_keeping(supervisor, launch, Some(Arc::clone(&captured)))
+            .await?;
+        let status = child.wait().await?;
+        // The service sends a program's output before its exit, on the one connection.
+        let captured = std::mem::take(
+            &mut *captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        Ok(std::process::Output {
+            status,
+            stdout: captured.stdout,
+            stderr: captured.stderr,
+        })
+    }
+
+    /// [`Channel::start`], keeping the program's output in `captured` where one is given.
+    async fn start_keeping(
+        &self,
+        supervisor: &str,
+        launch: Launch,
+        captured: Option<Arc<Mutex<Captured>>>,
+    ) -> io::Result<RemoteChild> {
         let connection = self.connection().await.map_err(unreachable)?;
         match Arc::clone(&connection)
-            .start(supervisor, launch.clone())
+            .start(supervisor, launch.clone(), captured.clone())
             .await
         {
             // The service went while the start was on its way, and what it started went with it:
@@ -1042,7 +1113,10 @@ impl Channel {
             Err(e) if connection.is_closed() => {
                 debug!(error = %e, "the second service went during a start; connecting again");
                 let connection = self.connection().await.map_err(unreachable)?;
-                match Arc::clone(&connection).start(supervisor, launch).await {
+                match Arc::clone(&connection)
+                    .start(supervisor, launch, captured)
+                    .await
+                {
                     Err(e) if connection.is_closed() => Err(unreachable(e)),
                     started => started,
                 }
@@ -1222,7 +1296,12 @@ impl Connection {
         self.routes().closed || self.requests.is_closed()
     }
 
-    async fn start(self: Arc<Self>, supervisor: &str, launch: Launch) -> io::Result<RemoteChild> {
+    async fn start(
+        self: Arc<Self>,
+        supervisor: &str,
+        launch: Launch,
+        captured: Option<Arc<Mutex<Captured>>>,
+    ) -> io::Result<RemoteChild> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (started_tx, started) = oneshot::channel();
         let (exited_tx, exited) = oneshot::channel();
@@ -1238,6 +1317,7 @@ impl Connection {
                     started: Some(started_tx),
                     exited: Some(exited_tx),
                     signals: VecDeque::new(),
+                    captured,
                 },
             );
         }
@@ -1317,13 +1397,18 @@ impl Connection {
             // Logged, not written to the Client's own streams: under the Supervisor it belongs to,
             // and escaped, so a program cannot pass a line of its own off as one of the Client's.
             Reply::Output { id, stream, line } => {
-                let supervisor = self
+                let route = self
                     .routes()
                     .by_id
                     .get(&id)
-                    .map(|route| route.supervisor.clone());
-                match supervisor {
-                    Some(supervisor) => {
+                    .map(|route| (route.supervisor.clone(), route.captured.clone()));
+                match route {
+                    // Kept for the one who asked, who reads it, rather than logged.
+                    Some((_, Some(captured))) => captured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(stream, &line),
+                    Some((supervisor, None)) => {
                         info!(supervisor = %supervisor, stream = %stream.name(), line = ?line, "output");
                     }
                     // A process the program left behind, still writing after the program's end.
