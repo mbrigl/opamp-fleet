@@ -428,12 +428,35 @@ impl InstallTarget {
         self.remove(&staged.temp);
     }
 
-    /// Puts back what ran before.
+    /// Puts back what ran before. Where nothing is there to put back, what is live stays, so a
+    /// failed rollback never empties `program/` (ADR-0026 clause 62).
     fn restore(&self) -> Result<(), String> {
         let (live, backup) = (self.live(), self.backup());
+        if let Err(e) = std::fs::symlink_metadata(&backup) {
+            return Err(format!("cannot restore {}: {e}", live.display()));
+        }
         self.remove(&live);
         std::fs::rename(&backup, &live)
             .map_err(|e| format!("cannot restore {}: {e}", live.display()))
+    }
+
+    /// Takes a package that was swapped in back out to its staged name, and puts back what ran
+    /// before it (ADR-0053 clause 2). On an error what was live is live again: where the package
+    /// cannot be taken out it stays, and where what ran before cannot be put back the package is
+    /// put back, so `program/` is never left empty (ADR-0026 clause 62).
+    fn take_back(&self, staged: &Staged, has_backup: bool) -> Result<(), String> {
+        let live = self.live();
+        std::fs::rename(&live, &staged.temp)
+            .map_err(|e| format!("cannot take {} back out: {e}", live.display()))?;
+        if has_backup {
+            if let Err(e) = self.restore() {
+                return match std::fs::rename(&staged.temp, &live) {
+                    Ok(()) => Err(e),
+                    Err(back) => Err(format!("{e}; nor can the package be put back: {back}")),
+                };
+            }
+        }
+        Ok(())
     }
 
     /// The marker beside a retained backup (ADR-0026): a sibling file holding the Unix-seconds
@@ -1032,8 +1055,9 @@ impl Runner {
         let started = tokio::select! {
             started = self.try_spawn() => started,
             _ = shutdown.requested() => {
-                if self.take_back(target, &staged, has_backup).is_ok() {
-                    target.discard(&staged);
+                match target.take_back(&staged, has_backup) {
+                    Ok(()) => target.discard(&staged),
+                    Err(e) => warn!(supervisor = %self.name, error = %e, "cannot take the package back out; it stays live"),
                 }
                 return Swapped::Gated(GraceOutcome::ShuttingDown);
             }
@@ -1072,10 +1096,10 @@ impl Runner {
         };
         if matches!(outcome, GraceOutcome::Unreachable) {
             info!(supervisor = %self.name, version = %version, "the second service went before the package proved itself; the package waits for it, and what ran before is put back");
-            return match self.take_back(target, &staged, has_backup) {
+            return match target.take_back(&staged, has_backup) {
                 Ok(()) => Swapped::Parked(staged),
-                // Neither in place nor out of the way: concluded as a failed install, which puts
-                // back what ran before where there is one.
+                // The package stays live: concluded as a failed install, which puts back what
+                // ran before where there is one to put back.
                 Err(e) => {
                     warn!(supervisor = %self.name, error = %e, "cannot take the package back out");
                     self.conclude(target, has_backup, GraceOutcome::Failed(e))
@@ -1083,23 +1107,6 @@ impl Runner {
             };
         }
         self.conclude(target, has_backup, outcome)
-    }
-
-    /// Takes a package that was swapped in back out to its staged name, and puts back what ran
-    /// before it.
-    fn take_back(
-        &self,
-        target: &InstallTarget,
-        staged: &Staged,
-        has_backup: bool,
-    ) -> Result<(), String> {
-        let live = target.live();
-        std::fs::rename(&live, &staged.temp)
-            .map_err(|e| format!("cannot take {} back out: {e}", live.display()))?;
-        if has_backup {
-            target.restore()?;
-        }
-        Ok(())
     }
 
     /// Concludes a swap on its gate's `outcome` (ADR-0026): rolls back to the predecessor after a
@@ -2492,6 +2499,51 @@ mod tests {
         assert!(target.sweep(1000), "at the deadline it is swept");
         assert!(!target.backup().exists(), "the previous version is gone");
         assert!(!target.backup_marker().exists(), "and so is its marker");
+    }
+
+    /// A package taken back out whose predecessor cannot be put back — here it is gone — is put
+    /// back itself, a file and a tree alike: `program/` is never left empty (ADR-0026 clause 62).
+    /// Verifies: ADR-0026
+    #[test]
+    fn a_package_taken_back_whose_predecessor_cannot_be_put_back_stays_live() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let targets = [
+            InstallTarget::Binary(dir.path().join("prog")),
+            InstallTarget::Tree {
+                root: dir.path().join("tree-root"),
+                program_path: PathBuf::from("bin/prog"),
+            },
+        ];
+        for target in targets {
+            let live = target.live();
+            let temp = live.with_extension("staged");
+            if matches!(target, InstallTarget::Tree { .. }) {
+                std::fs::create_dir_all(live.join("bin")).expect("mkdir");
+                std::fs::write(live.join("bin/prog"), b"the package").expect("write");
+            } else {
+                std::fs::write(&live, b"the package").expect("write");
+            }
+            let staged = Staged {
+                root: dir.path().to_path_buf(),
+                program: temp.clone(),
+                temp: temp.clone(),
+            };
+            let error = target
+                .take_back(&staged, true)
+                .expect_err("nothing to put back");
+            assert!(error.contains("cannot restore"), "{error}");
+            let program = match &target {
+                InstallTarget::Tree { .. } => live.join("bin/prog"),
+                InstallTarget::Binary(_) => live.clone(),
+            };
+            assert_eq!(
+                std::fs::read(&program).expect("live"),
+                b"the package",
+                "{}",
+                live.display()
+            );
+            assert!(!temp.exists(), "{}", temp.display());
+        }
     }
 
     /// A backup with no marker is not something this Runner retained (a half-finished install
