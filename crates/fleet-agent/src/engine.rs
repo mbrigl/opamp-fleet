@@ -197,7 +197,7 @@ impl Engine {
     }
 
     /// The plugins a Supervisor started at runtime is started with — `None` only for an Engine
-    /// not built by [`build_engine`](crate::supervisor::build_engine).
+    /// not built by [`build_engine`](crate::supervisor::build_engine), which then starts none.
     pub fn plugins(&self) -> Option<Arc<dyn PluginRegistry>> {
         self.plugins.clone()
     }

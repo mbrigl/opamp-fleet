@@ -294,6 +294,15 @@ fn start(
     shutdown: &Shutdown,
 ) -> Result<(), String> {
     let index = engine.next_index();
+    // The plugins the startup started its Supervisors with, so this one starts its Managed
+    // Process the same way (ADR-0059 clause 3). An Engine without them is not told who starts a
+    // program, and guessing the Client itself would start one outside the process account.
+    let plugins = engine.plugins().ok_or_else(|| {
+        format!(
+            "supervisor {:?}: this Client was not told who starts its programs",
+            block.name
+        )
+    })?;
     // The marks the startup read, so a re-added Supervisor is held to its type's mark (ADR-0043
     // clause 14). An Engine built without them reads them from `state_dir` now.
     let marks = match engine.high_water() {
@@ -305,14 +314,6 @@ fn start(
             marks
         }
     };
-    // The plugins the startup started its Supervisors with, so this one starts its Managed
-    // Process the same way (ADR-0059 clause 3). Only an Engine not built by `build_engine` has
-    // none, and then the Client starts the program itself, as there is nothing else it was told.
-    let plugins = engine.plugins().unwrap_or_else(|| {
-        std::sync::Arc::new(crate::supervisor::Registry::new(
-            crate::supervisor::process::Spawner::Local,
-        ))
-    });
     let agent = crate::supervisor::start_supervisor(
         config,
         block,
@@ -974,6 +975,86 @@ mod tests {
             ),
         )
         .expect("collector");
+    }
+
+    /// A Supervisor a set apply adds starts its Managed Process through the Spawner the Engine was
+    /// built with — here the second service's channel — as every Supervisor of the startup does
+    /// (ADR-0059 clause 3).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_supervisor_a_set_apply_adds_starts_through_the_engines_spawner() {
+        use crate::supervisor::channel::{peer, read_frame, write_frame, Channel, Reply, Request};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+        // A second service that starts nothing, and says what it was asked to start.
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
+                let reply = match request {
+                    Request::Hello { .. } => peer::hello(),
+                    Request::Start { id, launch } => {
+                        let _ = started_tx.send(launch.program);
+                        Reply::Started { id, pid: u32::MAX }
+                    }
+                    _ => continue,
+                };
+                if write_frame(&mut stream, &reply).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let path = dir.path().join("supervisor.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n",
+                state = dir.path().join("state").to_string_lossy(),
+            ),
+        )
+        .expect("write");
+        let mut config = ClientConfig::load(&path).expect("load");
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let mut engine = crate::supervisor::build_engine(
+            &config,
+            &shutdown,
+            crate::supervisor::process::Spawner::Channel(Channel::new(&socket, peer::own_uid())),
+        )
+        .expect("build");
+
+        apply(
+            &mut engine,
+            &mut config,
+            offer_of(&[("fleet", AGENT)]),
+            &shutdown,
+        )
+        .await;
+
+        let program = tokio::time::timeout(std::time::Duration::from_secs(10), started.recv())
+            .await
+            .expect("the added Supervisor's start reached the second service")
+            .expect("a start");
+        assert!(program.ends_with("agent"), "{}", program.display());
+    }
+
+    /// An Engine that was not told who starts its programs starts no Supervisor at all, rather
+    /// than the Client starting the program itself outside the process account (ADR-0059
+    /// clause 3).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn an_engine_without_its_plugins_starts_no_supervisor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config: ClientConfig = toml::from_str("").expect("config");
+        config.state_dir = dir.path().join("state");
+        let (blocks, _) = offered_blocks(&offer_of(&[("fleet", AGENT)])).expect("parse");
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let mut engine = Engine::new(Vec::new());
+        let refused = start(&mut engine, &config, &blocks[0], &shutdown)
+            .expect_err("started without its plugins");
+        assert!(refused.contains("who starts its programs"), "{refused}");
+        assert_eq!(engine.next_index(), 0, "nothing was added");
     }
 
     /// The switch lives where the Server cannot write: a set that removes the listed block and
