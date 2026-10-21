@@ -15,8 +15,13 @@ set -e
 case "${1-}" in
 # dpkg: everything that is not a real removal.
 upgrade | failed-upgrade | deconfigure) exit 0 ;;
-# rpm: "$1" is the number of instances that will remain — 1 means a replacement is coming.
-1) exit 0 ;;
+esac
+# rpm: "$1" is the number of instances that will remain — 0 is a removal, and any other number
+# means another instance of the package stays installed, an upgrade among them.
+case "${1-}" in
+'' | *[!0-9]*) ;;
+0) ;;
+*) exit 0 ;;
 esac
 
 if command -v systemctl >/dev/null 2>&1; then
