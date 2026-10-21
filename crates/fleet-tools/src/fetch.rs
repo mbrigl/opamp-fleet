@@ -16,8 +16,8 @@
 //!   host stays unbroken. Every artifact is verified against the checksum *upstream* published
 //!   before anything else happens to it.
 //! - **Repacked only where it must be.** An agent whose upstream publishes no archive a Client can
-//!   install is repacked deterministically (ADR-0026). That is the one place the bytes change, and
-//!   the tool says so.
+//!   install is repacked deterministically, from its own tree alone (ADR-0056). That is the one
+//!   place the bytes change, and the tool says so.
 //!
 //! Interactive by default; every prompt has a flag, so the same tool serves a pipeline:
 //!   opamp-fleetctl package fetch                          # asks for everything
@@ -905,16 +905,19 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
         .map(|(hash, _)| hash.trim().to_string())
 }
 
-/// Packs a directory as a `.tar.gz` a Client can install as a tree — deterministically, and with
-/// every link resolved.
+/// Packs a directory as a `.tar.gz` a Client can install as a tree — deterministically, with every
+/// link resolved, and with nothing from outside the tree (ADR-0056).
 ///
 /// Determinism is not tidiness: the fleet decides whether to distribute by content hash, so an
 /// artifact that differed by when it was packed would be a rollout nobody asked for. Times, owners
 /// and order are therefore fixed, exactly as `package pack` fixes them for one file.
 ///
 /// Links are resolved rather than carried because a tree package refuses them (ADR-0026): what a
-/// link names is not where it sits, which is the one thing a path check cannot judge. A link
-/// pointing at nothing is dropped.
+/// link names is not where it sits, which is the one thing a path check cannot judge. A link is
+/// resolved inside the tree alone, and one that leads out of it fails the pack before anything is
+/// written: following it would put the operator's own files into an artifact the operator then
+/// signs, and make its bytes depend on the host that packed it. A link pointing at nothing inside
+/// the tree is dropped.
 #[cfg_attr(
     any(not(test), not(unix)),
     expect(
@@ -924,11 +927,29 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 )]
 fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
     let mut members = Vec::new();
+    let mut leading_out = std::collections::BTreeSet::new();
     // The root is the first ancestor: a link back up to it is a cycle like any other.
-    let real_root = root
-        .canonicalize()
-        .map_err(|e| format!("cannot read {}: {e}", root.display()))?;
-    collect_members(root, Path::new(""), &mut members, &mut vec![real_root])?;
+    collect_members(
+        root,
+        Path::new(""),
+        Path::new(""),
+        &mut members,
+        &mut vec![PathBuf::new()],
+        &mut leading_out,
+    )?;
+    if !leading_out.is_empty() {
+        let links: Vec<String> = leading_out
+            .iter()
+            .map(|(link, target): &(PathBuf, PathBuf)| {
+                format!("{} -> {}", link.display(), target.display())
+            })
+            .collect();
+        return Err(format!(
+            "{} links out of itself, and a repack carries nothing from outside its tree: {}",
+            root.display(),
+            links.join(", ")
+        ));
+    }
     members.sort();
     if members.len() > MAX_TREE_MEMBERS {
         return Err(format!(
@@ -939,23 +960,40 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 
     let file =
         std::fs::File::create(out).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    let written = write_members(root, wrapper, &members, file, out);
+    if written.is_err() {
+        // Half an artifact is one somebody might sign.
+        let _ = std::fs::remove_file(out);
+    }
+    written
+}
+
+/// Writes the members, in the order given, into `file` as a gzipped tar.
+#[cfg_attr(
+    any(not(test), not(unix)),
+    expect(
+        dead_code,
+        reason = "only an agent whose upstream publishes no installable archive is repacked"
+    )
+)]
+fn write_members(
+    root: &Path,
+    wrapper: &str,
+    members: &[(PathBuf, PathBuf, bool)],
+    file: std::fs::File,
+    out: &Path,
+) -> Result<(), String> {
     let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
         file,
         flate2::Compression::default(),
     ));
-    for relative in &members {
-        let full = root.join(relative);
-        // Following the link is the point: `metadata` resolves, and an error means it resolves to
-        // nothing, which is a member to drop rather than a failure to pack.
-        let Ok(meta) = std::fs::metadata(&full) else {
-            continue;
-        };
-        let inside = Path::new(wrapper).join(relative);
+    for (name, real, is_dir) in members {
+        let inside = Path::new(wrapper).join(name);
         let mut header = tar::Header::new_gnu();
         header.set_mtime(0);
         header.set_uid(0);
         header.set_gid(0);
-        if meta.is_dir() {
+        if *is_dir {
             header.set_entry_type(tar::EntryType::Directory);
             header.set_size(0);
             header.set_mode(0o755);
@@ -965,12 +1003,17 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
                 .map_err(|e| format!("cannot pack {}: {e}", inside.display()))?;
             continue;
         }
+        // `real` holds no link, so what is opened is the member the walk judged.
+        let full = root.join(real);
+        let source = std::fs::File::open(&full)
+            .map_err(|e| format!("cannot read {}: {e}", full.display()))?;
+        let meta = source
+            .metadata()
+            .map_err(|e| format!("cannot read {}: {e}", full.display()))?;
         header.set_entry_type(tar::EntryType::Regular);
         header.set_size(meta.len());
         header.set_mode(mode_of(&meta));
         header.set_cksum();
-        let source = std::fs::File::open(&full)
-            .map_err(|e| format!("cannot read {}: {e}", full.display()))?;
         builder
             .append_data(&mut header, &inside, source)
             .map_err(|e| format!("cannot pack {}: {e}", inside.display()))?;
@@ -983,7 +1026,11 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Every path under `root`, relative to it — directories included, because a tree keeps its shape.
+/// Every member under the directory packed as `name` and read from `real` — directories included,
+/// because a tree keeps its shape. A member is its name in the artifact, the path inside the tree
+/// it is read from, which holds no link, and whether it is a directory; the two paths differ for
+/// everything reached through a linked directory. A link that leads out of the tree is no member
+/// but goes into `leading_out`, by its own path and its target.
 ///
 /// Links are followed, and that is the whole difficulty. A link to a *directory* has to be
 /// descended into and packed **at the name the link carries**, because that name is one the agent
@@ -992,10 +1039,11 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 /// single module. So the contents are packed under both names, exactly as `tar -h` writes them.
 ///
 /// Following links makes a cycle possible, and the guard has to be the *ancestors* of the walk
-/// rather than everywhere it has already been: a link pointing back up is a cycle and is not followed —
-/// it is packed as an empty directory under its name — while a second path to the same directory is legitimate duplication and must be packed again.
-/// Deduplicating by real path instead would leave one of the two names empty — and which one, on
-/// directory-read order, which is nobody's guarantee.
+/// rather than everywhere it has already been: a link pointing back up is a cycle and is not
+/// followed — it is packed as an empty directory under its name — while a second path to the same
+/// directory is legitimate duplication and must be packed again. Deduplicating by real path
+/// instead would leave one of the two names empty — and which one, on directory-read order, which
+/// is nobody's guarantee.
 #[cfg_attr(
     any(not(test), not(unix)),
     expect(
@@ -1005,36 +1053,157 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 )]
 fn collect_members(
     root: &Path,
-    prefix: &Path,
-    into: &mut Vec<PathBuf>,
+    name: &Path,
+    real: &Path,
+    into: &mut Vec<(PathBuf, PathBuf, bool)>,
     ancestors: &mut Vec<PathBuf>,
+    leading_out: &mut std::collections::BTreeSet<(PathBuf, PathBuf)>,
 ) -> Result<(), String> {
-    let dir = root.join(prefix);
+    let dir = root.join(real);
     for entry in
         std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?
     {
         let entry = entry.map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
-        let relative = prefix.join(entry.file_name());
-        let full = root.join(&relative);
+        let member = name.join(entry.file_name());
         // Resolving rather than reading the entry itself: what matters is what the member *is*
-        // once the link is followed, because that is what gets packed. An error means it resolves
-        // to nothing — a dangling link, which is where the AppImage's Debian leftovers go.
-        let Ok(meta) = std::fs::metadata(&full) else {
-            continue;
+        // once the link is followed, because that is what gets packed.
+        let (resolved, is_dir) = match resolve_inside(root, real, Path::new(&entry.file_name()))? {
+            Resolution::Inside { real, is_dir } => (real, is_dir),
+            // A dangling link, which is where the AppImage's Debian leftovers go.
+            Resolution::Nothing => continue,
+            Resolution::LeadsOut => {
+                let link = real.join(entry.file_name());
+                let target = std::fs::read_link(entry.path())
+                    .map_err(|e| format!("cannot read {}: {e}", link.display()))?;
+                leading_out.insert((link, target));
+                continue;
+            }
         };
-        into.push(relative.clone());
-        if !meta.is_dir() {
+        into.push((member.clone(), resolved.clone(), is_dir));
+        if !is_dir || ancestors.contains(&resolved) {
             continue;
         }
-        let real = full.canonicalize().unwrap_or_else(|_| full.clone());
-        if ancestors.contains(&real) {
-            continue;
-        }
-        ancestors.push(real);
-        collect_members(root, &relative, into, ancestors)?;
+        ancestors.push(resolved.clone());
+        collect_members(root, &member, &resolved, into, ancestors, leading_out)?;
         ancestors.pop();
     }
     Ok(())
+}
+
+/// What a path of the tree is once every link on it is followed inside the tree.
+#[cfg_attr(
+    any(not(test), not(unix)),
+    expect(
+        dead_code,
+        reason = "only an agent whose upstream publishes no installable archive is repacked"
+    )
+)]
+enum Resolution {
+    /// A file or directory inside the tree, by its path relative to the root, which holds no link.
+    Inside { real: PathBuf, is_dir: bool },
+    /// Nothing inside the tree: a dangling link, a path through a file, or a loop of links.
+    Nothing,
+    /// The path climbs above the root, or meets a link with an absolute target.
+    LeadsOut,
+}
+
+/// How many links one resolution follows before it counts as a loop — the bound Linux puts on one
+/// path lookup.
+#[cfg_attr(
+    any(not(test), not(unix)),
+    expect(
+        dead_code,
+        reason = "only an agent whose upstream publishes no installable archive is repacked"
+    )
+)]
+const MAX_LINK_HOPS: usize = 40;
+
+/// Resolves `path`, taken relative to `base` — a directory of the tree, by a path that holds no
+/// link — by following every link on it inside the tree alone. The file system is only asked what
+/// each component is, never to follow a link itself, so nothing outside the tree is ever read.
+///
+/// A `..` above the root or an absolute target leads out, and so does a path that climbs above the
+/// root past a component that does not exist: whether a link leads out is the tree's to say, not
+/// the host's.
+#[cfg_attr(
+    any(not(test), not(unix)),
+    expect(
+        dead_code,
+        reason = "only an agent whose upstream publishes no installable archive is repacked"
+    )
+)]
+fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, String> {
+    use std::path::Component;
+    // Components still to resolve, the next one last; `None` if the path is absolute.
+    fn components(path: &Path) -> Option<Vec<std::ffi::OsString>> {
+        let mut parts = Vec::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(part) => parts.push(part.to_os_string()),
+                Component::ParentDir => parts.push("..".into()),
+                Component::CurDir => {}
+                Component::RootDir | Component::Prefix(_) => return None,
+            }
+        }
+        parts.reverse();
+        Some(parts)
+    }
+
+    let mut here: Vec<std::ffi::OsString> = base
+        .components()
+        .map(|c| c.as_os_str().to_os_string())
+        .collect();
+    let Some(mut pending) = components(path) else {
+        return Ok(Resolution::LeadsOut);
+    };
+    let mut hops = 0;
+    // Whether `here` is a directory; once a component names nothing, the rest of the path is read
+    // as text, only to learn whether it climbs out.
+    let mut is_dir = true;
+    let mut nothing = false;
+    while let Some(part) = pending.pop() {
+        if part == ".." {
+            nothing |= !is_dir;
+            if here.pop().is_none() {
+                return Ok(Resolution::LeadsOut);
+            }
+            is_dir = true;
+            continue;
+        }
+        nothing |= !is_dir;
+        here.push(part);
+        if nothing {
+            continue;
+        }
+        let full = root.join(here.iter().collect::<PathBuf>());
+        let Ok(meta) = std::fs::symlink_metadata(&full) else {
+            nothing = true;
+            continue;
+        };
+        if !meta.file_type().is_symlink() {
+            is_dir = meta.is_dir();
+            continue;
+        }
+        hops += 1;
+        if hops > MAX_LINK_HOPS {
+            return Ok(Resolution::Nothing);
+        }
+        let target = std::fs::read_link(&full)
+            .map_err(|e| format!("cannot read {}: {e}", full.display()))?;
+        // The target is taken relative to the directory holding the link.
+        here.pop();
+        let Some(mut further) = components(&target) else {
+            return Ok(Resolution::LeadsOut);
+        };
+        pending.append(&mut further);
+    }
+    if nothing {
+        return Ok(Resolution::Nothing);
+    }
+    Ok(Resolution::Inside {
+        real: here.iter().collect(),
+        is_dir,
+    })
 }
 
 /// The mode to store, which off Unix is a decision rather than a reading: a tar written on Windows
@@ -1627,6 +1796,8 @@ mod tests {
     /// produced a tree whose agent could not find a single module, and packing only one of the two
     /// names left which one to directory-read order. A cycle is still not followed, and a link
     /// pointing at nothing is dropped.
+    ///
+    /// Verifies: ADR-0056
     #[cfg(unix)]
     #[test]
     fn a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang() {
@@ -1670,7 +1841,7 @@ mod tests {
     /// the root is the first ancestor of the walk, so a link right under it to `..` or to the root
     /// packs no second copy of the tree; each such link is packed as an empty directory.
     ///
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0056
     #[cfg(unix)]
     #[test]
     fn a_link_to_the_root_is_not_followed() {
@@ -1681,7 +1852,8 @@ mod tests {
         std::fs::write(tree.join("lib/Universal.pm"), b"a-module").expect("write");
         std::os::unix::fs::symlink("..", tree.join("lib/up")).expect("link the root from below");
         std::os::unix::fs::symlink(".", tree.join("self")).expect("link the root from itself");
-        std::os::unix::fs::symlink(&tree, tree.join("absolute")).expect("link the root by path");
+        std::os::unix::fs::symlink("../lib/..", tree.join("lib/around"))
+            .expect("link the root the long way");
 
         let artifact = dir.path().join("packed.tar.gz");
         pack_tree(&tree, "wrapper", &artifact).expect("pack");
@@ -1702,7 +1874,7 @@ mod tests {
                 )
             })
             .collect();
-        for link in ["wrapper/lib/up", "wrapper/self", "wrapper/absolute"] {
+        for link in ["wrapper/lib/up", "wrapper/self", "wrapper/lib/around"] {
             assert!(
                 entries.contains(&(link.to_string(), tar::EntryType::Directory)),
                 "{link} is packed as a directory: {entries:?}"
@@ -1724,6 +1896,137 @@ mod tests {
             vec!["wrapper/AppRun", "wrapper/lib/Universal.pm"],
             "the tree is packed once, not again under a link to its root"
         );
+    }
+
+    /// A link whose target is absolute, or whose resolution climbs above the root, fails the repack
+    /// and nothing is written — whether or not the path it would name exists on this host, so the
+    /// outcome is the tree's and not the host's. The error names each such link by its path in the
+    /// tree and its target, and only those.
+    ///
+    /// Verifies: ADR-0056
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_tree_fails_the_repack_naming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("operator-secret");
+        std::fs::write(&outside, b"the-operators-file").expect("write");
+        let absolute_existing = outside.to_string_lossy().into_owned();
+        let cases: [&[(&str, &str)]; 6] = [
+            &[("lib/certs", absolute_existing.as_str())],
+            &[("lib/up", "../../operator-secret")],
+            &[("lib/certs", "/nonexistent-opamp-fleet/secret")],
+            &[("lib/up", "../../nonexistent-opamp-fleet")],
+            &[("lib/gone", "nowhere/../../../operator-secret")],
+            &[
+                ("lib/certs", absolute_existing.as_str()),
+                ("lib/up", "../../operator-secret"),
+            ],
+        ];
+        for (n, links) in cases.iter().enumerate() {
+            let tree = dir.path().join(format!("tree-{n}"));
+            std::fs::create_dir_all(tree.join("lib")).expect("create");
+            std::fs::write(tree.join("AppRun"), b"the-entry-point").expect("write");
+            std::os::unix::fs::symlink("AppRun", tree.join("inside")).expect("link inside");
+            for (link, target) in *links {
+                std::os::unix::fs::symlink(target, tree.join(link)).expect("link out");
+            }
+
+            let artifact = dir.path().join(format!("packed-{n}.tar.gz"));
+            let error = pack_tree(&tree, "wrapper", &artifact).expect_err(&format!(
+                "a link out of the tree fails the repack: {links:?}"
+            ));
+
+            for (link, target) in *links {
+                assert!(
+                    error.contains(&format!("{link} -> {target}")),
+                    "the error names {link} and its target: {error}"
+                );
+            }
+            assert!(
+                !error.contains("inside"),
+                "a link inside the tree is not named: {error}"
+            );
+            assert!(
+                !artifact.exists(),
+                "no artifact is left at the output path: {links:?}"
+            );
+        }
+    }
+
+    /// A link that stays inside the tree is still dereferenced, to a file as to a directory and
+    /// through other links on the way, and one that names nothing inside the tree is dropped —
+    /// however it climbs, as long as it does not climb out.
+    ///
+    /// Verifies: ADR-0056
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_tree_is_packed_under_its_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("lib/5.26.1")).expect("create");
+        std::fs::create_dir_all(tree.join("bin")).expect("create");
+        std::fs::write(tree.join("AppRun"), b"the-entry-point").expect("write");
+        std::fs::write(tree.join("lib/5.26.1/Universal.pm"), b"a-module").expect("write");
+        std::os::unix::fs::symlink("5.26.1", tree.join("lib/5.26")).expect("link a directory");
+        std::os::unix::fs::symlink("../AppRun", tree.join("bin/agent")).expect("link a file");
+        std::os::unix::fs::symlink("../lib/5.26/Universal.pm", tree.join("bin/module"))
+            .expect("link through a link");
+        std::os::unix::fs::symlink("../lib/missing", tree.join("bin/dangling"))
+            .expect("link to nothing");
+
+        let artifact = dir.path().join("packed.tar.gz");
+        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+
+        let dest = dir.path().join("unpacked");
+        std::fs::create_dir_all(&dest).expect("create");
+        fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &dest)
+            .expect("the packed tree is one a Client installs");
+        assert_eq!(
+            std::fs::read(dest.join("bin/agent")).expect("the linked file"),
+            b"the-entry-point"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("bin/module")).expect("the file behind two links"),
+            b"a-module"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("lib/5.26/Universal.pm")).expect("the linked directory"),
+            b"a-module"
+        );
+        assert!(
+            !dest.join("bin/dangling").exists(),
+            "a link that names nothing inside the tree is not a member"
+        );
+    }
+
+    /// The bytes of a repack are the tree's alone: the same tree packed twice, and a copy of it
+    /// packed from elsewhere on the host, give the same artifact.
+    ///
+    /// Verifies: ADR-0056
+    #[cfg(unix)]
+    #[test]
+    fn the_same_tree_repacks_to_the_same_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let build = |tree: &Path| {
+            std::fs::create_dir_all(tree.join("lib/5.26.1")).expect("create");
+            std::fs::write(tree.join("AppRun"), b"the-entry-point").expect("write");
+            std::fs::write(tree.join("lib/5.26.1/Universal.pm"), b"a-module").expect("write");
+            std::os::unix::fs::symlink("5.26.1", tree.join("lib/5.26")).expect("link");
+            std::os::unix::fs::symlink("..", tree.join("lib/up")).expect("link the root");
+        };
+        let tree = dir.path().join("tree");
+        let copy = dir.path().join("elsewhere/copy");
+        build(&tree);
+        build(&copy);
+
+        let packed = |from: &Path, name: &str| {
+            let artifact = dir.path().join(name);
+            pack_tree(from, "wrapper", &artifact).expect("pack");
+            std::fs::read(&artifact).expect("read")
+        };
+        let first = packed(&tree, "first.tar.gz");
+        assert_eq!(first, packed(&tree, "second.tar.gz"), "packed twice");
+        assert_eq!(first, packed(&copy, "copy.tar.gz"), "packed from elsewhere");
     }
 
     /// Both checksum shapes, read the way each source publishes them — including the `*` a
