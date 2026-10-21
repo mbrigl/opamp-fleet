@@ -1565,6 +1565,30 @@ mod tests {
         assert!(child.is_none());
     }
 
+    /// The stop's bound holds too when the service reports no end of the program it was asked to
+    /// kill: the stop gives up on the report rather than waiting for it without end.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_is_not_held_up_by_a_kill_the_service_does_not_report() {
+        use crate::supervisor::channel::{peer, KILL_ANSWER, SIGNAL_ANSWER};
+        let peer = peer::connect(peer::deaf).await;
+        let child = peer
+            .channel
+            .start("test", shell("true"))
+            .await
+            .expect("start");
+        let timeout = Duration::from_millis(100);
+        let mut child = Some(ManagedChild::Remote(child));
+        tokio::time::timeout(
+            SIGNAL_ANSWER * 2 + timeout + KILL_ANSWER + Duration::from_secs(2),
+            stop(&mut child, timeout, "test"),
+        )
+        .await
+        .expect("the stop ends within its bound");
+        assert!(child.is_none());
+    }
+
     /// A shutdown requested while a reload waits for its signal to be answered ends the reload at
     /// once, without the restart a signal that failed would bring.
     /// Verifies: ADR-0059

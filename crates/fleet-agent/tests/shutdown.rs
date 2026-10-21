@@ -72,14 +72,14 @@ fn sighup_leaves_the_agents_service_running() {
         .arg("--client-uid")
         .arg(client_uid.to_string())
         .spawn()
-        .expect("spawn the agents service");
+        .expect("spawn the second service");
 
     // The socket is bound once the signal handlers are in place.
     let deadline = Instant::now() + Duration::from_secs(10);
     while !socket.exists() {
         assert!(
             child.try_wait().expect("poll the service").is_none(),
-            "the agents service exited before it listened"
+            "the second service exited before it listened"
         );
         assert!(Instant::now() < deadline, "the socket never appeared");
         std::thread::sleep(Duration::from_millis(20));
@@ -89,19 +89,19 @@ fn sighup_leaves_the_agents_service_running() {
     std::thread::sleep(Duration::from_millis(500));
     assert!(
         child.try_wait().expect("poll the service").is_none(),
-        "SIGHUP ended the agents service"
+        "SIGHUP ended the second service"
     );
 
     send(&child, "-TERM");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(status) = child.try_wait().expect("poll the service") {
-            assert!(status.success(), "the agents service exited with {status}");
+            assert!(status.success(), "the second service exited with {status}");
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the agents service did not exit within 10s of SIGTERM"
+            "the second service did not exit within 10s of SIGTERM"
         );
         std::thread::sleep(Duration::from_millis(50));
     }

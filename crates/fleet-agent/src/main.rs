@@ -111,12 +111,18 @@ fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
 /// account (ADR-0059). Its channel is a Unix socket; Windows has none of it here.
 #[cfg(unix)]
 fn agents_service(socket: &Path, client_uid: u32) -> Result<(), String> {
-    fleet_agent::supervisor::channel::run_service(socket, client_uid)
+    use fleet_agent::supervisor::channel::{run_service, Served};
+    if run_service(socket, client_uid)? == Served::Superseded {
+        // Non-zero, as the Client's own exit for an update is: the service manager restarts only
+        // a service that failed (ADR-0019 clause 11).
+        std::process::exit(update::EXIT_RESTART_FOR_UPDATE);
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
 fn agents_service(_socket: &Path, _client_uid: u32) -> Result<(), String> {
-    Err("the agents service is not available on this platform".to_string())
+    Err("the second service is not available on this platform".to_string())
 }
 
 /// Dispatch a `service` verb (ADR-0019).

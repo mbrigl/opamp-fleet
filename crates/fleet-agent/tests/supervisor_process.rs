@@ -93,7 +93,7 @@ macro_rules! both {
 /// case ends.
 struct AgentsService {
     _dir: tempfile::TempDir,
-    task: tokio::task::JoinHandle<()>,
+    task: tokio::task::AbortHandle,
 }
 
 impl Drop for AgentsService {
@@ -118,12 +118,12 @@ fn launch(
             let listener = bind(&socket).expect("bind the agents socket");
             // SAFETY: getuid(2) cannot fail and touches no memory.
             let uid = unsafe { libc::getuid() };
-            let service = tokio::spawn(serve(listener, uid, std::future::pending()));
+            let service = tokio::spawn(serve(listener, uid, || false, std::future::pending()));
             let mut runner = runner;
             let task = tokio::spawn(async move {
-                let channel = Channel::connect(&socket)
+                let channel = Channel::connect(&socket, uid)
                     .await
-                    .expect("connect to the agents service");
+                    .expect("connect to the second service");
                 runner.spawner = Spawner::Channel(channel);
                 runner.run(shutdown).await;
             });
@@ -131,7 +131,7 @@ fn launch(
                 task,
                 Some(AgentsService {
                     _dir: dir,
-                    task: service,
+                    task: service.abort_handle(),
                 }),
             )
         }
@@ -575,7 +575,7 @@ async fn the_shipped_program_serves_as_the_second_service() {
         .expect("start the second service");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        match Channel::connect(&socket).await {
+        match Channel::connect(&socket, uid).await {
             Ok(_) => panic!("a connection from another uid was served"),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => break,
             Err(e) => {
