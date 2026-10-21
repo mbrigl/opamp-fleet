@@ -20,7 +20,9 @@ use tracing::{info, instrument, warn, Instrument as _};
 
 use crate::install;
 use crate::shutdown::Shutdown;
-use crate::supervisor::ports::{EventSender, InstallTarget, ProcessCommand, ProcessEvent};
+use crate::supervisor::ports::{
+    EventSender, InstallTarget, ProcessCommand, ProcessEvent, REFUSED, UNREACHABLE,
+};
 use crate::supervisor::restart::{AfterFailure, RestartPolicy};
 use opamp::client::Backoff;
 
@@ -1533,24 +1535,6 @@ impl Runner {
             }
         }
     }
-}
-
-/// What a Supervisor reports while the second service cannot be reached (ADR-0053 clause 2).
-pub(crate) const UNREACHABLE: &str = "the second service cannot be reached";
-
-/// What a Supervisor reports while the second service is reached and refused: another account
-/// serves its socket, it is another build, or it refuses the Client (ADR-0053 clauses 4 and 5).
-/// Not an outage that ends by itself, so it is told apart from [`UNREACHABLE`].
-pub(crate) const REFUSED: &str =
-    "the second service is refused: another account, another build, or it refuses this Client";
-
-/// Why `health` says that the second service is not reached — [`UNREACHABLE`] or [`REFUSED`] —
-/// or `None` where it says nothing of the kind. While it says so, a configuration that is applied
-/// and a package that is installed wait for the service, and the Agent names it as the reason
-/// (ADR-0053 clause 2).
-pub(crate) fn waiting_reason(health: &ComponentHealth) -> Option<&str> {
-    let waits = !health.healthy && (health.status == UNREACHABLE || health.status == REFUSED);
-    waits.then_some(health.status.as_str())
 }
 
 /// Why a start that did not reach the second service did not: [`REFUSED`] or [`UNREACHABLE`].
