@@ -33,8 +33,12 @@ jobs:
         # asserted anywhere else.
         # Linux: the unit the Client writes itself (ADR-0042) — a re-registration keeps its
         # account, the service keeps the privileges `sudo` and setuid helpers need, and systemd
-        # accepts the unit. The run step needs `sudo -E` there, which the Windows runner does not
-        # (its shell is already elevated).
+        # accepts the unit. And the process account (ADR-0059): with two real accounts, a Managed
+        # Process runs under the process account through the second service, cannot read the
+        # Client's key or write its program, reads its config, runs again after the second service
+        # restarts, and runs under the Client's account once the process account is dropped. The
+        # run step needs `sudo -E` there, which the Windows runner does not (its shell is already
+        # elevated).
         os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
@@ -47,6 +51,6 @@ jobs:
       - name: Install, start, kill, restart, stop, uninstall
         if: runner.os == 'Windows'
         run: cargo test -p fleet-agent --test service_smoke --locked -- --ignored --nocapture --test-threads=1
-      - name: Install, start, kill, restart, stop, uninstall; keep the account and the privileges
+      - name: Install, start, kill, restart, stop, uninstall; keep the account and the privileges; the process account
         if: runner.os == 'Linux'
         run: sudo -E env "PATH=$PATH" cargo test -p fleet-agent --test service_smoke --locked -- --ignored --nocapture --test-threads=1
