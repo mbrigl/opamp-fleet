@@ -1118,45 +1118,26 @@ mod tests {
     /// Verifies: ADR-0055
     #[test]
     fn a_differing_reported_type_is_warned_about_once_per_value() {
-        #[derive(Clone, Default)]
-        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Captured {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().expect("lock").extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-
         let dir = tempfile::tempdir().expect("tempdir");
         let mut agent = supervised_agent(dir.path());
         let mut warned = Vec::new();
-        tracing::subscriber::with_default(subscriber, || {
-            for name in ["other", "other", "another", "otelcol"] {
+        let mut log = String::new();
+        for name in ["other", "other", "another", "otelcol"] {
+            let ((), said) = crate::test_support::capture_logs(|| {
                 agent.set_process_description(AgentDescription {
                     identifying_attributes: vec![string_attr("service.name", name)],
                     non_identifying_attributes: vec![],
                 });
-                let log =
-                    String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
-                warned.push(
-                    log.lines()
-                        .filter(|line| line.contains("reports another Agent type"))
-                        .count(),
-                );
-            }
-        });
-        assert_eq!(warned, [1, 1, 2, 2], "warnings after each report");
+            });
+            warned.push(
+                said.lines()
+                    .filter(|line| line.contains("reports another Agent type"))
+                    .count(),
+            );
+            log.push_str(&said);
+        }
+        assert_eq!(warned, [1, 0, 1, 0], "warnings per report");
 
-        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
         let lines: Vec<&str> = log
             .lines()
             .filter(|line| line.contains("reports another Agent type"))
@@ -1182,34 +1163,15 @@ mod tests {
     /// Verifies: ADR-0055
     #[test]
     fn a_reported_type_reaches_the_log_escaped_and_bounded() {
-        #[derive(Clone, Default)]
-        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Captured {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().expect("lock").extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-
         let dir = tempfile::tempdir().expect("tempdir");
         let mut agent = supervised_agent(dir.path());
         let forged = format!("x\nINFO forged line{}", "y".repeat(10_000));
-        tracing::subscriber::with_default(subscriber, || {
+        let ((), log) = crate::test_support::capture_logs(|| {
             agent.set_process_description(AgentDescription {
                 identifying_attributes: vec![string_attr("service.name", &forged)],
                 non_identifying_attributes: vec![],
             });
         });
-        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
         assert_eq!(log.lines().count(), 1, "{log}");
         assert!(
             !log.lines().any(|line| line.starts_with("INFO forged")),
@@ -2794,27 +2756,9 @@ mod tests {
     /// Verifies: ADR-0017
     #[test]
     fn an_ignored_remote_config_is_logged_once_per_hash() {
-        #[derive(Clone, Default)]
-        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Captured {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().expect("lock").extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-
         let dir = tempfile::tempdir().expect("tempdir");
         let mut agent = listed_supervisor(dir.path());
-        tracing::subscriber::with_default(subscriber, || {
+        let ((), log) = crate::test_support::capture_logs(|| {
             for hash in [b"aaaa", b"aaaa", b"bbbb", b"aaaa", b"bbbb"] {
                 agent.handle(&ServerToAgent {
                     remote_config: Some(remote_config(b"x: 1\n", hash)),
@@ -2822,7 +2766,6 @@ mod tests {
                 });
             }
         });
-        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
         let ignored: Vec<&str> = log
             .lines()
             .filter(|line| line.contains("ignoring a remote configuration"))
@@ -2939,27 +2882,9 @@ mod tests {
     /// Verifies: ADR-0017
     #[test]
     fn a_set_ignored_by_a_host_that_keeps_it_is_logged_once_per_hash() {
-        #[derive(Clone, Default)]
-        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Captured {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().expect("lock").extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-
         let dir = tempfile::tempdir().expect("tempdir");
         let mut agent = own_agent_of_a_host_that_keeps_its_set(dir.path());
-        tracing::subscriber::with_default(subscriber, || {
+        let ((), log) = crate::test_support::capture_logs(|| {
             for hash in [b"aaaa", b"aaaa", b"bbbb", b"bbbb", b"aaaa"] {
                 agent.handle(&ServerToAgent {
                     remote_config: Some(remote_config(b"[[supervisor]]\n", hash)),
@@ -2967,7 +2892,6 @@ mod tests {
                 });
             }
         });
-        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
         let ignored: Vec<&str> = log
             .lines()
             .filter(|line| line.contains("ignoring a supervisor set"))
