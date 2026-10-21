@@ -164,6 +164,15 @@ pub enum InstallTarget {
     },
 }
 
+/// The process account's primary group, where a process account is registered (ADR-0059 clause 6).
+/// What the Client shares with the Managed Processes belongs to this group, and nothing else does.
+///
+/// Resolved from the `--process-uid` of the Client's command line when it starts, never from the
+/// configuration file: the registration that names the process account is the only place it is
+/// stated (ADR-0059 clause 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessGroup(pub u32);
+
 /// The package this Supervisor's Managed Process currently runs (ADR-0026), persisted so a
 /// restarted Client reports the version it has and is not re-offered it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -307,7 +316,7 @@ pub struct SupervisorContext {
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// The process account's primary group, where a process account is registered: what the
     /// Supervisor shares with its Managed Process belongs to it (ADR-0059 clause 6).
-    pub process_group: Option<crate::storage::ProcessGroup>,
+    pub process_group: Option<ProcessGroup>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.

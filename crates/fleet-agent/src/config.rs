@@ -112,7 +112,7 @@ pub struct ClientConfig {
     /// clause 6): what the Client shares with the Managed Processes belongs to it. Set by the run
     /// from the `--process-uid` its registration names, never by the file.
     #[serde(skip)]
-    pub process_group: Option<crate::storage::ProcessGroup>,
+    pub process_group: Option<crate::supervisor::ports::ProcessGroup>,
     /// The largest OpAMP message the Client accepts or sends, on either transport and in either
     /// direction — the Supervisor Endpoint included. The Baseline requires the limit, recommends
     /// this default, and asks that it be configurable.
