@@ -50,6 +50,14 @@ const MAX_LINE: usize = 16 * 1024;
 /// How long the handshake may take before the connection is dropped.
 const HANDSHAKE: Duration = Duration::from_secs(5);
 
+/// The largest handshake either end reads: a build name, or a refusal's reason. Until a peer is
+/// served it gets no more of the service's memory than this.
+const MAX_HANDSHAKE: u32 = 4 * 1024;
+
+/// How often a refused connection is logged at most; the refusals in between are counted into the
+/// next warning. A process that can reach the socket cannot fill the log with them.
+const REFUSAL_LOG_EVERY: Duration = Duration::from_secs(60);
+
 /// How long a program has to end on `SIGTERM` when the Client's connection closes, before its
 /// group is killed.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
@@ -149,6 +157,16 @@ where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
 {
+    read_frame_within(reader, MAX_FRAME).await
+}
+
+/// [`read_frame`] for a message of at most `max` bytes: a longer one is refused before its body
+/// is read.
+async fn read_frame_within<R, T>(reader: &mut R, max: u32) -> io::Result<Option<T>>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
     let mut len = [0u8; 4];
     match reader.read_exact(&mut len).await {
         Ok(_) => {}
@@ -156,7 +174,7 @@ where
         Err(e) => return Err(e),
     }
     let len = u32::from_be_bytes(len);
-    if len > MAX_FRAME {
+    if len > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "message too large",
@@ -250,6 +268,7 @@ async fn terminated() {
 /// connection closes, or at the shutdown, every program it started is stopped.
 pub async fn serve(listener: UnixListener, client_uid: u32, shutdown: impl Future<Output = ()>) {
     let mut shutdown = std::pin::pin!(shutdown);
+    let mut refusals = Refusals::default();
     loop {
         let stream = tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -268,24 +287,53 @@ pub async fn serve(listener: UnixListener, client_uid: u32, shutdown: impl Futur
             .map_err(|e| format!("cannot read the peer's credentials: {e}"))
             .and_then(|cred| admit(cred.uid(), client_uid));
         if let Err(reason) = peer {
-            warn!(reason = %reason, "refused a connection");
-            tokio::spawn(refuse(stream, reason));
+            refuse(stream, reason, &mut refusals);
             continue;
         }
-        if serve_connection(stream, &listener, shutdown.as_mut()).await == Ended::Shutdown {
+        if serve_connection(stream, &listener, shutdown.as_mut(), &mut refusals).await
+            == Ended::Shutdown
+        {
             return;
         }
     }
 }
 
-/// Tells a peer why it is not served, and closes the connection. Its handshake is read first, so
-/// the refusal never races the peer's first write into a closed socket.
-async fn refuse(mut stream: UnixStream, reason: String) {
-    let _ = tokio::time::timeout(HANDSHAKE, async {
-        let _ = read_frame::<_, Request>(&mut stream).await;
-        write_frame(&mut stream, &Reply::Refused { reason }).await
-    })
-    .await;
+/// Tells a peer why it is not served, and closes the connection — at once, reading nothing from
+/// it: the refusal goes into the socket's empty buffer without waiting, so no refused peer holds a
+/// task, a descriptor or a read of the service's.
+fn refuse(stream: UnixStream, reason: String, refusals: &mut Refusals) {
+    if let Some(unlogged) = refusals.note(std::time::Instant::now()) {
+        warn!(reason = %reason, unlogged, "refused a connection");
+    }
+    // Written straight to the socket: a stream just accepted has no readiness yet, so tokio's own
+    // `try_write` would only ever answer that it would block.
+    if let (Ok(frame), Ok(stream)) = (encode(&Reply::Refused { reason }), stream.into_std()) {
+        use std::io::Write as _;
+        let _ = (&stream).write(&frame);
+    }
+}
+
+/// The refusals logged so far: one warning per [`REFUSAL_LOG_EVERY`] at most.
+#[derive(Default)]
+struct Refusals {
+    logged: Option<std::time::Instant>,
+    unlogged: u64,
+}
+
+impl Refusals {
+    /// Counts one refusal at `now`; `Some` with the refusals not logged since the last warning
+    /// when this one is to be logged.
+    fn note(&mut self, now: std::time::Instant) -> Option<u64> {
+        if self
+            .logged
+            .is_some_and(|logged| now.duration_since(logged) < REFUSAL_LOG_EVERY)
+        {
+            self.unlogged += 1;
+            return None;
+        }
+        self.logged = Some(now);
+        Some(std::mem::take(&mut self.unlogged))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -309,9 +357,14 @@ async fn serve_connection<F: Future<Output = ()>>(
     stream: UnixStream,
     listener: &UnixListener,
     mut shutdown: Pin<&mut F>,
+    refusals: &mut Refusals,
 ) -> Ended {
     let (mut read, mut write) = stream.into_split();
-    let hello = tokio::time::timeout(HANDSHAKE, read_frame::<_, Request>(&mut read)).await;
+    let hello = tokio::time::timeout(
+        HANDSHAKE,
+        read_frame_within::<_, Request>(&mut read, MAX_HANDSHAKE),
+    )
+    .await;
     let refusal = match hello {
         Ok(Ok(Some(Request::Hello { version }))) if version == this_build() => None,
         Ok(Ok(Some(Request::Hello { version }))) => Some(format!(
@@ -412,7 +465,7 @@ async fn serve_connection<F: Future<Output = ()>>(
             }
             accepted = listener.accept() => {
                 if let Ok((stream, _)) = accepted {
-                    tokio::spawn(refuse(stream, "another connection is being served".to_string()));
+                    refuse(stream, "another connection is being served".to_string(), refusals);
                 }
             }
             () = shutdown.as_mut() => break Ended::Shutdown,
@@ -629,10 +682,20 @@ impl Channel {
         let hello = Request::Hello {
             version: this_build().to_string(),
         };
-        write_frame(&mut write, &hello).await?;
-        let answer = tokio::time::timeout(HANDSHAKE, read_frame::<_, Reply>(&mut read))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no handshake in time"))??;
+        // A refused Client may find the connection closed before its handshake is written; the
+        // refusal is read all the same, and says why.
+        let sent = write_frame(&mut write, &hello).await;
+        let answer = tokio::time::timeout(
+            HANDSHAKE,
+            read_frame_within::<_, Reply>(&mut read, MAX_HANDSHAKE),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no handshake in time"));
+        let answer = match (answer, sent) {
+            (Ok(Ok(Some(refused @ Reply::Refused { .. }))), _) => Some(refused),
+            (_, Err(e)) => return Err(e),
+            (answer, Ok(())) => answer??,
+        };
         match answer {
             Some(Reply::Hello { version }) if version == this_build() => {}
             Some(Reply::Hello { version }) => {
@@ -971,6 +1034,68 @@ mod tests {
             refused.err().map(|e| e.kind()),
             Some(io::ErrorKind::PermissionDenied)
         );
+    }
+
+    /// Nothing is read from a refused peer and nothing waits on it: a stranger that says nothing
+    /// is told and dropped at once, however many of them connect, rather than each holding a
+    /// descriptor for the length of a handshake.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_refused_peer_is_dropped_at_once() {
+        let service = service(own_uid().wrapping_add(1));
+        let mut strangers = Vec::new();
+        for _ in 0..20 {
+            strangers.push(UnixStream::connect(&service.socket).await.expect("connect"));
+        }
+        for stranger in &mut strangers {
+            let reply =
+                tokio::time::timeout(Duration::from_secs(1), read_frame::<_, Reply>(stranger))
+                    .await
+                    .expect("refused without waiting for a handshake");
+            assert!(
+                matches!(reply, Ok(Some(Reply::Refused { .. }))),
+                "{reply:?}"
+            );
+            let mut rest = Vec::new();
+            let closed =
+                tokio::time::timeout(Duration::from_secs(1), stranger.read_to_end(&mut rest))
+                    .await
+                    .expect("closed at once");
+            assert!(closed.map_or(true, |n| n == 0), "more after the refusal");
+        }
+    }
+
+    /// The handshake is a few bytes: a first message that claims more is refused without waiting
+    /// for it.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_handshake_larger_than_a_handshake_is_refused_at_once() {
+        let service = service(own_uid());
+        let mut stream = UnixStream::connect(&service.socket).await.expect("connect");
+        stream
+            .write_all(&(64 * 1024u32).to_be_bytes())
+            .await
+            .expect("a length");
+        let reply =
+            tokio::time::timeout(Duration::from_secs(1), read_frame::<_, Reply>(&mut stream))
+                .await
+                .expect("refused without waiting for the body");
+        assert!(
+            matches!(reply, Ok(Some(Reply::Refused { .. }))),
+            "{reply:?}"
+        );
+    }
+
+    /// Repeated refusals are logged once in a while, with how many went unlogged since.
+    #[test]
+    fn refusals_are_logged_sparingly() {
+        let start = std::time::Instant::now();
+        let mut refusals = Refusals::default();
+        assert_eq!(refusals.note(start), Some(0));
+        assert_eq!(refusals.note(start + Duration::from_secs(1)), None);
+        assert_eq!(refusals.note(start + Duration::from_secs(2)), None);
+        assert_eq!(refusals.note(start + REFUSAL_LOG_EVERY), Some(2));
+        assert_eq!(refusals.note(start + REFUSAL_LOG_EVERY), None);
     }
 
     /// Both ends are one build: a peer that names another is refused.
