@@ -950,8 +950,20 @@ impl Inner {
                 error,
                 os_error,
             } => {
-                let route = self.routes().by_id.remove(&id);
-                if let Some(started) = route.and_then(|route| route.started) {
+                // Only a start still waiting is answered: under the id of a running program the
+                // route is that program's, and stays.
+                let started = {
+                    let mut routes = self.routes();
+                    let started = routes
+                        .by_id
+                        .get_mut(&id)
+                        .and_then(|route| route.started.take());
+                    if started.is_some() {
+                        routes.by_id.remove(&id);
+                    }
+                    started
+                };
+                if let Some(started) = started {
                     let error = match os_error {
                         Some(code) => io::Error::from_raw_os_error(code),
                         None => io::Error::other(error),
@@ -1520,6 +1532,30 @@ mod tests {
             .await
             .expect("the signal gives up in time");
         assert!(sent.is_err(), "an unanswered signal is not taken as sent");
+    }
+
+    /// A start that failed answers only a start still waiting: one that names a running program
+    /// takes nothing from it, and its exit still reaches it.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_failed_start_under_a_running_id_leaves_its_program_alone() {
+        let peer = peer::connect(|request| match request {
+            Request::Start { id, .. } => vec![
+                Reply::Started { id, pid: u32::MAX },
+                Reply::StartFailed {
+                    id,
+                    error: format!("id {id} names a running program"),
+                    os_error: None,
+                },
+            ],
+            request => peer::mute(request),
+        })
+        .await;
+        let mut child = peer.channel.start("test", sh("true")).await.expect("start");
+        child
+            .kill()
+            .await
+            .expect("the exit reaches the running program");
     }
 
     /// A program that cannot start is reported with its OS error, so the Client still tells a
