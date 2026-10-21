@@ -1028,7 +1028,8 @@ impl Runner {
                 }
             }
             GraceOutcome::ShuttingDown => true,
-            // The gate's own, which the swap has already turned into a package that waits.
+            // Does not occur: the swap returns its gate's `Unreachable` as `Swapped::Parked`,
+            // handled above. Nothing to do were it to.
             GraceOutcome::Unreachable => false,
         }
     }

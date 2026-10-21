@@ -2362,7 +2362,7 @@ mod an_apply_while_the_second_service_is_away {
             next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(10)).await;
         assert_eq!(
             retried.status, "running",
-            "the restart's start decided: {retried:?}"
+            "the retry starts on its own: {retried:?}"
         );
         let ((package, installed), (config, applied)) =
             both_outcomes(&mut away.harness.events).await;
