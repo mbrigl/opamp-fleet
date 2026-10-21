@@ -619,13 +619,21 @@ pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
 /// The installed service, implementing the [`ServiceControl`] seam.
 pub struct NativeService {
     level: ServiceLevel,
+    /// The service manager of the host; a test's own in its place.
+    manager: fn(ServiceLevel) -> Result<Box<dyn ServiceManager>, String>,
+    /// Whether a second service is registered at a level.
+    agents_registered: fn(ServiceLevel) -> bool,
 }
 
 impl NativeService {
     /// A handle to the service at the given level.
     #[must_use]
     pub fn new(level: ServiceLevel) -> Self {
-        Self { level }
+        Self {
+            level,
+            manager,
+            agents_registered,
+        }
     }
 }
 
@@ -650,7 +658,7 @@ fn stopped(agents: bool) -> Vec<ServiceLabel> {
 impl ServiceControl for NativeService {
     fn start(&self) -> Result<(), String> {
         for label in started() {
-            manager(self.level)?
+            (self.manager)(self.level)?
                 .start(ServiceStartCtx { label })
                 .map_err(|e| format!("cannot start the service: {e}"))?;
         }
@@ -660,13 +668,13 @@ impl ServiceControl for NativeService {
     fn stop(&self) -> Result<(), String> {
         let mut result = Ok(());
         // Each one even when the one before failed: a stop leaves nothing running it can stop.
-        for label in stopped(agents_registered(self.level)) {
+        for label in stopped((self.agents_registered)(self.level)) {
             let which = if label == agents_label() {
                 "the second service"
             } else {
                 "the service"
             };
-            let stopped = manager(self.level)?
+            let stopped = (self.manager)(self.level)?
                 .stop(ServiceStopCtx { label })
                 .map_err(|e| format!("cannot stop {which}: {e}"));
             if result.is_ok() {
@@ -677,7 +685,7 @@ impl ServiceControl for NativeService {
     }
 
     fn state(&self) -> Result<ServiceState, String> {
-        let status = manager(self.level)?
+        let status = (self.manager)(self.level)?
             .status(ServiceStatusCtx { label: label() })
             .map_err(|e| format!("cannot query the service status: {e}"))?;
         Ok(match status {
@@ -1181,14 +1189,96 @@ mod tests {
         );
     }
 
+    std::thread_local! {
+        /// What the [`Recording`] service manager was asked, in order, on this test's thread.
+        static ASKED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A service manager that does nothing but note what it is asked, and fails to stop the
+    /// Client's service.
+    struct Recording;
+
+    impl Recording {
+        fn note(what: &str, label: &ServiceLabel) {
+            ASKED.with(|asked| asked.borrow_mut().push(format!("{what} {label}")));
+        }
+
+        fn asked() -> Vec<String> {
+            ASKED.with(|asked| std::mem::take(&mut *asked.borrow_mut()))
+        }
+    }
+
+    impl ServiceManager for Recording {
+        fn available(&self) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn install(&self, ctx: ServiceInstallCtx) -> std::io::Result<()> {
+            Recording::note("install", &ctx.label);
+            Ok(())
+        }
+        fn uninstall(&self, ctx: ServiceUninstallCtx) -> std::io::Result<()> {
+            Recording::note("uninstall", &ctx.label);
+            Ok(())
+        }
+        fn start(&self, ctx: ServiceStartCtx) -> std::io::Result<()> {
+            Recording::note("start", &ctx.label);
+            Ok(())
+        }
+        fn stop(&self, ctx: ServiceStopCtx) -> std::io::Result<()> {
+            Recording::note("stop", &ctx.label);
+            if ctx.label == label() {
+                return Err(std::io::Error::other("refused"));
+            }
+            Ok(())
+        }
+        fn level(&self) -> SmLevel {
+            SmLevel::System
+        }
+        fn set_level(&mut self, _level: SmLevel) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn status(&self, ctx: ServiceStatusCtx) -> std::io::Result<ServiceStatus> {
+            Recording::note("status", &ctx.label);
+            Ok(ServiceStatus::Running)
+        }
+    }
+
+    fn recording(
+        level: ServiceLevel,
+        agents_registered: fn(ServiceLevel) -> bool,
+    ) -> NativeService {
+        NativeService {
+            level,
+            manager: |_| Ok(Box::new(Recording)),
+            agents_registered,
+        }
+    }
+
     /// `start` starts the Client alone, whose unit wants the second service, and `stop` stops the
-    /// Client and then the second service (ADR-0053 clause 2).
+    /// Client and then the second service where one is registered — the second even when the
+    /// Client's stop failed, which `stop` still reports (ADR-0053 clause 2).
     /// Verifies: ADR-0053
     #[test]
     fn start_starts_the_client_and_stop_stops_both() {
-        assert_eq!(started(), vec![label()]);
-        assert_eq!(stopped(true), vec![label(), agents_label()]);
-        assert_eq!(stopped(false), vec![label()]);
+        let client = label().to_string();
+        let agents = agents_label().to_string();
+        let with_agents = recording(ServiceLevel::System, |_| true);
+        with_agents.start().expect("start");
+        assert_eq!(Recording::asked(), vec![format!("start {client}")]);
+        let refused = with_agents.stop().expect_err("the Client's stop failed");
+        assert!(refused.contains("cannot stop the service"), "{refused}");
+        assert_eq!(
+            Recording::asked(),
+            vec![format!("stop {client}"), format!("stop {agents}")]
+        );
+
+        let alone = recording(ServiceLevel::System, |_| false);
+        alone.start().expect("start");
+        let _ = alone.stop();
+        assert_eq!(
+            Recording::asked(),
+            vec![format!("start {client}"), format!("stop {client}")]
+        );
     }
 
     /// Where a process account is registered, the Client's unit wants the second service and starts
