@@ -424,6 +424,16 @@ async fn serve_connection<F: Future<Output = ()>>(
     let ended = loop {
         tokio::select! {
             request = requests.recv() => match request {
+                // An id names one program until it has ended: another start under it would take
+                // over the control of the one that runs.
+                Some(Request::Start { id, .. }) if programs.contains_key(&id) => {
+                    warn!(id, "a start under the id of a running program; refused");
+                    replies.send(Reply::StartFailed {
+                        id,
+                        error: format!("id {id} names a running program"),
+                        os_error: None,
+                    });
+                }
                 Some(Request::Start { id, launch }) => match start(&launch) {
                     Ok(child) => {
                         let pid = child.id().unwrap_or_default();
@@ -1205,6 +1215,48 @@ mod tests {
             ]
         );
         assert_eq!(status.code(), Some(3));
+    }
+
+    /// An id names one program: a start that names a running one fails, and the running program
+    /// is still the one its id stops.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_start_that_reuses_a_running_id_fails() {
+        let service = service(own_uid());
+        let mut stream = connect_raw(&service.socket, this_build()).await;
+        assert!(matches!(next(&mut stream).await, Some(Reply::Hello { .. })));
+        for script in ["sleep 300", "exit 5"] {
+            write_frame(
+                &mut stream,
+                &Request::Start {
+                    id: 1,
+                    launch: sh(script),
+                },
+            )
+            .await
+            .expect("start");
+        }
+        assert!(matches!(
+            next(&mut stream).await,
+            Some(Reply::Started { id: 1, .. })
+        ));
+        match next(&mut stream).await {
+            Some(Reply::StartFailed { id: 1, error, .. }) => {
+                assert!(error.contains("id"), "{error}")
+            }
+            other => panic!("expected the second start to fail, got {other:?}"),
+        }
+        write_frame(&mut stream, &Request::Stop { id: 1 })
+            .await
+            .expect("stop");
+        match next(&mut stream).await {
+            Some(Reply::Exited { id: 1, status }) => assert_eq!(
+                ExitStatus::from_raw(status.expect("a status")).signal(),
+                Some(libc::SIGKILL),
+                "the stop reached another program"
+            ),
+            other => panic!("expected the exit, got {other:?}"),
+        }
     }
 
     /// A program that cannot start is reported with its OS error, so the Client still tells a
