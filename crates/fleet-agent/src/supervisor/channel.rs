@@ -25,7 +25,7 @@ use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -966,8 +967,12 @@ impl Channel {
     /// # Errors
     /// Returns the service's reason the program did not start, keeping its OS error, or why the
     /// service could not be reached.
+    ///
+    /// A start that does not reach the service — it cannot be connected to, refuses the Client, or
+    /// goes during the start as well as before it — fails with an error [`is_unreachable`] tells
+    /// apart from a program that did not start.
     pub(crate) async fn start(&self, supervisor: &str, launch: Launch) -> io::Result<RemoteChild> {
-        let connection = self.connection().await?;
+        let connection = self.connection().await.map_err(unreachable)?;
         match Arc::clone(&connection)
             .start(supervisor, launch.clone())
             .await
@@ -976,7 +981,11 @@ impl Channel {
             // the start goes to the service that comes back.
             Err(e) if connection.is_closed() => {
                 debug!(error = %e, "the second service went during a start; connecting again");
-                self.connection().await?.start(supervisor, launch).await
+                let connection = self.connection().await.map_err(unreachable)?;
+                match Arc::clone(&connection).start(supervisor, launch).await {
+                    Err(e) if connection.is_closed() => Err(unreachable(e)),
+                    started => started,
+                }
             }
             started => started,
         }
@@ -1250,6 +1259,41 @@ impl Connection {
     }
 }
 
+/// Why the second service was not reached, wrapped so that a program that did not start — whose
+/// error may carry the same kind, `NotFound` for one — is told apart from it.
+#[derive(Debug)]
+struct Unreachable(io::Error);
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the second service cannot be reached: {}", self.0)
+    }
+}
+
+impl std::error::Error for Unreachable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// `error`, marked as the second service not reached; its kind is kept.
+fn unreachable(error: io::Error) -> io::Error {
+    if is_unreachable(&error) {
+        return error;
+    }
+    io::Error::new(error.kind(), Unreachable(error))
+}
+
+/// Whether `error` says that the second service was not reached, rather than that a program did
+/// not start or failed: a start or a wait that ended so is no failure of the program's, and a
+/// Supervisor tries again once the service is back (ADR-0059 clause 2).
+#[must_use]
+pub fn is_unreachable(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<Unreachable>())
+}
+
 /// Whether the socket is served by the process account (ADR-0059 clause 4). Its directory belongs
 /// to that account, so any process the account runs could put a socket of its own in its place;
 /// only one of another account is told apart here — the Managed Processes share the account, and
@@ -1309,7 +1353,8 @@ impl RemoteChild {
     /// Waits for the program to end. Cancel-safe; once it has ended, answers at once.
     ///
     /// # Errors
-    /// Returns an error when the service could not wait for it, or the channel closed first.
+    /// Returns an error when the service could not wait for it, or the channel closed first —
+    /// the service went, and the program with it, which [`is_unreachable`] says.
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
         if self.outcome.is_none() {
             let reported = match self.exited.as_mut() {
@@ -1321,8 +1366,9 @@ impl RemoteChild {
         }
         match &self.outcome {
             Some(Ok(status)) => Ok(*status),
+            Some(Err(e)) if e == CLOSED => Err(unreachable(closed())),
             Some(Err(e)) => Err(io::Error::other(e.clone())),
-            None => Err(closed()),
+            None => Err(unreachable(closed())),
         }
     }
 
@@ -1416,9 +1462,7 @@ pub(crate) mod peer {
             let (mut stream, _) = listener.accept().await.expect("accept");
             while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
                 let replies = match request {
-                    Request::Hello { .. } => vec![Reply::Hello {
-                        version: this_build().to_string(),
-                    }],
+                    Request::Hello { .. } => vec![hello()],
                     request => answer(request),
                 };
                 for reply in replies {
@@ -1430,6 +1474,13 @@ pub(crate) mod peer {
         });
         let channel = Channel::connect(&socket, own_uid()).await.expect("connect");
         Peer { channel, _dir: dir }
+    }
+
+    /// The stand-in's answer to the Client's handshake.
+    pub(crate) fn hello() -> Reply {
+        Reply::Hello {
+            version: this_build().to_string(),
+        }
     }
 
     /// The uid this test runs as, which serves its stand-ins and its in-process services.
