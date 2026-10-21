@@ -1391,11 +1391,12 @@ mod tests {
         assert_eq!(unset.get("channel"), None, "outside service.*, dropped");
     }
 
-    /// An admitted key is reported once, whichever lists the process states it in, so a Selector
-    /// and the fleet row read the same value; the identifying one wins.
+    /// An admitted key the process states in both lists is reported once, among the identifying
+    /// attributes, with its identifying value: the Server reads `service.version` from there, so a
+    /// version left among the non-identifying ones would be no version at all.
     /// Verifies: ADR-0055
     #[test]
-    fn an_admitted_key_is_reported_once_whichever_lists_the_process_states_it_in() {
+    fn a_key_stated_in_both_lists_is_reported_once_among_the_identifying_attributes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut agent = supervised_agent(dir.path());
         agent.set_process_description(AgentDescription {
@@ -1404,19 +1405,22 @@ mod tests {
         });
 
         let description = agent.describe();
-        let versions: Vec<String> = description
-            .identifying_attributes
-            .iter()
-            .chain(&description.non_identifying_attributes)
-            .filter(|kv| kv.key == "service.version")
-            .map(
-                |kv| match kv.value.as_ref().and_then(|v| v.value.as_ref()) {
-                    Some(opamp::proto::any_value::Value::StringValue(s)) => s.clone(),
-                    other => format!("{other:?}"),
-                },
-            )
-            .collect();
-        assert_eq!(versions, ["0.142.0"]);
+        let versions = |list: &[KeyValue]| {
+            list.iter()
+                .filter(|kv| kv.key == "service.version")
+                .map(
+                    |kv| match kv.value.as_ref().and_then(|v| v.value.as_ref()) {
+                        Some(opamp::proto::any_value::Value::StringValue(s)) => s.clone(),
+                        other => format!("{other:?}"),
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(versions(&description.identifying_attributes), ["0.142.0"]);
+        assert!(
+            versions(&description.non_identifying_attributes).is_empty(),
+            "the key is reported once"
+        );
     }
 
     #[test]

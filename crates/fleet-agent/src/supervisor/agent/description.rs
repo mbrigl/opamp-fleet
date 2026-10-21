@@ -187,16 +187,28 @@ impl Local {
                     && !(key == attributes::SERVICE_NAMESPACE && self.namespace.is_some())
                     && !operators_keys.contains(&key)
             };
-            // The identifying list is folded last, so where a process states one key in both
-            // lists its identifying value is the one reported.
-            let lists = [
-                (&reported.non_identifying_attributes, false),
-                (&reported.identifying_attributes, true),
-            ];
-            for (list, identifying) in lists {
-                for attr in list.iter().filter(|attr| admitted(&attr.key)) {
-                    fold_attr(&mut description, attr, identifying);
-                }
+            // Where a process states one key in both lists, its identifying statement is the one
+            // folded and the other is dropped: the key is reported once, among the identifying
+            // attributes the Server reads it from, with the identifying value.
+            for attr in reported
+                .identifying_attributes
+                .iter()
+                .filter(|attr| admitted(&attr.key))
+            {
+                fold_attr(&mut description, attr, true);
+            }
+            let stated_identifying = |key: &str| {
+                reported
+                    .identifying_attributes
+                    .iter()
+                    .any(|kv| kv.key == key)
+            };
+            for attr in reported
+                .non_identifying_attributes
+                .iter()
+                .filter(|attr| admitted(&attr.key) && !stated_identifying(&attr.key))
+            {
+                fold_attr(&mut description, attr, false);
             }
         }
         description
