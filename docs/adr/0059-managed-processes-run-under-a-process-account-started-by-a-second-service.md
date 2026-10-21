@@ -4,7 +4,7 @@
 - **Date:** 2026-10-20
 - **Deciders:** Markus Brigl
 - **Applies to:** the `--process-account` flag of `service install` and the second service it registers in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/windows_config.rs` and `crates/fleet-agent/src/service/windows_rights.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel between the Client and the second service, the modes and ownership of the Supervisors' directories in `crates/fleet-agent/src/storage.rs`, and every document that tells an operator which account a Managed Process runs as
-- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 3 and 9, [ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) clause 6
+- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 3 and 9, [ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) clauses 2 and 6, [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 60
 
 ## Context
 
@@ -139,12 +139,12 @@ signals and stops those programs on the Client's request.
 
    | Path | Owner : group | Mode |
    |---|---|---|
-   | `state_dir`, each Supervisor's directory | Client : process group | `0710` |
+   | `state_dir`, each Supervisor's directory | Client : the process account's group | `0710` |
    | the Client's key, certificates, `remote-config.pb`, `instance-uid`, package state and staging | Client | `0600` / `0700`, as today |
-   | `program/` and its files | Client : process group | `0750`, files without group or other write |
-   | the preflight's staging directory | Client : process group | `0750` |
-   | `config/` and its files | Client : process group | `0750` / `0640` |
-   | a kind's data directories | Client : process group | `2770` |
+   | `program/` and its files | Client : the process account's group | `0750`, files without group or other write |
+   | the preflight's staging directory | Client : the process account's group | `0750` |
+   | `config/` and its files | Client : the process account's group | `0750` / `0640` |
+   | a kind's data directories | Client : the process account's group | `2770` |
 
    On Windows the same split is made by ACL grants to the process account's SID instead of the
    group.
@@ -201,6 +201,71 @@ signals and stops those programs on the Client's request.
    `ExecStart=` runs `run --agents <socket> --client-uid <uid>`, `RuntimeDirectory=` holds the
    socket, `TimeoutStopSec=` exceeds the time the second service takes to stop what it started,
    and the directives are those of ADR-0042 clause 7 for its account.
+
+10. **Restates ADR-0042 clause 2. The system service runs under the account its registration
+   names, and both roots belong to it, except what the process account keeps there.** `service install --run-as <account>` names the account. It
+   applies at system scope only and conflicts with `--user`. On Linux and macOS, `--run-as root` is
+   how an operator chooses root. It is written as `User=root` or `UserName` `root`, so a unit
+   records that root was chosen. Without the flag, the account is taken in this order:
+   - **A re-registration keeps the account the registration names.** That is `User=` in the system
+     unit `/etc/systemd/system/<PRODUCT_NAME>.service`, `UserName` in
+     `/Library/LaunchDaemons/<PRODUCT_NAME>.plist`. The install reads the file the Client wrote, not
+     a drop-in and not the loaded state of the service manager. On Windows the install does not ask
+     the SCM: a re-registration without `--run-as` sets no logon account, so the SCM keeps the one
+     it holds (`windows_config`), and the install names no account.
+   - **A unit or plist that names no account, on a data root that a non-root account owns,** was
+     rewritten by a re-registration that dropped its account. The install takes the owner of the
+     data root and prints that it did, naming the data root. Every other registration that names no
+     account stays root.
+   - **A first registration**, one where no unit, plist or SCM entry exists, runs as root under
+     systemd and launchd and as `LocalSystem` under the SCM. The Linux packages name their account
+     themselves (ADR-0042 clause 5).
+
+   On Linux and macOS the install prints the account and where it came from: `--run-as`, the unit,
+   the plist, the owner of the data root, or the default.
+   - **The service runs as the account.** Under systemd this is `User=` in the unit the Client
+     writes (clause 9). Under launchd it is `UserName`, through `service-manager`'s `username`. On
+     Windows it is an `sc config obj=` step in `windows_config`. No *Log on as a service* grant is
+     performed: the default policy grants it to `NT SERVICE\ALL SERVICES`, built-in accounts carry
+     it, and a gMSA receives it from its domain. A host hardened against the default grant must
+     restore it.
+   - **Windows accepts only passwordless forms:** the service's own virtual account
+     `NT SERVICE\<PRODUCT_NAME>` (recommended), a gMSA (`name$`), or
+     `NT AUTHORITY\LocalService` / `NetworkService`. There is no password parameter, because it
+     would stand in the process list and the installer log. A form that needs a password is refused
+     with a message naming the passwordless forms.
+   - **The account must exist** on Linux and macOS, whether it was named or kept. An account that
+     does not exist is refused before anything is written, and the install fails closed. For a kept
+     account, the message names the account and the file or directory it came from. It shows the
+     `useradd --system` line that creates the account, and says that `--run-as <account>` or
+     `--run-as root` names another. The binary never creates an account; that is the packages' job
+     (ADR-0042 clause 5).
+   - **The hand-over covers both roots, on every registration that runs under an account.** That
+     includes a kept account and root. After laying out and registering, the install hands the
+     account the data root (`supervisor.toml`, `state/`), because the service reads and rewrites
+     them. It also hands over the layout root (`versions/`, `current`), because the self-update that
+     stages into it is the service itself. On Unix this is an ownership change. On Windows it is an
+     inheritable Modify ACL grant. Where the roots coincide this is one operation. Where they split,
+     an install that hands over only one has not succeeded.
+   - **Where a process account is registered, the hand-over leaves its data alone.** An entry the
+     process account owns is skipped together with everything beneath it, and a directory that
+     clause 6 gives the process account's group keeps that group and its mode, so a re-registration
+     — every package upgrade — takes from no Managed Process the data it wrote.
+   - **The hand-over never follows a link.** The account owns the trees that root walks, and
+     ADR-0042 clause 5 makes that walk part of every package upgrade. So each directory is opened
+     without following a link, and its owner is changed through that open handle. Its entries are
+     read from the handle, and a symbolic link is re-owned as a link. A regular file with more than
+     one hard link is skipped and named in a warning. Re-running `install` with another `--run-as`
+     re-owns the same directories.
+
+11. **Restates ADR-0026 clause 60. Modes come from a `.tar.gz` on Unix, never with write for group
+    or others; the program is always made executable.** A tar's member modes are applied, each
+    without the group's and others' write bits, on every host, whether or not a process account is
+    registered: a member written `0777` or `0666` lands `0755` or `0644`, so no account but the
+    Client's can rewrite what a Supervisor runs. A `.7z` or `.zip` carries Windows attributes, so no
+    mode is taken from it. The program — the single file or the member at `program_path` — is set
+    `0755` regardless, so whether it can run never depends on how the archive was built; an agent
+    with further executables beside its program ships as `.tar.gz`.
 
 **Out of scope:** an account per Supervisor; making a process account the default where none is
 named; job objects for a host without a process account; what the Managed Processes can read of
