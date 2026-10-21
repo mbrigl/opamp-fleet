@@ -432,7 +432,10 @@ impl InstallTarget {
     ///
     /// Where a process account is registered, that directory is `program/`, read by the process
     /// group and written by the Client alone (ADR-0053 clause 6).
-    pub fn prepare(&self, group: Option<crate::storage::ProcessGroup>) -> Result<(), String> {
+    pub fn prepare(
+        &self,
+        group: Option<crate::storage::ProcessAccountGroup>,
+    ) -> Result<(), String> {
         let dir = match self {
             InstallTarget::Binary(path) => path.parent().map(std::path::Path::to_path_buf),
             InstallTarget::Tree { root, .. } => Some(root.clone()),
@@ -468,13 +471,13 @@ impl InstallTarget {
     /// staged program can be proved to run *before* the running one is stopped, so a package that
     /// could never have worked costs no downtime at all.
     ///
-    /// A tree is staged in a directory the process group reads, where a process account is
-    /// registered, so the preflight it runs can reach it (ADR-0053 clause 6).
+    /// A tree is staged in a directory the process account's group reads, where a process account
+    /// is registered, so the preflight it runs can reach it (ADR-0053 clause 6).
     fn stage(
         &self,
         artifact: &std::path::Path,
         archive_key: Option<&str>,
-        group: Option<crate::storage::ProcessGroup>,
+        group: Option<crate::storage::ProcessAccountGroup>,
     ) -> Result<Staged, String> {
         match self {
             InstallTarget::Binary(path) => {
@@ -675,7 +678,7 @@ pub struct Runner {
     /// The process account's primary group, where a process account is registered: the
     /// directories the Managed Process writes into and the preflight's staging belong to it
     /// (ADR-0053 clause 6).
-    pub process_group: Option<crate::storage::ProcessGroup>,
+    pub process_account_group: Option<crate::storage::ProcessAccountGroup>,
     pub events: EventSender,
     pub commands: mpsc::Receiver<ProcessCommand>,
     pub build: Box<dyn Fn() -> Option<ProcessSpec> + Send + Sync>,
@@ -923,7 +926,11 @@ impl Runner {
             .install
             .as_ref()
             .ok_or_else(|| "this supervisor manages nothing a package can replace".to_string())?;
-        let staged = target.stage(artifact, self.archive_key.as_deref(), self.process_group)?;
+        let staged = target.stage(
+            artifact,
+            self.archive_key.as_deref(),
+            self.process_account_group,
+        )?;
         match self.check(&staged).await {
             Preflighted::Passed => Ok((staged, true)),
             Preflighted::Refused(e) => {
@@ -1610,7 +1617,7 @@ impl Runner {
             // is registered (ADR-0053 clause 6).
             if let Err(e) = crate::storage::create_shared_dir(
                 dir,
-                self.process_group,
+                self.process_account_group,
                 crate::storage::Shared::Written,
             ) {
                 warn!(supervisor = %self.name, dir = %dir.display(), error = %e, "cannot prepare a directory the agent writes into");
@@ -2019,7 +2026,7 @@ fn stage_tree(
     root: &std::path::Path,
     program_path: &std::path::Path,
     archive_key: Option<&str>,
-    group: Option<crate::storage::ProcessGroup>,
+    group: Option<crate::storage::ProcessAccountGroup>,
 ) -> Result<PathBuf, String> {
     let staging = root.join(".staging");
     // A previous attempt that died between unpacking and the rename would leave this behind.
@@ -2296,7 +2303,7 @@ mod tests {
             preflight: None,
             reload_signal: None,
             spawner: Spawner::Local,
-            process_group: None,
+            process_account_group: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || {
@@ -2400,7 +2407,7 @@ mod tests {
             preflight: None,
             reload_signal: Some(libc::SIGHUP),
             spawner: Spawner::Channel(peer.channel.clone()),
-            process_group: None,
+            process_account_group: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(|| None),
@@ -2464,7 +2471,7 @@ mod tests {
             preflight: None,
             reload_signal: None,
             spawner: Spawner::Channel(Channel::new(socket, peer::own_uid())),
-            process_group: None,
+            process_account_group: None,
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || {
@@ -3090,14 +3097,14 @@ mod tests {
     /// Verifies: ADR-0053
     #[cfg(unix)]
     #[tokio::test]
-    async fn the_staging_and_the_data_directories_are_shared_with_the_process_group() {
+    async fn the_staging_and_the_data_directories_are_shared_with_the_process_accounts_group() {
         use std::os::unix::fs::MetadataExt as _;
         let mode = |path: &std::path::Path| {
             let meta = std::fs::metadata(path).expect("metadata");
             (meta.mode() & 0o7777, meta.gid())
         };
         // SAFETY: getegid(2) cannot fail and touches no memory.
-        let group = crate::storage::ProcessGroup(unsafe { libc::getegid() });
+        let group = crate::storage::ProcessAccountGroup(unsafe { libc::getegid() });
         let dir = tempfile::tempdir().expect("tempdir");
         let artifact = dir.path().join("downloaded");
         std::fs::copy("/bin/true", &artifact).expect("a bare program");
@@ -3126,7 +3133,7 @@ mod tests {
             event_tx,
             command_rx,
         );
-        runner.process_group = Some(group);
+        runner.process_account_group = Some(group);
         let made = data.clone();
         runner.build = Box::new(move || {
             Some(ProcessSpec {

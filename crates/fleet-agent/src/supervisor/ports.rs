@@ -171,7 +171,7 @@ pub enum InstallTarget {
 /// configuration file: the registration that names the process account is the only place it is
 /// stated (ADR-0053 clause 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessGroup(pub u32);
+pub struct ProcessAccountGroup(pub u32);
 
 /// The package this Supervisor's Managed Process currently runs (ADR-0026), persisted so a
 /// restarted Client reports the version it has and is not re-offered it.
@@ -315,7 +315,7 @@ pub struct SupervisorContext {
     pub archive_key: Option<String>,
     /// The process account's primary group, where a process account is registered: what the
     /// Supervisor shares with its Managed Process belongs to it (ADR-0053 clause 6).
-    pub process_group: Option<ProcessGroup>,
+    pub process_account_group: Option<ProcessAccountGroup>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.
@@ -532,7 +532,7 @@ mod tests {
             apply_grace: Duration::from_secs(0),
             retain_previous: Duration::from_secs(0),
             archive_key: None,
-            process_group: None,
+            process_account_group: None,
             settings: toml::Table::new(),
             events: EventSender::new(0, event_tx),
             shutdown,

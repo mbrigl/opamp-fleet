@@ -42,11 +42,11 @@ pub const SUPPLEMENTARY_FILE: &str = ".supplementary";
 
 pub struct Storage {
     dir: PathBuf,
-    /// The process group, where a process account is registered (ADR-0053 clause 6): the
+    /// The process account's group, where a process account is registered (ADR-0053 clause 6): the
     /// directory is passed through by it, and what is stored is kept from it.
-    group: Option<ProcessGroup>,
-    /// Whether `config/` is read by the Managed Process, and so shared with the process group: a
-    /// Supervisor's, never the Client's own.
+    group: Option<ProcessAccountGroup>,
+    /// Whether `config/` is read by the Managed Process, and so shared with the process account's
+    /// group: a Supervisor's, never the Client's own.
     config_shared: bool,
 }
 
@@ -56,19 +56,25 @@ impl Storage {
         Storage::open(dir, None, false)
     }
 
-    /// The Client's own storage in the state directory: passed through by the process group on the
-    /// way to the Supervisors' directories, and nothing in it shared (ADR-0053 clause 6).
-    pub fn client(dir: PathBuf, group: Option<ProcessGroup>) -> io::Result<Self> {
+    /// The Client's own storage in the state directory: passed through by the process account's
+    /// group on the way to the Supervisors' directories, and nothing in it shared (ADR-0053
+    /// clause 6).
+    pub fn client(dir: PathBuf, group: Option<ProcessAccountGroup>) -> io::Result<Self> {
         Storage::open(dir, group, false)
     }
 
-    /// A Supervisor's storage in its own directory: passed through by the process group, with
-    /// `config/` read by its Managed Process and the rest kept from it (ADR-0053 clause 6).
-    pub fn supervised(dir: PathBuf, group: Option<ProcessGroup>) -> io::Result<Self> {
+    /// A Supervisor's storage in its own directory: passed through by the process account's
+    /// group, with `config/` read by its Managed Process and the rest kept from it (ADR-0053
+    /// clause 6).
+    pub fn supervised(dir: PathBuf, group: Option<ProcessAccountGroup>) -> io::Result<Self> {
         Storage::open(dir, group, true)
     }
 
-    fn open(dir: PathBuf, group: Option<ProcessGroup>, config_shared: bool) -> io::Result<Self> {
+    fn open(
+        dir: PathBuf,
+        group: Option<ProcessAccountGroup>,
+        config_shared: bool,
+    ) -> io::Result<Self> {
         create_shared_dir(&dir, group, Shared::Traversed)?;
         let storage = Storage {
             dir,
@@ -79,10 +85,10 @@ impl Storage {
         Ok(storage)
     }
 
-    /// Shares what `config/` already holds with the process group — files written before a process
-    /// account was registered, or placed there by the operator — so the Managed Process reads them
-    /// before the next configuration is written. Nothing where `config/` is not shared, or does
-    /// not exist yet.
+    /// Shares what `config/` already holds with the process account's group — files written
+    /// before a process account was registered, or placed there by the operator — so the Managed
+    /// Process reads them before the next configuration is written. Nothing where `config/` is not
+    /// shared, or does not exist yet.
     fn share_config(&self) -> io::Result<()> {
         let Some(group) = self.config_group() else {
             return Ok(());
@@ -103,13 +109,14 @@ impl Storage {
         Ok(())
     }
 
-    /// The process group `config/` is shared with, if it is.
-    fn config_group(&self) -> Option<ProcessGroup> {
+    /// The process account's group `config/` is shared with, if it is.
+    fn config_group(&self) -> Option<ProcessAccountGroup> {
         self.group.filter(|_| self.config_shared)
     }
 
-    /// Writes one of the Client's own records. In a directory the process group passes through it
-    /// is kept from that group, `0600`; elsewhere it is written as it always was, at the umask.
+    /// Writes one of the Client's own records. In a directory the process account's group passes
+    /// through it is kept from that group, `0600`; elsewhere it is written as it always was, at
+    /// the umask.
     fn write_record(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
         if self.group.is_some() {
             write_private(path, contents)
@@ -305,7 +312,7 @@ impl AgentStorage for Storage {
         // The protobuf and the entry files can carry secret material (a roled `${file:...}` entry
         // that is a certificate or key), so both the config directory and the files are owner-only.
         // Where a process account is registered, a Supervisor's `config/` is what its Managed
-        // Process reads: shared with the process group to read, never to write (ADR-0053
+        // Process reads: shared with the process account's group to read, never to write (ADR-0053
         // clause 6).
         let config_dir = self.dir.join(CONFIG_DIR);
         create_shared_dir(&config_dir, self.config_group(), Shared::Read)?;
@@ -433,9 +440,10 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub use crate::supervisor::ports::ProcessGroup;
+pub use crate::supervisor::ports::ProcessAccountGroup;
 
-/// How a directory the Client creates is shared with the process group (ADR-0053 clause 6).
+/// How a directory the Client creates is shared with the process account's group (ADR-0053
+/// clause 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Shared {
     /// Passed through on the way to what is shared, never listed: `0710`. The state directory, the
@@ -460,13 +468,13 @@ impl Shared {
 }
 
 /// Create `dir` (and its parents) shared with `group` as `shared` says: owned by the group, at the
-/// mode of ADR-0053 clause 6. Without a process group it is [`create_private_dir`], exactly as
-/// where none is registered.
+/// mode of ADR-0053 clause 6. Where no process account is registered it is
+/// [`create_private_dir`], exactly as before.
 ///
 /// The parents this creates are not shared: each that must be is named by its own call.
 pub(crate) fn create_shared_dir(
     dir: &Path,
-    group: Option<ProcessGroup>,
+    group: Option<ProcessAccountGroup>,
     shared: Shared,
 ) -> io::Result<()> {
     let Some(group) = group else {
@@ -494,7 +502,7 @@ pub(crate) fn create_shared_dir(
 
 /// Makes the regular file at `path` readable by `group` and no wider: `0640`, owned by the group.
 #[cfg(unix)]
-fn share_file(path: &Path, group: ProcessGroup) -> io::Result<()> {
+fn share_file(path: &Path, group: ProcessAccountGroup) -> io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -505,11 +513,11 @@ fn share_file(path: &Path, group: ProcessGroup) -> io::Result<()> {
 }
 
 /// Write `contents` to `path` readable by `group`: `0640`, owned by the group (ADR-0053 clause 6).
-/// Without a process group it is [`write_private`].
+/// Where no process account is registered it is [`write_private`].
 pub(crate) fn write_shared(
     path: &Path,
     contents: &[u8],
-    group: Option<ProcessGroup>,
+    group: Option<ProcessAccountGroup>,
 ) -> io::Result<()> {
     let Some(group) = group else {
         return write_private(path, contents);
@@ -802,9 +810,9 @@ mod tests {
     /// The group this test may share with: its own primary group, of which it is a member as the
     /// Client is of the process account's.
     #[cfg(unix)]
-    fn own_group() -> ProcessGroup {
+    fn own_group() -> ProcessAccountGroup {
         // SAFETY: getegid(2) cannot fail and touches no memory.
-        ProcessGroup(unsafe { libc::getegid() })
+        ProcessAccountGroup(unsafe { libc::getegid() })
     }
 
     #[cfg(unix)]
@@ -814,15 +822,15 @@ mod tests {
         (meta.mode() & 0o7777, meta.gid())
     }
 
-    /// Where a process account is registered, the Client shares with the process group what the
-    /// Managed Process reads and nothing else: the state directory and a Supervisor's directory
-    /// are passed through, `0710`; a Supervisor's `config/` and its entries are read, `0750` and
-    /// `0640`; a data directory is written, `2770`. The Client's own `config/`, the stored
-    /// protobuf, the identity and the package record stay the Client's, `0700` and `0600`.
+    /// Where a process account is registered, the Client shares with the process account's group
+    /// what the Managed Process reads and nothing else: the state directory and a Supervisor's
+    /// directory are passed through, `0710`; a Supervisor's `config/` and its entries are read,
+    /// `0750` and `0640`; a data directory is written, `2770`. The Client's own `config/`, the
+    /// stored protobuf, the identity and the package record stay the Client's, `0700` and `0600`.
     /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
-    fn with_a_process_account_the_process_group_reads_only_what_it_runs_on() {
+    fn with_a_process_account_its_group_reads_only_what_it_runs_on() {
         let dir = tempfile::tempdir().expect("tempdir");
         let group = own_group();
         let state = dir.path().join("state");

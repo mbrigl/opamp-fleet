@@ -63,11 +63,11 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
 /// directory holding it no wider than `0700`. On Windows the directory ACL under `%ProgramData%`
 /// protects it (ADR-0019); there is no mode to set.
 ///
-/// `group` is the process group where a process account is registered: the state directory stays
-/// passed through by it (ADR-0053 clause 6).
+/// `group` is the process account's group where a process account is registered: the state
+/// directory stays passed through by it (ADR-0053 clause 6).
 pub fn store(
     state_dir: &Path,
-    group: Option<crate::storage::ProcessGroup>,
+    group: Option<crate::storage::ProcessAccountGroup>,
     settings: &ConnectionSettingsOffers,
 ) -> std::io::Result<()> {
     crate::storage::create_shared_dir(state_dir, group, crate::storage::Shared::Traversed)?;
