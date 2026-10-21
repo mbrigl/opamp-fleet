@@ -1149,11 +1149,16 @@ impl Runner {
         if package.checked {
             return Checked::Ready(package);
         }
-        match self
-            .check(&package.staged)
-            .instrument(package.span.clone())
-            .await
-        {
+        // A shutdown does not wait for the preflight: the package stays parked, unchecked, and
+        // what ran before stays in place.
+        let checked = tokio::select! {
+            checked = self.check(&package.staged).instrument(package.span.clone()) => checked,
+            _ = shutdown.requested() => {
+                s.parked = Some(package);
+                return Checked::Done(true);
+            }
+        };
+        match checked {
             Preflighted::Passed => Checked::Ready(Parked {
                 checked: true,
                 ..package
@@ -2337,6 +2342,68 @@ mod tests {
         assert_eq!(
             not_started, 1,
             "the predecessor is started once, after the package"
+        );
+    }
+
+    /// A shutdown requested while the preflight a package waited for runs ends the install at
+    /// once, without waiting out the preflight's bound: the package stays parked, unchecked, and
+    /// what ran before stays in place (ADR-0059 clauses 2 and 3).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shutdown_ends_the_preflight_a_parked_package_waited_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("agent");
+        std::fs::write(&live, b"what ran before").expect("a predecessor");
+        let target = InstallTarget::Binary(live.clone());
+        let artifact = dir.path().join("downloaded");
+        std::fs::write(&artifact, "#!/bin/sh\nexec sleep 30\n").expect("a program that hangs");
+        let staged = target.stage(&artifact, None, None).expect("stage");
+        let (event_tx, _events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(1);
+        let (shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
+        let apply_grace = Duration::from_millis(300);
+        let mut runner = package_runner(live.clone(), apply_grace, event_tx, command_rx);
+        runner.preflight = Some(Preflight {
+            args: Vec::new(),
+            env: Vec::new(),
+        });
+        let mut s = Supervision {
+            child: None,
+            policy: RestartPolicy::new(apply_grace, Instant::now()),
+            backoff: Backoff::new(),
+            waiting: Waiting::new(),
+            owed: None,
+            parked: None,
+        };
+        let package = Parked {
+            checked: false,
+            staged,
+            version: "9.9.9".to_string(),
+            hash: b"9.9.9".to_vec(),
+            span: tracing::Span::none(),
+        };
+        let shutting_down = {
+            let install = runner.install(package, &mut s, &mut shutdown);
+            tokio::pin!(install);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), install.as_mut())
+                    .await
+                    .is_err(),
+                "the preflight runs"
+            );
+            shutdown_tx.send(true).expect("request the shutdown");
+            tokio::time::timeout(Duration::from_secs(1), install)
+                .await
+                .expect("the shutdown is seen at once")
+        };
+        assert!(shutting_down);
+        let parked = s.parked.expect("the package stays parked");
+        assert!(!parked.checked, "the preflight did not finish");
+        assert_eq!(
+            std::fs::read(&live).expect("live"),
+            b"what ran before",
+            "what ran before stays in place"
         );
     }
 
