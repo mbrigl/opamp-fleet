@@ -1763,6 +1763,101 @@ mod tests {
         assert_eq!(served, Served::Superseded);
     }
 
+    /// Only a peer of the Client's account can make a superseded service end: one of another
+    /// account that names another build is refused before it is served, and the service goes on
+    /// (ADR-0053 clauses 2 and 4).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_peer_of_another_account_ends_no_superseded_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let (stop, task) = listen(&socket, own_uid().wrapping_add(1), || true);
+        let mut stream = connect_raw(&socket, "0.0.0-another-build").await;
+        assert!(matches!(
+            next(&mut stream).await,
+            Some(Reply::Refused { version: None, .. })
+        ));
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!task.is_finished(), "a foreign peer ended the service");
+        let _ = stop.send(());
+        let served = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the service ended")
+            .expect("cleanly");
+        assert_eq!(served, Served::Stopped);
+    }
+
+    /// The service goes while a start is on its way: the start goes to the service that comes back
+    /// rather than failing on the connection that went (ADR-0053 clause 2).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_start_the_service_cut_short_goes_to_the_service_that_comes_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        // The first connection goes on the start; the second runs it.
+        let service = tokio::spawn(async move {
+            for served in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
+                    let reply = match request {
+                        Request::Hello { .. } => peer::hello(),
+                        Request::Start { .. } if served == 0 => break,
+                        Request::Start { id, .. } => Reply::Started { id, pid: 4242 },
+                        _ => continue,
+                    };
+                    if write_frame(&mut stream, &reply).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let channel = Channel::new(&socket, own_uid());
+        let child =
+            tokio::time::timeout(Duration::from_secs(10), channel.start("test", sh("true")))
+                .await
+                .expect("in time")
+                .expect("the start reached the service that came back");
+        assert_eq!(child.id(), Some(4242));
+        drop(child);
+        drop(channel);
+        service.abort();
+    }
+
+    /// A start that waited for the service in vain makes the next ones in the same outage try
+    /// once, rather than each waiting out the reconnect again; once that has passed, a start waits
+    /// again. Every one fails as not reaching the service.
+    /// Verifies: ADR-0053
+    #[tokio::test(start_paused = true)]
+    async fn a_start_in_an_outage_that_was_waited_out_tries_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let channel = Channel::new(&dir.path().join("agents.sock"), own_uid());
+        let timed = || async {
+            let started = Instant::now();
+            let failed = channel
+                .start("test", sh("true"))
+                .await
+                .err()
+                .expect("no service");
+            assert!(is_unreachable(&failed), "{failed}");
+            started.elapsed()
+        };
+        assert!(
+            timed().await >= RECONNECT,
+            "the first start waits for the service"
+        );
+        assert!(
+            timed().await < RECONNECT_EVERY,
+            "the next one in the same outage tries once"
+        );
+        tokio::time::advance(RECONNECT).await;
+        assert!(
+            timed().await >= RECONNECT,
+            "a later outage is waited out again"
+        );
+    }
+
     /// The self-update restarts the Client, whose connection closes: a service that `current` no
     /// longer names ends then, beside the Client, rather than only once the new Client has met it.
     /// Verifies: ADR-0053
