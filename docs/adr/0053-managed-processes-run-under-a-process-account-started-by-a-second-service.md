@@ -4,7 +4,7 @@
 - **Date:** 2026-10-20
 - **Deciders:** Markus Brigl
 - **Applies to:** the `--process-account` flag of `service install` and the second service it registers in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/windows_config.rs` and `crates/fleet-agent/src/service/windows_rights.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel between the Client and the second service, the modes and ownership of the Supervisors' directories in `crates/fleet-agent/src/storage.rs`, and every document that tells an operator which account a Managed Process runs as
-- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 3
+- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 3 and 9, [ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) clause 6
 
 ## Context
 
@@ -65,6 +65,9 @@ signals and stops those programs on the Client's request.
      `LocalSystem` or the account the Client runs as is refused, naming `--run-as root` as the way
      to run everything as root. A host whose agents need root runs as root as a whole (ADR-0042
      clause 2), with no second service.
+   - **It is dropped on request.** `service install --no-process-account` stops and deregisters the
+     second service, and the Client starts its programs itself again. It conflicts with
+     `--process-account`, and a refusal that a kept process account causes names it.
 
 2. **Restates ADR-0019 clause 3. The service is `PRODUCT_NAME`, with no suffix, on every platform,
    and the second service is `<PRODUCT_NAME>-agents`.** The label is a single token — no
@@ -79,10 +82,22 @@ signals and stops those programs on the Client's request.
      delivers one file (ADR-0042 clause 3).
    - **The two are registered, started, stopped and deregistered together.** `service install`,
      `start`, `stop` and `uninstall` act on both, the second service first on start and last on
-     stop. The self-update stops and starts both around the switch of `current`. Its unit carries
+     stop. Its unit carries
      the directives ADR-0042 clause 7 sets for its account; its plist names the account in
      `UserName`. On Windows its required privileges are limited to `SeChangeNotifyPrivilege`, so no
      Managed Process holds `SeImpersonatePrivilege`, and the Client's service depends on it.
+   - **The Client runs without it, and neither waits for the other.** Under systemd the Client's
+     unit wants the second service and is ordered after it (`Wants=`, `After=`), never `Requires=`:
+     while the second service is down the Client stays reported to the Server, its Supervisors say
+     that their programs do not start, and they start again once it is back. A Supervisor whose
+     start finds the second service unreachable is not held for failing to start; it tries again
+     with backoff. The Client connects again whenever the second service has restarted.
+   - **A self-update restarts whichever end is behind.** The self-update switches `current` and
+     restarts the Client as before. A second service that meets a Client of another build while
+     `current` no longer names its own version exits, so that its service manager starts it from
+     `current`; a Client that meets a second service of another build while `current` no longer
+     names its own version exits for the same restart. A peer of another build is otherwise
+     refused (clause 5), and only a peer of the admitted account can cause either exit (clause 4).
 
 3. **Every program a Supervisor starts is started by the second service.** Where a process account
    is registered, the Managed Process, the version probe and the preflight of a staged package run
@@ -105,7 +120,9 @@ signals and stops those programs on the Client's request.
 
 6. **The process account reads what it runs and writes only its own data.** The process account's
    primary group is made a supplementary group of the Client's account by the operator, and the
-   install refuses to register where it is not. Then:
+   install refuses to register where it is not, or where the process account's primary group is
+   group 0 or the Client's own primary group, or the process account is a member of the Client's
+   primary group. Then:
 
    | Path | Owner : group | Mode |
    |---|---|---|
@@ -123,6 +140,54 @@ signals and stops those programs on the Client's request.
    with the block's `env` and the Supervisor Endpoint's token laid over it, the token last
    ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)
    clause 16); `HOME`, `USER` and `LOGNAME` are the process account's.
+
+8. **Restates ADR-0019 clause 9. The executable layout is versioned side by side behind a `current`
+   pointer, and the registered command line names the second service where there is one.**
+
+   ```text
+   <layout root>/versions/supervisor-<MAJOR.MINOR.PATCH>-<hash>/supervisor[.exe]
+   <layout root>/versions/supervisor-…/manifest.toml   # full version string, binary SHA-256
+   <layout root>/current -> versions/supervisor-…/      # symlink on Unix, junction on Windows
+   ```
+
+   The directory name is the bare base and the commit short-hash of
+   [ADR-0012](0012-versions-resolved-in-the-internal-crate.md)'s version, never the pre-release: the release `1.2.3` and a
+   development build heading for it are told apart by their commit, and the manifest's full string
+   answers release-or-dev. The service's program is `<layout root>/current/supervisor`, so a
+   version switch never re-registers anything. On Unix the pointer is switched atomically — a
+   temporary symlink `rename`d over `current`, never unlink-then-relink; on Windows the junction
+   (which needs no symlink privilege) is recreated only while the service is stopped. At start the
+   daemon verifies that `current` resolves to the version directory it runs from and repairs a torn
+   switch. Staging a version already present replaces its contents and rewrites its manifest, and
+   skips the write when the staged binary already holds the same bytes (an install arriving through
+   the `PATH` symlink runs from that file). The default state directory is `<data root>/state` when
+   the configuration names no absolute one. Every path is absolute at install time, and the
+   registered command line is `run --service --config <abs> --state-dir <abs>`, followed, where a
+   process account is registered, by `--agents-socket <abs> --process-uid <uid>` (clause 2).
+
+9. **Restates ADR-0042 clause 6. The Client writes its systemd system units itself, and
+   `service-manager` installs them.**
+   `manager::install` passes `contents: Some(<unit>)` at system scope under systemd.
+   `service-manager` still writes the file (mode `0644`), enables it, which reloads the manager's
+   configuration, and uninstalls it. The unit holds:
+   - `[Unit]`: `Description=<PRODUCT_NAME>`, the same as before. The display name stays where
+     ADR-0019 clause 2 puts prose. Where a process account is registered, also
+     `Wants=<PRODUCT_NAME>-agents.service` and `After=<PRODUCT_NAME>-agents.service` (clause 2).
+   - `[Service]`: `ExecStart=` with the program and every argument in double quotes. A `\` and a
+     `"` are escaped, a `%` is written `%%` and a `$` is written `$$`, so any absolute path reaches
+     the program as it was given. Then `Restart=on-failure`, `RestartSec=` set to the restart delay
+     the SCM's recovery actions use (ADR-0019 clause 11), `User=` set to the account of ADR-0042
+     clause 2, and the directives of ADR-0042 clause 7.
+   - `[Install]`: `WantedBy=multi-user.target`.
+
+   The user scope and the launchd plist stay as `service-manager` renders them. `service install`
+   never writes, reads or removes anything under `/etc/systemd/system/<PRODUCT_NAME>.service.d/`.
+   Drop-ins there belong to the operator, outrank the unit, and survive every re-registration.
+
+   The second service's unit is written the same way: `User=` names the process account,
+   `ExecStart=` runs `run --agents <socket> --client-uid <uid>`, `RuntimeDirectory=` holds the
+   socket, `TimeoutStopSec=` exceeds the time the second service takes to stop what it started,
+   and the directives are those of ADR-0042 clause 7 for its account.
 
 **Out of scope:** an account per Supervisor; making a process account the default where none is
 named; job objects for a host without a process account; what the Managed Processes can read of
