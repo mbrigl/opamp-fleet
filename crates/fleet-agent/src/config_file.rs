@@ -230,19 +230,42 @@ pub(crate) fn absolute(path: &Path) -> PathBuf {
 /// The file's text with every secret value replaced by `***`, for reporting it off the host —
 /// the Server persists effective configurations to disk, so a credential must never be in one.
 ///
-/// The text is parsed with `toml_edit`, which keeps everything it does not touch byte for byte —
-/// the operator's comments, ordering and layout are half of what a configuration file says. A
-/// secret key is found wherever and however it is written (a table, a dotted or quoted key, an
-/// inline table, an array of tables) and its whole value is replaced, a multi-line string to its
-/// closing quotes, together with a comment beside it. Text that does not parse cannot be taken
-/// apart, so none of it is reported — over-redaction is the cheap failure here, a leaked
+/// The text is parsed with `toml_edit`, which keeps the operator's comments, ordering and layout —
+/// half of what a configuration file says — though line endings become `\n`, and a table written
+/// only as the parent of a masked one comes out written as its own. A secret key is found wherever
+/// and however it is written (a table, a dotted or quoted key, an inline table, an array of tables)
+/// and its whole value is replaced, a multi-line string to its closing quotes, together with a
+/// comment beside it. A leftover `[auth]` section, which the Client ignores (ADR-0021 clause 3),
+/// has every value masked, whatever its keys are called. Text that does not parse cannot be taken
+/// apart, so it is reported as a placeholder — over-redaction is the cheap failure here, a leaked
 /// credential the expensive one.
 pub fn redact_secrets(text: &str) -> String {
     let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else {
         return "# (configuration redacted: it does not parse)\n".to_owned();
     };
+    if let Some(auth) = doc.get_mut("auth") {
+        mask_every_value_in_item(auth);
+    }
     mask_secrets_in(doc.as_table_mut());
     doc.to_string()
+}
+
+/// Masks every value under `item`, whatever its key: a section nothing reads may hold anything.
+fn mask_every_value_in_item(item: &mut toml_edit::Item) {
+    match item {
+        toml_edit::Item::Table(table) => {
+            table
+                .iter_mut()
+                .for_each(|(_, item)| mask_every_value_in_item(item));
+        }
+        toml_edit::Item::ArrayOfTables(tables) => tables.iter_mut().for_each(|table| {
+            table
+                .iter_mut()
+                .for_each(|(_, item)| mask_every_value_in_item(item));
+        }),
+        toml_edit::Item::Value(_) => *item = toml_edit::value("***"),
+        toml_edit::Item::None => {}
+    }
 }
 
 /// Masks every secret key of `table` and of every table nested in it.
@@ -281,7 +304,9 @@ mod tests {
 
     /// The file's text is reported off the host as the effective configuration, and the Server
     /// persists what it receives — so a credential value must never survive the redaction, while
-    /// the operator's comments and layout must (they are half of what the file says).
+    /// the operator's comments and layout must (they are half of what the file says). A leftover
+    /// `[auth]` section is masked whole, whatever its keys are called.
+    /// Verifies: ADR-0017, ADR-0021
     #[test]
     fn redaction_masks_credential_values_and_keeps_everything_else() {
         let text = "# the fleet endpoint\nendpoint = \"wss://fleet:4320/v1/opamp\"\n\n\
@@ -308,12 +333,16 @@ mod tests {
         // An inline table hides a credential no better than a line of its own.
         let inline = redact_secrets("auth = { username = \"op\", password = \"hunter2\" }\n");
         assert!(!inline.contains("hunter2"), "{inline}");
+        let renamed = redact_secrets("[auth]\nPassword = \"hunter2\"\ntoken = \"t0ken\"\n");
+        assert!(!renamed.contains("hunter2"), "{renamed}");
+        assert!(!renamed.contains("t0ken"), "{renamed}");
+        assert!(renamed.contains("token = \"***\""), "{renamed}");
     }
 
     /// A secret is masked whatever TOML spelling carries it: a multi-line string, basic or
     /// literal, must not leave its continuation lines behind, and a dotted key, a quoted key, an
     /// inline table or an array of tables hides it no better. What is not secret stays as written.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0017, ADR-0026
     #[test]
     fn redaction_masks_every_spelling_of_a_secret_value() {
         let spellings = [
@@ -358,8 +387,8 @@ mod tests {
         );
     }
 
-    /// Text that does not parse cannot be taken apart, so none of it is reported.
-    /// Verifies: ADR-0026
+    /// Text that does not parse cannot be taken apart, so it is reported as a placeholder.
+    /// Verifies: ADR-0017, ADR-0026
     #[test]
     fn redaction_replaces_text_that_does_not_parse_whole() {
         let redacted = redact_secrets("archive_key = \"\"\"\nleak\nnot = closed\n");
