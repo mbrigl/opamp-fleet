@@ -2236,6 +2236,35 @@ mod an_apply_while_the_second_service_is_away {
         shut_down(away).await;
     }
 
+    /// The second service goes during a package's apply grace, and the predecessor the package
+    /// would be taken back out for cannot be put back — it is gone. The package stays live and is
+    /// reported `InstallFailed`: `program/` is never left empty (ADR-0026 clause 62).
+    /// Verifies: ADR-0026, ADR-0059
+    #[tokio::test]
+    async fn a_package_whose_predecessor_cannot_be_put_back_stays_live() {
+        let (mut away, service) = running(&stub_agent(), Duration::from_secs(3)).await;
+        let new = another_build_of_the_agent();
+        offer(&away, &new, "2.0.0").await;
+        let started =
+            next_health_and_no_outcome(&mut away.harness.events, Duration::from_secs(10)).await;
+        assert_eq!(started.status, "running", "{started:?}");
+        std::fs::remove_file(away.binary.with_extension("rollback"))
+            .expect("the predecessor is set aside");
+
+        // Within the grace.
+        service.stop().await;
+        let (hash, result) = next_package_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"2.0.0".to_vec());
+        let error = result.expect_err("neither proved nor taken back out");
+        assert!(error.contains("cannot restore"), "{error}");
+        assert!(
+            std::fs::read(&away.binary).ok() == Some(new),
+            "program/ is left without the package"
+        );
+        assert!(!away.binary.with_extension("staged").exists());
+        shut_down(away).await;
+    }
+
     /// A first install whose start finds the service away is taken back out, and a second package
     /// offered meanwhile replaces it: once the service is back only the second is swapped in and
     /// gated, and the first, which never ran, is nobody's predecessor.
