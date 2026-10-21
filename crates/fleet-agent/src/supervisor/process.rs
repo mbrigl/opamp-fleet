@@ -196,6 +196,20 @@ pub fn is_unreachable(error: &std::io::Error) -> bool {
     }
 }
 
+/// Whether `error` says that the second service was reached and refused, or was refused: another
+/// account serves its socket, it is another build, or it refused the Client (ADR-0059 clauses 4
+/// and 5). [`is_unreachable`] holds for it too. Never so for a program the Client starts itself.
+#[must_use]
+pub fn is_refused(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    return crate::supervisor::channel::is_refused(error);
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 /// A start that found the second service unreachable, or a program that went with the service:
 /// no failed start of the program's, so the [`RestartPolicy`] does not count it and never holds
 /// for it. The start is tried again, with a backoff of its own, until the service is back
@@ -1414,7 +1428,9 @@ impl Runner {
                 // is not there — a first install that failed and was undone, or a program never
                 // installed — is a Supervisor with no process, and saying so is more use to an
                 // operator than "spawn failed".
-                let status = if is_unreachable(&e) {
+                let status = if is_refused(&e) {
+                    REFUSED
+                } else if is_unreachable(&e) {
                     UNREACHABLE
                 } else if e.kind() == std::io::ErrorKind::NotFound {
                     "no process installed"
@@ -1435,6 +1451,12 @@ impl Runner {
 
 /// What a Supervisor reports while the second service cannot be reached (ADR-0059 clause 2).
 const UNREACHABLE: &str = "the second service cannot be reached";
+
+/// What a Supervisor reports while the second service is reached and refused: another account
+/// serves its socket, it is another build, or it refuses the Client (ADR-0059 clauses 4 and 5).
+/// Not an outage that ends by itself, so it is told apart from [`UNREACHABLE`].
+const REFUSED: &str =
+    "the second service is refused: another account, another build, or it refuses this Client";
 
 /// How long a version probe may take before it is abandoned — it must never stall startup.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -2186,6 +2208,31 @@ mod tests {
         assert_eq!(gone.status, UNREACHABLE);
         shutdown_tx.send(true).expect("request the shutdown");
         tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .expect("the Runner ends on the shutdown")
+            .expect("cleanly");
+    }
+
+    /// A socket another account serves is no outage: the Supervisor reports it as a refusal of its
+    /// own, so the Server tells a misconfigured host from a stopped service (ADR-0059 clause 4).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_socket_of_another_account_is_reported_refused_not_unreachable() {
+        use crate::supervisor::channel::{peer, Channel};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let (_stop, _service) = second_service(&socket);
+        let (mut runner, mut events, _commands) =
+            running_through_the_second_service(&socket, PathBuf::from("/bin/true"), Vec::new());
+        // The socket is served by this test's uid; the process account is said to be another.
+        runner.spawner = Spawner::Channel(Channel::new(&socket, peer::own_uid().wrapping_add(1)));
+        let (shutdown_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let run = tokio::spawn(runner.run(shutdown));
+        let health = next_health(&mut events, Duration::from_secs(30)).await;
+        assert_eq!(health.status, REFUSED, "{health:?}");
+        shutdown_tx.send(true).expect("request the shutdown");
+        tokio::time::timeout(Duration::from_secs(10), run)
             .await
             .expect("the Runner ends on the shutdown")
             .expect("cleanly");
