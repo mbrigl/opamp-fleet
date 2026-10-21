@@ -255,7 +255,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     // (ADR-0054). Passed through by the process group where one is registered (ADR-0059 clause 6).
     crate::storage::create_shared_dir(
         &config.state_dir,
-        config.process_group,
+        config.process_account_group,
         crate::storage::Shared::Traversed,
     )
     .map_err(|e| format!("cannot create {}: {e}", config.state_dir.display()))?;
@@ -426,7 +426,7 @@ mod tests {
         let mut config = config(&state_dir);
         // SAFETY: getegid(2) cannot fail and touches no memory.
         let group = unsafe { libc::getegid() };
-        config.process_group = Some(crate::supervisor::ports::ProcessGroup(group));
+        config.process_account_group = Some(crate::supervisor::ports::ProcessAccountGroup(group));
         let signed = sign(request(&config).expect("a request"));
         let mode = |name: &str| {
             state_dir
@@ -437,7 +437,11 @@ mod tests {
                 .mode()
                 & 0o7777
         };
-        assert_eq!(mode(""), 0o710, "passed through by the process group");
+        assert_eq!(
+            mode(""),
+            0o710,
+            "passed through by the process account's group"
+        );
         assert_eq!(mode(PENDING_CSR_FILE), 0o600);
         accept(&state_dir, signed.as_bytes()).expect("accept");
         assert_eq!(mode(ISSUED_CERT_FILE), 0o600);

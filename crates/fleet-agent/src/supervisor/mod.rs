@@ -129,7 +129,7 @@ pub fn build_engine(
     // otherwise it would be invisible on exactly the hosts that manage something, and the Server
     // would have nobody to offer the Client's own package to. It is index 0 so the Supervisors that
     // follow keep a stable, obvious offset.
-    let storage = Storage::client(config.state_dir.clone(), config.process_group)
+    let storage = Storage::client(config.state_dir.clone(), config.process_account_group)
         .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
     // A host that keeps its Supervisor set takes none from the Server, and the set stored from
     // before leaves rather than be reported as applied (ADR-0017 clauses 42 and 44).
@@ -312,16 +312,16 @@ pub fn start_supervisor(
     let supervisor_dir = config.supervisor_dir(&block.name);
     // The Managed Process passes through the Supervisors' root on its way to its own directory
     // (ADR-0059 clause 6). Left as it is made where no process account is registered.
-    if config.process_group.is_some() {
+    if config.process_account_group.is_some() {
         let root = config.supervisors_root();
         crate::storage::create_shared_dir(
             &root,
-            config.process_group,
+            config.process_account_group,
             crate::storage::Shared::Traversed,
         )
         .map_err(|e| format!("cannot prepare {}: {e}", root.display()))?;
     }
-    let storage = Storage::supervised(supervisor_dir.clone(), config.process_group)
+    let storage = Storage::supervised(supervisor_dir.clone(), config.process_account_group)
         .map_err(|e| format!("cannot prepare {}: {e}", supervisor_dir.display()))?;
     let config_dir = storage.config_dir();
 
@@ -372,7 +372,7 @@ pub fn start_supervisor(
     //
     // What the target itself needs — for a tree that is its root and nothing below it, since the
     // live tree arrives by renaming a directory over that name (ADR-0026).
-    install.prepare(config.process_group)?;
+    install.prepare(config.process_account_group)?;
     // Only a Client holding the operator's verification key takes packages: there is no unsigned
     // posture (ADR-0026). Without it the program stays as installed, and the startup notice says
     // why.
@@ -416,7 +416,7 @@ pub fn start_supervisor(
         apply_grace: timing.apply_grace,
         retain_previous: timing.retain_previous,
         archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
-        process_group: config.process_group,
+        process_account_group: config.process_account_group,
         settings,
         events: EventSender::new(index, event_tx.clone()),
         shutdown: stop,
@@ -758,7 +758,7 @@ mod tests {
     /// Verifies: ADR-0059
     #[cfg(unix)]
     #[tokio::test]
-    async fn the_engine_lays_out_the_path_to_each_managed_process_for_the_process_group() {
+    async fn the_engine_lays_out_the_path_to_each_managed_process_for_the_process_accounts_group() {
         use std::os::unix::fs::MetadataExt as _;
         let mode = |path: &std::path::Path| {
             let meta = std::fs::metadata(path).expect("metadata");
@@ -770,7 +770,7 @@ mod tests {
 
         let shared = tempfile::tempdir().expect("tempdir");
         let mut config = two_of_a_type(shared.path());
-        config.process_group = Some(crate::storage::ProcessGroup(gid));
+        config.process_account_group = Some(crate::storage::ProcessAccountGroup(gid));
         let _engine = build_engine(&config, &shutdown, Spawner::Local).expect("build");
         assert_eq!(mode(&config.state_dir), (0o710, gid));
         assert_eq!(mode(&config.supervisors_root()), (0o710, gid));
