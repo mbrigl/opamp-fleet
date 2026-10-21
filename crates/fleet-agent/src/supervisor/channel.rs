@@ -15,7 +15,7 @@
 //!
 //! Unix only: on Linux and macOS the channel is a Unix socket.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
@@ -79,7 +79,8 @@ pub(crate) enum Request {
     /// Start a program. `id` is the Client's name for it in every later message.
     Start { id: u64, launch: Launch },
     /// Send `signal` to the program, or, with `group`, to its process group where the program was
-    /// asked to lead one ([`Launch::own_process_group`]).
+    /// asked to lead one ([`Launch::own_process_group`]). Answered, in order, by
+    /// [`Reply::Signalled`] or [`Reply::SignalFailed`].
     Signal { id: u64, signal: i32, group: bool },
     /// Kill the program, and its process group where it was asked to lead one.
     Stop { id: u64 },
@@ -102,6 +103,10 @@ pub(crate) enum Reply {
         error: String,
         os_error: Option<i32>,
     },
+    /// The signal was sent — or the program has ended, and there was nothing to signal.
+    Signalled { id: u64 },
+    /// The signal could not be sent, and why.
+    SignalFailed { id: u64, error: String },
     /// One line the program wrote, without its line end.
     Output {
         id: u64,
@@ -420,7 +425,7 @@ async fn serve_connection<F: Future<Output = ()>>(
     });
 
     let mut programs: HashMap<u64, mpsc::UnboundedSender<Control>> = HashMap::new();
-    let mut running: JoinSet<u64> = JoinSet::new();
+    let mut running: JoinSet<(u64, mpsc::UnboundedReceiver<Control>)> = JoinSet::new();
     let ended = loop {
         tokio::select! {
             request = requests.recv() => match request {
@@ -458,11 +463,14 @@ async fn serve_connection<F: Future<Output = ()>>(
                         });
                     }
                 },
-                Some(Request::Signal { id, signal, group }) => {
-                    if let Some(control) = programs.get(&id) {
+                Some(Request::Signal { id, signal, group }) => match programs.get(&id) {
+                    Some(control) => {
                         let _ = control.send(Control::Signal { signal, group });
                     }
-                }
+                    // Ended, as far as this connection knows: nothing to signal, as for a program
+                    // the Client has waited for itself.
+                    None => replies.send(Reply::Signalled { id }),
+                },
                 Some(Request::Stop { id }) => {
                     if let Some(control) = programs.get(&id) {
                         let _ = control.send(Control::Stop);
@@ -472,8 +480,16 @@ async fn serve_connection<F: Future<Output = ()>>(
                 None => break Ended::Closed,
             },
             Some(done) = running.join_next() => {
-                if let Ok(id) = done {
+                if let Ok((id, mut unanswered)) = done {
                     programs.remove(&id);
+                    // Signals that came after the program ended still get their answer, here, in
+                    // the order they were asked.
+                    unanswered.close();
+                    while let Ok(control) = unanswered.try_recv() {
+                        if let Control::Signal { .. } = control {
+                            replies.send(Reply::Signalled { id });
+                        }
+                    }
                 }
             }
             accepted = listener.accept() => {
@@ -569,14 +585,15 @@ fn start(launch: &Launch) -> io::Result<Child> {
 }
 
 /// Watches one program: relays its output, carries out what the connection asks, and reports its
-/// exit. Returns the program's id once it has ended.
+/// exit. Returns the program's id once it has ended, with what was asked of it that it did not
+/// get to.
 async fn supervise(
     id: u64,
     mut child: Child,
     own_process_group: bool,
     mut control: mpsc::UnboundedReceiver<Control>,
     replies: Replies,
-) -> u64 {
+) -> (u64, mpsc::UnboundedReceiver<Control>) {
     let group = child.id();
     let stdout = child
         .stdout
@@ -591,13 +608,21 @@ async fn supervise(
             status = child.wait() => break status,
             Some(request) = control.recv() => match request {
                 Control::Signal { signal, group } => {
-                    if let Some(pid) = child.id() {
-                        send_signal(pid, signal, group && own_process_group);
-                    }
+                    let sent = match child.id() {
+                        Some(pid) => send_signal(pid, signal, group && own_process_group),
+                        None => Ok(()),
+                    };
+                    replies.send(match sent {
+                        Ok(()) => Reply::Signalled { id },
+                        Err(e) => Reply::SignalFailed {
+                            id,
+                            error: e.to_string(),
+                        },
+                    });
                 }
                 Control::Stop => {
                     if let Some(pid) = child.id() {
-                        send_signal(pid, libc::SIGKILL, own_process_group);
+                        let _ = send_signal(pid, libc::SIGKILL, own_process_group);
                     }
                     let _ = child.start_kill();
                 }
@@ -610,14 +635,14 @@ async fn supervise(
     }
     let status = status.map(ExitStatus::into_raw).map_err(|e| e.to_string());
     replies.send(Reply::Exited { id, status });
-    id
+    (id, control)
 }
 
 /// The stop at the connection's end: `SIGTERM` to the program's group, a bounded wait, then
 /// `SIGKILL` to the group — sent even when the program ended in time, for anything it left behind.
 async fn close(child: &mut Child, group: Option<u32>) -> io::Result<std::process::ExitStatus> {
     if let Some(pgid) = group {
-        send_signal(pgid, libc::SIGTERM, true);
+        let _ = send_signal(pgid, libc::SIGTERM, true);
     }
     let status = match tokio::time::timeout(CLOSE_GRACE, child.wait()).await {
         Ok(status) => status,
@@ -627,16 +652,17 @@ async fn close(child: &mut Child, group: Option<u32>) -> io::Result<std::process
         }
     };
     if let Some(pgid) = group {
-        send_signal(pgid, libc::SIGKILL, true);
+        let _ = send_signal(pgid, libc::SIGKILL, true);
     }
     status
 }
 
-fn send_signal(pid: u32, signal: i32, group: bool) {
+fn send_signal(pid: u32, signal: i32, group: bool) -> io::Result<()> {
     let pid = pid as libc::pid_t;
     // SAFETY: plain kill(2); no memory is touched.
-    unsafe {
-        libc::kill(if group { -pid } else { pid }, signal);
+    match unsafe { libc::kill(if group { -pid } else { pid }, signal) } {
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
     }
 }
 
@@ -717,10 +743,12 @@ struct Routes {
     by_id: HashMap<u64, Route>,
 }
 
-/// Where the replies about one program go.
+/// Where the replies about one program go, for as long as its [`RemoteChild`] lives.
 struct Route {
     started: Option<oneshot::Sender<io::Result<u32>>>,
     exited: Option<oneshot::Sender<Result<i32, String>>>,
+    /// The signals sent and not yet answered, in the order they were sent.
+    signals: VecDeque<oneshot::Sender<Result<(), String>>>,
 }
 
 impl Channel {
@@ -815,6 +843,7 @@ impl Channel {
                 Route {
                     started: Some(started_tx),
                     exited: Some(exited_tx),
+                    signals: VecDeque::new(),
                 },
             );
         }
@@ -899,15 +928,32 @@ impl Inner {
                     Stream::Stderr => writeln!(std::io::stderr().lock(), "{line}"),
                 };
             }
+            Reply::Signalled { id } => self.answer_signal(id, Ok(())),
+            Reply::SignalFailed { id, error } => self.answer_signal(id, Err(error)),
             Reply::Exited { id, status } => {
-                let route = self.routes().by_id.remove(&id);
-                if let Some(exited) = route.and_then(|route| route.exited) {
+                if let Some(exited) = self
+                    .routes()
+                    .by_id
+                    .get_mut(&id)
+                    .and_then(|route| route.exited.take())
+                {
                     let _ = exited.send(status);
                 }
             }
             Reply::Hello { .. } | Reply::Refused { .. } => {
                 warn!("the agents service repeated the handshake; ignored");
             }
+        }
+    }
+
+    fn answer_signal(&self, id: u64, answer: Result<(), String>) {
+        if let Some(signalled) = self
+            .routes()
+            .by_id
+            .get_mut(&id)
+            .and_then(|route| route.signals.pop_front())
+        {
+            let _ = signalled.send(answer);
         }
     }
 
@@ -960,19 +1006,33 @@ impl RemoteChild {
         }
     }
 
-    /// Sends `signal` to the program, or with `group` to its process group where it leads one.
+    /// Sends `signal` to the program, or with `group` to its process group where it leads one, and
+    /// waits for the service's answer. Once the program has ended there is nothing to signal.
     ///
     /// # Errors
-    /// Returns an error when the channel is closed.
-    pub fn signal(&self, signal: i32, group: bool) -> io::Result<()> {
+    /// Returns why the service could not send the signal, or that the channel is closed.
+    pub async fn signal(&self, signal: i32, group: bool) -> io::Result<()> {
         if self.outcome.is_some() {
             return Ok(());
         }
-        self.channel.send(&Request::Signal {
-            id: self.id,
-            signal,
-            group,
-        })
+        let (signalled, answer) = oneshot::channel();
+        {
+            let mut routes = self.channel.inner.routes();
+            let Some(route) = routes.by_id.get_mut(&self.id) else {
+                return Err(closed());
+            };
+            self.channel.send(&Request::Signal {
+                id: self.id,
+                signal,
+                group,
+            })?;
+            route.signals.push_back(signalled);
+        }
+        match answer.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(io::Error::other(e)),
+            Err(_) => Err(closed()),
+        }
     }
 
     /// Kills the program and waits for it to end.
@@ -990,6 +1050,7 @@ impl RemoteChild {
 impl Drop for RemoteChild {
     /// Takes the program along, as `kill_on_drop` does for a program the Client started itself.
     fn drop(&mut self) {
+        self.channel.inner.routes().by_id.remove(&self.id);
         if self.outcome.is_none() {
             let _ = self.channel.send(&Request::Stop { id: self.id });
         }
@@ -1257,6 +1318,25 @@ mod tests {
             ),
             other => panic!("expected the exit, got {other:?}"),
         }
+    }
+
+    /// A signal the service could not send is an error at the Client, as it is when the Client
+    /// signals a program itself, so a reload that cannot be signalled falls back to the restart.
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_signal_that_cannot_be_sent_is_an_error() {
+        let service = service(own_uid());
+        let channel = Channel::connect(&service.socket).await.expect("connect");
+        let mut child = channel.start(sh("sleep 300")).await.expect("start");
+        child.signal(0, false).await.expect("signal 0 is sent");
+        // No such signal: kill(2) fails with EINVAL.
+        assert!(child.signal(999, false).await.is_err());
+        child.kill().await.expect("kill");
+        // Once the program has been waited for there is nothing to signal, and nothing fails.
+        child
+            .signal(libc::SIGTERM, false)
+            .await
+            .expect("nothing to do");
     }
 
     /// A program that cannot start is reported with its OS error, so the Client still tells a

@@ -160,7 +160,7 @@ impl ManagedChild {
 
     /// Sends `signal` to the process — with `group`, to its whole process group where it leads
     /// one (ADR-0017). Nothing to do once it has been waited for.
-    fn signal(&self, signal: i32, group: bool) -> Result<(), String> {
+    async fn signal(&self, signal: i32, group: bool) -> Result<(), String> {
         match self {
             ManagedChild::Local(child) => {
                 let Some(pid) = child.id() else {
@@ -176,7 +176,9 @@ impl ManagedChild {
                 send_reload_signal(pid, signal)
             }
             #[cfg(unix)]
-            ManagedChild::Remote(child) => child.signal(signal, group).map_err(|e| e.to_string()),
+            ManagedChild::Remote(child) => {
+                child.signal(signal, group).await.map_err(|e| e.to_string())
+            }
         }
     }
 }
@@ -883,7 +885,7 @@ impl Runner {
             *child = Some(proc);
             return Reloaded::NotApplied;
         }
-        if let Err(e) = proc.signal(signal, false) {
+        if let Err(e) = proc.signal(signal, false).await {
             warn!(supervisor = %self.name, signal, error = %e, "cannot signal a reload; restarting instead");
             *child = Some(proc);
             return Reloaded::NotApplied;
@@ -1119,7 +1121,7 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
     };
     #[cfg(unix)]
     if c.id().is_some() {
-        let _ = c.signal(libc::SIGTERM, true);
+        let _ = c.signal(libc::SIGTERM, true).await;
         if tokio::time::timeout(timeout, c.wait()).await.is_ok() {
             info!(supervisor = %name, "process stopped");
             return;
@@ -1127,7 +1129,7 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
         warn!(supervisor = %name, "process ignored SIGTERM; killing it");
         // The group too, so a worker the child spawned does not survive the escalation and go on
         // holding what the Supervisor manages (ADR-0017 clause 56). `Child::kill` below only reaps the one.
-        let _ = c.signal(libc::SIGKILL, true);
+        let _ = c.signal(libc::SIGKILL, true).await;
     }
     #[cfg(not(unix))]
     let _ = timeout; // Windows has no SIGTERM equivalent: kill is the stop.
