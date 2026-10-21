@@ -80,7 +80,11 @@ fn collector_spec(
     })
 }
 
-pub struct CollectorPlugin;
+/// The Collector kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0053).
+#[derive(Default)]
+pub struct CollectorPlugin {
+    pub spawner: Spawner,
+}
 
 impl Plugin for CollectorPlugin {
     fn kind(&self) -> &'static str {
@@ -158,9 +162,9 @@ impl Plugin for CollectorPlugin {
             // The Collector has no reload convention — a configuration is applied by restart,
             // the generic behaviour (ADR-0017), which is also what the reference supervisor does.
             reload_signal: None,
-            // The Client starts the program itself: nothing registers a process account yet
-            // (ADR-0053 clause 1).
-            spawner: Spawner::Local,
+            // The Client itself, or the second service where a process account is registered
+            // (ADR-0053 clause 3): the registry says which.
+            spawner: self.spawner.clone(),
             events: ctx.events,
             commands: command_rx,
             build: Box::new(move || collector_spec(&binary, &config_dir, &extra_args, &env)),

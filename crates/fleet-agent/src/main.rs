@@ -61,12 +61,19 @@ fn main() {
             config_path: cli.config,
             state_dir: cli.state_dir,
             service: false,
+            agents: None,
         }),
         Some(Command::Run(args)) => {
             let spec = RunSpec {
                 config_path: cli.config,
                 state_dir: cli.state_dir,
                 service: args.service,
+                agents: args.agents_socket.clone().zip(args.process_uid).map(
+                    |(socket, process_uid)| runtime::AgentsChannel {
+                        socket,
+                        process_uid,
+                    },
+                ),
             };
             run_command(spec, args)
         }

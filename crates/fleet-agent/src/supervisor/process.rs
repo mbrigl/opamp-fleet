@@ -78,9 +78,10 @@ pub struct Launch {
 /// Who starts a Managed Process (ADR-0053): the Client itself, or the second service under the
 /// process account, through its channel. The Client starts its programs itself wherever no process
 /// account is registered.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Spawner {
     /// The Client starts the program as a child of its own.
+    #[default]
     Local,
     /// The second service starts it, on the Client's request (ADR-0053 clause 3).
     #[cfg(unix)]

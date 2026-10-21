@@ -155,7 +155,9 @@ core module names an adapter or a technology, and when a module has no role.
   program is the runner's `Spawner`: the Client itself, or on Unix the second service of
   [ADR-0053](adr/0053-managed-processes-run-under-a-process-account-started-by-a-second-service.md),
   `supervisor run --agents`, through `supervisor::channel`, which holds the private protocol, the
-  service and the Client's end of its socket.
+  service and the Client's end of its socket. The registry hands every plugin the one `Spawner`
+  of the run, which `service::runtime` chooses once from the Client's command line: the unit
+  `service install --process-account` writes names the second service's socket there.
   `supervisor::agent`, an Agent's decisions, names three more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, `HighWaterMarks`, which
   `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares
