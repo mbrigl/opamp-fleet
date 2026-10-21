@@ -203,7 +203,8 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 /// `supervisor run --agents <socket> --client-uid <uid>`: the second service (ADR-0053), until
-/// `SIGTERM` or `SIGINT`.
+/// `SIGTERM` or `SIGINT`. `SIGHUP` is ignored, as the Client ignores it (ADR-0019 clause 12): its
+/// default disposition would end the service and leave its programs running.
 ///
 /// # Errors
 /// Returns an error when the runtime cannot be built or the socket cannot be bound.
@@ -211,6 +212,8 @@ pub fn run_service(socket: &Path, client_uid: u32) -> Result<(), String> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| format!("cannot start the async runtime: {e}"))?;
     runtime.block_on(async {
+        // Before the socket is bound: whoever sees it may already signal the service.
+        crate::service::runtime::ignore_sighup();
         let listener =
             bind(socket).map_err(|e| format!("cannot listen on {}: {e}", socket.display()))?;
         info!(socket = %socket.display(), client_uid, "agents service listening");

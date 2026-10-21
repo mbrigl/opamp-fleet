@@ -106,7 +106,7 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
             let _ = tx.send(true);
         });
         #[cfg(unix)]
-        tokio::spawn(ignore_sighup());
+        ignore_sighup();
         on_a_worker(run_until_shutdown(spec, shutdown)).await
     })?;
     if exit == Exit::RestartForUpdate {
@@ -490,16 +490,19 @@ async fn shutdown_signal() {
 }
 
 /// daemon(7) reserves `SIGHUP` for a configuration reload. Until that exists it is explicitly
-/// ignored — the default disposition would terminate the daemon.
+/// ignored — the default disposition would terminate the daemon. The handler is in place when this
+/// returns; it must be called inside the runtime.
 #[cfg(unix)]
-async fn ignore_sighup() {
+pub(crate) fn ignore_sighup() {
     use tokio::signal::unix::{signal, SignalKind};
     let Ok(mut hangup) = signal(SignalKind::hangup()) else {
         return;
     };
-    while hangup.recv().await.is_some() {
-        tracing::debug!("SIGHUP ignored (reserved for a future configuration reload)");
-    }
+    tokio::spawn(async move {
+        while hangup.recv().await.is_some() {
+            tracing::debug!("SIGHUP ignored (reserved for a future configuration reload)");
+        }
+    });
 }
 
 #[cfg(test)]
