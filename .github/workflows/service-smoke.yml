@@ -35,8 +35,9 @@ jobs:
         # account, the service keeps the privileges `sudo` and setuid helpers need, and systemd
         # accepts the unit. And the process account (ADR-0059): with two real accounts, a Managed
         # Process runs under the process account through the second service, cannot read the
-        # Client's key or write its program, reads its config, runs again after the second service
-        # restarts, and runs under the Client's account once the process account is dropped. The
+        # Client's key or write its program, reads its config and writes its data, runs again after
+        # the second service restarts, keeps its data across a re-registration as a package upgrade
+        # makes one, and runs under the Client's account once the process account is dropped. The
         # run step needs `sudo -E` there, which the Windows runner does not (its shell is already
         # elevated).
         os: [windows-latest, ubuntu-latest]
