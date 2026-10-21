@@ -309,6 +309,11 @@ pub struct InstallArgs {
     /// unit names. System scope on Linux with systemd only, for now.
     #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub process_account: Option<String>,
+    // ADR-0059.
+    /// Drop the process account: stop and deregister the second service, and let the Client
+    /// start its Managed Processes itself again.
+    #[arg(long, conflicts_with = "process_account")]
+    pub no_process_account: bool,
 }
 
 /// Arguments for `service config`: where the installed configuration is, named as `install`
@@ -585,6 +590,30 @@ mod tests {
             "service",
             "install",
             "--user",
+            "--process-account",
+            "opamp-fleet-agents"
+        ])
+        .is_err());
+    }
+
+    /// `--no-process-account` drops the process account, and conflicts with naming one (ADR-0059
+    /// clause 1).
+    /// Verifies: ADR-0059
+    #[test]
+    fn no_process_account_conflicts_with_naming_one() {
+        let cli = parse(&["client", "service", "install", "--no-process-account"]);
+        let Some(Command::Service {
+            action: ServiceAction::Install(args),
+        }) = cli.command
+        else {
+            panic!("expected service install");
+        };
+        assert!(args.no_process_account);
+        assert!(Cli::try_parse_from([
+            "client",
+            "service",
+            "install",
+            "--no-process-account",
             "--process-account",
             "opamp-fleet-agents"
         ])
