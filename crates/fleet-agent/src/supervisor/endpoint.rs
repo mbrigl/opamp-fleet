@@ -327,6 +327,8 @@ mod tests {
                 ProcessEvent::AvailableComponents(_) => "components",
                 ProcessEvent::ConfigApplied { .. } => "applied",
                 ProcessEvent::PackageApplied { .. } => "package",
+                ProcessEvent::ConfigWaiting { .. } => "config waiting",
+                ProcessEvent::PackageWaiting { .. } => "package waiting",
                 ProcessEvent::Uninstalled { .. } => "uninstalled",
             });
         }

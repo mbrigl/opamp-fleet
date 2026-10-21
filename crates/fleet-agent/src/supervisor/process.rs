@@ -163,6 +163,8 @@ struct Waiting {
     /// When the next start is due; `None` while nothing waits for the service.
     due: Option<tokio::time::Instant>,
     backoff: Backoff,
+    /// Why the service was not reached: [`UNREACHABLE`] or [`REFUSED`].
+    reason: &'static str,
 }
 
 impl Waiting {
@@ -170,11 +172,13 @@ impl Waiting {
         Waiting {
             due: None,
             backoff: Backoff::new(),
+            reason: UNREACHABLE,
         }
     }
 
-    /// The service was not reached: the next start is due after the backoff.
-    fn arm(&mut self) {
+    /// The service was not reached, for `reason`: the next start is due after the backoff.
+    fn arm(&mut self, reason: &'static str) {
+        self.reason = reason;
         self.due = Some(tokio::time::Instant::now() + self.backoff.advance());
     }
 
@@ -668,9 +672,11 @@ impl Runner {
                             // service again decides it (ADR-0053 clause 2).
                             GraceOutcome::Unreachable => {
                                 if !waiting.armed() {
-                                    waiting.arm();
+                                    waiting.arm(UNREACHABLE);
                                 }
-                                owed = Some(OwedConfig { hash: config.config_hash, span });
+                                let config = OwedConfig { hash: config.config_hash, span };
+                                self.report_waiting(Some(&config), None, waiting.reason).await;
+                                owed = Some(config);
                                 continue;
                             }
                         };
@@ -725,6 +731,7 @@ impl Runner {
                         // clause 2).
                         if waiting.armed() {
                             info!(supervisor = %self.name, version = %package.version, "package staged; it is swapped in once the second service is back");
+                            self.report_waiting(None, Some(&package), waiting.reason).await;
                             parked = Some(package);
                             continue;
                         }
@@ -781,7 +788,7 @@ impl Runner {
                                 "the second service went, and the program with it".to_string(),
                             )))
                             .await;
-                        waiting.arm();
+                        waiting.arm(UNREACHABLE);
                         continue;
                     }
                     let describe = describe_exit(status);
@@ -876,12 +883,15 @@ impl Runner {
         let outcome = match swapped {
             Swapped::Gated(outcome) => outcome,
             Swapped::Parked(staged) => {
-                *parked = Some(Parked {
+                let package = Parked {
                     staged,
                     version,
                     hash,
                     span,
-                });
+                };
+                self.report_waiting(owed.as_ref(), Some(&package), waiting.reason)
+                    .await;
+                *parked = Some(package);
                 return false;
             }
         };
@@ -1010,7 +1020,7 @@ impl Runner {
             // Not started because the second service was not reached: the package rejected
             // nothing, and waits for the service out of the way (ADR-0053 clause 2).
             Err(e) if is_unreachable(&e) => {
-                waiting.arm();
+                waiting.arm(why_unreached(&e));
                 GraceOutcome::Unreachable
             }
             // "Nothing started" has two meanings, and only one of them is a failed install. A
@@ -1033,7 +1043,7 @@ impl Runner {
                 waiting.clear();
                 let outcome = self.gate(Some(proc), child, shutdown).await;
                 if matches!(outcome, GraceOutcome::Unreachable) {
-                    waiting.arm();
+                    waiting.arm(UNREACHABLE);
                 }
                 outcome
             }
@@ -1101,6 +1111,32 @@ impl Runner {
         Swapped::Gated(outcome)
     }
 
+    /// Tells the Agent what waits for the second service, and `reason`, why: the configuration
+    /// stays `APPLYING` and the package `Installing`, each naming it (ADR-0053 clause 2).
+    async fn report_waiting(
+        &self,
+        config: Option<&OwedConfig>,
+        package: Option<&Parked>,
+        reason: &str,
+    ) {
+        if let Some(config) = config {
+            self.events
+                .send(ProcessEvent::ConfigWaiting {
+                    hash: config.hash.clone(),
+                    reason: reason.to_string(),
+                })
+                .await;
+        }
+        if let Some(package) = package {
+            self.events
+                .send(ProcessEvent::PackageWaiting {
+                    hash: package.hash.clone(),
+                    reason: reason.to_string(),
+                })
+                .await;
+        }
+    }
+
     /// Reports the acknowledgement of a configuration: `APPLIED`, or `FAILED` with the reason.
     async fn settle(&self, config: OwedConfig, result: Result<(), String>) {
         match &result {
@@ -1139,8 +1175,11 @@ impl Runner {
             return false;
         };
         let outcome = if !ran && waiting.armed() {
+            // Still away: owed on.
+            self.report_waiting(Some(&config), None, waiting.reason)
+                .await;
             *owed = Some(config);
-            return false; // still away: owed on
+            return false;
         } else if !ran && (self.build)().is_none() {
             GraceOutcome::Ok // nothing should run, as the apply itself would have found
         } else {
@@ -1153,7 +1192,9 @@ impl Runner {
             GraceOutcome::Failed(e) => Err(e),
             GraceOutcome::ShuttingDown => return true,
             GraceOutcome::Unreachable => {
-                waiting.arm();
+                waiting.arm(UNREACHABLE);
+                self.report_waiting(Some(&config), None, waiting.reason)
+                    .await;
                 *owed = Some(config);
                 return false;
             }
@@ -1381,7 +1422,7 @@ impl Runner {
                 Some(child)
             }
             Err(e) if is_unreachable(&e) => {
-                waiting.arm();
+                waiting.arm(why_unreached(&e));
                 None
             }
             Err(_) => {
@@ -1488,10 +1529,8 @@ impl Runner {
                 // is not there — a first install that failed and was undone, or a program never
                 // installed — is a Supervisor with no process, and saying so is more use to an
                 // operator than "spawn failed".
-                let status = if is_refused(&e) {
-                    REFUSED
-                } else if is_unreachable(&e) {
-                    UNREACHABLE
+                let status = if is_unreachable(&e) {
+                    why_unreached(&e)
                 } else if e.kind() == std::io::ErrorKind::NotFound {
                     "no process installed"
                 } else {
@@ -1517,6 +1556,15 @@ const UNREACHABLE: &str = "the second service cannot be reached";
 /// Not an outage that ends by itself, so it is told apart from [`UNREACHABLE`].
 const REFUSED: &str =
     "the second service is refused: another account, another build, or it refuses this Client";
+
+/// Why a start that did not reach the second service did not: [`REFUSED`] or [`UNREACHABLE`].
+fn why_unreached(error: &std::io::Error) -> &'static str {
+    if is_refused(error) {
+        REFUSED
+    } else {
+        UNREACHABLE
+    }
+}
 
 /// How long a version probe may take before it is abandoned — it must never stall startup.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);

@@ -90,6 +90,12 @@ pub enum ProcessEvent {
         hash: Vec<u8>,
         result: Result<(), String>,
     },
+    /// The configuration of `hash` waits for the second service, for `reason`: still `APPLYING`,
+    /// and its status names why (ADR-0053 clause 2).
+    ConfigWaiting { hash: Vec<u8>, reason: String },
+    /// The package of `hash` waits for the second service, staged and not swapped in, for
+    /// `reason`: still `Installing`, and its status names why (ADR-0053 clause 2).
+    PackageWaiting { hash: Vec<u8>, reason: String },
     /// Outcome of an [`ProcessCommand::ApplyPackage`]: `Ok(version)` reports `Installed` at that
     /// version, `Err` reports `InstallFailed` with the error after rolling back (ADR-0026).
     PackageApplied {

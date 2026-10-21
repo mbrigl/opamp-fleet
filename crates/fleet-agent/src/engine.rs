@@ -776,6 +776,12 @@ impl Engine {
             ProcessEvent::PackageApplied { hash, result } => {
                 agent.state.package_applied(hash, result);
             }
+            ProcessEvent::ConfigWaiting { hash, reason } => {
+                agent.state.config_waiting(&hash, reason);
+            }
+            ProcessEvent::PackageWaiting { hash, reason } => {
+                agent.state.package_waiting(&hash, reason);
+            }
             // The adapter's last word before retirement (ADR-0017). The goodbye carries no
             // status, so the outcome is the operator's to read here — an `Err` names what the
             // kind could not undo, which nothing else will ever mention again.
