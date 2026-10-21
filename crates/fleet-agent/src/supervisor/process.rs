@@ -2062,7 +2062,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(not_started, 1, "the predecessor is started once, after the package");
+        assert_eq!(
+            not_started, 1,
+            "the predecessor is started once, after the package"
+        );
     }
 
     /// A Runner that installs packages over `live` and runs what is there.
