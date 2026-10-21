@@ -1816,6 +1816,26 @@ mod an_apply_while_the_second_service_is_away {
         preflight: Option<Preflight>,
     ) -> Away {
         let binary = dir.path().join("agent");
+        let install = InstallTarget::Binary(binary.clone());
+        on_target(
+            dir,
+            install,
+            binary,
+            apply_grace,
+            retain_previous,
+            preflight,
+        )
+    }
+
+    /// [`on_with`], installing into `install` and running `binary`.
+    fn on_target(
+        dir: tempfile::TempDir,
+        install: InstallTarget,
+        binary: PathBuf,
+        apply_grace: Duration,
+        retain_previous: Duration,
+        preflight: Option<Preflight>,
+    ) -> Away {
         let socket = dir.path().join("agents.sock");
         let (event_tx, events) = mpsc::channel(64);
         let (commands, command_rx) = mpsc::channel(16);
@@ -1827,7 +1847,7 @@ mod an_apply_while_the_second_service_is_away {
             stop_timeout: Duration::from_secs(5),
             apply_grace,
             retain_previous,
-            install: Some(InstallTarget::Binary(binary.clone())),
+            install: Some(install),
             archive_key: None,
             version_probe: None,
             preflight,
@@ -2035,6 +2055,95 @@ mod an_apply_while_the_second_service_is_away {
             good,
             "rolled back once it failed"
         );
+        shut_down(away).await;
+    }
+
+    /// [`a_package_waits_staged_while_the_service_is_away_and_is_swapped_in_once_it_is_back`] for a
+    /// package that is a tree (ADR-0026 clause 58): staged beside what runs and kept, the whole
+    /// previous tree in place while the service is away, and swapped in whole once it is back —
+    /// here it survives its grace and is `Installed`.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_tree_package_waits_staged_while_the_service_is_away_and_is_swapped_in_once_it_is_back(
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("program");
+        let inside = PathBuf::from("bin").join("agent");
+        let live = root.join(TREE_DIR);
+        let old = bytes_of(&stub_agent());
+        std::fs::create_dir_all(live.join("bin")).expect("mkdir");
+        write_executable(&live.join(&inside), &old);
+        std::fs::create_dir_all(live.join("lib")).expect("mkdir");
+        std::fs::write(live.join("lib/libagent.so"), b"v1-library").expect("write");
+        let service = Service::up(&dir.path().join("agents.sock"));
+        let install = InstallTarget::Tree {
+            root: root.clone(),
+            program_path: inside.clone(),
+        };
+        let mut away = on_target(
+            dir,
+            install,
+            live.join(&inside),
+            Duration::from_millis(500),
+            Duration::ZERO,
+            None,
+        );
+        let health = next_health(&mut away.harness.events).await;
+        assert_eq!(health.status, "running", "{health:?}");
+        the_service_goes(&mut away, service).await;
+
+        let new = another_build_of_the_agent();
+        let artifact = away.dir.path().join("agent-2.0.0.tar.gz");
+        tar_gz(
+            &artifact,
+            &[
+                ("agent-2.0.0/bin/agent".to_string(), new.clone()),
+                (
+                    "agent-2.0.0/lib/libagent.so".to_string(),
+                    b"v2-library".to_vec(),
+                ),
+            ],
+        );
+        away.harness
+            .commands
+            .send(ProcessCommand::ApplyPackage {
+                staged: artifact,
+                version: "2.0.0".to_string(),
+                hash: b"2.0.0".to_vec(),
+                span: tracing::Span::current(),
+            })
+            .await
+            .expect("send");
+        let staging = root.join(".staging");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while std::fs::read(staging.join("lib/libagent.so"))
+                .ok()
+                .as_deref()
+                != Some(b"v2-library".as_slice())
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the tree is staged in time");
+        // What ran stays in place, the whole tree, and nothing is reported.
+        stays_live(&mut away, &old, Duration::from_secs(1)).await;
+        assert_eq!(
+            std::fs::read(live.join("lib/libagent.so")).expect("the library"),
+            b"v1-library"
+        );
+
+        let _service = Service::up(&away.socket);
+        let (hash, result) = next_package_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"2.0.0".to_vec());
+        assert_eq!(result, Ok("2.0.0".to_string()));
+        assert!(std::fs::read(live.join(&inside)).expect("the program") == new);
+        assert_eq!(
+            std::fs::read(live.join("lib/libagent.so")).expect("the library"),
+            b"v2-library",
+            "swapped in whole"
+        );
+        assert!(!staging.exists(), "staging does not survive");
         shut_down(away).await;
     }
 
