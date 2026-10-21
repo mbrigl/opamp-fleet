@@ -155,7 +155,7 @@ fn data_root_owner(data_root: &Path) -> Result<Option<String>, String> {
     if meta.uid() == 0 {
         return Ok(None);
     }
-    match account_name(meta.uid()) {
+    match account_of(meta.uid()).map(|found| found.map(|account| account.name)) {
         Ok(Some(name)) => Ok(Some(name)),
         Ok(None) => Err(format!(
             "the data root {} is owned by uid {}, which no account on this host carries, and the \
@@ -172,9 +172,23 @@ fn data_root_owner(data_root: &Path) -> Result<Option<String>, String> {
     }
 }
 
-/// The account name of `uid`, through `getpwuid_r(3)`.
+/// What the password database says of one uid.
 #[cfg(unix)]
-fn account_name(uid: u32) -> std::io::Result<Option<String>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub name: String,
+    pub home: PathBuf,
+    /// The primary group.
+    pub gid: u32,
+}
+
+/// The account of `uid`, through `getpwuid_r(3)`; `None` where no entry names it.
+///
+/// # Errors
+/// Returns the error the lookup failed with.
+#[cfg(unix)]
+pub fn account_of(uid: u32) -> std::io::Result<Option<Account>> {
+    use std::os::unix::ffi::OsStrExt as _;
     let mut buffer = vec![0 as libc::c_char; 1024];
     loop {
         let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
@@ -200,10 +214,20 @@ fn account_name(uid: u32) -> std::io::Result<Option<String>> {
         if found.is_null() {
             return Ok(None);
         }
-        // SAFETY: `found` points at the filled `entry`, and `pw_name` at a NUL-terminated string
-        // inside `buffer`, which outlives this read.
-        let name = unsafe { std::ffi::CStr::from_ptr((*found).pw_name) };
-        return Ok(Some(name.to_string_lossy().into_owned()));
+        // SAFETY: `found` points at the filled `entry`, and `pw_name` and `pw_dir` at
+        // NUL-terminated strings inside `buffer`, which outlives these reads.
+        let (name, home, gid) = unsafe {
+            (
+                std::ffi::CStr::from_ptr((*found).pw_name),
+                std::ffi::CStr::from_ptr((*found).pw_dir),
+                (*found).pw_gid,
+            )
+        };
+        return Ok(Some(Account {
+            name: name.to_string_lossy().into_owned(),
+            home: PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes())),
+            gid,
+        }));
     }
 }
 
