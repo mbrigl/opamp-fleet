@@ -384,7 +384,7 @@ impl AgentState {
             .local
             .process_health
             .as_ref()
-            .and_then(crate::supervisor::process::waiting_reason)
+            .and_then(crate::supervisor::ports::waiting_reason)
             .unwrap_or_default()
             .to_string();
         self.config_waits(&reason);
@@ -2404,7 +2404,8 @@ mod tests {
     /// Verifies: ADR-0059
     #[test]
     fn a_configuration_that_waits_for_the_second_service_stays_applying_and_says_why() {
-        use crate::supervisor::process::{unhealthy, REFUSED, UNREACHABLE};
+        use crate::supervisor::ports::{REFUSED, UNREACHABLE};
+        use crate::supervisor::process::unhealthy;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut agent = supervised_agent(dir.path());
         let _ = agent.next_report();
@@ -2454,7 +2455,8 @@ mod tests {
     /// Verifies: ADR-0059
     #[test]
     fn a_package_that_waits_for_the_second_service_stays_installing_and_says_why() {
-        use crate::supervisor::process::{unhealthy, UNREACHABLE};
+        use crate::supervisor::ports::UNREACHABLE;
+        use crate::supervisor::process::unhealthy;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut agent = supervised_agent(dir.path());
         agent.accept_packages();
