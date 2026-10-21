@@ -34,7 +34,7 @@ use tokio::io::{
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
@@ -62,6 +62,10 @@ const REFUSAL_LOG_EVERY: Duration = Duration::from_secs(60);
 /// How long a program has to end on `SIGTERM` when the Client's connection closes, before its
 /// group is killed.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
+
+/// How many lines of output may wait to be written to the Client. A program that writes faster
+/// than they go out waits on its pipe, as it would on a slow terminal; nothing else waits on it.
+const OUTPUT_QUEUE: usize = 256;
 
 /// How long the exit report waits for the rest of a program's output. A process the program left
 /// behind may hold its pipes open; its output is still relayed, after the exit.
@@ -391,9 +395,9 @@ async fn serve_connection<F: Future<Output = ()>>(
     }
     info!("the Client connected");
 
-    let (reply_tx, mut reply_rx) = mpsc::channel::<Reply>(256);
+    let (replies, mut reply_rx) = Replies::new();
     let writer = tokio::spawn(async move {
-        while let Some(reply) = reply_rx.recv().await {
+        while let Some(Queued { reply, permit }) = reply_rx.recv().await {
             // A reply too large to send is lost alone; only a broken connection ends the writer.
             let frame = match encode(&reply) {
                 Ok(frame) => frame,
@@ -405,6 +409,7 @@ async fn serve_connection<F: Future<Output = ()>>(
             if write.write_all(&frame).await.is_err() {
                 break;
             }
+            drop(permit);
         }
     });
     let (request_tx, mut requests) = mpsc::channel::<Request>(64);
@@ -425,7 +430,7 @@ async fn serve_connection<F: Future<Output = ()>>(
                     Ok(child) => {
                         let pid = child.id().unwrap_or_default();
                         info!(id, pid, program = %launch.program.display(), "program started");
-                        let _ = reply_tx.send(Reply::Started { id, pid }).await;
+                        replies.send(Reply::Started { id, pid });
                         let (control_tx, control_rx) = mpsc::unbounded_channel();
                         programs.insert(id, control_tx);
                         running.spawn(supervise(
@@ -433,18 +438,16 @@ async fn serve_connection<F: Future<Output = ()>>(
                             child,
                             launch.own_process_group,
                             control_rx,
-                            reply_tx.clone(),
+                            replies.clone(),
                         ));
                     }
                     Err(e) => {
                         warn!(id, program = %launch.program.display(), error = %e, "cannot start a program");
-                        let _ = reply_tx
-                            .send(Reply::StartFailed {
-                                id,
-                                error: e.to_string(),
-                                os_error: e.raw_os_error(),
-                            })
-                            .await;
+                        replies.send(Reply::StartFailed {
+                            id,
+                            error: e.to_string(),
+                            os_error: e.raw_os_error(),
+                        });
                     }
                 },
                 Some(Request::Signal { id, signal, group }) => {
@@ -481,13 +484,62 @@ async fn serve_connection<F: Future<Output = ()>>(
     reader.abort();
     // The exits go out before the connection does — bounded, since output a left-behind process
     // still relays holds a sender too.
-    drop(reply_tx);
+    drop(replies);
     let writing = writer.abort_handle();
     if tokio::time::timeout(OUTPUT_DRAIN, writer).await.is_err() {
         writing.abort();
     }
     info!("the Client's connection ended; its programs are stopped");
     ended
+}
+
+/// The replies to the Client, written in the order they are queued. Queuing never waits, so the
+/// connection's loop and a program's supervision never wait on the Client; only output, which a
+/// program can make without end, is held to [`OUTPUT_QUEUE`] lines, and the program's relay waits
+/// for room.
+#[derive(Clone)]
+struct Replies {
+    queue: mpsc::UnboundedSender<Queued>,
+    output: Arc<Semaphore>,
+}
+
+/// A reply on its way to the Client; an output line holds its place in the output queue until it
+/// is written.
+struct Queued {
+    reply: Reply,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl Replies {
+    fn new() -> (Replies, mpsc::UnboundedReceiver<Queued>) {
+        let (queue, queued) = mpsc::unbounded_channel();
+        let replies = Replies {
+            queue,
+            output: Arc::new(Semaphore::new(OUTPUT_QUEUE)),
+        };
+        (replies, queued)
+    }
+
+    /// Queues a reply that is not output: one per request or per program, never waiting.
+    fn send(&self, reply: Reply) {
+        let _ = self.queue.send(Queued {
+            reply,
+            permit: None,
+        });
+    }
+
+    /// Queues a line of output once there is room for it; `false` once the connection is gone.
+    async fn output(&self, reply: Reply) -> bool {
+        let Ok(permit) = Arc::clone(&self.output).acquire_owned().await else {
+            return false;
+        };
+        self.queue
+            .send(Queued {
+                reply,
+                permit: Some(permit),
+            })
+            .is_ok()
+    }
 }
 
 /// Starts a program as the leader of a process group of its own, always: whatever its own
@@ -515,7 +567,7 @@ async fn supervise(
     mut child: Child,
     own_process_group: bool,
     mut control: mpsc::UnboundedReceiver<Control>,
-    replies: mpsc::Sender<Reply>,
+    replies: Replies,
 ) -> u64 {
     let group = child.id();
     let stdout = child
@@ -549,7 +601,7 @@ async fn supervise(
         let _ = tokio::time::timeout(OUTPUT_DRAIN, relay).await;
     }
     let status = status.map(ExitStatus::into_raw).map_err(|e| e.to_string());
-    let _ = replies.send(Reply::Exited { id, status }).await;
+    replies.send(Reply::Exited { id, status });
     id
 }
 
@@ -581,12 +633,7 @@ fn send_signal(pid: u32, signal: i32, group: bool) {
 }
 
 /// Relays a program's output, line by line, until the pipe closes or the connection is gone.
-async fn relay(
-    id: u64,
-    stream: Stream,
-    pipe: impl AsyncRead + Unpin,
-    replies: mpsc::Sender<Reply>,
-) {
+async fn relay(id: u64, stream: Stream, pipe: impl AsyncRead + Unpin, replies: Replies) {
     let mut reader = tokio::io::BufReader::new(pipe);
     let mut line = Vec::new();
     loop {
@@ -599,11 +646,7 @@ async fn relay(
             line.pop();
         }
         let line = String::from_utf8_lossy(&line).into_owned();
-        if replies
-            .send(Reply::Output { id, stream, line })
-            .await
-            .is_err()
-        {
+        if !replies.output(Reply::Output { id, stream, line }).await {
             break;
         }
     }
@@ -1219,14 +1262,7 @@ mod tests {
         let service = service(own_uid());
         let channel = Channel::connect(&service.socket).await.expect("connect");
         // A duration no other process on the host sleeps for, to find this one by.
-        let marker = format!(
-            "299.{}{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .subsec_nanos()
-        );
+        let marker = unique_marker();
         let launch = Launch {
             program: PathBuf::from("sleep"),
             args: vec![marker.clone()],
@@ -1258,6 +1294,69 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// A Client slow to read a program's output holds up that program alone: the service still
+    /// starts and stops programs while the output waits — here it stops the flood itself, with
+    /// nothing read from the connection at all.
+    /// Verifies: ADR-0059
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn output_the_client_has_not_read_holds_up_no_request() {
+        let service = service(own_uid());
+        let mut stream = connect_raw(&service.socket, this_build()).await;
+        assert!(matches!(next(&mut stream).await, Some(Reply::Hello { .. })));
+        let marker = unique_marker();
+        let flood = Launch {
+            program: PathBuf::from("yes"),
+            args: vec![marker.clone()],
+            ..sh("")
+        };
+        write_frame(
+            &mut stream,
+            &Request::Start {
+                id: 1,
+                launch: flood,
+            },
+        )
+        .await
+        .expect("start");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !running_with_arg(&marker) {
+            assert!(std::time::Instant::now() < deadline, "the flood never ran");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Long enough for the flood to fill the socket and every queue in front of it.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        for request in [
+            Request::Start {
+                id: 2,
+                launch: sh("true"),
+            },
+            Request::Stop { id: 1 },
+        ] {
+            write_frame(&mut stream, &request).await.expect("a request");
+        }
+        while running_with_arg(&marker) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stop waited for the Client to read the output"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// An argument no other process on the host carries, to find a test's program by.
+    #[cfg(target_os = "linux")]
+    fn unique_marker() -> String {
+        format!(
+            "299.{}{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .subsec_nanos()
+        )
     }
 
     /// Whether a live process has `arg` among its arguments.
