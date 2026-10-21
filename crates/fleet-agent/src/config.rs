@@ -159,13 +159,13 @@ pub struct SupervisorBlock {
     /// systems.
     pub name: String,
     /// The Agent *type* this Supervisor presents as `service.name` — the Baseline's "reverse FQDN
-    /// that uniquely identifies the Agent type" (ADR-0016). `None` falls back to the program's own
-    /// file name, and a Managed Process that reports a type of its own overrides both: a
-    /// Collector's `opampextension` states the `dist.name` it was built with, which is the truth
-    /// this key can only approximate.
+    /// that uniquely identifies the Agent type" (ADR-0055). `None` falls back to the program's own
+    /// file name. A Managed Process never overrides it: a type the process reports, such as the
+    /// `dist.name` a Collector's `opampextension` states, is dropped with a warning naming this
+    /// key.
     ///
-    /// Set it for a Managed Process that reports nothing — the core `otelcol` distribution, every
-    /// Foreign Agent — so a Selector can aim at what this Agent *is* (ADR-0026).
+    /// Set it where the file name is not the type — a Collector whose `dist.name` should be its
+    /// type, every Foreign Agent — so a Selector can aim at what this Agent *is* (ADR-0026).
     pub service_name: Option<String>,
     /// The Supervisor Endpoint's loopback port; `0` (the default) binds an ephemeral port. Pin
     /// it when the distributed configuration carries the `opampextension` pointing at it.

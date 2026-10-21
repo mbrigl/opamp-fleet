@@ -1003,11 +1003,14 @@ an Agent and where it runs: `service.name`, `service.instance.name`, `service.in
 `service.version`, which for the Client's own Agent is the Client's baked-in version and for a
 Supervisor-backed Agent is whatever the Managed Process reports about itself.
 
-A Managed Process states only its own `service.*` attributes: its type (`service.name`, a
-Collector's `dist.name`) and its version replace what the Supervisor reports. Everything else it
-reports is dropped — `host.*`, `os.*` and `supervisor.*`, and keys in a namespace of its own such as
-a Collector's `agent_description.non_identifying_attributes` and resource attributes. Where the
-Agent runs is the Supervisor's statement, since it decides which Selectors match and which
+A Managed Process states only its own `service.*` attributes, such as its version, which replaces
+what the Supervisor reports. It never states the Agent's type: `service.name` is the Supervisor's,
+taken from the block's `service_name` or the program's file name, and a type the process reports,
+such as a Collector's `dist.name`, is dropped with a warning in the Client log that names the
+Supervisor, both values and `service_name`. Everything else it reports is dropped — `host.*`,
+`os.*` and `supervisor.*`, and keys in a namespace of its own such as a
+Collector's `agent_description.non_identifying_attributes` and resource attributes. Where the Agent
+runs is the Supervisor's statement, since it decides which Selectors match and which
 artifact is offered. Within `service.*` the process cannot restate `service.instance.id`,
 `service.instance.name`, `service.namespace` while `service_namespace` is set, or a key
 `[attributes]` sets. To tag a Collector, use a Server label, or `[attributes]` for the whole host.
@@ -1482,7 +1485,7 @@ false` as well to close that. A change to the list takes effect when the Client 
 |---|---|---|
 | `type` | — | `"collector"` or `"command"` — one section each below. Required. |
 | `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
-| `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process that reports a type of its own wins over it — a Collector with the `opampextension` states the `dist.name` it was built with — so set it for a process that reports nothing. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
+| `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process never overrides it: a type the process reports — a Collector with the `opampextension` states the `dist.name` it was built with — is dropped and named in a warning, so set this key to present that value as the type. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
 | `stop_timeout_secs` | global `[supervisors]` value | Graceful-stop budget before the process is killed. **Unwrapped kinds only.** |
 | `apply_grace_secs` | global `[supervisors]` value | How long a restarted process must survive before a received configuration is acknowledged `APPLIED`. `0` acknowledges on start. **Unwrapped kinds only.** |
@@ -1570,7 +1573,9 @@ uploading. Mind the member name: the binary inside is called after the distribut
 
 A Collector **with** the `opampextension` reports its own description, health, and effective
 configuration through the Supervisor Endpoint instead of being watched from outside. Of its
-description, only its `service.*` attributes reach the Server (see [`[attributes]`](#attributes)). The extension
+description, only its `service.*` attributes reach the Server, and not its type (see
+[`[attributes]`](#attributes)): the Agent's type is the block's `service_name`, else the program's
+file name, and a `dist.name` that differs is named in a warning in the Client log. The extension
 ships only in the Contrib distribution. Pin `endpoint_port` and make sure the configuration the
 Server distributes carries the extension pointing at it:
 
@@ -1603,8 +1608,8 @@ the Collector's name. A Collector configuration without the header loses its own
 supervision.
 
 A Collector **without** the extension needs no `endpoint_port`: the endpoint still comes up on an
-ephemeral port, and nothing ever connects to it. Nothing reports an Agent type either, so state one
-with `service_name` — left out, the program's file name is used anyway.
+ephemeral port, and nothing ever connects to it. The Agent type is the block's either way:
+`service_name`, or the program's file name when it is left out.
 
 ```toml
 [[supervisor]]
