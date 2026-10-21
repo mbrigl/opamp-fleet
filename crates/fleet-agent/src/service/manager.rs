@@ -790,21 +790,18 @@ fn command_line_arguments(line: &str) -> Vec<String> {
 
 /// Deregister the service. The install layout and state are never deleted.
 ///
+/// The second service last, as it is stopped last (ADR-0059 clause 2), and stopped first: a
+/// deregistration leaves a running service running, and one that outlived its unit would go on
+/// running the Managed Processes with nothing left to stop it by.
+///
 /// # Errors
-/// Returns an error if the manager cannot uninstall the service.
+/// Returns an error if the manager cannot uninstall the service, or stop or uninstall the second
+/// service.
 pub fn uninstall(level: ServiceLevel) -> Result<(), String> {
     manager(level)?
         .uninstall(ServiceUninstallCtx { label: label() })
         .map_err(|e| format!("cannot uninstall the service: {e}"))?;
-    // The second service last, as it is stopped last (ADR-0059 clause 2).
-    if agents_registered(level) {
-        manager(level)?
-            .uninstall(ServiceUninstallCtx {
-                label: agents_label(),
-            })
-            .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
-    }
-    Ok(())
+    remove_agents(level).map(|_| ())
 }
 
 /// Stops and deregisters the second service, where one is registered (ADR-0059 clause 1,

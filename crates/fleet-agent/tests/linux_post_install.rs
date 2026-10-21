@@ -231,22 +231,7 @@ fn no_maintainer_script_removes_the_account() {
 #[cfg(unix)]
 #[test]
 fn the_pre_removal_acts_only_on_a_real_removal() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let log = dir.path().join("systemctl.log");
-    let stub = dir.path().join("systemctl");
-    std::fs::write(
-        &stub,
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()),
-    )
-    .expect("write the stub");
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/linux/prerm");
-    let path = format!(
-        "{}:{}",
-        dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
     for (argument, removal) in [
         ("remove", true),
         ("0", true),
@@ -256,19 +241,42 @@ fn the_pre_removal_acts_only_on_a_real_removal() {
         ("1", false),
         ("2", false),
     ] {
-        let _ = std::fs::remove_file(&log);
-        let status = std::process::Command::new("sh")
+        // `sh -x` traces each command it runs: the stop shows whether the script went on past its
+        // fall-through.
+        let output = std::process::Command::new("sh")
+            .arg("-x")
             .arg(&script)
             .arg(argument)
-            .env("PATH", &path)
-            .status()
+            .output()
             .expect("run the pre-removal");
-        assert!(status.success(), "{argument}: {status}");
+        assert!(output.status.success(), "{argument}: {}", output.status);
+        let trace = String::from_utf8_lossy(&output.stderr);
+        let stopped = trace.contains("supervisor service stop");
         assert_eq!(
-            log.exists(),
-            removal,
-            "{argument}: stopped the service = {}",
-            log.exists()
+            stopped, removal,
+            "{argument}: stopped the service = {stopped}\n{trace}"
         );
     }
+}
+
+/// A removal runs `service stop`, then `service uninstall` (ADR-0042 clause 3), and stops nothing
+/// by its unit name: the stop takes down the second service too, where a process account is
+/// registered (ADR-0059).
+/// Verifies: ADR-0042, ADR-0059
+#[test]
+fn the_pre_removal_stops_both_services_before_it_deregisters() {
+    let commands = commands(&maintainer_script("prerm"));
+    let position = |needle: &str| {
+        commands
+            .iter()
+            .position(|c| c.starts_with(needle))
+            .unwrap_or_else(|| panic!("no {needle} in {commands:#?}"))
+    };
+    let stop = position("/usr/libexec/opamp-fleet/supervisor service stop");
+    let uninstall = position("/usr/libexec/opamp-fleet/supervisor service uninstall");
+    assert!(stop < uninstall, "{commands:#?}");
+    assert!(
+        !commands.iter().any(|c| c.contains("systemctl stop")),
+        "{commands:#?}"
+    );
 }

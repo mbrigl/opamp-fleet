@@ -20,12 +20,13 @@ upgrade | failed-upgrade | deconfigure) exit 0 ;;
 [1-9]*) exit 0 ;;
 esac
 
-if command -v systemctl >/dev/null 2>&1; then
-	systemctl stop opamp-fleet.service >/dev/null 2>&1 || true
-fi
-
+# `service stop`, then `service uninstall` (ADR-0042 clause 3): the stop takes the second service
+# down too where a process account is registered (ADR-0059), which a stop of the Client's unit
+# alone would leave running.
+#
 # Best-effort: a host whose service was never registered, or already unregistered by hand, must
 # still be able to remove the package. The payload path, not the PATH symlink (ADR-0019): the
 # symlink resolves through a layout an operator may have already deleted by hand, while the
 # payload is the file this package guarantees to still exist at this moment.
+/usr/libexec/opamp-fleet/supervisor service stop >/dev/null 2>&1 || true
 /usr/libexec/opamp-fleet/supervisor service uninstall || true
