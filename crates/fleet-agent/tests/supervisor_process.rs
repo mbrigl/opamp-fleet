@@ -568,13 +568,16 @@ async fn the_shipped_program_serves_as_the_second_service() {
     };
 
     let mut child = Spawner::Channel(channel)
-        .spawn(Launch {
-            program: stub_crasher(),
-            args: Vec::new(),
-            env: Vec::new(),
-            working_dir: None,
-            own_process_group: false,
-        })
+        .spawn(
+            "crasher",
+            Launch {
+                program: stub_crasher(),
+                args: Vec::new(),
+                env: Vec::new(),
+                working_dir: None,
+                own_process_group: false,
+            },
+        )
         .await
         .expect("started through the channel");
     let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
