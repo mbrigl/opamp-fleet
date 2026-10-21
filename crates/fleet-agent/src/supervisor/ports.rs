@@ -24,7 +24,8 @@ pub enum ProcessCommand {
     /// A remote configuration was received and persisted — the entry files are already written
     /// to the adapter's [`config_dir`](SupervisorContext::config_dir). Apply it, which for a
     /// process means restarting on the new files, and answer with
-    /// [`ProcessEvent::ConfigApplied`].
+    /// [`ProcessEvent::ConfigApplied`] — where the start does not reach the second service, once
+    /// a start does (ADR-0053 clause 2).
     ApplyConfig {
         config: AgentRemoteConfig,
         /// The span of the apply this command is one half of (ADR-0016). The core opens it when the
@@ -37,7 +38,9 @@ pub enum ProcessCommand {
     /// does — a binary that will not stay up is rolled back to the previous one. Answered with
     /// [`ProcessEvent::PackageApplied`]. `staged` is the path of the verified artifact — a file,
     /// not its bytes, since a program is too big to carry through the core; `hash` is the package
-    /// hash the status refers to; `version` is what the Agent then reports it has.
+    /// hash the status refers to; `version` is what the Agent then reports it has. Where the
+    /// start does not reach the second service, the package stays in place and the answer follows
+    /// the start that does (ADR-0053 clause 2).
     ApplyPackage {
         staged: PathBuf,
         version: String,
