@@ -13,6 +13,7 @@ use std::path::Path;
 
 use opamp::proto::{AgentRemoteConfig, AgentToServer};
 use tracing::{info, instrument, warn, Instrument as _};
+use zeroize::Zeroizing;
 
 use crate::config::{ClientConfig, SupervisorBlock};
 use crate::config_file::redact_secrets;
@@ -436,7 +437,10 @@ fn supervisor_tables(item: &toml_edit::Item) -> Option<Vec<toml_edit::Table>> {
 /// (ADR-0017). A file that does not exist yet is created; the write goes through a sibling
 /// temporary file so a crash never leaves a half-written configuration. Returns the new text.
 #[cfg(test)]
-fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<String, String> {
+fn write_supervisors(
+    path: &Path,
+    tables: Vec<toml_edit::Table>,
+) -> Result<Zeroizing<String>, String> {
     replace_file(path, render_supervisors(path, tables)?)
 }
 
@@ -446,10 +450,17 @@ fn write_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<Strin
 /// in position order across the whole document — so tables from two entries would interleave, and
 /// a sub-table such as `[supervisor.env]` would land under another block's header. Each table and
 /// its sub-tables are therefore renumbered in array order, after everything the file already has.
-fn render_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<String, String> {
+///
+/// The file may hold `[packages] archive_key`, so the text read and the text rendered are held in
+/// buffers wiped when they are dropped; what `toml_edit` keeps while it edits is its own
+/// (ADR-0057).
+fn render_supervisors(
+    path: &Path,
+    tables: Vec<toml_edit::Table>,
+) -> Result<Zeroizing<String>, String> {
     let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Ok(text) => Zeroizing::new(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Zeroizing::default(),
         Err(e) => return Err(format!("cannot read the current file: {e}")),
     };
     let mut doc: toml_edit::DocumentMut = text
@@ -465,7 +476,7 @@ fn render_supervisors(path: &Path, tables: Vec<toml_edit::Table>) -> Result<Stri
         }
         doc.insert("supervisor", toml_edit::Item::ArrayOfTables(array));
     }
-    Ok(doc.to_string())
+    Ok(Zeroizing::new(doc.to_string()))
 }
 
 /// The highest position any table of `table` holds, itself included.
@@ -515,8 +526,9 @@ fn reads_back_as(text: &str, blocks: &[SupervisorBlock]) -> Result<(), String> {
     Ok(())
 }
 
-/// Replaces `path` with `new_text` in one step.
-fn replace_file(path: &Path, new_text: String) -> Result<String, String> {
+/// Replaces `path` with `new_text` in one step, and hands the text back still in its wiped buffer
+/// (ADR-0057).
+fn replace_file(path: &Path, new_text: Zeroizing<String>) -> Result<Zeroizing<String>, String> {
     let tmp = path.with_extension("toml.tmp");
     write_replacement(&tmp, path, &new_text)?;
     // `rename` replaces an existing file on every platform — on Windows it is `MoveFileExW` with
@@ -808,10 +820,15 @@ mod tests {
         let text = render_supervisors(&path, tables).expect("render");
         reads_back_as(&text, &blocks).expect("the checked set, block for block");
         let parsed: ClientConfig = toml::from_str(&text).expect("parse");
-        assert!(parsed.supervisors[0].settings.contains_key("env"), "{text}");
+        assert!(
+            parsed.supervisors[0].settings.contains_key("env"),
+            "{}",
+            *text
+        );
         assert!(
             !parsed.supervisors[1].settings.contains_key("env"),
-            "{text}"
+            "{}",
+            *text
         );
     }
 
@@ -1141,7 +1158,7 @@ mod tests {
         assert!(text.contains("max_message_size_bytes = 8388608"));
         assert!(text.contains("name = \"new\""));
         assert!(!text.contains("\"old\""));
-        assert_eq!(std::fs::read_to_string(&path).expect("read back"), text);
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), *text);
         // And the result is a valid configuration the next startup will load.
         let parsed: ClientConfig = toml::from_str(&text).expect("the rewritten file parses");
         assert_eq!(parsed.supervisors.len(), 1);
@@ -1205,7 +1222,8 @@ mod tests {
         ] {
             assert!(
                 !text.contains(offered),
-                "{offered} reached the file:\n{text}"
+                "{offered} reached the file:\n{}",
+                *text
             );
         }
         let parsed: ClientConfig = toml::from_str(&text).expect("the file parses");
@@ -1521,7 +1539,7 @@ mod tests {
         let (blocks, tables) = offered_blocks(&offer_of(&[("fleet", "")])).expect("parse");
         assert!(blocks.is_empty());
         let text = write_supervisors(&path, tables).expect("rewrite");
-        assert!(!text.contains("supervisor"), "{text}");
-        assert!(text.contains("endpoint"), "{text}");
+        assert!(!text.contains("supervisor"), "{}", *text);
+        assert!(text.contains("endpoint"), "{}", *text);
     }
 }

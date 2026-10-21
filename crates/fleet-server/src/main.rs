@@ -283,6 +283,8 @@ fn hash_credential(scheme: Option<String>) -> ! {
 /// One line from standard input, the trailing newline dropped. On a Unix terminal echo is off while
 /// it is typed, so the secret does not stand on the screen. It is held in a buffer wiped when it is
 /// dropped, sized for any password a person types so it is not grown and left behind (ADR-0057).
+/// The copy in the buffer of the process-wide standard input, which the standard library keeps,
+/// is not wiped.
 fn read_secret() -> std::io::Result<zeroize::Zeroizing<String>> {
     use std::io::{BufRead as _, IsTerminal as _};
     let stdin = std::io::stdin();

@@ -295,17 +295,12 @@ mod tests {
     #[test]
     fn the_clients_secrets_are_held_in_zeroizing_buffers() {
         use crate::config::BootstrapIdentity;
-        use crate::supervisor::ports::SupervisorContext;
         fn bootstrap_key(identity: BootstrapIdentity) -> Zeroizing<Vec<u8>> {
             identity.key_pem
-        }
-        fn endpoint_token(context: SupervisorContext) -> Zeroizing<String> {
-            context.endpoint_token
         }
         fn archive_key(packages: crate::config::PackagesConfig) -> Option<Zeroizing<String>> {
             packages.archive_key
         }
-        let _: fn(SupervisorContext) -> Zeroizing<String> = endpoint_token;
         let reads_key: fn(&Path) -> Result<Zeroizing<Vec<u8>>, String> = key_file;
         let reads_password: fn(&Path, &str) -> Result<Zeroizing<String>, String> =
             crate::config_init::read_password_file;

@@ -321,9 +321,13 @@ pub fn run(
         println!("copied {}", copy.display());
     }
     if existing {
+        // The file may hold `[packages] archive_key`: the text read and the text written are wiped
+        // when they are dropped; what `toml_edit` keeps while it edits is its own (ADR-0057).
         let text = std::fs::read_to_string(path)
+            .map(zeroize::Zeroizing::new)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        replace(path, &edit(&text, &answers)?)?;
+        let edited = zeroize::Zeroizing::new(edit(&text, &answers)?);
+        replace(path, &edited)?;
     } else {
         write_new(path, &render(&answers))?;
     }
