@@ -38,6 +38,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   walk stops as soon as the tree passes the 10 000-member cap, a link back to the tree's root is no
   longer packed as a second copy, and the names it reports are quoted.
 
+- **Secrets are wiped from memory when they are dropped**
+  ([ADR-0057](docs/adr/0057-secrets-the-applications-hold-are-zeroized.md)): private keys,
+  passwords, the bytes of a `bootstrap.p12` while it is read, the Supervisor Endpoint token,
+  `[packages] archive_key` and the text of `supervisor.toml` where the Client rewrites it, on the
+  Client, the Server and in `opamp-fleetctl`. What libraries keep, the key in
+  `opamp::tls::Identity` among it, is not wiped.
+
 ## [0.6.2]
 
 ### Security
