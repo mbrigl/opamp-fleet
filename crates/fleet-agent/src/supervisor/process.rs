@@ -1244,19 +1244,26 @@ impl Runner {
     }
 
     /// Holds the program down after `failures` failed starts in a row, and says so (ADR-0026
-    /// clause 63): it is not started again until a new configuration, package, or restart.
+    /// clause 63): it is not started again until a new configuration, package, or restart. A
+    /// configuration owed its acknowledgement — held after the package that was to be its start
+    /// failed — is no longer waited for: no start comes to decide it, so it is `FAILED`
+    /// (ADR-0053 clause 2).
     async fn hold(&self, failures: usize, s: &mut Supervision) {
         warn!(
             supervisor = %self.name, restarts = failures,
             "not restarting: the program keeps failing to start — holding until a new configuration, package, or restart"
         );
+        let held = format!("held after {failures} failed starts in a row");
         self.events
             .send(ProcessEvent::Health(unhealthy(
                 "not restarting: the program keeps failing to start".to_string(),
-                format!("held after {failures} failed starts in a row"),
+                held.clone(),
             )))
             .await;
         s.child = None;
+        if let Some(config) = s.owed.take() {
+            self.settle(config, Err(held)).await;
+        }
     }
 
     /// The `gate` phase: the apply-grace health gate a configuration apply and a package swap
@@ -1961,6 +1968,85 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), waiting.due())
             .await
             .expect("the retry is due at once");
+    }
+
+    /// A Supervisor held after a package that failed leaves no configuration waiting: one owed its
+    /// acknowledgement — its start waited for the second service, and the package was to be its
+    /// start — is `FAILED`, not left `APPLYING` while nothing starts (ADR-0053 clause 2).
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hold_after_a_failed_package_fails_the_configuration_it_owes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("agent");
+        let target = InstallTarget::Binary(live.clone());
+        let artifact = dir.path().join("downloaded");
+        std::fs::copy("/bin/false", &artifact).expect("a program that exits at once");
+        let staged = target.stage(&artifact, None).expect("stage");
+        let (event_tx, mut events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(1);
+        let (_shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
+        let apply_grace = Duration::from_millis(300);
+        let program = live.clone();
+        let runner = Runner {
+            name: "test".to_string(),
+            endpoint_token: String::new(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace,
+            install: Some(target),
+            retain_previous: Duration::ZERO,
+            archive_key: None,
+            version_probe: None,
+            preflight: None,
+            reload_signal: None,
+            spawner: Spawner::Local,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || {
+                Some(ProcessSpec {
+                    program: program.clone(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: None,
+                    ensure_dirs: Vec::new(),
+                    own_process_group: false,
+                })
+            }),
+        };
+        let mut s = Supervision {
+            child: None,
+            policy: RestartPolicy::new(apply_grace, Instant::now()),
+            backoff: Backoff::new(),
+            waiting: Waiting::new(),
+            owed: Some(OwedConfig {
+                hash: b"cfg".to_vec(),
+                span: tracing::Span::none(),
+            }),
+            parked: None,
+        };
+        // Two failed starts already: the package's is the one the streak holds on.
+        for _ in 1..crate::supervisor::restart::MAX_CRASH_RESTARTS {
+            assert_eq!(s.policy.failed(), AfterFailure::Retry);
+        }
+        let package = Parked {
+            staged,
+            version: "9.9.9".to_string(),
+            hash: b"9.9.9".to_vec(),
+            span: tracing::Span::none(),
+        };
+        assert!(!runner.install(package, &mut s, &mut shutdown).await);
+        assert!(s.child.is_none(), "held");
+        assert!(s.owed.is_none(), "a configuration left waiting");
+        let mut config = None;
+        while let Ok((_, event)) = events.try_recv() {
+            if let ProcessEvent::ConfigApplied { hash, result } = event {
+                config = Some((hash, result));
+            }
+        }
+        let (hash, result) = config.expect("the configuration is decided");
+        assert_eq!(hash, b"cfg".to_vec());
+        let error = result.expect_err("FAILED");
+        assert!(error.contains("held after"), "{error}");
     }
 
     /// What the stand-in for the second service is asked to start; it runs nothing.
