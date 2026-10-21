@@ -162,6 +162,20 @@ impl Spawner {
                 .map(ManagedChild::Remote),
         }
     }
+
+    /// Reaches the second service now, or says why it is not reached; at once for the Client,
+    /// which starts its programs itself. A start may still not reach it: the service can go
+    /// between the two.
+    ///
+    /// # Errors
+    /// Returns why the second service was not reached, an error [`is_unreachable`] holds for.
+    pub async fn reach(&self) -> std::io::Result<()> {
+        match self {
+            Spawner::Local => Ok(()),
+            #[cfg(unix)]
+            Spawner::Channel(channel) => channel.reach().await,
+        }
+    }
 }
 
 fn spawn_local(launch: &Launch) -> std::io::Result<Child> {
@@ -900,12 +914,36 @@ impl Runner {
     }
 
     /// Swaps a staged package in, starts it and gates it (ADR-0026), and reports the outcome;
-    /// a package that fails is rolled back to its predecessor, which is started again. Where the
-    /// start does not reach the second service, the package is taken back out and waits in
-    /// `parked`, and what ran before stays in place (ADR-0059 clause 2). A configuration owed its
-    /// acknowledgement is decided by the start that reaches the service: the package's, or, where
-    /// the package fails, its predecessor's. Returns `true` when shutdown was requested meanwhile.
+    /// a package that fails is rolled back to its predecessor, which is started again.
+    ///
+    /// Swapped in only once the second service is reached (ADR-0059 clause 2): until then the
+    /// package waits in `parked`, and what ran before stays in place, its retained predecessor
+    /// with it, so no package is live before a start that can run it — and a Client that ends
+    /// meanwhile, however it ends, leaves the program the record names. Where the service goes
+    /// after all, before the start reaches it or during the apply grace, the package is taken
+    /// back out to wait. A configuration owed its acknowledgement is decided by the start that
+    /// reaches the service: the package's, or, where the package fails, its predecessor's.
+    /// Returns `true` when shutdown was requested meanwhile.
     async fn install(&self, package: Parked, s: &mut Supervision, shutdown: &mut Shutdown) -> bool {
+        let reached = tokio::select! {
+            reached = self.spawner.reach() => reached,
+            _ = shutdown.requested() => {
+                s.parked = Some(package);
+                return true;
+            }
+        };
+        if let Err(e) = reached {
+            info!(supervisor = %self.name, version = %package.version, error = %e, "the second service cannot be reached; the package waits for it, and what runs stays in place");
+            s.waiting.arm();
+            self.events
+                .send(ProcessEvent::Health(unhealthy(
+                    why_unreached(&e).to_string(),
+                    format!("a package waits for it: {e}"),
+                )))
+                .await;
+            s.parked = Some(package);
+            return false;
+        }
         let Parked {
             staged,
             version,
@@ -995,9 +1033,10 @@ impl Runner {
     /// Swaps the staged artifact over the binary, respawns, and health-gates on the apply grace,
     /// rolling the binary back on failure (ADR-0026). The process is already stopped. On success
     /// `child` holds the running process; on failure the previous binary is restored (and the
-    /// caller respawns it). A start that does not reach the second service, before or during the
-    /// grace, takes the package back out to its staged name and puts back what ran before: it is
-    /// [`Swapped::Parked`], neither installed nor failed (ADR-0059 clause 2).
+    /// caller respawns it). The second service was reached just before; where it has gone by the
+    /// start, or goes during the grace, the package is taken back out to its staged name and what
+    /// ran before is put back: it is [`Swapped::Parked`], neither installed nor failed (ADR-0059
+    /// clause 2).
     ///
     /// Everything here moves *files*: the old binary is renamed aside rather than read into
     /// memory, and the artifact is moved or streamed rather than loaded. A program can weigh
@@ -1083,7 +1122,7 @@ impl Runner {
             }
         };
         if matches!(outcome, GraceOutcome::Unreachable) {
-            info!(supervisor = %self.name, version = %version, "the second service cannot be reached; the package waits for it, and what ran before stays in place");
+            info!(supervisor = %self.name, version = %version, "the second service went before the package proved itself; the package waits for it, and what ran before is put back");
             return match self.take_back(target, &staged, has_backup) {
                 Ok(()) => Swapped::Parked(staged),
                 // Neither in place nor out of the way: concluded as a failed install, which puts
