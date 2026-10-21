@@ -273,8 +273,9 @@ pub const ENDPOINT_TOKEN_ENV: &str = "OPAMP_SUPERVISOR_TOKEN";
 
 pub struct Runner {
     pub name: String,
-    /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0015).
-    pub endpoint_token: String,
+    /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0015); wiped when it is
+    /// dropped (ADR-0057).
+    pub endpoint_token: zeroize::Zeroizing<String>,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// (ADR-0017's health-gated acknowledgement); zero acknowledges on start.
@@ -867,9 +868,10 @@ impl Runner {
         };
         let mut command = Command::new(&program);
         command.args(&spec.args).envs(spec.env.iter().cloned());
-        // Last, so no block's `env` can replace it (ADR-0015).
+        // Last, so no block's `env` can replace it (ADR-0015). The copy `Command` keeps, and the
+        // one the process receives, are beyond this code's reach (ADR-0057 clause 4).
         if !self.endpoint_token.is_empty() {
-            command.env(ENDPOINT_TOKEN_ENV, &self.endpoint_token);
+            command.env(ENDPOINT_TOKEN_ENV, self.endpoint_token.as_str());
         }
         if let Some(dir) = working_dir {
             command.current_dir(dir);

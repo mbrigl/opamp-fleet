@@ -15,6 +15,7 @@ use std::path::Path;
 
 use rcgen::{CertificateParams, KeyPair};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use crate::config::ClientConfig;
 use crate::nofollow::HeldDir;
@@ -136,10 +137,13 @@ pub fn recover(state_dir: &Path) -> Result<(), String> {
 /// Whether the PEM certificate `cert_pem` is issued for the private key in the file `key_name`.
 fn certifies(dir: &HeldDir, cert_pem: &[u8], key_name: &str) -> bool {
     use rcgen::PublicKeyData as _;
-    let Ok(Ok(key_pem)) = dir.read(key_name).map(String::from_utf8) else {
+    let Ok(key_bytes) = dir.read(key_name).map(Zeroizing::new) else {
         return false;
     };
-    let Ok(key) = KeyPair::from_pem(&key_pem) else {
+    let Ok(key_pem) = std::str::from_utf8(&key_bytes) else {
+        return false;
+    };
+    let Ok(key) = KeyPair::from_pem(key_pem) else {
         return false;
     };
     let Ok((_, block)) = x509_parser::pem::parse_x509_pem(cert_pem) else {
@@ -156,7 +160,7 @@ fn certifies(dir: &HeldDir, cert_pem: &[u8], key_name: &str) -> bool {
 #[must_use]
 pub fn pending_fingerprint(state_dir: &Path) -> Option<String> {
     use sha2::{Digest, Sha256};
-    let pem = crate::nofollow::read(&state_dir.join(PENDING_KEY_FILE)).ok()?;
+    let pem = Zeroizing::new(crate::nofollow::read(&state_dir.join(PENDING_KEY_FILE)).ok()?);
     let key = KeyPair::from_pem(std::str::from_utf8(&pem).ok()?).ok()?;
     Some(hex::encode(Sha256::digest(key.public_key_raw())))
 }
@@ -253,8 +257,12 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     // disk at the umask default even briefly; it replaces a key file a prior enrolment left at a
     // wider mode. On Windows the state directory's ACL under `%ProgramData%` protects it
     // (ADR-0019).
-    dir.write(PENDING_KEY_FILE, key.serialize_pem().as_bytes(), 0o600)
-        .map_err(|e| format!("cannot store the private key: {e}"))?;
+    dir.write(
+        PENDING_KEY_FILE,
+        Zeroizing::new(key.serialize_pem()).as_bytes(),
+        0o600,
+    )
+    .map_err(|e| format!("cannot store the private key: {e}"))?;
     dir.write(PENDING_CSR_FILE, csr.as_bytes(), 0o644)
         .map_err(|e| format!("cannot store the certificate request: {e}"))?;
     // What the operator matches in the enrolment queue (ADR-0021 clause 22): the same SHA-256 the
@@ -278,7 +286,7 @@ fn renewal_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
     use sha2::{Digest as _, Sha256};
     let dir = HeldDir::open(&config.state_dir).ok()?;
     let cert_pem = dir.read(ISSUED_CERT_FILE).ok()?;
-    let key_pem = dir.read(ISSUED_KEY_FILE).ok()?;
+    let key_pem = Zeroizing::new(dir.read(ISSUED_KEY_FILE).ok()?);
     let (_, block) = x509_parser::pem::parse_x509_pem(&cert_pem).ok()?;
     let old_key = KeyPair::from_pem(std::str::from_utf8(&key_pem).ok()?).ok()?;
     let new_key_sha256 = Sha256::digest(new_key.subject_public_key_info());
@@ -307,9 +315,11 @@ fn bootstrap_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
         return None;
     }
     let identity = crate::tls::client_tls(config).ok()?.identity?;
+    // Read here only to sign: the key moves into a buffer wiped on drop (ADR-0057).
+    let key_pem = Zeroizing::new(identity.key_pem);
     let certificate = opamp::tls::certificates(&identity.cert_pem).ok()?;
     let leaf = certificate.first()?;
-    let key = KeyPair::from_pem(std::str::from_utf8(&identity.key_pem).ok()?).ok()?;
+    let key = KeyPair::from_pem(std::str::from_utf8(&key_pem).ok()?).ok()?;
     let new_key_sha256 = Sha256::digest(new_key.subject_public_key_info());
     let signature = key
         .sign(&fleet_core::bootstrap_proof::statement(&new_key_sha256))
@@ -645,7 +655,7 @@ mod tests {
         let from_p12 = ClientConfig {
             bootstrap_identity: Some(crate::config::BootstrapIdentity {
                 cert_pem: cert.pem().into_bytes(),
-                key_pem: key.serialize_pem().into_bytes(),
+                key_pem: zeroize::Zeroizing::new(key.serialize_pem().into_bytes()),
             }),
             ..config(&p12_state)
         };

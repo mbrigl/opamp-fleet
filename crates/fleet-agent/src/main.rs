@@ -226,14 +226,19 @@ fn install(
             about_to_run.endpoint.clone_from(endpoint);
         }
         about_to_run.state_dir = about_to_run.service_state_dir(&roots)?;
-        beside.unasked_enrolment(&about_to_run, password.as_deref())?
+        beside.unasked_enrolment(&about_to_run, password.as_deref().map(String::as_str))?
     };
     // Held from the first write to the last, so the account cannot swap the data root for a link
     // while this privileged run writes into it (ADR-0054).
     let mut held_root = hold_data_root(&data_root)?;
     let mut written = config_init::Written::default();
     if args.interactive {
-        written = ask(&config_path, &roots, &beside, password.as_deref())?;
+        written = ask(
+            &config_path,
+            &roots,
+            &beside,
+            password.as_deref().map(String::as_str),
+        )?;
     } else if let Some(endpoint) = &args.endpoint {
         // The same file, from an answer given rather than asked for (ADR-0019): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with

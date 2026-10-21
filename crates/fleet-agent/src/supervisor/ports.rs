@@ -252,8 +252,9 @@ pub struct SupervisorContext {
     /// The Supervisor's name (the TOML `name`; the Agent's `service.name`).
     pub name: String,
     /// What the Supervisor Endpoint asks the Managed Process to present (ADR-0015); handed to the
-    /// process as [`ENDPOINT_TOKEN_ENV`](crate::supervisor::process::ENDPOINT_TOKEN_ENV).
-    pub endpoint_token: String,
+    /// process as [`ENDPOINT_TOKEN_ENV`](crate::supervisor::process::ENDPOINT_TOKEN_ENV). Wiped
+    /// when it is dropped (ADR-0057).
+    pub endpoint_token: zeroize::Zeroizing<String>,
     /// Everything this Supervisor owns: its state, its `program/`, its package staging
     /// (ADR-0017). Placed by `supervisor_dir`, so nothing may assume where it is.
     pub supervisor_dir: PathBuf,
@@ -475,7 +476,7 @@ mod tests {
         let (_tx, shutdown) = shutdown_channel();
         let (event_tx, _events) = mpsc::channel(1);
         SupervisorContext {
-            endpoint_token: String::new(),
+            endpoint_token: zeroize::Zeroizing::default(),
             name: "fluent-bit".to_string(),
             config_dir: supervisor_dir.join("config"),
             supervisor_dir,

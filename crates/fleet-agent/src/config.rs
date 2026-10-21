@@ -127,12 +127,12 @@ pub struct ClientConfig {
     pub supervisors: Vec<SupervisorBlock>,
 }
 
-/// A bootstrap certificate and its key as PEM, held in memory (ADR-0029 clause 7). Its `Debug`
-/// names neither.
+/// A bootstrap certificate and its key as PEM, held in memory (ADR-0029 clause 7), the key in a
+/// buffer wiped when it is dropped (ADR-0057). Its `Debug` names neither.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BootstrapIdentity {
     pub cert_pem: Vec<u8>,
-    pub key_pem: Vec<u8>,
+    pub key_pem: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl std::fmt::Debug for BootstrapIdentity {

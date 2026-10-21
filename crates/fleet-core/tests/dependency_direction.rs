@@ -196,10 +196,11 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     ),
 ];
 
-/// The external crates the core may name: data formats, codecs, and the logging facade — none of
-/// them reaches a file, a socket, a process, or a clock.
+/// The external crates the core may name: data formats, codecs, the logging facade, and the buffer
+/// a secret is wiped from on drop (ADR-0057) — none of them reaches a file, a socket, a process, or
+/// a clock.
 const CORE_CRATES: &[&str] = &[
-    "prost", "serde", "sha2", "hex", "base64", "uuid", "flate2", "tracing",
+    "prost", "serde", "sha2", "hex", "base64", "uuid", "flate2", "tracing", "zeroize",
 ];
 
 /// What the core may name of a technology, by path prefix. `tokio::sync` is channels, which need
