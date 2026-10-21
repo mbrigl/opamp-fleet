@@ -424,6 +424,8 @@ both!(a_program_named_by_a_relative_path_still_starts_in_its_own_directory);
 async fn the_probe_reports_a_version_description() {
     let (event_tx, mut events) = mpsc::channel(4);
     probe_version(
+        Spawner::Local,
+        "test".to_string(),
         stub_agent(),
         vec!["--version".to_string()],
         None,
@@ -441,6 +443,8 @@ async fn the_probe_reports_a_version_description() {
 async fn a_failing_or_versionless_probe_stays_silent() {
     let (event_tx, mut events) = mpsc::channel(4);
     probe_version(
+        Spawner::Local,
+        "test".to_string(),
         PathBuf::from("nonexistent-definitely-not-here"),
         vec![],
         None,
@@ -450,6 +454,8 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     // Runs, says nothing a version can be read out of, and exits: a Foreign Agent whose version
     // flag is not the one the operator configured.
     probe_version(
+        Spawner::Local,
+        "test".to_string(),
         stub_agent(),
         vec!["--exit-code".to_string(), "0".to_string()],
         None,
@@ -2624,11 +2630,12 @@ mod an_apply_while_the_second_service_is_away {
             .expect("cleanly");
     }
 
-    /// The preflight runs the staged program as the Client in this slice and needs no second
-    /// service: a package that passes it while the service is away waits, and is not refused.
+    /// The preflight runs through the second service (ADR-0053 clause 3): a package offered while
+    /// the service is away is staged unchecked and waits, and once the service is back the
+    /// preflight runs before the swap — here it passes, and the package is installed.
     /// Verifies: ADR-0053
     #[tokio::test]
-    async fn a_preflight_passed_while_the_service_is_away_leaves_the_package_waiting() {
+    async fn a_package_whose_preflight_found_the_service_away_is_checked_once_it_is_back() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_executable(&dir.path().join("agent"), &bytes_of(&stub_agent()));
         let service = Service::up(&dir.path().join("agents.sock"));
@@ -2653,6 +2660,51 @@ mod an_apply_while_the_second_service_is_away {
         let (hash, result) = next_package_ack(&mut away.harness.events).await;
         assert_eq!(hash, b"2.0.0".to_vec());
         assert_eq!(result, Ok("2.0.0".to_string()));
+        shut_down(away).await;
+    }
+
+    /// A package that waited for the second service without its preflight is refused by the
+    /// preflight that runs once the service is back, before anything is stopped: it is reported
+    /// failed, and what ran stays in place (ADR-0053 clause 3, ADR-0017 clause 57).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_package_whose_preflight_found_the_service_away_is_refused_once_it_is_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = bytes_of(&stub_agent());
+        write_executable(&dir.path().join("agent"), &old);
+        let service = Service::up(&dir.path().join("agents.sock"));
+        // The stub exits with the code it is given: every staged program fails this preflight.
+        let preflight = Preflight {
+            args: vec!["--exit-code".to_string(), "3".to_string()],
+            env: Vec::new(),
+        };
+        let mut away = on_with(
+            dir,
+            Duration::from_millis(500),
+            Duration::ZERO,
+            Some(preflight),
+        );
+        let health = next_health(&mut away.harness.events).await;
+        assert_eq!(health.status, "running", "{health:?}");
+        the_service_goes(&mut away, service).await;
+
+        let new = another_build_of_the_agent();
+        offer(&away, &new, "2.0.0").await;
+        staged_beside(&away, &new).await;
+        let _service = Service::up(&away.socket);
+        let (hash, result) = next_package_ack(&mut away.harness.events).await;
+        assert_eq!(hash, b"2.0.0".to_vec());
+        let refused = result.expect_err("the preflight refuses it");
+        assert!(refused.contains("does not run on this host"), "{refused}");
+        assert_eq!(
+            std::fs::read(&away.binary).expect("the program"),
+            old,
+            "what ran stays in place"
+        );
+        assert!(
+            !away.binary.with_extension("staged").exists(),
+            "the refused package is thrown away"
+        );
         shut_down(away).await;
     }
 }
