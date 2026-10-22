@@ -24,6 +24,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   0.103.16 no longer accepts a distrusted intermediate in a certificate chain, and
   `webpki-roots`/`webpki-root-certs` 1.0.10 drop the distrusted emSign intermediates. Nothing to
   do beyond the update.
+  The fuzz targets' lockfile also moves off the yanked `tokio` 1.54.0
+  ([RUSTSEC-2026-0384](https://rustsec.org/advisories/RUSTSEC-2026-0384.html)) to 1.54.1; the
+  Client and the Server build on 1.53.3, which the advisory does not affect.
 
 ## [0.6.0]
 
