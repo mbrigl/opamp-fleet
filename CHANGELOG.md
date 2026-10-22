@@ -27,9 +27,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   entry, and an offered set that carries one is reported `FAILED` whole before anything stops. A
   Supervisor whose directory would be `state_dir` or hold it is refused the same way.
   **What to do:** on a host whose `supervisor_dir` is `state_dir`, rename a Supervisor of one of
-  these names before the update, in `supervisor.toml` and in the set the Server offers; otherwise
-  the Client does not start, or the set is reported `FAILED`. A renamed Supervisor registers as a
-  new Agent.
+  these names before the update, in `supervisor.toml` and in the set the Server offers; on any
+  host, rename a Supervisor whose directory would be `state_dir` or hold it, or move
+  `supervisor_dir`. Otherwise the Client does not start, or the set is reported `FAILED`. A
+  renamed Supervisor registers as a new Agent. The default `supervisor_dir`,
+  `<state_dir>/supervisors`, is not affected.
 
 ## [0.6.0] - 2026-10-20
 

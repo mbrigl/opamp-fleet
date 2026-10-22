@@ -879,11 +879,16 @@ pub(crate) mod handle {
         }
         let inner = open(dir.as_raw_fd(), name, DIRECTORY).map_err(named)?;
         for child in entries(&inner).map_err(named)? {
-            remove_tree_at(
+            // A child gone already was removed by another walk of the same tree (a purge beside
+            // the start's), which is what this one wants too; the rest of the tree is still due.
+            match remove_tree_at(
                 &inner,
                 &child,
                 &path.join(OsStr::from_bytes(child.as_bytes())),
-            )?;
+            ) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                other => other?,
+            }
         }
         drop(inner);
         // SAFETY: a valid descriptor and a NUL-terminated name.
