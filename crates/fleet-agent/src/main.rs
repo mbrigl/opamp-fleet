@@ -349,7 +349,12 @@ fn install(
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
     }
-    let created_outside = windows_rights::restrict(level, &restrictions)?;
+    // What the process account owns there is its own, and left as it is (ADR-0059 clause 10).
+    #[cfg(windows)]
+    let process_sid = process.as_ref().map(|p| p.sid().to_string());
+    #[cfg(not(windows))]
+    let process_sid: Option<String> = None;
+    let created_outside = windows_rights::restrict(level, &restrictions, process_sid.as_deref())?;
     if let Some(bootstrap) = unasked {
         println!("enrolling with {}", bootstrap.describe());
         written.bootstrap = Some(bootstrap);

@@ -846,8 +846,8 @@ fn grant_modify(path: &Path, who: &str) {
 /// restarts it, the Client reaches it again and the program runs again. The runner's shell is
 /// elevated, as `service install` needs.
 ///
-/// A re-registration and `--no-process-account` are not run here: the SCM's `sc create` refuses a
-/// service that is registered already, so a Windows install re-registers only after an uninstall.
+/// A re-registration without either flag, as an upgrade makes, rewrites both SCM entries in place
+/// and keeps both accounts; `--no-process-account` returns the program to the Client's account.
 /// Verifies: ADR-0059
 #[cfg(windows)]
 #[test]
@@ -944,9 +944,26 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     let _registered = Registered;
     assert!(installed.contains(&process_account), "{installed}");
     // A kind's data directory, granted to the process account as the Client grants one a kind
-    // names; the command kind names none.
-    let process_sid = fleet_agent::win32::virtual_account_sid(&agents_service_name());
+    // names (`storage::create_shared_dir`); the command kind this test runs names none, so the
+    // test grants it.
+    let process_sid =
+        fleet_agent::win32::virtual_account_sid(&agents_service_name()).expect("ascii");
     grant_modify(&data, &format!("*{process_sid}"));
+    // The second service keeps SeChangeNotifyPrivilege and no other, as the SCM holds it.
+    {
+        use windows_service::service::ServiceAccess;
+        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .expect("the SCM");
+        let registered = manager
+            .open_service(agents_service_name(), ServiceAccess::QUERY_CONFIG)
+            .expect("the second service");
+        // SAFETY: the handle of `registered`, alive across the call.
+        let privileges =
+            unsafe { fleet_agent::win32::required_privileges(registered.raw_handle()) }
+                .expect("its required privileges");
+        assert_eq!(privileges, ["SeChangeNotifyPrivilege"]);
+    }
     client(&["service", "start"], &config).expect("start the service");
     wait_for(
         "the Agent to appear in the fleet",
@@ -981,6 +998,46 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     assert!(
         again["user"].eq_ignore_ascii_case(&process_account),
         "{again:?}"
+    );
+
+    // Re-registered without either flag, as an upgrade does: the SCM's entries are rewritten in
+    // place, and both accounts are kept.
+    client(&["service", "stop"], &config).expect("stop the service");
+    std::fs::remove_file(&result).expect("remove the result");
+    let reinstalled = client(&["service", "install", "--root", &root_arg], &config)
+        .expect("re-install without --run-as and --process-account");
+    assert!(
+        reinstalled.contains(&format!("processes: {process_account} (kept from")),
+        "{reinstalled}"
+    );
+    client(&["service", "start"], &config).expect("start the service again");
+    let upgraded = reported_on_windows(&result);
+    assert!(
+        upgraded["user"].eq_ignore_ascii_case(&process_account),
+        "{upgraded:?}"
+    );
+    assert_eq!(upgraded["data"], "written", "{upgraded:?}");
+    assert_eq!(upgraded["key"], "denied", "{upgraded:?}");
+
+    // Dropped: the Client starts its program itself again, under its own account.
+    client(&["service", "stop"], &config).expect("stop the service");
+    std::fs::remove_file(&result).expect("remove the result");
+    client(
+        &[
+            "service",
+            "install",
+            "--root",
+            &root_arg,
+            "--no-process-account",
+        ],
+        &config,
+    )
+    .expect("drop the process account");
+    client(&["service", "start"], &config).expect("start the service again");
+    let dropped = reported_on_windows(&result);
+    assert!(
+        dropped["user"].eq_ignore_ascii_case(&client_account),
+        "{dropped:?}"
     );
 
     client(&["service", "stop"], &config).expect("stop the service");

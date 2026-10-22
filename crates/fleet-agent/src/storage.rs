@@ -548,72 +548,73 @@ pub(crate) fn create_shared_dir(
     }
     #[cfg(windows)]
     {
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(root)?;
         grant(root, dir, group, shared)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
     }
     Ok(())
 }
 
-/// The `icacls.exe` arguments that grant the process account `sid` what `shared` says of `dir`,
-/// in place of whatever it was granted there before, inherited by everything in it, and on `dir`
-/// itself even where it is a link: read and execute for `Read`, modify for `Written`. `None` for
+/// The ACEs that grant the process account `sid` what `shared` says, on Windows (ADR-0059
+/// clause 6): for the directory itself, for a directory and for a file already in it. `None` for
 /// `Traversed`: the process account passes through a directory of the Client's by the
 /// `SeChangeNotifyPrivilege` the second service keeps (ADR-0059 clause 2), and is granted nothing
-/// there, so it lists nothing and reads nothing of the Client's own (ADR-0059 clause 6).
+/// there, so it lists nothing and reads nothing of the Client's own.
+///
+/// `Read` is read and execute, inherited by everything in the directory. `Written` is modify on
+/// what is in the directory, inherited, and on the directory itself everything of modify but
+/// `DELETE`: as on Unix, where the process account writes in its data directory and cannot remove
+/// it, the Client's.
 #[cfg(any(windows, test))]
-fn grant_args(dir: &Path, sid: &str, shared: Shared) -> Option<Vec<std::ffi::OsString>> {
-    let rights = match shared {
-        Shared::Traversed => return None,
-        Shared::Read => "(OI)(CI)RX",
-        Shared::Written => "(OI)(CI)M",
-    };
-    Some(vec![
-        dir.as_os_str().to_owned(),
-        "/grant:r".into(),
-        format!("*{sid}:{rights}").into(),
-        "/L".into(),
-    ])
+pub(crate) fn grant_aces(sid: &str, shared: Shared) -> Option<[Vec<String>; 3]> {
+    use crate::win32::acl::{allow, DELETE, MODIFY, READ_EXECUTE};
+    match shared {
+        Shared::Traversed => None,
+        Shared::Read => Some([
+            vec![allow(sid, READ_EXECUTE, "OICI")],
+            vec![allow(sid, READ_EXECUTE, "OICI")],
+            vec![allow(sid, READ_EXECUTE, "")],
+        ]),
+        Shared::Written => Some([
+            vec![
+                allow(sid, MODIFY & !DELETE, ""),
+                allow(sid, MODIFY, "OICIIO"),
+            ],
+            vec![allow(sid, MODIFY, "OICI")],
+            vec![allow(sid, MODIFY, "")],
+        ]),
+    }
 }
 
-/// Grants the process account `group` — its SID, on Windows — what `shared` says of `dir`, a
-/// directory beneath `root` (ADR-0059 clause 6). A grant on a directory is inherited by what is
-/// in it, what is already there included, so a file the Client writes into `config/` or an agent
-/// into its data directory needs none of its own. No directory from `root` to `dir` may be a link
-/// or a junction: the grant would land on what it names.
+/// Creates `dir` beneath `root` where it is missing and grants the process account `group` — its
+/// SID, on Windows — what `shared` says of it (ADR-0059 clause 6). Every component from `root` to
+/// `dir` is opened as itself and held while the next is opened, none a link
+/// ([`crate::win32::files::open_beneath`]), and the DACL is set on the handle of `dir`. What is
+/// already in it is granted the same where `dir` was not granted it yet — a directory a Managed
+/// Process wrote before a process account was registered — walked without entering a link and
+/// past what the process account owns, which is its own already.
 #[cfg(windows)]
 fn grant(root: &Path, dir: &Path, group: ProcessAccountGroup, shared: Shared) -> io::Result<()> {
-    use std::os::windows::fs::MetadataExt as _;
-    /// FILE_ATTRIBUTE_REPARSE_POINT.
-    const REPARSE_POINT: u32 = 0x400;
-    let Some(args) = grant_args(dir, group.0, shared) else {
+    use crate::win32::files::{grant_tree, open_beneath, Access};
+    let aces = grant_aces(group.0, shared);
+    let access = if aces.is_some() {
+        Access::Dacl
+    } else {
+        Access::Pass
+    };
+    let (_held, made) = open_beneath(root, dir, access, true)?;
+    let Some([on_top, on_dir, on_file]) = aces else {
         return Ok(());
     };
-    let beneath = dir.strip_prefix(root).unwrap_or(Path::new(""));
-    let mut reached = root.to_path_buf();
-    for part in std::iter::once(None).chain(beneath.components().map(Some)) {
-        if let Some(part) = part {
-            reached.push(part);
-        }
-        if std::fs::symlink_metadata(&reached)?.file_attributes() & REPARSE_POINT != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{} is a link or a junction", reached.display()),
-            ));
-        }
-    }
-    let output = std::process::Command::new("icacls.exe")
-        .args(&args)
-        .output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "icacls.exe {} exited with {} ({})",
-        args[2].to_string_lossy(),
-        output.status,
-        String::from_utf8_lossy(&output.stdout).trim()
-    )))
+    let process = crate::win32::Sid::parse(group.0).map_err(io::Error::other)?;
+    grant_tree(
+        &made,
+        group.0,
+        [on_top.as_slice(), on_dir.as_slice(), on_file.as_slice()],
+        Some(&process),
+        false,
+    )
+    .map(|_| ())
 }
 
 /// Directories reached through handles, never through a link: what the Client changes where the
@@ -1404,39 +1405,76 @@ impl crate::supervisor::ports::HighWaterMarks for HighWaterFile {
 
 #[cfg(test)]
 mod windows_grants {
-    use super::{grant_args, Shared};
-    use std::path::Path;
+    use super::{grant_aces, Shared};
+
+    /// On Windows a shared directory is reached through no junction: one on the way from the root
+    /// is refused, and a data directory is granted to the process account — `LocalService`
+    /// standing in — modify for what it holds and everything of it but `DELETE` on itself.
+    /// Verifies: ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_share_is_made_through_no_junction() {
+        use super::{create_shared_dir, ProcessAccountGroup};
+        use crate::win32::files::{Access, Entry};
+        let group = ProcessAccountGroup(crate::win32::LOCAL_SERVICE);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("supervisor");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&outside).expect("outside");
+        let linked = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(root.join("link"))
+            .arg(&outside)
+            .status()
+            .expect("run mklink");
+        assert!(linked.success(), "cannot make the junction");
+        assert!(create_shared_dir(
+            &root,
+            &root.join("link").join("data"),
+            Some(group),
+            Shared::Written
+        )
+        .is_err());
+        assert!(!outside.join("data").exists(), "nothing made through it");
+
+        let data = root.join("data");
+        create_shared_dir(&root, &data, Some(group), Shared::Written).expect("data");
+        let dacl = Entry::open(&data, Access::Dacl, false)
+            .and_then(|entry| entry.dacl())
+            .expect("dacl");
+        assert!(dacl.holds("(A;;0x1201bf;;;S-1-5-19)"), "{dacl:?}");
+        assert!(dacl.holds("(A;OICIIO;0x1301bf;;;S-1-5-19)"), "{dacl:?}");
+    }
 
     /// On Windows the split of ADR-0059 clause 6 is made by ACL grants to the process account's
     /// SID: `program/`, the preflight's staging and `config/` read and executed, a kind's data
-    /// directories modified, each inherited by what is in them, and the directories passed
-    /// through granted nothing.
+    /// directory modified beneath it but not removed itself, each inherited by what is in them,
+    /// and the directories passed through granted nothing.
     /// Verifies: ADR-0059
     #[test]
     fn the_process_account_is_granted_what_it_reads_and_writes_and_nothing_else() {
-        let dir = Path::new(r"C:\ProgramData\opamp-fleet\state\supervisors\otel\program");
         let sid = "S-1-5-80-1-2-3-4-5";
-        let strings = |shared| {
-            grant_args(dir, sid, shared).map(|args| {
-                args.iter()
-                    .map(|arg| arg.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-            })
-        };
         assert_eq!(
-            strings(Shared::Read),
-            Some(vec![
-                dir.display().to_string(),
-                "/grant:r".to_string(),
-                format!("*{sid}:(OI)(CI)RX"),
-                "/L".to_string(),
+            grant_aces(sid, Shared::Read),
+            Some([
+                vec![format!("(A;OICI;0x1200a9;;;{sid})")],
+                vec![format!("(A;OICI;0x1200a9;;;{sid})")],
+                vec![format!("(A;;0x1200a9;;;{sid})")],
             ])
         );
+        let [top, dir, file] = grant_aces(sid, Shared::Written).expect("granted");
         assert_eq!(
-            strings(Shared::Written).expect("granted")[2],
-            format!("*{sid}:(OI)(CI)M")
+            top,
+            [
+                format!("(A;;0x1201bf;;;{sid})"),
+                format!("(A;OICIIO;0x1301bf;;;{sid})")
+            ],
+            "everything of modify on the directory itself but DELETE"
         );
-        assert_eq!(strings(Shared::Traversed), None);
+        assert_eq!(dir, [format!("(A;OICI;0x1301bf;;;{sid})")]);
+        assert_eq!(file, [format!("(A;;0x1301bf;;;{sid})")]);
+        assert_eq!(grant_aces(sid, Shared::Traversed), None);
     }
 }
 
