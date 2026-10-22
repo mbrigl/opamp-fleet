@@ -329,6 +329,7 @@ pub fn start_supervisor(
         let root = config.supervisors_root();
         crate::storage::create_shared_dir(
             &root,
+            &root,
             config.process_account_group,
             crate::storage::Shared::Traversed,
         )

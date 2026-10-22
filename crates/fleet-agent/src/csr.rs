@@ -255,6 +255,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     // (ADR-0054). Passed through by the process group where one is registered (ADR-0059 clause 6).
     crate::storage::create_shared_dir(
         &config.state_dir,
+        &config.state_dir,
         config.process_account_group,
         crate::storage::Shared::Traversed,
     )

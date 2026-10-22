@@ -55,3 +55,9 @@ jobs:
       - name: Install, start, kill, restart, stop, uninstall; keep the account and the privileges; the process account
         if: runner.os == 'Linux'
         run: sudo -E env "PATH=$PATH" cargo test -p fleet-agent --test service_smoke --locked -- --ignored --nocapture --test-threads=1
+      # Run as root, every link the test places is root's, and none beneath the Client's
+      # directories is followed all the same (ADR-0059 clause 6). The unprivileged run in CI covers
+      # the links of every other account.
+      - name: No link of root's beneath the Client's directories is followed
+        if: runner.os == 'Linux'
+        run: sudo -E env "PATH=$PATH" cargo test -p fleet-agent --lib --locked -- --exact storage::tests::no_link_beneath_the_root_is_followed_whoever_owns_it
