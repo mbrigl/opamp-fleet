@@ -4,7 +4,7 @@
 - **Date:** 2026-10-20
 - **Deciders:** Markus Brigl
 - **Applies to:** the `--process-account` flag of `service install` and the second service it registers in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/windows_config.rs` and `crates/fleet-agent/src/service/windows_rights.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel between the Client and the second service, the modes and ownership of the Supervisors' directories in `crates/fleet-agent/src/storage.rs`, and every document that tells an operator which account a Managed Process runs as
-- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 3 and 9, [ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) clauses 2 and 6, [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 60, [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clause 37
+- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 3 and 9, [ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) clauses 2 and 6, [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 60, [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clauses 21 and 37
 
 ## Context
 
@@ -53,7 +53,8 @@ signals and stops those programs on the Client's request.
    <account>` names it, at system scope only; it conflicts with `--user`. A re-registration without
    the flag keeps the account the second service's registration names (clause 2), read the way
    ADR-0042 clause 2 reads the Client's. Without the flag and without such a registration, there is
-   no process account and no second service, and the Client starts its programs itself, as before.
+   no process account and no second service, and the Client starts its programs itself, as before
+   (clauses 11 and 13 hold on every host).
    - **The operator creates the account.** On Linux and macOS it must exist, and an install naming
      one that does not is refused before anything is written, with a message that shows the
      `useradd --system` line, and on macOS the `sysadminctl -roleAccount` line, that creates it. The
@@ -283,6 +284,35 @@ signals and stops those programs on the Client's request.
     itself records that the Client meant to remove it. A tombstone the purge could not delete is
     removed again at the next start and with the next purge, through the second service where a
     process account is registered, and is logged as a warning until it is gone.
+
+13. **Restates ADR-0017 clause 21. One directory per Supervisor, under a relocatable root, never
+   on an entry of the Client's.** The top-level key `supervisor_dir`
+   defaults to `<state_dir>/supervisors` and is made absolute at load. Under it each Supervisor
+   owns `<supervisor_dir>/<name>/`, holding everything it needs:
+
+   ```
+   <supervisor_dir>/<name>/
+     instance-uid            # its Agent identity
+     remote-config.pb        # the last received configuration
+     installed-package.json  # what is installed
+     config/                 # the written configuration entries
+     program/<file>          # the Managed Process — or program/tree/<program_path> for a tree
+     packages/               # this Supervisor's download staging
+   ```
+
+   One knob moves state and program together. Staging beside `program/` makes a raw artifact's
+   install a rename on one filesystem. The directory is `program/`, not `bin/`, because it holds a
+   whole tree for a multi-file package ([ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)). Moving
+   `supervisor_dir` on a running host leaves the old tree behind and migrates nothing; each
+   Supervisor then registers as a new Agent.
+
+   Where `supervisor_dir` is `state_dir`, a Supervisor is never named after an entry the Client
+   keeps there itself (`instance-uid`, `config`, `packages`, `logs`, `gateway-packages`,
+   `supervisors`), and `supervisor_dir` never is, or holds, `state_dir` otherwise: a block that
+   would is refused at startup, and an offered set that carries one fails as a whole (ADR-0017
+   clause 28). This holds on every host, with a process account or without one, because a purge
+   of such a Supervisor would delete the Client's own entry and its share would expose it to the
+   process account's group. The changelog names the rename this asks of a host that has one.
 
 **Out of scope:** an account per Supervisor; making a process account the default where none is
 named; job objects for a host without a process account; what the Managed Processes can read of
