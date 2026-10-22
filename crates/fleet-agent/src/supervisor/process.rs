@@ -1585,11 +1585,12 @@ impl Runner {
     /// Right after a package swap the reason matters: exec of a freshly written binary can fail
     /// with `ETXTBSY`, which is transient and says nothing about the artifact
     /// ([`install::is_text_file_busy`] states why). So the swap retries briefly rather than rolling
-    /// back a binary that is perfectly good.
+    /// back a binary that is perfectly good, and a start it retries reports no failed health: only
+    /// the last says the program could not be started.
     async fn try_spawn(&self) -> std::io::Result<ManagedChild> {
         let mut attempt = 0;
         loop {
-            match self.spawn_once().await {
+            match self.spawn_once(attempt < install::BUSY_RETRIES).await {
                 Err(e) if install::is_text_file_busy(&e) && attempt < install::BUSY_RETRIES => {
                     attempt += 1;
                     warn!(
@@ -1603,7 +1604,9 @@ impl Runner {
         }
     }
 
-    async fn spawn_once(&self) -> Result<ManagedChild, std::io::Error> {
+    /// Starts the Managed Process once. With `retried`, a start that fails as busy is retried by
+    /// the caller, and reports no health.
+    async fn spawn_once(&self, retried: bool) -> Result<ManagedChild, std::io::Error> {
         let Some(spec) = (self.build)() else {
             self.events
                 .send(ProcessEvent::Health(unhealthy(
@@ -1678,6 +1681,7 @@ impl Runner {
                     .await;
                 Ok(child)
             }
+            Err(e) if retried && install::is_text_file_busy(&e) => Err(e),
             Err(e) => {
                 warn!(supervisor = %self.name, program = %spec.program.display(), error = %e, "cannot spawn");
                 // What the Server should read is the *situation*, not the syscall. A binary that
@@ -2347,6 +2351,54 @@ mod tests {
             b"what ran before",
             "what ran before stays in place"
         );
+    }
+
+    /// A start that finds the program busy — held open for writing, as a fork racing the write of
+    /// a fresh binary holds it — and is retried until it starts reports only that it runs: no
+    /// failed health in between for a Server to read as a program that does not start. One that
+    /// stays busy past the retries says so, once.
+    /// Verifies: ADR-0026
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_retried_while_the_program_is_busy_reports_no_failure_in_between() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("agent");
+        std::fs::write(&live, "#!/bin/sh\nexit 0\n").expect("a program");
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let (event_tx, mut events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(1);
+        let runner = package_runner(live.clone(), Duration::ZERO, event_tx, command_rx);
+        let statuses = |events: &mut mpsc::Receiver<(usize, ProcessEvent)>| {
+            let mut statuses = Vec::new();
+            while let Ok((_, event)) = events.try_recv() {
+                if let ProcessEvent::Health(health) = event {
+                    statuses.push(health.status);
+                }
+            }
+            statuses
+        };
+
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&live)
+            .expect("held open for writing");
+        let freed = async {
+            tokio::time::sleep(install::BUSY_DELAY * 3).await;
+            drop(held);
+        };
+        let (started, ()) = tokio::join!(runner.try_spawn(), freed);
+        let mut child = Some(started.expect("started once the program was free"));
+        assert_eq!(statuses(&mut events), vec!["running".to_string()]);
+        stop(&mut child, Duration::from_secs(1), "test").await;
+
+        let _held = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&live)
+            .expect("held open for writing");
+        let error = runner.try_spawn().await.err().expect("busy throughout");
+        assert!(install::is_text_file_busy(&error), "{error}");
+        assert_eq!(statuses(&mut events), vec!["spawn failed".to_string()]);
     }
 
     /// A Runner that installs packages over `live` and runs what is there.
