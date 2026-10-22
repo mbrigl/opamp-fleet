@@ -373,11 +373,17 @@ pub fn parse_instance_name(raw: &str) -> Result<InstanceName, String> {
 /// one (ADR-0017 clause 34).
 pub(crate) const TOMBSTONE: &str = ".purge-";
 
+/// How many digits a tombstone's nonce has at least: the nanoseconds since the Unix epoch, 16
+/// lowercase hexadecimal digits at least, and a counter, one at least
+/// ([`crate::reconfigure::tombstone_name`]).
+pub(crate) const TOMBSTONE_NONCE: usize = 17;
+
 /// The Supervisor whose tombstone `name` is ([`crate::reconfigure::tombstone_name`]), or `None`
-/// where it is none.
+/// where it is none: its nonce is [`TOMBSTONE_NONCE`] lowercase hexadecimal digits at least, so a
+/// directory an operator named alike — `.purge-backup-20241001` — is never taken for one.
 pub(crate) fn tombstone_of(name: &str) -> Option<&str> {
     let (supervisor, nonce) = name.strip_prefix(TOMBSTONE)?.rsplit_once('-')?;
-    let nonce_ok = !nonce.is_empty()
+    let nonce_ok = nonce.len() >= TOMBSTONE_NONCE
         && nonce
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
@@ -2275,6 +2281,25 @@ mod tests {
         ] {
             assert_eq!(tombstone_of(name), None, "{name}");
         }
+    }
+
+    /// Only the nonce a tombstone name is made with marks one: a directory an operator named
+    /// alike is no tombstone, so neither a start nor a purge removes it (ADR-0053 clause 12).
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_directory_named_alike_is_no_tombstone() {
+        for name in [
+            ".purge-foo-abc",
+            ".purge-backup-20241001",
+            ".purge-agent-18f3a2b4c5d6e7f8",
+            ".purge-agent-18F3A2B4C5D6E7F80",
+        ] {
+            assert_eq!(tombstone_of(name), None, "{name}");
+        }
+        assert_eq!(
+            tombstone_of(".purge-agent-18f3a2b4c5d6e7f80"),
+            Some("agent")
+        );
     }
 
     #[test]

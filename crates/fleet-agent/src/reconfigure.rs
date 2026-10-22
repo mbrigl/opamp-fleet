@@ -217,14 +217,18 @@ fn plan(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Plan {
 }
 
 /// A fresh tombstone name for the directory of the Supervisor `supervisor`:
-/// `.purge-<supervisor>-<nonce>`, the nonce in lowercase hexadecimal.
+/// `.purge-<supervisor>-<nonce>`, the nonce in lowercase hexadecimal: the nanoseconds since the
+/// Unix epoch, 16 digits at least, then a counter ([`crate::config::TOMBSTONE_NONCE`]).
 pub(crate) fn tombstone_name(supervisor: &str) -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
     let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{}{supervisor}-{nanos:x}{next:x}", crate::config::TOMBSTONE)
+    format!(
+        "{}{supervisor}-{nanos:016x}{next:x}",
+        crate::config::TOMBSTONE
+    )
 }
 
 /// A removed Supervisor's directory, moved aside to a tombstone beneath the Supervisors' root
@@ -1944,7 +1948,13 @@ mod tests {
         let program = root.join(tombstone_name("earlier")).join("program");
         std::fs::create_dir_all(&program).expect("a tombstone");
         std::fs::write(program.join("agent"), b"left").expect("its program");
-        for orphan in ["orphan", ".purge-orphan", ".purge-orphan-xyz"] {
+        for orphan in [
+            "orphan",
+            ".purge-orphan",
+            ".purge-orphan-xyz",
+            ".purge-foo-abc",
+            ".purge-backup-20241001",
+        ] {
             std::fs::create_dir_all(root.join(orphan).join("program")).expect("an orphan");
         }
         std::fs::create_dir_all(config.supervisor_dir("gone")).expect("gone");
@@ -1964,7 +1974,14 @@ mod tests {
         left_over.sort();
         assert_eq!(
             left_over,
-            vec![".purge-orphan", ".purge-orphan-xyz", "orphan", "stays"]
+            vec![
+                ".purge-backup-20241001",
+                ".purge-foo-abc",
+                ".purge-orphan",
+                ".purge-orphan-xyz",
+                "orphan",
+                "stays"
+            ]
         );
     }
 
