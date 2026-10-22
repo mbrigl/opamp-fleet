@@ -919,9 +919,10 @@ Before it deletes a removed Agent's directory, the Client renames it to a tombst
 fresh directory. `<hex>` is 17 lowercase hexadecimal digits or more; a directory named alike with
 a shorter suffix, such as `.purge-backup-20241001`, is no tombstone. A tombstone that could not be deleted — a file held open, or one the process
 account wrote that the second service could not remove — stays, with a warning, and nothing in it
-is used again. The Client removes it again at the next start, beside the start and once the second
-service is reached where a process account is registered, and with the next removal of a
-Supervisor; until it is gone, each startup warns about it. No other directory that no block names
+is used again. The Client removes it again at the next start, beside the start, and with the next
+removal of a Supervisor. Where a process account is registered, each try waits for the second
+service as long as a purge does; a try that does not reach it warns, and the next start or removal
+tries again. Until it is gone, each startup warns about it. No other directory that no block names
 is touched.
 
 `config/` is what `${config_dir}` expands to in a process's arguments, which is how a program is

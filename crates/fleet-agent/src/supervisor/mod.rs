@@ -88,10 +88,6 @@ impl PluginRegistry for Registry {
                 .collect()
         })
     }
-
-    fn reached(&self) -> crate::supervisor::ports::Reached<'_> {
-        Box::pin(self.spawner.reached())
-    }
 }
 
 /// The compiled-in plugins, for what reads a block — its kind, its program, its settings — and
@@ -137,11 +133,7 @@ pub fn build_engine(
 ) -> Result<Engine, String> {
     let plugins: Arc<dyn PluginRegistry> = Arc::new(Registry::new(spawner));
     report_orphaned_supervisor_dirs(config);
-    crate::reconfigure::reap_tombstones(
-        &config.supervisors_root(),
-        Arc::clone(&plugins),
-        shutdown.clone(),
-    );
+    crate::reconfigure::reap_tombstones(&config.supervisors_root(), Arc::clone(&plugins));
     for notice in remote_config_disabled_notices(config) {
         warn!("{notice}");
     }
