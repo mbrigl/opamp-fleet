@@ -166,6 +166,7 @@ impl Plugin for CollectorPlugin {
             // (ADR-0059 clause 3): the registry says which.
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
+            supervisor_dir: ctx.supervisor_dir.clone(),
             events: ctx.events,
             commands: command_rx,
             build: Box::new(move || collector_spec(&binary, &config_dir, &extra_args, &env)),

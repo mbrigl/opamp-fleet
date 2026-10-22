@@ -72,7 +72,12 @@ pub fn store(
 ) -> std::io::Result<()> {
     // Never through a link at the directory's name or the file's: an install enrols as root in a
     // directory that belongs to the service's account (ADR-0054).
-    crate::storage::create_shared_dir(state_dir, group, crate::storage::Shared::Traversed)?;
+    crate::storage::create_shared_dir(
+        state_dir,
+        state_dir,
+        group,
+        crate::storage::Shared::Traversed,
+    )?;
     crate::nofollow::HeldDir::open(state_dir)?.write(
         SETTINGS_FILE,
         &settings.encode_to_vec(),
