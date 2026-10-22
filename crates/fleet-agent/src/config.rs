@@ -223,6 +223,23 @@ pub const TREE_DIR: &str = "tree";
 /// The subdirectory a downloaded artifact is staged in, per Supervisor.
 const PACKAGES_DIR: &str = "packages";
 
+/// The default Supervisors' root in the state directory, where `supervisor_dir` names none.
+const SUPERVISORS_DIR: &str = "supervisors";
+
+/// What the Client keeps in its state directory under a name a Supervisor could carry, with what
+/// it is: no Supervisor takes one of these names where `supervisor_dir` is the state directory
+/// ([`ClientConfig::check_supervisor_dir`]). The rest of what is kept there has a `.` in its name,
+/// which no Supervisor's name holds ([`parse_instance_name`]). Spelled here, in the core, and held
+/// to the adapters' own constants by a test of `storage`.
+pub(crate) const CLIENT_ENTRIES: [(&str, &str); 6] = [
+    ("instance-uid", "the Client's own identity"),
+    ("config", "the Client's own configuration entries"),
+    (PACKAGES_DIR, "the staging of the Client's self-update"),
+    ("logs", "the Client's default log directory"),
+    ("gateway-packages", "the Gateway's package cache"),
+    (SUPERVISORS_DIR, "the default Supervisors' root"),
+];
+
 /// Where a Supervisor's Managed Process lives — and, as the same fact, whether this Client may
 /// replace it (ADR-0017).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1097,7 +1114,36 @@ impl ClientConfig {
     pub fn supervisors_root(&self) -> PathBuf {
         self.supervisor_dir
             .clone()
-            .unwrap_or_else(|| self.state_dir.join("supervisors"))
+            .unwrap_or_else(|| self.state_dir.join(SUPERVISORS_DIR))
+    }
+
+    /// Checks that the directory of the Supervisor `name` is none of the Client's own: not the
+    /// state directory or one that holds it, and, where `supervisor_dir` is the state directory
+    /// itself, none of the entries the Client keeps there ([`CLIENT_ENTRIES`]). A Supervisor
+    /// there would share that entry with the process account's group, and its purge would delete
+    /// it — a Supervisor named `logs` the Client's log, one named `instance-uid` its identity.
+    ///
+    /// # Errors
+    /// Returns the reason, naming the Supervisor and the entry its directory would be.
+    pub fn check_supervisor_dir(&self, name: &str) -> Result<(), String> {
+        let dir = self.supervisor_dir(name);
+        if self.state_dir.starts_with(&dir) {
+            return Err(format!(
+                "supervisor {name:?}: its directory {} would be the state directory or hold it; \
+                 choose another name",
+                dir.display()
+            ));
+        }
+        if self.supervisors_root() == self.state_dir {
+            if let Some((_, what)) = CLIENT_ENTRIES.iter().find(|(entry, _)| *entry == name) {
+                return Err(format!(
+                    "supervisor {name:?}: its directory {} would be {what}, which the Client keeps \
+                     in the state directory that supervisor_dir names too; choose another name",
+                    dir.display()
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// One Supervisor's own directory: its state, its `program/`, and its package staging, under
@@ -2146,6 +2192,61 @@ mod tests {
         std::fs::write(&path, "endpoint = \"wss://fleet:4320/v1/opamp\"\n").expect("write");
         let clean = ClientConfig::load(&path).expect("loads");
         assert_eq!(clean.leftover_auth_notice(), None, "no section, no notice");
+    }
+
+    /// Where `supervisor_dir` is the state directory, no Supervisor takes the name of an entry the
+    /// Client keeps there, and the refusal names the Supervisor and the entry; under the default
+    /// root the same names are Supervisors like any other. A Supervisor's directory is never the
+    /// state directory or one that holds it (ADR-0053 clause 6, ADR-0017 clause 21).
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_supervisor_never_takes_a_directory_of_the_clients() {
+        let state = Path::new("/var/lib/opamp-fleet/state");
+        let shared = ClientConfig {
+            state_dir: state.to_path_buf(),
+            supervisor_dir: Some(state.to_path_buf()),
+            ..ClientConfig::default()
+        };
+        let apart = ClientConfig {
+            state_dir: state.to_path_buf(),
+            ..ClientConfig::default()
+        };
+        for name in [
+            "instance-uid",
+            "config",
+            "packages",
+            "logs",
+            "gateway-packages",
+            "supervisors",
+        ] {
+            parse_instance_name(name).expect("a name a Supervisor could carry");
+            let error = shared
+                .check_supervisor_dir(name)
+                .expect_err("the Client's own entry");
+            assert!(error.contains(&format!("{name:?}")), "{error}");
+            assert!(error.contains("the Client keeps"), "{error}");
+            apart
+                .check_supervisor_dir(name)
+                .expect("a Supervisor beneath the default root");
+        }
+        assert!(shared
+            .check_supervisor_dir("logs")
+            .expect_err("logs")
+            .contains("default log directory"));
+        shared
+            .check_supervisor_dir("agent")
+            .expect("a name of its own");
+
+        let above = ClientConfig {
+            state_dir: state.to_path_buf(),
+            supervisor_dir: Some(PathBuf::from("/var/lib/opamp-fleet")),
+            ..ClientConfig::default()
+        };
+        let error = above
+            .check_supervisor_dir("state")
+            .expect_err("the state directory itself");
+        assert!(error.contains("\"state\""), "{error}");
+        above.check_supervisor_dir("agent").expect("beside it");
     }
 
     /// A tombstone name ([`crate::reconfigure::tombstone_name`]) names the Supervisor whose

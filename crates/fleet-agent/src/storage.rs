@@ -21,7 +21,9 @@ use crate::supervisor::ports::{AgentStorage, InstalledPackage};
 /// The file that keeps the `instance_uid`.
 pub const UID_FILE: &str = "instance-uid";
 const CONFIG_PB_FILE: &str = "remote-config.pb";
-const CONFIG_DIR: &str = "config";
+/// The directory of the configuration entries, in the Client's state directory and in each
+/// Supervisor's.
+pub(crate) const CONFIG_DIR: &str = "config";
 const PACKAGE_FILE: &str = "installed-package.json";
 
 /// The role each delivered entry carries (ADR-0023) — `<name> <role>` per line, written into the
@@ -1668,6 +1670,38 @@ mod tests {
         assert!(!handle::trusted_link(&dir(1001, 0o755), &link(0), own));
         assert!(!handle::trusted_link(&dir(1001, 0o755), &link(own), own));
         assert!(!handle::trusted_link(&dir(own, 0o755), &link(1001), own));
+    }
+
+    /// Every entry the Client keeps in its state directory under a name a Supervisor could carry
+    /// is one the configuration refuses as a Supervisor's name there: the core's list is the
+    /// adapters' constants (ADR-0053 clause 6).
+    /// Verifies: ADR-0053
+    #[test]
+    fn every_entry_of_the_clients_a_supervisor_could_be_named_after_is_listed() {
+        let listed: Vec<&str> = crate::config::CLIENT_ENTRIES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let state = Path::new("/var/lib/opamp-fleet/state");
+        let config = crate::config::ClientConfig {
+            state_dir: state.to_path_buf(),
+            ..crate::config::ClientConfig::default()
+        };
+        let staging = config.staging_dir_for(None);
+        let staged = staging.file_name().and_then(|name| name.to_str());
+        let root = config.supervisors_root();
+        let default_root = root.file_name().and_then(|name| name.to_str());
+        for name in [
+            Some(UID_FILE),
+            Some(CONFIG_DIR),
+            staged,
+            Some(crate::logging::DIR_NAME),
+            Some(crate::gateway::cache::DIR),
+            default_root,
+        ] {
+            let name = name.expect("a name in the state directory");
+            assert!(listed.contains(&name), "{name} is not listed");
+        }
     }
 
     /// A root reached through the system's own link — `/var/run` → `/run` on Linux, `/var` →

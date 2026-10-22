@@ -1290,6 +1290,73 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
     }
 
+    /// Where `supervisor_dir` is the state directory, a Supervisor named after an entry the Client
+    /// keeps there fails startup, and an offered set carrying one is refused whole, naming the
+    /// Supervisor and the entry, before anything stops or the file changes: a Supervisor `logs`
+    /// would share the Client's log directory with the process account's group, and its purge
+    /// would delete it (ADR-0053 clause 6, ADR-0017 clause 28).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_supervisor_named_after_an_entry_of_the_clients_is_refused() {
+        use opamp::proto::RemoteConfigStatuses;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let path = dir.path().join("supervisor.toml");
+        let file = |blocks: &str| {
+            format!(
+                "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\
+                 supervisor_dir = {state:?}\n\n{blocks}",
+                state = state.to_string_lossy(),
+            )
+        };
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+
+        std::fs::write(
+            &path,
+            file("[[supervisor]]\ntype = \"command\"\nname = \"instance-uid\"\ncommand = \"agent\"\n"),
+        )
+        .expect("write");
+        let config = ClientConfig::load(&path).expect("load");
+        let Err(error) = crate::supervisor::build_engine(
+            &config,
+            &shutdown,
+            crate::supervisor::process::Spawner::Local,
+        ) else {
+            panic!("a Supervisor in the Client's identity started");
+        };
+        assert!(
+            error.contains("\"instance-uid\"") && error.contains("identity"),
+            "{error}"
+        );
+
+        std::fs::write(&path, file(AGENT)).expect("write");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let mut config = ClientConfig::load(&path).expect("load");
+        let mut engine = crate::supervisor::build_engine(
+            &config,
+            &shutdown,
+            crate::supervisor::process::Spawner::Local,
+        )
+        .expect("build");
+        let logs = offer_of(&[(
+            "fleet",
+            &format!(
+                "{AGENT}[[supervisor]]\ntype = \"command\"\nname = \"logs\"\ncommand = \"agent\"\n"
+            ),
+        )]);
+        apply(&mut engine, &mut config, logs, &shutdown).await;
+        let reports = engine.poll_reports();
+        let status = reports[0].remote_config_status.clone().expect("a status");
+        assert_eq!(status.status, RemoteConfigStatuses::Failed as i32);
+        assert!(
+            status.error_message.contains("\"logs\"")
+                && status.error_message.contains("log directory"),
+            "{status:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
+        assert_eq!(engine.next_index(), 2, "the running set stays");
+    }
+
     /// ADR-0017: a Server-delivered block that names an **absolute** program path is refused as a
     /// whole — that is the machine's own process, and letting the Server spawn one would run
     /// arbitrary code that never passed through package signing. The refusal names the block and the

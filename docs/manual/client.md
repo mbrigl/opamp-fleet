@@ -727,7 +727,7 @@ writes is refused the same way, and the Client runs without a log file: the stat
 the Supervisors' root or anything above it, a Supervisor's directory or anything beneath it, and a
 path named with `..`. A directory beneath the state directory is kept the Client's alone, `0700`.
 The default `<state_dir>/logs` stays usable where `supervisor_dir` is the state directory itself,
-as long as no Supervisor is named `logs`.
+where no Supervisor can be named `logs`.
 
 This is a different thing from the Client's own telemetry (`ReportsOwnLogs`), which ships
 log records to a destination the **Server** offers. That needs a Server it can already reach — which
@@ -981,7 +981,7 @@ notice.
 | `heartbeat_interval_secs` | `30` | Heartbeat interval on WebSocket. `0` disables heartbeats and undeclares the capability; on plain HTTP every poll already is the periodic report. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message sent or accepted, in either direction — including on the Supervisor Endpoint. A message past it is never sent, and an oversized one from the Server is refused. |
 | `state_dir` | `"client-state"` | Where the Client persists its own Agent's identity, its remote configuration, and any Server-offered connection settings. A self-update artifact is streamed here first, so it needs room for one agent binary. |
-| `supervisor_dir` | `<state_dir>/supervisors` | Where the per-Supervisor directories live. Set it when the programs must not live where the state does — `/var/lib` is often mounted `noexec`, and sized for state rather than for a few hundred megabytes of Collector. |
+| `supervisor_dir` | `<state_dir>/supervisors` | Where the per-Supervisor directories live. Set it when the programs must not live where the state does — `/var/lib` is often mounted `noexec`, and sized for state rather than for a few hundred megabytes of Collector. Where it is the state directory itself, a Supervisor named after what the Client keeps there — `instance-uid`, `config`, `packages`, `logs`, `gateway-packages`, `supervisors` — is refused at startup and in a set the Server offers, and no Supervisor's directory may be the state directory or hold it. |
 
 > **Moving `supervisor_dir` on a running host leaves the old tree behind**, `instance-uid` included,
 > so every Supervisor re-registers as a **new** Agent on the Server. Nothing migrates automatically.
