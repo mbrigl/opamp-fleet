@@ -3,7 +3,7 @@
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-21
 - **Deciders:** Markus Brigl
-- **Applies to:** the blob port in `crates/fleet-server/src/blobs.rs`, its filesystem adapter in `crates/fleet-server/src/fs/blobs.rs` and every S3 adapter beside it, the wiring in `crates/fleet-server/src/main.rs`, the `[blobs]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `object_store` dependency in `Cargo.toml` and `deny.toml`, the S3 adapter's tests, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps artifacts
+- **Applies to:** the blob port in `crates/fleet-server/src/blobs.rs`, its filesystem adapter in `crates/fleet-server/src/fs/blobs.rs` and every S3 adapter beside it, the wiring in `crates/fleet-server/src/main.rs`, the `[blobs]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `object_store` dependency in `Cargo.toml` and `deny.toml`, the S3 adapter's tests and the CI job that runs them, the rustfs service in `observability/compose.yaml` and its forward into the Dev Container, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps artifacts
 - **Supersedes:** [ADR-0037](0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md) clauses 4 and 5
 
 ## Context
@@ -117,21 +117,26 @@ the `object_store` crate over TLS 1.3 and streamed through the Server in both di
    - The directories under `data_dir` are owner-only and every file `0600`
      (ADR-0037 clause 1).
 
-9. **The store is external; the adapter only connects to it.** The project runs, provisions and
-   configures no object store: not in production, not for development, not in CI. The bucket, its
-   credentials, its policies, its retention and its backups are the operator's. The Server creates
-   nothing in the store but the objects of clause 4.
-   - The S3 adapter's tests run against an external store that `FLEET_TEST_S3_ENDPOINT`,
-     `FLEET_TEST_S3_BUCKET` and the credentials of clause 6 name. Without them the tests are
-     skipped and say so; they never start a store of their own.
-   - The project supports S3-compatible stores in general. rustfs is the store its maintainers
-     test against.
+9. **The store is external; the adapter only connects to it.** The Server ships with no object
+   store and creates nothing in one but the objects of clause 4. In production the bucket, its
+   credentials, its policies, its retention and its backups are the operator's.
+   - For development, rustfs runs as a service of `observability/compose.yaml`, the Compose
+     project on the host beside the Dev Container
+     ([ADR-0002](0002-dev-container-runtime.md)). The Dev Container forwards its port onto its own
+     loopback, as it forwards the Collector's, so a development Server reaches it at an
+     `http://127.0.0.1` endpoint that clause 5 allows, through `[blobs.s3]` like any other store.
+   - The S3 adapter's tests run against the store that `FLEET_TEST_S3_ENDPOINT`,
+     `FLEET_TEST_S3_BUCKET` and the credentials of clause 6 name. CI runs them in a job with a
+     rustfs service, its image pinned. Where no store is named, the tests are skipped and say so;
+     they never start a store of their own.
+   - The project supports S3-compatible stores in general; rustfs is the one development and CI
+     use.
 
 **Out of scope:** Package metadata outside `data_dir`, which follows the decision on PostgreSQL; a
 bucket shared by several Server instances, which follows the decision on high availability; Object
 Lock and bucket versioning, which the operator may enable but the Server neither needs nor checks;
 server-side encryption beyond what the bucket's own default applies; moving blobs from S3 back to
-the filesystem; anything that runs, provisions or monitors a store.
+the filesystem; anything that runs, provisions or monitors a production store.
 
 ## Alternatives considered
 
@@ -159,10 +164,12 @@ the filesystem; anything that runs, provisions or monitors a store.
 - **Take the store's configuration from the `AWS_*` environment, as the S3 client does by
   default.** `AWS_ALLOW_HTTP` or `AWS_ENDPOINT` set in a service's environment would then move the
   Server to plaintext or to another store without `server.toml` saying so. Rejected.
-- **A store run by the project for development and CI** (a Compose project on the host, a
-  workflow service in CI). It would run the S3 tests on every pull request, but it makes the
-  project the operator of a store it does not ship, with an image to pin and keep current.
-  Rejected: the store is external.
+- **S3 tests only where a developer names a store.** No service in CI, nothing in the
+  development stack. A defect in the S3 adapter would then be found only by whoever runs the
+  tests against a store, not by every pull request. Rejected.
+- **A Compose project of its own for the stores.** It would keep the observability stack to its
+  one purpose, but a developer would start and forward two stacks on the host instead of one.
+  Rejected.
 - **MinIO as the reference store.** The working note named it. MinIO no longer maintains its open
   source distribution; rustfs is S3-compatible, Apache-2.0, and reached 1.0 in 2026. Rejected in
   favour of rustfs.
@@ -201,10 +208,9 @@ the filesystem; anything that runs, provisions or monitors a store.
 - Negative / trade-offs: an object altered in the bucket is not detected by the Server; it is
   served, and the Client refuses it. The Server's integrity check at startup covers the filesystem
   store only.
-- Negative / trade-offs: two stores to test and document. The S3 tests need an external store,
-  so they run only where one is named and are skipped in every `cargo test` and CI run that names
-  none. A defect in the S3 adapter is found by whoever runs them against a store, not by every
-  pull request.
+- Negative / trade-offs: two stores to test and document. The S3 tests need a store, so they run
+  in a CI job of their own and against the development stack, and are skipped in a plain
+  `cargo test`.
 - Negative / trade-offs: a first start on S3 with a large `data_dir/blobs/` takes as long as the
   upload of what is missing.
 - Follow-ups: Package metadata and the other stores in PostgreSQL, and several Server instances
@@ -217,8 +223,8 @@ Tests that will carry `Verifies: ADR-0049`:
 
 - One contract test of the blob port runs against both stores: `put` of identical bytes stores
   one blob, `get` returns them, `delete` of an absent blob is no error, and `list` names every
-  blob with its size. Against S3 it runs when `FLEET_TEST_S3_ENDPOINT` names a store, and is
-  reported skipped otherwise.
+  blob with its size. Against S3 it runs in the CI job with a rustfs service, and is reported
+  skipped where no store is named.
 - A stream that fails during `put` leaves no object under `blobs/`, and a leftover staging object
   is deleted at the next startup.
 - A key under the prefix that the layout does not name fails startup, naming it.
