@@ -58,11 +58,14 @@ impl<'a> MakeWriter<'a> for LogFile {
 /// `keep` is a bound the caller cannot escape — `ClientConfig` refuses `0` at load rather than
 /// reading it as "keep everything", which is the setting that fills a disk on a host nobody
 /// watches.
-pub fn open(dir: &Path, keep: usize) -> Result<PathBuf, String> {
+///
+/// With `private`, the directory and the Client's log files in it are kept the Client's alone
+/// ([`keep_private`]); without, the directory is only created where it is missing.
+pub fn open(dir: &Path, keep: usize, private: bool) -> Result<PathBuf, String> {
     if FILE.get().is_some() {
         return Ok(dir.to_path_buf());
     }
-    keep_private(dir)
+    prepare(dir, private)
         .map_err(|e| format!("cannot create the log directory {}: {e}", dir.display()))?;
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
@@ -77,20 +80,34 @@ pub fn open(dir: &Path, keep: usize) -> Result<PathBuf, String> {
     Ok(dir.to_path_buf())
 }
 
-/// Creates the log directory owner-only, `0700`, and narrows one that exists, with the log files
-/// already in it, to the Client alone: `0700` and `0600` (ADR-0059 clause 6). The state directory
-/// it hangs off is passed through by the process account's group where one is registered, and the
-/// log is never among what that group reads. The appender creates each day's file at the umask; the
-/// directory is what keeps it.
+/// Creates the log directory: with `private`, kept the Client's alone ([`keep_private`]); without,
+/// only created where it is missing, and what it holds left as it is.
+fn prepare(dir: &Path, private: bool) -> std::io::Result<()> {
+    if private {
+        keep_private(dir)
+    } else {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Creates the log directory owner-only, `0700`, and narrows one that exists, with the Client's
+/// log files already in it, to the Client alone: `0700` and `0600` (ADR-0059 clause 6). For a log
+/// directory beneath a state directory that the process account's group passes through, which
+/// [`is_private`] decides: the log is never among what that group reads. The appender creates each
+/// day's file at the umask; the directory is what keeps it.
 ///
-/// A file there with a second hard link, or anything that is not a regular file, is left alone.
+/// Only a regular file the Client owns, with one name, and named as the appender names its files
+/// is narrowed; anything else there is left as it is.
 fn keep_private(dir: &Path) -> std::io::Result<()> {
     crate::storage::create_private_dir(dir)?;
     #[cfg(unix)]
     for entry in std::fs::read_dir(dir)? {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
         let entry = entry?;
-        if !entry.file_type()?.is_file() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(&format!("{FILE_STEM}."))
+            || !entry.file_type()?.is_file()
+        {
             continue;
         }
         let Ok(file) = std::fs::OpenOptions::new()
@@ -101,11 +118,21 @@ fn keep_private(dir: &Path) -> std::io::Result<()> {
             continue;
         };
         let meta = file.metadata()?;
-        if meta.is_file() && meta.nlink() == 1 && meta.mode() & 0o077 != 0 {
+        // SAFETY: geteuid(2) cannot fail and touches no memory.
+        let own = meta.uid() == unsafe { libc::geteuid() };
+        if own && meta.is_file() && meta.nlink() == 1 && meta.mode() & 0o077 != 0 {
             file.set_permissions(std::fs::Permissions::from_mode(meta.mode() & 0o700))?;
         }
     }
     Ok(())
+}
+
+/// Whether the log directory `dir` is kept the Client's alone ([`keep_private`]): where a process
+/// account is registered and `dir` lies beneath the state directory `state_dir`, which its group
+/// passes through. A directory an operator chose elsewhere is the operator's, and is left as it is.
+#[must_use]
+pub fn is_private(dir: &Path, state_dir: &Path, process_account: bool) -> bool {
+    process_account && dir.starts_with(state_dir)
 }
 
 /// Where the log goes for a given state directory, unless `[logging] dir` names somewhere else.
@@ -149,7 +176,7 @@ mod tests {
     fn opening_creates_the_directory_and_a_writable_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let logs = dir.path().join("nested").join("logs");
-        let used = open(&logs, 7).expect("open");
+        let used = open(&logs, 7, false).expect("open");
         assert_eq!(used, logs);
         assert!(logs.is_dir(), "the directory is created");
 
@@ -179,10 +206,10 @@ mod tests {
         );
     }
 
-    /// The log is the Client's alone (ADR-0059 clause 6): its directory is made `0700`, and one
-    /// that exists — made at the umask by an earlier version — is narrowed to `0700` with the log
-    /// files in it `0600`, so a process account that passes through the state directory reads no
-    /// line of it.
+    /// The log is the Client's alone (ADR-0059 clause 6) where a process account passes through
+    /// the state directory it lies in: its directory is made `0700`, and one that exists — made at
+    /// the umask by an earlier version — is narrowed to `0700` with the Client's log files in it
+    /// `0600`. A file there that the appender did not name is left as it is.
     /// Verifies: ADR-0059
     #[cfg(unix)]
     #[test]
@@ -192,7 +219,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let fresh = dir.path().join("fresh").join("logs");
-        keep_private(&fresh).expect("created");
+        prepare(&fresh, true).expect("created");
         assert_eq!(mode(&fresh), 0o700);
 
         let earlier = dir.path().join("earlier");
@@ -201,8 +228,42 @@ mod tests {
         let log = earlier.join("supervisor.2026-10-21.log");
         std::fs::write(&log, b"line\n").expect("write");
         std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        keep_private(&earlier).expect("narrowed");
+        let other = earlier.join("other.log");
+        std::fs::write(&other, b"line\n").expect("write");
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        prepare(&earlier, true).expect("narrowed");
         assert_eq!(mode(&earlier), 0o700);
         assert_eq!(mode(&log), 0o600);
+        assert_eq!(mode(&other), 0o644, "not the appender's");
+    }
+
+    /// A log directory is kept private only beneath the state directory and only where a process
+    /// account is registered; otherwise — and in a directory the operator chose elsewhere, such
+    /// as `/var/log` — the directory and what it holds stay as they are (ADR-0059 clause 6).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn a_log_directory_elsewhere_or_without_a_process_account_is_left_as_it_is() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let state = Path::new("/var/lib/opamp-fleet/state");
+        assert!(is_private(&default_dir(state), state, true));
+        assert!(!is_private(&default_dir(state), state, false));
+        assert!(!is_private(Path::new("/var/log"), state, true));
+
+        let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o7777;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let chosen = dir.path().join("log");
+        std::fs::create_dir(&chosen).expect("mkdir");
+        std::fs::set_permissions(&chosen, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let foreign = chosen.join("syslog");
+        let log = chosen.join("supervisor.2026-10-21.log");
+        for file in [&foreign, &log] {
+            std::fs::write(file, b"line\n").expect("write");
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        }
+        prepare(&chosen, false).expect("left");
+        assert_eq!(mode(&chosen), 0o755);
+        assert_eq!(mode(&foreign), 0o644);
+        assert_eq!(mode(&log), 0o644);
     }
 }
