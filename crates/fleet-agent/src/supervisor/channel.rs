@@ -814,7 +814,10 @@ fn start(launch: &Launch) -> io::Result<Child> {
 ///   ([`crate::reconfigure::tombstone_name`]) — never its own directory, which a Supervisor added
 ///   again under the same name gets afresh — and the Client's account owns it and the directory
 ///   it is in, the Supervisors' root;
-/// - `dir` itself is no link;
+/// - `dir` itself is no link, and a link on the way to the Supervisors' root is followed only
+///   where root or the Client's account owns it, as the Client follows it
+///   ([`crate::storage::handle::open_beneath`]) — never one of the process account's, this
+///   service's own;
 /// - each of `shared` is a path beneath it, of plain names alone;
 /// - no link is followed beneath `dir`, and an entry, a link included, is removed as what it is;
 /// - only what this service's account owns is removed.
@@ -843,8 +846,8 @@ pub(crate) fn purge(
         ));
     };
     let at = |e: io::Error| format!("{}: {e}", dir.display());
-    let parent = handle::open_beneath(root, root, handle::SEARCH, None).map_err(at)?;
-    let top = handle::open_beneath(root, dir, handle::SEARCH, None).map_err(at)?;
+    let parent = handle::open_beneath(root, root, handle::SEARCH, None, client_uid).map_err(at)?;
+    let top = handle::open_beneath(root, dir, handle::SEARCH, None, client_uid).map_err(at)?;
     for (what, handle) in [(root, &parent), (dir, &top)] {
         let owner = handle::fstat(handle).map_err(at)?.st_uid;
         if owner != client_uid {
@@ -2401,6 +2404,47 @@ mod tests {
         purge(me, "agent", &tomb, &shared).expect("the tombstone's");
         assert!(!data.join("state").exists());
         assert!(live.join("state").exists());
+    }
+
+    /// On the way to the Supervisors' root the service follows the links the Client follows —
+    /// root's and the Client's account's — and not its own: it runs as the process account, which
+    /// is not the Client's. Run unprivileged, a link of this test's own account is refused where
+    /// the Client is another account; run as root, a link of the Client's account is followed and
+    /// one of a third account is refused (ADR-0053 clause 5, ADR-0017 clause 35).
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_purge_follows_the_clients_links_above_the_root_and_not_the_services() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        let tomb = crate::reconfigure::tombstone_name("agent");
+        let data = real.join("supervisors").join(&tomb).join("data");
+        std::fs::create_dir_all(&data).expect("mkdir");
+        std::fs::write(data.join("state"), b"x").expect("write");
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&real, &linked).expect("a link above the root");
+        let through = linked.join("supervisors").join(&tomb);
+        let shared = vec![PathBuf::from("data")];
+        let me = own_uid();
+        if me != 0 {
+            let error = purge(me + 1, "agent", &through, &shared)
+                .expect_err("the service's own link, for another Client");
+            assert!(error.contains("not trusted"), "{error}");
+            assert!(data.join("state").exists());
+            return;
+        }
+        let (client, other) = (4242, 4243);
+        let owned_by = |path: &Path, uid: u32| {
+            std::os::unix::fs::lchown(path, Some(uid), None).expect("lchown");
+        };
+        owned_by(&real.join("supervisors"), client);
+        owned_by(&real.join("supervisors").join(&tomb), client);
+        owned_by(&linked, other);
+        let error = purge(client, "agent", &through, &shared).expect_err("a third account's link");
+        assert!(error.contains("not trusted"), "{error}");
+        assert!(data.join("state").exists());
+        owned_by(&linked, client);
+        purge(client, "agent", &through, &shared).expect("the Client's own link");
+        assert!(!data.join("state").exists());
     }
 
     /// The Client asks once per purged Supervisor, naming the directories it shares for writing,
