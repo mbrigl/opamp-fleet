@@ -1532,6 +1532,9 @@ mod tests {
         let cache = made.join("cache");
         std::fs::create_dir_all(&cache).expect("mkdir");
         std::fs::set_permissions(&made, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // A data directory the Client shares for writing (ADR-0053 clause 6).
+        std::fs::set_permissions(gone.join("data"), std::fs::Permissions::from_mode(0o2770))
+            .expect("chmod");
         std::fs::write(cache.join("module"), b"x").expect("write");
         std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o555)).expect("chmod");
         std::fs::write(gone.join("instance-uid"), "uid").expect("write");

@@ -118,42 +118,12 @@ impl Captured {
     }
 }
 
-/// How long the Client waits for the service to remove one entry of a purged Supervisor's
-/// directory. A purge that outlasts it leaves an orphan, as one the Client cannot delete does
-/// (ADR-0017 clause 36).
-pub(crate) const PURGE_ANSWER: Duration = Duration::from_secs(60);
-
-/// The entries under `dir` that `uid` — the process account — owns and that are directories, by
-/// their path relative to `dir`: what the Client cannot empty itself. Nothing beneath such an
-/// entry is listed, and no link is followed.
-fn written_by(dir: &Path, uid: u32) -> io::Result<Vec<PathBuf>> {
-    use std::os::unix::fs::MetadataExt as _;
-    let mut found = Vec::new();
-    let mut pending = vec![PathBuf::new()];
-    while let Some(relative) = pending.pop() {
-        let entries = match std::fs::read_dir(dir.join(&relative)) {
-            Ok(entries) => entries,
-            // A directory the Client cannot list holds nothing it can name.
-            Err(e) if relative.as_os_str().is_empty() => return Err(e),
-            Err(_) => continue,
-        };
-        for entry in entries {
-            let entry = entry?;
-            let meta = entry.metadata()?;
-            if !meta.is_dir() {
-                continue;
-            }
-            let path = relative.join(entry.file_name());
-            if meta.uid() == uid {
-                found.push(path);
-            } else {
-                pending.push(path);
-            }
-        }
-    }
-    found.sort();
-    Ok(found)
-}
+/// How long the Client waits for the service to remove what the process account wrote under one
+/// purged Supervisor's directory, reaching the service included: as long as a program has to end
+/// when the Client's connection closes. However much the process account wrote, a purge that
+/// outlasts it leaves an orphan, as one the Client cannot delete does (ADR-0017 clause 36), and
+/// the Client's management goes on (ADR-0053 clause 2).
+pub(crate) const PURGE_ANSWER: Duration = CLOSE_GRACE;
 
 /// What the Client asks of the second service.
 #[derive(Debug, Serialize, Deserialize)]
@@ -169,15 +139,16 @@ pub(crate) enum Request {
     Signal { id: u64, signal: i32, group: bool },
     /// Kill the program, and its process group where it was asked to lead one.
     Stop { id: u64 },
-    /// Remove `entry` — a path relative to `dir`, the directory of the Supervisor named
-    /// `supervisor` — with everything beneath it, when the Supervisor is purged (ADR-0053
-    /// clause 5): what the process account wrote there and the Client cannot remove itself.
-    /// Answered by [`Reply::Purged`].
+    /// Remove what the process account wrote under `dir`, the directory of the Supervisor named
+    /// `supervisor`, when the Supervisor is purged (ADR-0053 clause 5): what the Client cannot
+    /// remove itself. `shared` names, relative to `dir`, the Client's directories the process
+    /// account's group writes, where alone the process account can have written; the service
+    /// looks for its own entries there itself. Answered by [`Reply::Purged`].
     Purge {
         id: u64,
         supervisor: String,
         dir: PathBuf,
-        entry: PathBuf,
+        shared: Vec<PathBuf>,
     },
 }
 
@@ -693,13 +664,13 @@ async fn serve_connection<F: Future<Output = ()>>(
                 }
                 // Off the connection's loop: a tree takes as long to remove as it is large, and the
                 // programs' output and signals do not wait for it.
-                Some(Request::Purge { id, supervisor, dir, entry }) => {
+                Some(Request::Purge { id, supervisor, dir, shared }) => {
                     let replies = replies.clone();
                     tokio::task::spawn_blocking(move || {
-                        let result = purge(client_uid, &supervisor, &dir, &entry);
+                        let result = purge(client_uid, &supervisor, &dir, &shared);
                         match &result {
-                            Ok(()) => info!(supervisor = %supervisor, entry = %dir.join(&entry).display(), "removed what the process account wrote"),
-                            Err(e) => warn!(supervisor = %supervisor, entry = %dir.join(&entry).display(), error = %e, "cannot remove what the process account wrote"),
+                            Ok(()) => info!(supervisor = %supervisor, dir = %dir.display(), "removed what the process account wrote"),
+                            Err(e) => warn!(supervisor = %supervisor, dir = %dir.display(), error = %e, "cannot remove what the process account wrote"),
                         }
                         replies.send(Reply::Purged { id, result });
                     });
@@ -832,23 +803,26 @@ fn start(launch: &Launch) -> io::Result<Child> {
     command.spawn()
 }
 
-/// Removes `entry`, a path relative to `dir`, with everything beneath it: what the process account
-/// wrote in the directory of the Supervisor named `supervisor`, which the Client purges (ADR-0053
-/// clause 5). The service holds the request to that and no more:
+/// Removes what the process account wrote under `dir`, the directory of the Supervisor named
+/// `supervisor`, which the Client purges (ADR-0053 clause 5): every entry this service's account
+/// owns in each of the directories `shared` names relative to `dir`, and in the directories beneath
+/// them it can read, with everything beneath it. The service holds the request to that and no
+/// more:
 ///
 /// - `dir` is absolute and named after the Supervisor, and the Client's account owns it;
-/// - `entry` is a path beneath it, of plain names alone;
-/// - no link is followed on the way — none below `dir`, and above it only one root owns — and the
-///   entry itself, a link included, is removed as what it is;
-/// - the entry is the process account's own.
+/// - each of `shared` is a path beneath it, of plain names alone;
+/// - no link is followed beneath `dir`, and an entry, a link included, is removed as what it is;
+/// - only what this service's account owns is removed.
+///
+/// What cannot be reached is passed over, and the rest goes on.
 ///
 /// # Errors
-/// Returns why the request is refused, or the first entry that cannot be removed.
+/// Returns why the request is refused, or the first entry that cannot be reached or removed.
 pub(crate) fn purge(
     client_uid: u32,
     supervisor: &str,
     dir: &Path,
-    entry: &Path,
+    shared: &[PathBuf],
 ) -> Result<(), String> {
     use crate::storage::handle;
     use std::os::fd::AsRawFd as _;
@@ -859,20 +833,6 @@ pub(crate) fn purge(
             dir.display()
         ));
     }
-    let names = entry
-        .components()
-        .map(|component| match component {
-            std::path::Component::Normal(name) => std::ffi::CString::new(name.as_bytes()).ok(),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()
-        .filter(|names| !names.is_empty())
-        .ok_or_else(|| {
-            format!(
-                "{} is not a path beneath the Supervisor's directory",
-                entry.display()
-            )
-        })?;
     let at = |e: io::Error| format!("{}: {e}", dir.display());
     let top = handle::open_beneath(dir, dir, handle::SEARCH, None).map_err(at)?;
     let owner = handle::fstat(&top).map_err(at)?.st_uid;
@@ -882,23 +842,74 @@ pub(crate) fn purge(
             dir.display()
         ));
     }
-    let (last, parents) = names.split_last().expect("not empty");
-    let mut parent = top;
-    for name in parents {
-        parent = handle::open(parent.as_raw_fd(), name, handle::SEARCH)
-            .map_err(|e| format!("{}: {e}", dir.join(entry).display()))?;
+    let mut first = None;
+    for relative in shared {
+        let path = dir.join(relative);
+        let names = relative
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(name) => std::ffi::CString::new(name.as_bytes()).ok(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|names| !names.is_empty());
+        let Some(names) = names else {
+            first.get_or_insert_with(|| {
+                format!(
+                    "{} is not a path beneath the Supervisor's directory",
+                    relative.display()
+                )
+            });
+            continue;
+        };
+        let (last, parents) = names.split_last().expect("not empty");
+        let reached = parents
+            .iter()
+            .try_fold(top.try_clone().map_err(at)?, |parent, name| {
+                handle::open(parent.as_raw_fd(), name, handle::SEARCH)
+            })
+            .and_then(|parent| handle::open(parent.as_raw_fd(), last, handle::DIRECTORY));
+        let result = match reached {
+            Ok(shared) => remove_own(&shared, &path),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        };
+        if let Err(e) = result {
+            first.get_or_insert(e);
+        }
     }
-    let path = dir.join(entry);
-    let st = handle::lstat_at(parent.as_raw_fd(), last)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    first.map_or(Ok(()), Err)
+}
+
+/// Removes every entry this service's account owns in `dir`, with everything beneath it, and
+/// looks the same way into each directory there that it can read: never through a link.
+fn remove_own(dir: &std::os::fd::OwnedFd, path: &Path) -> Result<(), String> {
+    use crate::storage::handle;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
     // SAFETY: geteuid(2) cannot fail and touches no memory.
-    if st.st_uid != unsafe { libc::geteuid() } {
-        return Err(format!(
-            "{} is not the process account's, and is not removed",
-            path.display()
-        ));
+    let me = unsafe { libc::geteuid() };
+    let mut first = None;
+    for name in handle::entries(dir).map_err(|e| format!("{}: {e}", path.display()))? {
+        let child = path.join(std::ffi::OsStr::from_bytes(name.as_bytes()));
+        let result = match handle::lstat_at(dir.as_raw_fd(), &name) {
+            Ok(st) if st.st_uid == me => {
+                handle::remove_tree_at(dir, &name, &child).map_err(|e| e.to_string())
+            }
+            Ok(st) if handle::is(&st, libc::S_IFDIR) => {
+                // A directory of the Client's it may not read holds nothing of its own.
+                match handle::open(dir.as_raw_fd(), &name, handle::DIRECTORY) {
+                    Ok(inner) => remove_own(&inner, &child),
+                    Err(_) => Ok(()),
+                }
+            }
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("{}: {e}", child.display())),
+        };
+        if let Err(e) = result {
+            first.get_or_insert(e);
+        }
     }
-    handle::remove_tree_at(&parent, last, &path).map_err(|e| e.to_string())
+    first.map_or(Ok(()), Err)
 }
 
 /// `HOME`, `USER` and `LOGNAME` of the account this service runs as — the process account — from
@@ -1297,43 +1308,41 @@ impl Channel {
     }
 
     /// Asks the service to remove what the process account wrote in `dir`, the directory of the
-    /// Supervisor named `supervisor`, and the Client cannot remove itself: each entry the process
-    /// account owns that is a directory, with everything beneath it (ADR-0053 clause 5). A file
-    /// the process account owns in a directory of the Client's is the Client's to remove, and is
-    /// left to the purge that follows.
+    /// Supervisor named `supervisor`, and the Client cannot remove itself (ADR-0053 clause 5), in
+    /// one request: the service looks for its own entries in the directories the Client shares
+    /// for writing beneath `dir` ([`crate::storage::handle::shared_for_writing`]). A file the
+    /// process account owns in a directory of the Client's is the Client's to remove too, and the
+    /// purge that follows removes it where the service did not.
     ///
     /// # Errors
-    /// Returns the first entry the service could not remove, or why it was not reached — in
-    /// time, too: [`PURGE_ANSWER`] for each entry.
+    /// Returns what the service could not remove, or why it was not reached — in time, too:
+    /// [`PURGE_ANSWER`] for the whole of it.
     pub(crate) async fn purge(&self, supervisor: &str, dir: &Path) -> io::Result<()> {
-        let entries = {
-            let (dir, uid) = (dir.to_path_buf(), self.shared.service_uid);
-            tokio::task::spawn_blocking(move || written_by(&dir, uid))
+        let shared = {
+            let dir = dir.to_path_buf();
+            tokio::task::spawn_blocking(move || crate::storage::handle::shared_for_writing(&dir))
                 .await
                 .map_err(io::Error::other)??
         };
-        if entries.is_empty() {
+        if shared.is_empty() {
             return Ok(());
         }
-        let connection = self.connection().await.map_err(unreachable)?;
-        for entry in entries {
-            let answer = tokio::time::timeout(
-                PURGE_ANSWER,
-                Arc::clone(&connection).purge(supervisor, dir, &entry),
-            )
+        let asked = async {
+            let connection = self.connection().await.map_err(unreachable)?;
+            connection.purge(supervisor, dir, shared).await
+        };
+        tokio::time::timeout(PURGE_ANSWER, asked)
             .await
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
-                        "the second service did not remove {} in time",
-                        dir.join(&entry).display()
+                        "the second service did not remove what the process account wrote under {} within {}s",
+                        dir.display(),
+                        PURGE_ANSWER.as_secs()
                     ),
                 )
-            })?;
-            answer?;
-        }
-        Ok(())
+            })?
     }
 
     /// The open connection, or a new one once the last is gone.
@@ -1543,7 +1552,12 @@ impl Connection {
         })
     }
 
-    async fn purge(self: Arc<Self>, supervisor: &str, dir: &Path, entry: &Path) -> io::Result<()> {
+    async fn purge(
+        self: Arc<Self>,
+        supervisor: &str,
+        dir: &Path,
+        shared: Vec<PathBuf>,
+    ) -> io::Result<()> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (purged_tx, purged) = oneshot::channel();
         {
@@ -1557,7 +1571,7 @@ impl Connection {
             id,
             supervisor: supervisor.to_string(),
             dir: dir.to_path_buf(),
-            entry: entry.to_path_buf(),
+            shared,
         };
         if let Err(e) = self.send(&request) {
             self.routes().purges.remove(&id);
@@ -2190,13 +2204,16 @@ mod tests {
     }
 
     /// A Supervisor's directory as a Managed Process leaves it under the process account: a data
-    /// directory holding a directory it made with `MkdirAll`'s `0755`, a read-only one inside it
-    /// as a Go module cache makes them, files, and a link out of the directory.
+    /// directory the Client shares for writing, holding a directory it made with `MkdirAll`'s
+    /// `0755`, a read-only one inside it as a Go module cache makes them, files, and a link out of
+    /// the directory.
     fn written_by_an_agent(supervisor: &Path, outside: &Path) {
         use std::os::unix::fs::PermissionsExt as _;
-        let made = supervisor.join("data").join("made");
+        let data = supervisor.join("data");
+        let made = data.join("made");
         let cache = made.join("cache");
         std::fs::create_dir_all(&cache).expect("mkdir");
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
         std::fs::set_permissions(&made, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         std::fs::write(cache.join("module"), b"x").expect("write");
         std::os::unix::fs::symlink(outside, made.join("out")).expect("a link");
@@ -2225,9 +2242,9 @@ mod tests {
         assert_eq!(std::fs::read(&outside).expect("outside"), b"kept");
     }
 
-    /// The service removes no more than a purge asks of it: an entry beneath the directory of the
-    /// Supervisor it names, of plain names, reached through no link, in a directory the Client's
-    /// account owns (ADR-0053 clause 5).
+    /// The service removes no more than a purge asks of it: its own entries in directories beneath
+    /// the directory of the Supervisor it names, of plain names, reached through no link, in a
+    /// directory the Client's account owns (ADR-0053 clause 5).
     /// Verifies: ADR-0053
     #[test]
     fn a_purge_removes_nothing_outside_the_supervisors_directory() {
@@ -2236,40 +2253,75 @@ mod tests {
         std::fs::create_dir(&outside).expect("mkdir");
         std::fs::write(outside.join("keep"), b"kept").expect("write");
         let supervisor = dir.path().join("supervisors").join("agent");
-        std::fs::create_dir_all(supervisor.join("data")).expect("mkdir");
+        let data = supervisor.join("data");
+        std::fs::create_dir_all(&data).expect("mkdir");
+        std::fs::write(data.join("state"), b"x").expect("write");
+        std::os::unix::fs::symlink(&outside, data.join("out")).expect("a link in data");
         std::os::unix::fs::symlink(&outside, supervisor.join("link")).expect("a link");
         let me = own_uid();
+        let shared = |path: &str| vec![PathBuf::from(path)];
 
-        for (name, at, entry) in [
-            ("other", supervisor.as_path(), Path::new("data")),
-            ("agent", Path::new("supervisors/agent"), Path::new("data")),
-            ("agent", supervisor.as_path(), Path::new("../outside")),
-            (
-                "agent",
-                supervisor.as_path(),
-                Path::new("data/../../outside"),
-            ),
-            ("agent", supervisor.as_path(), outside.as_path()),
-            ("agent", supervisor.as_path(), Path::new("")),
-            ("agent", supervisor.as_path(), Path::new("link/keep")),
+        for (name, at, within) in [
+            ("other", supervisor.as_path(), shared("data")),
+            ("agent", Path::new("supervisors/agent"), shared("data")),
+            ("agent", supervisor.as_path(), shared("../outside")),
+            ("agent", supervisor.as_path(), shared("data/../../outside")),
+            ("agent", supervisor.as_path(), vec![outside.clone()]),
+            ("agent", supervisor.as_path(), shared("")),
+            ("agent", supervisor.as_path(), shared("link")),
+            ("agent", supervisor.as_path(), shared("link/keep")),
         ] {
-            let refused = purge(me, name, at, entry);
-            assert!(
-                refused.is_err(),
-                "{name} {} {}",
-                at.display(),
-                entry.display()
-            );
+            let refused = purge(me, name, at, &within);
+            assert!(refused.is_err(), "{name} {} {within:?}", at.display());
         }
-        assert!(purge(me.wrapping_add(1), "agent", &supervisor, Path::new("data")).is_err());
+        assert!(purge(me.wrapping_add(1), "agent", &supervisor, &shared("data")).is_err());
         assert_eq!(std::fs::read(outside.join("keep")).expect("kept"), b"kept");
-        assert!(supervisor.join("data").is_dir());
+        assert!(data.join("state").exists());
 
-        // A link is removed as a link.
-        purge(me, "agent", &supervisor, Path::new("link")).expect("the link");
+        // Its own entries go, a link as a link; the directory the Client shares stays.
+        purge(me, "agent", &supervisor, &shared("data")).expect("the data directory's");
         assert_eq!(std::fs::read(outside.join("keep")).expect("kept"), b"kept");
-        purge(me, "agent", &supervisor, Path::new("data")).expect("the data directory");
-        assert!(!supervisor.join("data").exists());
+        assert!(data.is_dir());
+        assert_eq!(std::fs::read_dir(&data).expect("read").count(), 0);
+    }
+
+    /// The Client asks once per purged Supervisor, naming the directories it shares for writing,
+    /// and a service that does not answer holds it [`PURGE_ANSWER`] and no longer, however many
+    /// entries the process account wrote (ADR-0053 clause 2, ADR-0017 clause 36).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_purge_waits_for_the_service_once_however_much_was_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let supervisor = dir.path().join("supervisors").join("agent");
+        let data = supervisor.join("data");
+        std::fs::create_dir_all(&data).expect("mkdir");
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
+        for n in 0..20 {
+            std::fs::create_dir(data.join(n.to_string())).expect("an entry");
+        }
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let heard = Arc::clone(&asked);
+        let peer = peer::connect(move |request| {
+            if let Request::Purge { shared, .. } = request {
+                heard.lock().expect("lock").push(shared);
+            }
+            Vec::new()
+        })
+        .await;
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let error = peer
+            .channel
+            .purge("agent", &supervisor)
+            .await
+            .expect_err("no answer");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(started.elapsed() <= PURGE_ANSWER + Duration::from_secs(1));
+        assert_eq!(
+            *asked.lock().expect("lock"),
+            vec![vec![PathBuf::from("data")]]
+        );
     }
 
     /// What a program run to its end writes is kept up to its last [`CAPTURED`] bytes per stream,
