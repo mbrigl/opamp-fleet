@@ -495,7 +495,7 @@ impl Shared {
 /// Supervisor's directory. Every component beneath `root` is opened through the handle of the one
 /// before it and none through a link, whoever owns it, so a link the process account placed in a
 /// directory it writes cannot turn the Client's change on something else of its own (ADR-0053
-/// clause 6); the links on the way to `root` are resolved as its path says
+/// clause 6); on the way to `root` only the system's own links are followed
 /// ([`handle::open_beneath`]). The group and the mode are changed through the directory's own
 /// handle. A parent this creates is passed through, `0710`, so the directory is reached; each
 /// parent that must be more is named by its own call.
