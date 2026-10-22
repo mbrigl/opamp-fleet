@@ -6,14 +6,18 @@
 //! is the link, never what it names, and a walk enters no link. A directory on the way is held
 //! open without `FILE_SHARE_DELETE` for as long as anything beneath it is reached, so nobody can
 //! rename it, or replace it with a link, under the walk (CreateFileW): the path from the held
-//! directory to the next entry names the same directory throughout.
+//! directory to the next entry names the same directory throughout. A regular file with a second
+//! hard link is passed over and named: its other name may stand anywhere on the volume, and
+//! changing it would change that too.
 //!
 //! A DACL is set with `SetKernelObjectSecurity` on the handle, which changes that one object.
 //! Learn points file systems to `SetSecurityInfo` and `SetNamedSecurityInfo` instead, because
-//! those propagate what a directory passes on to what it holds; that propagation is exactly what
-//! is not wanted here, since nothing documents that it stays out of a junction a process account
-//! placed. What a directory passes on to what it already holds is applied by the walk itself
-//! ([`super::acl`]).
+//! those propagate what a directory passes on to what it holds (SetSecurityInfo, Remarks); that
+//! propagation is exactly what is not wanted here, since nothing documents that it stays out of a
+//! junction a process account placed, or out of what the process account owns. What a directory
+//! passes on to what it already holds is applied by the walk itself ([`super::acl`]). Whether the
+//! system keeps a DACL's protection set this way is not documented either: every DACL set is read
+//! back, and one whose protection did not hold fails the change.
 
 use std::fs::File;
 use std::io;
@@ -32,21 +36,28 @@ const WRITE_DAC: u32 = 0x0004_0000;
 const WRITE_OWNER: u32 = 0x0008_0000;
 const FILE_READ_ATTRIBUTES: u32 = 0x0080;
 const SYNCHRONIZE: u32 = 0x0010_0000;
-/// `FILE_FLAG_BACKUP_SEMANTICS`, which opens a directory, and `FILE_FLAG_OPEN_REPARSE_POINT`,
-/// which opens a link as itself.
+/// `FILE_FLAG_BACKUP_SEMANTICS`, which opens a directory — and, where the backup and restore
+/// privileges are enabled ([`super::BackupPrivileges`]), whatever its DACL says — and
+/// `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a link as itself.
 const AS_ITSELF: u32 = 0x0200_0000 | 0x0020_0000;
 const FILE_SHARE_READ: u32 = 0x1;
 const FILE_SHARE_WRITE: u32 = 0x2;
 const FILE_SHARE_DELETE: u32 = 0x4;
 /// `FILE_ATTRIBUTE_REPARSE_POINT`.
 const REPARSE_POINT: u32 = 0x400;
+/// `ERROR_ACCESS_DENIED`.
+const ACCESS_DENIED: i32 = 5;
+/// `ERROR_SHARING_VIOLATION`.
+const SHARING_VIOLATION: i32 = 32;
 
 /// What an entry is opened for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     /// Its attributes alone: a directory passed through.
     Pass,
-    /// Its owner and its DACL, read and changed.
+    /// Its owner and its DACL, read.
+    Read,
+    /// Its owner and its DACL, read, and its DACL changed.
     Dacl,
     /// Its owner changed too.
     Owner,
@@ -57,6 +68,7 @@ impl Access {
         let read = FILE_READ_ATTRIBUTES | SYNCHRONIZE;
         match self {
             Access::Pass => read,
+            Access::Read => read | READ_CONTROL,
             Access::Dacl => read | READ_CONTROL | WRITE_DAC,
             Access::Owner => read | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
         }
@@ -71,11 +83,13 @@ pub struct Entry {
     pub dir: bool,
     /// A symbolic link or a junction.
     pub link: bool,
+    /// How many names the entry has.
+    pub links: u32,
 }
 
 impl Entry {
-    /// Opens `path` as itself for `access`; a directory held so that nobody renames it meanwhile
-    /// where `hold`.
+    /// Opens `path` as itself for `access`; held, so that nobody renames it meanwhile, where
+    /// `hold`.
     ///
     /// # Errors
     /// Returns why it cannot be opened: `NotFound` where it does not exist.
@@ -88,12 +102,20 @@ impl Entry {
             .open(path)?;
         let meta = file.metadata()?;
         let link = meta.file_attributes() & REPARSE_POINT != 0;
+        let links = super::link_count(file.as_raw_handle())?;
         Ok(Entry {
             path: path.to_path_buf(),
             dir: meta.is_dir() && !link,
             link,
+            links,
             file,
         })
+    }
+
+    /// A regular file with more than one name.
+    #[must_use]
+    pub fn hard_linked(&self) -> bool {
+        !self.dir && !self.link && self.links > 1
     }
 
     /// The entry's owner.
@@ -113,12 +135,23 @@ impl Entry {
         Dacl::parse(&text).map_err(io::Error::other)
     }
 
-    /// Sets the entry's DACL to `dacl`, on this object alone.
+    /// Sets the entry's DACL to `dacl`, on this object alone, and reads it back: a DACL whose
+    /// protection from what the parent passes on did not hold is an error.
     ///
     /// # Errors
-    /// Returns why it could not be set.
+    /// Returns why it could not be set, or that its protection did not hold.
     pub fn set_dacl(&self, dacl: &Dacl) -> io::Result<()> {
-        self.set(&dacl.text(), DACL_SECURITY_INFORMATION)
+        self.set(&dacl.text(), DACL_SECURITY_INFORMATION)?;
+        let held = self.dacl()?;
+        if held.protected() != dacl.protected() {
+            return Err(io::Error::other(format!(
+                "{}: the system kept {} where {} was set",
+                self.path.display(),
+                held.text(),
+                dacl.text()
+            )));
+        }
+        Ok(())
     }
 
     /// Makes `owner` — a SID or an SDDL alias such as `BA` — the entry's owner.
@@ -185,19 +218,86 @@ pub fn open_beneath(
     unreachable!("the loop returns at its last component")
 }
 
+/// What a walk passed over, each to be named in a warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Passed {
+    /// The account the walk leaves alone owns it; nothing beneath it was reached either.
+    Owned(PathBuf),
+    /// A regular file with a second hard link.
+    HardLinked(PathBuf),
+    /// It could not be opened to be changed, and the walk may go on without it.
+    Unreadable(PathBuf),
+}
+
+/// How a walk goes: what it opens each entry for, whose entries it leaves alone, and whether an
+/// entry it cannot open is passed over rather than an error — for a walk that only adds.
+#[derive(Debug, Clone, Copy)]
+pub struct Walk<'a> {
+    pub access: Access,
+    pub skip: Option<&'a Sid>,
+    pub lenient: bool,
+}
+
+impl Walk<'_> {
+    /// Opens the entry `path` the walk reached: `Ok(None)` where it is gone, `Err(passed)` inside
+    /// where it is passed over. A directory is held; one that cannot be held — something holds it
+    /// open for deleting — is the skipped account's, or an error. Whose an entry is that cannot be
+    /// opened for the walk is asked of one handle opened to read it alone.
+    fn open(&self, path: &Path) -> io::Result<Option<Result<Entry, Passed>>> {
+        let opened = match Entry::open(path, self.access, true) {
+            Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => {
+                match Entry::open(path, self.access, false) {
+                    Ok(entry) if entry.dir && !self.owned(&entry) => return Err(e),
+                    unheld => unheld,
+                }
+            }
+            opened => opened,
+        };
+        let entry = match opened {
+            Ok(entry) => entry,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.raw_os_error() == Some(ACCESS_DENIED) => {
+                let owned = Entry::open(path, Access::Read, false)
+                    .ok()
+                    .is_some_and(|read| self.owned(&read));
+                if owned {
+                    return Ok(Some(Err(Passed::Owned(path.to_path_buf()))));
+                }
+                if self.lenient {
+                    return Ok(Some(Err(Passed::Unreadable(path.to_path_buf()))));
+                }
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
+        if self.owned(&entry) {
+            return Ok(Some(Err(Passed::Owned(path.to_path_buf()))));
+        }
+        if entry.hard_linked() {
+            return Ok(Some(Err(Passed::HardLinked(path.to_path_buf()))));
+        }
+        Ok(Some(Ok(entry)))
+    }
+
+    /// Whether the skipped account owns `entry`.
+    fn owned(&self, entry: &Entry) -> bool {
+        self.skip
+            .is_some_and(|skip| entry.owner().ok().as_ref() == Some(skip))
+    }
+}
+
 /// Walks what the directory `top` holds, top-down, calling `visit` for each entry with its
-/// parent: never into a link, and past every entry `skip` owns with all beneath it, each named in
-/// `skipped`. `visit` answers whether to go into a directory. An entry gone meanwhile is passed
-/// over.
+/// parent: never into a link, past every entry the walk's skipped account owns with all beneath
+/// it, and past every regular file with a second hard link, each named in `passed`. `visit`
+/// answers whether to go into a directory. An entry gone meanwhile is passed over.
 ///
 /// # Errors
 /// Returns the first error opening or visiting an entry.
 pub fn walk(
     top: &Entry,
-    access: Access,
-    skip: Option<&Sid>,
+    how: Walk<'_>,
     visit: &mut dyn FnMut(&Entry, &Entry) -> io::Result<bool>,
-    skipped: &mut Vec<PathBuf>,
+    passed: &mut Vec<Passed>,
 ) -> io::Result<()> {
     for item in std::fs::read_dir(&top.path)? {
         let path = match item {
@@ -205,64 +305,27 @@ pub fn walk(
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e),
         };
-        let entry = match open_held(&path, access) {
-            Ok(entry) => entry,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            // What may not be changed is first asked whose it is: the skipped account's needs no
-            // change.
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && skip.is_some() => {
-                let owned = Entry::open(&path, Access::Pass, false)
-                    .ok()
-                    .and_then(|entry| {
-                        let read = std::fs::OpenOptions::new()
-                            .access_mode(READ_CONTROL)
-                            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-                            .custom_flags(AS_ITSELF)
-                            .open(&entry.path)
-                            .ok()?;
-                        super::file_owner(read.as_raw_handle()).ok()
-                    });
-                if owned.as_ref() == skip {
-                    skipped.push(path);
-                    continue;
-                }
-                return Err(e);
+        let entry = match how.open(&path)? {
+            None => continue,
+            Some(Err(skipped)) => {
+                passed.push(skipped);
+                continue;
             }
-            Err(e) => return Err(e),
+            Some(Ok(entry)) => entry,
         };
-        if skip.is_some_and(|skip| entry.owner().ok().as_ref() == Some(skip)) {
-            skipped.push(path);
-            continue;
-        }
         if visit(&entry, top)? && entry.dir {
-            walk(&entry, access, skip, visit, skipped)?;
+            walk(&entry, how, visit, passed)?;
         }
     }
     Ok(())
 }
 
-/// `ERROR_SHARING_VIOLATION`.
-const SHARING_VIOLATION: i32 = 32;
-
-/// Opens `path` as itself, held where it is a directory: a file that something holds open for
-/// deleting cannot be held, and needs no holding, as nothing is reached through it.
-fn open_held(path: &Path, access: Access) -> io::Result<Entry> {
-    match Entry::open(path, access, true) {
-        Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => {
-            let entry = Entry::open(path, access, false)?;
-            if entry.dir {
-                return Err(e);
-            }
-            Ok(entry)
-        }
-        entry => entry,
-    }
-}
-
 /// Grants `sid` the ACEs `[on_top, on_dir, on_file]`: `on_top` on `top`, a directory or a file,
 /// `on_dir` on each directory and `on_file` on each file beneath it, each in place of what that
-/// account was granted there, never through a link and past what `skip` owns. Changes nothing
-/// where `top` holds `on_top` already and `again` is not asked. Returns what was skipped.
+/// account was granted there — never through a link, past what `skip` owns, past a file with a
+/// second hard link, and past an entry that cannot be opened, as the grant only adds. Changes
+/// nothing where `top` holds `on_top` already and `again` is not asked. Returns what was passed
+/// over, `top` itself where it is passed over.
 ///
 /// # Errors
 /// Returns the first entry whose DACL could not be read or set.
@@ -272,25 +335,33 @@ pub fn grant_tree(
     [on_top, on_dir, on_file]: [&[String]; 3],
     skip: Option<&Sid>,
     again: bool,
-) -> io::Result<Vec<PathBuf>> {
-    let mut skipped = Vec::new();
+) -> io::Result<Vec<Passed>> {
+    let mut passed = Vec::new();
+    if top.hard_linked() {
+        passed.push(Passed::HardLinked(top.path.clone()));
+        return Ok(passed);
+    }
     let own = |entry: &Entry| if entry.dir { on_dir } else { on_file };
     let dacl = top.dacl()?;
     if !again && on_top.iter().all(|ace| dacl.holds(ace)) {
-        return Ok(skipped);
+        return Ok(passed);
     }
     top.set_dacl(&dacl.granting(sid, on_top))?;
     if top.dir {
+        let how = Walk {
+            access: Access::Dacl,
+            skip,
+            lenient: true,
+        };
         walk(
             top,
-            Access::Dacl,
-            skip,
+            how,
             &mut |entry, _| {
                 entry.set_dacl(&entry.dacl()?.granting(sid, own(entry)))?;
                 Ok(true)
             },
-            &mut skipped,
+            &mut passed,
         )?;
     }
-    Ok(skipped)
+    Ok(passed)
 }

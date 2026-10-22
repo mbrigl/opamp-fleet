@@ -706,6 +706,150 @@ mod system {
         check(unsafe { SetKernelObjectSecurity(handle.cast(), info, (descriptor.0).0) })
     }
 
+    /// BY_HANDLE_FILE_INFORMATION, its three FILETIMEs as pairs of 32-bit words.
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileInformation {
+        attributes: u32,
+        times: [u32; 6],
+        volume_serial_number: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+
+    /// LUID_AND_ATTRIBUTES.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct LuidAndAttributes {
+        low: u32,
+        high: i32,
+        attributes: u32,
+    }
+
+    /// TOKEN_PRIVILEGES for up to three privileges.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct TokenPrivileges {
+        count: u32,
+        privileges: [LuidAndAttributes; 3],
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileInformationByHandle(file: Handle, info: *mut FileInformation) -> Bool;
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn LookupPrivilegeValueW(system: *const u16, name: *const u16, luid: *mut [u32; 2])
+            -> Bool;
+        fn AdjustTokenPrivileges(
+            token: Handle,
+            disable_all: Bool,
+            new: *const TokenPrivileges,
+            len: u32,
+            previous: *mut TokenPrivileges,
+            returned: *mut u32,
+        ) -> Bool;
+    }
+
+    /// How many names the file `handle` names has (`nNumberOfLinks`, GetFileInformationByHandle).
+    ///
+    /// # Errors
+    /// Returns why the information could not be read.
+    pub fn link_count(handle: RawHandle) -> io::Result<u32> {
+        let mut info = FileInformation::default();
+        // SAFETY: a handle the caller holds and a structure of the documented layout.
+        check(unsafe { GetFileInformationByHandle(handle.cast(), &mut info) })?;
+        Ok(info.links)
+    }
+
+    /// The backup, restore and take-ownership privileges of this process's token, enabled while
+    /// this lives and returned to what they were when it drops: with them, an entry opened with
+    /// `FILE_FLAG_BACKUP_SEMANTICS` is opened whatever its DACL says, and its owner may be set to
+    /// the Administrators (CreateFileW, AdjustTokenPrivileges). Only an elevated administrator
+    /// holds them; where the token lacks one, nothing is enabled for it, and what it would have
+    /// opened fails as it would have without.
+    pub struct BackupPrivileges {
+        token: OwnedHandle,
+        previous: TokenPrivileges,
+    }
+
+    impl BackupPrivileges {
+        /// Enables the privileges.
+        ///
+        /// # Errors
+        /// Returns why the token could not be opened or adjusted.
+        pub fn enable() -> io::Result<BackupPrivileges> {
+            const TOKEN_ADJUST_PRIVILEGES: u32 = 0x0020;
+            const SE_PRIVILEGE_ENABLED: u32 = 0x2;
+            let mut token: Handle = std::ptr::null_mut();
+            // SAFETY: the pseudo-handle of this process; `token` receives a handle owned below.
+            check(unsafe {
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                    &mut token,
+                )
+            })?;
+            let token = owned(token)?;
+            let mut new = TokenPrivileges {
+                count: 3,
+                ..TokenPrivileges::default()
+            };
+            for (slot, name) in new.privileges.iter_mut().zip([
+                "SeBackupPrivilege",
+                "SeRestorePrivilege",
+                "SeTakeOwnershipPrivilege",
+            ]) {
+                let name = wide(OsStr::new(name));
+                let mut luid = [0u32; 2];
+                // SAFETY: a NUL-terminated name and a LUID to write.
+                check(unsafe {
+                    LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut luid)
+                })?;
+                *slot = LuidAndAttributes {
+                    low: luid[0],
+                    high: i32::from_ne_bytes(luid[1].to_ne_bytes()),
+                    attributes: SE_PRIVILEGE_ENABLED,
+                };
+            }
+            let mut previous = TokenPrivileges::default();
+            let mut returned = 0u32;
+            // SAFETY: a token opened for adjusting, and structures of the sizes passed.
+            check(unsafe {
+                AdjustTokenPrivileges(
+                    token.as_raw_handle().cast(),
+                    0,
+                    &new,
+                    std::mem::size_of::<TokenPrivileges>() as u32,
+                    &mut previous,
+                    &mut returned,
+                )
+            })?;
+            Ok(BackupPrivileges { token, previous })
+        }
+    }
+
+    impl Drop for BackupPrivileges {
+        fn drop(&mut self) {
+            // SAFETY: the token this holds, and the previous state the adjustment returned.
+            unsafe {
+                AdjustTokenPrivileges(
+                    self.token.as_raw_handle().cast(),
+                    0,
+                    &self.previous,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+    }
+
     #[link(name = "kernel32")]
     extern "system" {
         fn CreateFileW(
