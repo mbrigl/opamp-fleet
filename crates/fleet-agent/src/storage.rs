@@ -501,13 +501,29 @@ pub(crate) fn create_shared_dir(
 }
 
 /// Makes the regular file at `path` readable by `group` and no wider: `0640`, owned by the group.
+///
+/// A file with a second hard link is left as it is and named in a warning, as the hand-over leaves
+/// one (ADR-0053 clause 10): its other name may be one of the Client's own records — a link to
+/// `client-key.pem` placed while the Managed Process still ran as the Client — and sharing it would
+/// share that record too.
 #[cfg(unix)]
 fn share_file(path: &Path, group: ProcessAccountGroup) -> io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Ok(());
+    }
+    if meta.nlink() > 1 {
+        warn!(
+            file = %path.display(),
+            "the file has a second hard link and is not shared with the process account's group"
+        );
+        return Ok(());
+    }
     std::os::unix::fs::fchown(&file, None, Some(group.0))?;
     file.set_permissions(std::fs::Permissions::from_mode(0o640))
 }
@@ -901,6 +917,36 @@ mod tests {
         let group = own_group();
         let after = Storage::supervised(supervisor, Some(group)).expect("with one");
         assert_eq!(mode_and_group(&after.config_dir()), (0o750, group.0));
+        assert_eq!(
+            mode_and_group(&after.config_dir().join("fleet")),
+            (0o640, group.0)
+        );
+    }
+
+    /// A hard link in `config/` to one of the Client's records — placed while the Managed Process
+    /// still ran as the Client — is not shared when the storage opens: the record behind it stays
+    /// `0600`, and the Client's alone.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_in_config_to_a_private_file_is_not_shared() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let supervisor = state.join("agent");
+        let before = Storage::new(supervisor.clone()).expect("without a process account");
+        before
+            .store_remote_config(&roled_offer(&[("fleet", b"service: {}\n", "")]))
+            .expect("store");
+        let key = state.join("client-key.pem");
+        write_private(&key, b"KEY").expect("the Client's key");
+        std::fs::hard_link(&key, before.config_dir().join("key"))
+            .expect("a link the Managed Process placed");
+        let at_first = mode_and_group(&key);
+        assert_eq!(at_first.0, 0o600);
+
+        let group = own_group();
+        let after = Storage::supervised(supervisor, Some(group)).expect("with one");
+        assert_eq!(mode_and_group(&key), at_first, "the key stays the Client's");
         assert_eq!(
             mode_and_group(&after.config_dir().join("fleet")),
             (0o640, group.0)
