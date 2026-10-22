@@ -150,10 +150,16 @@ fn start_log_file(config: &crate::config::ClientConfig) {
         .dir
         .clone()
         .unwrap_or_else(|| crate::logging::default_dir(&config.state_dir));
+    let supervisors: Vec<&str> = config
+        .supervisors
+        .iter()
+        .map(|block| block.name.as_str())
+        .collect();
     let private = match crate::logging::is_private(
         &dir,
         &config.state_dir,
         &config.supervisors_root(),
+        &supervisors,
         config.process_account_group.is_some(),
     ) {
         Ok(private) => private,
