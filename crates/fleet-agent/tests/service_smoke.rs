@@ -323,6 +323,88 @@ impl Drop for TemporaryAccount {
     }
 }
 
+/// A temporary role account with a group of its own, made with the lines the refusal of a
+/// missing process account shows on macOS: `dseditgroup` creates the group, and `sysadminctl
+/// -roleAccount` the account, with that group as its primary one. Removed however the test ends.
+#[cfg(target_os = "macos")]
+struct TemporaryAccount(&'static str);
+
+#[cfg(target_os = "macos")]
+impl TemporaryAccount {
+    fn create(name: &'static str) -> Self {
+        // A role account's uid lies in a range `sysadminctl` names, which macOS releases have
+        // moved: the first free id of each range is tried, and the account looked up after.
+        for range in [450..500, 300..400] {
+            let Some(id) = range.into_iter().find(|id| id_is_free(*id)) else {
+                continue;
+            };
+            let id = id.to_string();
+            let group = Command::new("dseditgroup")
+                .args(["-o", "create", "-i", &id, name])
+                .status()
+                .expect("run dseditgroup");
+            assert!(group.success(), "cannot create the group {name}");
+            let account = Self(name);
+            let _ = Command::new("sysadminctl")
+                .args(["-addUser", name, "-UID", &id, "-GID", &id, "-roleAccount"])
+                .status()
+                .expect("run sysadminctl");
+            // `sysadminctl`'s exit status is not taken on faith: the account is looked up.
+            let found = fleet_agent::service::run_as::account_of(id.parse().expect("an id"))
+                .expect("the password database");
+            if found
+                .as_ref()
+                .is_some_and(|found| found.name == name && found.gid.to_string() == id)
+            {
+                return account;
+            }
+            drop(account);
+        }
+        panic!("sysadminctl created no role account {name} with a group of its own");
+    }
+}
+
+/// Whether neither an account nor a group holds `id`.
+#[cfg(target_os = "macos")]
+fn id_is_free(id: u32) -> bool {
+    // SAFETY: a lookup by id; the entry it may return is not read.
+    let group = unsafe { libc::getgrgid(id) };
+    group.is_null()
+        && fleet_agent::service::run_as::account_of(id)
+            .expect("the password database")
+            .is_none()
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for TemporaryAccount {
+    fn drop(&mut self) {
+        let _ = Command::new("dscl")
+            .args([".", "-delete", &format!("/Users/{}", self.0)])
+            .status();
+        let _ = Command::new("dseditgroup")
+            .args(["-o", "delete", self.0])
+            .status();
+    }
+}
+
+/// The accounts the process account's smoke test creates: on macOS a role account's name begins
+/// with `_`.
+#[cfg(target_os = "linux")]
+const SMOKE_ACCOUNTS: (&str, &str) = ("opamp-fleet-smoke", "opamp-fleet-smoke-agents");
+#[cfg(target_os = "macos")]
+const SMOKE_ACCOUNTS: (&str, &str) = ("_opamp-fleet-smoke", "_opamp-fleet-smoke-agents");
+
+/// A temporary directory both accounts reach: under `/tmp` on Linux, and under `/private/tmp` on
+/// macOS, where the default one lies in the invoking user's own `0700` directory and `/tmp` is a
+/// link.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn shared_tempdir() -> tempfile::TempDir {
+    #[cfg(target_os = "macos")]
+    return tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    #[cfg(target_os = "linux")]
+    tempfile::tempdir().expect("tempdir")
+}
+
 /// Install under an account, then re-install without `--run-as`, as every package upgrade does:
 /// the service still runs as the account, and the unit the Client wrote leaves it the privileges
 /// a Managed Process needs for `sudo` and setuid helpers — no `no_new_privs`, and `/` not mounted
@@ -448,9 +530,18 @@ fn add_to_group(member: &str, group: &str) {
     assert!(status.success(), "cannot add {member} to {group}");
 }
 
+#[cfg(target_os = "macos")]
+fn add_to_group(member: &str, group: &str) {
+    let status = Command::new("dseditgroup")
+        .args(["-o", "edit", "-a", member, "-t", "user", group])
+        .status()
+        .expect("run dseditgroup");
+    assert!(status.success(), "cannot add {member} to {group}");
+}
+
 /// What the Managed Process below found out about itself, once it has written it: its pid, its
 /// account, and what it could and could not reach.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn reported(result: &Path, other_than: Option<u32>) -> std::collections::BTreeMap<String, String> {
     wait_for(
         "the Managed Process to report",
@@ -468,14 +559,45 @@ fn reported(result: &Path, other_than: Option<u32>) -> std::collections::BTreeMa
     )
 }
 
-/// The account a running process runs as, asked of `ps`.
-#[cfg(target_os = "linux")]
+/// The account a running process runs as: its uid asked of `ps`, its name of the password
+/// database, which no column width shortens.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn user_of(pid: &str) -> String {
     let out = Command::new("ps")
-        .args(["-o", "user=", "-p", pid])
+        .args(["-o", "uid=", "-p", pid])
         .output()
         .expect("run ps");
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let Ok(uid) = uid.parse() else {
+        return format!("no process {pid}");
+    };
+    fleet_agent::service::run_as::account_of(uid)
+        .expect("the password database")
+        .map_or_else(|| format!("uid {uid}"), |account| account.name)
+}
+
+/// The uid and primary gid of `account`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ids_of(account: &str) -> (u32, u32) {
+    let id = |flag: &str| -> u32 {
+        let out = Command::new("id")
+            .args([flag, account])
+            .output()
+            .expect("run id");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("an id")
+    };
+    (id("-u"), id("-g"))
+}
+
+/// The owner, group and mode of `path`, set-ID bits included.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn owner_and_mode(path: &Path) -> (u32, u32, u32) {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(path).expect("metadata");
+    (meta.uid(), meta.gid(), meta.mode() & 0o7777)
 }
 
 /// A Managed Process under a process account (ADR-0053): installed with `--run-as` and
@@ -487,9 +609,10 @@ fn user_of(pid: &str) -> String {
 /// accounts and leaves the program its data: what it wrote is still its own, and it writes there
 /// again. `--no-process-account` returns the program to the Client's account. The in-process tests stand in for the second
 /// service under the test's own uid; this is the one place the shipped binary starts a program
-/// over the socket under another account.
+/// over the socket under another account. On Linux under systemd, and on macOS under launchd with
+/// role accounts made as the refusal of a missing account says.
 /// Verifies: ADR-0053
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_runs() {
@@ -500,11 +623,11 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
         "a leftover {} service from an earlier run — remove it before running this",
         service_name()
     );
-    let client_account = TemporaryAccount::create("opamp-fleet-smoke");
-    let process_account = TemporaryAccount::create("opamp-fleet-smoke-agents");
+    let client_account = TemporaryAccount::create(SMOKE_ACCOUNTS.0);
+    let process_account = TemporaryAccount::create(SMOKE_ACCOUNTS.1);
     add_to_group(client_account.0, process_account.0);
 
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = shared_tempdir();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
         .expect("chmod the temporary directory");
     let root = dir.path().join("install");
@@ -621,16 +744,17 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     // The second service restarts, and its programs with it: the Client reaches it again and
     // starts the program again, under the process account.
     let first_pid: u32 = first["pid"].parse().expect("a pid");
+    let agents = fleet_agent::service::manager::agents_service_name();
+    #[cfg(target_os = "linux")]
     let restarted = Command::new("systemctl")
-        .args([
-            "restart",
-            &format!(
-                "{}.service",
-                fleet_agent::service::manager::agents_service_name()
-            ),
-        ])
+        .args(["restart", &format!("{agents}.service")])
         .status()
         .expect("run systemctl restart");
+    #[cfg(target_os = "macos")]
+    let restarted = Command::new("launchctl")
+        .args(["kickstart", "-k", &format!("system/{agents}")])
+        .status()
+        .expect("run launchctl kickstart");
     assert!(restarted.success(), "cannot restart the second service");
     let again = reported(&result, Some(first_pid));
     assert_eq!(user_of(&again["pid"]), process_account.0, "{again:?}");
@@ -645,18 +769,13 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
         reinstalled.contains(&format!("processes: {} (kept from", process_account.0)),
         "{reinstalled}"
     );
-    let written = Command::new("stat")
-        .args(["-c", "%U %G %a"])
-        .arg(data.join("written"))
-        .arg(&data)
-        .output()
-        .expect("run stat");
+    let (client_uid, _) = ids_of(client_account.0);
+    let (process_uid, process_gid) = ids_of(process_account.0);
     assert_eq!(
-        String::from_utf8_lossy(&written.stdout),
-        format!(
-            "{p} {p} 644\n{} {p} 2770\n",
-            client_account.0,
-            p = process_account.0
+        (owner_and_mode(&data.join("written")), owner_and_mode(&data)),
+        (
+            (process_uid, process_gid, 0o644),
+            (client_uid, process_gid, 0o2770)
         ),
         "the hand-over took the data from the process account"
     );
