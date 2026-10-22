@@ -471,7 +471,17 @@ impl Shared {
 /// mode of ADR-0053 clause 6. Where no process account is registered it is
 /// [`create_private_dir`], exactly as before.
 ///
-/// The parents this creates are not shared: each that must be is named by its own call.
+/// Every component is opened through the handle of the one before it, and none through a link
+/// but one root owns — a system's `/var/run`, macOS's `/var` — so a link the process account
+/// placed in a directory it writes cannot turn the Client's change on something else of its own
+/// (ADR-0053 clause 6). The group and the mode are changed through the directory's own handle. A
+/// parent this creates is passed through, `0710`, so the directory is reached; each parent that
+/// must be more is named by its own call.
+///
+/// A data directory (`Written`) that was not yet shared — one a Managed Process wrote while it ran
+/// as the Client, before a process account was registered — gives what the Client owns in it to
+/// the group too, writable by it, so the Managed Process goes on writing its own state: every
+/// directory and every regular file with one name, never through a link.
 pub(crate) fn create_shared_dir(
     dir: &Path,
     group: Option<ProcessAccountGroup>,
@@ -480,24 +490,304 @@ pub(crate) fn create_shared_dir(
     let Some(group) = group else {
         return create_private_dir(dir);
     };
-    std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        // Never through a link: what is shared is the directory the Client made.
-        if !std::fs::symlink_metadata(dir)?.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("{} is not a directory", dir.display()),
-            ));
+        let traversed =
+            |made: &std::os::fd::OwnedFd| handle::share(made, group, Shared::Traversed.mode());
+        let made = handle::open_dir(dir, Some(&traversed))
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
+        let before = handle::fstat(&made)?;
+        handle::share(&made, group, shared.mode())?;
+        if shared == Shared::Written
+            && (before.st_gid != group.0 || handle::mode(&before) != shared.mode())
+        {
+            handle::give_written(&made, group, dir);
         }
-        // The group first: a change of group may clear the set-group-ID bit the mode sets.
-        std::os::unix::fs::lchown(dir, None, Some(group.0))?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(shared.mode()))?;
     }
     #[cfg(not(unix))]
-    let _ = (group, shared);
+    {
+        std::fs::create_dir_all(dir)?;
+        let _ = (group, shared);
+    }
     Ok(())
+}
+
+/// Directories reached through handles, never through a link: what the Client changes where the
+/// process account may write (ADR-0053 clauses 5, 6 and 10).
+#[cfg(unix)]
+pub(crate) mod handle {
+    use std::ffi::{CStr, CString, OsStr};
+    use std::io;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _, OwnedFd, RawFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::{Component, Path};
+
+    use tracing::warn;
+
+    use super::ProcessAccountGroup;
+
+    /// A directory, opened as one and never through a link.
+    pub(crate) const DIRECTORY: libc::c_int =
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+    /// A regular file, opened to change its owner and mode: never through a link, and never
+    /// blocking on a FIFO or taking a terminal.
+    const FILE: libc::c_int =
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
+
+    /// `name` in `dir`, opened with `flags`; the last component never follows a link where
+    /// `flags` says `O_NOFOLLOW`.
+    pub(crate) fn open(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
+        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; no `O_CREAT`, so no mode.
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `openat` returned a new descriptor that nothing else owns.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// What `handle` holds, as the kernel sees it.
+    pub(crate) fn fstat(handle: &OwnedFd) -> io::Result<libc::stat> {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: a valid descriptor and room for one `stat`.
+        if unsafe { libc::fstat(handle.as_raw_fd(), st.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fstat` succeeded and filled it.
+        Ok(unsafe { st.assume_init() })
+    }
+
+    /// The entry `name` in `dir` itself, a link as a link.
+    pub(crate) fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: a valid descriptor, a NUL-terminated name and room for one `stat`.
+        let rc = unsafe {
+            libc::fstatat(
+                dir,
+                name.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fstatat` succeeded and filled it.
+        Ok(unsafe { st.assume_init() })
+    }
+
+    /// Whether `st` is of the file type `kind` (`S_IFDIR`, `S_IFREG`, `S_IFLNK`).
+    pub(crate) fn is(st: &libc::stat, kind: libc::mode_t) -> bool {
+        st.st_mode & libc::S_IFMT == kind
+    }
+
+    /// The permission bits of `st`, set-ID and sticky bits included.
+    pub(crate) fn mode(st: &libc::stat) -> u32 {
+        // `mode_t` is `u32` on Linux and `u16` on macOS.
+        #[allow(clippy::useless_conversion)]
+        let mode = u32::from(st.st_mode);
+        mode & 0o7777
+    }
+
+    /// Opens the directory `path` one component at a time, each through the handle of the one
+    /// before it. A link is followed only where root owns it: no other account can place one that
+    /// root owns. With `made`, a missing component is created, `0700`, and handed to `made`.
+    ///
+    /// # Errors
+    /// Returns an error when a component is missing (without `made`), is no directory, or is a
+    /// link another account owns.
+    pub(crate) fn open_dir(
+        path: &Path,
+        made: Option<&dyn Fn(&OwnedFd) -> io::Result<()>>,
+    ) -> io::Result<OwnedFd> {
+        let start = if path.is_absolute() { c"/" } else { c"." };
+        let mut dir = open(libc::AT_FDCWD, start, DIRECTORY)?;
+        for component in path.components() {
+            let name = match component {
+                Component::Normal(name) => name,
+                Component::ParentDir => OsStr::new(".."),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => continue,
+            };
+            let name = CString::new(name.as_bytes())?;
+            dir = step(&dir, &name, made)?;
+        }
+        Ok(dir)
+    }
+
+    /// The directory `name` in `dir`, as [`open_dir`] takes each component.
+    fn step(
+        dir: &OwnedFd,
+        name: &CStr,
+        made: Option<&dyn Fn(&OwnedFd) -> io::Result<()>>,
+    ) -> io::Result<OwnedFd> {
+        let error = match open(dir.as_raw_fd(), name, DIRECTORY) {
+            Ok(next) => return Ok(next),
+            Err(e) => e,
+        };
+        match (error.raw_os_error(), made) {
+            (Some(libc::ENOENT), Some(made)) => {
+                // SAFETY: a valid descriptor and a NUL-terminated name.
+                let rc = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) };
+                let created = rc == 0;
+                if !created && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
+                    return Err(io::Error::last_os_error());
+                }
+                let next = open(dir.as_raw_fd(), name, DIRECTORY)?;
+                if created {
+                    made(&next)?;
+                }
+                Ok(next)
+            }
+            (Some(libc::ELOOP | libc::ENOTDIR), _) => {
+                let st = lstat_at(dir.as_raw_fd(), name)?;
+                if is(&st, libc::S_IFLNK) && st.st_uid == 0 {
+                    return open(
+                        dir.as_raw_fd(),
+                        name,
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    );
+                }
+                let what = if is(&st, libc::S_IFLNK) {
+                    "is a link, which only root's is followed"
+                } else {
+                    "is not a directory"
+                };
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} {what}", name.to_string_lossy()),
+                ))
+            }
+            _ => Err(error),
+        }
+    }
+
+    /// Gives what `handle` holds to `group` at `mode`: the group first, since a change of group
+    /// may clear the set-group-ID bit the mode sets.
+    pub(crate) fn share(handle: &OwnedFd, group: ProcessAccountGroup, mode: u32) -> io::Result<()> {
+        // SAFETY: a valid descriptor; `uid_t::MAX` (-1) leaves the owner as it is.
+        if unsafe { libc::fchown(handle.as_raw_fd(), libc::uid_t::MAX, group.0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // The mode is at most `0o7777`, which every `mode_t` holds.
+        #[allow(clippy::cast_possible_truncation)]
+        let mode = mode as libc::mode_t;
+        // SAFETY: a valid descriptor.
+        if unsafe { libc::fchmod(handle.as_raw_fd(), mode) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// The names in `dir`, read from the handle, without `.` and `..`.
+    pub(crate) fn entries(dir: &OwnedFd) -> io::Result<Vec<CString>> {
+        // `fdopendir` takes the descriptor it is given; it gets a duplicate, and `dir` stays ours.
+        let raw = dir.try_clone()?.into_raw_fd();
+        // SAFETY: `raw` is an open directory descriptor this function owns.
+        let stream = unsafe { libc::fdopendir(raw) };
+        if stream.is_null() {
+            let error = io::Error::last_os_error();
+            // SAFETY: `fdopendir` failed, so `raw` is still ours to close.
+            unsafe { libc::close(raw) };
+            return Err(error);
+        }
+        // `fdopendir` reads from the descriptor's offset, which a duplicate shares: from the top.
+        // SAFETY: `stream` is the open stream from `fdopendir`.
+        unsafe { libc::rewinddir(stream) };
+        let mut names = Vec::new();
+        let result = loop {
+            // SAFETY: errno is thread-local; clearing it tells the end of the stream from a
+            // failure, which `readdir` both report as null.
+            unsafe { *errno() = 0 };
+            // SAFETY: `stream` is the open stream from `fdopendir`.
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                let error = io::Error::last_os_error();
+                break match error.raw_os_error() {
+                    Some(0) | None => Ok(()),
+                    Some(_) => Err(error),
+                };
+            }
+            // SAFETY: `entry` is valid until the next `readdir` on this stream, and `d_name` is
+            // NUL-terminated; the name is copied out at once.
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                names.push(name.to_owned());
+            }
+        };
+        // SAFETY: `stream` is open and closed once; this closes `raw` with it.
+        unsafe { libc::closedir(stream) };
+        result.map(|()| names)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn errno() -> *mut libc::c_int {
+        // SAFETY: returns the calling thread's errno location.
+        unsafe { libc::__errno_location() }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn errno() -> *mut libc::c_int {
+        // SAFETY: returns the calling thread's errno location.
+        unsafe { libc::__error() }
+    }
+
+    /// Gives what the Client owns under the data directory `dir` to `group`, writable by it: each
+    /// directory `2770` at least, each regular file with one name group-readable and -writable.
+    /// What the Client does not own, a link, and a file with a second hard link are left as they
+    /// are. Best-effort: an entry that cannot be changed is named in a warning, and the rest goes
+    /// on. `path` names `dir` in those warnings.
+    pub(crate) fn give_written(dir: &OwnedFd, group: ProcessAccountGroup, path: &Path) {
+        // SAFETY: geteuid(2) cannot fail and touches no memory.
+        let me = unsafe { libc::geteuid() };
+        let names = match entries(dir) {
+            Ok(names) => names,
+            Err(e) => {
+                warn!(dir = %path.display(), error = %e, "cannot read a data directory to share what it holds");
+                return;
+            }
+        };
+        for name in names {
+            let child = path.join(OsStr::from_bytes(name.as_bytes()));
+            if let Err(e) = give_entry(dir, &name, group, me, &child) {
+                warn!(path = %child.display(), error = %e, "cannot share an entry of a data directory with the process account's group");
+            }
+        }
+    }
+
+    fn give_entry(
+        dir: &OwnedFd,
+        name: &CStr,
+        group: ProcessAccountGroup,
+        me: libc::uid_t,
+        path: &Path,
+    ) -> io::Result<()> {
+        let st = lstat_at(dir.as_raw_fd(), name)?;
+        if st.st_uid != me {
+            return Ok(());
+        }
+        let flags = if is(&st, libc::S_IFDIR) {
+            DIRECTORY
+        } else if is(&st, libc::S_IFREG) && st.st_nlink == 1 {
+            FILE
+        } else {
+            return Ok(());
+        };
+        let entry = open(dir.as_raw_fd(), name, flags)?;
+        // Read again from the handle: the name may have been swapped since.
+        let st = fstat(&entry)?;
+        let mode = mode(&st);
+        if st.st_uid != me {
+            return Ok(());
+        }
+        if is(&st, libc::S_IFDIR) {
+            share(&entry, group, mode | 0o2770)?;
+            give_written(&entry, group, path);
+        } else if is(&st, libc::S_IFREG) && st.st_nlink == 1 {
+            share(&entry, group, mode | 0o060)?;
+        }
+        Ok(())
+    }
 }
 
 /// Makes the regular file at `path` readable by `group` and no wider: `0640`, owned by the group.
@@ -921,6 +1211,101 @@ mod tests {
             mode_and_group(&after.config_dir().join("fleet")),
             (0o640, group.0)
         );
+    }
+
+    /// A link in a directory the process account writes is never followed on the way to a
+    /// directory the Client shares: the link is refused, and what it names is neither created nor
+    /// changed (ADR-0053 clause 6).
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn a_link_on_the_way_to_a_shared_directory_is_not_followed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let group = own_group();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("mkdir");
+        write_private(&outside.join("record"), b"the Client's").expect("write");
+        create_private_dir(&outside).expect("owner-only");
+        let before = mode_and_group(&outside);
+
+        let supervisor = dir.path().join("agent");
+        create_shared_dir(&supervisor, Some(group), Shared::Traversed).expect("the Supervisor's");
+        // The Managed Process put a link where its data directory's parent goes.
+        std::os::unix::fs::symlink(&outside, supervisor.join("data")).expect("a link");
+        let error = create_shared_dir(
+            &supervisor.join("data").join("certs"),
+            Some(group),
+            Shared::Written,
+        )
+        .expect_err("through a link");
+        assert!(error.to_string().contains("link"), "{error}");
+        assert!(
+            !outside.join("certs").exists(),
+            "nothing made behind the link"
+        );
+        assert_eq!(mode_and_group(&outside), before);
+
+        // The last component too: shared through its own handle, never through a link.
+        std::fs::remove_file(supervisor.join("data")).expect("unlink");
+        std::fs::create_dir(supervisor.join("data")).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, supervisor.join("data").join("certs"))
+            .expect("a link");
+        create_shared_dir(
+            &supervisor.join("data").join("certs"),
+            Some(group),
+            Shared::Written,
+        )
+        .expect_err("a link as the directory itself");
+        assert_eq!(mode_and_group(&outside), before);
+        assert_eq!(mode_and_group(&outside.join("record")).0, 0o600);
+    }
+
+    /// A parent the Client creates on the way to a shared directory is passed through by the
+    /// process account's group, `0710`, and no wider.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_made_on_the_way_is_passed_through_and_no_more() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let group = own_group();
+        let data = dir.path().join("agent").join("var").join("data");
+        create_shared_dir(&data, Some(group), Shared::Written).expect("made");
+        assert_eq!(mode_and_group(&data), (0o2770, group.0));
+        assert_eq!(
+            mode_and_group(data.parent().expect("var")),
+            (0o710, group.0)
+        );
+    }
+
+    /// A data directory a Managed Process wrote while it ran as the Client gives what the Client
+    /// owns in it to the process account's group, writable by it, once it is first shared: the
+    /// Managed Process goes on writing its own state. A link is not followed, and a file with a
+    /// second hard link is left as it is.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn a_data_directory_written_before_is_given_to_the_group_once_shared() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let group = own_group();
+        let outside = dir.path().join("outside");
+        write_private(&outside, b"elsewhere").expect("write");
+        let data = dir.path().join("agent").join("data");
+        let nested = data.join("db");
+        create_private_dir(&nested).expect("as it was written");
+        create_private_dir(&data).expect("owner-only");
+        write_private(&nested.join("state"), b"state").expect("state");
+        write_private(&data.join("twice"), b"twice").expect("write");
+        std::fs::hard_link(data.join("twice"), dir.path().join("twice")).expect("a second name");
+        std::os::unix::fs::symlink(&outside, data.join("link")).expect("a link");
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        create_shared_dir(&data, Some(group), Shared::Written).expect("shared");
+        assert_eq!(mode_and_group(&data), (0o2770, group.0));
+        assert_eq!(mode_and_group(&nested), (0o2770, group.0));
+        assert_eq!(mode_and_group(&nested.join("state")), (0o660, group.0));
+        assert_eq!(mode_and_group(&data.join("twice")).0, 0o600);
+        assert_eq!(mode_and_group(&outside).0, 0o600);
     }
 
     /// A hard link in `config/` to one of the Client's records — placed while the Managed Process
