@@ -70,6 +70,53 @@ pub fn agents_socket() -> PathBuf {
     agents_socket_dir().join("agents.sock")
 }
 
+/// Refuses a root that is the directory of the second service's socket, or lies in it: that
+/// directory is the process account's (ADR-0059 clause 9), and a root there would be handed to
+/// it, or to the Client beneath what the process account may replace. Named the same, by
+/// another case of its letters on macOS, whose file system ignores it by default, or by another
+/// path to the same directory.
+///
+/// # Errors
+/// Returns the refusal, naming the root.
+#[cfg(unix)]
+pub fn check_roots_apart(roots: &[&Path], socket: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(dir) = socket.parent() else {
+        return Ok(());
+    };
+    let key = |path: &Path| {
+        path.components()
+            .map(|c| {
+                let part = c.as_os_str().to_string_lossy();
+                if cfg!(target_os = "macos") {
+                    part.to_lowercase()
+                } else {
+                    part.into_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let named = key(dir);
+    let found = std::fs::metadata(dir).ok().map(|m| (m.dev(), m.ino()));
+    for root in roots {
+        let within = root.ancestors().any(|above| {
+            key(above) == named
+                || found.is_some_and(|found| {
+                    std::fs::metadata(above).is_ok_and(|m| (m.dev(), m.ino()) == found)
+                })
+        });
+        if within {
+            return Err(format!(
+                "{} is, or lies in, {}, the directory of the second service's socket, which is the \
+                 process account's: name another root. Nothing has been installed or written.",
+                root.display(),
+                dir.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn agents_socket_dir() -> PathBuf {
     PathBuf::from("/Library/Application Support").join(agents_service_name())
@@ -1971,6 +2018,39 @@ mod tests {
         .expect_err("launchd cannot be asked");
         assert_eq!(unasked, "cannot run launchctl");
         let _ = Recording::asked();
+    }
+
+    /// No root is the socket's directory or lies in it: named as it is, by a path through a link,
+    /// or beneath it. A root beside it, or one it lies in, is the operator's choice.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn no_root_is_the_sockets_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_dir = dir.path().join("opamp-fleet-agents");
+        let socket = socket_dir.join("agents.sock");
+        let beside = dir.path().join("opamp-fleet");
+        let inside = socket_dir.join("data");
+        for root in [
+            &socket_dir,
+            &inside,
+            &dir.path().join("opamp-fleet-agents/"),
+        ] {
+            let refused =
+                check_roots_apart(&[&beside, root], &socket).expect_err("not yet there, by name");
+            assert!(refused.contains("the second service's socket"), "{refused}");
+        }
+        check_roots_apart(&[&beside, dir.path()], &socket).expect("beside it, or above it");
+
+        std::fs::create_dir(&socket_dir).expect("mkdir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&socket_dir, &link).expect("a link");
+        check_roots_apart(&[&link], &socket).expect_err("the same directory by another path");
+        check_roots_apart(&[&link.join("data")], &socket).expect_err("in it by another path");
+        check_roots_apart(&[&beside], &socket).expect("beside it");
+        #[cfg(target_os = "macos")]
+        check_roots_apart(&[&dir.path().join("OPAMP-fleet-agents")], &socket)
+            .expect_err("another case of its letters");
     }
 
     /// The socket's directory goes with the second service: the socket first — a link at its
