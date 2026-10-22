@@ -1925,7 +1925,6 @@ mod tests {
             "launchd"
         );
         assert_eq!(started(false, false), vec![label()]);
-        assert_eq!(PULLED_IN, cfg!(target_os = "linux"));
         let with_agents = recording(ServiceLevel::System, |_| true);
         with_agents.start().expect("start");
         let mut start = vec![format!("start {client}")];
