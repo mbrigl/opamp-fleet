@@ -654,7 +654,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(
         String::from_utf8_lossy(&written.stdout),
         format!(
-            "{p} {p} 664\n{} {p} 2770\n",
+            "{p} {p} 644\n{} {p} 2770\n",
             client_account.0,
             p = process_account.0
         ),

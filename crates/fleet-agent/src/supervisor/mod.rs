@@ -74,6 +74,19 @@ impl PluginRegistry for Registry {
     fn plugins(&self) -> Vec<Box<dyn Plugin>> {
         registry(&self.spawner)
     }
+
+    fn purge<'a>(
+        &'a self,
+        supervisor: &'a str,
+        dir: &'a std::path::Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.spawner
+                .purge(supervisor, dir)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
 }
 
 /// The compiled-in plugins, for what reads a block — its kind, its program, its settings — and

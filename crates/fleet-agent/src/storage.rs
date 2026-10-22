@@ -494,7 +494,7 @@ pub(crate) fn create_shared_dir(
     {
         let traversed =
             |made: &std::os::fd::OwnedFd| handle::share(made, group, Shared::Traversed.mode());
-        let made = handle::open_dir(dir, Some(&traversed))
+        let made = handle::open_dir(dir, handle::DIRECTORY, Some(&traversed))
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
         let before = handle::fstat(&made)?;
         handle::share(&made, group, shared.mode())?;
@@ -529,6 +529,15 @@ pub(crate) mod handle {
     /// A directory, opened as one and never through a link.
     pub(crate) const DIRECTORY: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+    /// A directory passed through on the way to another, never through a link: on Linux a
+    /// path-only handle, which needs no right to read the directory, only to search it.
+    #[cfg(target_os = "linux")]
+    pub(crate) const SEARCH: libc::c_int =
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    /// Elsewhere a directory read, as [`DIRECTORY`].
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) const SEARCH: libc::c_int = DIRECTORY;
 
     /// A regular file, opened to change its owner and mode: never through a link, and never
     /// blocking on a FIFO or taking a terminal.
@@ -590,38 +599,43 @@ pub(crate) mod handle {
         mode & 0o7777
     }
 
+    /// What [`open_dir`] hands each directory it creates: the creator's own change to it.
+    pub(crate) type Made<'a> = Option<&'a dyn Fn(&OwnedFd) -> io::Result<()>>;
+
     /// Opens the directory `path` one component at a time, each through the handle of the one
-    /// before it. A link is followed only where root owns it: no other account can place one that
-    /// root owns. With `made`, a missing component is created, `0700`, and handed to `made`.
+    /// before it: every component searched ([`SEARCH`]), the last opened with `flags`. A link is
+    /// followed only where root owns it: no other account can place one that root owns. With
+    /// `made`, a missing component is created, `0700`, and handed to `made`, opened to read.
     ///
     /// # Errors
     /// Returns an error when a component is missing (without `made`), is no directory, or is a
     /// link another account owns.
-    pub(crate) fn open_dir(
-        path: &Path,
-        made: Option<&dyn Fn(&OwnedFd) -> io::Result<()>>,
-    ) -> io::Result<OwnedFd> {
+    pub(crate) fn open_dir(path: &Path, flags: libc::c_int, made: Made<'_>) -> io::Result<OwnedFd> {
         let start = if path.is_absolute() { c"/" } else { c"." };
-        let mut dir = open(libc::AT_FDCWD, start, DIRECTORY)?;
-        for component in path.components() {
-            let name = match component {
-                Component::Normal(name) => name,
-                Component::ParentDir => OsStr::new(".."),
-                Component::RootDir | Component::CurDir | Component::Prefix(_) => continue,
-            };
-            let name = CString::new(name.as_bytes())?;
-            dir = step(&dir, &name, made)?;
+        let names = path
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name),
+                Component::ParentDir => Some(OsStr::new("..")),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+            })
+            .map(|name| CString::new(name.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut dir = open(
+            libc::AT_FDCWD,
+            start,
+            if names.is_empty() { flags } else { SEARCH },
+        )?;
+        for (at, name) in names.iter().enumerate() {
+            let flags = if at + 1 == names.len() { flags } else { SEARCH };
+            dir = step(&dir, name, flags, made)?;
         }
         Ok(dir)
     }
 
-    /// The directory `name` in `dir`, as [`open_dir`] takes each component.
-    fn step(
-        dir: &OwnedFd,
-        name: &CStr,
-        made: Option<&dyn Fn(&OwnedFd) -> io::Result<()>>,
-    ) -> io::Result<OwnedFd> {
-        let error = match open(dir.as_raw_fd(), name, DIRECTORY) {
+    /// The directory `name` in `dir`, opened with `flags`, as [`open_dir`] takes each component.
+    fn step(dir: &OwnedFd, name: &CStr, flags: libc::c_int, made: Made<'_>) -> io::Result<OwnedFd> {
+        let error = match open(dir.as_raw_fd(), name, flags) {
             Ok(next) => return Ok(next),
             Err(e) => e,
         };
@@ -633,20 +647,15 @@ pub(crate) mod handle {
                 if !created && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
                     return Err(io::Error::last_os_error());
                 }
-                let next = open(dir.as_raw_fd(), name, DIRECTORY)?;
                 if created {
-                    made(&next)?;
+                    made(&open(dir.as_raw_fd(), name, DIRECTORY)?)?;
                 }
-                Ok(next)
+                open(dir.as_raw_fd(), name, flags)
             }
             (Some(libc::ELOOP | libc::ENOTDIR), _) => {
                 let st = lstat_at(dir.as_raw_fd(), name)?;
                 if is(&st, libc::S_IFLNK) && st.st_uid == 0 {
-                    return open(
-                        dir.as_raw_fd(),
-                        name,
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-                    );
+                    return open(dir.as_raw_fd(), name, flags & !libc::O_NOFOLLOW);
                 }
                 let what = if is(&st, libc::S_IFLNK) {
                     "is a link, which only root's is followed"
@@ -660,6 +669,47 @@ pub(crate) mod handle {
             }
             _ => Err(error),
         }
+    }
+
+    /// Removes the entry `name` in `dir` with everything beneath it, never through a link: a link
+    /// is removed as a link. A directory this process owns is made its own to read and write
+    /// first, as one an agent made read-only — a Go module cache — needs to be emptied.
+    ///
+    /// # Errors
+    /// Returns the first entry that cannot be removed.
+    pub(crate) fn remove_tree_at(dir: &OwnedFd, name: &CStr, path: &Path) -> io::Result<()> {
+        let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        let st = lstat_at(dir.as_raw_fd(), name).map_err(named)?;
+        if !is(&st, libc::S_IFDIR) {
+            // SAFETY: a valid descriptor and a NUL-terminated name.
+            if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                return Err(named(io::Error::last_os_error()));
+            }
+            return Ok(());
+        }
+        // SAFETY: geteuid(2) cannot fail and touches no memory.
+        if st.st_uid == unsafe { libc::geteuid() } && mode(&st) & 0o700 != 0o700 {
+            // By name, as the directory may not be readable yet: an entry this account owns, in a
+            // directory it writes, which only this account could have swapped.
+            // SAFETY: a valid descriptor and a NUL-terminated name.
+            if unsafe { libc::fchmodat(dir.as_raw_fd(), name.as_ptr(), 0o700, 0) } != 0 {
+                return Err(named(io::Error::last_os_error()));
+            }
+        }
+        let inner = open(dir.as_raw_fd(), name, DIRECTORY).map_err(named)?;
+        for child in entries(&inner).map_err(named)? {
+            remove_tree_at(
+                &inner,
+                &child,
+                &path.join(OsStr::from_bytes(child.as_bytes())),
+            )?;
+        }
+        drop(inner);
+        // SAFETY: a valid descriptor and a NUL-terminated name.
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(named(io::Error::last_os_error()));
+        }
+        Ok(())
     }
 
     /// Gives what `handle` holds to `group` at `mode`: the group first, since a change of group
