@@ -854,7 +854,8 @@ mod walk {
         /// link count are read from that handle, and its owner is changed through it, so a name
         /// swapped after it was read changes only what the handle holds. A directory is walked;
         /// anything else with a second hard link is skipped. What the process account owns is
-        /// neither re-owned nor walked, and what is in its group keeps that group.
+        /// neither re-owned nor walked, and what is in its group keeps that group; a change of
+        /// owner by root leaves a directory's mode, its set-group-ID bit included.
         fn entry(&mut self, dir: RawFd, name: &CStr, path: &Path) -> io::Result<()> {
             let handle = match open(dir, name, ENTRY) {
                 Ok(handle) => handle,
