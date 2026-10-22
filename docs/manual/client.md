@@ -914,6 +914,13 @@ Client stops the process and deletes everything above — program, packages, con
 identity. A directory that no block names is reported at startup and never deleted on its own, so a
 typo in a name does not destroy an Agent's identity.
 
+Before it deletes a removed Agent's directory, the Client renames it to a tombstone,
+`.purge-<name>-<hex>`, beside the others, so an Agent added again under the same name starts in a
+fresh directory. A tombstone that could not be deleted — a file held open, or one the process
+account wrote that the second service could not remove — stays, with a warning. Each startup then
+warns that it is the tombstone of a removed Supervisor's directory and leaves it in place; nothing
+in it is used again, and deleting it is yours.
+
 `config/` is what `${config_dir}` expands to in a process's arguments, which is how a program is
 pointed at its own configuration without anyone writing an absolute path into a block. Where a
 Configuration carries a role rather than configuration text, it is written here too and named in a
@@ -1372,8 +1379,9 @@ as its new set:
   process is not touched — a fleet-wide change to one collector does not cycle its neighbours.
 - **A removed Supervisor is purged**. Once the rewritten file no longer names it, its
   whole directory `<supervisor_dir>/<name>/` is deleted — identity, written configuration,
-  staged packages, and the Client-owned program. A changed Supervisor restarts under its name
-  and keeps its directory; the program itself is
+  staged packages, and the Client-owned program — by way of a tombstone
+  ([one directory per Agent](#one-directory-per-agent)). A changed Supervisor restarts under its
+  name and keeps its directory; the program itself is
   never touched. Removal is destructive on the host: re-adding the same name later starts a
   genuinely fresh Agent, restoring service, not history.
 - **`supervisor.toml` stays the single truth.** The blocks are written into the file itself,
