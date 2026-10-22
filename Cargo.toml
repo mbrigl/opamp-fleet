@@ -148,6 +148,10 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 # presenting a client certificate (ADR-0021) to a Server with a publicly trusted one, which needs
 # a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
 webpki-roots = "1"
+# Artifact bytes in an S3-compatible bucket (ADR-0049). `aws-base`, `ring` and `reqwest` build the
+# S3 client on *ring*; the `aws` feature would pull `aws-lc-rs` (ADR-0013), and so would the
+# default `fs`, which nothing here needs. The HTTP client is the Server's own, handed in.
+object_store = { version = "0.14.2", default-features = false, features = ["aws-base", "ring", "reqwest"] }
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 # The hyper timer the HTTP/1 header-read timeout needs to exist at all (ADR-0013): hyper defaults

@@ -27,6 +27,7 @@ pub mod migrate;
 pub mod packages;
 pub mod pki;
 pub mod revocation;
+pub mod s3;
 pub mod throttle;
 pub mod tls;
 pub mod transport;
@@ -74,6 +75,36 @@ impl packages::PackageStore {
             Box::new(FsPackageBackend::open(&data_dir)?),
             Box::new(FsBlobStore::open(&data_dir)?),
         )
+    }
+
+    /// Opens the store in the data directory `data_dir` with the artifacts in the store `[blobs]`
+    /// chooses (ADR-0049 clause 2): the filesystem as [`open`](Self::open) does, or the bucket of
+    /// `[blobs.s3]`. On the bucket, a referenced artifact it lacks and `data_dir/blobs/` holds is
+    /// copied into it first (clause 7).
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be opened, as [`open`](Self::open) does, when the
+    /// bucket cannot be reached or listed, or when an artifact to copy does not match its name.
+    pub fn open_with(
+        data_dir: std::path::PathBuf,
+        blobs: &config::BlobsConfig,
+    ) -> Result<Self, String> {
+        let Some(bucket) = blobs.s3() else {
+            return Self::open(data_dir);
+        };
+        let backend = FsPackageBackend::open(&data_dir)?;
+        let store = s3::S3BlobStore::open(bucket)?;
+        let referenced: Vec<String> = packages::PackageBackend::load(&backend)?
+            .iter()
+            .flat_map(|package| package.entries.values())
+            .map(|entry| hex::encode(&entry.content_hash))
+            .collect();
+        s3::copy_from_filesystem(
+            &data_dir.join(fs::BLOBS),
+            referenced.iter().map(String::as_str),
+            &store,
+        )?;
+        Self::with_backend(Box::new(backend), Box::new(store))
     }
 }
 

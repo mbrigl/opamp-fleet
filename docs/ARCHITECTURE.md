@@ -102,7 +102,10 @@ core module names an adapter or a technology, and when a module has no role.
   revisions and assignments as one operation, and answers what an assignment pins;
   `ConfigBackend` under the `ConfigStore` in `configs`; `DeploymentBackend` under the
   `DeploymentStore` in `deployments`; `PackageBackend` and `BlobStore` (`blobs`, artifact bytes by
-  SHA-256) under the `PackageStore` in `packages`; `BootstrapStore` under the
+  SHA-256) under the `PackageStore` in `packages`, the bytes in `data_dir` or, with
+  `[blobs] store = "s3"`, in one bucket of an S3-compatible store through the adapter in `s3`, which
+  bridges the synchronous port onto a runtime of its own
+  ([ADR-0049](adr/0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md)); `BootstrapStore` under the
   `BootstrapCertificates` in `bootstrap`; `EnrolmentStore` under the `Enrolment` in `enrolment`;
   `LedgerStore` in `revocation`; `AuditStore` in `audit_log`. The filesystem adapters are in `fs`,
   which also opens the data directory and refuses anything its layout does not name. The core's
@@ -255,7 +258,7 @@ concerns at once and follows every renewal.
 
 **Where state lives.** The Server keeps all of its state under one `data_dir`, one directory per
 domain and owner-only: `configurations/`, `deployments/`, `packages/` (metadata) and `blobs/` (the
-artifacts, named by SHA-256), `agents/` (each Agent's record, its labels inside), `hosts/`,
+artifacts, named by SHA-256, unless a bucket keeps them), `agents/` (each Agent's record, its labels inside), `hosts/`,
 `certificates/` (the register), `revocations.json`, `bootstrap/`, `enrolment.json` (the window and
 its queue) and `audit/`
 ([ADR-0037](adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)).

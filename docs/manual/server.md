@@ -232,6 +232,61 @@ verification_key = "<hex-encoded Ed25519 public key>"
 |---|---|---|
 | `verification_key` | unset | The hex-encoded Ed25519 public key — the same value as the Clients' `[packages] verification_key`, as `opamp-fleetctl package keygen` prints it. With it, each entry's signature is checked when it is written and when the store is loaded, and reported `valid` or `invalid`; without it, `unchecked`. An `invalid` signature is stored and offered all the same: each Client's own check decides what is installed. A key that is not hex, or not 32 bytes, fails startup naming it. |
 
+### `[blobs]`
+
+Optional. Where the artifacts' bytes are kept: one file per
+artifact under `data_dir/blobs/`, the default, or one object per artifact in a bucket of an
+S3-compatible object store. Both are supported in production; the bytes pass through the Server in
+both directions, and no Agent ever reaches the store.
+
+```toml
+[blobs]
+store = "s3"
+
+[blobs.s3]
+endpoint = "https://s3.example.org"
+bucket = "fleet-artifacts"
+region = "eu-central-1"
+prefix = "fleet/"
+access_key_id = "<key id>"
+secret_access_key_file = "/run/secrets/s3-secret-access-key"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `store` | `"fs"` | `"fs"` or `"s3"`. Any other value fails startup naming the key; so do `"s3"` without a `[blobs.s3]` section and a `[blobs.s3]` section beside `"fs"`. |
+| `s3.endpoint` | — | Required with `"s3"`. The store's URL, `https://`. `http://` is accepted to `127.0.0.1` or `::1` alone; any other fails startup naming the key. |
+| `s3.bucket` | — | Required with `"s3"`. The bucket. The Server does not create it: one that does not exist or cannot be listed fails startup, naming it and the error. |
+| `s3.region` | — | Required with `"s3"`. The region the requests are signed for; a store without regions takes any, such as `us-east-1`. |
+| `s3.prefix` | empty | Where in the bucket the Server's keys live: empty, or ending in `/`. Artifacts are kept at `<prefix>blobs/<sha256>`, an upload in progress at `<prefix>staging/<random>`. |
+| `s3.ca_file` | unset | One PEM root for a store whose certificate no public root signs. |
+| `s3.access_key_id` | unset | The key ID of a static key pair. Set together with `secret_access_key_file` or not at all; one without the other fails startup naming both. |
+| `s3.secret_access_key_file` | unset | The file holding that key pair's secret, readable by the Server's account alone (`0600`); one others can read fails startup. The secret is never written into `server.toml`. |
+
+Without a key pair the Server uses its platform's workload identity, in this order: a web identity
+token (`AWS_WEB_IDENTITY_TOKEN_FILE` with `AWS_ROLE_ARN`), the container credentials of ECS or EKS
+(`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, or `AWS_CONTAINER_CREDENTIALS_FULL_URI` with
+`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`), and the instance metadata service. Those are the only
+`AWS_*` variables it reads: endpoint, bucket, region, prefix and every TLS or HTTP option come
+from its configuration alone, so `AWS_ENDPOINT` or `AWS_ALLOW_HTTP` in its environment change
+nothing, and no proxy variable is honoured. The connection is TLS 1.3 on the public roots and
+`ca_file`.
+
+In the bucket, a key under `<prefix>staging/` is an interrupted upload and is deleted at startup;
+any other key under `<prefix>` that is not `blobs/<sha256>` fails startup naming it. At startup the
+Server lists the bucket for each artifact's size and downloads nothing: unlike the filesystem
+store, it does not hash the artifacts again. An object altered in the bucket is served, and the
+Client's own hash and signature checks refuse it. The bucket, its credentials, policies, retention
+and backups are the operator's.
+
+**Switching to `"s3"`** copies what is missing: at the first start with `"s3"`, every artifact a
+Package entry names that the bucket lacks is read from `data_dir/blobs/`, hashed — a file whose
+content does not match its name fails the start, naming it — uploaded and logged. The files are left
+where they are, and the Server does not write to `data_dir/blobs/` again; removing them once the
+bucket holds every artifact is yours. A large `data_dir/blobs/` makes that first start as long as
+its upload. Nothing is copied back: switching from `"s3"` to `"fs"`, an entry whose artifact
+`data_dir/blobs/` lacks fails the start, naming the entry.
+
 ### `[tls]`
 
 Required. The Agent plane serves HTTPS and WSS in TLS 1.3 with this certificate and key, and so
@@ -352,7 +407,7 @@ Everything the Server knows survives a restart under one directory, `data_dir`, 
 | `configurations/<name>.json` | Configuration | Its saved revision and every revision still rolled out somewhere |
 | `deployments/<name>.json` | Deployment | Its Selector, its Packages and its Configurations |
 | `packages/<agent type>@<version>.json` | Package | Its identity and entries, each naming its artifact by SHA-256 and carrying its signature |
-| `blobs/<sha256>` | artifact | The bytes, named by their SHA-256 — identical bytes are stored once |
+| `blobs/<sha256>` | artifact | The bytes, named by their SHA-256 — identical bytes are stored once; unused while [`[blobs]`](#blobs) keeps them in a bucket |
 | `agents/<instance_uid>.json` | Agent | What it reported, its assignment, its labels |
 | `hosts/<host>.json` | Host | What its certificate says, and which Agents it speaks for |
 | `certificates/<issuer>-<serial>.json` | certificate | The register of what the client CA signed |
@@ -375,8 +430,8 @@ letters, digits, `.`, `_` and `-` has it written as `%XX` in its file name.
   decision they answer is. A temporary file a crash left behind is removed at the next start.
 - **Nothing else is read.** A file or directory the layout does not name, a file that does not
   parse, or one whose name disagrees with what it holds stops the start, naming the path — a store
-  that merely looked empty would be worse. Every artifact is hashed again at startup, and an artifact
-  no Package entry names is deleted then.
+  that merely looked empty would be worse. Every artifact is hashed again at startup — in a bucket,
+  only listed — and an artifact no Package entry names is deleted then.
 - **Backup** is a copy of `data_dir` taken while the Server is stopped; restoring it is putting the
   copy back. A copy taken while it runs may hold an Agent record or an audit line mid-write.
 
@@ -1006,7 +1061,8 @@ rollout (`POST /api/v1/agents/{instance_uid}/rollout`, with an empty body or
 
 ## Packages and Deployments: distributing software
 
-The Packages live in `data_dir/packages/` and their artifacts in `data_dir/blobs/`; the Server
+The Packages live in `data_dir/packages/` and their artifacts in `data_dir/blobs/` or the bucket
+of [`[blobs]`](#blobs); the Server
 declares the capability only while the store holds a Package. Two objects, and the split is the
 whole of the model:
 

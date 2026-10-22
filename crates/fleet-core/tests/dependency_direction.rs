@@ -103,6 +103,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("listen", Adapter),
             ("migrate", Adapter),
             ("pki", Adapter),
+            ("s3", Adapter),
             ("tls", Adapter),
             ("transport", Adapter),
         ],

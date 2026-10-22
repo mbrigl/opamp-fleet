@@ -62,6 +62,10 @@ pub struct ServerConfig {
     /// How the Server checks the signatures on its Package entries (ADR-0033).
     #[serde(default)]
     pub packages: PackagesConfig,
+    /// Where the artifacts' bytes are kept: the filesystem under `data_dir`, or a bucket of an
+    /// S3-compatible object store (ADR-0049).
+    #[serde(default)]
+    pub blobs: BlobsConfig,
     /// Refused at startup: every package is offered as a path the Client resolves against its own
     /// endpoint, and a Client downloads from no other host (ADR-0033). Read only so that a leftover
     /// key can be named.
@@ -240,6 +244,165 @@ impl PackagesConfig {
             ));
         }
         Ok(Some(key))
+    }
+}
+
+/// The `[blobs]` section (ADR-0049 clause 2): which store keeps the artifacts' bytes. One store,
+/// the filesystem by default; both are supported in production.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobsConfig {
+    /// `"fs"`, one file per blob under `data_dir/blobs/`, or `"s3"`, one object per blob in the
+    /// bucket `[blobs.s3]` names. A string rather than an enum so that any other value is refused
+    /// by [`check`](Self::check), naming the key.
+    #[serde(default = "default_blob_store")]
+    pub store: String,
+    /// The bucket, when `store = "s3"`; refused beside `store = "fs"`.
+    pub s3: Option<S3BlobsConfig>,
+}
+
+impl Default for BlobsConfig {
+    fn default() -> Self {
+        BlobsConfig {
+            store: default_blob_store(),
+            s3: None,
+        }
+    }
+}
+
+fn default_blob_store() -> String {
+    "fs".to_string()
+}
+
+impl BlobsConfig {
+    /// The bucket's settings when the store is S3, `None` when it is the filesystem.
+    #[must_use]
+    pub fn s3(&self) -> Option<&S3BlobsConfig> {
+        self.s3.as_ref().filter(|_| self.store == "s3")
+    }
+
+    /// Loud validation (ADR-0049 clauses 2, 5 and 6): a known store, the bucket's section exactly
+    /// when the store is S3, and an S3 connection that stays off plaintext and holds no half of a
+    /// key pair.
+    fn check(&self) -> Result<(), String> {
+        match (self.store.as_str(), &self.s3) {
+            ("fs", None) => Ok(()),
+            ("fs", Some(_)) => Err(
+                "[blobs.s3] is set but [blobs] store is \"fs\" — set store = \"s3\" to keep \
+                 the artifacts in the bucket, or remove [blobs.s3]"
+                    .to_string(),
+            ),
+            ("s3", None) => Err(
+                "[blobs] store = \"s3\" needs a [blobs.s3] section naming endpoint, bucket and \
+                 region"
+                    .to_string(),
+            ),
+            ("s3", Some(s3)) => s3.check(),
+            (other, _) => Err(format!(
+                "[blobs] store must be \"fs\" or \"s3\", not {other:?}"
+            )),
+        }
+    }
+}
+
+/// The `[blobs.s3]` section (ADR-0049 clauses 4 to 6): the one bucket that keeps the artifacts,
+/// and how the Server reaches it. Every setting of the connection is here and nowhere else; the
+/// Server reads no `AWS_*` variable that would change one.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3BlobsConfig {
+    /// The store's URL, `https://`; `http://` only to 127.0.0.1 or ::1 (ADR-0049 clause 5).
+    pub endpoint: String,
+    /// The bucket. The Server does not create it.
+    pub bucket: String,
+    /// The region the requests are signed for.
+    pub region: String,
+    /// Where under the bucket the Server's keys live: empty, or ending in `/`. Objects are kept at
+    /// `<prefix>blobs/<sha256>`, an upload in progress at `<prefix>staging/<random>`.
+    #[serde(default)]
+    pub prefix: String,
+    /// One PEM root for a store whose certificate no public root signs.
+    pub ca_file: Option<PathBuf>,
+    /// The key ID of a static key pair, set together with `secret_access_key_file`. Without both,
+    /// the Server uses its platform's workload identity (ADR-0049 clause 6).
+    pub access_key_id: Option<String>,
+    /// The file holding the secret of that key pair, readable by the Server's account alone.
+    pub secret_access_key_file: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for S3BlobsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3BlobsConfig")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("prefix", &self.prefix)
+            .field("ca_file", &self.ca_file)
+            .field(
+                "access_key_id",
+                &self.access_key_id.as_ref().map(|_| "<set>"),
+            )
+            .field("secret_access_key_file", &self.secret_access_key_file)
+            .finish()
+    }
+}
+
+impl S3BlobsConfig {
+    /// Whether the endpoint is plaintext, which [`check`](Self::check) allows on the loopback
+    /// alone.
+    #[must_use]
+    pub fn allows_http(&self) -> bool {
+        opamp::endpoint::is_plaintext(&self.endpoint)
+    }
+
+    fn check(&self) -> Result<(), String> {
+        // Q-1: a package is never sent unencrypted beyond the loopback, to the store neither.
+        let endpoint = &self.endpoint;
+        match endpoint.split_once("://").map(|(scheme, _)| scheme) {
+            Some("https") => {}
+            Some("http")
+                if opamp::endpoint::is_loopback_literal(opamp::endpoint::host_of(endpoint)) => {}
+            Some("http") => {
+                return Err(format!(
+                    "[blobs.s3] endpoint {endpoint}: plaintext is for 127.0.0.1 and ::1 alone — \
+                     use https://"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "[blobs.s3] endpoint {endpoint} must start with https:// (http:// only to \
+                     127.0.0.1 or ::1)"
+                ))
+            }
+        }
+        for (key, value) in [("bucket", &self.bucket), ("region", &self.region)] {
+            if value.trim().is_empty() {
+                return Err(format!("[blobs.s3] {key} must not be empty"));
+            }
+        }
+        let prefix = &self.prefix;
+        if !prefix.is_empty()
+            && (!prefix.ends_with('/')
+                || prefix.starts_with('/')
+                || prefix
+                    .split('/')
+                    .rev()
+                    .skip(1)
+                    .any(|segment| segment.is_empty() || segment == "." || segment == ".."))
+        {
+            return Err(format!(
+                "[blobs.s3] prefix {prefix:?} must be empty or end in `/`, with no empty, `.` or \
+                 `..` segment, e.g. \"fleet/\""
+            ));
+        }
+        if self.access_key_id.is_some() != self.secret_access_key_file.is_some() {
+            return Err(
+                "[blobs.s3] access_key_id and secret_access_key_file are set together or not at \
+                 all — without both, the Server uses its platform's workload identity"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -660,6 +823,7 @@ impl Default for ServerConfig {
             telemetry_offer: None,
             packages_dir: None,
             packages: PackagesConfig::default(),
+            blobs: BlobsConfig::default(),
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
             max_package_size_bytes: default_max_package_size(),
@@ -839,6 +1003,7 @@ impl ServerConfig {
         }
         // A malformed key fails startup, not the first signature it would have checked (ADR-0033).
         self.packages.verification_key()?;
+        self.blobs.check()?;
         // The two planes are two listeners (ADR-0013). Addresses that collide would surface as the
         // second bind failing with "address already in use" — a message about sockets for what is
         // really a configuration mistake, so it is refused here, by name.
@@ -2286,6 +2451,125 @@ mod tests {
                 .expect("loads")
                 .environment_notice(),
             None
+        );
+    }
+
+    /// `[blobs]`: the filesystem by default; `"s3"` with its bucket; any other store, a bucket
+    /// beside the filesystem, a plaintext endpoint off the loopback, and half a key pair each fail
+    /// startup naming the key — with no store to reach (ADR-0049 clauses 2, 5 and 6).
+    /// Verifies: ADR-0049
+    #[test]
+    fn the_blob_store_is_chosen_and_checked_naming_the_key() {
+        let load = |blobs: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{blobs}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        let bucket = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nbucket = \"fleet\"\nregion = \"eu-1\"\n";
+
+        let config = load("").expect("the default");
+        assert_eq!(config.blobs.store, "fs");
+        assert!(config.blobs.s3().is_none());
+        let config = load(&format!(
+            "{bucket}endpoint = \"https://s3.example\"\nprefix = \"fleet/\"\n"
+        ))
+        .expect("a bucket over TLS");
+        let s3 = config.blobs.s3().expect("s3");
+        assert_eq!(
+            (s3.bucket.as_str(), s3.prefix.as_str()),
+            ("fleet", "fleet/")
+        );
+        assert!(!s3.allows_http());
+        for loopback in ["http://127.0.0.1:9100", "http://[::1]:9100"] {
+            let config = load(&format!("{bucket}endpoint = \"{loopback}\"\n")).expect(loopback);
+            assert!(config.blobs.s3().expect("s3").allows_http(), "{loopback}");
+        }
+
+        for (blobs, named) in [
+            ("[blobs]\nstore = \"S3\"\n", "[blobs] store"),
+            ("[blobs]\nstore = \"minio\"\n", "[blobs] store"),
+            ("[blobs]\nstore = \"s3\"\n", "[blobs.s3]"),
+            (
+                "[blobs.s3]\nendpoint = \"https://s3.example\"\nbucket = \"b\"\nregion = \"r\"\n",
+                "[blobs.s3] is set but [blobs] store",
+            ),
+            (
+                &format!("{bucket}endpoint = \"http://s3.example:9000\"\n"),
+                "[blobs.s3] endpoint",
+            ),
+            (
+                &format!("{bucket}endpoint = \"http://localhost:9000\"\n"),
+                "[blobs.s3] endpoint",
+            ),
+            (
+                &format!("{bucket}endpoint = \"s3.example\"\n"),
+                "[blobs.s3] endpoint",
+            ),
+            (
+                &format!("{bucket}endpoint = \"https://s3.example\"\nprefix = \"fleet\"\n"),
+                "[blobs.s3] prefix",
+            ),
+            (
+                &format!("{bucket}endpoint = \"https://s3.example\"\nprefix = \"a//\"\n"),
+                "[blobs.s3] prefix",
+            ),
+            (
+                &format!("{bucket}endpoint = \"https://s3.example\"\naccess_key_id = \"AK\"\n"),
+                "[blobs.s3] access_key_id and secret_access_key_file",
+            ),
+            (
+                &format!(
+                    "{bucket}endpoint = \"https://s3.example\"\nsecret_access_key_file = \"s\"\n"
+                ),
+                "[blobs.s3] access_key_id and secret_access_key_file",
+            ),
+            (
+                &format!("{bucket}endpoint = \"https://s3.example\"\nsecret_access_key = \"x\"\n"),
+                "secret_access_key",
+            ),
+        ] {
+            let err = load(blobs).expect_err(blobs);
+            assert!(err.contains(named), "{blobs}: {err}");
+        }
+    }
+
+    /// The store's keys come through the environment like every other key, the secret's file
+    /// included, with no code of their own (ADR-0049 clause 5, ADR-0051).
+    /// Verifies: ADR-0049
+    #[test]
+    fn the_blob_store_is_configured_from_the_environment_too() {
+        let mut pairs = TLS_VARIABLES.to_vec();
+        pairs.extend([
+            ("FLEET_SERVER__BLOBS__STORE", "s3"),
+            (
+                "FLEET_SERVER__BLOBS__S3__ENDPOINT",
+                "https://s3.example:9000",
+            ),
+            ("FLEET_SERVER__BLOBS__S3__BUCKET", "fleet"),
+            ("FLEET_SERVER__BLOBS__S3__REGION", "eu-central-1"),
+            ("FLEET_SERVER__BLOBS__S3__PREFIX", "server-1/"),
+            ("FLEET_SERVER__BLOBS__S3__ACCESS_KEY_ID", "fleet-server"),
+            (
+                "FLEET_SERVER__BLOBS__S3__SECRET_ACCESS_KEY_FILE",
+                "/run/secrets/s3-secret",
+            ),
+        ]);
+        let config = ServerConfig::load_layered(None, variables(&pairs))
+            .expect("loads")
+            .config;
+        let s3 = config.blobs.s3().expect("s3");
+        assert_eq!(s3.endpoint, "https://s3.example:9000");
+        assert_eq!(s3.prefix, "server-1/");
+        assert_eq!(
+            s3.secret_access_key_file.as_deref(),
+            Some(Path::new("/run/secrets/s3-secret"))
+        );
+        pairs.push(("FLEET_SERVER__BLOBS__S3__ENDPOINT_URL", "https://x"));
+        let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err("unknown");
+        assert!(
+            err.contains("FLEET_SERVER__BLOBS__S3__ENDPOINT_URL"),
+            "{err}"
         );
     }
 }

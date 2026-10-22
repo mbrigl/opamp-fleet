@@ -460,12 +460,13 @@ async fn main() {
                 // ADR-0033.
                 info!("checking package signatures against [packages] verification_key");
             }
-            fleet_server::packages::PackageStore::open(config.data_dir.clone()).map(|store| {
-                store.with_verifier(key.map(|key| {
-                    Box::new(fleet_server::config::Ed25519Verifier::new(key))
-                        as Box<dyn fleet_server::packages::SignatureVerifier>
-                }))
-            })
+            fleet_server::packages::PackageStore::open_with(config.data_dir.clone(), &config.blobs)
+                .map(|store| {
+                    store.with_verifier(key.map(|key| {
+                        Box::new(fleet_server::config::Ed25519Verifier::new(key))
+                            as Box<dyn fleet_server::packages::SignatureVerifier>
+                    }))
+                })
         })
         .and_then(|store| {
             if !store.is_empty() {

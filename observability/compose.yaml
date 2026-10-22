@@ -28,7 +28,11 @@
 # Ports published on the host, on OBSERVABILITY_BIND (default 0.0.0.0 — every interface):
 #   4317 OTLP/gRPC, 4318 OTLP/HTTP, 8888 Collector self-metrics, 13133 Collector health,
 #   3001 Grafana, 8123 ClickHouse HTTP, 9000 ClickHouse native, 8030 Doris FE HTTP and web UI,
-#   9030 Doris FE MySQL protocol.
+#   9030 Doris FE MySQL protocol, 9100 rustfs S3 API.
+#
+# rustfs is no part of the observability stack: it is the S3-compatible store a development Server
+# keeps its artifacts in when `[blobs] store = "s3"` (ADR-0049 clause 9), here so that a developer
+# starts and forwards one stack rather than two.
 #
 # Doris needs fixed addresses: its images register the FE and the BE with each other by IP, never
 # by name (`FE_SERVERS`, `BE_ADDR`). The project network therefore has a
@@ -212,6 +216,19 @@ services:
       grafana-doris-app:
         condition: service_completed_successfully
 
+  # The development S3 store (ADR-0049 clause 9). The Server creates no bucket; README.md →
+  # "The S3 store" creates `fleet` once. The key pair is a development one, like Grafana's admin.
+  rustfs:
+    image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: fleet-dev
+      RUSTFS_SECRET_KEY: fleet-dev-secret
+    volumes:
+      - rustfs-data:/data
+    ports:
+      - "${OBSERVABILITY_BIND:-0.0.0.0}:9100:9000"   # S3 API — not 9000, which ClickHouse holds
+
 networks:
   default:
     ipam:
@@ -224,3 +241,4 @@ volumes:
   doris-be-storage:
   grafana-data:
   grafana-doris-app:
+  rustfs-data:

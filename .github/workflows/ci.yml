@@ -50,6 +50,54 @@ jobs:
       - name: Test
         run: cargo test -p fleet-agent --locked
 
+  # ADR-0049 clause 9: the S3 store's tests, which a plain `cargo test` skips, run here against a
+  # rustfs service, its image pinned by digest. The key pair is the throwaway one of this job's
+  # own container, not a secret. The tests make a prefix of their own and leave the bucket empty.
+  s3-store:
+    runs-on: ubuntu-latest
+    services:
+      rustfs:
+        image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
+        env:
+          RUSTFS_ACCESS_KEY: fleet-ci
+          RUSTFS_SECRET_KEY: fleet-ci-secret
+        ports:
+          - 9000:9000
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Create the bucket
+        # The Server creates none (ADR-0049 clause 4). curl signs the request itself; the service
+        # may still be starting, so the first attempts are allowed to fail.
+        run: |
+          empty="$(printf '' | sha256sum | cut -d' ' -f1)"
+          for _ in $(seq 1 30); do
+            if curl -fsS --aws-sigv4 aws:amz:us-east-1:s3 --user fleet-ci:fleet-ci-secret \
+                -H "x-amz-content-sha256: $empty" -X PUT http://127.0.0.1:9000/fleet; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "rustfs did not create the bucket" >&2
+          exit 1
+      - name: Test against rustfs
+        env:
+          FLEET_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          FLEET_TEST_S3_BUCKET: fleet
+          FLEET_TEST_S3_ACCESS_KEY_ID: fleet-ci
+          FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE: ${{ runner.temp }}/s3-secret
+        run: |
+          set -euo pipefail
+          (umask 077 && printf '%s' fleet-ci-secret > "$FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE")
+          cargo test -p fleet-server --lib --locked s3:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/s3.log"
+          # Skipped is not passed: the store was named, so every S3 test must have reached it.
+          if grep -q "skipped: no S3 store" "$RUNNER_TEMP/s3.log"; then
+            echo "an S3 test was skipped although a store is named" >&2
+            exit 1
+          fi
+
   # The Client ships on Linux, macOS, and Windows; the Server on Linux only.
   release-build:
     name: release (${{ matrix.name }})

@@ -2,7 +2,9 @@
 #
 # Puts the host's OpenTelemetry Collector on this container's loopback: 127.0.0.1:4317 (OTLP/gRPC)
 # and 127.0.0.1:4318 (OTLP/HTTP) inside the container are forwarded to the same ports on the host,
-# where observability/compose.yaml publishes the Collector.
+# where observability/compose.yaml publishes the Collector. 127.0.0.1:9100 goes the same way to the
+# stack's rustfs, the S3 store a development Server may keep its artifacts in (ADR-0049 clause 9):
+# its `[blobs.s3] endpoint` may be plaintext on the loopback alone.
 #
 # The detour is ADR-0016's: the Client sends own telemetry in plaintext to a loopback IP literal
 # and nowhere else — not to host.docker.internal, not to a private address, not even to the name
@@ -25,7 +27,7 @@ set -euo pipefail
 
 HOST="${OTLP_FORWARD_HOST:-host.docker.internal}"
 
-for port in 4317 4318; do
+for port in 4317 4318 9100; do
   if ss -Hltn "sport = :$port" | grep -q .; then
     echo "forward-otlp: 127.0.0.1:$port is already listening; left as it is"
     continue

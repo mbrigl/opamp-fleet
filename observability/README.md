@@ -115,6 +115,26 @@ The host is reached by the name Podman and Docker Desktop both give it, `host.do
 Docker Engine on Linux gives it no name; set `OTLP_FORWARD_HOST` in the container's environment to
 the host's address on the bridge (usually `172.17.0.1`).
 
+### The S3 store
+
+The stack carries rustfs, an S3-compatible store, for a development Server that keeps its
+artifacts in a bucket ([ADR-0049](../docs/adr/0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md)).
+It is published on port 9100 and forwarded onto the Dev Container's loopback like the Collector,
+so `http://127.0.0.1:9100` is the same store on the host and in the container. The Server creates
+no bucket; create `fleet` once, with the development key pair of `compose.yaml`:
+
+```sh
+curl --aws-sigv4 aws:amz:us-east-1:s3 --user fleet-dev:fleet-dev-secret -X PUT \
+  -H "x-amz-content-sha256: $(printf '' | sha256sum | cut -d' ' -f1)" http://127.0.0.1:9100/fleet
+```
+
+Then point the Server at it with `[blobs] store = "s3"` and a `[blobs.s3]` section naming that
+endpoint, `bucket = "fleet"`, a `region`, `access_key_id = "fleet-dev"` and a
+`secret_access_key_file` holding the secret, mode `0600`. The same settings run the S3 store's
+tests: `FLEET_TEST_S3_ENDPOINT=http://127.0.0.1:9100 FLEET_TEST_S3_BUCKET=fleet
+FLEET_TEST_S3_ACCESS_KEY_ID=fleet-dev FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE=<file> cargo test -p
+fleet-server s3::`.
+
 ## Pointing this Server's Agents at it
 
 The destination is not a Client setting — the Server names it, and the Client reports to what it is
@@ -380,3 +400,4 @@ ORDER BY l.Timestamp
 | 9000 | ClickHouse | Native protocol — what the Collector and Grafana speak |
 | 8030 | Doris FE | HTTP API and web UI; where the Collector's stream load starts |
 | 9030 | Doris FE | MySQL protocol — what Grafana, the Doris app and `mysql` speak |
+| 9100 | rustfs | S3 API — the development store of the Server's artifacts |

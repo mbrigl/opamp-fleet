@@ -31,6 +31,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   **What to do:** nothing to keep a deployment running. To configure a container without a file,
   set the variables; keep secrets in files and set their `*_file` keys to the paths.
 
+- **Artifacts may live in an S3-compatible object store**
+  ([ADR-0049](docs/adr/0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md)).
+  `[blobs] store = "s3"` with a `[blobs.s3]` section (`endpoint`, `bucket`, `region`, optional
+  `prefix` and `ca_file`) keeps one object per artifact in that bucket instead of a file under
+  `data_dir/blobs/`, streamed through the Server both ways over TLS 1.3. The endpoint is `https://`,
+  `http://` only on the loopback. Credentials are `access_key_id` with `secret_access_key_file`, or
+  the platform's workload identity; no `AWS_*` variable changes the endpoint, bucket or TLS. The
+  Server creates no bucket, and copies every referenced artifact the bucket lacks from
+  `data_dir/blobs/` at its first start on it, leaving the files in place. The default stays
+  `"fs"`. **What to do:** nothing to keep a deployment running. To move the artifacts into a
+  bucket, create it, set `[blobs]` and `[blobs.s3]`, and restart; once the Server has started on
+  it, `data_dir/blobs/` may be removed — keep it until a backup of the bucket exists.
+
 ### Changed
 
 - **A configuration file the Server is told to read has to exist**
