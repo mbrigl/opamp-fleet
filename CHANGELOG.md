@@ -13,6 +13,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Security
+
+- **TLS verification takes the fixed `rustls-webpki` and root certificates**
+  ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382.html),
+  [RUSTSEC-2026-0381](https://rustsec.org/advisories/RUSTSEC-2026-0381.html),
+  [RUSTSEC-2026-0383](https://rustsec.org/advisories/RUSTSEC-2026-0383.html)): `rustls-webpki`
+  0.103.16 no longer accepts a distrusted intermediate in a certificate chain, and
+  `webpki-roots`/`webpki-root-certs` 1.0.10 drop the distrusted emSign intermediates. Nothing to
+  do beyond the update.
+
 ## [0.6.0]
 
 ### Added
