@@ -481,7 +481,7 @@ fn user_of(pid: &str) -> String {
 /// A Managed Process under a process account (ADR-0053): installed with `--run-as` and
 /// `--process-account` naming two real accounts, the Client starts its program through the second
 /// service, and the program runs as the process account. It reads its `config/`, writes into its
-/// data directory, and can neither read the Client's `client-key.pem` nor write its own
+/// data directory, and can neither read the Client's `client-key.pem` or its log nor write its own
 /// `program/`. After a restart of the second service the Client reaches it again and the program
 /// runs again. A re-registration without either flag, as every package upgrade makes, keeps both
 /// accounts and leaves the program its data: what it wrote is still its own, and it writes there
@@ -553,6 +553,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
              echo \"pid=$$\"\n\
              echo \"user=$(id -un)\"\n\
              if cat {key} >/dev/null 2>&1; then echo key=read; else echo key=denied; fi\n\
+             if ls {logs} >/dev/null 2>&1; then echo logs=read; else echo logs=denied; fi\n\
              if (: > {program}/written) 2>/dev/null; then echo program=written; else echo program=denied; fi\n\
              if (echo $$ >> {data}/written) 2>/dev/null; then echo data=written; else echo data=denied; fi\n\
              echo \"config=$(cat {config}/settings 2>/dev/null)\"\n\
@@ -561,6 +562,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
              exec sleep 3600\n",
             out = out.display(),
             key = key.display(),
+            logs = state.join("logs").display(),
             program = program.display(),
             data = data.display(),
             config = config_dir.display(),
@@ -611,6 +613,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(first["user"], process_account.0, "{first:?}");
     assert_eq!(user_of(&first["pid"]), process_account.0, "{first:?}");
     assert_eq!(first["key"], "denied", "{first:?}");
+    assert_eq!(first["logs"], "denied", "{first:?}");
     assert_eq!(first["program"], "denied", "{first:?}");
     assert_eq!(first["config"], "from the config", "{first:?}");
     assert_eq!(first["data"], "written", "{first:?}");

@@ -558,8 +558,14 @@ impl InstallTarget {
 
     /// Keeps the backup and records when it may be deleted (ADR-0026). Persisted, so the deadline
     /// survives a Client restart the way the self-update outcome marker does (ADR-0018).
+    ///
+    /// The marker is the Client's alone, `0600`, though it stands in `program/`, which the process
+    /// account's group reads (ADR-0053 clause 6).
     fn retain(&self, deadline_unix: u64) {
-        let _ = std::fs::write(self.backup_marker(), deadline_unix.to_string());
+        let _ = crate::storage::write_private(
+            &self.backup_marker(),
+            deadline_unix.to_string().as_bytes(),
+        );
     }
 
     /// Drops the backup — and its retention marker — once it is no longer wanted: immediately when
@@ -3035,6 +3041,24 @@ mod tests {
         target.drop_backup();
         assert!(!target.backup().exists());
         assert!(!target.backup_marker().exists());
+    }
+
+    /// The retention marker is the Client's alone, `0600`, whatever the umask: it stands in
+    /// `program/`, which the process account's group reads (ADR-0053 clause 6).
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn the_retention_marker_is_the_clients_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = InstallTarget::Binary(dir.path().join("prog"));
+        std::fs::write(target.backup(), b"old").expect("write");
+        target.retain(5000);
+        let mode = std::fs::metadata(target.backup_marker())
+            .expect("marker")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     /// A stand-in for the second service that runs nothing: every start is reported to `asked`,
