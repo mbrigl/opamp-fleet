@@ -233,6 +233,18 @@ fn report_orphaned_supervisor_dirs(config: &ClientConfig) {
         {
             continue;
         }
+        if name
+            .to_str()
+            .and_then(crate::config::tombstone_of)
+            .is_some()
+        {
+            warn!(
+                path = %entry.path().display(),
+                "a purge cut short left this removed supervisor's directory; the next purge tries \
+                 it again"
+            );
+            continue;
+        }
         warn!(
             path = %entry.path().display(),
             "no [[supervisor]] block names this directory; leaving it untouched — remove it by \

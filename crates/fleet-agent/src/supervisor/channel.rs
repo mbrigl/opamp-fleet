@@ -810,7 +810,10 @@ fn start(launch: &Launch) -> io::Result<Child> {
 /// them it can read, with everything beneath it. The service holds the request to that and no
 /// more:
 ///
-/// - `dir` is absolute and named after the Supervisor, and the Client's account owns it;
+/// - `dir` is absolute, named after the Supervisor or its tombstone
+///   ([`crate::config::tombstone_name`]), and the Client's account owns it and the directory it
+///   is in, the Supervisors' root;
+/// - `dir` itself is no link;
 /// - each of `shared` is a path beneath it, of plain names alone;
 /// - no link is followed beneath `dir`, and an entry, a link included, is removed as what it is;
 /// - only what this service's account owns is removed.
@@ -828,20 +831,29 @@ pub(crate) fn purge(
     use crate::storage::handle;
     use std::os::fd::AsRawFd as _;
     use std::os::unix::ffi::OsStrExt as _;
-    if !dir.is_absolute() || dir.file_name() != Some(std::ffi::OsStr::new(supervisor)) {
+    let named = dir
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| {
+            name == supervisor || crate::config::tombstone_of(name) == Some(supervisor)
+        });
+    let (Some(root), true) = (dir.parent().filter(|_| dir.is_absolute()), named) else {
         return Err(format!(
             "{} is not the directory of the Supervisor {supervisor}",
             dir.display()
         ));
-    }
+    };
     let at = |e: io::Error| format!("{}: {e}", dir.display());
-    let top = handle::open_beneath(dir, dir, handle::SEARCH, None).map_err(at)?;
-    let owner = handle::fstat(&top).map_err(at)?.st_uid;
-    if owner != client_uid {
-        return Err(format!(
-            "{} belongs to uid {owner}, not to the Client's account",
-            dir.display()
-        ));
+    let parent = handle::open_beneath(root, root, handle::SEARCH, None).map_err(at)?;
+    let top = handle::open_beneath(root, dir, handle::SEARCH, None).map_err(at)?;
+    for (what, handle) in [(root, &parent), (dir, &top)] {
+        let owner = handle::fstat(handle).map_err(at)?.st_uid;
+        if owner != client_uid {
+            return Err(format!(
+                "{} belongs to uid {owner}, not to the Client's account",
+                what.display()
+            ));
+        }
     }
     let mut first = None;
     for relative in shared {
@@ -2338,6 +2350,45 @@ mod tests {
         assert_eq!(std::fs::read(outside.join("keep")).expect("kept"), b"kept");
         assert!(data.is_dir());
         assert_eq!(std::fs::read_dir(&data).expect("read").count(), 0);
+    }
+
+    /// The service purges the tombstone of the Supervisor it names, a directory the Client moved
+    /// aside beneath the Supervisors' root, and nothing that only looks like one: another
+    /// Supervisor's tombstone, a name of no tombstone, or a link of that name (ADR-0053 clause 5,
+    /// ADR-0017 clause 34).
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_purge_takes_the_tombstone_of_the_supervisor_it_names() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("supervisors");
+        let tomb = root.join(crate::config::tombstone_name("agent"));
+        let data = tomb.join("data");
+        std::fs::create_dir_all(&data).expect("mkdir");
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
+        std::fs::write(data.join("state"), b"x").expect("write");
+        let linked = root.join(crate::config::tombstone_name("agent"));
+        std::os::unix::fs::symlink(&tomb, &linked).expect("a link");
+        let me = own_uid();
+        let shared = vec![PathBuf::from("data")];
+
+        for (name, at) in [
+            ("other", tomb.clone()),
+            ("agent", root.join(".purge-agent-")),
+            ("agent", root.join(".purge-agent-xyz")),
+            ("agent", root.join(".purge-other-1f")),
+            ("agent", linked),
+        ] {
+            assert!(
+                purge(me, name, &at, &shared).is_err(),
+                "{name} {}",
+                at.display()
+            );
+        }
+        assert!(data.join("state").exists());
+
+        purge(me, "agent", &tomb, &shared).expect("the tombstone's");
+        assert!(!data.join("state").exists());
     }
 
     /// The Client asks once per purged Supervisor, naming the directories it shares for writing,

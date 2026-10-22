@@ -163,7 +163,8 @@ core module names an adapter or a technology, and when a module has no role.
   hands `build_engine`. The Engine keeps that registry behind the port `PluginRegistry` of
   `supervisor::ports`, so a Supervisor a Supervisor-set apply starts later starts its program
   the same way, and a Supervisor it purges has the same `Spawner` remove first what its
-  programs wrote under their own account. What the Client changes where the process account
+  programs wrote under their own account, in the directory the purge first moved aside to a name
+  no Supervisor carries. What the Client changes where the process account
   writes, it reaches through `storage::handle`, one directory handle at a time from a root of its
   own — the state directory, the Supervisors' root, a Supervisor's directory — beneath which no
   link is followed.
