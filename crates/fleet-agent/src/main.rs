@@ -68,12 +68,9 @@ fn main() {
                 config_path: cli.config,
                 state_dir: cli.state_dir,
                 service: args.service,
-                agents: args.agents_socket.clone().zip(args.process_uid).map(
-                    |(socket, process_uid)| runtime::AgentsChannel {
-                        socket,
-                        process_uid,
-                    },
-                ),
+                agents: args
+                    .agents_channel()
+                    .map(|(socket, process)| runtime::AgentsChannel { socket, process }),
             };
             run_command(spec, args)
         }
@@ -103,8 +100,8 @@ fn main() {
 /// the shim) owns the tokio runtime; `main` stays synchronous.
 fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
     // The second service (ADR-0059): it reads neither the configuration nor the state directory.
-    if let (Some(socket), Some(client_uid)) = (&args.agents, args.client_uid) {
-        return agents_service(socket, client_uid);
+    if let Some((socket, client)) = args.agents_service() {
+        return agents_service(&socket, client);
     }
     #[cfg(windows)]
     if args.service {
@@ -115,7 +112,7 @@ fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
 }
 
 /// `run --agents`: the second service, which starts the Managed Processes under the process
-/// account (ADR-0059). Its channel is a Unix socket; Windows has none of it here.
+/// account (ADR-0059). Its channel is a Unix socket.
 #[cfg(unix)]
 fn agents_service(socket: &Path, client_uid: u32) -> Result<(), String> {
     use fleet_agent::supervisor::channel::{run_service, Served};
@@ -127,9 +124,10 @@ fn agents_service(socket: &Path, client_uid: u32) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn agents_service(_socket: &Path, _client_uid: u32) -> Result<(), String> {
-    Err("the second service is not available on this platform".to_string())
+/// `run --agents` on Windows: the second service under the SCM, on a named pipe.
+#[cfg(windows)]
+fn agents_service(pipe: &Path, client: fleet_agent::win32::Sid) -> Result<(), String> {
+    fleet_agent::service::windows::run_agents_as_service(pipe, client)
 }
 
 /// Dispatch a `service` verb (ADR-0019).

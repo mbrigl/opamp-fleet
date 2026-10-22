@@ -170,8 +170,16 @@ pub enum InstallTarget {
 /// Resolved from the `--process-uid` of the Client's command line when it starts, never from the
 /// configuration file: the registration that names the process account is the only place it is
 /// stated (ADR-0059 clause 8).
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub u32);
+
+/// On Windows the process account itself, by its SID, from the `--process-sid` of the Client's
+/// command line: what the Client shares with the Managed Processes is granted to it by ACL, where
+/// Unix gives it to the account's group (ADR-0059 clause 6). Made once per run.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessAccountGroup(pub &'static str);
 
 /// The package this Supervisor's Managed Process currently runs (ADR-0026), persisted so a
 /// restarted Client reports the version it has and is not re-offered it.

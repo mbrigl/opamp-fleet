@@ -172,10 +172,14 @@ core module names an adapter or a technology, and when a module has no role.
   `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the
   Supervisors' root as an absolute path too. When a failed process is started again or held is
   `supervisor::restart`'s decision; the runner reads the clock and starts it. Who starts the
-  program is the runner's `Spawner`: the Client itself, or on Unix the second service of
+  program is the runner's `Spawner`: the Client itself, or the second service of
   [ADR-0059](adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md),
   `supervisor run --agents`, through `supervisor::channel`, which holds the private protocol, the
-  service and the Client's end of its socket. The registry hands every plugin the one `Spawner`
+  service and the Client's end of its socket — on Windows of its named pipe, in
+  `supervisor::channel::windows`, which runs each program in a job object. The Windows system
+  calls neither the standard library nor a dependency offers — the SIDs, the pipe's security
+  descriptor and its two ends' identities, the job objects — are declared in `win32`. The
+  registry hands every plugin the one `Spawner`
   of the run, which `service::runtime` chooses once from the Client's command line — the unit
   or plist `service install --process-account` writes names the second service's socket there —
   and hands `build_engine`. The Engine keeps that registry behind the port `PluginRegistry` of

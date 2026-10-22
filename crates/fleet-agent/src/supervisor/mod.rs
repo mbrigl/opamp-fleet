@@ -7,7 +7,6 @@
 
 pub mod agent;
 pub mod block;
-#[cfg(unix)]
 pub mod channel;
 pub mod collector;
 pub mod command;

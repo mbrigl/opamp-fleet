@@ -171,6 +171,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("service::windows_rights", Adapter),
             ("storage", Adapter),
             ("supervisor::channel", Adapter),
+            ("supervisor::channel::windows", Adapter),
             ("supervisor::collector", Adapter),
             ("supervisor::command", Adapter),
             ("supervisor::endpoint", Adapter),
@@ -181,6 +182,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("tls", Adapter),
             ("transport", Adapter),
             ("update::installer", Adapter),
+            ("win32", Adapter),
         ],
     ),
     (
