@@ -546,12 +546,74 @@ pub(crate) fn create_shared_dir(
             handle::give_written(&made, group, dir);
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         std::fs::create_dir_all(dir)?;
-        let _ = (root, group, shared);
+        grant(root, dir, group, shared)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
     }
     Ok(())
+}
+
+/// The `icacls.exe` arguments that grant the process account `sid` what `shared` says of `dir`,
+/// in place of whatever it was granted there before, inherited by everything in it, and on `dir`
+/// itself even where it is a link: read and execute for `Read`, modify for `Written`. `None` for
+/// `Traversed`: the process account passes through a directory of the Client's by the
+/// `SeChangeNotifyPrivilege` the second service keeps (ADR-0059 clause 2), and is granted nothing
+/// there, so it lists nothing and reads nothing of the Client's own (ADR-0059 clause 6).
+#[cfg(any(windows, test))]
+fn grant_args(dir: &Path, sid: &str, shared: Shared) -> Option<Vec<std::ffi::OsString>> {
+    let rights = match shared {
+        Shared::Traversed => return None,
+        Shared::Read => "(OI)(CI)RX",
+        Shared::Written => "(OI)(CI)M",
+    };
+    Some(vec![
+        dir.as_os_str().to_owned(),
+        "/grant:r".into(),
+        format!("*{sid}:{rights}").into(),
+        "/L".into(),
+    ])
+}
+
+/// Grants the process account `group` — its SID, on Windows — what `shared` says of `dir`, a
+/// directory beneath `root` (ADR-0059 clause 6). A grant on a directory is inherited by what is
+/// in it, what is already there included, so a file the Client writes into `config/` or an agent
+/// into its data directory needs none of its own. No directory from `root` to `dir` may be a link
+/// or a junction: the grant would land on what it names.
+#[cfg(windows)]
+fn grant(root: &Path, dir: &Path, group: ProcessAccountGroup, shared: Shared) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt as _;
+    /// FILE_ATTRIBUTE_REPARSE_POINT.
+    const REPARSE_POINT: u32 = 0x400;
+    let Some(args) = grant_args(dir, group.0, shared) else {
+        return Ok(());
+    };
+    let beneath = dir.strip_prefix(root).unwrap_or(Path::new(""));
+    let mut reached = root.to_path_buf();
+    for part in std::iter::once(None).chain(beneath.components().map(Some)) {
+        if let Some(part) = part {
+            reached.push(part);
+        }
+        if std::fs::symlink_metadata(&reached)?.file_attributes() & REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a link or a junction", reached.display()),
+            ));
+        }
+    }
+    let output = std::process::Command::new("icacls.exe")
+        .args(&args)
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "icacls.exe {} exited with {} ({})",
+        args[2].to_string_lossy(),
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim()
+    )))
 }
 
 /// Directories reached through handles, never through a link: what the Client changes where the
@@ -1337,6 +1399,44 @@ impl crate::supervisor::ports::HighWaterMarks for HighWaterFile {
                  it again from the installed-package records"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod windows_grants {
+    use super::{grant_args, Shared};
+    use std::path::Path;
+
+    /// On Windows the split of ADR-0059 clause 6 is made by ACL grants to the process account's
+    /// SID: `program/`, the preflight's staging and `config/` read and executed, a kind's data
+    /// directories modified, each inherited by what is in them, and the directories passed
+    /// through granted nothing.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_process_account_is_granted_what_it_reads_and_writes_and_nothing_else() {
+        let dir = Path::new(r"C:\ProgramData\opamp-fleet\state\supervisors\otel\program");
+        let sid = "S-1-5-80-1-2-3-4-5";
+        let strings = |shared| {
+            grant_args(dir, sid, shared).map(|args| {
+                args.iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            strings(Shared::Read),
+            Some(vec![
+                dir.display().to_string(),
+                "/grant:r".to_string(),
+                format!("*{sid}:(OI)(CI)RX"),
+                "/L".to_string(),
+            ])
+        );
+        assert_eq!(
+            strings(Shared::Written).expect("granted")[2],
+            format!("*{sid}:(OI)(CI)M")
+        );
+        assert_eq!(strings(Shared::Traversed), None);
     }
 }
 
