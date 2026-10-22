@@ -59,5 +59,5 @@ ones it uses without defining.
   _Avoid:_ helper, launcher, sidecar.
 - **Tombstone** — the name, `.purge-<name>-<nonce>`, beneath the Supervisors' root that a removed
   Supervisor's directory is moved to before its purge deletes it, a name no Supervisor can carry;
-  one the purge could not delete is an orphan.
+  one the purge could not delete is removed again at the next start and with the next purge.
   _Avoid:_ trash directory, purge directory.
