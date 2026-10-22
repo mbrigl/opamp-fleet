@@ -1819,6 +1819,10 @@ mod tests {
         let (gid, uid) = unsafe { (libc::getegid(), libc::geteuid()) };
         group_members(gid).expect("the group database");
         if account_of(uid).ok().flatten().map(|a| a.gid) != Some(gid) {
+            crate::skipped_unless_ci(
+                "the_group_lookups_read_this_hosts_databases",
+                "password database entry with the test's own primary group",
+            );
             return;
         }
         assert!(
@@ -1937,6 +1941,10 @@ mod tests {
         std::fs::create_dir_all(&root).expect("mkdir");
         let (me, other) = me_with_another_group(&root);
         let Some(group) = other else {
+            crate::skipped_unless_ci(
+                "the_handover_keeps_the_process_accounts_group_and_its_modes",
+                "supplementary group",
+            );
             return;
         };
         let (shared, record) = shared_tree(&root, group);
@@ -1969,6 +1977,10 @@ mod tests {
         std::fs::create_dir_all(&root).expect("mkdir");
         let (mut me, other) = me_with_another_group(&root);
         let Some(group) = other else {
+            crate::skipped_unless_ci(
+                "the_handover_skips_what_the_process_account_owns_with_everything_beneath_it",
+                "supplementary group",
+            );
             return;
         };
         let before = mode_and_group(&root).1;
@@ -2027,6 +2039,10 @@ mod tests {
         std::fs::create_dir_all(&root).expect("mkdir");
         let (me, other) = me_with_another_group(&root);
         let Some(group) = other else {
+            crate::skipped_unless_ci(
+                "without_a_process_account_the_handover_re_owns_every_group",
+                "supplementary group",
+            );
             return;
         };
         let (shared, record) = shared_tree(&root, group);
