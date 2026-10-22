@@ -80,11 +80,17 @@ fn agents_socket_dir() -> PathBuf {
     PathBuf::from("/run").join(agents_service_name())
 }
 
-/// How long the service manager waits for the second service to stop before it kills it —
-/// systemd's `TimeoutStopSec=`, launchd's `ExitTimeOut`: longer than the service's own grace for
-/// its programs and the drain of their output after it, so a stop ends them through the service
-/// rather than through the manager.
+/// How long systemd waits for the second service to stop before it kills it (`TimeoutStopSec=`):
+/// longer than the service's own grace for its programs and the drain of their output after it,
+/// so a stop ends them through the service rather than through the manager.
 pub const AGENTS_STOP_TIMEOUT_SECS: u32 = 30;
+
+/// How long launchd waits for a job to exit after `SIGTERM` before it kills it, where its plist
+/// names no `ExitTimeOut` — as the second service's, which `service-manager` renders, does not:
+/// launchd's default, which exceeds the time the second service takes to stop what it started
+/// (ADR-0059 clause 9).
+#[cfg(test)]
+const LAUNCHD_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The name a human reads where the platform has somewhere to put one (ADR-0019): the Windows
 /// services list. systemd shows the unit name as its `Description`, and a launchd job *is* its
@@ -286,33 +292,52 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
 }
 
 /// Registers the second service (ADR-0059 clause 2), which only a host where [`agents_supported`]
-/// holds gets: a systemd system unit of the Client's own text, or on macOS a `LaunchDaemon` plist
-/// of the Client's own text, once the directory of its socket is in place.
+/// holds gets, and on macOS then the directory of its socket. The registration first, so an
+/// install that may not register a system service is told so before anything else.
 fn install_agents(spec: &InstallSpec, agents: &Agents) -> Result<(), String> {
+    manager(spec.level)?
+        .install(agents_install_ctx(spec, agents, cfg!(target_os = "linux"))?)
+        .map_err(|e| format!("cannot install the second service (system scope needs root): {e}"))?;
+    // The plist is registered `Disabled`: launchd starts nothing until `service start`, by when
+    // the directory is in place.
     #[cfg(target_os = "macos")]
-    let contents = {
-        let dir = agents
+    socket_dir(
+        agents
             .socket
             .parent()
-            .ok_or_else(|| format!("{} names no directory", agents.socket.display()))?;
-        socket_dir(dir, agents.uid, agents.gid)?;
-        agents_plist(spec, agents)?
-    };
-    #[cfg(not(target_os = "macos"))]
-    let contents = agents_unit(spec, agents)?;
-    manager(spec.level)?
-        .install(ServiceInstallCtx {
-            label: agents_label(),
-            program: spec.program.clone(),
-            args: agents_args(agents),
-            contents: Some(contents),
-            username: Some(agents.account.clone()),
-            working_directory: None,
-            environment: None,
-            autostart: true,
-            restart_policy: RESTART_POLICY,
-        })
-        .map_err(|e| format!("cannot install the second service: {e}"))
+            .ok_or_else(|| format!("{} names no directory", agents.socket.display()))?,
+        agents.uid,
+        agents.gid,
+    )?;
+    Ok(())
+}
+
+/// What `service-manager` is asked to register for the second service. Under systemd
+/// (`own_unit`) a system unit of the Client's own text (ADR-0059 clause 9); under launchd the plist
+/// the crate renders, as it renders the Client's: `UserName` naming the process account,
+/// `KeepAlive` with `SuccessfulExit` false for the restart policy of ADR-0019 clause 11,
+/// `RunAtLoad`, and `Disabled`, which keeps the install from starting it until `service start`.
+/// It names no `ExitTimeOut`: launchd's default outlasts the service's own stop of its programs.
+fn agents_install_ctx(
+    spec: &InstallSpec,
+    agents: &Agents,
+    own_unit: bool,
+) -> Result<ServiceInstallCtx, String> {
+    Ok(ServiceInstallCtx {
+        label: agents_label(),
+        program: spec.program.clone(),
+        args: agents_args(agents),
+        contents: if own_unit {
+            Some(agents_unit(spec, agents)?)
+        } else {
+            None
+        },
+        username: Some(agents.account.clone()),
+        working_directory: None,
+        environment: None,
+        autostart: true,
+        restart_policy: RESTART_POLICY,
+    })
 }
 
 /// Whether this host can register the second service (ADR-0059): a system service under systemd
@@ -469,76 +494,6 @@ pub fn agents_unit(spec: &InstallSpec, agents: &Agents) -> Result<String, String
     let _ = writeln!(unit, "[Install]");
     let _ = writeln!(unit, "WantedBy=multi-user.target");
     Ok(unit)
-}
-
-/// The second service's `LaunchDaemon` plist (ADR-0059 clause 2): the same program as the
-/// Client's, under the process account in `UserName`, whose primary group launchd gives it where
-/// the plist names no `GroupName` (launchd.plist(5)).
-///
-/// It says what `service-manager` renders for the Client's plist — `KeepAlive` with
-/// `SuccessfulExit` false for the restart policy of ADR-0019 clause 11, `RunAtLoad`, and
-/// `Disabled`, which keeps the install from starting it until `service start` (ADR-0019 clause 11)
-/// — and adds `ExitTimeOut`, which outlasts the service's own stop of its programs, as
-/// `TimeoutStopSec=` does under systemd. The crate cannot be asked for that key, so the plist is
-/// the Client's own text, as the second service's unit is.
-///
-/// # Errors
-/// Returns an error if a path is not UTF-8, or if the account name or an argument holds a
-/// character a plist cannot carry.
-pub fn agents_plist(spec: &InstallSpec, agents: &Agents) -> Result<String, String> {
-    use std::fmt::Write as _;
-    check_unit_account(&agents.account)?;
-    let mut plist = String::new();
-    let _ = writeln!(plist, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-    let _ = writeln!(
-        plist,
-        r#"<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#
-    );
-    let _ = writeln!(plist, r#"<plist version="1.0">"#);
-    let _ = writeln!(plist, "<dict>");
-    let _ = writeln!(plist, "\t<key>Label</key>");
-    let _ = writeln!(plist, "\t<string>{}</string>", agents_service_name());
-    let _ = writeln!(plist, "\t<key>ProgramArguments</key>");
-    let _ = writeln!(plist, "\t<array>");
-    for word in std::iter::once(spec.program.clone().into_os_string()).chain(agents_args(agents)) {
-        let _ = writeln!(plist, "\t\t<string>{}</string>", plist_text(&word)?);
-    }
-    let _ = writeln!(plist, "\t</array>");
-    let _ = writeln!(plist, "\t<key>KeepAlive</key>");
-    let _ = writeln!(plist, "\t<dict>");
-    let _ = writeln!(plist, "\t\t<key>SuccessfulExit</key>");
-    let _ = writeln!(plist, "\t\t<false/>");
-    let _ = writeln!(plist, "\t</dict>");
-    let _ = writeln!(plist, "\t<key>UserName</key>");
-    let _ = writeln!(
-        plist,
-        "\t<string>{}</string>",
-        plist_text(std::ffi::OsStr::new(&agents.account))?
-    );
-    let _ = writeln!(plist, "\t<key>ExitTimeOut</key>");
-    let _ = writeln!(plist, "\t<integer>{AGENTS_STOP_TIMEOUT_SECS}</integer>");
-    let _ = writeln!(plist, "\t<key>RunAtLoad</key>");
-    let _ = writeln!(plist, "\t<true/>");
-    let _ = writeln!(plist, "\t<key>Disabled</key>");
-    let _ = writeln!(plist, "\t<true/>");
-    let _ = writeln!(plist, "</dict>");
-    let _ = writeln!(plist, "</plist>");
-    Ok(plist)
-}
-
-/// One string of a plist, its markup escaped. A control character is refused: XML 1.0 cannot
-/// carry most of them, and none belongs in a path or an account.
-fn plist_text(word: &std::ffi::OsStr) -> Result<String, String> {
-    let text = word
-        .to_str()
-        .ok_or_else(|| format!("{} is not UTF-8, which a plist must be", word.display()))?;
-    if text.chars().any(char::is_control) {
-        return Err(format!("{text:?} cannot be written into a launchd plist"));
-    }
-    Ok(text
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;"))
 }
 
 /// Refuses an account name that would change what a unit says.
@@ -1517,73 +1472,83 @@ mod tests {
         }
     }
 
-    /// The second service's plist runs the same program under the process account, in
-    /// `UserName`, as `run --agents` serving the Client's uid, restarts as the Client's does, is
-    /// started by `service start` and not by the install, and gives the service longer to stop
-    /// than it gives its programs. Rendered on every platform: it is text.
+    /// Under launchd the second service's plist is the one `service-manager` renders, as it
+    /// renders the Client's: the same program as `run --agents` serving the Client's uid, the
+    /// process account in `UserName`, the Client's restart policy, and started by `service start`,
+    /// not by the install. Under systemd it is the unit the Client writes.
     /// Verifies: ADR-0059
+    #[cfg(unix)]
     #[test]
-    fn the_second_services_plist_runs_the_program_under_the_process_account() {
-        let plist = agents_plist(&with_agents(), &macos_agents()).expect("plist");
-        let body: Vec<&str> = plist.lines().map(str::trim).collect();
-        let expected = [
-            "<dict>",
-            "<key>Label</key>",
-            "<string>opamp-fleet-agents</string>",
-            "<key>ProgramArguments</key>",
-            "<array>",
-            "<string>/opt/opamp-fleet/current/supervisor</string>",
-            "<string>run</string>",
-            "<string>--agents</string>",
-            "<string>/Library/Application Support/opamp-fleet-agents/agents.sock</string>",
-            "<string>--client-uid</string>",
-            "<string>998</string>",
-            "</array>",
-            "<key>KeepAlive</key>",
-            "<dict>",
-            "<key>SuccessfulExit</key>",
-            "<false/>",
-            "</dict>",
-            "<key>UserName</key>",
-            "<string>_opamp-fleet-agents</string>",
-            "<key>ExitTimeOut</key>",
-            "<integer>30</integer>",
-            "<key>RunAtLoad</key>",
-            "<true/>",
-            "<key>Disabled</key>",
-            "<true/>",
-            "</dict>",
-            "</plist>",
-        ];
-        let start = body.iter().position(|l| *l == "<dict>").expect("dict");
-        assert_eq!(&body[start..], expected, "{plist}");
-        assert!(plist.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"));
-        // `ExitTimeOut` outlasts the service's own stop, as the test of `TimeoutStopSec=` shows.
-        assert!(plist.contains(&format!("<integer>{AGENTS_STOP_TIMEOUT_SECS}</integer>")));
+    fn the_second_services_plist_is_the_one_service_manager_renders() {
+        let ctx = agents_install_ctx(&with_agents(), &macos_agents(), false).expect("ctx");
+        assert!(ctx.contents.is_none(), "{:?}", ctx.contents);
+        assert_eq!(ctx.label, agents_label());
         assert_eq!(
-            plist_account(&plist).as_deref(),
-            Some("_opamp-fleet-agents"),
-            "a re-registration keeps the account the plist names"
+            ctx.program,
+            PathBuf::from("/opt/opamp-fleet/current/supervisor")
+        );
+        assert_eq!(ctx.args, agents_args(&macos_agents()));
+        assert_eq!(ctx.username.as_deref(), Some("_opamp-fleet-agents"));
+        assert!(
+            ctx.autostart,
+            "RunAtLoad, held back by Disabled until service start"
+        );
+        assert_eq!(ctx.restart_policy, RESTART_POLICY);
+        assert_eq!(
+            (ctx.working_directory, ctx.environment),
+            (None, None),
+            "nothing the Client's plist does not carry either"
         );
 
-        let mut odd = with_agents();
-        odd.program = PathBuf::from("/opt/a&b<c>/current/supervisor");
-        let plist = agents_plist(&odd, &macos_agents()).expect("plist");
-        assert!(
-            plist.contains("<string>/opt/a&amp;b&lt;c&gt;/current/supervisor</string>"),
-            "{plist}"
+        let ctx = agents_install_ctx(&with_agents(), &agents(), true).expect("ctx");
+        assert_eq!(
+            ctx.contents,
+            Some(agents_unit(&with_agents(), &agents()).expect("unit"))
         );
-        let mut evil = macos_agents();
-        evil.account = "evil</string><key>Program</key><string>/bin/sh".to_string();
-        let plist = agents_plist(&with_agents(), &evil).expect("escaped");
-        assert!(
-            !plist.contains("<key>Program</key>"),
-            "an account name cannot add a key: {plist}"
-        );
-        evil.account = "evil\n".to_string();
-        assert!(agents_plist(&with_agents(), &evil).is_err());
-        odd.program = PathBuf::from("/opt/a\u{1}b/current/supervisor");
-        assert!(agents_plist(&odd, &macos_agents()).is_err());
+    }
+
+    /// launchd's default exit timeout, which the second service's plist keeps, outlasts the time
+    /// the service takes to stop what it started: the grace its programs have to end, and the
+    /// drain of their output after it. A stop ends them through the service, not through launchd.
+    /// Verifies: ADR-0059
+    #[test]
+    fn launchds_default_exit_timeout_outlasts_the_second_services_stop() {
+        use crate::supervisor::channel::{CLOSE_GRACE, OUTPUT_DRAIN};
+        assert_eq!(LAUNCHD_EXIT_TIMEOUT, std::time::Duration::from_secs(20));
+        assert!(CLOSE_GRACE + OUTPUT_DRAIN < LAUNCHD_EXIT_TIMEOUT);
+    }
+
+    /// A re-registration reads the process account back from the plist as `service-manager`
+    /// writes it — through the `plist` crate, which escapes what XML must — and as its `start`
+    /// rewrites it without `Disabled`: a name with markup in it comes back as it was given.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_process_account_is_read_back_from_the_plist_service_manager_writes() {
+        use plist::{Dictionary, Value};
+        for account in ["_opamp-fleet-agents", "_a&b<c>'d"] {
+            let mut keep_alive = Dictionary::new();
+            keep_alive.insert("SuccessfulExit".to_string(), Value::Boolean(false));
+            let mut dict = Dictionary::new();
+            dict.insert("Label".to_string(), Value::String(agents_service_name()));
+            dict.insert(
+                "ProgramArguments".to_string(),
+                Value::Array(vec![Value::String("/opt/a&b/supervisor".to_string())]),
+            );
+            dict.insert("KeepAlive".to_string(), Value::Dictionary(keep_alive));
+            dict.insert("UserName".to_string(), Value::String(account.to_string()));
+            dict.insert("RunAtLoad".to_string(), Value::Boolean(true));
+            dict.insert("Disabled".to_string(), Value::Boolean(true));
+            let mut plist = Value::Dictionary(dict);
+            for _ in ["installed", "started"] {
+                let mut xml = Vec::new();
+                plist.to_writer_xml(&mut xml).expect("xml");
+                let xml = String::from_utf8(xml).expect("utf-8");
+                assert_eq!(plist_account(&xml).as_deref(), Some(account), "{xml}");
+                if let Value::Dictionary(dict) = &mut plist {
+                    dict.remove("Disabled");
+                }
+            }
+        }
     }
 
     /// The Client's plist, which `service-manager` renders from the command line, names the
