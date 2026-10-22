@@ -140,7 +140,6 @@ pub enum Spawner {
     #[default]
     Local,
     /// The second service starts it, on the Client's request (ADR-0059 clause 3).
-    #[cfg(unix)]
     Channel(crate::supervisor::channel::Channel),
 }
 
@@ -153,11 +152,8 @@ impl Spawner {
     pub async fn spawn(&self, supervisor: &str, launch: Launch) -> std::io::Result<ManagedChild> {
         // The name is for the channel, which logs a program's output under it; a program the
         // Client starts itself writes to the Client's own streams.
-        #[cfg(not(unix))]
-        let _ = supervisor;
         match self {
             Spawner::Local => spawn_local(&launch).map(ManagedChild::Local),
-            #[cfg(unix)]
             Spawner::Channel(channel) => channel
                 .start(supervisor, launch)
                 .await
@@ -174,7 +170,6 @@ impl Spawner {
     pub async fn reach(&self) -> std::io::Result<()> {
         match self {
             Spawner::Local => Ok(()),
-            #[cfg(unix)]
             Spawner::Channel(channel) => channel.reach().await,
         }
     }
@@ -190,7 +185,6 @@ impl Spawner {
     pub async fn purge(&self, removed: &[(String, PathBuf)]) -> Vec<std::io::Result<()>> {
         match self {
             Spawner::Local => removed.iter().map(|_| Ok(())).collect(),
-            #[cfg(unix)]
             Spawner::Channel(channel) => channel.purge(removed).await,
         }
     }
@@ -210,8 +204,6 @@ impl Spawner {
         supervisor: &str,
         launch: &Launch,
     ) -> Option<std::io::Result<std::process::Output>> {
-        #[cfg(not(unix))]
-        let _ = supervisor;
         // Reached first, outside the bound: a start may wait for the second service to come back,
         // and a wait for it that the bound cut short would read as a program that did not answer.
         if let Err(e) = self.reach().await {
@@ -222,7 +214,6 @@ impl Spawner {
             let run = async {
                 match self {
                     Spawner::Local => local_command(launch).output().await,
-                    #[cfg(unix)]
                     Spawner::Channel(channel) => channel.output(supervisor, launch.clone()).await,
                 }
             };
@@ -272,13 +263,7 @@ fn spawn_local(launch: &Launch) -> std::io::Result<Child> {
 /// not start or failed (ADR-0059 clause 2). Never so for a program the Client starts itself.
 #[must_use]
 pub fn is_unreachable(error: &std::io::Error) -> bool {
-    #[cfg(unix)]
-    return crate::supervisor::channel::is_unreachable(error);
-    #[cfg(not(unix))]
-    {
-        let _ = error;
-        false
-    }
+    crate::supervisor::channel::is_unreachable(error)
 }
 
 /// Whether `error` says that the second service was reached and refused, or was refused: another
@@ -286,13 +271,7 @@ pub fn is_unreachable(error: &std::io::Error) -> bool {
 /// and 5). [`is_unreachable`] holds for it too. Never so for a program the Client starts itself.
 #[must_use]
 pub fn is_refused(error: &std::io::Error) -> bool {
-    #[cfg(unix)]
-    return crate::supervisor::channel::is_refused(error);
-    #[cfg(not(unix))]
-    {
-        let _ = error;
-        false
-    }
+    crate::supervisor::channel::is_refused(error)
 }
 
 /// A start that found the second service unreachable, or a program that went with the service:
@@ -406,10 +385,11 @@ enum Swapped {
     Parked(Staged),
 }
 
-/// A running Managed Process, whichever [`Spawner`] started it.
+/// A running Managed Process, whichever [`Spawner`] started it. One per Supervisor, so the size of
+/// a Windows `Child` beside a `RemoteChild` costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 pub enum ManagedChild {
     Local(Child),
-    #[cfg(unix)]
     Remote(crate::supervisor::channel::RemoteChild),
 }
 
@@ -419,7 +399,6 @@ impl ManagedChild {
     pub fn id(&self) -> Option<u32> {
         match self {
             ManagedChild::Local(child) => child.id(),
-            #[cfg(unix)]
             ManagedChild::Remote(child) => child.id(),
         }
     }
@@ -431,7 +410,6 @@ impl ManagedChild {
     pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         match self {
             ManagedChild::Local(child) => child.wait().await,
-            #[cfg(unix)]
             ManagedChild::Remote(child) => child.wait().await,
         }
     }
@@ -439,7 +417,6 @@ impl ManagedChild {
     async fn kill(&mut self) -> std::io::Result<()> {
         match self {
             ManagedChild::Local(child) => child.kill().await,
-            #[cfg(unix)]
             ManagedChild::Remote(child) => child.kill().await,
         }
     }
@@ -461,7 +438,6 @@ impl ManagedChild {
                 let _ = group;
                 send_reload_signal(pid, signal)
             }
-            #[cfg(unix)]
             ManagedChild::Remote(child) => {
                 child.signal(signal, group).await.map_err(|e| e.to_string())
             }
