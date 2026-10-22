@@ -453,6 +453,7 @@ pub struct ProcessAccount {
     uid: u32,
     /// The primary group: what the Client shares with the Managed Processes belongs to it
     /// (ADR-0053 clause 6).
+    #[cfg(unix)]
     gid: u32,
     /// The second service's unit it was kept from; `None` where `--process-account` named it.
     kept_from: Option<PathBuf>,
@@ -1337,6 +1338,7 @@ mod tests {
         let kept = ProcessAccount {
             account: "opamp-fleet-agents".to_string(),
             uid: 997,
+            #[cfg(unix)]
             gid: 997,
             kept_from: Some(PathBuf::from(AGENTS_UNIT)),
         };
