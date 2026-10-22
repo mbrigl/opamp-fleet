@@ -1314,7 +1314,19 @@ impl ServiceControl for NativeService {
             } else {
                 "the service"
             };
-            let stopped = (self.manager)(self.level)?
+            let manager = (self.manager)(self.level)?;
+            // `sc stop` refuses a service that does not run (1062), where systemd and launchd
+            // stop nothing: a service that is not running is stopped already.
+            if cfg!(windows)
+                && manager
+                    .status(ServiceStatusCtx {
+                        label: label.clone(),
+                    })
+                    .is_ok_and(|status| status != ServiceStatus::Running)
+            {
+                continue;
+            }
+            let stopped = manager
                 .stop(ServiceStopCtx { label })
                 .map_err(|e| format!("cannot stop {which}: {e}"));
             if result.is_ok() {
@@ -2111,8 +2123,8 @@ mod tests {
         fn set_level(&mut self, _level: SmLevel) -> std::io::Result<()> {
             Ok(())
         }
-        fn status(&self, ctx: ServiceStatusCtx) -> std::io::Result<ServiceStatus> {
-            Recording::note("status", &ctx.label);
+        /// Every service runs; a query is no request, and is not noted.
+        fn status(&self, _ctx: ServiceStatusCtx) -> std::io::Result<ServiceStatus> {
             Ok(ServiceStatus::Running)
         }
     }

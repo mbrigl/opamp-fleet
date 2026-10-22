@@ -650,34 +650,54 @@ mod system {
         fn SetKernelObjectSecurity(handle: Handle, info: u32, descriptor: *mut c_void) -> Bool;
     }
 
-    /// The parts `info` names of the security descriptor of the file `handle` names, as SDDL.
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn GetKernelObjectSecurity(
+            handle: Handle,
+            info: u32,
+            descriptor: *mut c_void,
+            len: u32,
+            needed: *mut u32,
+        ) -> Bool;
+    }
+
+    /// The parts `info` names of the security descriptor of the object `handle` names, as SDDL —
+    /// as the object holds it (GetKernelObjectSecurity). Not through `GetSecurityInfo`, which
+    /// presents a file's DACL that does not carry `SE_DACL_AUTO_INHERITED` against its parent's
+    /// current one: an ACE the parent passed on before, and passes on no more, it shows as
+    /// explicit, and an object nothing changed reads as changed.
     ///
     /// # Errors
     /// Returns why the descriptor could not be read: the handle lacks `READ_CONTROL`.
     pub fn security_text(handle: RawHandle, info: u32) -> io::Result<String> {
-        let mut descriptor: *mut c_void = std::ptr::null_mut();
-        // SAFETY: a handle the caller holds; the descriptor is freed below.
-        let error = unsafe {
-            GetSecurityInfo(
-                handle.cast(),
-                SE_FILE_OBJECT,
-                info,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut descriptor,
-            )
+        let mut needed = 0u32;
+        // SAFETY: a size query.
+        let sized = unsafe {
+            GetKernelObjectSecurity(handle.cast(), info, std::ptr::null_mut(), 0, &mut needed)
         };
-        let descriptor = Local(descriptor);
-        if error != 0 {
-            return Err(io::Error::from_raw_os_error(error as i32));
+        if sized == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(INSUFFICIENT_BUFFER) {
+                return Err(error);
+            }
         }
+        let mut descriptor = vec![0u64; (needed as usize).div_ceil(8).max(1)];
+        // SAFETY: a buffer of at least `needed` bytes.
+        check(unsafe {
+            GetKernelObjectSecurity(
+                handle.cast(),
+                info,
+                descriptor.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        })?;
         let mut text: *mut u16 = std::ptr::null_mut();
-        // SAFETY: the descriptor the call returned; `text` receives a LocalAlloc'd string.
+        // SAFETY: the self-relative descriptor the call wrote; `text` receives a LocalAlloc'd
+        // string.
         check(unsafe {
             ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                descriptor.0,
+                descriptor.as_mut_ptr().cast(),
                 SDDL_REVISION_1,
                 info,
                 &mut text,

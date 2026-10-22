@@ -808,11 +808,11 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
 
-/// `service start` on Windows, and on a failure what the SCM holds of both services and what the
-/// layout grants, so that a failed start says why.
+/// `service <verb>` on Windows, and on a failure what the SCM holds of both services, what the
+/// layout grants and what the SCM last logged, so that a failed start or stop says why.
 #[cfg(windows)]
-fn start_on_windows(config: &Path, root: &Path) {
-    if let Err(e) = client(&["service", "start"], config) {
+fn service_on_windows(verb: &str, config: &Path, root: &Path) {
+    if let Err(e) = client(&["service", verb], config) {
         let mut said = String::new();
         let mut run = |program: &str, args: &[&std::ffi::OsStr]| {
             let out = Command::new(program).args(args).output();
@@ -854,7 +854,7 @@ fn start_on_windows(config: &Path, root: &Path) {
                 std::ffi::OsStr::new("/q:*[System[Provider[@Name='Service Control Manager']]]"),
             ],
         );
-        panic!("start the service: {e}{said}");
+        panic!("{verb} the service: {e}{said}");
     }
 }
 
@@ -1014,7 +1014,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
                 .expect("its required privileges");
         assert_eq!(privileges, ["SeChangeNotifyPrivilege"]);
     }
-    start_on_windows(&config, &root);
+    service_on_windows("start", &config, &root);
     wait_for(
         "the Agent to appear in the fleet",
         Duration::from_secs(60),
@@ -1052,7 +1052,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
 
     // Re-registered without either flag, as an upgrade does: the SCM's entries are rewritten in
     // place, and both accounts are kept.
-    client(&["service", "stop"], &config).expect("stop the service");
+    service_on_windows("stop", &config, &root);
     std::fs::remove_file(&result).expect("remove the result");
     let reinstalled = client(&["service", "install", "--root", &root_arg], &config)
         .expect("re-install without --run-as and --process-account");
@@ -1060,7 +1060,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         reinstalled.contains(&format!("processes: {process_account} (kept from")),
         "{reinstalled}"
     );
-    start_on_windows(&config, &root);
+    service_on_windows("start", &config, &root);
     let upgraded = reported_on_windows(&result);
     assert!(
         upgraded["user"].eq_ignore_ascii_case(&process_account),
@@ -1070,7 +1070,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     assert_eq!(upgraded["key"], "denied", "{upgraded:?}");
 
     // Dropped: the Client starts its program itself again, under its own account.
-    client(&["service", "stop"], &config).expect("stop the service");
+    service_on_windows("stop", &config, &root);
     std::fs::remove_file(&result).expect("remove the result");
     client(
         &[
@@ -1083,13 +1083,13 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         &config,
     )
     .expect("drop the process account");
-    start_on_windows(&config, &root);
+    service_on_windows("start", &config, &root);
     let dropped = reported_on_windows(&result);
     assert!(
         dropped["user"].eq_ignore_ascii_case(&client_account),
         "{dropped:?}"
     );
 
-    client(&["service", "stop"], &config).expect("stop the service");
+    service_on_windows("stop", &config, &root);
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
