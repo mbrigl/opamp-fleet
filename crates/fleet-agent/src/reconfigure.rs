@@ -1869,6 +1869,36 @@ mod tests {
         assert_eq!(left_over, vec![std::ffi::OsString::from("stays")]);
     }
 
+    /// A Supervisors' root reached through a link of the Client's own account — one beneath a data
+    /// root the hand-over gave the Client, or `~/.local` → `/data` for `--user` — is purged
+    /// through it: the link is the Client's, in a directory only the Client writes (ADR-0017
+    /// clause 34, ADR-0059 clause 6).
+    /// Verifies: ADR-0017
+    #[cfg(unix)]
+    #[test]
+    fn a_root_reached_through_a_link_of_the_clients_own_is_purged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("data");
+        std::fs::create_dir_all(real.join("supervisors").join("gone").join("program"))
+            .expect("gone");
+        std::fs::create_dir_all(real.join("supervisors").join("stays")).expect("stays");
+        let linked = dir.path().join("local");
+        std::os::unix::fs::symlink(&real, &linked).expect("the Client's own link");
+        let config: ClientConfig = toml::from_str(&format!(
+            "supervisor_dir = {:?}",
+            linked.join("supervisors").to_string_lossy()
+        ))
+        .expect("config");
+
+        purge_removed(&config, &["gone".to_string()]);
+
+        let left_over: Vec<_> = std::fs::read_dir(real.join("supervisors"))
+            .expect("read")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(left_over, vec![std::ffi::OsString::from("stays")]);
+    }
+
     /// A compromised Server purges a Supervisor and adds it back to reset its floor: `a` of type
     /// `otelcol` installs `0.110.0`, a set without `a` purges it, and sets adding `b` and then `a`
     /// again follow. The mark file survives the purge — here with `supervisor_dir` at `state_dir`
