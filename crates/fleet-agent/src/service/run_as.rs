@@ -747,7 +747,7 @@ pub fn check_process_account(
 /// clause 1): the shadow utilities on Linux, the directory service's on macOS. The binary runs
 /// none of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Host {
+pub(crate) enum Host {
     /// `useradd`, `usermod`, `gpasswd`.
     Linux,
     /// `sysadminctl -roleAccount`, `dseditgroup`, `dscl`.
@@ -815,7 +815,7 @@ impl Host {
 ///
 /// # Errors
 /// Returns the refusal, with the way out.
-pub fn check_process_account_on(
+pub(crate) fn check_process_account_on(
     host: Host,
     account: &str,
     found: Option<&Ids>,

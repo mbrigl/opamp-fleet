@@ -2993,12 +2993,13 @@ mod tests {
         );
     }
 
-    /// Both ends read the other's account the same way on Linux and on macOS: `peer_cred` is
-    /// `SO_PEERCRED` on Linux and `getpeereid` on macOS, each the peer's effective uid as it was
-    /// when it connected or listened, so the checks of ADR-0053 clause 4 compare the same uid.
+    /// Both ends read the other's account on Linux and on macOS alike: `peer_cred` is
+    /// `SO_PEERCRED` on Linux and `getpeereid` on macOS, and either end finds the other's uid there
+    /// for the checks of ADR-0053 clause 4. Run as one account, the test cannot tell an effective
+    /// uid from a real one: that both calls give the effective uid is their documentation's.
     /// Verifies: ADR-0053
     #[tokio::test]
-    async fn a_peer_is_known_by_its_effective_uid_at_either_end() {
+    async fn a_peer_is_known_by_its_uid_at_either_end() {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("peer.sock");
         let listener = bind(&socket).expect("bind");
