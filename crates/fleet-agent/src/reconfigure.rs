@@ -228,12 +228,17 @@ async fn release_removed(
     let Some(plugins) = plugins else {
         return;
     };
-    for name in removed {
-        let dir = config.supervisor_dir(name);
-        if !std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
-            continue;
-        }
-        if let Err(e) = plugins.purge(name, &dir).await {
+    let asked: Vec<_> = removed
+        .iter()
+        .map(|name| (name.clone(), config.supervisor_dir(name)))
+        .filter(|(_, dir)| std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()))
+        .collect();
+    if asked.is_empty() {
+        return;
+    }
+    let answers = plugins.purge(&asked).await;
+    for ((name, dir), answer) in asked.iter().zip(answers) {
+        if let Err(e) = answer {
             warn!(supervisor = %name, path = %dir.display(), error = %e, "cannot remove what the removed supervisor's processes wrote; the purge leaves it");
         }
     }
@@ -1567,6 +1572,76 @@ mod tests {
         purge_removed(&config, &["gone".to_string()]);
 
         assert!(!gone.exists(), "the removed supervisor's directory is gone");
+    }
+
+    /// Removed Supervisors whose Managed Processes wrote something, each in a data directory the
+    /// Client shares for writing, under a root of its own.
+    #[cfg(unix)]
+    fn removed_with_data(names: &[&str]) -> (tempfile::TempDir, ClientConfig) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig = toml::from_str(&format!(
+            "supervisor_dir = {:?}",
+            dir.path().join("supervisors").to_string_lossy()
+        ))
+        .expect("config");
+        for name in names {
+            let data = config.supervisor_dir(name).join("data");
+            std::fs::create_dir_all(data.join("written")).expect("mkdir");
+            std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o2770))
+                .expect("chmod");
+        }
+        (dir, config)
+    }
+
+    /// One apply waits for the second service once, however many Supervisors it removes: two
+    /// removed Supervisors and a service that never answers hold it [`PURGE_ANSWER`], not twice
+    /// that (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_apply_waits_for_a_service_that_does_not_answer_once() {
+        use crate::supervisor::channel::{peer, PURGE_ANSWER};
+        use crate::supervisor::process::Spawner;
+        let (_dir, config) = removed_with_data(&["a", "b"]);
+        let peer = peer::connect(peer::mute).await;
+        let plugins = crate::supervisor::Registry::new(Spawner::Channel(peer.channel.clone()));
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        release_removed(Some(&plugins), &config, &["a".to_string(), "b".to_string()]).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < PURGE_ANSWER + std::time::Duration::from_secs(1),
+            "{elapsed:?}"
+        );
+    }
+
+    /// A second service that cannot be reached holds one apply [`PURGE_ANSWER`] for all its
+    /// removed Supervisors, and the next apply in the same outage tries once rather than waiting
+    /// again: the wait the deadline cut short counts as given up on (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_apply_waits_for_a_service_that_cannot_be_reached_once_per_outage() {
+        use crate::supervisor::channel::{peer, Channel, PURGE_ANSWER};
+        use crate::supervisor::process::Spawner;
+        let (dir, config) = removed_with_data(&["a", "b", "c"]);
+        let plugins = crate::supervisor::Registry::new(Spawner::Channel(Channel::new(
+            &dir.path().join("nobody.sock"),
+            peer::own_uid(),
+        )));
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        release_removed(Some(&plugins), &config, &["a".to_string(), "b".to_string()]).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < PURGE_ANSWER + std::time::Duration::from_secs(1),
+            "{elapsed:?}"
+        );
+        let started = tokio::time::Instant::now();
+        release_removed(Some(&plugins), &config, &["c".to_string()]).await;
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
     }
 
     /// A compromised Server purges a Supervisor and adds it back to reset its floor: `a` of type

@@ -179,20 +179,19 @@ impl Spawner {
         }
     }
 
-    /// Removes what the Managed Processes wrote in `dir`, the directory of the Supervisor named
-    /// `supervisor`, and the Client cannot remove itself, before the Client purges the rest
-    /// (ADR-0059 clause 5): through the second service, which runs as their account. Nothing for
-    /// the Client, which owns what its own programs wrote.
+    /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
+    /// directory — and the Client cannot remove itself, before the Client purges the rest
+    /// (ADR-0059 clause 5): through the second service, which runs as their account, all of them
+    /// within one wait. Nothing for the Client, which owns what its own programs wrote.
     ///
     /// # Errors
-    /// Returns what the second service could not remove, or why it was not reached.
-    pub async fn purge(&self, supervisor: &str, dir: &std::path::Path) -> std::io::Result<()> {
-        #[cfg(not(unix))]
-        let _ = (supervisor, dir);
+    /// Each answer, in the order of `removed`, is what the second service could not remove, or
+    /// why it was not reached.
+    pub async fn purge(&self, removed: &[(String, PathBuf)]) -> Vec<std::io::Result<()>> {
         match self {
-            Spawner::Local => Ok(()),
+            Spawner::Local => removed.iter().map(|_| Ok(())).collect(),
             #[cfg(unix)]
-            Spawner::Channel(channel) => channel.purge(supervisor, dir).await,
+            Spawner::Channel(channel) => channel.purge(removed).await,
         }
     }
 
