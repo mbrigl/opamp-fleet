@@ -1327,7 +1327,10 @@ mod tests {
     /// The second service runs the same program under the process account, as `run --agents`
     /// serving the Client's uid, with its socket in a runtime directory only the account and its
     /// group reach, and the directives ADR-0042 clause 7 gives a unit that is not root.
+    /// Not on Windows, which registers no second service: the socket is a Unix path, and a Windows
+    /// build joins it with its own separator.
     /// Verifies: ADR-0059
+    #[cfg(unix)]
     #[test]
     fn the_second_services_unit_runs_the_program_under_the_process_account() {
         let unit = agents_unit(&with_agents(), &agents()).expect("unit");
@@ -1494,7 +1497,9 @@ mod tests {
     /// Where a process account is registered, the Client's unit wants the second service and starts
     /// after it, and its command line names the socket and the process account's uid; the CLI
     /// takes both lines as written.
+    /// Not on Windows, for the reason the second service's own unit is not.
     /// Verifies: ADR-0059
+    #[cfg(unix)]
     #[test]
     fn the_clients_unit_names_the_second_service() {
         let unit = systemd_unit(&with_agents(), "opamp-fleet").expect("unit");
