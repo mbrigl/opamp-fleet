@@ -179,6 +179,23 @@ impl Spawner {
         }
     }
 
+    /// Removes what the Managed Processes wrote in `dir`, the directory of the Supervisor named
+    /// `supervisor`, and the Client cannot remove itself, before the Client purges the rest
+    /// (ADR-0059 clause 5): through the second service, which runs as their account. Nothing for
+    /// the Client, which owns what its own programs wrote.
+    ///
+    /// # Errors
+    /// Returns what the second service could not remove, or why it was not reached.
+    pub async fn purge(&self, supervisor: &str, dir: &std::path::Path) -> std::io::Result<()> {
+        #[cfg(not(unix))]
+        let _ = (supervisor, dir);
+        match self {
+            Spawner::Local => Ok(()),
+            #[cfg(unix)]
+            Spawner::Channel(channel) => channel.purge(supervisor, dir).await,
+        }
+    }
+
     /// Runs `launch` to its end, as the version probe and the preflight do, within
     /// [`PROBE_TIMEOUT`] once the second service is reached: `None` when it does not end in time,
     /// and is stopped. A second service that is not reached is an error [`is_unreachable`] holds
@@ -2182,7 +2199,7 @@ fn share_staged(
         use std::os::fd::OwnedFd;
         use std::os::unix::fs::OpenOptionsExt as _;
         let shared = if std::fs::symlink_metadata(staging).is_ok_and(|meta| meta.is_dir()) {
-            handle::open_dir(staging, None)
+            handle::open_dir(staging, handle::DIRECTORY, None)
                 .and_then(|tree| handle::share_tree(&tree, group, staging))
         } else {
             std::fs::OpenOptions::new()

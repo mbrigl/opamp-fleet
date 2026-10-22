@@ -145,7 +145,13 @@ async fn apply_inner(
     // `stopping` restart under their names and keep theirs.
     drop(write);
     {
-        let _purge = tracing::info_span!("purge", removed = removed.len()).entered();
+        let purge = tracing::info_span!("purge", removed = removed.len());
+        // What the process account wrote and the Client cannot remove goes first, through the
+        // second service (ADR-0059 clause 5); the Client then deletes the rest.
+        release_removed(engine.plugins().as_deref(), config, &removed)
+            .instrument(purge.clone())
+            .await;
+        let _purge = purge.entered();
         purge_removed(config, &removed);
     }
 
@@ -206,6 +212,30 @@ fn plan(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Plan {
             .filter(|old| offered.iter().all(|new| new.name != old.name))
             .map(|old| old.name.clone())
             .collect(),
+    }
+}
+
+/// Asks `plugins` — the second service, where a process account is registered — to remove what
+/// the Managed Processes wrote in each removed Supervisor's directory and the Client cannot remove
+/// itself (ADR-0059 clause 5). Only a directory that is one, not a link, is asked about: the
+/// purge after it unlinks a link and refuses what resolves outside the root. What is left is a
+/// warning, and the purge leaves it an orphan (ADR-0017 clause 36).
+async fn release_removed(
+    plugins: Option<&dyn crate::supervisor::ports::PluginRegistry>,
+    config: &ClientConfig,
+    removed: &[String],
+) {
+    let Some(plugins) = plugins else {
+        return;
+    };
+    for name in removed {
+        let dir = config.supervisor_dir(name);
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        if let Err(e) = plugins.purge(name, &dir).await {
+            warn!(supervisor = %name, path = %dir.display(), error = %e, "cannot remove what the removed supervisor's processes wrote; the purge leaves it");
+        }
     }
 }
 
@@ -1496,6 +1526,44 @@ mod tests {
             stays.join("instance-uid").is_file(),
             "a neighbour keeps its directory and identity"
         );
+    }
+
+    /// Where a process account is registered, the purge first has the second service remove what
+    /// the removed Supervisor's Managed Processes wrote — a directory an agent made `0755`, as Go's
+    /// `MkdirAll` does, a read-only one inside it — and then deletes the rest: nothing is left
+    /// (ADR-0059 clause 5, ADR-0017 clause 34). The in-process service runs as this test's uid, so
+    /// the read-only directory is what the Client could not remove without it.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_purge_has_the_second_service_remove_what_the_processes_wrote() {
+        use crate::supervisor::channel::{peer, Channel};
+        use crate::supervisor::process::Spawner;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig = toml::from_str(&format!(
+            "supervisor_dir = {:?}",
+            dir.path().join("supervisors").to_string_lossy()
+        ))
+        .expect("config");
+        let gone = config.supervisor_dir("gone");
+        let made = gone.join("data").join("made");
+        let cache = made.join("cache");
+        std::fs::create_dir_all(&cache).expect("mkdir");
+        std::fs::set_permissions(&made, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::write(cache.join("module"), b"x").expect("write");
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        std::fs::write(gone.join("instance-uid"), "uid").expect("write");
+
+        let service = peer::real();
+        let plugins = crate::supervisor::Registry::new(Spawner::Channel(Channel::new(
+            &service.socket,
+            peer::own_uid(),
+        )));
+        release_removed(Some(&plugins), &config, &["gone".to_string()]).await;
+        purge_removed(&config, &["gone".to_string()]);
+
+        assert!(!gone.exists(), "the removed supervisor's directory is gone");
     }
 
     /// A compromised Server purges a Supervisor and adds it back to reset its floor: `a` of type
