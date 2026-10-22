@@ -842,7 +842,8 @@ fn start(launch: &Launch) -> io::Result<Child> {
 /// - no link is followed beneath `dir`, and an entry, a link included, is removed as what it is;
 /// - only what this service's account owns is removed.
 ///
-/// What cannot be reached is passed over, and the rest goes on.
+/// What cannot be reached is passed over, and the rest goes on. What is gone already — the
+/// tombstone, or anything in it, which a start and a purge may each be removing — is no error.
 ///
 /// # Errors
 /// Returns why the request is refused, or the first entry that cannot be reached or removed.
@@ -867,7 +868,12 @@ pub(crate) fn purge(
     };
     let at = |e: io::Error| format!("{}: {e}", dir.display());
     let parent = handle::open_beneath(root, root, handle::SEARCH, None, client_uid).map_err(at)?;
-    let top = handle::open_beneath(root, dir, handle::SEARCH, None, client_uid).map_err(at)?;
+    // Gone already: a start and a purge each remove a tombstone left behind, and the one that
+    // comes second finds nothing left to do.
+    let top = match handle::open_beneath(root, dir, handle::SEARCH, None, client_uid) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        top => top.map_err(at)?,
+    };
     for (what, handle) in [(root, &parent), (dir, &top)] {
         let owner = handle::fstat(handle).map_err(at)?.st_uid;
         if owner != client_uid {
@@ -906,6 +912,7 @@ pub(crate) fn purge(
             .and_then(|parent| handle::open(parent.as_raw_fd(), last, handle::DIRECTORY));
         let result = match reached {
             Ok(shared) => remove_own(&shared, &path),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("{}: {e}", path.display())),
         };
         if let Err(e) = result {
@@ -927,9 +934,10 @@ fn remove_own(dir: &std::os::fd::OwnedFd, path: &Path) -> Result<(), String> {
     for name in handle::entries(dir).map_err(|e| format!("{}: {e}", path.display()))? {
         let child = path.join(std::ffi::OsStr::from_bytes(name.as_bytes()));
         let result = match handle::lstat_at(dir.as_raw_fd(), &name) {
-            Ok(st) if st.st_uid == me => {
-                handle::remove_tree_at(dir, &name, &child).map_err(|e| e.to_string())
-            }
+            Ok(st) if st.st_uid == me => match handle::remove_tree_at(dir, &name, &child) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.to_string()),
+                _ => Ok(()),
+            },
             Ok(st) if handle::is(&st, libc::S_IFDIR) => {
                 // A directory of the Client's it may not read holds nothing of its own.
                 match handle::open(dir.as_raw_fd(), &name, handle::DIRECTORY) {
@@ -938,6 +946,7 @@ fn remove_own(dir: &std::os::fd::OwnedFd, path: &Path) -> Result<(), String> {
                 }
             }
             Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("{}: {e}", child.display())),
         };
         if let Err(e) = result {
@@ -1381,7 +1390,13 @@ impl Channel {
                         crate::storage::handle::shared_for_writing(&dir)
                     })
                     .await
-                    .map_err(io::Error::other)??
+                    .map_err(io::Error::other)?
+                };
+                // Gone already, as the service answers too: a start and a purge each remove a
+                // tombstone left behind.
+                let shared = match shared {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    shared => shared?,
                 };
                 if shared.is_empty() {
                     return Ok(());
@@ -2425,6 +2440,26 @@ mod tests {
         purge(me, "agent", &tomb, &shared).expect("the tombstone's");
         assert!(!data.join("state").exists());
         assert!(live.join("state").exists());
+    }
+
+    /// A tombstone a start and a purge both set out to remove is gone for whichever comes second:
+    /// neither the service nor the Client asking it takes that for what the process account
+    /// wrote and could not be removed (ADR-0059 clause 12).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_tombstone_gone_already_is_no_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("supervisors");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let gone = root.join(crate::reconfigure::tombstone_name("agent"));
+        let tomb = root.join(crate::reconfigure::tombstone_name("agent"));
+        std::fs::create_dir_all(&tomb).expect("mkdir");
+
+        purge(own_uid(), "agent", &gone, &[PathBuf::from("data")]).expect("gone already");
+        purge(own_uid(), "agent", &tomb, &[PathBuf::from("data")]).expect("its data gone");
+        let channel = Channel::new(&dir.path().join("nobody.sock"), own_uid());
+        let answers = channel.purge(&[("agent".to_string(), gone)]).await;
+        assert!(answers.iter().all(Result::is_ok), "{answers:?}");
     }
 
     /// On the way to the Supervisors' root the service follows the links the Client follows —
