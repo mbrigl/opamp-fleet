@@ -161,6 +161,17 @@ impl Layout {
         Ok(true)
     }
 
+    /// Whether `current` resolves, and to a version directory other than `version_dir`: a
+    /// self-update switched it. A pointer or a directory that cannot be resolved — one the account
+    /// asking may not resolve among them — is no evidence of a switch.
+    #[must_use]
+    pub fn names_another(&self, version_dir: &Path) -> bool {
+        std::fs::canonicalize(self.current())
+            .ok()
+            .zip(std::fs::canonicalize(version_dir).ok())
+            .is_some_and(|(current, version)| current != version)
+    }
+
     /// Whether `current` resolves to `version_dir`. A pointer or a directory that cannot be
     /// resolved names nothing.
     #[must_use]

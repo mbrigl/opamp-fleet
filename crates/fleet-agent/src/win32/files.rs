@@ -135,17 +135,32 @@ impl Entry {
         Dacl::parse(&text).map_err(io::Error::other)
     }
 
-    /// Sets the entry's DACL to `dacl`, on this object alone, and reads it back: a DACL whose
-    /// protection from what the parent passes on did not hold is an error.
+    /// Sets the entry's DACL to exactly `dacl`, on this object alone, and reads it back: a DACL
+    /// the object does not then hold as it was set fails the change.
+    ///
+    /// The file system sets a DACL by the rules of automatic inheritance (SetPrivateObjectSecurityEx,
+    /// `SEF_DACL_AUTO_INHERIT`): an unprotected DACL set on an unprotected object keeps the
+    /// object's inherited ACEs and takes only the explicit ones of what is set, so what a parent
+    /// passes on could never be replaced that way. A protected DACL is taken as it is set, its
+    /// ACEs made explicit, and an unprotected one set on a protected object is taken exactly as it
+    /// is set, inherited ACEs included. So an unprotected DACL is set in two steps: its ACEs
+    /// protected first, then the DACL itself.
     ///
     /// # Errors
-    /// Returns why it could not be set, or that its protection did not hold.
+    /// Returns why it could not be set, or what the object holds instead.
     pub fn set_dacl(&self, dacl: &Dacl) -> io::Result<()> {
+        if !dacl.protected() {
+            let first = Dacl {
+                flags: format!("P{}", dacl.flags),
+                aces: dacl.aces.clone(),
+            };
+            self.set(&first.text(), DACL_SECURITY_INFORMATION)?;
+        }
         self.set(&dacl.text(), DACL_SECURITY_INFORMATION)?;
         let held = self.dacl()?;
-        if held.protected() != dacl.protected() {
+        if !held.matches(dacl) {
             return Err(io::Error::other(format!(
-                "{}: the system kept {} where {} was set",
+                "{}: the object holds {} where {} was set",
                 self.path.display(),
                 held.text(),
                 dacl.text()

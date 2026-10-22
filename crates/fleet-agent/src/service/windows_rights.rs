@@ -602,18 +602,8 @@ mod tests {
             Entry::open(&owned, Access::Owner, false)
                 .and_then(|entry| entry.set_owner(me.as_str()))
                 .expect("owned by the stand-in");
-            let grants = |path: &Path| {
-                Entry::open(path, Access::Read, false)
-                    .and_then(|entry| entry.dacl())
-                    .expect("dacl")
-                    .grants()
-            };
-            let before = (
-                sddl(&outside),
-                sddl(&outside.join("secret")),
-                grants(&owned),
-            );
-            let before_owned = sddl(&owned);
+            let before = (sddl(&outside), sddl(&outside.join("secret")), sddl(&owned));
+            let before_sub = sddl(&sub);
 
             restrict(
                 ServiceLevel::System,
@@ -628,7 +618,7 @@ mod tests {
                 let text = sddl(path);
                 assert!(
                     !text.contains(";;;BU)") && !text.contains(";;;WD)"),
-                    "{treatment:?} {}: {text}",
+                    "{treatment:?} {}: {text} (sub was {before_sub})",
                     path.display()
                 );
                 assert!(
@@ -642,15 +632,9 @@ mod tests {
                 "{treatment:?}: inherited"
             );
             assert_eq!(
-                (
-                    sddl(&outside),
-                    sddl(&outside.join("secret")),
-                    grants(&owned)
-                ),
+                (sddl(&outside), sddl(&outside.join("secret")), sddl(&owned)),
                 before,
-                "{treatment:?}: no link entered, no other name, nothing of the process account's: \
-                 {before_owned} became {}",
-                sddl(&owned)
+                "{treatment:?}: no link entered, no other name, nothing of the process account's"
             );
             if treatment == Treatment::TakeOver {
                 assert_eq!(owner(&sub).as_str(), "S-1-5-32-544");
