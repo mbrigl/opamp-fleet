@@ -3386,6 +3386,101 @@ mod tests {
         assert_eq!(mode(&data), (0o2770, group.0));
     }
 
+    /// Where the walk to a data directory begins, beneath which no link is followed: the
+    /// Supervisor's directory for one inside it, the outermost of the kind's directories that
+    /// holds one outside it, and the directory itself where none does. A `..` does not lift a
+    /// directory out of the Supervisor's: the walk from there refuses it (ADR-0053 clause 6).
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_data_directory_is_walked_to_from_the_outermost_root_that_holds_it() {
+        use std::path::Path;
+        let supervisor = Path::new("/state/supervisors/agent");
+        let inside = supervisor.join("data").join("inventory");
+        let outer = PathBuf::from("/var/lib/agent");
+        let nested = outer.join("spool");
+        let alone = PathBuf::from("/srv/cache");
+        let escaping = supervisor.join("..").join("other").join("data");
+        let ensure_dirs = vec![
+            inside.clone(),
+            nested.clone(),
+            outer.clone(),
+            alone.clone(),
+            escaping.clone(),
+        ];
+        assert_eq!(data_root(supervisor, &ensure_dirs, &inside), supervisor);
+        assert_eq!(data_root(supervisor, &ensure_dirs, &nested), outer);
+        assert_eq!(data_root(supervisor, &ensure_dirs, &outer), outer);
+        assert_eq!(data_root(supervisor, &ensure_dirs, &alone), alone);
+        assert_eq!(data_root(supervisor, &ensure_dirs, &escaping), supervisor);
+
+        #[cfg(unix)]
+        {
+            // SAFETY: getegid(2) cannot fail and touches no memory.
+            let group = crate::storage::ProcessAccountGroup(unsafe { libc::getegid() });
+            let dir = tempfile::tempdir().expect("tempdir");
+            let supervisor = dir.path().join("supervisors").join("agent");
+            std::fs::create_dir_all(&supervisor).expect("mkdir");
+            let escaping = supervisor.join("..").join("other");
+            let refused = crate::storage::create_shared_dir(
+                data_root(&supervisor, std::slice::from_ref(&escaping), &escaping),
+                &escaping,
+                Some(group),
+                crate::storage::Shared::Written,
+            );
+            assert!(refused.is_err());
+            assert!(!dir.path().join("supervisors").join("other").exists());
+        }
+    }
+
+    /// Where a process account is registered, a data directory is reached through no link beneath
+    /// the Supervisor's directory: a link where `data` should be, placed by an account that writes
+    /// there, fails the start, and nothing is made or shared where it points (ADR-0053 clause 6).
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_on_the_way_to_a_data_directory_fails_the_start() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: getegid(2) cannot fail and touches no memory.
+        let group = crate::storage::ProcessAccountGroup(unsafe { libc::getegid() });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let supervisor = dir.path().join("supervisors").join("agent");
+        std::fs::create_dir_all(&supervisor).expect("mkdir");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("mkdir");
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod");
+        std::os::unix::fs::symlink(&elsewhere, supervisor.join("data")).expect("a link");
+
+        let (event_tx, _events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(1);
+        let mut runner = package_runner(
+            PathBuf::from("/bin/true"),
+            Duration::ZERO,
+            event_tx,
+            command_rx,
+        );
+        runner.supervisor_dir = supervisor.clone();
+        runner.process_account_group = Some(group);
+        let made = supervisor.join("data").join("inventory");
+        runner.build = Box::new(move || {
+            Some(ProcessSpec {
+                program: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+                env: Vec::new(),
+                working_dir: None,
+                ensure_dirs: vec![made.clone()],
+                own_process_group: false,
+            })
+        });
+        assert!(runner.try_spawn().await.is_err(), "started through a link");
+        assert!(!elsewhere.join("inventory").exists());
+        let mode = std::fs::metadata(&elsewhere)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o700);
+    }
+
     /// A group of this test's account other than its effective one, as the process account's group
     /// is to the Client: `None` where the account is in no other group.
     #[cfg(unix)]
