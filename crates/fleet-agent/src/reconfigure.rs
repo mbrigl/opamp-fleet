@@ -146,13 +146,16 @@ async fn apply_inner(
     drop(write);
     {
         let purge = tracing::info_span!("purge", removed = removed.len());
-        // What the process account wrote and the Client cannot remove goes first, through the
-        // second service (ADR-0059 clause 5); the Client then deletes the rest.
-        release_removed(engine.plugins().as_deref(), config, &removed)
+        // Moved aside first, so nothing that goes on removing from them reaches a Supervisor added
+        // again under the same name. What the process account wrote and the Client cannot remove
+        // goes next, through the second service (ADR-0059 clause 5); the Client then deletes the
+        // rest.
+        let tombs = purge.in_scope(|| entomb(config, &removed));
+        release_removed(engine.plugins().as_deref(), &tombs)
             .instrument(purge.clone())
             .await;
         let _purge = purge.entered();
-        purge_removed(config, &removed);
+        bury(&tombs);
     }
 
     config.supervisors = blocks;
@@ -215,27 +218,170 @@ fn plan(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Plan {
     }
 }
 
+/// A removed Supervisor's directory, moved aside to a tombstone beneath the Supervisors' root
+/// before it is purged ([`crate::config::tombstone_name`]).
+#[derive(Debug)]
+struct Tomb {
+    supervisor: String,
+    path: std::path::PathBuf,
+}
+
+/// What [`move_aside`] found where a removed Supervisor's directory was.
+enum Aside {
+    /// Nothing: a block that failed to start owns no directory yet, and purged is what it is.
+    Nothing,
+    /// A link, which is removed as a link and never followed (ADR-0017 clause 35).
+    Link,
+    /// The directory, now under this tombstone name.
+    Moved(String),
+}
+
+/// Moves each removed Supervisor's directory aside, beneath the Supervisors' root, to a tombstone
+/// name no Supervisor can carry, so that whatever goes on removing from it after the purge gave up
+/// — the second service, past the purge's deadline — never reaches a Supervisor added again under
+/// the same name, which gets a fresh directory (ADR-0017 clause 34). A link where a directory
+/// should be is removed, never followed (clause 35). The tombstones a purge cut short left are
+/// tried again with them. What cannot be moved is a warning, and stays an orphan (clause 36).
+fn entomb(config: &ClientConfig, removed: &[String]) -> Vec<Tomb> {
+    if removed.is_empty() {
+        return Vec::new();
+    }
+    let root = config.supervisors_root();
+    let mut tombs: Vec<Tomb> = std::fs::read_dir(&root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let supervisor = crate::config::tombstone_of(name.to_str()?)?.to_string();
+            entry.file_type().ok()?.is_dir().then(|| Tomb {
+                supervisor,
+                path: entry.path(),
+            })
+        })
+        .collect();
+    for name in removed {
+        let dir = config.supervisor_dir(name);
+        match move_aside(&root, name) {
+            Ok(Aside::Nothing) => {}
+            Ok(Aside::Link) => {
+                warn!(supervisor = %name, path = %dir.display(), "refusing to purge through a symlink; removed the link only");
+            }
+            Ok(Aside::Moved(tomb)) => tombs.push(Tomb {
+                supervisor: name.clone(),
+                path: root.join(tomb),
+            }),
+            Err(e) => {
+                warn!(supervisor = %name, path = %dir.display(), error = %e, "cannot purge the removed supervisor's directory");
+            }
+        }
+    }
+    tombs
+}
+
+/// Moves the directory `name` beneath `root` aside to a fresh tombstone name, through the root's
+/// own handle: neither the entry nor anything beneath the root is followed as a link.
+#[cfg(unix)]
+fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
+    use crate::storage::handle;
+    use std::os::fd::AsRawFd as _;
+    let at = match handle::open_beneath(root, root, handle::DIRECTORY, None) {
+        Ok(at) => at,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Aside::Nothing),
+        Err(e) => return Err(e),
+    };
+    let entry = std::ffi::CString::new(name)?;
+    let st = match handle::lstat_at(at.as_raw_fd(), &entry) {
+        Ok(st) => st,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Aside::Nothing),
+        Err(e) => return Err(e),
+    };
+    if handle::is(&st, libc::S_IFLNK) {
+        // SAFETY: a valid descriptor and a NUL-terminated name.
+        if unsafe { libc::unlinkat(at.as_raw_fd(), entry.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        return Ok(Aside::Link);
+    }
+    if !handle::is(&st, libc::S_IFDIR) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a directory",
+        ));
+    }
+    loop {
+        let tomb = crate::config::tombstone_name(name);
+        let tomb_entry = std::ffi::CString::new(tomb.as_str())?;
+        match handle::lstat_at(at.as_raw_fd(), &tomb_entry) {
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        // SAFETY: valid descriptors and NUL-terminated names.
+        let rc = unsafe {
+            libc::renameat(
+                at.as_raw_fd(),
+                entry.as_ptr(),
+                at.as_raw_fd(),
+                tomb_entry.as_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        return Ok(Aside::Moved(tomb));
+    }
+}
+
+/// Moves the directory `name` beneath `root` aside to a fresh tombstone name; a link is removed,
+/// and a directory whose resolved path lies outside the root is left alone (ADR-0017 clause 35).
+#[cfg(not(unix))]
+fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
+    let dir = root.join(name);
+    let meta = match std::fs::symlink_metadata(&dir) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Aside::Nothing),
+        Err(e) => return Err(e),
+    };
+    if meta.file_type().is_symlink() {
+        std::fs::remove_file(&dir)?;
+        return Ok(Aside::Link);
+    }
+    if let (Ok(root), Ok(resolved)) = (root.canonicalize(), dir.canonicalize()) {
+        if !resolved.starts_with(root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the resolved path is outside the supervisors directory",
+            ));
+        }
+    }
+    loop {
+        let tomb = crate::config::tombstone_name(name);
+        if std::fs::symlink_metadata(root.join(&tomb)).is_ok() {
+            continue;
+        }
+        std::fs::rename(&dir, root.join(&tomb))?;
+        return Ok(Aside::Moved(tomb));
+    }
+}
+
 /// Asks `plugins` — the second service, where a process account is registered — to remove what
-/// the Managed Processes wrote in each removed Supervisor's directory and the Client cannot remove
-/// itself (ADR-0059 clause 5). Only a directory that is one, not a link, is asked about: the
-/// purge after it unlinks a link and refuses what resolves outside the root. What is left is a
-/// warning, and the purge leaves it an orphan (ADR-0017 clause 36).
+/// the Managed Processes wrote in each tomb and the Client cannot remove itself (ADR-0059 clause
+/// 5). What is left is a warning, and the purge leaves it an orphan (ADR-0017 clause 36).
 async fn release_removed(
     plugins: Option<&dyn crate::supervisor::ports::PluginRegistry>,
-    config: &ClientConfig,
-    removed: &[String],
+    tombs: &[Tomb],
 ) {
     let Some(plugins) = plugins else {
         return;
     };
-    let asked: Vec<_> = removed
-        .iter()
-        .map(|name| (name.clone(), config.supervisor_dir(name)))
-        .filter(|(_, dir)| std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()))
-        .collect();
-    if asked.is_empty() {
+    if tombs.is_empty() {
         return;
     }
+    let asked: Vec<_> = tombs
+        .iter()
+        .map(|tomb| (tomb.supervisor.clone(), tomb.path.clone()))
+        .collect();
     let answers = plugins.purge(&asked).await;
     for ((name, dir), answer) in asked.iter().zip(answers) {
         if let Err(e) = answer {
@@ -244,61 +390,48 @@ async fn release_removed(
     }
 }
 
-/// Deletes a removed Supervisor's directory whole — program, packages, configuration, and the
-/// `instance-uid` whose Agent has already said its goodbye (ADR-0017). It does not touch
+/// Deletes each tomb whole — program, packages, configuration, and the `instance-uid` whose Agent
+/// has already said its goodbye (ADR-0017). It does not touch
 /// `<state_dir>/package-high-water.json` (ADR-0043 clause 14): whatever a re-added Supervisor
 /// installs, under the same name or another, is held to the mark of its Agent type. Runs only after the
 /// rewritten `supervisor.toml` no longer names the Supervisor: a failed write restarts the stopped
 /// set from the old file, which needs the data intact. A directory that will not delete is a
 /// warning, never a `FAILED` apply — the set the Server asked for is running; the leftover is an
-/// orphan the next startup reports.
-fn purge_removed(config: &ClientConfig, removed: &[String]) {
-    // Resolved once, so the confinement check below compares canonical against canonical — which
-    // catches a symlinked *parent* component as well as a symlinked directory. `None` if the root
-    // does not exist yet, in which case there is nothing under it to purge either.
-    let canon_root = config.supervisors_root().canonicalize().ok();
-    for name in removed {
-        let dir = config.supervisor_dir(name);
-        // The delete is confined to the Supervisor's own directory *self-containedly* (ADR-0017),
-        // not by trusting `remove_dir_all`'s symlink handling. `name` is already a validated single
-        // component (ADR-0017), so `dir` cannot traverse; the risk this guards is a symlink planted
-        // where the directory should be. Refuse to recurse through one — unlink the stray link
-        // itself — and refuse a resolved path that is not under the supervisors root.
-        match std::fs::symlink_metadata(&dir) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                let _ = std::fs::remove_file(&dir);
-                warn!(supervisor = %name, path = %dir.display(), "refusing to purge through a symlink; removed the link only");
-                continue;
-            }
-            Ok(_) => {
-                if let (Some(root), Ok(resolved)) = (&canon_root, dir.canonicalize()) {
-                    if !resolved.starts_with(root) {
-                        warn!(supervisor = %name, path = %dir.display(), "refusing to purge: the resolved path is outside the supervisors directory");
-                        continue;
-                    }
-                }
-            }
-            // Never materialized (a block that failed to start owns no directory yet): purged is
-            // what it already is.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                warn!(supervisor = %name, path = %dir.display(), error = %e, "cannot inspect the removed supervisor's directory");
-                continue;
-            }
-        }
-        match std::fs::remove_dir_all(&dir) {
+/// orphan the next startup reports and the next purge tries again.
+fn bury(tombs: &[Tomb]) {
+    for tomb in tombs {
+        match remove_tomb(&tomb.path) {
             Ok(()) => {
-                info!(supervisor = %name, path = %dir.display(), "removed supervisor purged");
+                info!(supervisor = %tomb.supervisor, path = %tomb.path.display(), "removed supervisor purged");
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => warn!(
-                supervisor = %name,
-                path = %dir.display(),
+                supervisor = %tomb.supervisor,
+                path = %tomb.path.display(),
                 error = %e,
-                "cannot purge the removed supervisor's directory"
+                "cannot purge the removed supervisor's directory; the next purge tries it again"
             ),
         }
     }
+}
+
+/// Removes the tomb at `path` with everything beneath it, through its parent's handle — the
+/// Supervisors' root — and never through a link.
+#[cfg(unix)]
+fn remove_tomb(path: &Path) -> std::io::Result<()> {
+    use crate::storage::handle;
+    use std::os::unix::ffi::OsStrExt as _;
+    let (Some(root), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    };
+    let at = handle::open_beneath(root, root, handle::DIRECTORY, None)?;
+    handle::remove_tree_at(&at, &std::ffi::CString::new(name.as_bytes())?, path)
+}
+
+/// Removes the tomb at `path` with everything beneath it.
+#[cfg(not(unix))]
+fn remove_tomb(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_dir_all(path)
 }
 
 /// Brings the Supervisors a failed apply had stopped back up from the still-standing old
@@ -619,6 +752,11 @@ fn write_replacement(tmp: &Path, target: &Path, contents: &str) -> Result<(), St
 mod tests {
     use super::*;
     use opamp::proto::{AgentConfigMap, AgentConfigObject};
+
+    /// The purge of an apply without a second service: moved aside, then deleted.
+    fn purge_removed(config: &ClientConfig, removed: &[String]) {
+        bury(&entomb(config, removed));
+    }
 
     fn offer_of(entries: &[(&str, &str)]) -> AgentRemoteConfig {
         AgentRemoteConfig {
@@ -1568,8 +1706,9 @@ mod tests {
             &service.socket,
             peer::own_uid(),
         )));
-        release_removed(Some(&plugins), &config, &["gone".to_string()]).await;
-        purge_removed(&config, &["gone".to_string()]);
+        let tombs = entomb(&config, &["gone".to_string()]);
+        release_removed(Some(&plugins), &tombs).await;
+        bury(&tombs);
 
         assert!(!gone.exists(), "the removed supervisor's directory is gone");
     }
@@ -1608,7 +1747,8 @@ mod tests {
         let plugins = crate::supervisor::Registry::new(Spawner::Channel(peer.channel.clone()));
         tokio::time::pause();
         let started = tokio::time::Instant::now();
-        release_removed(Some(&plugins), &config, &["a".to_string(), "b".to_string()]).await;
+        let tombs = entomb(&config, &["a".to_string(), "b".to_string()]);
+        release_removed(Some(&plugins), &tombs).await;
         let elapsed = started.elapsed();
         assert!(
             elapsed < PURGE_ANSWER + std::time::Duration::from_secs(1),
@@ -1632,16 +1772,92 @@ mod tests {
         )));
         tokio::time::pause();
         let started = tokio::time::Instant::now();
-        release_removed(Some(&plugins), &config, &["a".to_string(), "b".to_string()]).await;
+        let tombs = entomb(&config, &["a".to_string(), "b".to_string()]);
+        release_removed(Some(&plugins), &tombs).await;
         let elapsed = started.elapsed();
         assert!(
             elapsed < PURGE_ANSWER + std::time::Duration::from_secs(1),
             "{elapsed:?}"
         );
         let started = tokio::time::Instant::now();
-        release_removed(Some(&plugins), &config, &["c".to_string()]).await;
+        let tombs = entomb(&config, &["c".to_string()]);
+        release_removed(Some(&plugins), &tombs).await;
         let elapsed = started.elapsed();
         assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+    }
+
+    /// What goes on being removed after the purge gave up never reaches a Supervisor added again
+    /// under the same name: the second service answers past the purge's deadline and only then
+    /// removes what the process account wrote, while `gone` has been purged and added again in
+    /// between; the new `gone` keeps its data (ADR-0017 clause 34, ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn what_a_purge_removes_after_its_deadline_misses_a_supervisor_added_again() {
+        use crate::supervisor::channel::{peer, purge, Request, PURGE_ANSWER};
+        use crate::supervisor::process::Spawner;
+        let (_dir, config) = removed_with_data(&["gone"]);
+        let (late_tx, late) = tokio::sync::oneshot::channel();
+        let mut late_tx = Some(late_tx);
+        let peer = peer::connect(move |request| {
+            if let Request::Purge {
+                supervisor,
+                dir,
+                shared,
+                ..
+            } = request
+            {
+                let done = late_tx.take();
+                tokio::spawn(async move {
+                    tokio::time::sleep(PURGE_ANSWER * 2).await;
+                    let result = purge(peer::own_uid(), &supervisor, &dir, &shared);
+                    if let Some(done) = done {
+                        let _ = done.send(result);
+                    }
+                });
+            }
+            Vec::new()
+        })
+        .await;
+        let plugins = crate::supervisor::Registry::new(Spawner::Channel(peer.channel.clone()));
+        tokio::time::pause();
+
+        let tombs = entomb(&config, &["gone".to_string()]);
+        release_removed(Some(&plugins), &tombs).await;
+        bury(&tombs);
+        let added = config.supervisor_dir("gone").join("data");
+        std::fs::create_dir_all(&added).expect("added again");
+        std::fs::write(added.join("state"), b"new").expect("its data");
+
+        let _ = late.await.expect("the late purge ran");
+        assert_eq!(std::fs::read(added.join("state")).expect("kept"), b"new");
+    }
+
+    /// A tombstone a purge cut short is tried again by the next purge, and goes with it.
+    /// Verifies: ADR-0017
+    #[test]
+    fn the_next_purge_tries_a_tombstone_left_behind_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig = toml::from_str(&format!(
+            "supervisor_dir = {:?}",
+            dir.path().join("supervisors").to_string_lossy()
+        ))
+        .expect("config");
+        let left = config
+            .supervisors_root()
+            .join(crate::config::tombstone_name("earlier"));
+        std::fs::create_dir_all(left.join("program")).expect("a tombstone");
+        std::fs::create_dir_all(config.supervisor_dir("gone")).expect("gone");
+        std::fs::create_dir_all(config.supervisor_dir("stays")).expect("stays");
+
+        purge_removed(&config, &["gone".to_string()]);
+
+        let mut left_over: Vec<_> = std::fs::read_dir(config.supervisors_root())
+            .expect("read")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        left_over.sort();
+        assert_eq!(left_over, vec![std::ffi::OsString::from("stays")]);
     }
 
     /// A compromised Server purges a Supervisor and adds it back to reset its floor: `a` of type
