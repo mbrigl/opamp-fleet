@@ -230,6 +230,12 @@ fn install(
         run_as.as_ref(),
         manager::agents_supported(level),
     )?;
+    // The second service's socket lives in a directory of the process account's, which no root
+    // may be (ADR-0059 clause 9).
+    #[cfg(unix)]
+    if process.is_some() {
+        manager::check_roots_apart(&[&layout_root, &data_root], &manager::agents_socket())?;
+    }
 
     // Everything baked into the unit is absolute: a service's working directory is `/` or
     // `System32`, so a relative path would silently point nowhere. An operator who named no path
