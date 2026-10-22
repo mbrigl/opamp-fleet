@@ -528,8 +528,14 @@ pub(crate) fn create_shared_dir(
     {
         let traversed =
             |made: &std::os::fd::OwnedFd| handle::share(made, group, Shared::Traversed.mode());
-        let made = handle::open_beneath(root, dir, handle::DIRECTORY, Some(&traversed))
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
+        let made = handle::open_beneath(
+            root,
+            dir,
+            handle::DIRECTORY,
+            Some(&traversed),
+            handle::own(),
+        )
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
         let before = handle::fstat(&made)?;
         handle::share(&made, group, shared.mode())?;
         if shared == Shared::Written
@@ -633,6 +639,13 @@ pub(crate) mod handle {
         mode & 0o7777
     }
 
+    /// This process's effective account: the Client's, where the Client walks its own tree
+    /// ([`open_beneath`]).
+    pub(crate) fn own() -> libc::uid_t {
+        // SAFETY: geteuid(2) cannot fail and touches no memory.
+        unsafe { libc::geteuid() }
+    }
+
     /// What [`open_dir`] hands each directory it creates: the creator's own change to it.
     pub(crate) type Made<'a> = Option<&'a dyn Fn(&OwnedFd) -> io::Result<()>>;
 
@@ -640,13 +653,16 @@ pub(crate) mod handle {
     /// through the handle of the one before it: every component searched ([`SEARCH`]), the last
     /// opened with `flags`. `root` is where the Client's own tree begins — the state directory, the
     /// Supervisors' root, a Supervisor's directory — and what the operator configured. On the way
-    /// to it a link is followed only where it is trusted ([`trusted_link`]): root or this
-    /// process's own account owns it and the directory it is in, which nobody else may write, so
+    /// to it a link is followed only where it is trusted ([`trusted_link`]): root or `trusted`,
+    /// the Client's account, owns it and the directory it is in, which nobody else may write, so
     /// no other account can have placed or changed it; its target is read once, through the same
-    /// handle, and walked to the same way. Beneath `root` no link is followed, whoever owns it,
-    /// since an account that writes a directory there can place one, and root's own links among
-    /// them where it can link a file of root's into it. With `made`, a missing component is
-    /// created, `0700`, and handed to `made`, opened to read.
+    /// handle, and walked to the same way. `trusted` is the Client's account wherever this runs:
+    /// the Client passes its own ([`own`]), and the second service the account it serves, never
+    /// the process account it runs as, whose links are no more the Client's than any other.
+    /// Beneath `root` no link is followed, whoever owns it, since an account that writes a
+    /// directory there can place one, and root's own links among them where it can link a file
+    /// of root's into it. With `made`, a missing component is created, `0700`, and handed to
+    /// `made`, opened to read.
     ///
     /// # Errors
     /// Returns an error when `dir` is not beneath `root` by plain names, or a component is
@@ -657,6 +673,7 @@ pub(crate) mod handle {
         dir: &Path,
         flags: libc::c_int,
         made: Made<'_>,
+        trusted: libc::uid_t,
     ) -> io::Result<OwnedFd> {
         let not_beneath = || {
             io::Error::new(
@@ -696,7 +713,7 @@ pub(crate) mod handle {
         )?;
         let mut hops = 0;
         for (at, name) in prefix.iter().enumerate() {
-            handle = step_trusting(&handle, name, flags_at(at), made, &mut hops)?;
+            handle = step_trusting(&handle, name, flags_at(at), made, trusted, &mut hops)?;
         }
         for (at, name) in beneath.iter().enumerate() {
             handle = step(&handle, name, flags_at(prefix.len() + at), made).map_err(|e| {
@@ -715,14 +732,15 @@ pub(crate) mod handle {
     const MAX_HOPS: u32 = 40;
 
     /// The directory `name` in `dir`, opened with `flags` as [`step`] opens it, on the way to a
-    /// root: a link there is followed where it is trusted ([`trusted_link`]), its target read
-    /// once and walked to component by component from `dir`, or from `/` where it is absolute,
-    /// by the same rule.
+    /// root: a link there is followed where it is trusted ([`trusted_link`]) for the account
+    /// `trusted`, its target read once and walked to component by component from `dir`, or from
+    /// `/` where it is absolute, by the same rule.
     fn step_trusting(
         dir: &OwnedFd,
         name: &CStr,
         flags: libc::c_int,
         made: Made<'_>,
+        trusted: libc::uid_t,
         hops: &mut u32,
     ) -> io::Result<OwnedFd> {
         let st = match lstat_at(dir.as_raw_fd(), name) {
@@ -736,12 +754,11 @@ pub(crate) mod handle {
             // Opened without following: a link swapped in since is refused.
             return step(dir, name, flags, made);
         }
-        // SAFETY: geteuid(2) cannot fail and touches no memory.
-        if !trusted_link(&fstat(dir)?, &st, unsafe { libc::geteuid() }) {
+        if !trusted_link(&fstat(dir)?, &st, trusted) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "{} is a link that is not trusted — root or this process's account must own \
+                    "{} is a link that is not trusted — root or the Client's account must own \
                      it and the directory it is in, which no other account may write — and is \
                      not followed",
                     name.to_string_lossy()
@@ -771,13 +788,13 @@ pub(crate) mod handle {
             return open(at.as_raw_fd(), c".", flags & !libc::O_NOFOLLOW);
         };
         for name in on_the_way {
-            at = step_trusting(&at, name, SEARCH, None, hops)?;
+            at = step_trusting(&at, name, SEARCH, None, trusted, hops)?;
         }
-        step_trusting(&at, last, flags, None, hops)
+        step_trusting(&at, last, flags, None, trusted, hops)
     }
 
     /// Whether the link `link` in the directory `dir` is trusted on the way to a root: root or
-    /// `own`, this process's account, owns each of them, and the directory is not writable by its
+    /// `own`, the Client's account, owns each of them, and the directory is not writable by its
     /// group or others, so no other account can have placed or changed it. The system's own —
     /// `/var/run` → `/run`, or `/var` → `private/var` on macOS — and the Client's own, as a link
     /// beneath a data root the hand-over gave the Client, or `~/.local` → `/data` for `--user`: a
@@ -1020,10 +1037,9 @@ pub(crate) mod handle {
                 }
             }
         }
-        let top = open_beneath(dir, dir, DIRECTORY, None)?;
+        let top = open_beneath(dir, dir, DIRECTORY, None, own())?;
         let mut found = Vec::new();
-        // SAFETY: geteuid(2) cannot fail and touches no memory.
-        walk(&top, Path::new(""), unsafe { libc::geteuid() }, &mut found);
+        walk(&top, Path::new(""), own(), &mut found);
         found.sort();
         Ok(found)
     }
@@ -1654,7 +1670,8 @@ mod tests {
             );
             return;
         }
-        handle::open_beneath(root, root, handle::SEARCH, None).expect("the system's link");
+        handle::open_beneath(root, root, handle::SEARCH, None, handle::own())
+            .expect("the system's link");
     }
 
     /// What a purge names to the second service is where alone the process account can have

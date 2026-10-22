@@ -285,7 +285,7 @@ fn entomb(config: &ClientConfig, removed: &[String]) -> Vec<Tomb> {
 fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
     use crate::storage::handle;
     use std::os::fd::AsRawFd as _;
-    let at = match handle::open_beneath(root, root, handle::DIRECTORY, None) {
+    let at = match handle::open_beneath(root, root, handle::DIRECTORY, None, handle::own()) {
         Ok(at) => at,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Aside::Nothing),
         Err(e) => return Err(e),
@@ -426,7 +426,7 @@ fn remove_tomb(path: &Path) -> std::io::Result<()> {
     let (Some(root), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     };
-    let at = handle::open_beneath(root, root, handle::DIRECTORY, None)?;
+    let at = handle::open_beneath(root, root, handle::DIRECTORY, None, handle::own())?;
     handle::remove_tree_at(&at, &std::ffi::CString::new(name.as_bytes())?, path)
 }
 
