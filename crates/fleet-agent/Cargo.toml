@@ -157,6 +157,9 @@ post_trans_script = "../../packaging/linux/posttrans"
 # Virtual time, so a bound measured in minutes is tested in milliseconds.
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
+# ADR-0053: a test reads the process account back from a plist as `service-manager` writes it,
+# through the crate it writes with.
+plist = "1"
 # A test holds a TLS connection open mid-headers on the Gateway (H18), below what a client library
 # would let it do.
 rustls.workspace = true

@@ -40,10 +40,10 @@ jobs:
         # makes one, and runs under the Client's account once the process account is dropped. The
         # run step needs `sudo -E` there, which the Windows runner does not (its shell is already
         # elevated).
-        # macOS: the same for launchd — the Client's plist from `service-manager`, the second
-        # service's own, and two role accounts made with `dseditgroup` and `sysadminctl
-        # -roleAccount` as the refusal of a missing process account says. The runner's `sudo`
-        # asks no password, as on Linux.
+        # macOS: the same for launchd — both plists from `service-manager`, the second service's
+        # with the process account in `UserName`, and two role accounts made with `dseditgroup`
+        # and `sysadminctl -roleAccount` as the refusal of a missing process account says. The
+        # runner's `sudo` asks no password, as on Linux.
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
