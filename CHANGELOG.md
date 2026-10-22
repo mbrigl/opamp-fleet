@@ -17,6 +17,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Added
 
+- **The Server ships as a container image**
+  ([ADR-0052](docs/adr/0052-the-server-ships-as-a-container-image-built-from-its-attested-release-binary.md)).
+  Every release pushes `ghcr.io/mbrigl/opamp-fleet-server:<version>` for `linux/amd64` and
+  `linux/arm64`: the Server binary the release built and checked for its version, on
+  `gcr.io/distroless/cc-debian13:nonroot` pinned by digest, with no shell, running as UID and GID
+  `65532`, its data directory the volume `/var/lib/opamp-fleet`, and `4320` and `4321` exposed on
+  `0.0.0.0`. It carries no configuration, certificate, key or secret, so started with nothing
+  mounted it refuses to start and names the missing `[tls]`. It is tagged with the exact version
+  only after its build-provenance attestation verifies; there is no `latest` tag and no
+  `HEALTHCHECK`. The release adds `server_<version>_linux_<arch>.cdx.json`, the SBOM of the binary
+  in each image. **What to do:** to run the Server from the image, deploy it by the digest the
+  release notes name, after `gh attestation verify oci://ghcr.io/mbrigl/opamp-fleet-server@<digest>
+  --repo mbrigl/opamp-fleet --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml`;
+  mount the certificates, keys and secret files read-only and the data directory as a volume
+  writable by UID `65532`, and probe `4320` over TCP. A Server built from source and run as before
+  needs nothing. A script that downloads a release's `*.cdx.json` now also gets the Server's two.
+
 - **The Server's records may live in PostgreSQL**
   ([ADR-0050](docs/adr/0050-the-servers-records-may-live-in-postgresql.md)).
   `[database] store = "postgres"` with a `[database.postgres]` section (`host`, `port`, `dbname`,

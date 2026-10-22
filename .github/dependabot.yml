@@ -48,3 +48,12 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  # The Server image's base, pinned by digest in packaging/container/Containerfile (ADR-0052 clause
+  # 13): a new digest of the `nonroot` tag arrives as a pull request, reviewed like any other. Where
+  # Dependabot does not read a file named `Containerfile`, the digest is raised by a reviewed commit
+  # on the schedule of the packaging tools.
+  - package-ecosystem: "docker"
+    directory: "/packaging/container"
+    schedule:
+      interval: "weekly"

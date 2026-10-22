@@ -114,6 +114,67 @@ Each plane holds a bounded number of connections: `max_connections` for the Agen
 before the TLS handshake, and the connections already held keep working. See
 [Bounds on every listener](#bounds-on-every-listener).
 
+### In a container
+
+The Server ships as an image and nowhere else:
+`ghcr.io/mbrigl/opamp-fleet-server`, for `linux/amd64` and `linux/arm64`, tagged with each
+release's exact version and with nothing else — there is no `latest`. Deploy it **by its digest**,
+which the release notes name, not by its tag: the attestation names the digest, and a tag is only
+a name for it. Verify the digest before you deploy it:
+
+```console
+$ gh attestation verify oci://ghcr.io/mbrigl/opamp-fleet-server@sha256:<digest> \
+    --repo mbrigl/opamp-fleet \
+    --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml
+```
+
+The image holds the binary the release built and checked for its version, on
+`gcr.io/distroless/cc-debian13:nonroot` pinned by digest: glibc, CA certificates and time zone
+data, and no shell and no package manager. Its SBOM is the release asset
+`server_<version>_linux_<arch>.cdx.json` for the image's architecture; the base's own packages are
+not in it and are named by the `org.opencontainers.image.base.digest` annotation.
+
+| Property | Value |
+|---|---|
+| Entrypoint | `/usr/local/bin/server`; arguments after the image name are the Server's, such as `--config` |
+| User | UID and GID `65532`, numeric; no capability is needed, both ports are above 1024 |
+| Data directory | `/var/lib/opamp-fleet`, a volume owned by `65532` |
+| Working directory | `/`, which `65532` cannot write, so the `server.toml` read without `--config` is never one on the volume |
+| Ports | `4320` (Agent plane) and `4321` (Operator plane) |
+| Environment it sets | `FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet`, `FLEET_SERVER__LISTEN=0.0.0.0:4320`, `FLEET_SERVER__REST__LISTEN=0.0.0.0:4321`, and nothing else |
+| Configuration, certificates, keys, secrets | none; you mount them as files |
+
+Because both planes listen off the loopback inside the container, the Server requires `[tls]` and
+`[rest.auth]` there. The image carries neither, so started with nothing mounted it names the
+missing key and stops — it never serves in the clear or without authentication. Mount the
+certificates, the keys and every password or credential file read-only, and name their paths in the
+configuration. The image works with a read-only root filesystem; the Server
+writes under its data directory alone.
+
+```console
+$ docker run -d --name opamp-fleet-server --read-only \
+    -p 4320:4320 -p 4321:4321 \
+    -v opamp-fleet-data:/var/lib/opamp-fleet \
+    -v /etc/opamp-fleet:/etc/opamp-fleet:ro \
+    ghcr.io/mbrigl/opamp-fleet-server@sha256:<digest> \
+    --config /etc/opamp-fleet/server.toml
+```
+
+A bind mount for the data directory must be writable by UID `65532`. There is no `HEALTHCHECK` —
+the image has no shell to run one and the Server has no health endpoint — so probe a TCP connection
+to `4320` for liveness and readiness. The `debug` variant of the base, which has a shell, is for
+inspecting a problem locally; it is not published.
+
+To build the image yourself from a checkout, on a system whose glibc is no newer than Debian 13's,
+copy the binary under the name the Containerfile expects:
+
+```console
+$ cargo build --release -p fleet-server --bin server
+$ mkdir -p image && cp target/release/server image/server-linux-amd64
+$ docker buildx build --platform linux/amd64 --load -t opamp-fleet-server:dev \
+    -f packaging/container/Containerfile image
+```
+
 ## Configuration reference
 
 The full annotated example is [`config/server.toml`](../../config/server.toml). Every key is shown
