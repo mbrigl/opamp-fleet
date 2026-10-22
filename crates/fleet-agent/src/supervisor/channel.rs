@@ -1357,14 +1357,6 @@ impl Channel {
         self.connection().await.map(|_| ()).map_err(unreachable)
     }
 
-    /// Resolves once the service is reached, trying again every [`RECONNECT`] while it is not:
-    /// for what has no deadline of its own and waits for the service as long as it is away.
-    pub(crate) async fn reached(&self) {
-        while self.reach().await.is_err() {
-            tokio::time::sleep(RECONNECT).await;
-        }
-    }
-
     /// Asks the service to remove what the process account wrote in each of `removed` — the
     /// Supervisor's name and its directory — and the Client cannot remove itself (ADR-0059
     /// clause 5), one request per Supervisor: the service looks for its own entries in the
