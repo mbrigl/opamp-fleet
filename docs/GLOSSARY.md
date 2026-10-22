@@ -57,3 +57,7 @@ ones it uses without defining.
   process account is named, which runs under that account and starts, signals and stops those
   programs on the Client's request, over a channel only the Client's account may use.
   _Avoid:_ helper, launcher, sidecar.
+- **Tombstone** — the name, `.purge-<name>-<nonce>`, beneath the Supervisors' root that a removed
+  Supervisor's directory is moved to before its purge deletes it, a name no Supervisor can carry;
+  one the purge could not delete is an orphan.
+  _Avoid:_ trash directory, purge directory.
