@@ -415,7 +415,9 @@ fn agents_spec(
     Some(manager::Agents {
         account: process.account().to_string(),
         uid: process.uid(),
+        gid: process.gid(),
         client_uid: client.uid(),
+        socket: manager::agents_socket(),
     })
 }
 

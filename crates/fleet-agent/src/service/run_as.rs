@@ -582,6 +582,13 @@ impl ProcessAccount {
         self.uid
     }
 
+    /// The account's primary group, which the directory of the second service's socket is given.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn gid(&self) -> u32 {
+        self.gid
+    }
+
     /// The words the install prints after the account.
     #[must_use]
     pub fn describe(&self) -> String {
@@ -640,8 +647,8 @@ pub fn decide_process_account(
         _ => {
             return Err(format!(
                 "a process account needs the second service, which only a system service under \
-                 systemd on Linux registers so far; {account} cannot be named here. Nothing has \
-                 been installed or written."
+                 systemd on Linux or launchd on macOS registers so far; {account} cannot be named \
+                 here. Nothing has been installed or written."
             ))
         }
     };
@@ -726,18 +733,104 @@ pub fn check_process_account(
     client: &Ids,
     kept_from: Option<&Path>,
 ) -> Result<(), String> {
-    refuse_process_account(account, found, client_name, client, kept_from).map_err(|refusal| {
-        // A kept account was not asked for in this install: the refusal says how to drop it.
-        match (kept_from, refusal.strip_suffix(NOTHING)) {
-            (Some(_), Some(reason)) => format!("{reason}Or drop it with {DROP} {NOTHING}"),
-            _ => refusal,
+    check_process_account_on(Host::THIS, account, found, client_name, client, kept_from)
+}
+
+/// The tools an operator changes accounts and groups with, which a refusal names (ADR-0053
+/// clause 1): the shadow utilities on Linux, the directory service's on macOS. The binary runs
+/// none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Host {
+    /// `useradd`, `usermod`, `gpasswd`.
+    Linux,
+    /// `sysadminctl -roleAccount`, `dseditgroup`, `dscl`.
+    MacOs,
+}
+
+impl Host {
+    /// This host's.
+    pub const THIS: Host = if cfg!(target_os = "macos") {
+        Host::MacOs
+    } else {
+        Host::Linux
+    };
+
+    /// The lines that create `account` with a primary group of its own and make that group one
+    /// of `client`'s. On macOS the group is created first and named in the account's `-GID`, so
+    /// it is the account's own rather than `staff`; a role account's name begins with `_`, and
+    /// `sysadminctl` says which uids it allows one.
+    fn create(self, account: &str, client: &str) -> String {
+        match self {
+            Host::Linux => format!(
+                "`useradd --system --user-group --no-create-home --shell /usr/sbin/nologin \
+                 {account}`) and make its group one of the Client's (`{}`)",
+                self.add(client, account)
+            ),
+            Host::MacOs => format!(
+                "`dseditgroup -o create -i <gid> {account}`, then `sysadminctl -addUser {account} \
+                 -UID <uid> -GID <gid> -roleAccount`, with a gid and a uid no group or account \
+                 holds; a role account's name begins with `_`) and make its group one of the \
+                 Client's (`{}`)",
+                self.add(client, account)
+            ),
         }
-    })
+    }
+
+    /// The line that adds `member` to `group`.
+    fn add(self, member: &str, group: &str) -> String {
+        match self {
+            Host::Linux => format!("usermod --append --groups {group} {member}"),
+            Host::MacOs => format!("dseditgroup -o edit -a {member} -t user {group}"),
+        }
+    }
+
+    /// The line that removes `member` from `group`.
+    fn remove(self, member: &str, group: &str) -> String {
+        match self {
+            Host::Linux => format!("gpasswd --delete {member} {group}"),
+            Host::MacOs => format!("dseditgroup -o edit -d {member} -t user {group}"),
+        }
+    }
+
+    /// How `account` gets a primary group of its own.
+    fn own_group(self, account: &str) -> String {
+        match self {
+            Host::Linux => "`useradd --user-group`".to_string(),
+            Host::MacOs => format!(
+                "`dseditgroup -o create -i <gid> {account}`, then `dscl . -create \
+                 /Users/{account} PrimaryGroupID <gid>`"
+            ),
+        }
+    }
+}
+
+/// [`check_process_account`], its refusals naming the tools of `host`.
+///
+/// # Errors
+/// Returns the refusal, with the way out.
+pub fn check_process_account_on(
+    host: Host,
+    account: &str,
+    found: Option<&Ids>,
+    client_name: &str,
+    client: &Ids,
+    kept_from: Option<&Path>,
+) -> Result<(), String> {
+    refuse_process_account(host, account, found, client_name, client, kept_from).map_err(
+        |refusal| {
+            // A kept account was not asked for in this install: the refusal says how to drop it.
+            match (kept_from, refusal.strip_suffix(NOTHING)) {
+                (Some(_), Some(reason)) => format!("{reason}Or drop it with {DROP} {NOTHING}"),
+                _ => refusal,
+            }
+        },
+    )
 }
 
 const NOTHING: &str = "Nothing has been installed or written.";
 
 fn refuse_process_account(
+    host: Host,
     account: &str,
     found: Option<&Ids>,
     client_name: &str,
@@ -766,10 +859,9 @@ fn refuse_process_account(
     }
     let Some(found) = found else {
         return Err(format!(
-            "{named} does not exist on this host. Create it first (`useradd --system --user-group \
-             --no-create-home --shell /usr/sbin/nologin {account}`) and make its group one of \
-             the Client's (`usermod --append --groups {account} {client_name}`), or name another \
-             with --process-account <account>. {NOTHING}"
+            "{named} does not exist on this host. Create it first ({}), or name another with \
+             --process-account <account>. {NOTHING}",
+            host.create(account, client_name)
         ));
     };
     if found.uid == client.uid {
@@ -783,33 +875,34 @@ fn refuse_process_account(
     if found.gid == 0 {
         return Err(format!(
             "{named} has the primary group {} (gid 0), and a process account's group is never \
-             root's. Give it a group of its own (`useradd --user-group`), then install again. \
-             {NOTHING}",
-            found.group
+             root's. Give it a group of its own ({}), then install again. {NOTHING}",
+            found.group,
+            host.own_group(account)
         ));
     }
     if found.gid == client.gid {
         return Err(format!(
             "{named} has the primary group {}, which is the primary group of the Client's account \
              {client_name}: the Managed Processes would read what the Client's group may. Give it \
-             a group of its own (`useradd --user-group`), then install again. {NOTHING}",
-            found.group
+             a group of its own ({}), then install again. {NOTHING}",
+            found.group,
+            host.own_group(account)
         ));
     }
     if found.groups.contains(&client.gid) {
         return Err(format!(
             "{named} is a member of the primary group of the Client's account {client_name}: the \
              Managed Processes would read what the Client's group may. Remove it from that group \
-             (`gpasswd --delete {account} {}`), then install again. {NOTHING}",
-            client.group
+             (`{}`), then install again. {NOTHING}",
+            host.remove(account, &client.group)
         ));
     }
     if !client.groups.contains(&found.gid) {
         return Err(format!(
             "{named} has the primary group {}, and the Client's account {client_name} is not in \
-             it. Add it (`usermod --append --groups {} {client_name}`), then install again. \
-             {NOTHING}",
-            found.group, found.group
+             it. Add it (`{}`), then install again. {NOTHING}",
+            found.group,
+            host.add(client_name, &found.group)
         ));
     }
     // The group is the process account's own: whoever else holds it reads what every Managed
@@ -823,8 +916,9 @@ fn refuse_process_account(
         return Err(format!(
             "{named} has the primary group {group}, and {other} is a member of it beside the \
              Client's account {client_name}: {other} would read what the Managed Processes read. \
-             Remove it (`gpasswd --delete {other} {group}`), or give the process account a group \
-             of its own, then install again. {NOTHING}",
+             Remove it (`{}`), or give the process account a group of its own, then install \
+             again. {NOTHING}",
+            host.remove(other, &found.group),
             group = found.group
         ));
     }
@@ -832,7 +926,8 @@ fn refuse_process_account(
         return Err(format!(
             "{named} has the primary group {group}, which is also the primary group of {other}: \
              the Managed Processes would share it with that account. Give the process account a \
-             group of its own (`useradd --user-group`), then install again. {NOTHING}",
+             group of its own ({}), then install again. {NOTHING}",
+            host.own_group(account),
             group = found.group
         ));
     }
@@ -972,8 +1067,8 @@ mod walk {
         /// link count are read from that handle, and its owner is changed through it, so a name
         /// swapped after it was read changes only what the handle holds. A directory is walked;
         /// anything else with a second hard link is skipped. What the process account owns is
-        /// neither re-owned nor walked, and what is in its group keeps that group; a change of
-        /// owner by root leaves a directory's mode, its set-group-ID bit included.
+        /// neither re-owned nor walked, and what is in its group keeps that group; a directory
+        /// keeps its mode, its set-group-ID bit included ([`Walk::directory`]).
         fn entry(&mut self, dir: RawFd, name: &CStr, path: &Path) -> io::Result<()> {
             let handle = match open(dir, name, ENTRY) {
                 Ok(handle) => handle,
@@ -1004,7 +1099,10 @@ mod walk {
         }
 
         /// Re-own the directory `handle` holds to the group `gid`, then its entries, read from the
-        /// handle.
+        /// handle. Its mode stays as it was: macOS clears a directory's set-group-ID bit on a
+        /// change of owner by anyone but root, even one that changes nothing, so a mode the change
+        /// took is set again — the bit of a data directory of the process account's group
+        /// (ADR-0053 clause 6) among it.
         fn directory(&mut self, handle: OwnedFd, gid: u32, path: &Path) -> io::Result<()> {
             // The path-only handle cannot list entries; `.` through it is that same directory.
             #[cfg(target_os = "linux")]
@@ -1013,7 +1111,14 @@ mod walk {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
                 Err(e) => return Err(e),
             };
+            let before = fstat(&handle)?.st_mode;
             chown(&handle, self.uid, gid)?;
+            if fstat(&handle)?.st_mode != before {
+                // SAFETY: a valid descriptor on the directory, opened to read.
+                if unsafe { libc::fchmod(handle.as_raw_fd(), before & 0o7777) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
             for name in entries(&handle)? {
                 let child = path.join(OsStr::from_bytes(name.as_bytes()));
                 (self.between)(&child);
@@ -1508,7 +1613,8 @@ mod tests {
     /// Verifies: ADR-0053
     #[test]
     fn a_missing_process_account_is_refused_with_the_way_out() {
-        let err = check_process_account(
+        let err = check_process_account_on(
+            Host::Linux,
             "opamp-fleet-agents",
             None,
             "opamp-fleet",
@@ -1535,6 +1641,73 @@ mod tests {
         );
     }
 
+    /// On macOS the refusals name the directory service's tools: a missing account the
+    /// `sysadminctl -roleAccount` line that creates it after its own group, and `dseditgroup` for
+    /// each membership to add or remove; no Linux tool is named. This host's are the ones an
+    /// install shows.
+    /// Verifies: ADR-0053
+    #[test]
+    fn on_macos_the_refusals_show_the_directory_services_lines() {
+        assert_eq!(
+            Host::THIS,
+            if cfg!(target_os = "macos") {
+                Host::MacOs
+            } else {
+                Host::Linux
+            }
+        );
+        let refused = |agents: Option<&Ids>, client: &Ids| {
+            check_process_account_on(
+                Host::MacOs,
+                "_opamp-fleet-agents",
+                agents,
+                "_opamp-fleet",
+                client,
+                Some(Path::new("/Library/LaunchDaemons/opamp-fleet-agents.plist")),
+            )
+            .expect_err("refused")
+        };
+        let missing = refused(None, &client_ids());
+        for line in [
+            "/Library/LaunchDaemons/opamp-fleet-agents.plist",
+            "dseditgroup -o create -i <gid> _opamp-fleet-agents",
+            "sysadminctl -addUser _opamp-fleet-agents -UID <uid> -GID <gid> -roleAccount",
+            "dseditgroup -o edit -a _opamp-fleet -t user _opamp-fleet-agents",
+            "--no-process-account",
+        ] {
+            assert!(missing.contains(line), "{line} in {missing}");
+        }
+        let mut lacking = client_ids();
+        lacking.groups = vec![998];
+        let mut agents = agents_ids();
+        agents.group = "_opamp-fleet-agents".to_string();
+        agents.members = vec!["_opamp-fleet".to_string()];
+        let err = refused(Some(&agents), &lacking);
+        assert!(
+            err.contains("dseditgroup -o edit -a _opamp-fleet -t user _opamp-fleet-agents"),
+            "{err}"
+        );
+        let mut member = agents.clone();
+        member.groups.push(998);
+        let err = refused(Some(&member), &client_ids());
+        assert!(
+            err.contains("dseditgroup -o edit -d _opamp-fleet-agents -t user opamp-fleet"),
+            "{err}"
+        );
+        let mut shared = agents.clone();
+        shared.primary_of.push(("_www".to_string(), 70));
+        let err = refused(Some(&shared), &client_ids());
+        assert!(
+            err.contains("dscl . -create /Users/_opamp-fleet-agents PrimaryGroupID <gid>"),
+            "{err}"
+        );
+        for err in [missing, err] {
+            for linux in ["useradd", "usermod", "gpasswd"] {
+                assert!(!err.contains(linux), "{linux} in {err}");
+            }
+        }
+    }
+
     /// The Client reaches what the process account may read through its primary group (ADR-0053
     /// clause 6): an account whose group the Client's account is not in is refused, with the line
     /// that adds it.
@@ -1543,7 +1716,8 @@ mod tests {
     fn a_process_account_whose_group_the_client_lacks_is_refused() {
         let mut client = client_ids();
         client.groups = vec![998];
-        let err = check_process_account(
+        let err = check_process_account_on(
+            Host::Linux,
             "opamp-fleet-agents",
             Some(&agents_ids()),
             "opamp-fleet",
@@ -1622,7 +1796,8 @@ mod tests {
     #[test]
     fn a_process_account_whose_group_reaches_the_clients_files_is_refused() {
         let refused = |agents: Ids, client: Ids| {
-            check_process_account(
+            check_process_account_on(
+                Host::Linux,
                 "opamp-fleet-agents",
                 Some(&agents),
                 "opamp-fleet",
@@ -1670,7 +1845,8 @@ mod tests {
     #[test]
     fn a_process_account_whose_group_is_shared_with_another_account_is_refused() {
         let refused = |agents: Ids| {
-            check_process_account(
+            check_process_account_on(
+                Host::Linux,
                 "opamp-fleet-agents",
                 Some(&agents),
                 "opamp-fleet",
@@ -1847,11 +2023,11 @@ mod tests {
     /// it: a directory in the process account's group keeps that group and its mode, and so does
     /// an entry in it, while the rest is handed over as before. A re-registration — every package
     /// upgrade — takes from no Managed Process what it reads or writes.
-    /// Linux alone so far: only systemd registers a process account. The test is not root, and
-    /// macOS, unlike Linux, clears a directory's set-group-ID bit on a chown by anyone but root,
-    /// even one that changes nothing; the hand-over itself runs as root.
+    /// The test is not root, and macOS, unlike Linux, clears a directory's set-group-ID bit on a
+    /// chown by anyone but root, even one that changes nothing: the walk sets the mode again, so
+    /// the data directory stays `2770` there too.
     /// Verifies: ADR-0053
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_handover_keeps_the_process_accounts_group_and_its_modes() {
         let dir = tempfile::tempdir().expect("tempdir");
