@@ -150,7 +150,12 @@ fn start_log_file(config: &crate::config::ClientConfig) {
         .dir
         .clone()
         .unwrap_or_else(|| crate::logging::default_dir(&config.state_dir));
-    match crate::logging::open(&dir, config.logging.keep) {
+    let private = crate::logging::is_private(
+        &dir,
+        &config.state_dir,
+        config.process_account_group.is_some(),
+    );
+    match crate::logging::open(&dir, config.logging.keep, private) {
         Ok(dir) => {
             tracing::info!(dir = %dir.display(), keep = config.logging.keep, "logging to file")
         }
