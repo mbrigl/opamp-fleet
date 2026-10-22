@@ -2291,7 +2291,7 @@ mod tests {
         let live = dir.path().join("agent");
         let target = InstallTarget::Binary(live.clone());
         let artifact = dir.path().join("downloaded");
-        std::fs::copy("/bin/false", &artifact).expect("a program that exits at once");
+        std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
         let staged = target.stage(&artifact, None, None).expect("stage");
         let (event_tx, mut events) = mpsc::channel(64);
         let (_commands, command_rx) = mpsc::channel(1);
@@ -2350,7 +2350,7 @@ mod tests {
         std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let target = InstallTarget::Binary(live.clone());
         let artifact = dir.path().join("downloaded");
-        std::fs::copy("/bin/false", &artifact).expect("a program that exits at once");
+        std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
         let staged = target.stage(&artifact, None, None).expect("stage");
         let (event_tx, mut events) = mpsc::channel(64);
         let (_commands, command_rx) = mpsc::channel(1);
@@ -2454,8 +2454,9 @@ mod tests {
     /// a fresh binary holds it — and is retried until it starts reports only that it runs: no
     /// failed health in between for a Server to read as a program that does not start. One that
     /// stays busy past the retries says so, once.
+    /// Linux alone refuses to exec a file held open for writing, so the race exists only there.
     /// Verifies: ADR-0026
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_start_retried_while_the_program_is_busy_reports_no_failure_in_between() {
         use std::os::unix::fs::PermissionsExt;
@@ -2534,6 +2535,17 @@ mod tests {
                 })
             }),
         }
+    }
+
+    /// A program in `dir` that exits at once. A script rather than `/bin/true`, which macOS has
+    /// only in `/usr/bin`: `/bin/sh` is where every Unix has it.
+    #[cfg(unix)]
+    fn exiting_at_once(dir: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let program = dir.join("exits-at-once");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").expect("a program that exits at once");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        program
     }
 
     /// What the stand-in for the second service is asked to start; it runs nothing.
@@ -3344,7 +3356,7 @@ mod tests {
         let group = crate::storage::ProcessAccountGroup(unsafe { libc::getegid() });
         let dir = tempfile::tempdir().expect("tempdir");
         let artifact = dir.path().join("downloaded");
-        std::fs::copy("/bin/true", &artifact).expect("a bare program");
+        std::fs::write(&artifact, "#!/bin/sh\nexit 0\n").expect("a bare program");
         let root = dir.path().join("program");
         let target = InstallTarget::Tree {
             root: root.clone(),
@@ -3364,17 +3376,13 @@ mod tests {
         let data = dir.path().join("data").join("inventory");
         let (event_tx, _events) = mpsc::channel(64);
         let (_commands, command_rx) = mpsc::channel(1);
-        let mut runner = package_runner(
-            PathBuf::from("/bin/true"),
-            Duration::ZERO,
-            event_tx,
-            command_rx,
-        );
+        let program = exiting_at_once(dir.path());
+        let mut runner = package_runner(program.clone(), Duration::ZERO, event_tx, command_rx);
         runner.process_account_group = Some(group);
         let made = data.clone();
         runner.build = Box::new(move || {
             Some(ProcessSpec {
-                program: PathBuf::from("/bin/true"),
+                program: program.clone(),
                 args: Vec::new(),
                 env: Vec::new(),
                 working_dir: None,
@@ -3453,18 +3461,14 @@ mod tests {
 
         let (event_tx, _events) = mpsc::channel(64);
         let (_commands, command_rx) = mpsc::channel(1);
-        let mut runner = package_runner(
-            PathBuf::from("/bin/true"),
-            Duration::ZERO,
-            event_tx,
-            command_rx,
-        );
+        let program = exiting_at_once(dir.path());
+        let mut runner = package_runner(program.clone(), Duration::ZERO, event_tx, command_rx);
         runner.supervisor_dir = supervisor.clone();
         runner.process_account_group = Some(group);
         let made = supervisor.join("data").join("inventory");
         runner.build = Box::new(move || {
             Some(ProcessSpec {
-                program: PathBuf::from("/bin/true"),
+                program: program.clone(),
                 args: Vec::new(),
                 env: Vec::new(),
                 working_dir: None,
@@ -3568,7 +3572,7 @@ mod tests {
         let single = InstallTarget::Binary(program.clone());
         single.prepare(Some(group)).expect("prepare");
         let raw = dir.path().join("downloaded");
-        std::fs::copy("/bin/true", &raw).expect("a bare program");
+        std::fs::write(&raw, "#!/bin/sh\nexit 0\n").expect("a bare program");
         let staged = single.stage(&raw, None, Some(group)).expect("staged");
         assert_eq!(stat(&staged.program), (0o755, group.0));
     }
