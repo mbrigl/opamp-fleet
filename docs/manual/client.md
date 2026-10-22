@@ -722,6 +722,11 @@ unbounded setting is the one that eventually fills a disk, so turning the log of
 Client says so and runs anyway: a monitoring agent that refuses to start because of its own log
 file has turned a diagnostic into an outage.
 
+Where a process account is registered, a `dir` the process account's group passes through or
+writes is refused the same way, and the Client runs without a log file: the state directory itself,
+the Supervisors' root or anything beneath or above it, and a path named with `..`. A directory
+beneath the state directory is kept the Client's alone, `0700`.
+
 This is a different thing from the Client's own telemetry (`ReportsOwnLogs`), which ships
 log records to a destination the **Server** offers. That needs a Server it can already reach — which
 is exactly what a bad `supervisor.toml`, an unusable certificate, or a refused endpoint does not give
