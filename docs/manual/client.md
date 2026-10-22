@@ -916,7 +916,8 @@ typo in a name does not destroy an Agent's identity.
 
 Before it deletes a removed Agent's directory, the Client renames it to a tombstone,
 `.purge-<name>-<hex>`, beside the others, so an Agent added again under the same name starts in a
-fresh directory. A tombstone that could not be deleted — a file held open, or one the process
+fresh directory. `<hex>` is 17 lowercase hexadecimal digits or more; a directory named alike with
+a shorter suffix, such as `.purge-backup-20241001`, is no tombstone. A tombstone that could not be deleted — a file held open, or one the process
 account wrote that the second service could not remove — stays, with a warning, and nothing in it
 is used again. The Client removes it again at the next start, beside the start and once the second
 service is reached where a process account is registered, and with the next removal of a
