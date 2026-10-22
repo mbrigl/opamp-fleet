@@ -22,7 +22,8 @@ fn usage() -> ! {
          server hash-credential --basic   (reads the password from standard input)\n       \
          server audit-verify <data_dir>/audit\n       \
          server pki status [--config <server.toml>]\n       \
-         server migrate --config-dir <old> --packages-dir <old> --data-dir <new>"
+         server migrate --config-dir <old> --packages-dir <old> --data-dir <new>\n       \
+         server migrate-to-postgres --from <data_dir> --data-dir <new> [--config <server.toml>]"
     );
     std::process::exit(2);
 }
@@ -182,6 +183,63 @@ fn migrate(mut args: impl Iterator<Item = String>) -> ! {
     }
 }
 
+/// `server migrate-to-postgres --from <data_dir> --data-dir <new> [--config <server.toml>]`
+/// (ADR-0050 clause 15): copies the records of `data_dir` into the database the configuration
+/// names, and its audit record and filesystem blobs into a new, empty `data_dir`, leaving the old
+/// one as the backup. It is run while the Server is stopped; it takes the database's lock, so a
+/// Server still running against it stops the copy. Prints what it copied, and exits non-zero when
+/// it could not copy all of it, leaving the database without the Server's tables.
+fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
+    let (mut from, mut data_dir, mut config) = (None, None, None);
+    while let Some(flag) = args.next() {
+        let slot = match flag.as_str() {
+            "--from" => &mut from,
+            "--data-dir" => &mut data_dir,
+            "--config" => &mut config,
+            _ => usage(),
+        };
+        match args.next() {
+            Some(path) if slot.is_none() => *slot = Some(PathBuf::from(path)),
+            _ => usage(),
+        }
+    }
+    let (Some(from), Some(data_dir)) = (from, data_dir) else {
+        usage()
+    };
+    let config = load_config(config).config;
+    let Some(database) = config.database.postgres() else {
+        eprintln!(
+            "the configuration names no database — set [database] store = \"postgres\" and \
+             [database.postgres], then copy again"
+        );
+        std::process::exit(1);
+    };
+    match fleet_server::postgres::import::run(
+        &from,
+        &data_dir,
+        database,
+        config.blobs.s3().is_none(),
+    ) {
+        Ok(report) => {
+            for line in &report.lines {
+                println!("{line}");
+            }
+            println!(
+                "copied into the database {} and into {} — set data_dir to it in server.toml, keep [database] \
+                 store = \"postgres\", and start the Server; {} stays as the backup",
+                database.dbname,
+                data_dir.display(),
+                from.display()
+            );
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// What makes the entry `server.toml` keeps from a secret.
 type Hasher = fn(&str) -> Result<String, String>;
 
@@ -285,6 +343,7 @@ fn parse_args() -> Option<PathBuf> {
             "audit-verify" => audit_verify(args.next()),
             "pki" => pki(args),
             "migrate" => migrate(args),
+            "migrate-to-postgres" => migrate_to_postgres(args),
             "--config" => match args.next() {
                 Some(path) => config = Some(PathBuf::from(path)),
                 None => usage(),
@@ -354,24 +413,27 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // One root for all state, its layout created owner-only and checked before any store opens
-    // (ADR-0037).
-    if let Err(e) = fleet_server::fs::open_data_dir(&config.data_dir) {
-        eprintln!("{e}");
-        std::process::exit(1);
+    // Where the records live (ADR-0050): the data directory, its layout created owner-only and
+    // checked before any store opens (ADR-0037), and with PostgreSQL the database, its lock taken
+    // and its schema applied.
+    let records = match fleet_server::Records::open(&config) {
+        Ok(records) => records,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if let fleet_server::Records::Postgres(database) = &records {
+        info!(database = %database.name(), "keeping the records in PostgreSQL");
     }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
     // ADR-0021: closed until an operator opens it; the window and its queue survive a restart
     // (ADR-0037 clause 9).
     let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
-        fleet_server::enrolment::Enrolment::open_on(
-            clock.clone(),
-            Box::new(fleet_server::fs::FsEnrolmentStore::open(&config.data_dir)),
+        fleet_server::enrolment::Enrolment::open_on(clock.clone(), records.enrolment()).map(
+            |enrolment| enrolment.with_max_pending_per_bootstrap(section.max_pending_per_bootstrap),
         )
-        .map(|enrolment| {
-            enrolment.with_max_pending_per_bootstrap(section.max_pending_per_bootstrap)
-        })
     }) {
         None => None,
         Some(Ok(enrolment)) => Some(Arc::new(enrolment)),
@@ -418,11 +480,11 @@ async fn main() {
                 if signer.is_some() {
                     info!("issuing bootstrap certificates on an operator's request");
                 }
-                fleet_server::bootstrap::BootstrapCertificates::on_disk(
+                fleet_server::bootstrap::BootstrapCertificates::on(
                     signer.map(|ca| {
                         Box::new(ca) as Box<dyn fleet_server::bootstrap::BootstrapSigner>
                     }),
-                    &config.data_dir,
+                    &records,
                     clock.clone(),
                 )
             },
@@ -460,7 +522,7 @@ async fn main() {
                 // ADR-0033.
                 info!("checking package signatures against [packages] verification_key");
             }
-            fleet_server::packages::PackageStore::open_with(config.data_dir.clone(), &config.blobs)
+            fleet_server::packages::PackageStore::open_on(&records, &config.data_dir, &config.blobs)
                 .map(|store| {
                     store.with_verifier(key.map(|key| {
                         Box::new(fleet_server::config::Ed25519Verifier::new(key))
@@ -473,7 +535,7 @@ async fn main() {
                 // ADR-0026.
                 info!("offering software packages to the fleet");
             }
-            fleet_server::fleet::PackageOffering::new(&config.data_dir, store)
+            fleet_server::fleet::PackageOffering::on(&records, store)
         });
     let packages = match packages {
         Ok(offering) => Some(offering),
@@ -483,20 +545,15 @@ async fn main() {
         }
     };
     // What the client CA signed and what is revoked (ADR-0021), kept beside the fleet's records.
-    let revocations =
-        match fleet_server::fs::FsLedgerStore::open(&config.data_dir).and_then(|store| {
-            fleet_server::revocation::Revocations::open(
-                Box::new(store),
-                clock.clone(),
-                planes.3.clone(),
-            )
-        }) {
-            Ok(revocations) => Arc::new(revocations),
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        };
+    let revocations = match records.ledger().and_then(|store| {
+        fleet_server::revocation::Revocations::open(store, clock.clone(), planes.3.clone())
+    }) {
+        Ok(revocations) => Arc::new(revocations),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     // The audit record (ADR-0022), opened before anything is decided.
     let audit_log = match fleet_server::fs::FsAuditStore::open(&config.data_dir).and_then(|store| {
         fleet_server::audit_log::AuditLog::start(
@@ -546,7 +603,7 @@ async fn main() {
         config.max_agents,
         clock.clone(),
     ));
-    let state = match AppState::new(config.data_dir.clone()) {
+    let state = match AppState::on(&records) {
         Ok(state) => Arc::new(
             state
                 .with_agent_rate(Some(agent_rate))

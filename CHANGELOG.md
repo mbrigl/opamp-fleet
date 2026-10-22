@@ -17,6 +17,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Added
 
+- **The Server's records may live in PostgreSQL**
+  ([ADR-0050](docs/adr/0050-the-servers-records-may-live-in-postgresql.md)).
+  `[database] store = "postgres"` with a `[database.postgres]` section (`host`, `port`, `dbname`,
+  `user`, `password_file`, optional `ca_file` and `tls`) keeps the Configurations, Deployments,
+  Package records, Agents, Hosts, the certificate register, the revocation list, the bootstrap
+  certificates with their PKCS#12 files and the enrolment window in one database instead of files
+  under `data_dir`; the audit record and, with the filesystem blob store, the artifacts stay under
+  `data_dir`. The connection is TLS 1.3 with the database's certificate and host name verified;
+  `tls = false` is accepted to `127.0.0.1` or `::1` alone, and no `PG*` variable changes the
+  connection. The Server applies its own schema at startup and holds a lock so one Server runs per
+  database; it creates no database and no role. The default stays `"fs"`.
+  **What to do:** nothing to keep a deployment running. To move to PostgreSQL, create the database
+  and a role that may create tables in it, put the password into a file only the Server's account
+  can read, stop the Server, copy the records with `server migrate-to-postgres --from <data_dir>
+  --data-dir <new>`, point `data_dir` at the new directory, set `[database]`, and start it. Back up
+  the database and `data_dir` together.
+
 - **The Server's configuration may come from its environment**
   ([ADR-0051](docs/adr/0051-the-servers-configuration-may-come-from-its-environment.md)). Every
   key of `server.toml` can be set by a variable `FLEET_SERVER__` followed by the key's path, its

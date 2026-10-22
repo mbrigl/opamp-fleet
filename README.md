@@ -459,10 +459,11 @@ configured once by a maintainer and worth re-checking after a repository move or
 - a **ruleset on `main`** that requires pull requests, requires the
   <!-- required-checks begin — compared with the workflow's jobs by scripts/check-docs.sh -->
   `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, `shell`, `rust`,
-  `client-windows`, and `client-macos`
+  `client-windows`, `client-macos`, `s3-store`, and `postgres-store`
   <!-- required-checks end -->
-  jobs as required status checks — every job of the **Checks** workflow, and the Client's
-  Windows and macOS jobs of the **CI** workflow (rulesets list checks by their job name) — and
+  jobs as required status checks — every job of the **Checks** workflow, the Client's Windows and
+  macOS jobs of the **CI** workflow, and its jobs that run the S3 and PostgreSQL stores' tests
+  against a real store (rulesets list checks by their job name) — and
   blocks force pushes and branch deletion;
 - enable **require a review from Code Owners** on that ruleset, so the two artifacts only a human
   decides, [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) and everything under

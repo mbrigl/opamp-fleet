@@ -351,6 +351,22 @@ pub trait BootstrapStore: Send + Sync {
     /// Returns an error when it cannot be removed.
     fn remove(&self, id: &CertId) -> Result<(), String>;
 
+    /// Persists the entry of a certificate just issued together with its PKCS#12 file (ADR-0029
+    /// clause 4, ADR-0050 clause 12): both or neither. An adapter that cannot make it one step
+    /// writes the file first and removes it again when the entry cannot be written, so no file is
+    /// kept that no entry names.
+    ///
+    /// # Errors
+    /// Returns an error when either cannot be written; neither is then kept.
+    fn put_with_p12(&self, entry: &Entry, file: &[u8]) -> Result<(), String> {
+        self.put_p12(&entry.id, file)?;
+        if let Err(e) = self.put(entry) {
+            let _ = self.remove_p12(&entry.id);
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Keeps the PKCS#12 file of one entry, owner-only.
     ///
     /// # Errors
@@ -499,15 +515,11 @@ impl BootstrapCertificates {
             ca_key: signer.ca_key_fingerprint(),
             p12: true,
         };
-        // The file before the entry that says it is there (ADR-0029 clause 4), and gone again
-        // when the entry cannot be written: no file is kept that no entry ends.
+        // The entry and its file together (ADR-0029 clause 4, ADR-0050 clause 12): no file is
+        // kept that no entry ends.
         self.store
-            .put_p12(&entry.id, &pair.pkcs12)
+            .put_with_p12(&entry, &pair.pkcs12)
             .map_err(IssueError::Failed)?;
-        if let Err(e) = self.store.put(&entry) {
-            let _ = self.store.remove_p12(&entry.id);
-            return Err(IssueError::Failed(e));
-        }
         entries.insert(entry.id.clone(), entry);
         Ok(pair)
     }

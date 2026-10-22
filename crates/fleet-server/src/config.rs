@@ -66,6 +66,10 @@ pub struct ServerConfig {
     /// S3-compatible object store (ADR-0049).
     #[serde(default)]
     pub blobs: BlobsConfig,
+    /// Where the Server keeps its records: files under `data_dir`, or one PostgreSQL database
+    /// (ADR-0050).
+    #[serde(default)]
+    pub database: DatabaseConfig,
     /// Refused at startup: every package is offered as a path the Client resolves against its own
     /// endpoint, and a Client downloads from no other host (ADR-0033). Read only so that a leftover
     /// key can be named.
@@ -326,7 +330,7 @@ pub struct S3BlobsConfig {
     /// The key ID of a static key pair, set together with `secret_access_key_file`. Without both,
     /// the Server uses its platform's workload identity (ADR-0049 clause 6).
     pub access_key_id: Option<String>,
-    /// The file holding the secret of that key pair, readable by the Server's account alone.
+    /// The file holding the secret of that key pair, readable by its owner and group alone.
     pub secret_access_key_file: Option<PathBuf>,
 }
 
@@ -395,6 +399,18 @@ impl S3BlobsConfig {
                  `..` segment, e.g. \"fleet/\""
             ));
         }
+        // `object_store` percent-encodes these in a key it builds, so the Server's keys would
+        // not be the ones it lists under the prefix: refused here rather than at the first upload.
+        if let Some(c) = prefix
+            .chars()
+            .find(|c| !c.is_ascii() || c.is_ascii_control() || "\\{^}%`]\">[~<#|*?".contains(*c))
+        {
+            return Err(format!(
+                "[blobs.s3] prefix {prefix:?} holds {c:?}, which the S3 client would \
+                 percent-encode — use letters, digits and - _ . / ! ' ( ) & $ @ = ; : + , and \
+                 space"
+            ));
+        }
         if self.access_key_id.is_some() != self.secret_access_key_file.is_some() {
             return Err(
                 "[blobs.s3] access_key_id and secret_access_key_file are set together or not at \
@@ -404,6 +420,170 @@ impl S3BlobsConfig {
         }
         Ok(())
     }
+}
+
+/// The `[database]` section (ADR-0050 clause 1): where the Server keeps its records. One store,
+/// the filesystem under `data_dir` by default; both are supported in production.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseConfig {
+    /// `"fs"`, one file per record under `data_dir`, or `"postgres"`, one database that
+    /// `[database.postgres]` names. A string rather than an enum so that any other value is
+    /// refused by [`check`](Self::check), naming the key.
+    #[serde(default = "default_record_store")]
+    pub store: String,
+    /// The database, when `store = "postgres"`; refused beside `store = "fs"`.
+    pub postgres: Option<PostgresConfig>,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        DatabaseConfig {
+            store: default_record_store(),
+            postgres: None,
+        }
+    }
+}
+
+fn default_record_store() -> String {
+    "fs".to_string()
+}
+
+impl DatabaseConfig {
+    /// The database's settings when the records live in PostgreSQL, `None` when they are files.
+    #[must_use]
+    pub fn postgres(&self) -> Option<&PostgresConfig> {
+        self.postgres.as_ref().filter(|_| self.store == "postgres")
+    }
+
+    /// Loud validation (ADR-0050 clauses 1 and 7): a known store, the database's section exactly
+    /// when the store is PostgreSQL, and a connection that stays off plaintext beyond the loopback.
+    fn check(&self) -> Result<(), String> {
+        match (self.store.as_str(), &self.postgres) {
+            ("fs", None) => Ok(()),
+            ("fs", Some(_)) => Err(
+                "[database.postgres] is set but [database] store is \"fs\" — set store = \
+                 \"postgres\" to keep the records in the database, or remove [database.postgres]"
+                    .to_string(),
+            ),
+            ("postgres", None) => Err(
+                "[database] store = \"postgres\" needs a [database.postgres] section naming host, \
+                 dbname, user and password_file"
+                    .to_string(),
+            ),
+            ("postgres", Some(postgres)) => postgres.check(),
+            (other, _) => Err(format!(
+                "[database] store must be \"fs\" or \"postgres\", not {other:?}"
+            )),
+        }
+    }
+}
+
+/// The `[database.postgres]` section (ADR-0050 clause 7): the one database that keeps the records,
+/// and how the Server reaches it. Every setting of the connection is here and nowhere else; the
+/// Server reads no `PG*` variable that would change one.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresConfig {
+    /// The database's host name or IP address — what its certificate must name.
+    pub host: String,
+    /// Its port.
+    #[serde(default = "default_postgres_port")]
+    pub port: u16,
+    /// The database. The Server does not create it.
+    pub dbname: String,
+    /// The role the Server signs in as. The Server does not create it.
+    pub user: String,
+    /// The file holding the role's password, readable by its owner and group alone.
+    pub password_file: PathBuf,
+    /// One PEM root for a database whose certificate no public root signs.
+    pub ca_file: Option<PathBuf>,
+    /// `false` connects without TLS, which is allowed to a loopback IP literal alone (Q-1).
+    #[serde(default = "default_postgres_tls")]
+    pub tls: bool,
+}
+
+fn default_postgres_port() -> u16 {
+    5432
+}
+
+fn default_postgres_tls() -> bool {
+    true
+}
+
+impl PostgresConfig {
+    fn check(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("host", &self.host),
+            ("dbname", &self.dbname),
+            ("user", &self.user),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("[database.postgres] {key} must not be empty"));
+            }
+        }
+        if self.port == 0 {
+            return Err("[database.postgres] port must not be 0".to_string());
+        }
+        if self.host.starts_with('/') {
+            return Err(format!(
+                "[database.postgres] host {:?} names a socket directory — the Server connects \
+                 over TCP, to a host name or an IP address",
+                self.host
+            ));
+        }
+        // Q-1: a credential never crosses a network unencrypted, the database password neither.
+        if !self.tls && !opamp::endpoint::is_loopback_literal(&self.host) {
+            return Err(format!(
+                "[database.postgres] tls = false is for a host that is a loopback IP literal \
+                 (127.0.0.1 or ::1) alone, and host is {:?} — remove tls = false",
+                self.host
+            ));
+        }
+        if !self.tls && self.ca_file.is_some() {
+            return Err(
+                "[database.postgres] ca_file is set but tls = false — a root verifies nothing \
+                 without TLS; remove one of them"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The secret in `file`, which no account outside the file's group may read and no account but
+/// its owner may write: the key `key` names it in every refusal (ADR-0049 clause 6, ADR-0050
+/// clause 7). Group read is allowed — `0640`, or `0440` with a group of the orchestrator's choice,
+/// as Kubernetes mounts a secret with `fsGroup` — and nothing for others, nor group write.
+/// Surrounding whitespace is dropped, and an empty secret is refused.
+///
+/// # Errors
+/// Returns an error naming the key and the file when it cannot be read, may be read by others or
+/// written by its group, or is empty.
+pub fn read_secret_file(key: &str, file: &Path) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(file)
+            .map_err(|e| format!("{key} {}: {e}", file.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o027 != 0 {
+            return Err(format!(
+                "{key} {} may be read by others or written by its group (mode {:o}) — restrict \
+                 it: chmod 600, or 640 to let its group read it",
+                file.display(),
+                mode & 0o777
+            ));
+        }
+    }
+    let secret =
+        std::fs::read_to_string(file).map_err(|e| format!("{key} {}: {e}", file.display()))?;
+    let secret = secret.trim();
+    if secret.is_empty() {
+        return Err(format!("{key} {} is empty", file.display()));
+    }
+    Ok(secret.to_string())
 }
 
 /// The Ed25519 adapter behind [`SignatureVerifier`](crate::packages::SignatureVerifier): the
@@ -824,6 +1004,7 @@ impl Default for ServerConfig {
             packages_dir: None,
             packages: PackagesConfig::default(),
             blobs: BlobsConfig::default(),
+            database: DatabaseConfig::default(),
             advertised_url: None,
             max_message_size_bytes: default_max_message_size(),
             max_package_size_bytes: default_max_package_size(),
@@ -912,15 +1093,14 @@ impl ServerConfig {
                     ),
                     Some(variable) => format!("{}: {}", variable.name, e.message()),
                     None => {
-                        // A file alone, parsed again as text, points at the line.
-                        let detail = match &text {
-                            Some(text) if variables.is_empty() => {
-                                toml::from_str::<ServerConfig>(text)
-                                    .err()
-                                    .map_or_else(|| e.to_string(), |e| e.to_string())
-                            }
-                            _ => e.to_string(),
-                        };
+                        // The file alone, parsed again as text, points at the line — when it
+                        // fails alone with the same complaint, whatever the environment set
+                        // beside it.
+                        let detail = text
+                            .as_deref()
+                            .and_then(|text| toml::from_str::<ServerConfig>(text).err())
+                            .filter(|alone| alone.message() == e.message())
+                            .map_or_else(|| e.to_string(), |alone| alone.to_string());
                         format!("cannot parse {origin}: {detail}")
                     }
                 })?;
@@ -1004,6 +1184,7 @@ impl ServerConfig {
         // A malformed key fails startup, not the first signature it would have checked (ADR-0033).
         self.packages.verification_key()?;
         self.blobs.check()?;
+        self.database.check()?;
         // The two planes are two listeners (ADR-0013). Addresses that collide would surface as the
         // second bind failing with "address already in use" — a message about sockets for what is
         // really a configuration mistake, so it is refused here, by name.
@@ -2073,8 +2254,29 @@ mod tests {
         ("FLEET_SERVER__TLS__CLIENT_CA_FILE", "ca.pem"),
     ];
 
+    /// A mistake in the file is named with its line, also when the environment sets other keys
+    /// beside it (ADR-0051 clause 7: the file's checks hold as they did).
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_mistake_in_the_file_names_its_line_whatever_the_environment_sets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(
+            &path,
+            format!("data_dir = \"from-file\"\n\nstale_after_secs = \"soon\"\n{TLS}"),
+        )
+        .expect("write");
+        for set in [&[][..], &[("FLEET_SERVER__DATA_DIR", "/var/lib/fleet")][..]] {
+            let err =
+                ServerConfig::load_layered(Some(&path), variables(set)).expect_err("not a number");
+            assert!(err.contains("line 3"), "{set:?}: {err}");
+            assert!(err.contains("stale_after_secs"), "{set:?}: {err}");
+        }
+    }
+
     /// A variable sets the key its name spells, over the file's value; a key no variable names
     /// keeps the file's; and a variable that does not start with the prefix configures nothing.
+    /// The `[database]` example of the ADR's Enforcement is among them.
     /// Verifies: ADR-0051
     #[test]
     fn the_environment_overrides_the_files_keys_and_keeps_the_rest() {
@@ -2085,13 +2287,17 @@ mod tests {
             format!(
                 "data_dir = \"from-file\"\nstale_after_secs = 120\n\
                  [connection_offer]\nheartbeat_interval_secs = 30\n\
-                 [rest.tls]\ncert_file = \"file-ui.pem\"\nkey_file = \"file-ui-key.pem\"\n{TLS}"
+                 [rest.tls]\ncert_file = \"file-ui.pem\"\nkey_file = \"file-ui-key.pem\"\n\
+                 [database]\nstore = \"postgres\"\n\
+                 [database.postgres]\nhost = \"db.example\"\nport = 5432\ndbname = \"fleet\"\n\
+                 user = \"fleet\"\npassword_file = \"/run/secrets/pg\"\n{TLS}"
             ),
         )
         .expect("write");
         let layered = ServerConfig::load_layered(
             Some(&path),
             variables(&[
+                ("FLEET_SERVER__DATABASE__POSTGRES__PORT", "5433"),
                 ("FLEET_SERVER__DATA_DIR", "/var/lib/fleet"),
                 ("FLEET_SERVER__REST__TLS__CERT_FILE", "/run/secrets/ui.pem"),
                 (
@@ -2115,6 +2321,9 @@ mod tests {
                 .heartbeat_interval_secs,
             Some(45)
         );
+        let database = config.database.postgres().expect("[database.postgres]");
+        assert_eq!(database.port, 5433);
+        assert_eq!(database.host, "db.example", "a key no variable names");
         assert_eq!(config.stale_after_secs, 120, "a key no variable names");
         assert!(layered.origin.contains("server.toml"), "{}", layered.origin);
     }
@@ -2515,6 +2724,18 @@ mod tests {
                 "[blobs.s3] prefix",
             ),
             (
+                &format!("{bucket}endpoint = \"https://s3.example\"\nprefix = \"50%/\"\n"),
+                "[blobs.s3] prefix",
+            ),
+            (
+                &format!("{bucket}endpoint = \"https://s3.example\"\nprefix = \"a#b/\"\n"),
+                "[blobs.s3] prefix",
+            ),
+            (
+                &format!("{bucket}endpoint = \"https://s3.example\"\nprefix = \"flöte/\"\n"),
+                "[blobs.s3] prefix",
+            ),
+            (
                 &format!("{bucket}endpoint = \"https://s3.example\"\naccess_key_id = \"AK\"\n"),
                 "[blobs.s3] access_key_id and secret_access_key_file",
             ),
@@ -2569,6 +2790,132 @@ mod tests {
         let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err("unknown");
         assert!(
             err.contains("FLEET_SERVER__BLOBS__S3__ENDPOINT_URL"),
+            "{err}"
+        );
+    }
+
+    /// `[database]`: the filesystem by default; `"postgres"` with its database. Any other store, a
+    /// database beside the filesystem, a missing `[database.postgres]` key, and `tls = false` with a
+    /// host that is not a loopback IP literal each fail startup naming the key — with no database
+    /// to reach (ADR-0050 clauses 1 and 7).
+    /// Verifies: ADR-0050
+    #[test]
+    fn the_record_store_is_chosen_and_checked_naming_the_key() {
+        let load = |database: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("server.toml");
+            std::fs::write(&path, format!("{TLS}{database}")).expect("write");
+            ServerConfig::load(&path)
+        };
+        let section = "[database]\nstore = \"postgres\"\n[database.postgres]\n";
+        let full = format!(
+            "{section}host = \"db.example\"\ndbname = \"fleet\"\nuser = \"fleet\"\n\
+             password_file = \"/run/secrets/db\"\n"
+        );
+
+        let config = load("").expect("the default");
+        assert_eq!(config.database.store, "fs");
+        assert!(config.database.postgres().is_none());
+        let config = load(&full).expect("a database over TLS");
+        let postgres = config.database.postgres().expect("postgres");
+        assert_eq!(
+            (postgres.host.as_str(), postgres.port, postgres.tls),
+            ("db.example", 5432, true)
+        );
+        assert!(postgres.ca_file.is_none());
+        for loopback in ["127.0.0.1", "::1"] {
+            let config = load(&format!(
+                "{section}host = \"{loopback}\"\ndbname = \"f\"\nuser = \"f\"\n\
+                 password_file = \"p\"\ntls = false\n"
+            ))
+            .expect(loopback);
+            assert!(!config.database.postgres().expect("postgres").tls);
+        }
+
+        let without = |key: &str| {
+            full.lines()
+                .filter(|line| !line.starts_with(&format!("{key} =")))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for (database, named) in [
+            (
+                "[database]\nstore = \"pg\"\n".to_string(),
+                "[database] store",
+            ),
+            (
+                "[database]\nstore = \"Postgres\"\n".to_string(),
+                "[database] store",
+            ),
+            (
+                "[database]\nstore = \"postgres\"\n".to_string(),
+                "[database.postgres]",
+            ),
+            (
+                "[database.postgres]\nhost = \"h\"\ndbname = \"d\"\nuser = \"u\"\n\
+                 password_file = \"p\"\n"
+                    .to_string(),
+                "[database.postgres] is set but [database] store",
+            ),
+            (without("host"), "host"),
+            (without("dbname"), "dbname"),
+            (without("user"), "user"),
+            (without("password_file"), "password_file"),
+            (format!("{full}tls = false\n"), "tls = false"),
+            (
+                format!(
+                    "{section}host = \"localhost\"\ndbname = \"f\"\nuser = \"f\"\n\
+                         password_file = \"p\"\ntls = false\n"
+                ),
+                "host is \"localhost\"",
+            ),
+            (format!("{full}password = \"x\"\n"), "password"),
+            (format!("{full}sslmode = \"disable\"\n"), "sslmode"),
+            (
+                format!(
+                    "{section}host = \"\"\ndbname = \"f\"\nuser = \"f\"\npassword_file = \"p\"\n"
+                ),
+                "[database.postgres] host",
+            ),
+        ] {
+            let err = load(&database).expect_err(&database);
+            assert!(err.contains(named), "{database}: {err}");
+        }
+    }
+
+    /// The database's keys come through the environment like every other key, the password's file
+    /// included, with no code of their own (ADR-0050 clause 7, ADR-0051).
+    /// Verifies: ADR-0050
+    #[test]
+    fn the_record_store_is_configured_from_the_environment_too() {
+        let mut pairs = TLS_VARIABLES.to_vec();
+        pairs.extend([
+            ("FLEET_SERVER__DATABASE__STORE", "postgres"),
+            ("FLEET_SERVER__DATABASE__POSTGRES__HOST", "127.0.0.1"),
+            ("FLEET_SERVER__DATABASE__POSTGRES__PORT", "5433"),
+            ("FLEET_SERVER__DATABASE__POSTGRES__DBNAME", "fleet"),
+            ("FLEET_SERVER__DATABASE__POSTGRES__USER", "fleet"),
+            (
+                "FLEET_SERVER__DATABASE__POSTGRES__PASSWORD_FILE",
+                "/run/secrets/db-password",
+            ),
+            ("FLEET_SERVER__DATABASE__POSTGRES__TLS", "false"),
+        ]);
+        let config = ServerConfig::load_layered(None, variables(&pairs))
+            .expect("loads")
+            .config;
+        let postgres = config.database.postgres().expect("postgres");
+        assert_eq!(postgres.host, "127.0.0.1");
+        assert_eq!(postgres.port, 5433);
+        assert!(!postgres.tls);
+        assert_eq!(
+            postgres.password_file,
+            Path::new("/run/secrets/db-password")
+        );
+        pairs.push(("FLEET_SERVER__DATABASE__POSTGRES__PASSWORD", "x"));
+        let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err("unknown");
+        assert!(
+            err.contains("FLEET_SERVER__DATABASE__POSTGRES__PASSWORD"),
             "{err}"
         );
     }

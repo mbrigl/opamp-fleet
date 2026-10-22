@@ -154,7 +154,7 @@ max_package_size_bytes = 1073741824
 # under data_dir/blobs/. "s3" keeps one object per artifact in a bucket of an S3-compatible store,
 # streamed through the Server both ways; the Server creates no bucket. The endpoint is https://,
 # http:// only to 127.0.0.1 or ::1. Without access_key_id and secret_access_key_file (set both or
-# neither; the file readable by the Server's account alone) the Server uses its platform's workload
+# neither; the file readable by its owner and at most its group) the Server uses its platform's workload
 # identity: a web identity token, ECS/EKS container credentials, or the instance metadata service.
 # No AWS_* variable changes the endpoint, bucket, region or TLS. On the first start with "s3", every
 # artifact the bucket lacks is copied from data_dir/blobs/, which is left in place.
@@ -169,6 +169,27 @@ max_package_size_bytes = 1073741824
 # ca_file = "/etc/opamp/s3-ca.pem"      # optional: one PEM root no public root signs
 # access_key_id = "<key id>"
 # secret_access_key_file = "/run/secrets/s3-secret-access-key"
+
+# Where the records are kept. Optional; the default, "fs", keeps one file per record under data_dir
+# as listed above. "postgres" keeps them in one PostgreSQL database instead; data_dir then holds the
+# audit record and, with the filesystem blob store, the artifacts, and nothing else. The Server
+# creates no database and no role: the role needs the right to create tables, and the Server applies
+# its own schema at startup. One Server per database. The connection is TLS 1.3 with the database's
+# certificate and host name verified, against the public roots or ca_file; tls = false is accepted
+# for host = "127.0.0.1" or "::1" alone. The password comes from password_file, readable by its
+# owner and at most its group; no PG* variable changes the connection. An existing data_dir is copied
+# into the database once, while the Server is stopped, by
+#   server migrate-to-postgres --from <data_dir> --data-dir <new>
+# [database]
+# store = "postgres"
+#
+# [database.postgres]
+# host = "db.example.org"
+# port = 5432
+# dbname = "fleet"
+# user = "fleet"
+# password_file = "/run/secrets/fleet-db-password"
+# ca_file = "/etc/opamp/db-ca.pem"      # optional: the roots the database's certificate is checked against
 
 # TLS, REQUIRED: the Agent plane serves HTTPS/WSS with this certificate and key, in TLS 1.3
 # only, and so does the Operator plane unless [rest.tls] below names its own. Without the

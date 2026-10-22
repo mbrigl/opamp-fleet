@@ -2,28 +2,30 @@
 //! behind [`BlobStore`](crate::blobs::BlobStore), beside the filesystem's.
 //!
 //! The port is synchronous and `object_store` is not, so the adapter bridges inside itself
-//! (ADR-0049 clause 1): it owns a small Tokio runtime of its own, and every operation is spawned
-//! onto it while the calling thread waits on a plain channel. The callers stay as they are — the
-//! upload and the download stream run on blocking threads, the rest on whatever thread calls —
-//! and none of them can deadlock the Server's runtime: the work never needs a thread of the
-//! runtime that waits for it, and a channel, unlike `Handle::block_on`, may be waited on from
-//! inside an asynchronous context.
+//! (ADR-0049 clause 1) through a [`Bridge`]: a small Tokio runtime of its own, onto which every
+//! operation is spawned while the calling thread waits on a plain channel. The callers stay as they
+//! are — the upload and the download stream run on blocking threads, the rest on whatever thread
+//! calls.
 
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::client::{HttpClient, HttpConnector};
 use object_store::path::Path as Key;
-use object_store::{ClientConfigKey, ClientOptions, ObjectStore, ObjectStoreExt as _, PutPayload};
+use object_store::{
+    BackoffConfig, ClientConfigKey, ClientOptions, ObjectStore, ObjectStoreExt as _, PutPayload,
+    RetryConfig,
+};
 use sha2::{Digest, Sha256};
 
 use crate::blobs::{is_hash, BlobStore};
+use crate::bridge::Bridge;
 use crate::config::S3BlobsConfig;
 
 /// The bytes of one part of a multipart upload. S3 takes no part below 5 MiB but the last, so an
@@ -54,6 +56,32 @@ const WORKLOAD_IDENTITY: [(&str, AmazonS3ConfigKey); 5] = [
     ),
 ];
 
+/// How long an S3 request may wait (ADR-0049 clause 5), so a store that stops answering fails the
+/// one call that needs it instead of holding it — and whatever lock its caller holds — forever.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    /// A connection, TLS included.
+    connect: Duration,
+    /// Silence: from the request until its answer begins — the upload of one part included —
+    /// and then between two pieces of the answer, so a download of any size runs as long as
+    /// bytes keep coming.
+    silence: Duration,
+    /// Retries of a request that failed or fell silent, and how long after the first attempt
+    /// one may still start.
+    retries: usize,
+    retry_for: Duration,
+}
+
+/// The limits the Server runs with: a stalled store fails a call within about two minutes at
+/// most — the last retry's silence after `retry_for` — and a single silent request within 30
+/// seconds.
+const LIMITS: Limits = Limits {
+    connect: Duration::from_secs(10),
+    silence: Duration::from_secs(30),
+    retries: 2,
+    retry_for: Duration::from_secs(60),
+};
+
 /// One object per blob at `<prefix>blobs/<sha256>`, an upload in progress at
 /// `<prefix>staging/<random>`, and no key outside `<prefix>` (ADR-0049 clause 4).
 pub struct S3BlobStore {
@@ -72,7 +100,13 @@ impl S3BlobStore {
     /// Returns an error naming the key when the secret or the CA file cannot be read, and naming
     /// the bucket when it does not exist or cannot be listed.
     pub fn open(config: &S3BlobsConfig) -> Result<Self, String> {
-        let builder = builder(config, &|name| std::env::var(name).ok())?;
+        Self::open_within(config, LIMITS)
+    }
+
+    /// [`open`](Self::open) with `limits` rather than [`LIMITS`]: what the tests of a store that
+    /// stops answering wait for.
+    fn open_within(config: &S3BlobsConfig, limits: Limits) -> Result<Self, String> {
+        let builder = builder(config, &|name| std::env::var(name).ok(), limits)?;
         let store = builder
             .build()
             .map_err(|e| format!("[blobs.s3]: cannot build the S3 client: {e}"))?;
@@ -80,7 +114,7 @@ impl S3BlobStore {
             store: Arc::new(store),
             bucket: config.bucket.clone(),
             prefix: config.prefix.clone(),
-            bridge: Arc::new(Bridge::new()?),
+            bridge: Arc::new(Bridge::new("blobs-s3")?),
         };
         let root = s3.root();
         let store = s3.store.clone();
@@ -218,7 +252,7 @@ impl BlobStore for S3BlobStore {
         let staging = self.staging_key()?;
         let (sha256, size) = self.stage(&staging, bytes)?;
         let copied = self.blob_key(&sha256).and_then(|blob| {
-            if self.exists(&sha256) {
+            if self.exists(&sha256)? {
                 // The same bytes are stored already: once is enough.
                 return Ok(());
             }
@@ -251,19 +285,18 @@ impl BlobStore for S3BlobStore {
         }))
     }
 
-    fn exists(&self, sha256: &str) -> bool {
+    fn exists(&self, sha256: &str) -> Result<bool, String> {
         let Ok(key) = self.blob_key(sha256) else {
-            return false;
+            return Ok(false);
         };
         let store = self.store.clone();
         match self.bridge.run(async move { store.head(&key).await }) {
-            Ok(_) => true,
-            Err(object_store::Error::NotFound { .. }) => false,
-            Err(e) => {
-                // Answered "not stored": the one caller then refuses to record an entry on it.
-                tracing::warn!(blob = %sha256, error = %e, "cannot ask the bucket for a blob");
-                false
-            }
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(format!(
+                "cannot ask bucket {} for blob {sha256}: {e}",
+                self.bucket
+            )),
         }
     }
 
@@ -352,72 +385,32 @@ impl Read for ObjectReader {
     }
 }
 
-/// The adapter's own runtime (ADR-0049 clause 1). Two workers carry every request of the store;
-/// a caller waits for its result on a channel.
-struct Bridge {
-    /// `Some` until dropped: a runtime is shut down in the background, because the last handle to
-    /// the store may well be dropped on a thread of the Server's own runtime, where a blocking
-    /// shutdown panics.
-    runtime: Option<tokio::runtime::Runtime>,
-}
-
-impl Bridge {
-    fn new() -> Result<Self, String> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("blobs-s3")
-            .enable_all()
-            .build()
-            .map_err(|e| format!("cannot start the S3 store's runtime: {e}"))?;
-        Ok(Bridge {
-            runtime: Some(runtime),
-        })
-    }
-
-    /// Runs `future` on the adapter's runtime and waits for its output.
-    fn run<F>(&self, future: F) -> F::Output
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        self.runtime
-            .as_ref()
-            .expect("the runtime lives as long as the bridge")
-            .spawn(async move {
-                let _ = sender.send(future.await);
-            });
-        receiver
-            .recv()
-            .expect("a task of the adapter's runtime runs to its end")
-    }
-}
-
-impl Drop for Bridge {
-    fn drop(&mut self) {
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
-    }
-}
-
 /// The S3 client for `config`, with the credentials of clause 6 and the HTTP client of clause 5.
 /// `variable` reads the environment, and is asked for the names of [`WORKLOAD_IDENTITY`] alone.
 fn builder(
     config: &S3BlobsConfig,
     variable: &dyn Fn(&str) -> Option<String>,
+    limits: Limits,
 ) -> Result<AmazonS3Builder, String> {
     let mut builder = AmazonS3Builder::new()
         .with_endpoint(config.endpoint.clone())
         .with_bucket_name(config.bucket.clone())
         .with_region(config.region.clone())
         .with_allow_http(config.allows_http())
-        .with_http_connector(TlsConnector::new(config.ca_file.as_deref())?);
+        .with_retry(RetryConfig {
+            backoff: BackoffConfig::default(),
+            max_retries: limits.retries,
+            retry_timeout: limits.retry_for,
+        })
+        .with_http_connector(TlsConnector::new(config.ca_file.as_deref(), limits)?);
     match (&config.access_key_id, &config.secret_access_key_file) {
         (Some(key_id), Some(file)) => {
             builder = builder
                 .with_access_key_id(key_id.clone())
-                .with_secret_access_key(read_secret(file)?);
+                .with_secret_access_key(crate::config::read_secret_file(
+                    "[blobs.s3] secret_access_key_file",
+                    file,
+                )?);
         }
         _ => {
             for (name, key) in WORKLOAD_IDENTITY {
@@ -430,49 +423,22 @@ fn builder(
     Ok(builder)
 }
 
-/// The secret of `[blobs.s3] secret_access_key_file`, which only the Server's account may read
-/// (ADR-0049 clause 6).
-fn read_secret(file: &Path) -> Result<String, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(file)
-            .map_err(|e| format!("[blobs.s3] secret_access_key_file {}: {e}", file.display()))?
-            .permissions()
-            .mode();
-        if mode & 0o077 != 0 {
-            return Err(format!(
-                "[blobs.s3] secret_access_key_file {} is readable by others (mode {:o}) — \
-                 restrict it to the Server's account: chmod 600",
-                file.display(),
-                mode & 0o777
-            ));
-        }
-    }
-    let secret = std::fs::read_to_string(file)
-        .map_err(|e| format!("[blobs.s3] secret_access_key_file {}: {e}", file.display()))?;
-    let secret = secret.trim();
-    if secret.is_empty() {
-        return Err(format!(
-            "[blobs.s3] secret_access_key_file {} is empty",
-            file.display()
-        ));
-    }
-    Ok(secret.to_string())
-}
-
 /// The HTTP client `object_store` is handed: the project's TLS 1.3, *ring*-only configuration with
 /// the public roots and the optional `ca_file` root (ADR-0049 clause 5). Plaintext only where the
 /// client's own options allow it: the loopback endpoint `[blobs.s3]` checked, and the platform's
 /// credential endpoints on their link-local addresses. No proxy and no other setting is taken from
 /// the environment.
+///
+/// The client is built here, so `object_store`'s own timeouts in its `ClientOptions` never reach
+/// it: the timeouts of [`Limits`] are set on it instead.
 #[derive(Debug)]
 struct TlsConnector {
     tls: rustls::ClientConfig,
+    limits: Limits,
 }
 
 impl TlsConnector {
-    fn new(ca_file: Option<&Path>) -> Result<Self, String> {
+    fn new(ca_file: Option<&Path>, limits: Limits) -> Result<Self, String> {
         let mut roots = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
@@ -490,7 +456,7 @@ impl TlsConnector {
         let tls = opamp::tls::client_builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        Ok(TlsConnector { tls })
+        Ok(TlsConnector { tls, limits })
     }
 }
 
@@ -505,7 +471,10 @@ impl HttpConnector for TlsConnector {
             .no_proxy()
             // A compressed response would not be the bytes its `Content-Length` counts.
             .no_gzip()
-            .connect_timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(self.limits.connect)
+            // reqwest's read timeout runs from the request until its answer begins and then
+            // again between two chunks of the answer.
+            .read_timeout(self.limits.silence)
             .build()
             .map_err(|e| object_store::Error::Generic {
                 store: "S3",
@@ -530,7 +499,7 @@ pub fn copy_from_filesystem<'a>(
 ) -> Result<(), String> {
     for sha256 in referenced {
         let path = dir.join(sha256);
-        if !is_hash(sha256) || !path.is_file() || store.exists(sha256) {
+        if !is_hash(sha256) || !path.is_file() || store.exists(sha256)? {
             // Not there to copy: the package store names the entry whose blob is missing.
             continue;
         }
@@ -713,15 +682,15 @@ mod tests {
         assert!(read_all(store.get(&parts).expect("get large")) == large);
         assert!(read_all(store.get(&empty).expect("get empty")).is_empty());
 
-        assert!(store.exists(&artifact));
+        assert!(store.exists(&artifact).expect("exists"));
         store.delete(&artifact).expect("delete");
-        assert!(!store.exists(&artifact));
+        assert!(!store.exists(&artifact).expect("exists"));
         assert!(store.get(&artifact).is_err());
         store
             .delete(&artifact)
             .expect("deleting the absent is no error");
         assert!(store.get("../x").is_err(), "only a hash names a blob");
-        assert!(!store.exists("../x"));
+        assert!(!store.exists("../x").expect("no hash, no blob"));
 
         assert!(store.put(&mut CutOff(PART_SIZE + 10)).is_err());
         assert!(store.put(&mut CutOff(10)).is_err());
@@ -938,10 +907,14 @@ mod tests {
     #[test]
     fn aws_variables_change_neither_the_endpoint_nor_plaintext() {
         let asked = std::cell::RefCell::new(Vec::new());
-        builder(&config("https://s3.example"), &|name| {
-            asked.borrow_mut().push(name.to_string());
-            Some("x".to_string())
-        })
+        builder(
+            &config("https://s3.example"),
+            &|name| {
+                asked.borrow_mut().push(name.to_string());
+                Some("x".to_string())
+            },
+            LIMITS,
+        )
         .expect("builder");
         let identity: Vec<&str> = WORKLOAD_IDENTITY.iter().map(|(name, _)| *name).collect();
         assert_eq!(asked.into_inner(), identity);
@@ -975,9 +948,11 @@ mod tests {
         if std::env::var_os(CHILD).is_none() {
             return;
         }
-        let builder = builder(&config("https://s3.example"), &|name| {
-            std::env::var(name).ok()
-        })
+        let builder = builder(
+            &config("https://s3.example"),
+            &|name| std::env::var(name).ok(),
+            LIMITS,
+        )
         .expect("builder");
         assert_eq!(
             builder
@@ -1015,7 +990,58 @@ mod tests {
         assert!(!built.contains("203.0.113.9"), "{built}");
     }
 
-    /// A static key pair's secret comes from its file, which only the Server's account may read
+    /// A store that takes the connection and never answers fails the call within the limits —
+    /// the silence of each attempt, retried — rather than holding it, and whatever lock its caller
+    /// holds, forever (ADR-0049 clause 5). The call is the listing at startup; every request goes
+    /// through the same client. Needs no store.
+    /// Verifies: ADR-0049
+    #[test]
+    fn a_store_that_never_answers_fails_the_call_within_the_limits() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                // Kept open, read from never, answered never.
+                held.push(stream);
+            }
+        });
+        let limits = Limits {
+            connect: Duration::from_secs(1),
+            silence: Duration::from_millis(300),
+            retries: 1,
+            retry_for: Duration::from_millis(500),
+        };
+        // A key pair, so that the request goes to the store rather than to a credential source.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, "the-secret").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod");
+        }
+        let mut silent = config(&format!("http://127.0.0.1:{port}"));
+        silent.access_key_id = Some("fleet-test".to_string());
+        silent.secret_access_key_file = Some(secret);
+        let started = std::time::Instant::now();
+        let err = S3BlobStore::open_within(&silent, limits)
+            .err()
+            .expect("no answer");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}: {err}",
+            started.elapsed()
+        );
+        assert!(err.contains("bucket fleet"), "{err}");
+        assert!(
+            err.contains(&format!("GET http://127.0.0.1:{port}/")) && err.contains("1 retries"),
+            "the store itself fell silent, and was asked again: {err}"
+        );
+    }
+
+    /// A static key pair's secret comes from its file, which its owner and group alone may read
     /// (ADR-0049 clause 6).
     /// Verifies: ADR-0049
     #[test]
@@ -1030,12 +1056,17 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-            let err = builder(&keyed, &|_| None).expect_err("readable by others");
+            let err = builder(&keyed, &|_| None, LIMITS).expect_err("readable by others");
             assert!(err.contains("[blobs.s3] secret_access_key_file"), "{err}");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+            // Its group may read it, as an orchestrator's secret mount lets it.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod");
         }
-        let builder =
-            builder(&keyed, &|_| panic!("no AWS_* variable beside a key pair")).expect("builder");
+        let builder = builder(
+            &keyed,
+            &|_| panic!("no AWS_* variable beside a key pair"),
+            LIMITS,
+        )
+        .expect("builder");
         assert_eq!(
             builder
                 .get_config_value(&AmazonS3ConfigKey::SecretAccessKey)

@@ -258,10 +258,10 @@ secret_access_key_file = "/run/secrets/s3-secret-access-key"
 | `s3.endpoint` | — | Required with `"s3"`. The store's URL, `https://`. `http://` is accepted to `127.0.0.1` or `::1` alone; any other fails startup naming the key. |
 | `s3.bucket` | — | Required with `"s3"`. The bucket. The Server does not create it: one that does not exist or cannot be listed fails startup, naming it and the error. |
 | `s3.region` | — | Required with `"s3"`. The region the requests are signed for; a store without regions takes any, such as `us-east-1`. |
-| `s3.prefix` | empty | Where in the bucket the Server's keys live: empty, or ending in `/`. Artifacts are kept at `<prefix>blobs/<sha256>`, an upload in progress at `<prefix>staging/<random>`. |
+| `s3.prefix` | empty | Where in the bucket the Server's keys live: empty, or ending in `/`. Artifacts are kept at `<prefix>blobs/<sha256>`, an upload in progress at `<prefix>staging/<random>`. Letters, digits, space and `- _ . / ! ' ( ) & $ @ = ; : + ,` only: any other character, which the S3 client would percent-encode, fails startup naming the key. |
 | `s3.ca_file` | unset | One PEM root for a store whose certificate no public root signs. |
 | `s3.access_key_id` | unset | The key ID of a static key pair. Set together with `secret_access_key_file` or not at all; one without the other fails startup naming both. |
-| `s3.secret_access_key_file` | unset | The file holding that key pair's secret, readable by the Server's account alone (`0600`); one others can read fails startup. The secret is never written into `server.toml`. |
+| `s3.secret_access_key_file` | unset | The file holding that key pair's secret, readable by the Server's account and at most its group (`0600`, or `0640`/`0440` as an orchestrator mounts a secret for a group); one others can read, or its group can write, fails startup naming the key. The secret is never written into `server.toml`. |
 
 Without a key pair the Server uses its platform's workload identity, in this order: a web identity
 token (`AWS_WEB_IDENTITY_TOKEN_FILE` with `AWS_ROLE_ARN`), the container credentials of ECS or EKS
@@ -271,6 +271,12 @@ token (`AWS_WEB_IDENTITY_TOKEN_FILE` with `AWS_ROLE_ARN`), the container credent
 from its configuration alone, so `AWS_ENDPOINT` or `AWS_ALLOW_HTTP` in its environment change
 nothing, and no proxy variable is honoured. The connection is TLS 1.3 on the public roots and
 `ca_file`.
+
+Every request to the store is bounded: a connection may take 10 seconds, and a request fails once
+the store is silent for 30 seconds — before its answer begins, the upload of one 8 MiB part
+included, or between two pieces of a download, which therefore runs as long as bytes keep coming.
+A request that failed is tried again at most twice, and not once a minute has passed since the
+first attempt. A store that stops answering fails the act that needs it, as a failed write does.
 
 In the bucket, a key under `<prefix>staging/` is an interrupted upload and is deleted at startup;
 any other key under `<prefix>` that is not `blobs/<sha256>` fails startup naming it. At startup the
@@ -286,6 +292,67 @@ where they are, and the Server does not write to `data_dir/blobs/` again; removi
 bucket holds every artifact is yours. A large `data_dir/blobs/` makes that first start as long as
 its upload. Nothing is copied back: switching from `"s3"` to `"fs"`, an entry whose artifact
 `data_dir/blobs/` lacks fails the start, naming the entry.
+
+### `[database]`
+
+Optional. Where the Server keeps its records: one file per record under `data_dir`, the default, or
+one PostgreSQL database. Both are supported in production. Either way the Server loads every record
+at startup and answers from memory; the database is the durable copy, written before an act is
+answered, and only this Server writes to it while it runs.
+
+```toml
+[database]
+store = "postgres"
+
+[database.postgres]
+host = "db.example.org"
+port = 5432
+dbname = "fleet"
+user = "fleet"
+password_file = "/run/secrets/fleet-db-password"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `store` | `"fs"` | `"fs"` or `"postgres"`. Any other value fails startup naming the key; so do `"postgres"` without a `[database.postgres]` section and a `[database.postgres]` section beside `"fs"`. |
+| `postgres.host` | — | Required with `"postgres"`. The database's host name or IP address — what its certificate must name. |
+| `postgres.port` | `5432` | Its port. |
+| `postgres.dbname` | — | Required with `"postgres"`. The database. The Server does not create it. |
+| `postgres.user` | — | Required with `"postgres"`. The role the Server signs in as. The Server does not create it. |
+| `postgres.password_file` | — | Required with `"postgres"`. The file holding the role's password, readable by the Server's account and at most its group (`0600`, or `0640`/`0440` as an orchestrator mounts a secret for a group); one others can read, or its group can write, fails startup naming it. The password is never written into `server.toml`. |
+| `postgres.ca_file` | unset | A PEM file of the roots the database's certificate is verified against, for a database no public root signs. Without it, the public roots. |
+| `postgres.tls` | `true` | `false` connects without TLS, which is accepted when `host` is `127.0.0.1` or `::1` alone; any other host fails startup naming both keys. |
+
+A missing key fails startup naming it. The connection is TLS 1.3, the database's certificate
+verified and its host name checked — what libpq calls `verify-full`. Every setting comes from the
+configuration alone: `PGHOST`, `PGSSLMODE` and the other `PG*` variables in the Server's environment
+change nothing. A database that cannot be reached at startup stops the start, naming the host and
+the database; one lost while the Server runs fails the acts that need it, as a failed write does.
+Every call is bounded: it fails when no pooled connection is free within 5 seconds, when the
+database does not answer it within 15 seconds (a rollout gets 20 ms more per record it writes), and
+the database itself ends a statement after 10 seconds, a wait for a lock after 5 and a transaction
+left open by a client that went away after 60. TCP keepalives notice a database host that is gone
+within about half a minute.
+
+The role needs the right to create tables in its default schema: at every start the Server applies
+the migrations of its schema the database has not yet seen, in one transaction, and records them in
+the table `fleet_schema`. A migration only adds, so the Server before an upgrade runs on the schema
+after it. A database whose schema needs a newer Server stops the start, naming both versions, and is
+left unchanged. The Server creates tables and indexes, and nothing else: the database, the role,
+its rights and extensions, replication and backups are the operator's.
+
+One Server per database schema: the Server holds a lock on the schema it works in — its role's
+default — while it runs, and a second one started against the same database and schema stops,
+naming the database. The lock lives on a connection of its own; when that
+connection ends while the Server runs — the database restarted, the session was ended, the host
+is gone — the lock is gone with it, and the Server logs an error naming the database and refuses
+every write from then on, so it never writes beside a second Server. Restart it once the database
+answers.
+
+With `"postgres"`, `data_dir` holds the audit record (`audit/`) and, with the filesystem blob
+store, the artifacts (`blobs/`), and nothing else. A record of the filesystem store found there —
+`agents/`, `configurations/`, `revocations.json` and the rest — stops the start, naming it and
+`server migrate-to-postgres`. A backup takes the database and `data_dir` together.
 
 ### `[tls]`
 
@@ -400,7 +467,9 @@ endpoint = "wss://fleet.example:4320/v1/opamp"
 
 ## Where the Server keeps its state
 
-Everything the Server knows survives a restart under one directory, `data_dir`, in a fixed layout:
+Everything the Server knows survives a restart under one directory, `data_dir`, in a fixed layout —
+or, with [`[database]`](#database) `store = "postgres"`, in the database, with only `audit/` and
+`blobs/` left under `data_dir`. With the filesystem store the layout is:
 
 | Path | One file per | Holds |
 |---|---|---|
@@ -434,6 +503,34 @@ letters, digits, `.`, `_` and `-` has it written as `%XX` in its file name.
   only listed — and an artifact no Package entry names is deleted then.
 - **Backup** is a copy of `data_dir` taken while the Server is stopped; restoring it is putting the
   copy back. A copy taken while it runs may hold an Agent record or an audit line mid-write.
+
+## Moving the records into PostgreSQL
+
+An existing `data_dir` is copied into PostgreSQL once, while the Server is stopped, with the
+`server.toml` that names the database in [`[database]`](#database):
+
+```sh
+server migrate-to-postgres --from /var/lib/opamp-fleet/fleet-data \
+    --data-dir /var/lib/opamp-fleet/fleet-data-pg --config /etc/opamp-fleet/server.toml
+```
+
+- It refuses a database that holds any of the Server's tables, and a `--data-dir` that is not
+  empty, and checks the database before it creates anything.
+- It reads every record of the old `data_dir` as a Server's start would, so a record a start would
+  refuse stops the copy, naming it, before anything is written into the database. It only reads
+  the old `data_dir`: what a start would repair there — a missing directory, a leftover temporary
+  file, a mode — it leaves as it is.
+- It copies `audit/` and, with the filesystem blob store, `blobs/` into the new `data_dir` byte
+  for byte, so the audit chain still verifies; then it applies the schema and writes every record
+  in one transaction.
+- It copies rather than moves: the old `data_dir` stays as the backup. It prints what it copied,
+  and exits non-zero when it could not copy all of it, leaving the database without the Server's
+  tables and the new `data_dir` empty.
+
+Then set `data_dir` to the new directory and `[database] store = "postgres"`, and start the
+Server. With an S3 bucket in [`[blobs]`](#blobs), start once with `"s3"` on the old `data_dir`
+before the copy, so the bucket holds every artifact. Moving records back from PostgreSQL to files
+is not provided.
 
 ## Upgrading to one data directory
 

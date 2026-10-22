@@ -104,14 +104,24 @@ core module names an adapter or a technology, and when a module has no role.
   `DeploymentStore` in `deployments`; `PackageBackend` and `BlobStore` (`blobs`, artifact bytes by
   SHA-256) under the `PackageStore` in `packages`, the bytes in `data_dir` or, with
   `[blobs] store = "s3"`, in one bucket of an S3-compatible store through the adapter in `s3`, which
-  bridges the synchronous port onto a runtime of its own
+  bridges the synchronous port onto a runtime of its own (`bridge`)
   ([ADR-0049](adr/0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md)); `BootstrapStore` under the
   `BootstrapCertificates` in `bootstrap`; `EnrolmentStore` under the `Enrolment` in `enrolment`;
   `LedgerStore` in `revocation`; `AuditStore` in `audit_log`. The filesystem adapters are in `fs`,
-  which also opens the data directory and refuses anything its layout does not name. The core's
+  which also opens the data directory and refuses anything its layout does not name. With
+  `[database] store = "postgres"` every port but the blob and the audit port has its PostgreSQL
+  adapter in `postgres` instead (`postgres::agents`, `configs`, `deployments`, `packages`,
+  `ledger`, `bootstrap`, `enrolment`), each call one transaction; `postgres` holds the connection
+  they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, the advisory lock that
+  keeps one Server per database — and applies the schema embedded in `postgres::schema` as
+  numbered migrations; `postgres::import` is `server migrate-to-postgres`, which copies a
+  `data_dir` into the database offline
+  ([ADR-0050](adr/0050-the-servers-records-may-live-in-postgresql.md)). The core's
   constructors take the ports — `AppState::with_stores`, `PackageStore::with_backend`,
   `PackageOffering::with_deployments`, `BootstrapCertificates::open`, `Enrolment::open_on` — and
-  `lib.rs` wires the filesystem adapters in `AppState::new`, `PackageStore::open`,
+  `lib.rs` chooses the adapters by `[database]` in `Records`, which `AppState::on`,
+  `PackageStore::open_on`, `PackageOffering::on` and `BootstrapCertificates::on` take, and wires
+  the filesystem adapters in `AppState::new`, `PackageStore::open`,
   `PackageOffering::new` and `BootstrapCertificates::on_disk`. `migrate` is the one module that
   reads the layout of an older Server, for `server migrate`, and nothing in the running Server
   calls it.
@@ -262,6 +272,10 @@ artifacts, named by SHA-256, unless a bucket keeps them), `agents/` (each Agent'
 `certificates/` (the register), `revocations.json`, `bootstrap/`, `enrolment.json` (the window and
 its queue) and `audit/`
 ([ADR-0037](adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)).
+With `[database] store = "postgres"` the records are rows of one PostgreSQL database instead, and
+`data_dir` keeps `audit/` and, with the filesystem blob store, `blobs/`
+([ADR-0050](adr/0050-the-servers-records-may-live-in-postgresql.md)); the Server still loads
+every record at startup and answers from memory.
 A restart restores the fleet from them and shows each Agent disconnected until it reports; an
 installation an older Server wrote is moved there once by `server migrate`. The Client keeps its state
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,

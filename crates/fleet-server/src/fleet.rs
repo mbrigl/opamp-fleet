@@ -1704,6 +1704,12 @@ impl AppState {
 
     /// Writes one record when its durable content changed since it was last written, and says
     /// whether the write failed — for an operator's act that must not be answered unwritten.
+    ///
+    /// The `written` lock — and the fleet lock every caller holds while it reads `record` — stays
+    /// held across the store's write. Releasing it would let two writes of one record race, and an
+    /// older state land after a newer one while `written` names the newer; and an act is answered
+    /// only once its record is written (ADR-0024 clause 5). What a store's write may take is
+    /// bounded instead: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0050 clause 7).
     fn persist(&self, uid: &InstanceUid, record: &AgentRecord) -> Result<(), String> {
         let persisted = record.to_persisted();
         let digest = persisted.durable_digest();

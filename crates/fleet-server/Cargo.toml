@@ -49,6 +49,10 @@ utoipa-axum.workspace = true
 object_store.workspace = true
 reqwest.workspace = true
 webpki-roots.workspace = true
+# The record store in PostgreSQL (ADR-0050), over the same TLS 1.3 *ring* client.
+tokio-postgres.workspace = true
+deadpool-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
 
 [dev-dependencies]
 tokio-tungstenite.workspace = true
