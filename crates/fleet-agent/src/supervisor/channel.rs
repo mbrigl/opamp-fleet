@@ -924,6 +924,12 @@ pub(crate) fn purge(
 /// `HOME`, `USER` and `LOGNAME` of the account this service runs as — the process account — from
 /// the password database, whatever the environment the service was started with says. Empty
 /// where the database names no such account.
+///
+/// Under systemd this repeats what the service manager already sets for a unit with `User=`
+/// (`SetLoginEnvironment=`, systemd.exec(5)), unless an operator's drop-in turns that off. It
+/// stays for launchd, whose plist names the account in `UserName` and whose manual does not say
+/// that it sets these variables for it, and so that clause 7 holds whatever the service manager
+/// does.
 fn account_env() -> &'static [(String, std::ffi::OsString)] {
     static ACCOUNT: std::sync::OnceLock<Vec<(String, std::ffi::OsString)>> =
         std::sync::OnceLock::new();
