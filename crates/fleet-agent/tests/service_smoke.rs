@@ -807,3 +807,182 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     client(&["service", "stop"], &config).expect("stop the service");
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
+
+/// What the Managed Process below found out about itself on Windows, once it has written it.
+#[cfg(windows)]
+fn reported_on_windows(result: &Path) -> std::collections::BTreeMap<String, String> {
+    wait_for(
+        "the Managed Process to report",
+        Duration::from_secs(90),
+        || {
+            let text = std::fs::read_to_string(result).ok()?;
+            let report: std::collections::BTreeMap<String, String> = text
+                .lines()
+                .filter_map(|line| line.trim().split_once('='))
+                .map(|(key, value)| (key.to_string(), value.trim().to_string()))
+                .collect();
+            report.contains_key("done").then_some(report)
+        },
+    )
+}
+
+/// Grants `who` modify on `path` and everything in it, by `icacls.exe`.
+#[cfg(windows)]
+fn grant_modify(path: &Path, who: &str) {
+    let status = Command::new("icacls.exe")
+        .arg(path)
+        .args(["/grant", &format!("{who}:(OI)(CI)M")])
+        .status()
+        .expect("run icacls");
+    assert!(status.success(), "cannot grant {who} {}", path.display());
+}
+
+/// A Managed Process under a process account on Windows (ADR-0059): installed with `--run-as`
+/// naming the Client's own virtual account and `--process-account` the second service's, the
+/// Client starts its program through the second service, on its named pipe, and the program runs
+/// as `NT SERVICE\<PRODUCT_NAME>-agents` without `SeImpersonatePrivilege`. It reads its `config/`
+/// and writes into its data directory, and can neither read the Client's `client-key.pem` or its
+/// log nor write its own `program/`. After the second service's process is killed the SCM
+/// restarts it, the Client reaches it again and the program runs again. The runner's shell is
+/// elevated, as `service install` needs.
+///
+/// A re-registration and `--no-process-account` are not run here: the SCM's `sc create` refuses a
+/// service that is registered already, so a Windows install re-registers only after an uninstall.
+/// Verifies: ADR-0059
+#[cfg(windows)]
+#[test]
+#[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
+fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_runs() {
+    use fleet_agent::service::manager::agents_service_name;
+    assert_eq!(
+        service().state().expect("query the service"),
+        ServiceState::NotInstalled,
+        "a leftover {} service from an earlier run — remove it before running this",
+        service_name()
+    );
+    let client_account = format!(r"NT SERVICE\{}", service_name());
+    let process_account = format!(r"NT SERVICE\{}", agents_service_name());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("install");
+    let state = root.join("state");
+    let supervisor = state.join("supervisors").join("probe");
+    let program = supervisor.join("program");
+    let config_dir = supervisor.join("config");
+    let data = supervisor.join("data");
+    std::fs::create_dir_all(&program).expect("program/");
+    std::fs::create_dir_all(&config_dir).expect("config/");
+    std::fs::create_dir_all(&data).expect("data/");
+    // Where the Managed Process says what it found: writable by everyone, outside every root.
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).expect("out/");
+    grant_modify(&out, "*S-1-1-0");
+    let result = out.join("result");
+
+    common::client_identity(dir.path());
+    let key = state.join("client-key.pem");
+    let cert = state.join("client.pem");
+    std::fs::rename(dir.path().join("test-client-key.pem"), &key).expect("place the key");
+    std::fs::rename(dir.path().join("test-client.pem"), &cert).expect("place the certificate");
+    std::fs::write(config_dir.join("settings"), "from the config\r\n").expect("config entry");
+    std::fs::write(
+        program.join("probe.cmd"),
+        format!(
+            "@echo off\r\n\
+             (\r\n\
+             for /f \"delims=\" %%u in ('whoami') do echo user=%%u\r\n\
+             type \"{key}\" >nul 2>&1 && echo key=read || echo key=denied\r\n\
+             dir \"{logs}\" >nul 2>&1 && echo logs=read || echo logs=denied\r\n\
+             (echo x> \"{program}\\written\") 2>nul && echo program=written || echo program=denied\r\n\
+             (echo x>> \"{data}\\written\") 2>nul && echo data=written || echo data=denied\r\n\
+             for /f \"usebackq delims=\" %%c in (\"{config}\\settings\") do echo config=%%c\r\n\
+             whoami /priv | find /i \"SeImpersonatePrivilege\" >nul && echo impersonate=held || echo impersonate=none\r\n\
+             whoami /priv | find /i \"SeChangeNotifyPrivilege\" >nul && echo traverse=held || echo traverse=none\r\n\
+             echo done=yes\r\n\
+             ) > \"{out}\\result.tmp\"\r\n\
+             move /y \"{out}\\result.tmp\" \"{out}\\result\" >nul\r\n\
+             ping -n 3600 127.0.0.1 >nul\r\n",
+            key = key.display(),
+            logs = state.join("logs").display(),
+            program = program.display(),
+            data = data.display(),
+            config = config_dir.display(),
+            out = out.display(),
+        ),
+    )
+    .expect("write the program");
+
+    let (addr, state_view, _server) = spawn_server();
+    let config = dir.path().join("supervisor.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n\
+             [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\n\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"probe\"\ncommand = \"probe.cmd\"\n",
+            cert = cert.display().to_string(),
+            key = key.display().to_string(),
+        ),
+    )
+    .expect("write supervisor.toml");
+
+    let root_arg = root.to_string_lossy().into_owned();
+    let installed = client(
+        &[
+            "service",
+            "install",
+            "--root",
+            &root_arg,
+            "--run-as",
+            &client_account,
+            "--process-account",
+            &process_account,
+        ],
+        &config,
+    )
+    .expect("install the service with a process account");
+    let _registered = Registered;
+    assert!(installed.contains(&process_account), "{installed}");
+    // A kind's data directory, granted to the process account as the Client grants one a kind
+    // names; the command kind names none.
+    let process_sid = fleet_agent::win32::virtual_account_sid(&agents_service_name());
+    grant_modify(&data, &format!("*{process_sid}"));
+    client(&["service", "start"], &config).expect("start the service");
+    wait_for(
+        "the Agent to appear in the fleet",
+        Duration::from_secs(60),
+        || agent(&state_view).filter(|a| a.connected).map(|_| ()),
+    );
+
+    let first = reported_on_windows(&result);
+    assert!(
+        first["user"].eq_ignore_ascii_case(&process_account),
+        "{first:?}"
+    );
+    assert_eq!(first["key"], "denied", "{first:?}");
+    assert_eq!(first["logs"], "denied", "{first:?}");
+    assert_eq!(first["program"], "denied", "{first:?}");
+    assert_eq!(first["config"], "from the config", "{first:?}");
+    assert_eq!(first["data"], "written", "{first:?}");
+    assert_eq!(first["impersonate"], "none", "{first:?}");
+    assert_eq!(first["traverse"], "held", "{first:?}");
+
+    // The second service's process is killed: the SCM restarts it, and the Client starts the
+    // program again through it.
+    std::fs::remove_file(&result).expect("remove the result");
+    let queried = Command::new("sc")
+        .args(["queryex", &agents_service_name()])
+        .output()
+        .expect("run sc queryex");
+    let pid = parse_after(&String::from_utf8_lossy(&queried.stdout), "PID")
+        .expect("the second service's process id");
+    kill(pid);
+    let again = reported_on_windows(&result);
+    assert!(
+        again["user"].eq_ignore_ascii_case(&process_account),
+        "{again:?}"
+    );
+
+    client(&["service", "stop"], &config).expect("stop the service");
+    client(&["service", "uninstall"], &config).expect("uninstall the service");
+}
