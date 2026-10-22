@@ -127,15 +127,20 @@ signals and stops those programs on the Client's request.
 
 5. **The requests are what the Supervisor does today, and both ends are one build.** The Client
    asks the second service to start a program with its arguments, environment and working
-   directory, to signal or stop one, and to report its exit; the second service streams each
-   program's output back. The messages are private to the build: both ends run from `current`, and
+   directory, to signal or stop one, and to report its exit, and to remove what the process account
+   wrote under a Supervisor's directory when that Supervisor is purged; the second service streams
+   each program's output back. The programs run with the second service's own umask, never one
+   widened for the Client's sake. The messages are private to the build: both ends run from `current`, and
    a peer that states another version is refused.
 
 6. **The process account reads what it runs and writes only its own data.** The process account's
    primary group is made a supplementary group of the Client's account by the operator, and the
    install refuses to register where it is not, or where the process account's primary group is
-   group 0 or the Client's own primary group, or the process account is a member of the Client's
-   primary group. Then:
+   group 0 or the Client's own primary group, where it has a member other than the Client's account
+   or is the primary group of an account other than the process account, or where the process
+   account is a member of the Client's primary group: the group is the process account's own.
+   Every file and directory the Client keeps under `state_dir` that the table does not name — its
+   logs among them — stays the Client's alone. Then:
 
    | Path | Owner : group | Mode |
    |---|---|---|
@@ -149,10 +154,11 @@ signals and stops those programs on the Client's request.
    On Windows the same split is made by ACL grants to the process account's SID instead of the
    group.
 
-7. **A program inherits nothing of the Client's.** Its environment is the second service's own,
-   with the block's `env` and the Supervisor Endpoint's token laid over it, the token last
+7. **A program inherits nothing of the Client's.** Its environment is the second service's own
+   with `HOME`, `USER` and `LOGNAME` set to the process account's, then the block's `env` laid over
+   it, then the Supervisor Endpoint's token, last
    ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)
-   clause 16); `HOME`, `USER` and `LOGNAME` are the process account's.
+   clause 16).
 
 8. **Restates ADR-0019 clause 9. The executable layout is versioned side by side behind a `current`
    pointer, and the registered command line names the second service where there is one.**
@@ -248,9 +254,9 @@ signals and stops those programs on the Client's request.
      inheritable Modify ACL grant. Where the roots coincide this is one operation. Where they split,
      an install that hands over only one has not succeeded.
    - **Where a process account is registered, the hand-over leaves its data alone.** An entry the
-     process account owns is skipped together with everything beneath it, and a directory that
-     clause 6 gives the process account's group keeps that group and its mode, so a re-registration
-     — every package upgrade — takes from no Managed Process the data it wrote.
+     process account owns is skipped together with everything beneath it, and an entry in the
+     process account's group keeps that group, a directory its mode too, so a re-registration —
+     every package upgrade — takes from no Managed Process the data it wrote or reads.
    - **The hand-over never follows a link.** The account owns the trees that root walks, and
      ADR-0042 clause 5 makes that walk part of every package upgrade. So each directory is opened
      without following a link, and its owner is changed through that open handle. Its entries are
