@@ -251,26 +251,13 @@ enum Aside {
 /// name no Supervisor can carry, so that whatever goes on removing from it after the purge gave up
 /// — the second service, past the purge's deadline — never reaches a Supervisor added again under
 /// the same name, which gets a fresh directory (ADR-0017 clause 34). A link where a directory
-/// should be is removed, never followed (clause 35). The tombstones a purge cut short left are
-/// tried again with them. What cannot be moved is a warning, and stays an orphan (clause 36).
+/// should be is removed, never followed (clause 35). What cannot be moved is a warning, and stays
+/// an orphan (clause 36). Only the directories of the Supervisors this apply removes are taken: a
+/// tombstone an earlier purge could not delete is an orphan like any other, reported at startup
+/// and never reaped (clause 37).
 fn entomb(config: &ClientConfig, removed: &[String]) -> Vec<Tomb> {
-    if removed.is_empty() {
-        return Vec::new();
-    }
     let root = config.supervisors_root();
-    let mut tombs: Vec<Tomb> = std::fs::read_dir(&root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let supervisor = crate::config::tombstone_of(name.to_str()?)?.to_string();
-            entry.file_type().ok()?.is_dir().then(|| Tomb {
-                supervisor,
-                path: entry.path(),
-            })
-        })
-        .collect();
+    let mut tombs = Vec::new();
     for name in removed {
         let dir = config.supervisor_dir(name);
         match move_aside(&root, name) {
@@ -291,7 +278,9 @@ fn entomb(config: &ClientConfig, removed: &[String]) -> Vec<Tomb> {
 }
 
 /// Moves the directory `name` beneath `root` aside to a fresh tombstone name, through the root's
-/// own handle: neither the entry nor anything beneath the root is followed as a link.
+/// own handle: neither the entry nor anything beneath the root is followed as a link. So no
+/// directory whose resolved path lies outside the root is reached at all, and none is moved or
+/// removed (ADR-0017 clause 35): the entry is the root's own, and its tombstone stays beside it.
 #[cfg(unix)]
 fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
     use crate::storage::handle;
@@ -408,7 +397,8 @@ async fn release_removed(
 /// rewritten `supervisor.toml` no longer names the Supervisor: a failed write restarts the stopped
 /// set from the old file, which needs the data intact. A directory that will not delete is a
 /// warning, never a `FAILED` apply — the set the Server asked for is running; the leftover is an
-/// orphan the next startup reports and the next purge tries again.
+/// orphan the next startup reports, and removing it is the operator's call (ADR-0017 clauses 36
+/// and 37).
 fn bury(tombs: &[Tomb]) {
     for tomb in tombs {
         match remove_tomb(&tomb.path) {
@@ -420,7 +410,8 @@ fn bury(tombs: &[Tomb]) {
                 supervisor = %tomb.supervisor,
                 path = %tomb.path.display(),
                 error = %e,
-                "cannot purge the removed supervisor's directory; the next purge tries it again"
+                "cannot purge the removed supervisor's directory; it stays an orphan, for the \
+                 operator to remove"
             ),
         }
     }
@@ -1844,18 +1835,22 @@ mod tests {
         assert_eq!(std::fs::read(added.join("state")).expect("kept"), b"new");
     }
 
-    /// A tombstone a purge cut short is tried again by the next purge, and goes with it.
+    /// A tombstone an earlier purge could not delete is an orphan like any other: a later purge
+    /// takes only the Supervisors its apply removes, and leaves the tombstone for the operator
+    /// (ADR-0017 clauses 36 and 37).
     /// Verifies: ADR-0017
     #[test]
-    fn the_next_purge_tries_a_tombstone_left_behind_again() {
+    fn a_tombstone_left_behind_is_never_reaped_by_a_later_purge() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config: ClientConfig = toml::from_str(&format!(
             "supervisor_dir = {:?}",
             dir.path().join("supervisors").to_string_lossy()
         ))
         .expect("config");
-        let left = config.supervisors_root().join(tombstone_name("earlier"));
-        std::fs::create_dir_all(left.join("program")).expect("a tombstone");
+        let left = tombstone_name("earlier");
+        let program = config.supervisors_root().join(&left).join("program");
+        std::fs::create_dir_all(&program).expect("a tombstone");
+        std::fs::write(program.join("agent"), b"kept").expect("its program");
         std::fs::create_dir_all(config.supervisor_dir("gone")).expect("gone");
         std::fs::create_dir_all(config.supervisor_dir("stays")).expect("stays");
 
@@ -1866,7 +1861,11 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name())
             .collect();
         left_over.sort();
-        assert_eq!(left_over, vec![std::ffi::OsString::from("stays")]);
+        assert_eq!(
+            left_over,
+            vec![std::ffi::OsString::from(left), "stays".into()]
+        );
+        assert_eq!(std::fs::read(program.join("agent")).expect("kept"), b"kept");
     }
 
     /// A Supervisors' root reached through a link of the Client's own account — one beneath a data
