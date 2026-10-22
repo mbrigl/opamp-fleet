@@ -383,9 +383,10 @@ impl RunAs {
     /// keeps that group, a directory its mode too, so a re-registration takes from no Managed
     /// Process what it wrote or reads. Without one, everything is re-owned, group included.
     ///
-    /// Returns the regular files left as they were because they have a second hard link (Unix):
-    /// another name for the file may stand outside the roots, and re-owning it would hand that
-    /// over too.
+    /// Returns what was left as it was and is to be named in a warning (Unix): the regular files
+    /// with a second hard link — another name for the file may stand outside the roots, and
+    /// re-owning it would hand that over too — and each of `paths` the process account owns,
+    /// which an operator who names it as a root means the Client to have.
     ///
     /// # Errors
     /// Returns an error naming the first path that could not be handed over.
@@ -393,7 +394,7 @@ impl RunAs {
         &self,
         paths: &[&Path],
         process: Option<&ProcessAccount>,
-    ) -> Result<Vec<PathBuf>, String> {
+    ) -> Result<Vec<Skipped>, String> {
         let mut skipped = Vec::new();
         let mut walked: Vec<&Path> = Vec::new();
         for path in paths {
@@ -419,7 +420,7 @@ impl RunAs {
         &self,
         path: &Path,
         process: Option<&ProcessAccount>,
-        skipped: &mut Vec<PathBuf>,
+        skipped: &mut Vec<Skipped>,
     ) -> std::io::Result<()> {
         let kept = process.map(|process| walk::Kept {
             uid: process.uid,
@@ -434,7 +435,7 @@ impl RunAs {
         &self,
         path: &Path,
         _process: Option<&ProcessAccount>,
-        _skipped: &mut Vec<PathBuf>,
+        _skipped: &mut Vec<Skipped>,
     ) -> Result<(), String> {
         // Asked of the entry itself: a link or junction is never a directory to walk.
         let is_dir = std::fs::symlink_metadata(path)
@@ -535,6 +536,34 @@ fn missing_account(
          --run-as root. Nothing has been installed or written.",
         data_root.display()
     )
+}
+
+/// What the hand-over left as it was, to be named in a warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Skipped {
+    /// A regular file with a second hard link (ADR-0042 clause 2).
+    HardLinked(PathBuf),
+    /// One of the paths handed over, which the process account owns: left to it with everything
+    /// beneath it (ADR-0059 clause 10).
+    ProcessAccounts(PathBuf),
+}
+
+impl Skipped {
+    /// The warning that names it, for a hand-over to `account`.
+    #[must_use]
+    pub fn warning(&self, account: &str) -> String {
+        match self {
+            Skipped::HardLinked(path) => format!(
+                "{} has a second hard link and was not handed over to {account}",
+                path.display()
+            ),
+            Skipped::ProcessAccounts(path) => format!(
+                "{} belongs to the process account and was not handed over to {account}, nor \
+                 anything beneath it; if the Client is to own it, hand it over with chown",
+                path.display()
+            ),
+        }
+    }
 }
 
 /// The account every Managed Process runs under, through the second service (ADR-0059 clause 1):
@@ -866,8 +895,9 @@ mod walk {
     use std::io;
     use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
     use std::os::unix::ffi::OsStrExt as _;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
+    use super::Skipped;
     use crate::storage::handle::{entries, fstat, open};
 
     /// The entry a name stands for, opened as what it is and never through a link. On Linux this
@@ -900,7 +930,7 @@ mod walk {
         uid: u32,
         gid: u32,
         kept: Option<Kept>,
-        skipped: &mut Vec<PathBuf>,
+        skipped: &mut Vec<Skipped>,
     ) -> io::Result<()> {
         chown_tree_with(path, uid, gid, kept, skipped, &|_| {})
     }
@@ -912,7 +942,7 @@ mod walk {
         uid: u32,
         gid: u32,
         kept: Option<Kept>,
-        skipped: &mut Vec<PathBuf>,
+        skipped: &mut Vec<Skipped>,
         between: &dyn Fn(&Path),
     ) -> io::Result<()> {
         let name = CString::new(path.as_os_str().as_bytes())?;
@@ -935,7 +965,7 @@ mod walk {
         name: &OsStr,
         path: &Path,
         (uid, gid): (u32, u32),
-        skipped: &mut Vec<PathBuf>,
+        skipped: &mut Vec<std::path::PathBuf>,
     ) -> io::Result<()> {
         let name = CString::new(name.as_bytes())?;
         let handle = match open(dir, &name, ENTRY) {
@@ -958,7 +988,7 @@ mod walk {
         uid: u32,
         gid: u32,
         kept: Option<Kept>,
-        skipped: &'a mut Vec<PathBuf>,
+        skipped: &'a mut Vec<Skipped>,
         between: &'a dyn Fn(&Path),
     }
 
@@ -977,7 +1007,14 @@ mod walk {
             };
             let st = fstat(&handle)?;
             let gid = match self.kept {
-                Some(kept) if st.st_uid == kept.uid => return Ok(()),
+                Some(kept) if st.st_uid == kept.uid => {
+                    // A root the operator named is meant for the Client: said, not passed over.
+                    if dir == libc::AT_FDCWD {
+                        self.skipped
+                            .push(Skipped::ProcessAccounts(path.to_path_buf()));
+                    }
+                    return Ok(());
+                }
                 Some(kept) if st.st_gid == kept.gid => kept.gid,
                 _ => self.gid,
             };
@@ -985,7 +1022,7 @@ mod walk {
                 return self.directory(handle, gid, path);
             }
             if st.st_nlink > 1 {
-                self.skipped.push(path.to_path_buf());
+                self.skipped.push(Skipped::HardLinked(path.to_path_buf()));
                 return Ok(());
             }
             chown(&handle, self.uid, gid)
@@ -1927,6 +1964,33 @@ mod tests {
         }
     }
 
+    /// A root of the hand-over that the process account owns is left to it, and named in a
+    /// warning: the operator who names it as a root means the Client to have it. What the process
+    /// account owns beneath a root is its data, and is passed over without a word.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn a_root_the_process_account_owns_is_named_in_a_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("state").join("data")).expect("mkdir");
+        let (me, _) = me_with_another_group(&root);
+        // The test's own account stands in for the process account.
+        let process = ProcessAccount {
+            account: "agents".to_string(),
+            uid: me.uid,
+            gid: me.gid,
+            kept_from: None,
+        };
+        let skipped = me
+            .hand_over(&[&root, &root.join("state")], Some(&process))
+            .expect("handover");
+        assert_eq!(skipped, vec![Skipped::ProcessAccounts(root.clone())]);
+        let warning = skipped[0].warning("opamp-fleet");
+        assert!(warning.contains(&root.display().to_string()), "{warning}");
+        assert!(warning.contains("process account"), "{warning}");
+    }
+
     /// Without a process account the hand-over is what it always was: every entry, in whatever
     /// group, is handed to the Client's account and group.
     /// Verifies: ADR-0059
@@ -2044,7 +2108,7 @@ mod tests {
             me.gid = group;
         }
         let skipped = me.hand_over(&[&root], None).expect("handover");
-        assert_eq!(skipped, vec![linked.clone()]);
+        assert_eq!(skipped, vec![Skipped::HardLinked(linked.clone())]);
         assert_eq!(std::fs::metadata(&outside).expect("outside").gid(), before);
         assert_eq!(
             std::fs::metadata(root.join("plain")).expect("plain").gid(),
@@ -2135,7 +2199,7 @@ mod tests {
             before,
             "the file outside was re-owned through its second name"
         );
-        assert_eq!(skipped, vec![swapped]);
+        assert_eq!(skipped, vec![Skipped::HardLinked(swapped)]);
         assert_eq!(
             std::fs::metadata(root.join("plain")).expect("plain").gid(),
             me.gid
