@@ -40,3 +40,15 @@ mod test_support;
 pub mod tls;
 pub mod transport;
 pub mod update;
+
+/// Skips the test `test`, which needs what this host lacks — `needs` — and says so; on CI, whose
+/// runners have it, fails the test instead: a test that passes without running decides nothing.
+#[cfg(test)]
+pub(crate) fn skipped_unless_ci(test: &str, needs: &str) {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{test} needs {needs}, which CI's runners have; this one has not, so the test would \
+         pass without deciding anything"
+    );
+    eprintln!("{test}: skipped, as this host has no {needs}");
+}
