@@ -874,7 +874,7 @@ pub(crate) fn purge(
             )
         })?;
     let at = |e: io::Error| format!("{}: {e}", dir.display());
-    let top = handle::open_dir(dir, handle::SEARCH, None).map_err(at)?;
+    let top = handle::open_beneath(dir, dir, handle::SEARCH, None).map_err(at)?;
     let owner = handle::fstat(&top).map_err(at)?.st_uid;
     if owner != client_uid {
         return Err(format!(

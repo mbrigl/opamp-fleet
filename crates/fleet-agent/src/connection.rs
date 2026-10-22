@@ -70,7 +70,12 @@ pub fn store(
     group: Option<crate::storage::ProcessAccountGroup>,
     settings: &ConnectionSettingsOffers,
 ) -> std::io::Result<()> {
-    crate::storage::create_shared_dir(state_dir, group, crate::storage::Shared::Traversed)?;
+    crate::storage::create_shared_dir(
+        state_dir,
+        state_dir,
+        group,
+        crate::storage::Shared::Traversed,
+    )?;
     crate::storage::write_private(&state_dir.join(SETTINGS_FILE), &settings.encode_to_vec())
 }
 

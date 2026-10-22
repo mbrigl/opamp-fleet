@@ -237,6 +237,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
 
     crate::storage::create_shared_dir(
         &config.state_dir,
+        &config.state_dir,
         config.process_account_group,
         crate::storage::Shared::Traversed,
     )

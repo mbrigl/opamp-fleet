@@ -94,7 +94,7 @@ impl Storage {
         group: Option<ProcessAccountGroup>,
         config_shared: bool,
     ) -> io::Result<Self> {
-        create_shared_dir(&dir, group, Shared::Traversed)?;
+        create_shared_dir(&dir, &dir, group, Shared::Traversed)?;
         let storage = Storage {
             dir,
             group,
@@ -116,7 +116,7 @@ impl Storage {
         if !config_dir.is_dir() {
             return Ok(());
         }
-        create_shared_dir(&config_dir, Some(group), Shared::Read)?;
+        create_shared_dir(&self.dir, &config_dir, Some(group), Shared::Read)?;
         #[cfg(unix)]
         for entry in std::fs::read_dir(&config_dir)? {
             let entry = entry?;
@@ -334,7 +334,7 @@ impl AgentStorage for Storage {
         // Process reads: shared with the process account's group to read, never to write (ADR-0053
         // clause 6).
         let config_dir = self.dir.join(CONFIG_DIR);
-        create_shared_dir(&config_dir, self.config_group(), Shared::Read)?;
+        create_shared_dir(&self.dir, &config_dir, self.config_group(), Shared::Read)?;
         for entry in std::fs::read_dir(&config_dir)? {
             let path = entry?.path();
             if path.is_file() {
@@ -490,18 +490,22 @@ impl Shared {
 /// mode of ADR-0053 clause 6. Where no process account is registered it is
 /// [`create_private_dir`], exactly as before.
 ///
-/// Every component is opened through the handle of the one before it, and none through a link
-/// but one root owns — a system's `/var/run`, macOS's `/var` — so a link the process account
-/// placed in a directory it writes cannot turn the Client's change on something else of its own
-/// (ADR-0053 clause 6). The group and the mode are changed through the directory's own handle. A
-/// parent this creates is passed through, `0710`, so the directory is reached; each parent that
-/// must be more is named by its own call.
+/// `dir` is `root` or beneath it, and `root` is a directory of the Client's that the process
+/// account writes neither in nor above: the state directory, the Supervisors' root, a
+/// Supervisor's directory. Every component beneath `root` is opened through the handle of the one
+/// before it and none through a link, whoever owns it, so a link the process account placed in a
+/// directory it writes cannot turn the Client's change on something else of its own (ADR-0053
+/// clause 6); the links on the way to `root` are resolved as its path says
+/// ([`handle::open_beneath`]). The group and the mode are changed through the directory's own
+/// handle. A parent this creates is passed through, `0710`, so the directory is reached; each
+/// parent that must be more is named by its own call.
 ///
 /// A data directory (`Written`) that was not yet shared — one a Managed Process wrote while it ran
 /// as the Client, before a process account was registered — gives what the Client owns in it to
 /// the group too, writable by it, so the Managed Process goes on writing its own state: every
 /// directory and every regular file with one name, never through a link.
 pub(crate) fn create_shared_dir(
+    root: &Path,
     dir: &Path,
     group: Option<ProcessAccountGroup>,
     shared: Shared,
@@ -513,7 +517,7 @@ pub(crate) fn create_shared_dir(
     {
         let traversed =
             |made: &std::os::fd::OwnedFd| handle::share(made, group, Shared::Traversed.mode());
-        let made = handle::open_dir(dir, handle::DIRECTORY, Some(&traversed))
+        let made = handle::open_beneath(root, dir, handle::DIRECTORY, Some(&traversed))
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
         let before = handle::fstat(&made)?;
         handle::share(&made, group, shared.mode())?;
@@ -526,7 +530,7 @@ pub(crate) fn create_shared_dir(
     #[cfg(not(unix))]
     {
         std::fs::create_dir_all(dir)?;
-        let _ = (group, shared);
+        let _ = (root, group, shared);
     }
     Ok(())
 }
@@ -621,17 +625,45 @@ pub(crate) mod handle {
     /// What [`open_dir`] hands each directory it creates: the creator's own change to it.
     pub(crate) type Made<'a> = Option<&'a dyn Fn(&OwnedFd) -> io::Result<()>>;
 
-    /// Opens the directory `path` one component at a time, each through the handle of the one
-    /// before it: every component searched ([`SEARCH`]), the last opened with `flags`. A link is
-    /// followed only where root owns it: no other account can place one that root owns. With
-    /// `made`, a missing component is created, `0700`, and handed to `made`, opened to read.
+    /// Opens the directory `dir`, which is `root` or beneath it, one component at a time, each
+    /// through the handle of the one before it: every component searched ([`SEARCH`]), the last
+    /// opened with `flags`. `root` is where the Client's own tree begins — the state directory, the
+    /// Supervisors' root, a Supervisor's directory — and what the operator configured: the links
+    /// on the way to it are resolved, once, as the path says. Beneath it no link is followed, whoever
+    /// owns it, since an account that writes a directory there can place one, and root's own
+    /// links among them where it can link a file of root's into it. With `made`, a missing
+    /// component is created, `0700`, and handed to `made`, opened to read.
     ///
     /// # Errors
-    /// Returns an error when a component is missing (without `made`), is no directory, or is a
-    /// link another account owns.
-    pub(crate) fn open_dir(path: &Path, flags: libc::c_int, made: Made<'_>) -> io::Result<OwnedFd> {
-        let start = if path.is_absolute() { c"/" } else { c"." };
-        let names = path
+    /// Returns an error when `dir` is not beneath `root` by plain names, or a component is
+    /// missing (without `made`), is no directory, or is a link beneath `root`.
+    pub(crate) fn open_beneath(
+        root: &Path,
+        dir: &Path,
+        flags: libc::c_int,
+        made: Made<'_>,
+    ) -> io::Result<OwnedFd> {
+        let not_beneath = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is not beneath {} by plain names",
+                    dir.display(),
+                    root.display()
+                ),
+            )
+        };
+        let beneath = dir
+            .strip_prefix(root)
+            .map_err(|_| not_beneath())?
+            .components()
+            .map(|component| match component {
+                Component::Normal(name) => CString::new(name.as_bytes()).map_err(io::Error::from),
+                _ => Err(not_beneath()),
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let start = if root.is_absolute() { c"/" } else { c"." };
+        let prefix = root
             .components()
             .filter_map(|component| match component {
                 Component::Normal(name) => Some(name),
@@ -640,54 +672,67 @@ pub(crate) mod handle {
             })
             .map(|name| CString::new(name.as_bytes()))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut dir = open(
+        let total = prefix.len() + beneath.len();
+        let flags_at = |at: usize| if at + 1 == total { flags } else { SEARCH };
+        let follow = |flags: libc::c_int| flags & !libc::O_NOFOLLOW;
+        let mut handle = open(
             libc::AT_FDCWD,
             start,
-            if names.is_empty() { flags } else { SEARCH },
+            follow(if total == 0 { flags } else { SEARCH }),
         )?;
-        for (at, name) in names.iter().enumerate() {
-            let flags = if at + 1 == names.len() { flags } else { SEARCH };
-            dir = step(&dir, name, flags, made)?;
+        for (at, name) in prefix.iter().enumerate() {
+            handle = step(&handle, name, follow(flags_at(at)), made)?;
         }
-        Ok(dir)
+        for (at, name) in beneath.iter().enumerate() {
+            handle = step(&handle, name, flags_at(prefix.len() + at), made).map_err(|e| {
+                if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+                    refused(&handle, name, root, e)
+                } else {
+                    e
+                }
+            })?;
+        }
+        Ok(handle)
     }
 
-    /// The directory `name` in `dir`, opened with `flags`, as [`open_dir`] takes each component.
+    /// Why `name` in `dir` was not opened as a directory beneath `root`: a link, which is never
+    /// followed there, or something that is no directory.
+    fn refused(dir: &OwnedFd, name: &CStr, root: &Path, error: io::Error) -> io::Error {
+        let what = match lstat_at(dir.as_raw_fd(), name) {
+            Ok(st) if is(&st, libc::S_IFLNK) => {
+                format!(
+                    "is a link, and no link beneath {} is followed",
+                    root.display()
+                )
+            }
+            Ok(_) => "is not a directory".to_string(),
+            Err(_) => return error,
+        };
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} {what}", name.to_string_lossy()),
+        )
+    }
+
+    /// The directory `name` in `dir`, opened with `flags`, as [`open_beneath`] takes each
+    /// component; with `made`, created first where it is missing.
     fn step(dir: &OwnedFd, name: &CStr, flags: libc::c_int, made: Made<'_>) -> io::Result<OwnedFd> {
         let error = match open(dir.as_raw_fd(), name, flags) {
             Ok(next) => return Ok(next),
             Err(e) => e,
         };
-        match (error.raw_os_error(), made) {
-            (Some(libc::ENOENT), Some(made)) => {
-                // SAFETY: a valid descriptor and a NUL-terminated name.
-                let rc = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) };
-                let created = rc == 0;
-                if !created && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
-                    return Err(io::Error::last_os_error());
-                }
-                if created {
-                    made(&open(dir.as_raw_fd(), name, DIRECTORY)?)?;
-                }
-                open(dir.as_raw_fd(), name, flags)
-            }
-            (Some(libc::ELOOP | libc::ENOTDIR), _) => {
-                let st = lstat_at(dir.as_raw_fd(), name)?;
-                if is(&st, libc::S_IFLNK) && st.st_uid == 0 {
-                    return open(dir.as_raw_fd(), name, flags & !libc::O_NOFOLLOW);
-                }
-                let what = if is(&st, libc::S_IFLNK) {
-                    "is a link, which only root's is followed"
-                } else {
-                    "is not a directory"
-                };
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("{} {what}", name.to_string_lossy()),
-                ))
-            }
-            _ => Err(error),
+        let Some(made) = made.filter(|_| error.raw_os_error() == Some(libc::ENOENT)) else {
+            return Err(error);
+        };
+        // SAFETY: a valid descriptor and a NUL-terminated name.
+        if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } == 0 {
+            // Opened as `flags` says of links: one swapped in since is refused here too.
+            let read = (DIRECTORY & !libc::O_NOFOLLOW) | (flags & libc::O_NOFOLLOW);
+            made(&open(dir.as_raw_fd(), name, read)?)?;
+        } else if io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
+            return Err(io::Error::last_os_error());
         }
+        open(dir.as_raw_fd(), name, flags)
     }
 
     /// Removes the entry `name` in `dir` with everything beneath it, never through a link: a link
@@ -1289,7 +1334,8 @@ mod tests {
         assert_eq!(mode_and_group(&supervisor.join(PACKAGE_FILE)).0, 0o600);
 
         let data = supervisor.join("data");
-        create_shared_dir(&data, Some(group), Shared::Written).expect("a data directory");
+        create_shared_dir(&supervisor, &data, Some(group), Shared::Written)
+            .expect("a data directory");
         assert_eq!(mode_and_group(&data), (0o2770, group.0));
     }
 
@@ -1335,10 +1381,12 @@ mod tests {
         let before = mode_and_group(&outside);
 
         let supervisor = dir.path().join("agent");
-        create_shared_dir(&supervisor, Some(group), Shared::Traversed).expect("the Supervisor's");
+        create_shared_dir(&supervisor, &supervisor, Some(group), Shared::Traversed)
+            .expect("the Supervisor's");
         // The Managed Process put a link where its data directory's parent goes.
         std::os::unix::fs::symlink(&outside, supervisor.join("data")).expect("a link");
         let error = create_shared_dir(
+            &supervisor,
             &supervisor.join("data").join("certs"),
             Some(group),
             Shared::Written,
@@ -1357,6 +1405,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, supervisor.join("data").join("certs"))
             .expect("a link");
         create_shared_dir(
+            &supervisor,
             &supervisor.join("data").join("certs"),
             Some(group),
             Shared::Written,
@@ -1364,6 +1413,79 @@ mod tests {
         .expect_err("a link as the directory itself");
         assert_eq!(mode_and_group(&outside), before);
         assert_eq!(mode_and_group(&outside.join("record")).0, 0o600);
+    }
+
+    /// Beneath the Supervisor's directory no link is followed, whoever owns it: a link of root's
+    /// in a data directory — one a hard link to a link of root's elsewhere can place — that names a
+    /// link of the process account's to the Client's records shares nothing of them. Run as root,
+    /// every link here is root's; run as anyone else, the account's own. The links on the way to
+    /// the Supervisor's directory are followed as its path says, and a directory that is not
+    /// beneath it by plain names is refused (ADR-0053 clause 6).
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn no_link_beneath_the_root_is_followed_whoever_owns_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let group = own_group();
+        let supervisor = dir.path().join("agent");
+        let private = supervisor.join("private");
+        create_private_dir(&private).expect("the Client's own");
+        write_private(&private.join("client-key.pem"), b"KEY").expect("the key");
+        let data = supervisor.join("data");
+        create_shared_dir(&supervisor, &data, Some(group), Shared::Written).expect("data");
+        std::os::unix::fs::symlink("../private", data.join("evil")).expect("the process's link");
+        std::os::unix::fs::symlink("evil", data.join("certs")).expect("a link of another owner");
+        let before = (
+            mode_and_group(&private),
+            mode_and_group(&private.join("client-key.pem")),
+        );
+
+        let error = create_shared_dir(
+            &supervisor,
+            &data.join("certs"),
+            Some(group),
+            Shared::Written,
+        )
+        .expect_err("a link beneath the root");
+        assert!(error.to_string().contains("no link beneath"), "{error}");
+        create_shared_dir(
+            &supervisor,
+            &data.join("certs").join("ca"),
+            Some(group),
+            Shared::Written,
+        )
+        .expect_err("a link on the way beneath the root");
+        assert_eq!(
+            (
+                mode_and_group(&private),
+                mode_and_group(&private.join("client-key.pem")),
+            ),
+            before,
+            "nothing of the Client's is shared"
+        );
+
+        let through = dir.path().join("through");
+        std::os::unix::fs::symlink(&supervisor, &through).expect("a link above the root");
+        create_shared_dir(
+            &through,
+            &through.join("cache"),
+            Some(group),
+            Shared::Written,
+        )
+        .expect("the root's own path is followed");
+        assert_eq!(mode_and_group(&supervisor.join("cache")), (0o2770, group.0));
+
+        let error = create_shared_dir(
+            &data,
+            &data.join("..").join("private"),
+            Some(group),
+            Shared::Written,
+        )
+        .expect_err("not beneath by plain names");
+        assert!(error.to_string().contains("not beneath"), "{error}");
+        create_shared_dir(&data, &private, Some(group), Shared::Written)
+            .expect_err("not beneath at all");
+        assert_eq!(mode_and_group(&private), before.0);
     }
 
     /// A parent the Client creates on the way to a shared directory is passed through by the
@@ -1375,7 +1497,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let group = own_group();
         let data = dir.path().join("agent").join("var").join("data");
-        create_shared_dir(&data, Some(group), Shared::Written).expect("made");
+        create_shared_dir(
+            &dir.path().join("agent"),
+            &data,
+            Some(group),
+            Shared::Written,
+        )
+        .expect("made");
         assert_eq!(mode_and_group(&data), (0o2770, group.0));
         assert_eq!(
             mode_and_group(data.parent().expect("var")),
@@ -1406,7 +1534,13 @@ mod tests {
         std::os::unix::fs::symlink(&outside, data.join("link")).expect("a link");
         std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).expect("chmod");
 
-        create_shared_dir(&data, Some(group), Shared::Written).expect("shared");
+        create_shared_dir(
+            &dir.path().join("agent"),
+            &data,
+            Some(group),
+            Shared::Written,
+        )
+        .expect("shared");
         assert_eq!(mode_and_group(&data), (0o2770, group.0));
         assert_eq!(mode_and_group(&nested), (0o2770, group.0));
         assert_eq!(mode_and_group(&nested.join("state")), (0o660, group.0));
@@ -1500,7 +1634,7 @@ mod tests {
         assert_eq!(mode_and_group(&supervisor.join(UID_FILE)), at_umask);
         assert_eq!(mode_and_group(&supervisor.join(PACKAGE_FILE)), at_umask);
         let data = supervisor.join("data");
-        create_shared_dir(&data, None, Shared::Written).expect("a data directory");
+        create_shared_dir(&supervisor, &data, None, Shared::Written).expect("a data directory");
         assert_eq!(mode_and_group(&data).0, 0o700);
     }
 

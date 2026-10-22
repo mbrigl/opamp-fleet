@@ -461,7 +461,10 @@ impl InstallTarget {
             return Ok(());
         };
         let prepared = match group {
-            Some(_) => crate::storage::create_shared_dir(&dir, group, crate::storage::Shared::Read),
+            // Its own root: the process account writes neither in it nor above it.
+            Some(_) => {
+                crate::storage::create_shared_dir(&dir, &dir, group, crate::storage::Shared::Read)
+            }
             None => std::fs::create_dir_all(&dir),
         };
         prepared.map_err(|e| format!("cannot prepare {}: {e}", dir.display()))
@@ -708,6 +711,9 @@ pub struct Runner {
     /// directories the Managed Process writes into and the preflight's staging belong to it
     /// (ADR-0053 clause 6).
     pub process_account_group: Option<crate::storage::ProcessAccountGroup>,
+    /// The Supervisor's own directory (ADR-0017): beneath it, no link is followed on the way to a
+    /// directory the Managed Process writes into.
+    pub supervisor_dir: PathBuf,
     pub events: EventSender,
     pub commands: mpsc::Receiver<ProcessCommand>,
     pub build: Box<dyn Fn() -> Option<ProcessSpec> + Send + Sync>,
@@ -1651,8 +1657,10 @@ impl Runner {
         // made.
         for dir in &spec.ensure_dirs {
             // Written by the Managed Process, so shared with its group where a process account
-            // is registered (ADR-0053 clause 6).
+            // is registered (ADR-0053 clause 6), and reached through no link beneath the
+            // Supervisor's directory.
             if let Err(e) = crate::storage::create_shared_dir(
+                data_root(&self.supervisor_dir, &spec.ensure_dirs, dir),
                 dir,
                 self.process_account_group,
                 crate::storage::Shared::Written,
@@ -2070,7 +2078,9 @@ fn stage_tree(
     // A previous attempt that died between unpacking and the rename would leave this behind.
     let _ = std::fs::remove_dir_all(&staging);
     let created = match group {
-        Some(_) => crate::storage::create_shared_dir(&staging, group, crate::storage::Shared::Read),
+        Some(_) => {
+            crate::storage::create_shared_dir(root, &staging, group, crate::storage::Shared::Read)
+        }
         None => std::fs::create_dir_all(&staging),
     };
     created.map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
@@ -2129,6 +2139,21 @@ fn stage_tree(
     Ok(staging)
 }
 
+/// The directory beneath which no link is followed on the way to `dir`, one of `ensure_dirs` a
+/// kind names: the Supervisor's directory where `dir` lies in it, else the outermost of
+/// `ensure_dirs` that holds `dir`, which an operator placed — `dir` itself where none does.
+fn data_root<'a>(
+    supervisor_dir: &'a std::path::Path,
+    ensure_dirs: &'a [PathBuf],
+    dir: &'a std::path::Path,
+) -> &'a std::path::Path {
+    std::iter::once(supervisor_dir)
+        .chain(ensure_dirs.iter().map(PathBuf::as_path))
+        .filter(|root| dir.starts_with(root))
+        .min_by_key(|root| root.components().count())
+        .unwrap_or(dir)
+}
+
 /// Gives what is staged at `staging` — the program, or every member of a tree — to the process
 /// account's group `group`, without write for the group or others; nothing where no process
 /// account is registered.
@@ -2142,7 +2167,7 @@ fn share_staged(
         use std::os::fd::OwnedFd;
         use std::os::unix::fs::OpenOptionsExt as _;
         let shared = if std::fs::symlink_metadata(staging).is_ok_and(|meta| meta.is_dir()) {
-            handle::open_dir(staging, handle::DIRECTORY, None)
+            handle::open_beneath(staging, staging, handle::DIRECTORY, None)
                 .and_then(|tree| handle::share_tree(&tree, group, staging))
         } else {
             std::fs::OpenOptions::new()
@@ -2496,6 +2521,7 @@ mod tests {
             reload_signal: None,
             spawner: Spawner::Local,
             process_account_group: None,
+            supervisor_dir: std::env::temp_dir(),
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || {
@@ -2600,6 +2626,7 @@ mod tests {
             reload_signal: Some(libc::SIGHUP),
             spawner: Spawner::Channel(peer.channel.clone()),
             process_account_group: None,
+            supervisor_dir: std::env::temp_dir(),
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(|| None),
@@ -2664,6 +2691,7 @@ mod tests {
             reload_signal: None,
             spawner: Spawner::Channel(Channel::new(socket, peer::own_uid())),
             process_account_group: None,
+            supervisor_dir: std::env::temp_dir(),
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || {

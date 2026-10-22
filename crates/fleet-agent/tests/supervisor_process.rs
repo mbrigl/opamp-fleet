@@ -212,6 +212,7 @@ fn runner_full(
         reload_signal,
         spawner: Spawner::Local,
         process_account_group: None,
+        supervisor_dir: std::env::temp_dir(),
         events: EventSender::new(0, event_tx),
         commands: command_rx,
         build: Box::new(build),
@@ -681,6 +682,7 @@ async fn the_managed_process_is_handed_the_endpoint_token(via: Via) {
         reload_signal: None,
         spawner: Spawner::Local,
         process_account_group: None,
+        supervisor_dir: std::env::temp_dir(),
         events: EventSender::new(0, event_tx),
         commands: command_rx,
         build: Box::new(move || {
@@ -1862,6 +1864,7 @@ mod an_apply_while_the_second_service_is_away {
             reload_signal: None,
             spawner: Spawner::Channel(Channel::new(&socket, own_uid())),
             process_account_group: None,
+            supervisor_dir: std::env::temp_dir(),
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || Some(spec(&live))),
@@ -2593,6 +2596,7 @@ mod an_apply_while_the_second_service_is_away {
             // The process account is another uid than the one that serves the socket.
             spawner: Spawner::Channel(Channel::new(&socket, own_uid() + 1)),
             process_account_group: None,
+            supervisor_dir: std::env::temp_dir(),
             events: EventSender::new(0, event_tx),
             commands: command_rx,
             build: Box::new(move || Some(spec(&live))),
