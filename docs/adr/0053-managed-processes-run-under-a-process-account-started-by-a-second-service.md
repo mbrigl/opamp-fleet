@@ -4,7 +4,7 @@
 - **Date:** 2026-10-20
 - **Deciders:** Markus Brigl
 - **Applies to:** the `--process-account` flag of `service install` and the second service it registers in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/windows_config.rs` and `crates/fleet-agent/src/service/windows_rights.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel between the Client and the second service, the modes and ownership of the Supervisors' directories in `crates/fleet-agent/src/storage.rs`, and every document that tells an operator which account a Managed Process runs as
-- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 3 and 9, [ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) clauses 2 and 6, [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 60
+- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 3 and 9, [ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) clauses 2 and 6, [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 60, [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clause 37
 
 ## Context
 
@@ -272,6 +272,17 @@ signals and stops those programs on the Client's request.
     mode is taken from it. The program — the single file or the member at `program_path` — is set
     `0755` regardless, so whether it can run never depends on how the archive was built; an agent
     with further executables beside its program ships as `.tar.gz`.
+
+12. **Restates ADR-0017 clause 37. An orphaned directory is reported at startup, never reaped,
+    except a tombstone, which is reaped.** A directory under the root that no block names — a purge
+    cut short, a block removed by hand while the Client was down, a moved root — is logged as a
+    warning with its path and left in place. Startup cannot tell a leftover from a block
+    temporarily commented out, and deleting would cost that Agent its identity and program;
+    removing it is the operator's call. A tombstone is different: a purge first renames the
+    Supervisor's directory to `.purge-<name>-<nonce>`, a name no block can carry, so the name
+    itself records that the Client meant to remove it. A tombstone the purge could not delete is
+    removed again at the next start and with the next purge, through the second service where a
+    process account is registered, and is logged as a warning until it is gone.
 
 **Out of scope:** an account per Supervisor; making a process account the default where none is
 named; job objects for a host without a process account; what the Managed Processes can read of
