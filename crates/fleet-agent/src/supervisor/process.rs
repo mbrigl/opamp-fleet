@@ -2223,7 +2223,7 @@ fn share_staged(
         use std::os::fd::OwnedFd;
         use std::os::unix::fs::OpenOptionsExt as _;
         let shared = if std::fs::symlink_metadata(staging).is_ok_and(|meta| meta.is_dir()) {
-            handle::open_beneath(staging, staging, handle::DIRECTORY, None)
+            handle::open_beneath(staging, staging, handle::DIRECTORY, None, handle::own())
                 .and_then(|tree| handle::share_tree(&tree, group, staging))
         } else {
             std::fs::OpenOptions::new()
