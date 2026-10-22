@@ -231,6 +231,87 @@ pub fn account_of(uid: u32) -> std::io::Result<Option<Account>> {
     }
 }
 
+/// The members the group database lists for the group `gid` (`gr_mem`, through `getgrgid_r(3)`):
+/// the accounts that hold it as a supplementary group. Empty where no entry names the group.
+#[cfg(unix)]
+fn group_members(gid: u32) -> std::io::Result<Vec<String>> {
+    let mut buffer = vec![0 as libc::c_char; 4096];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::group>::uninit();
+        let mut found: *mut libc::group = std::ptr::null_mut();
+        // SAFETY: every pointer is valid for the call and the buffer's length is the one passed;
+        // `found` is either null or points at `entry`, whose strings live in `buffer`.
+        let rc = unsafe {
+            libc::getgrgid_r(
+                gid,
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &raw mut found,
+            )
+        };
+        if rc == libc::ERANGE && buffer.len() < 1 << 24 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 {
+            return Err(std::io::Error::from_raw_os_error(rc));
+        }
+        if found.is_null() {
+            return Ok(Vec::new());
+        }
+        let mut members = Vec::new();
+        // SAFETY: `gr_mem` is a null-terminated array of NUL-terminated strings inside `buffer`,
+        // which outlives these reads.
+        unsafe {
+            let mut member = (*found).gr_mem;
+            while !member.is_null() && !(*member).is_null() {
+                members.push(
+                    std::ffi::CStr::from_ptr(*member)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                member = member.add(1);
+            }
+        }
+        return Ok(members);
+    }
+}
+
+/// The accounts, by name and uid, whose primary group is `gid`, as the password database
+/// enumerates them (`getpwent(3)`). A directory service that does not enumerate its accounts is
+/// read for the local ones alone.
+#[cfg(unix)]
+fn primary_group_of(gid: u32) -> Vec<(String, u32)> {
+    // `getpwent` walks one cursor per process: no two walks at once.
+    static WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _walk = WALK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut accounts = Vec::new();
+    // SAFETY: the cursor is held under `WALK` from `setpwent` to `endpwent`, each entry is read
+    // before the next call, and `pw_name` is a NUL-terminated string in that entry.
+    unsafe {
+        libc::setpwent();
+        loop {
+            let entry = libc::getpwent();
+            if entry.is_null() {
+                break;
+            }
+            if (*entry).pw_gid == gid {
+                accounts.push((
+                    std::ffi::CStr::from_ptr((*entry).pw_name)
+                        .to_string_lossy()
+                        .into_owned(),
+                    (*entry).pw_uid,
+                ));
+            }
+        }
+        libc::endpwent();
+    }
+    accounts
+}
+
 /// An account the service may run as — validated (Windows) or resolved (Unix), never taken on
 /// faith from the command line or from a file.
 #[derive(Debug, Clone)]
@@ -492,6 +573,12 @@ pub struct Ids {
     pub group: String,
     /// Every group the account is in, the primary one included.
     pub groups: Vec<u32>,
+    /// The primary group's members, as the group database lists them: the accounts that hold it
+    /// as a supplementary group.
+    pub members: Vec<String>,
+    /// The accounts, by name and uid, whose primary group the primary group is — the account
+    /// itself among them.
+    pub primary_of: Vec<(String, u32)>,
 }
 
 /// Decide the process account of a `service install` (ADR-0053 clause 1) and check it against the
@@ -503,8 +590,9 @@ pub struct Ids {
 /// # Errors
 /// Returns why the account is refused: where a second service cannot be registered, root, a
 /// Client that runs as root, an account that does not exist, the Client's own account, one whose
-/// primary group is root's or the Client's primary group, one in the Client's primary group, or
-/// one whose primary group the Client's account is not in.
+/// primary group is root's or the Client's primary group, one in the Client's primary group, one
+/// whose primary group the Client's account is not in, and one whose primary group has a member
+/// other than the Client's account or is the primary group of another account.
 pub fn decide_process_account(
     flag: Option<&str>,
     dropped: bool,
@@ -695,6 +783,25 @@ fn refuse_process_account(
             found.group, found.group
         ));
     }
+    // The group is the process account's own: whoever else holds it reads what every Managed
+    // Process reads, and a Managed Process what the other account's files grant its group.
+    if let Some(other) = found.members.iter().find(|member| *member != client_name) {
+        return Err(format!(
+            "{named} has the primary group {group}, and {other} is a member of it beside the \
+             Client's account {client_name}: {other} would read what the Managed Processes read. \
+             Remove it (`gpasswd --delete {other} {group}`), or give the process account a group \
+             of its own, then install again. {NOTHING}",
+            group = found.group
+        ));
+    }
+    if let Some((other, _)) = found.primary_of.iter().find(|(_, uid)| *uid != found.uid) {
+        return Err(format!(
+            "{named} has the primary group {group}, which is also the primary group of {other}: \
+             the Managed Processes would share it with that account. Give the process account a \
+             group of its own (`useradd --user-group`), then install again. {NOTHING}",
+            group = found.group
+        ));
+    }
     Ok(())
 }
 
@@ -715,11 +822,14 @@ fn account_ids(account: &str) -> Result<Option<Ids>, String> {
         .split_whitespace()
         .filter_map(|g| g.parse().ok())
         .collect();
+    let members = group_members(gid).map_err(|e| failed(e.to_string()))?;
     Ok(Some(Ids {
         uid,
         gid,
         group,
         groups,
+        members,
+        primary_of: primary_group_of(gid),
     }))
 }
 
@@ -1292,6 +1402,8 @@ mod tests {
             gid: 998,
             group: "opamp-fleet".to_string(),
             groups: vec![998, 997],
+            members: Vec::new(),
+            primary_of: vec![("opamp-fleet".to_string(), 998)],
         }
     }
 
@@ -1302,6 +1414,8 @@ mod tests {
             gid: 997,
             group: "opamp-fleet-agents".to_string(),
             groups: vec![997],
+            members: vec!["opamp-fleet".to_string()],
+            primary_of: vec![("opamp-fleet-agents".to_string(), 997)],
         }
     }
 
@@ -1370,6 +1484,8 @@ mod tests {
             gid: 0,
             group: "root".to_string(),
             groups: vec![0],
+            members: Vec::new(),
+            primary_of: vec![("root".to_string(), 0)],
         };
         for (account, found) in [("root", Some(&root)), ("toor", Some(&root))] {
             let err = check_process_account(account, found, "opamp-fleet", &client_ids(), None)
@@ -1485,6 +1601,8 @@ mod tests {
             gid: 0,
             group: "root".to_string(),
             groups: vec![0],
+            members: Vec::new(),
+            primary_of: vec![("root".to_string(), 0)],
         };
         let kept = check_process_account(
             "opamp-fleet-agents",
@@ -1560,6 +1678,76 @@ mod tests {
         assert!(
             err.contains("Nothing has been installed or written"),
             "{err}"
+        );
+    }
+
+    /// The process account's primary group is its own (ADR-0053 clause 6): a member beside the
+    /// Client's account, or another account whose primary group it is, would read what every
+    /// Managed Process reads, and is refused with the way out. The account itself, under another
+    /// name for its uid, is no other account.
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_process_account_whose_group_is_shared_with_another_account_is_refused() {
+        let refused = |agents: Ids| {
+            check_process_account(
+                "opamp-fleet-agents",
+                Some(&agents),
+                "opamp-fleet",
+                &client_ids(),
+                None,
+            )
+            .expect_err("refused")
+        };
+        let mut member = agents_ids();
+        member.members.push("www-data".to_string());
+        let err = refused(member);
+        assert!(err.contains("www-data is a member"), "{err}");
+        assert!(
+            err.contains("gpasswd --delete www-data opamp-fleet-agents"),
+            "{err}"
+        );
+        assert!(
+            err.contains("Nothing has been installed or written"),
+            "{err}"
+        );
+
+        let mut primary = agents_ids();
+        primary.primary_of.push(("nobody".to_string(), 65534));
+        let err = refused(primary);
+        assert!(err.contains("primary group of nobody"), "{err}");
+        assert!(
+            err.contains("Nothing has been installed or written"),
+            "{err}"
+        );
+
+        let mut alias = agents_ids();
+        alias.primary_of.push(("agents-alias".to_string(), 997));
+        check_process_account(
+            "opamp-fleet-agents",
+            Some(&alias),
+            "opamp-fleet",
+            &client_ids(),
+            None,
+        )
+        .expect("its own uid under another name");
+    }
+
+    /// The group lookups behind those checks read this host's databases: the test's own primary
+    /// group is its own account's primary group, where the password database names the account.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn the_group_lookups_read_this_hosts_databases() {
+        // SAFETY: getegid(2) and geteuid(2) cannot fail and touch no memory.
+        let (gid, uid) = unsafe { (libc::getegid(), libc::geteuid()) };
+        group_members(gid).expect("the group database");
+        if account_of(uid).ok().flatten().map(|a| a.gid) != Some(gid) {
+            return;
+        }
+        assert!(
+            primary_group_of(gid).iter().any(|(_, found)| *found == uid),
+            "{:?}",
+            primary_group_of(gid)
         );
     }
 
