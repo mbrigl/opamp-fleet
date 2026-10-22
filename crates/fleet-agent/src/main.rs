@@ -366,12 +366,8 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
                 kept,
             )?,
         );
-        for file in skipped {
-            println!(
-                "warning: {} has a second hard link and was not handed over to {}",
-                file.display(),
-                run_as.account()
-            );
+        for skipped in skipped {
+            println!("warning: {}", skipped.warning(run_as.account()));
         }
     }
 
