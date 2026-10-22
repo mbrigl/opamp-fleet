@@ -54,11 +54,13 @@ $ server --version
 
 | Flag | Meaning |
 |---|---|
-| `--config <path>` | The TOML configuration file. Defaults to `server.toml` in the working directory. A missing file means the defaults, and the defaults hold no `[tls]`, so the Server refuses to start and names `[tls]`. |
+| `--config <path>` | The TOML configuration file. Without it, the file `FLEET_SERVER_CONFIG` names; without both, `server.toml` in the working directory when it exists, and otherwise none — the Server then starts from its defaults and its environment ([Configuration from the environment](#configuration-from-the-environment)). A file named by `--config` or `FLEET_SERVER_CONFIG` that does not exist fails startup, naming the path. The defaults hold no `[tls]`, so a Server configured by nothing refuses to start and names `[tls]`. |
 | `--version` | Print the version and exit — the full string, `1.2.3+<commit>` for a release and `1.2.3-dev+<commit>` for a build on the way to one. |
 
 Any other argument prints usage and exits with status 2. Logging goes to stderr and is controlled by
-the `RUST_LOG` environment variable (default `info`); everything else is in the configuration file.
+the `RUST_LOG` environment variable (default `info`); everything else is in the configuration file
+and the `FLEET_SERVER__…` variables over it. `server pki status` reads the same configuration, from
+the same places.
 
 Stopping the Server is `SIGTERM`/`Ctrl-C`. Configurations and packages are persisted to disk, so a
 restart resumes with the same fleet state; Agents reconnect on their own.
@@ -118,6 +120,39 @@ The full annotated example is [`config/server.toml`](../../config/server.toml). 
 below with its default. `[tls]` with its `client_ca_file` is required; every other key is
 optional. An unknown key fails startup rather than being ignored.
 
+### Configuration from the environment
+
+Every key can also be set by an environment variable, which is how a container is configured
+without a file. The configuration is built from the defaults, then the file, then the variables,
+each later one winning per key. A variable is `FLEET_SERVER__` followed by the key's path, its
+segments joined by `__` and upper-cased:
+
+```console
+FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet
+FLEET_SERVER__TLS__CERT_FILE=/run/secrets/server.pem
+FLEET_SERVER__REST__LISTEN=0.0.0.0:4321
+FLEET_SERVER__CONNECTION_OFFER__HEARTBEAT_INTERVAL_SECS=30
+FLEET_SERVER__REST__AUTH__BASIC_USERS_FILE=/run/secrets/basic-users.toml
+```
+
+- **A value is a TOML value.** `30` is an integer, `true` a boolean, `["a", "b"]` an array, and
+  `{ … }` an inline table that sets the whole table. A value that is not TOML is the string it is,
+  so a path needs no quotes; a string that looks like another type is quoted: `"1234"`.
+- **A variable is checked as strictly as a key.** One that names no key, has an empty segment
+  (`FLEET_SERVER__REST____TLS`), or holds a value of the wrong type fails startup, naming the
+  variable. So does any `FLEET_SERVER__…` variable in the environment of a process that starts the
+  Server.
+- **The environment carries paths to secrets, never secrets.** Every secret is a file named by a
+  `*_file` key. The two tables keyed by names you choose, `[rest.auth.basic_users]` and
+  `[telemetry_offer.headers]`, are reached from the environment only through `basic_users_file` and
+  `headers_file`; a variable that sets either table fails startup, naming the file key.
+- **The log says which keys the environment set.** At startup the Server logs, at `info`, the
+  name of every key a variable set, and never its value. A key set in both places takes the
+  variable's value.
+
+`FLEET_SERVER_CONFIG`, with one underscore, names the file and sets no key. No other variable
+configures the Server.
+
 ### Top level
 
 | Key | Default | Meaning |
@@ -160,6 +195,7 @@ fleet-admin = "$argon2id$v=19$m=19456,t=2,p=1$…"
 | Key | Default | Meaning |
 |---|---|---|
 | `basic_users` | *(empty)* | Accepted Basic credentials, `user = "<Argon2id hash>"` — see [Credentials are kept as hashes](#credentials-are-kept-as-hashes). A section without one, or an entry that is not such a hash, fails startup. |
+| `basic_users_file` | *(none)* | A TOML file holding the `basic_users` table — its lines are `user = "<Argon2id hash>"`, with no section header. Make it readable by the Server's account alone. Never beside `basic_users`: both fail startup, naming both. The one way the environment names the users ([Configuration from the environment](#configuration-from-the-environment)). |
 
 #### `[rest.tls]`
 
@@ -223,6 +259,10 @@ metrics_endpoint = "https://collector.example:4318/v1/metrics"
 [telemetry_offer.headers]
 Authorization = "Bearer a-telemetry-token"
 ```
+
+The headers can instead come from a file, `headers_file = "/run/secrets/telemetry-headers.toml"`,
+holding the lines of the `headers` table with no section header. Never beside `headers`: both fail
+startup, naming both. It is the one way the environment names the headers.
 
 ### `[client_ca]`
 

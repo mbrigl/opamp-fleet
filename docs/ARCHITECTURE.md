@@ -141,6 +141,11 @@ core module names an adapter or a technology, and when a module has no role.
   implements for the CSR flow and the renewal proof (ADR-0021), and
   `Clock`, which `clock::SystemClock` implements. The `[connection_offer]` and
   `[telemetry_offer]` sections become the fleet's offers in `config`.
+- **Server configuration** — `config` builds one TOML document from the defaults, `server.toml`
+  when one is read, and the `FLEET_SERVER__…` variables over it, and deserializes it once, so the
+  environment is checked as strictly as the file; `main.rs` reads the process environment and
+  hands the variables in
+  ([ADR-0051](adr/0051-the-servers-configuration-may-come-from-its-environment.md)).
 - **REST views** — what the REST API reads and returns is shaped in `api`, which derives its
   OpenAPI schema ([ADR-0023](adr/0023-configurations-and-the-rest-api.md)); the core's types —
   among them the fleet view `AgentView` — carry no schema, and `api` converts them.

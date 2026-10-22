@@ -13,6 +13,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Added
+
+- **The Server's configuration may come from its environment**
+  ([ADR-0051](docs/adr/0051-the-servers-configuration-may-come-from-its-environment.md)). Every
+  key of `server.toml` can be set by a variable `FLEET_SERVER__` followed by the key's path, its
+  segments joined by `__` and upper-cased — `FLEET_SERVER__REST__TLS__CERT_FILE` sets
+  `[rest.tls] cert_file` — and the variable wins over the file. The value is TOML, and what is not
+  TOML is a string. The Server logs the name of every key its environment set, never a value.
+  Without `--config`, `FLEET_SERVER_CONFIG` names the file, and without either the Server reads
+  `server.toml` in the working directory when it exists and otherwise starts from its defaults and
+  its environment; `server pki status` reads the same configuration, and its `--config` is
+  optional. `[rest.auth] basic_users_file` and `[telemetry_offer] headers_file` name a TOML file
+  holding the `basic_users` or the `headers` table, the one way the environment reaches either.
+  **What to do:** nothing to keep a deployment running. To configure a container without a file,
+  set the variables; keep secrets in files and set their `*_file` keys to the paths.
+
+### Changed
+
+- **A configuration file the Server is told to read has to exist**
+  ([ADR-0051](docs/adr/0051-the-servers-configuration-may-come-from-its-environment.md)). A
+  `--config` path that does not exist stopped nothing: the Server ran on its defaults. It now
+  fails startup, naming the path, and so does one `FLEET_SERVER_CONFIG` names. A
+  `FLEET_SERVER__…` variable that names no key, or holds a value of the wrong type, fails startup
+  naming the variable, and so does one that sets `[rest.auth.basic_users]` or
+  `[telemetry_offer.headers]`; a `basic_users_file` beside `basic_users`, or a `headers_file`
+  beside `headers`, fails startup naming both. **What to do:** check that every `--config` names a
+  file that exists, and that no `FLEET_SERVER__…` variable is left in the Server's environment
+  that is not meant for it.
+
 ## [0.6.0]
 
 ### Added

@@ -1,6 +1,8 @@
-//! The Server's own configuration file — TOML (ADR-0010).
+//! The Server's own configuration — TOML, from `server.toml` and its environment (ADR-0010,
+//! ADR-0051).
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -368,12 +370,16 @@ pub struct RestAuthConfig {
     /// a rotation, or an individual operator's credential to be withdrawn on its own.
     #[serde(default)]
     pub basic_users: BTreeMap<String, String>,
+    /// A TOML file holding the `basic_users` table, readable by the Server's account alone; never
+    /// beside it, and the one way the environment names credentials (ADR-0051 clause 5).
+    pub basic_users_file: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for RestAuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RestAuthConfig")
             .field("basic_users", &self.basic_users.keys().collect::<Vec<_>>())
+            .field("basic_users_file", &self.basic_users_file)
             .finish()
     }
 }
@@ -399,7 +405,8 @@ impl RestAuthConfig {
     fn check(&self) -> Result<(), String> {
         if self.basic_users.is_empty() {
             return Err(
-                "a [rest.auth] section needs at least one entry in [rest.auth.basic_users]"
+                "a [rest.auth] section needs at least one entry in [rest.auth.basic_users] or \
+                 in its basic_users_file"
                     .to_string(),
             );
         }
@@ -495,6 +502,9 @@ pub struct TelemetryOfferConfig {
     /// Headers sent with every signal — an access token for the receiving backend, typically.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// A TOML file holding the `headers` table; never beside it, and the one way the environment
+    /// names them (ADR-0051 clause 5).
+    pub headers_file: Option<PathBuf>,
 }
 
 impl TelemetryOfferConfig {
@@ -673,149 +683,220 @@ fn listeners_collide(a: SocketAddr, b: SocketAddr) -> bool {
 }
 
 impl ServerConfig {
-    /// Loads the file, or the defaults when it does not exist (a fresh checkout runs without any
-    /// setup). A file that exists but does not parse is an error — never silently ignored.
+    /// Loads `path` alone, with no environment: [`load_layered`](Self::load_layered) with the file
+    /// and no variables.
     pub fn load(path: &Path) -> Result<Self, String> {
-        // A missing file is the defaults, held to the same rules: they serve no TLS, so a Server
-        // without a configuration is refused below, naming what it needs (ADR-0013).
-        let config: ServerConfig = if path.exists() {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?
-        } else {
-            ServerConfig::default()
+        Self::load_layered(Some(path), Vec::new()).map(|layered| layered.config)
+    }
+
+    /// Builds the configuration from its layers (ADR-0051 clause 1): the built-in defaults, then
+    /// `file` when one is read, then every `FLEET_SERVER__…` variable among `variables`, each
+    /// later layer winning per key. The variables are taken as an argument so that the process
+    /// environment is read in one place, [`server_variables`].
+    ///
+    /// The merged document is deserialized once and held to the same rules as a file alone
+    /// (ADR-0051 clause 7). An error caused by a variable names the variable.
+    pub fn load_layered(
+        file: Option<&Path>,
+        variables: Vec<(String, String)>,
+    ) -> Result<Layered, String> {
+        let text = file
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))
+            })
+            .transpose()?;
+        let mut document = match (&text, file) {
+            (Some(text), Some(path)) => toml::from_str::<toml::Table>(text)
+                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?,
+            _ => toml::Table::new(),
         };
+        let variables = environment(variables)?;
+        for variable in &variables {
+            variable.set_in(&mut document)?;
+        }
+        let origin = match (file, variables.is_empty()) {
+            (Some(path), true) => path.display().to_string(),
+            (Some(path), false) => format!("{} and the environment", path.display()),
+            (None, false) => "the environment".to_string(),
+            (None, true) => "the defaults".to_string(),
+        };
+        // A table read from a file is never beside the same table written inline (ADR-0051
+        // clause 5): one of the two would be silently ignored.
+        for (table, file_key) in TABLES_FROM_FILES {
+            let section = &table[..table.len() - 1];
+            let inline = lookup(&document, table).is_some();
+            let mut file_path = section.to_vec();
+            file_path.push(file_key);
+            if inline && lookup(&document, &file_path).is_some() {
+                return Err(format!(
+                    "{origin}: [{}] {file_key} and [{}] are both set — name the table in one \
+                     place",
+                    section.join("."),
+                    table.join("."),
+                ));
+            }
+        }
+        let mut config: ServerConfig =
+            toml::Value::Table(document)
+                .try_into()
+                .map_err(|e: toml::de::Error| match blamed(&variables, &e) {
+                    Some(variable) if e.message().starts_with("unknown field") => format!(
+                        "{} names no key of the Server's configuration: {}",
+                        variable.name,
+                        e.message()
+                    ),
+                    Some(variable) => format!("{}: {}", variable.name, e.message()),
+                    None => {
+                        // A file alone, parsed again as text, points at the line.
+                        let detail = match &text {
+                            Some(text) if variables.is_empty() => {
+                                toml::from_str::<ServerConfig>(text)
+                                    .err()
+                                    .map_or_else(|| e.to_string(), |e| e.to_string())
+                            }
+                            _ => e.to_string(),
+                        };
+                        format!("cannot parse {origin}: {detail}")
+                    }
+                })?;
+        config
+            .read_table_files()
+            .and_then(|()| config.check())
+            .map_err(|e| format!("{origin}: {e}"))?;
+        Ok(Layered {
+            config,
+            origin,
+            from_environment: variables
+                .into_iter()
+                .map(|variable| (variable.path.join("."), variable.name))
+                .collect(),
+        })
+    }
+
+    /// Fills `basic_users` and `headers` from the files that name them (ADR-0051 clause 5).
+    fn read_table_files(&mut self) -> Result<(), String> {
+        if let Some(auth) = &mut self.rest.auth {
+            if let Some(path) = &auth.basic_users_file {
+                auth.basic_users = read_table_file("[rest.auth] basic_users_file", path)?;
+            }
+        }
+        if let Some(telemetry) = &mut self.telemetry_offer {
+            if let Some(path) = &telemetry.headers_file {
+                telemetry.headers = read_table_file("[telemetry_offer] headers_file", path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The startup checks every layered document passes, its source aside.
+    fn check(&self) -> Result<(), String> {
         // The Agent plane has no credential of its own (ADR-0021 clause 1). A leftover section is
         // refused rather than ignored: an operator is present at a Server upgrade, and a section
         // that silently did nothing would tell them the fleet still needs it.
-        if config.auth.is_some() {
-            return Err(format!(
-                "{}: [auth] is refused — the Agent plane admits by client certificate alone; \
-                 remove the section",
-                path.display()
-            ));
+        if self.auth.is_some() {
+            return Err(
+                "[auth] is refused — the Agent plane admits by client certificate alone; \
+                 remove the section"
+                    .to_string(),
+            );
         }
         // One root for all state (ADR-0037 clause 1). A leftover key is refused rather than
         // ignored: the directory it names holds the fleet's trust data, which this Server would
         // otherwise start without.
         for (key, named) in [
-            ("config_dir", config.config_dir.is_some()),
-            ("packages_dir", config.packages_dir.is_some()),
+            ("config_dir", self.config_dir.is_some()),
+            ("packages_dir", self.packages_dir.is_some()),
         ] {
             if named {
                 return Err(format!(
-                    "{}: {key} is removed — the Server keeps all of its state under data_dir \
+                    "{key} is removed — the Server keeps all of its state under data_dir \
                      (ADR-0037). Stop the Server, run `server migrate --config-dir <old> \
                      --packages-dir <old> --data-dir <new>`, then replace config_dir and \
-                     packages_dir with data_dir",
-                    path.display()
+                     packages_dir with data_dir"
                 ));
             }
         }
-        if config.advertised_url.is_some() {
-            return Err(format!(
-                "{}: advertised_url is removed — every package is offered as a path the Client \
+        if self.advertised_url.is_some() {
+            return Err(
+                "advertised_url is removed — every package is offered as a path the Client \
                  resolves against its own Server, and a Client downloads from no other host \
-                 (ADR-0033); remove the key",
-                path.display()
-            ));
+                 (ADR-0033); remove the key"
+                    .to_string(),
+            );
         }
-        if let Some(offer) = &config.connection_offer {
-            offer
-                .check()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some(offer) = &self.connection_offer {
+            offer.check()?;
         }
-        if let Some(client_ca) = &config.client_ca {
-            client_ca
-                .check()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some(client_ca) = &self.client_ca {
+            client_ca.check()?;
         }
-        if let Some(telemetry) = &config.telemetry_offer {
-            telemetry
-                .check()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some(telemetry) = &self.telemetry_offer {
+            telemetry.check()?;
         }
-        if let Some(auth) = &config.rest.auth {
-            auth.check()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some(auth) = &self.rest.auth {
+            auth.check()?;
         }
         // A malformed key fails startup, not the first signature it would have checked (ADR-0033).
-        config
-            .packages
-            .verification_key()
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.packages.verification_key()?;
         // The two planes are two listeners (ADR-0013). Addresses that collide would surface as the
         // second bind failing with "address already in use" — a message about sockets for what is
         // really a configuration mistake, so it is refused here, by name.
-        if listeners_collide(config.listen, config.rest.listen) {
+        if listeners_collide(self.listen, self.rest.listen) {
             return Err(format!(
-                "{}: listen ({}) and [rest] listen ({}) must be different addresses — the Agent \
+                "listen ({}) and [rest] listen ({}) must be different addresses — the Agent \
                  plane and the Operator plane are separate listeners",
-                path.display(),
-                config.listen,
-                config.rest.listen
+                self.listen, self.rest.listen
             ));
         }
         // Mutual TLS needs a TLS listener to happen on: `client_ca_file` lives inside `[tls]`, so
         // this can only be a `[client_ca]` without one — issuing certificates for a channel that
         // will never ask for them (ADR-0021).
-        if config.client_ca.is_some() && config.tls.is_none() {
-            return Err(format!(
-                "{}: [client_ca] issues client certificates, which only a TLS listener can ask \
-                 for — add a [tls] section, or remove [client_ca]",
-                path.display()
-            ));
+        if self.client_ca.is_some() && self.tls.is_none() {
+            return Err(
+                "[client_ca] issues client certificates, which only a TLS listener can ask \
+                 for — add a [tls] section, or remove [client_ca]"
+                    .to_string(),
+            );
         }
         // A limit of zero would refuse every message, and the Baseline knows no "unlimited": the
         // limit is mandatory, so a value that cannot carry a message fails startup.
-        if config.max_message_size_bytes == 0 {
-            return Err(format!(
-                "{}: max_message_size_bytes must be greater than zero",
-                path.display()
-            ));
+        if self.max_message_size_bytes == 0 {
+            return Err("max_message_size_bytes must be greater than zero".to_string());
         }
-        if config.stale_after_secs == 0 {
-            return Err(format!(
-                "{}: stale_after_secs must be greater than zero — a budget of nothing would call \
-                 every Agent stale the instant it reported",
-                path.display()
-            ));
+        if self.stale_after_secs == 0 {
+            return Err(
+                "stale_after_secs must be greater than zero — a budget of nothing would call \
+                 every Agent stale the instant it reported"
+                    .to_string(),
+            );
         }
-        if config.max_package_size_bytes == 0 {
-            return Err(format!(
-                "{}: max_package_size_bytes must be greater than zero",
-                path.display()
-            ));
+        if self.max_package_size_bytes == 0 {
+            return Err("max_package_size_bytes must be greater than zero".to_string());
         }
-        if config.max_total_package_bytes == 0 {
-            return Err(format!(
-                "{}: max_total_package_bytes must be greater than zero — it bounds the store, not a \
-                 switch",
-                path.display()
-            ));
+        if self.max_total_package_bytes == 0 {
+            return Err(
+                "max_total_package_bytes must be greater than zero — it bounds the store, not a \
+                 switch"
+                    .to_string(),
+            );
         }
-        if config.max_agents == 0 {
-            return Err(format!(
-                "{}: max_agents must be greater than zero — a fleet that can hold no Agent is a \
-                 misconfiguration, not a limit",
-                path.display()
-            ));
+        if self.max_agents == 0 {
+            return Err(
+                "max_agents must be greater than zero — a fleet that can hold no Agent is a \
+                 misconfiguration, not a limit"
+                    .to_string(),
+            );
         }
-        config
-            .agent_rate_limit
-            .check()
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        if config.max_connections == 0 || config.rest.max_connections == 0 {
-            return Err(format!(
-                "{}: max_connections and [rest] max_connections must be greater than zero — a \
-                 plane that holds no connection serves nobody",
-                path.display()
-            ));
+        self.agent_rate_limit.check()?;
+        if self.max_connections == 0 || self.rest.max_connections == 0 {
+            return Err(
+                "max_connections and [rest] max_connections must be greater than zero — a \
+                 plane that holds no connection serves nobody"
+                    .to_string(),
+            );
         }
-        config
-            .check_secure()
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(config)
+        self.check_secure()
     }
 
     /// A warning when one host cannot report for all the Agents it may speak for at the fleet's
@@ -900,6 +981,241 @@ impl ServerConfig {
         }
         Ok(())
     }
+}
+
+/// The prefix of a variable that sets one key of the Server's configuration (ADR-0051 clause 3).
+pub const VARIABLE_PREFIX: &str = "FLEET_SERVER__";
+
+/// The variable that names the configuration file when `--config` does not (ADR-0051 clause 2).
+/// One underscore: it is no key.
+pub const CONFIG_FILE_VARIABLE: &str = "FLEET_SERVER_CONFIG";
+
+/// The tables whose keys are data an operator chooses, each with the key that names a file
+/// holding it (ADR-0051 clause 5). The environment reaches them only through that key.
+const TABLES_FROM_FILES: [(&[&str], &str); 2] = [
+    (&["rest", "auth", "basic_users"], "basic_users_file"),
+    (&["telemetry_offer", "headers"], "headers_file"),
+];
+
+/// A configuration and where it came from.
+#[derive(Debug)]
+pub struct Layered {
+    pub config: ServerConfig,
+    /// The file, the environment, both, or the defaults — what an error found later names.
+    pub origin: String,
+    /// Every key the environment set, as its TOML path, with the variable that set it.
+    pub from_environment: Vec<(String, String)>,
+}
+
+impl Layered {
+    /// The startup log line naming every key the environment set, and never a value (ADR-0051
+    /// clause 7); `None` when it set none.
+    #[must_use]
+    pub fn environment_notice(&self) -> Option<String> {
+        (!self.from_environment.is_empty()).then(|| {
+            let keys: Vec<String> = self
+                .from_environment
+                .iter()
+                .map(|(key, variable)| format!("{key} ({variable})"))
+                .collect();
+            format!("set from the environment: {}", keys.join(", "))
+        })
+    }
+}
+
+/// Which file the Server reads (ADR-0051 clause 2): the one `--config` names, else the one
+/// [`CONFIG_FILE_VARIABLE`] names, and either has to exist; without both, `default` when it
+/// exists, and no file when it does not.
+///
+/// # Errors
+/// Returns an error naming the path when a named file does not exist.
+pub fn config_file(
+    named: Option<PathBuf>,
+    variable: Option<OsString>,
+    default: &Path,
+) -> Result<Option<PathBuf>, String> {
+    match named.or_else(|| variable.map(PathBuf::from)) {
+        Some(path) if path.exists() => Ok(Some(path)),
+        Some(path) => Err(format!(
+            "the configuration file {} does not exist",
+            path.display()
+        )),
+        None => Ok(default.exists().then(|| default.to_path_buf())),
+    }
+}
+
+/// The process's `FLEET_SERVER__…` variables, the one place the Server reads its environment for
+/// its configuration (ADR-0051 clause 8).
+///
+/// # Errors
+/// Returns an error naming a variable whose value is not UTF-8.
+pub fn server_variables() -> Result<Vec<(String, String)>, String> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let name = name.into_string().ok()?;
+            name.starts_with(VARIABLE_PREFIX).then_some((name, value))
+        })
+        .map(|(name, value)| match value.into_string() {
+            Ok(value) => Ok((name, value)),
+            Err(_) => Err(format!("{name} is not valid UTF-8")),
+        })
+        .collect()
+}
+
+/// One `FLEET_SERVER__…` variable, read.
+#[derive(Debug)]
+struct Variable {
+    name: String,
+    /// The key it sets, one TOML key per segment.
+    path: Vec<String>,
+    value: toml::Value,
+}
+
+/// The `FLEET_SERVER__…` variables among `variables`, in the order of their names, each read as
+/// clauses 3 to 5 of ADR-0051 say, and each key set by one of them at most.
+fn environment(variables: Vec<(String, String)>) -> Result<Vec<Variable>, String> {
+    let mut read = Vec::new();
+    for (name, value) in variables {
+        let Some(key) = name.strip_prefix(VARIABLE_PREFIX) else {
+            continue;
+        };
+        // The name is the key upper-cased (clause 3), so a lower-case letter is a second spelling
+        // of some key, which would let two variables set it and the later one win unseen.
+        if key.chars().any(|c| c.is_ascii_lowercase()) {
+            return Err(format!(
+                "{name} names no key of the Server's configuration: a variable name is the key \
+                 upper-cased"
+            ));
+        }
+        let path: Vec<String> = key.split("__").map(str::to_lowercase).collect();
+        if path.iter().any(String::is_empty) {
+            return Err(format!(
+                "{name} names no key of the Server's configuration: a segment between `__` is \
+                 empty"
+            ));
+        }
+        // A bare word is a string, so a path needs no quotes (clause 4).
+        let value = value
+            .parse::<toml::Value>()
+            .unwrap_or(toml::Value::String(value));
+        let variable = Variable { name, path, value };
+        for (table, file_key) in TABLES_FROM_FILES {
+            if variable.reaches(table) {
+                return Err(format!(
+                    "{} is refused — the environment never carries [{}]; name a file holding \
+                     it with {file_key}",
+                    variable.name,
+                    table.join(".")
+                ));
+            }
+        }
+        read.push(variable);
+    }
+    read.sort_by(|a, b| a.name.cmp(&b.name));
+    // A key and a table above it set by two variables would leave one of them unread; the
+    // inline-table case (`FLEET_SERVER__REST` beside `FLEET_SERVER__REST__LISTEN`) is the same.
+    for (i, outer) in read.iter().enumerate() {
+        if !outer.value.is_table() {
+            continue;
+        }
+        if let Some(inner) = read[i + 1..]
+            .iter()
+            .find(|inner| inner.path.starts_with(&outer.path))
+        {
+            return Err(format!(
+                "{} and {} both set [{}] — set it once",
+                outer.name,
+                inner.name,
+                outer.path.join(".")
+            ));
+        }
+    }
+    Ok(read)
+}
+
+impl Variable {
+    /// Whether this variable sets `target` or anything inside it, directly or in a table it sets
+    /// whole.
+    fn reaches(&self, target: &[&str]) -> bool {
+        let (shared, rest) = target.split_at(self.path.len().min(target.len()));
+        if !self.path.iter().zip(shared).all(|(a, b)| a == b) {
+            return false;
+        }
+        let mut value = &self.value;
+        for segment in rest {
+            match value.get(*segment) {
+                Some(inner) => value = inner,
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Sets the key in `document`, creating the tables on its way and replacing what was there.
+    fn set_in(&self, document: &mut toml::Table) -> Result<(), String> {
+        let (last, tables) = self.path.split_last().expect("a path has a segment");
+        let mut table = document;
+        for (depth, segment) in tables.iter().enumerate() {
+            let entry = table
+                .entry(segment.clone())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            table = entry.as_table_mut().ok_or_else(|| {
+                format!(
+                    "{} names no key of the Server's configuration: {} is not a table",
+                    self.name,
+                    self.path[..=depth].join(".")
+                )
+            })?;
+        }
+        table.insert(last.clone(), self.value.clone());
+        Ok(())
+    }
+}
+
+/// The value at `path` in `document`, if there is one.
+fn lookup<'a>(document: &'a toml::Table, path: &[&str]) -> Option<&'a toml::Value> {
+    let (first, rest) = path.split_first()?;
+    let mut value = document.get(*first)?;
+    for segment in rest {
+        value = value.get(*segment)?;
+    }
+    Some(value)
+}
+
+/// The variable a deserialization error is about, if one is: the one that set the key the error
+/// points at, a table holding it, or a key inside an unknown one. `toml` names the table an error
+/// is in on its `in `…`` line, and `serde` names an unknown field in the message.
+fn blamed<'a>(variables: &'a [Variable], error: &toml::de::Error) -> Option<&'a Variable> {
+    let text = error.to_string();
+    let mut key: Vec<String> = text
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("in `")?.strip_suffix('`'))
+        .map(|path| path.split('.').map(str::to_string).collect())
+        .unwrap_or_default();
+    if let Some(field) = error
+        .message()
+        .strip_prefix("unknown field `")
+        .and_then(|rest| rest.split('`').next())
+    {
+        key.push(field.to_string());
+    }
+    if key.is_empty() {
+        return None;
+    }
+    variables
+        .iter()
+        .find(|variable| variable.path.starts_with(&key) || key.starts_with(&variable.path))
+}
+
+/// A table of names to strings read from its own TOML file (ADR-0051 clause 5). A parse error
+/// says what is wrong but quotes no line: the file holds credentials.
+fn read_table_file(key: &str, path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("{key} {}: cannot read it: {e}", path.display()))?;
+    toml::from_str(&text).map_err(|e: toml::de::Error| {
+        format!("{key} {}: cannot parse it: {}", path.display(), e.message())
+    })
 }
 
 /// The `[connection_offer]` section as the offer the fleet makes (ADR-0014). It carries no
@@ -1548,7 +1864,7 @@ mod tests {
     fn a_server_without_tls_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
         // No file at all is the defaults, and the defaults serve no TLS.
-        let missing = ServerConfig::load(&dir.path().join("absent.toml")).expect_err("no tls");
+        let missing = ServerConfig::load_layered(None, Vec::new()).expect_err("no tls");
         assert!(missing.contains("[tls] is required"), "{missing}");
         let path = dir.path().join("server.toml");
         std::fs::write(&path, "listen = \"127.0.0.1:4320\"\n").expect("write");
@@ -1575,5 +1891,401 @@ mod tests {
 
         std::fs::write(&path, tls).expect("write");
         ServerConfig::load(&path).expect("a loopback plane needs no authentication");
+    }
+
+    /// The variables of a test, as the process environment would hand them over.
+    fn variables(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    /// The `[tls]` section as variables, for a configuration that comes from the environment alone.
+    const TLS_VARIABLES: [(&str, &str); 3] = [
+        ("FLEET_SERVER__TLS__CERT_FILE", "c.pem"),
+        ("FLEET_SERVER__TLS__KEY_FILE", "k.pem"),
+        ("FLEET_SERVER__TLS__CLIENT_CA_FILE", "ca.pem"),
+    ];
+
+    /// A variable sets the key its name spells, over the file's value; a key no variable names
+    /// keeps the file's; and a variable that does not start with the prefix configures nothing.
+    /// Verifies: ADR-0051
+    #[test]
+    fn the_environment_overrides_the_files_keys_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "data_dir = \"from-file\"\nstale_after_secs = 120\n\
+                 [connection_offer]\nheartbeat_interval_secs = 30\n\
+                 [rest.tls]\ncert_file = \"file-ui.pem\"\nkey_file = \"file-ui-key.pem\"\n{TLS}"
+            ),
+        )
+        .expect("write");
+        let layered = ServerConfig::load_layered(
+            Some(&path),
+            variables(&[
+                ("FLEET_SERVER__DATA_DIR", "/var/lib/fleet"),
+                ("FLEET_SERVER__REST__TLS__CERT_FILE", "/run/secrets/ui.pem"),
+                (
+                    "FLEET_SERVER__CONNECTION_OFFER__HEARTBEAT_INTERVAL_SECS",
+                    "45",
+                ),
+                ("FLEET_SERVER_CONFIG", "ignored.toml"),
+                ("FLEET_OTHER__DATA_DIR", "ignored"),
+            ]),
+        )
+        .expect("loads");
+        let config = layered.config;
+        assert_eq!(config.data_dir, PathBuf::from("/var/lib/fleet"));
+        let rest_tls = config.rest.tls.expect("[rest.tls]");
+        assert_eq!(rest_tls.cert_file, PathBuf::from("/run/secrets/ui.pem"));
+        assert_eq!(rest_tls.key_file, PathBuf::from("file-ui-key.pem"));
+        assert_eq!(
+            config
+                .connection_offer
+                .expect("[connection_offer]")
+                .heartbeat_interval_secs,
+            Some(45)
+        );
+        assert_eq!(config.stale_after_secs, 120, "a key no variable names");
+        assert!(layered.origin.contains("server.toml"), "{}", layered.origin);
+    }
+
+    /// No file named and none in the working directory: the defaults, with the environment over
+    /// them, which can be the whole configuration.
+    /// Verifies: ADR-0051
+    #[test]
+    fn without_a_file_the_configuration_is_built_from_defaults_and_the_environment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let default = dir.path().join("server.toml");
+        let file = config_file(None, None, &default).expect("no file is no error");
+        assert_eq!(file, None);
+        let config = ServerConfig::load_layered(file.as_deref(), variables(&TLS_VARIABLES))
+            .expect("the environment carries [tls]")
+            .config;
+        assert_eq!(config.tls.expect("[tls]").cert_file, PathBuf::from("c.pem"));
+        assert_eq!(config.listen.port(), 4320, "a default");
+
+        std::fs::write(&default, TLS).expect("write");
+        assert_eq!(
+            config_file(None, None, &default).expect("found"),
+            Some(default.clone()),
+            "server.toml in the working directory is read when it exists"
+        );
+    }
+
+    /// A file named by `--config` or by `FLEET_SERVER_CONFIG` has to exist; `--config` wins over
+    /// the variable.
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_named_configuration_file_that_does_not_exist_fails_startup_naming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let default = dir.path().join("server.toml");
+        std::fs::write(&default, TLS).expect("write");
+        let missing = dir.path().join("missing.toml");
+        let err = config_file(Some(missing.clone()), None, &default).expect_err("--config");
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+        let err = config_file(None, Some(missing.clone().into_os_string()), &default)
+            .expect_err("FLEET_SERVER_CONFIG");
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+        assert_eq!(
+            config_file(
+                Some(default.clone()),
+                Some(missing.into_os_string()),
+                &default
+            )
+            .expect("--config wins"),
+            Some(default)
+        );
+    }
+
+    /// A variable naming no key fails startup naming the variable, as an unknown key in the file
+    /// does; so does one with an empty segment, and one that reaches into a key that is no table.
+    /// Verifies: ADR-0051
+    #[test]
+    fn an_unknown_variable_fails_startup_naming_it() {
+        for (name, value) in [
+            ("FLEET_SERVER__REST__TLSS__CERT_FILE", "ui.pem"),
+            ("FLEET_SERVER__LISTNE", "127.0.0.1:4320"),
+            ("FLEET_SERVER__REST____TLS", "x"),
+            ("FLEET_SERVER__", "x"),
+            ("FLEET_SERVER__STALE_AFTER_SECS__X", "1"),
+            ("FLEET_SERVER__REST", "{ lisen = \"127.0.0.1:4321\" }"),
+        ] {
+            let mut pairs = TLS_VARIABLES.to_vec();
+            if name == "FLEET_SERVER__STALE_AFTER_SECS__X" {
+                pairs.push(("FLEET_SERVER__STALE_AFTER_SECS", "90"));
+            }
+            pairs.push((name, value));
+            let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err(name);
+            assert!(err.starts_with(&format!("{name} names no key")), "{err}");
+        }
+    }
+
+    /// A key has one spelling and one variable: a lower-case name, or two variables of which one
+    /// sets a table the other reaches into, fails startup naming them.
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_key_is_set_by_one_upper_case_variable() {
+        let mut pairs = TLS_VARIABLES.to_vec();
+        pairs.push(("FLEET_SERVER__listen", "127.0.0.1:4320"));
+        let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err("lower case");
+        assert!(
+            err.starts_with("FLEET_SERVER__listen names no key"),
+            "{err}"
+        );
+
+        let mut pairs = TLS_VARIABLES.to_vec();
+        pairs.push(("FLEET_SERVER__REST", "{ listen = \"127.0.0.1:4321\" }"));
+        pairs.push(("FLEET_SERVER__REST__LISTEN", "127.0.0.1:4322"));
+        let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err("twice");
+        assert!(
+            err.contains("FLEET_SERVER__REST and FLEET_SERVER__REST__LISTEN both set"),
+            "{err}"
+        );
+    }
+
+    /// A value whose type does not fit its key fails startup naming the variable and the type the
+    /// key expects.
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_value_of_the_wrong_type_fails_startup_naming_the_variable_and_the_type() {
+        for (name, value, expected) in [
+            ("FLEET_SERVER__STALE_AFTER_SECS", "soon", "u64"),
+            ("FLEET_SERVER__DATA_DIR", "1234", "path"),
+            (
+                "FLEET_SERVER__CONNECTION_OFFER__HEARTBEAT_INTERVAL_SECS",
+                "-1",
+                "u64",
+            ),
+        ] {
+            let mut pairs = TLS_VARIABLES.to_vec();
+            pairs.push((name, value));
+            let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err(name);
+            assert!(err.starts_with(&format!("{name}: ")), "{err}");
+            assert!(err.contains(&format!("expected {expected}")), "{err}");
+        }
+    }
+
+    /// A value is a TOML value, and what does not parse as one is the string it is: a path needs
+    /// no quotes, a quoted number is a string, a bare one an integer.
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_bare_word_is_a_string_and_a_quoted_number_too() {
+        let read = environment(variables(&[
+            ("FLEET_SERVER__A", "/run/secrets/pg"),
+            ("FLEET_SERVER__B", "\"1234\""),
+            ("FLEET_SERVER__C", "1234"),
+            ("FLEET_SERVER__D", "true"),
+            ("FLEET_SERVER__E", "[\"a\", \"b\"]"),
+            ("FLEET_SERVER__F", "{ g = 1 }"),
+        ]))
+        .expect("read");
+        let values: Vec<_> = read.iter().map(|variable| variable.value.clone()).collect();
+        assert_eq!(
+            values,
+            vec![
+                toml::Value::String("/run/secrets/pg".into()),
+                toml::Value::String("1234".into()),
+                toml::Value::Integer(1234),
+                toml::Value::Boolean(true),
+                toml::Value::Array(vec!["a".into(), "b".into()]),
+                toml::Value::Table(toml::Table::from_iter([(
+                    "g".to_string(),
+                    toml::Value::Integer(1)
+                )])),
+            ]
+        );
+
+        let mut pairs = TLS_VARIABLES.to_vec();
+        pairs.push(("FLEET_SERVER__DATA_DIR", "\"1234\""));
+        pairs.push((
+            "FLEET_SERVER__ENROLMENT__BOOTSTRAP_CA_FILE",
+            "/run/secrets/pg",
+        ));
+        let err = ServerConfig::load_layered(None, variables(&pairs))
+            .expect_err("[enrolment] without [client_ca]");
+        assert!(err.contains("[enrolment] needs [client_ca]"), "{err}");
+        pairs.pop();
+        let config = ServerConfig::load_layered(None, variables(&pairs))
+            .expect("a quoted number is a string")
+            .config;
+        assert_eq!(config.data_dir, PathBuf::from("1234"));
+    }
+
+    /// Credentials never come from the environment: `basic_users` set from it, by key or inside a
+    /// table set whole, fails startup naming `basic_users_file`, and the same holds for
+    /// `[telemetry_offer] headers` and `headers_file`.
+    /// Verifies: ADR-0051
+    #[test]
+    fn the_environment_names_credentials_by_file_alone() {
+        for (name, value, file_key) in [
+            (
+                "FLEET_SERVER__REST__AUTH__BASIC_USERS",
+                "{ ops = \"x\" }",
+                "basic_users_file",
+            ),
+            (
+                "FLEET_SERVER__REST__AUTH__BASIC_USERS__OPS",
+                "x",
+                "basic_users_file",
+            ),
+            (
+                "FLEET_SERVER__REST__AUTH",
+                "{ basic_users = { ops = \"x\" } }",
+                "basic_users_file",
+            ),
+            (
+                "FLEET_SERVER__TELEMETRY_OFFER__HEADERS",
+                "{ a = \"x\" }",
+                "headers_file",
+            ),
+            (
+                "FLEET_SERVER__TELEMETRY_OFFER__HEADERS__AUTHORIZATION",
+                "x",
+                "headers_file",
+            ),
+        ] {
+            let mut pairs = TLS_VARIABLES.to_vec();
+            pairs.push((name, value));
+            let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err(name);
+            assert!(err.starts_with(name), "{err}");
+            assert!(err.contains(file_key), "{err}");
+        }
+    }
+
+    /// A table named by a file is never beside the same table inline: startup fails naming both.
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_table_file_beside_its_table_fails_startup_naming_both() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        for (body, both) in [
+            (
+                "[rest.auth]\nbasic_users_file = \"users.toml\"\n[rest.auth.basic_users]\nops = \"x\"\n",
+                ["basic_users_file", "[rest.auth.basic_users]"],
+            ),
+            (
+                "[telemetry_offer]\nmetrics_endpoint = \"https://c.example/v1/metrics\"\n\
+                 headers_file = \"headers.toml\"\n[telemetry_offer.headers]\na = \"x\"\n",
+                ["headers_file", "[telemetry_offer.headers]"],
+            ),
+        ] {
+            std::fs::write(&path, format!("{TLS}{body}")).expect("write");
+            let err = ServerConfig::load(&path).expect_err("both");
+            for named in both {
+                assert!(err.contains(named), "{err}");
+            }
+        }
+        // The file key from the environment, the table in the file: the same document.
+        std::fs::write(
+            &path,
+            format!("{TLS}[rest.auth.basic_users]\nops = \"x\"\n"),
+        )
+        .expect("write");
+        let err = ServerConfig::load_layered(
+            Some(&path),
+            variables(&[("FLEET_SERVER__REST__AUTH__BASIC_USERS_FILE", "users.toml")]),
+        )
+        .expect_err("both");
+        assert!(
+            err.contains("basic_users_file") && err.contains("[rest.auth.basic_users]"),
+            "{err}"
+        );
+    }
+
+    /// `basic_users_file` holds the `basic_users` table, and the users in it are admitted;
+    /// `headers_file` holds the `headers` table.
+    /// Verifies: ADR-0051
+    #[test]
+    fn a_basic_users_file_with_valid_hashes_admits_its_users() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = dir.path().join("users.toml");
+        std::fs::write(
+            &users,
+            format!(
+                "fleet = {:?}\n",
+                crate::credentials::hash_basic("secret").expect("hash")
+            ),
+        )
+        .expect("write");
+        let headers = dir.path().join("headers.toml");
+        std::fs::write(&headers, "Authorization = \"Bearer t\"\n").expect("write");
+        let mut pairs = TLS_VARIABLES.to_vec();
+        let users_path = users.display().to_string();
+        let headers_path = headers.display().to_string();
+        pairs.extend([
+            ("FLEET_SERVER__REST__LISTEN", "0.0.0.0:4321"),
+            (
+                "FLEET_SERVER__REST__AUTH__BASIC_USERS_FILE",
+                users_path.as_str(),
+            ),
+            (
+                "FLEET_SERVER__TELEMETRY_OFFER__METRICS_ENDPOINT",
+                "https://c.example/v1/metrics",
+            ),
+            (
+                "FLEET_SERVER__TELEMETRY_OFFER__HEADERS_FILE",
+                headers_path.as_str(),
+            ),
+        ]);
+        let config = ServerConfig::load_layered(None, variables(&pairs))
+            .expect("loads")
+            .config;
+        let auth = config.rest.auth.expect("[rest.auth]");
+        // base64("fleet:secret")
+        assert!(auth
+            .credentials()
+            .expect("credentials")
+            .verify("Basic ZmxlZXQ6c2VjcmV0"));
+        assert_eq!(
+            config.telemetry_offer.expect("[telemetry_offer]").headers["Authorization"],
+            "Bearer t"
+        );
+
+        std::fs::write(&users, "fleet = \"plain-password\"\n").expect("write");
+        let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err("not a hash");
+        assert!(
+            err.contains("[rest.auth.basic_users] user \"fleet\""),
+            "{err}"
+        );
+        assert!(!err.contains("plain-"), "never echoes the value: {err}");
+        std::fs::write(&users, "fleet = plain-password\n").expect("write");
+        let err = ServerConfig::load_layered(None, variables(&pairs)).expect_err("not TOML");
+        assert!(err.contains("basic_users_file"), "{err}");
+        assert!(!err.contains("plain-"), "never quotes the file: {err}");
+    }
+
+    /// The startup log names every key the environment set, and none of their values.
+    /// Verifies: ADR-0051
+    #[test]
+    fn the_startup_log_names_the_keys_the_environment_set_and_no_value() {
+        let mut pairs = TLS_VARIABLES.to_vec();
+        pairs.push(("FLEET_SERVER__DATA_DIR", "/var/lib/secret-place"));
+        let layered = ServerConfig::load_layered(None, variables(&pairs)).expect("loads");
+        let notice = layered.environment_notice().expect("a notice");
+        for key in [
+            "tls.cert_file",
+            "tls.key_file",
+            "tls.client_ca_file",
+            "data_dir",
+        ] {
+            assert!(notice.contains(key), "{notice}");
+        }
+        for (_, value) in pairs {
+            assert!(!notice.contains(value), "{notice}");
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(&path, TLS).expect("write");
+        assert_eq!(
+            ServerConfig::load_layered(Some(&path), Vec::new())
+                .expect("loads")
+                .environment_notice(),
+            None
+        );
     }
 }

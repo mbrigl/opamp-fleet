@@ -9,6 +9,20 @@
 # next header, so a `[telemetry_offer]` sitting above `data_dir` would swallow it the moment
 # anyone uncommented it, and the Server would refuse to start with "unknown field `data_dir`".
 # Add new settings accordingly: a bare key goes in the first half, a section in the second.
+#
+# THE ENVIRONMENT OVER THIS FILE. Every key can also be set by a variable, FLEET_SERVER__ followed
+# by the key's path, its segments joined by __ and upper-cased; it wins over this file:
+#
+#   FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet       sets data_dir
+#   FLEET_SERVER__REST__TLS__CERT_FILE=ui.pem         sets [rest.tls] cert_file
+#
+# The value is TOML (30 is an integer, "30" a string), and what is not TOML is a string, so a path
+# needs no quotes. A variable that names no key fails startup, naming it, as an unknown key here
+# does. Secrets travel as paths to files, never as values: [rest.auth.basic_users] and
+# [telemetry_offer.headers] are reached from the environment only through basic_users_file and
+# headers_file. Without --config, FLEET_SERVER_CONFIG names this file; with neither, server.toml in
+# the working directory is read when it exists. The Server logs the name of every key the
+# environment set.
 
 # =============================================================================================
 # Settings
@@ -299,6 +313,9 @@ client_ca_file = "client-ca.pem"
 # [telemetry_offer.headers]
 # Authorization = "Bearer a-telemetry-token"
 #
+#     The headers may instead come from a file holding the same lines without the section header,
+#     headers_file = "/run/secrets/telemetry-headers.toml" under [telemetry_offer] — never both.
+#
 # (3) Metrics only — the smallest useful shape: one signal, no header, nothing else offered.
 # [telemetry_offer]
 # metrics_endpoint = "https://collector.example:4318/v1/metrics"
@@ -329,6 +346,11 @@ max_connections = 256
 # password is listed by its Argon2id hash: `server hash-credential --basic`.
 # [rest.auth.basic_users]
 # fleet-admin = "$argon2id$v=19$m=19456,t=2,p=1$…"
+#
+# Or the same lines, without the section header, in a file readable by the Server's account alone
+# — never both:
+# [rest.auth]
+# basic_users_file = "/run/secrets/basic-users.toml"
 
 # The Operator plane's own certificate and key, OPTIONAL. Without the section the Operator plane
 # serves [tls]'s, which chains to the fleet's server CA — the one every Client trusts, and one a

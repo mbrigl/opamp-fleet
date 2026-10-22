@@ -193,7 +193,10 @@ signed with the operator's key and fetched from a source the operator allowed.
 
 **Configuration files.** Both ends read one hand-edited TOML file, named with `--config`.
 Most keys are optional; the TLS material is not. An unknown key is
-refused at startup rather than ignored, and there are no environment-variable fallbacks. The
+refused at startup rather than ignored. The Server's keys can also be set by `FLEET_SERVER__…`
+environment variables, checked as strictly as the file
+([Configuration from the environment](server.md#configuration-from-the-environment)); the Client
+reads no setting from its environment. The
 annotated examples in [`config/`](../../config/) are the reference copies: [`config/server.toml`](../../config/server.toml) and
 [`config/supervisor.toml`](../../config/supervisor.toml).
 

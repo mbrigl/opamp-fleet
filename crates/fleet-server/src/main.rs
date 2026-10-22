@@ -1,5 +1,6 @@
-//! Entry point: load `server.toml`, bind the two listeners (plain or TLS) — the Agent plane and
-//! the Operator plane (ADR-0013) — and serve both until interrupted.
+//! Entry point: load the configuration from `server.toml` and the environment (ADR-0051), bind the
+//! two listeners (plain or TLS) — the Agent plane and the Operator plane (ADR-0013) — and serve
+//! both until interrupted.
 //!
 //! Both planes are served the same way whether or not TLS is configured, so that what bounds a
 //! connection before it becomes a request holds on all four surfaces (ADR-0013). Only the acceptor
@@ -9,7 +10,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use fleet_server::config::ServerConfig;
+use fleet_server::config::{Layered, ServerConfig};
 use fleet_server::fleet::AppState;
 use fleet_server::listen;
 use opamp::server::listen::Handle;
@@ -20,7 +21,7 @@ fn usage() -> ! {
         "Usage: server [--config <server.toml>] [--version]\n       \
          server hash-credential --basic   (reads the password from standard input)\n       \
          server audit-verify <data_dir>/audit\n       \
-         server pki status --config <server.toml>\n       \
+         server pki status [--config <server.toml>]\n       \
          server migrate --config-dir <old> --packages-dir <old> --data-dir <new>"
     );
     std::process::exit(2);
@@ -65,23 +66,47 @@ fn audit_verify(dir: Option<String>) -> ! {
     }
 }
 
-/// `server pki status --config <server.toml>` (ADR-0028 clause 12): when each certificate the
+/// The configuration every command that reads one reads (ADR-0051 clause 2): the file `--config`
+/// or `FLEET_SERVER_CONFIG` names, or `server.toml` in the working directory when it exists, with
+/// the environment over it. The keys the environment set are logged by name. Stops the process on
+/// an error.
+fn load_config(named: Option<PathBuf>) -> Layered {
+    let layered = fleet_server::config::config_file(
+        named,
+        std::env::var_os(fleet_server::config::CONFIG_FILE_VARIABLE),
+        std::path::Path::new("server.toml"),
+    )
+    .and_then(|file| {
+        let variables = fleet_server::config::server_variables()?;
+        ServerConfig::load_layered(file.as_deref(), variables)
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    if let Some(notice) = layered.environment_notice() {
+        // ADR-0051 clause 7.
+        info!("{notice}");
+    }
+    layered
+}
+
+/// `server pki status [--config <server.toml>]` (ADR-0028 clause 12): when each certificate the
 /// Server host depends on ends. The commands that make certificates are the operator tool's
 /// (ADR-0028); the Server binary makes none.
 fn pki(mut args: impl Iterator<Item = String>) -> ! {
     use fleet_server::pki;
-    let (Some("status"), Some("--config"), Some(path), None) = (
+    let named = match (
         args.next().as_deref(),
         args.next().as_deref(),
         args.next(),
         args.next(),
-    ) else {
-        usage()
+    ) {
+        (Some("status"), None, None, None) => None,
+        (Some("status"), Some("--config"), Some(path), None) => Some(PathBuf::from(path)),
+        _ => usage(),
     };
-    let config = ServerConfig::load(&PathBuf::from(path)).unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(1);
-    });
+    let config = load_config(named).config;
     let endings = pki::status(&config).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
@@ -250,8 +275,9 @@ impl Drop for EchoOff {
     }
 }
 
-fn parse_args() -> PathBuf {
-    let mut config = PathBuf::from("server.toml");
+/// The file `--config` names, if it does.
+fn parse_args() -> Option<PathBuf> {
+    let mut config = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -260,7 +286,7 @@ fn parse_args() -> PathBuf {
             "pki" => pki(args),
             "migrate" => migrate(args),
             "--config" => match args.next() {
-                Some(path) => config = PathBuf::from(path),
+                Some(path) => config = Some(PathBuf::from(path)),
                 None => usage(),
             },
             "--version" => {
@@ -306,14 +332,7 @@ async fn main() {
     // One TLS provider for the whole process (ADR-0013): ring, never a system library.
     opamp::tls::install_ring_provider();
 
-    let config_path = parse_args();
-    let config = match ServerConfig::load(&config_path) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
+    let Layered { config, origin, .. } = load_config(parse_args());
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
     // to know which CA issued what (ADR-0013, ADR-0021).
@@ -579,7 +598,7 @@ async fn main() {
             ))
         }),
         Err(e) => {
-            eprintln!("{}: {e}", config_path.display());
+            eprintln!("{origin}: {e}");
             std::process::exit(1);
         }
     };
