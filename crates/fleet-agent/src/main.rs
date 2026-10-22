@@ -429,6 +429,12 @@ fn install(
             println!("warning: {}", skipped.warning(run_as.account()));
         }
     }
+    // The second service runs from the layout, which a root taken over or cut off on Windows
+    // grants the process account nothing of (ADR-0059 clause 2).
+    #[cfg(windows)]
+    if let Some(process) = &process {
+        process.share_layout(&layout.versions_dir())?;
+    }
 
     drop(held_root);
     println!("installed {}", manager::service_name());

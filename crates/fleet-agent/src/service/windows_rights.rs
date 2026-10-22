@@ -113,40 +113,59 @@ fn taken_over(parent: &crate::win32::acl::Dacl, dir: bool) -> crate::win32::acl:
 /// beneath it, is left as it is (ADR-0059 clause 10). An entry that cannot be taken over fails the
 /// install instead of staying behind.
 #[cfg(windows)]
-fn take_over(dir: &std::path::Path, process: Option<&crate::win32::Sid>) -> std::io::Result<()> {
-    use crate::win32::files::{walk, Access, Entry};
+fn take_over(
+    dir: &std::path::Path,
+    process: Option<&crate::win32::Sid>,
+) -> std::io::Result<Vec<crate::win32::files::Passed>> {
+    use crate::win32::files::{walk, Access, Entry, Walk};
     let top = open_root(dir, Access::Owner)?;
     top.set_owner(OWNER)?;
     let keepers_alone = crate::win32::acl::Dacl::parse("D:").map_err(std::io::Error::other)?;
     top.set_dacl(&cut(&keepers_alone))?;
-    let mut skipped = Vec::new();
+    let mut passed = Vec::new();
+    let how = Walk {
+        access: Access::Owner,
+        skip: process,
+        lenient: false,
+    };
     walk(
         &top,
-        Access::Owner,
-        process,
+        how,
         &mut |entry: &Entry, parent: &Entry| {
             entry.set_owner(OWNER)?;
             entry.set_dacl(&taken_over(&parent.dacl()?, entry.dir))?;
             Ok(true)
         },
-        &mut skipped,
-    )
+        &mut passed,
+    )?;
+    Ok(passed)
 }
 
 /// Cuts `dir` off from the rights it inherits and leaves it to [`KEEPERS`] ([`cut`]), and applies
 /// what it then passes on to what it already holds — the configuration written moments ago would
 /// otherwise keep the read right `BUILTIN\Users` passed on before. Through handles, as
 /// [`take_over`] goes, and stopping at an entry protected from what its parent passes on.
+///
+/// What the process account owns is left as it is, its inherited ACEs included: what a root the
+/// operator named passed on to it before the cut — `BUILTIN\Users` reading, say — it keeps until
+/// it is written again. Its content is the Managed Processes' own, which the cut does not touch.
 #[cfg(windows)]
-fn cut_off(dir: &std::path::Path, process: Option<&crate::win32::Sid>) -> std::io::Result<()> {
-    use crate::win32::files::{walk, Access, Entry};
+fn cut_off(
+    dir: &std::path::Path,
+    process: Option<&crate::win32::Sid>,
+) -> std::io::Result<Vec<crate::win32::files::Passed>> {
+    use crate::win32::files::{walk, Access, Entry, Walk};
     let top = open_root(dir, Access::Dacl)?;
     top.set_dacl(&cut(&top.dacl()?))?;
-    let mut skipped = Vec::new();
+    let mut passed = Vec::new();
+    let how = Walk {
+        access: Access::Dacl,
+        skip: process,
+        lenient: false,
+    };
     walk(
         &top,
-        Access::Dacl,
-        process,
+        how,
         &mut |entry: &Entry, parent: &Entry| {
             let dacl = entry.dacl()?;
             let inherits = dacl.inheriting(&parent.dacl()?, entry.dir);
@@ -155,8 +174,29 @@ fn cut_off(dir: &std::path::Path, process: Option<&crate::win32::Sid>) -> std::i
             }
             Ok(!dacl.protected())
         },
-        &mut skipped,
-    )
+        &mut passed,
+    )?;
+    Ok(passed)
+}
+
+/// The warning that names what a walk of the install passed over.
+#[cfg(windows)]
+pub(crate) fn passed_warning(passed: &crate::win32::files::Passed) -> String {
+    use crate::win32::files::Passed;
+    match passed {
+        Passed::Owned(path) => format!(
+            "{} belongs to the process account and was left as it is, with everything beneath it",
+            path.display()
+        ),
+        Passed::HardLinked(path) => format!(
+            "{} has a second hard link and was left as it is: its other name may stand anywhere",
+            path.display()
+        ),
+        Passed::Unreadable(path) => format!(
+            "{} could not be opened and was left as it is",
+            path.display()
+        ),
+    }
 }
 
 /// Opens the root `dir` as itself, held: a root that is a link is refused.
@@ -260,6 +300,10 @@ pub fn restrict(
         .map(crate::win32::Sid::parse)
         .transpose()
         .map_err(|e| format!("the process account: {e}"))?;
+    // For as short as the walks take: an entry another account made, or one a Managed Process
+    // protected from the Administrators, is opened all the same, and its owner set.
+    let _privileges = crate::win32::BackupPrivileges::enable()
+        .map_err(|e| format!("cannot enable the backup and restore privileges: {e}"))?;
     for (index, (dir, treatment)) in plan.iter().enumerate() {
         if *treatment == Treatment::Untouched {
             println!(
@@ -278,12 +322,17 @@ pub fn restrict(
         } else {
             cut_off(dir, process.as_ref())
         };
-        restricted.map_err(|e| {
+        let passed = restricted.map_err(|e| {
             format!(
                 "cannot restrict {} to LocalSystem and the Administrators: {e}",
                 dir.display()
             )
         })?;
+        for passed in passed {
+            if !matches!(passed, crate::win32::files::Passed::Owned(_)) {
+                println!("warning: {}", passed_warning(&passed));
+            }
+        }
         if index > 0 {
             created.push(dir.clone());
         }
@@ -489,6 +538,133 @@ mod tests {
             "D:AI(A;;0x1;;;LS)(A;ID;0x1301bf;;;S-1-5-80-1-2-3-4-5)(A;ID;0x1f01ff;;;SY)(A;ID;0x1f01ff;;;BA)",
             "no read right for Users"
         );
+    }
+
+    /// A tree under a parent that passes on what every local user may read, cut off or taken over
+    /// on real NTFS: the root keeps the keepers alone and is protected, what it holds inherits the
+    /// keepers alone, and a junction, the other name of a hard link and what the process account
+    /// owns — this test's own account standing in — are not touched; a root that is a link is
+    /// refused. The test runs elevated, as an install does.
+    /// Verifies: ADR-0019, ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_restricted_root_keeps_the_keepers_alone_and_enters_no_link() {
+        use super::restrict;
+        use crate::service::ServiceLevel;
+        use crate::win32::files::{Access, Entry};
+        let me = crate::win32::own_sid().expect("own sid");
+        let sddl = |path: &Path| {
+            Entry::open(path, Access::Read, false)
+                .and_then(|entry| entry.dacl())
+                .expect("dacl")
+                .text()
+        };
+        let owner = |path: &Path| {
+            Entry::open(path, Access::Read, false)
+                .and_then(|entry| entry.owner())
+                .expect("owner")
+        };
+        let mklink = |kind: &str, link: &Path, target: &Path| {
+            let made = std::process::Command::new("cmd")
+                .args(["/c", "mklink", kind])
+                .arg(link)
+                .arg(target)
+                .status()
+                .expect("run mklink");
+            assert!(made.success(), "cannot make {}", link.display());
+        };
+        for treatment in [Treatment::Cut, Treatment::TakeOver] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let parent = dir.path().join("parent");
+            std::fs::create_dir(&parent).expect("parent");
+            Entry::open(&parent, Access::Dacl, false)
+                .and_then(|entry| {
+                    entry.set_dacl(
+                        &Dacl::parse(&format!(
+                            "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{me})\
+                             (A;OICI;0x1200a9;;;BU)(A;OICI;0x1200a9;;;WD)"
+                        ))
+                        .expect("dacl"),
+                    )
+                })
+                .expect("a parent that passes on reading to everyone");
+            let root = parent.join("root");
+            let sub = root.join("sub");
+            std::fs::create_dir_all(&sub).expect("sub");
+            std::fs::write(sub.join("file"), b"x").expect("file");
+            let outside = dir.path().join("outside");
+            std::fs::create_dir(&outside).expect("outside");
+            std::fs::write(outside.join("secret"), b"x").expect("secret");
+            mklink("/J", &root.join("link"), &outside);
+            mklink("/H", &root.join("hard"), &outside.join("secret"));
+            let owned = root.join("owned");
+            std::fs::create_dir(&owned).expect("owned");
+            Entry::open(&owned, Access::Owner, false)
+                .and_then(|entry| entry.set_owner(me.as_str()))
+                .expect("owned by the stand-in");
+            let grants = |path: &Path| {
+                Entry::open(path, Access::Read, false)
+                    .and_then(|entry| entry.dacl())
+                    .expect("dacl")
+                    .grants()
+            };
+            let before = (
+                sddl(&outside),
+                sddl(&outside.join("secret")),
+                grants(&owned),
+            );
+            let before_owned = sddl(&owned);
+
+            restrict(
+                ServiceLevel::System,
+                &[(root.clone(), treatment)],
+                Some(me.as_str()),
+            )
+            .expect("restricted");
+
+            let top = sddl(&root);
+            assert!(top.starts_with("D:P"), "{treatment:?}: {top}");
+            for path in [&root, &sub, &sub.join("file")] {
+                let text = sddl(path);
+                assert!(
+                    !text.contains(";;;BU)") && !text.contains(";;;WD)"),
+                    "{treatment:?} {}: {text}",
+                    path.display()
+                );
+                assert!(
+                    text.contains(";;;SY)") && text.contains(";;;BA)"),
+                    "{treatment:?} {}: {text}",
+                    path.display()
+                );
+            }
+            assert!(
+                sddl(&sub).contains("(A;OICIID;FA;;;SY)"),
+                "{treatment:?}: inherited"
+            );
+            assert_eq!(
+                (
+                    sddl(&outside),
+                    sddl(&outside.join("secret")),
+                    grants(&owned)
+                ),
+                before,
+                "{treatment:?}: no link entered, no other name, nothing of the process account's: \
+                 {before_owned} became {}",
+                sddl(&owned)
+            );
+            if treatment == Treatment::TakeOver {
+                assert_eq!(owner(&sub).as_str(), "S-1-5-32-544");
+            }
+            assert!(
+                restrict(
+                    ServiceLevel::System,
+                    &[(root.join("link"), treatment)],
+                    Some(me.as_str())
+                )
+                .is_err(),
+                "{treatment:?}: a root that is a link is refused"
+            );
+        }
     }
 
     /// The message *is* the feature: this check exists only so that a refusal says what was

@@ -629,8 +629,27 @@ mod tests {
             .expect("another account serves it");
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
         assert!(refused.to_string().contains(me.as_str()), "{refused}");
-        let stream = connect(&pipe).expect("connect");
+        // Until the service has a new instance waiting, every one is busy: the Client's channel
+        // tries again, as this does.
+        let stream = connect_when_free(&pipe).await;
         assert_eq!(server_of(&stream).expect("owner"), me);
+    }
+
+    /// Connects to `pipe` once an instance is free: `ERROR_PIPE_BUSY` while the service has none
+    /// waiting yet.
+    async fn connect_when_free(pipe: &Path) -> NamedPipeClient {
+        const PIPE_BUSY: i32 = 231;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match connect(pipe) {
+                Err(e)
+                    if e.raw_os_error() == Some(PIPE_BUSY) && std::time::Instant::now() < until =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                connected => return connected.expect("connect"),
+            }
+        }
     }
 
     /// A pipe of that name made by someone first is not taken over.
@@ -656,7 +675,7 @@ mod tests {
         tokio::spawn(super::super::serve(listener, other, || false, async {
             let _ = stopped.await;
         }));
-        let mut stream = connect(&pipe).expect("connect");
+        let mut stream = connect_when_free(&pipe).await;
         write_frame(
             &mut stream,
             &Request::Hello {
@@ -680,12 +699,27 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("alive");
         let (channel, _stop, _pipe) = served().await;
-        // The program starts a process of its own and ends; that process writes on.
-        let script = format!(
-            "start /b cmd /c \"for /l %i in (0,0,1) do (echo x>>\"{}\" & ping -n 2 127.0.0.1 >nul)\"",
-            marker.display()
-        );
-        let mut child = channel.start("test", cmd(&script)).await.expect("start");
+        // The program starts a process of its own and ends; that process writes on. Its loop is
+        // a script of its own: quotes inside an argument do not reach `cmd` as `cmd` reads them.
+        let looping = dir.path().join("loop.cmd");
+        std::fs::write(
+            &looping,
+            format!(
+                "@echo off\r\n:again\r\necho x>>\"{}\"\r\nping -n 2 127.0.0.1 >nul\r\ngoto again\r\n",
+                marker.display()
+            ),
+        )
+        .expect("loop.cmd");
+        let mut launch = cmd("start");
+        launch.args = vec![
+            "/c".to_string(),
+            "start".to_string(),
+            "/b".to_string(),
+            r"C:\Windows\System32\cmd.exe".to_string(),
+            "/c".to_string(),
+            looping.display().to_string(),
+        ];
+        let mut child = channel.start("test", launch).await.expect("start");
         let _ = child.wait().await;
         let size = || std::fs::metadata(&marker).map(|m| m.len()).unwrap_or(0);
         let wait = || tokio::time::sleep(std::time::Duration::from_secs(3));
