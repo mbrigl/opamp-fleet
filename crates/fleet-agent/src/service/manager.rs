@@ -89,8 +89,12 @@ pub const AGENTS_STOP_TIMEOUT_SECS: u32 = 30;
 /// names no `ExitTimeOut` — as the second service's, which `service-manager` renders, does not:
 /// launchd's default, which exceeds the time the second service takes to stop what it started
 /// (ADR-0053 clause 9).
-#[cfg(test)]
+#[cfg(any(target_os = "macos", test))]
 const LAUNCHD_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How often the removal of the second service asks launchd whether it still holds the job.
+#[cfg(any(target_os = "macos", test))]
+const LAUNCHD_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The name a human reads where the platform has somewhere to put one (ADR-0019): the Windows
 /// services list. systemd shows the unit name as its `Description`, and a launchd job *is* its
@@ -697,38 +701,129 @@ pub fn uninstall(level: ServiceLevel) -> Result<(), String> {
 }
 
 /// Stops and deregisters the second service, where one is registered (ADR-0053 clause 1,
-/// `--no-process-account`). Returns whether there was one.
+/// `--no-process-account`), and on macOS removes the directory of its socket once launchd holds
+/// it no more, warning where that directory stays. Returns whether there was one.
 ///
 /// # Errors
-/// Returns an error if the manager cannot stop or uninstall it.
+/// Returns an error if the manager cannot stop or uninstall it, or, on macOS, if launchd still
+/// holds it afterwards.
 pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
     if !agents_registered(level) {
         return Ok(false);
     }
-    let stopped = manager(level)?
-        .stop(ServiceStopCtx {
-            label: agents_label(),
-        })
-        .map_err(|e| format!("cannot stop the second service: {e}"));
-    // launchd: `launchctl remove`, which the uninstall runs, ends a running job itself
-    // (launchctl(1)), and a job registered `Disabled` and never started may be unknown to
-    // `launchctl stop`.
-    if cfg!(not(target_os = "macos")) {
-        stopped?;
-    }
-    manager(level)?
-        .uninstall(ServiceUninstallCtx {
-            label: agents_label(),
-        })
-        .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
-    // What systemd removes with the runtime directory, removed here: the socket — a link the
-    // process account placed there is removed as a link — and the directory once it is empty.
+    let manager = manager(level)?;
     #[cfg(target_os = "macos")]
     {
-        let _ = std::fs::remove_file(agents_socket());
-        let _ = std::fs::remove_dir(agents_socket_dir());
+        let name = agents_service_name();
+        // As long as launchd gives the job to exit, and a little more for launchd itself.
+        remove_launchd_job(
+            &*manager,
+            agents_label(),
+            &mut || launchd_loaded(&name),
+            LAUNCHD_EXIT_TIMEOUT + std::time::Duration::from_secs(5),
+        )?;
+        // What systemd removes with the runtime directory, removed here once the job is gone.
+        if let Err(e) = remove_socket_dir(&agents_socket()) {
+            println!("warning: {e}");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        manager
+            .stop(ServiceStopCtx {
+                label: agents_label(),
+            })
+            .map_err(|e| format!("cannot stop the second service: {e}"))?;
+        manager
+            .uninstall(ServiceUninstallCtx {
+                label: agents_label(),
+            })
+            .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
     }
     Ok(true)
+}
+
+/// Stops and deregisters a launchd job, and waits until launchd holds it no more (ADR-0053
+/// clause 1).
+///
+/// A failed stop is passed over only where launchd holds no such job — one registered `Disabled`
+/// and never started is not loaded, and `launchctl stop` does not know it; a loaded job that
+/// could not be stopped is reported. `service-manager` passes over what `launchctl remove`
+/// answers, and the job ends asynchronously, so its absence afterwards is what says it was
+/// removed: it is waited for `within`, and a job launchd still holds then is reported.
+///
+/// # Errors
+/// Returns an error if a loaded job cannot be stopped, the manager cannot uninstall it, launchd
+/// cannot be asked, or launchd still holds it after `within`.
+#[cfg(any(target_os = "macos", test))]
+fn remove_launchd_job(
+    manager: &dyn ServiceManager,
+    label: ServiceLabel,
+    loaded: &mut dyn FnMut() -> Result<bool, String>,
+    within: std::time::Duration,
+) -> Result<(), String> {
+    if let Err(e) = manager.stop(ServiceStopCtx {
+        label: label.clone(),
+    }) {
+        if loaded()? {
+            return Err(format!("cannot stop the second service: {e}"));
+        }
+    }
+    let name = label.to_qualified_name();
+    manager
+        .uninstall(ServiceUninstallCtx { label })
+        .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
+    let until = std::time::Instant::now() + within;
+    while loaded()? {
+        if std::time::Instant::now() >= until {
+            return Err(format!(
+                "launchd still holds {name} {}s after its removal (`launchctl print \
+                 system/{name}`)",
+                within.as_secs()
+            ));
+        }
+        std::thread::sleep(LAUNCHD_POLL);
+    }
+    Ok(())
+}
+
+/// Whether launchd holds the job `label` in the system domain: `launchctl print system/<label>`
+/// succeeds for a loaded job, running or not, and fails for one it does not know.
+///
+/// # Errors
+/// Returns an error if `launchctl` cannot be run.
+#[cfg(target_os = "macos")]
+fn launchd_loaded(label: &str) -> Result<bool, String> {
+    use std::process::Stdio;
+    std::process::Command::new("launchctl")
+        .arg("print")
+        .arg(format!("system/{label}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .map_err(|e| format!("cannot run launchctl: {e}"))
+}
+
+/// Removes the second service's socket — a link at its name as a link — and then its directory,
+/// which `service install` made for it on macOS. A directory the process account left anything
+/// else in stays, and is named.
+///
+/// # Errors
+/// Returns what was left in place, and why.
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn remove_socket_dir(socket: &Path) -> Result<(), String> {
+    let gone = |result: std::io::Result<()>| match result {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    };
+    gone(std::fs::remove_file(socket))
+        .map_err(|e| format!("{} was left in place: {e}", socket.display()))?;
+    let Some(dir) = socket.parent() else {
+        return Ok(());
+    };
+    gone(std::fs::remove_dir(dir)).map_err(|e| format!("{} was left in place: {e}", dir.display()))
 }
 
 /// The installed service, implementing the [`ServiceControl`] seam.
@@ -1594,6 +1689,107 @@ mod tests {
         assert_eq!(
             Recording::asked(),
             vec![format!("start {client}"), format!("stop {client}")]
+        );
+    }
+
+    /// The removal of a launchd job passes over a failed stop only where launchd holds no such
+    /// job, and holds the removal done only once launchd holds it no more, waiting for that a
+    /// while. `Recording` refuses to stop the Client's label, which stands for a job that cannot
+    /// be stopped; the second service's it stops.
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_launchd_job_is_removed_only_once_launchd_holds_it_no_more() {
+        let within = std::time::Duration::from_secs(5);
+        let answers = |answers: Vec<bool>| {
+            let mut answers = answers.into_iter();
+            move || Ok(answers.next().expect("asked once more than expected"))
+        };
+        let client = label().to_string();
+        let agents = agents_label().to_string();
+
+        remove_launchd_job(
+            &Recording,
+            label(),
+            &mut answers(vec![false, false]),
+            within,
+        )
+        .expect("never loaded: nothing to stop");
+        assert_eq!(
+            Recording::asked(),
+            vec![format!("stop {client}"), format!("uninstall {client}")]
+        );
+
+        let refused = remove_launchd_job(&Recording, label(), &mut answers(vec![true]), within)
+            .expect_err("loaded, and not stopped");
+        assert!(
+            refused.contains("cannot stop the second service"),
+            "{refused}"
+        );
+        assert_eq!(Recording::asked(), vec![format!("stop {client}")]);
+
+        remove_launchd_job(
+            &Recording,
+            agents_label(),
+            &mut answers(vec![true, false]),
+            within,
+        )
+        .expect("gone after a while");
+        assert_eq!(
+            Recording::asked(),
+            vec![format!("stop {agents}"), format!("uninstall {agents}")]
+        );
+
+        let held = remove_launchd_job(
+            &Recording,
+            agents_label(),
+            &mut || Ok(true),
+            std::time::Duration::ZERO,
+        )
+        .expect_err("launchd holds it still");
+        assert!(
+            held.contains("launchd still holds opamp-fleet-agents"),
+            "{held}"
+        );
+        let _ = Recording::asked();
+
+        let unasked = remove_launchd_job(
+            &Recording,
+            label(),
+            &mut || Err("cannot run launchctl".to_string()),
+            within,
+        )
+        .expect_err("launchd cannot be asked");
+        assert_eq!(unasked, "cannot run launchctl");
+        let _ = Recording::asked();
+    }
+
+    /// The socket's directory goes with the second service: the socket first — a link at its
+    /// name as a link — then the directory; one the process account left anything else in stays,
+    /// and is named.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn the_sockets_directory_goes_with_the_second_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_dir = dir.path().join("opamp-fleet-agents");
+        let socket = socket_dir.join("agents.sock");
+        std::fs::create_dir(&socket_dir).expect("mkdir");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        remove_socket_dir(&socket).expect("removed");
+        assert!(!socket_dir.exists());
+        drop(listener);
+        remove_socket_dir(&socket).expect("nothing left to remove");
+
+        std::fs::create_dir(&socket_dir).expect("mkdir");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"x").expect("write");
+        std::os::unix::fs::symlink(&elsewhere, &socket).expect("a link");
+        std::fs::write(socket_dir.join("left"), b"x").expect("write");
+        let left = remove_socket_dir(&socket).expect_err("something else is there");
+        assert!(left.contains(&socket_dir.display().to_string()), "{left}");
+        assert!(
+            !socket.exists() && elsewhere.exists(),
+            "the link alone is gone"
         );
     }
 
