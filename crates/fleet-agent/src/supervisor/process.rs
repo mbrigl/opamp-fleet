@@ -3414,6 +3414,10 @@ mod tests {
     fn every_member_of_a_staged_package_is_given_to_the_process_accounts_group() {
         use std::os::unix::fs::MetadataExt as _;
         let Some(group) = another_group() else {
+            crate::skipped_unless_ci(
+                "every_member_of_a_staged_package_is_given_to_the_process_accounts_group",
+                "supplementary group",
+            );
             return;
         };
         let stat = |path: &std::path::Path| {
