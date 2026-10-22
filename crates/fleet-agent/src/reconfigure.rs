@@ -250,12 +250,14 @@ enum Aside {
 /// — the second service, past the purge's deadline — never reaches a Supervisor added again under
 /// the same name, which gets a fresh directory (ADR-0017 clause 34). A link where a directory
 /// should be is removed, never followed (clause 35). What cannot be moved is a warning, and stays
-/// an orphan (clause 36). Only the directories of the Supervisors this apply removes are taken: a
-/// tombstone an earlier purge could not delete is an orphan like any other, reported at startup
-/// and never reaped (clause 37).
+/// an orphan (clause 36). The tombstones earlier purges could not delete go with them: their names
+/// record that the Client meant to remove them (ADR-0053 clause 12), and no other orphan is taken.
 fn entomb(config: &ClientConfig, removed: &[String]) -> Vec<Tomb> {
+    if removed.is_empty() {
+        return Vec::new();
+    }
     let root = config.supervisors_root();
-    let mut tombs = Vec::new();
+    let mut tombs = tombstones(&root);
     for name in removed {
         let dir = config.supervisor_dir(name);
         match move_aside(&root, name) {
@@ -273,6 +275,49 @@ fn entomb(config: &ClientConfig, removed: &[String]) -> Vec<Tomb> {
         }
     }
     tombs
+}
+
+/// The tombstones beneath `root`: each directory whose name [`crate::config::tombstone_of`] holds
+/// for one, and nothing else — no other orphan, and no link of such a name.
+fn tombstones(root: &Path) -> Vec<Tomb> {
+    std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let supervisor = crate::config::tombstone_of(name.to_str()?)?.to_string();
+            entry.file_type().ok()?.is_dir().then(|| Tomb {
+                supervisor,
+                path: entry.path(),
+            })
+        })
+        .collect()
+}
+
+/// Removes again the tombstones beneath `root` that earlier purges could not delete, the way a
+/// purge removes its own (ADR-0053 clause 12): what the process account wrote through `plugins` —
+/// the second service, once it is reached, however long that takes — and the rest by the Client.
+/// It runs beside the start and never holds it up: the work is spawned, and a `shutdown` ends the
+/// wait for the second service. A tombstone that is still not gone is a warning again, and the
+/// next start or purge tries it once more. No other orphan is touched (ADR-0017 clause 37).
+pub(crate) fn reap_tombstones(
+    root: &Path,
+    plugins: std::sync::Arc<dyn crate::supervisor::ports::PluginRegistry>,
+    mut shutdown: Shutdown,
+) {
+    let tombs = tombstones(root);
+    if tombs.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::select! {
+            () = plugins.reached() => {}
+            () = shutdown.requested() => return,
+        }
+        release_removed(Some(&*plugins), &tombs).await;
+        let _ = tokio::task::spawn_blocking(move || bury(&tombs)).await;
+    });
 }
 
 /// Moves the directory `name` beneath `root` aside to a fresh tombstone name, through the root's
@@ -394,9 +439,9 @@ async fn release_removed(
 /// installs, under the same name or another, is held to the mark of its Agent type. Runs only after the
 /// rewritten `supervisor.toml` no longer names the Supervisor: a failed write restarts the stopped
 /// set from the old file, which needs the data intact. A directory that will not delete is a
-/// warning, never a `FAILED` apply — the set the Server asked for is running; the leftover is an
-/// orphan the next startup reports, and removing it is the operator's call (ADR-0017 clauses 36
-/// and 37).
+/// warning, never a `FAILED` apply — the set the Server asked for is running; the tombstone left
+/// is reported and removed again at the next start and with the next purge (ADR-0017 clause 36,
+/// ADR-0053 clause 12).
 fn bury(tombs: &[Tomb]) {
     for tomb in tombs {
         match remove_tomb(&tomb.path) {
@@ -408,8 +453,8 @@ fn bury(tombs: &[Tomb]) {
                 supervisor = %tomb.supervisor,
                 path = %tomb.path.display(),
                 error = %e,
-                "cannot purge the removed supervisor's directory; it stays an orphan, for the \
-                 operator to remove"
+                "cannot purge the removed supervisor's directory; the next start or purge \
+                 removes it again"
             ),
         }
     }
@@ -1883,37 +1928,108 @@ mod tests {
         assert_eq!(std::fs::read(added.join("state")).expect("kept"), b"new");
     }
 
-    /// A tombstone an earlier purge could not delete is an orphan like any other: a later purge
-    /// takes only the Supervisors its apply removes, and leaves the tombstone for the operator
-    /// (ADR-0017 clauses 36 and 37).
-    /// Verifies: ADR-0017
+    /// A tombstone an earlier purge could not delete goes with the next purge, its name recording
+    /// that the Client meant to remove it; every other orphan stays — a directory no block names,
+    /// and one that only looks like a tombstone (ADR-0053 clause 12, ADR-0017 clause 37).
+    /// Verifies: ADR-0053
     #[test]
-    fn a_tombstone_left_behind_is_never_reaped_by_a_later_purge() {
+    fn the_next_purge_removes_a_tombstone_left_behind() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config: ClientConfig = toml::from_str(&format!(
             "supervisor_dir = {:?}",
             dir.path().join("supervisors").to_string_lossy()
         ))
         .expect("config");
-        let left = tombstone_name("earlier");
-        let program = config.supervisors_root().join(&left).join("program");
+        let root = config.supervisors_root();
+        let program = root.join(tombstone_name("earlier")).join("program");
         std::fs::create_dir_all(&program).expect("a tombstone");
-        std::fs::write(program.join("agent"), b"kept").expect("its program");
+        std::fs::write(program.join("agent"), b"left").expect("its program");
+        for orphan in ["orphan", ".purge-orphan", ".purge-orphan-xyz"] {
+            std::fs::create_dir_all(root.join(orphan).join("program")).expect("an orphan");
+        }
         std::fs::create_dir_all(config.supervisor_dir("gone")).expect("gone");
         std::fs::create_dir_all(config.supervisor_dir("stays")).expect("stays");
 
+        purge_removed(&config, &[]);
+        assert!(
+            program.join("agent").is_file(),
+            "an apply that removes nothing purges nothing"
+        );
         purge_removed(&config, &["gone".to_string()]);
 
-        let mut left_over: Vec<_> = std::fs::read_dir(config.supervisors_root())
+        let mut left_over: Vec<_> = std::fs::read_dir(&root)
             .expect("read")
             .map(|entry| entry.expect("entry").file_name())
             .collect();
         left_over.sort();
         assert_eq!(
             left_over,
-            vec![std::ffi::OsString::from(left), "stays".into()]
+            vec![".purge-orphan", ".purge-orphan-xyz", "orphan", "stays"]
         );
-        assert_eq!(std::fs::read(program.join("agent")).expect("kept"), b"kept");
+    }
+
+    /// What a start removes again: the tombstones alone, each named to the second service by its
+    /// Supervisor, and only once the second service is reached — the start does not wait for it
+    /// (ADR-0053 clauses 2 and 12, ADR-0017 clause 37).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_start_removes_the_tombstones_again_once_the_second_service_is_reached() {
+        use crate::supervisor::ports::{Plugin, PluginRegistry, Purged, Reached};
+        struct Service {
+            reached: tokio::sync::watch::Receiver<bool>,
+            asked: std::sync::Mutex<Vec<String>>,
+        }
+        impl PluginRegistry for Service {
+            fn plugins(&self) -> Vec<Box<dyn Plugin>> {
+                Vec::new()
+            }
+            fn purge<'a>(&'a self, removed: &'a [(String, std::path::PathBuf)]) -> Purged<'a> {
+                self.asked
+                    .lock()
+                    .expect("lock")
+                    .extend(removed.iter().map(|(name, _)| name.clone()));
+                Box::pin(std::future::ready(removed.iter().map(|_| Ok(())).collect()))
+            }
+            fn reached(&self) -> Reached<'_> {
+                let mut reached = self.reached.clone();
+                Box::pin(async move {
+                    let _ = reached.wait_for(|reached| *reached).await;
+                })
+            }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("supervisors");
+        let tomb = root.join(tombstone_name("earlier"));
+        std::fs::create_dir_all(tomb.join("program")).expect("a tombstone");
+        for orphan in ["orphan", ".purge-orphan"] {
+            std::fs::create_dir_all(root.join(orphan)).expect("an orphan");
+        }
+        let (reach, reached) = tokio::sync::watch::channel(false);
+        let service = std::sync::Arc::new(Service {
+            reached,
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let (_stop, shutdown) = crate::shutdown::shutdown_channel();
+
+        reap_tombstones(&root, service.clone(), shutdown);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            tomb.is_dir(),
+            "removed before the second service was reached"
+        );
+        assert!(service.asked.lock().expect("lock").is_empty());
+
+        reach.send_replace(true);
+        let gone = async {
+            while tomb.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), gone)
+            .await
+            .expect("the tombstone is removed again");
+        assert_eq!(*service.asked.lock().expect("lock"), vec!["earlier"]);
+        assert!(root.join("orphan").is_dir() && root.join(".purge-orphan").is_dir());
     }
 
     /// A Supervisors' root reached through a link of the Client's own account — one beneath a data

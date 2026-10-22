@@ -125,6 +125,16 @@ impl Spawner {
         }
     }
 
+    /// Resolves once the second service is reached, however long it is away; at once for the
+    /// Client, which starts its programs itself.
+    pub async fn reached(&self) {
+        match self {
+            Spawner::Local => {}
+            #[cfg(unix)]
+            Spawner::Channel(channel) => channel.reached().await,
+        }
+    }
+
     /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
     /// directory — and the Client cannot remove itself, before the Client purges the rest
     /// (ADR-0053 clause 5): through the second service, which runs as their account, all of them

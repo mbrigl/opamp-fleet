@@ -88,6 +88,10 @@ impl PluginRegistry for Registry {
                 .collect()
         })
     }
+
+    fn reached(&self) -> crate::supervisor::ports::Reached<'_> {
+        Box::pin(self.spawner.reached())
+    }
 }
 
 /// The compiled-in plugins, for what reads a block — its kind, its program, its settings — and
@@ -133,6 +137,11 @@ pub fn build_engine(
 ) -> Result<Engine, String> {
     let plugins: Arc<dyn PluginRegistry> = Arc::new(Registry::new(spawner));
     report_orphaned_supervisor_dirs(config);
+    crate::reconfigure::reap_tombstones(
+        &config.supervisors_root(),
+        Arc::clone(&plugins),
+        shutdown.clone(),
+    );
     for notice in remote_config_disabled_notices(config) {
         warn!("{notice}");
     }
@@ -211,10 +220,12 @@ pub fn build_engine(
 }
 
 /// A directory under the Supervisor root that no `[[supervisor]]` block names is reported, never
-/// reaped (ADR-0017 clause 37), a tombstone a purge could not delete among them, named as one: it
-/// may be a purge a crash or an error cut short — or an operator's deliberate hand edit, a
-/// temporarily commented-out block whose identity and program are not the Client's to delete. The
-/// log line makes the leftover visible; removing it stays the operator's call.
+/// reaped (ADR-0053 clause 12): it may be a purge a crash cut short, or an operator's deliberate
+/// hand edit, a temporarily commented-out block whose identity and program are not the Client's
+/// to delete. The log line makes the leftover visible; removing it stays the operator's call. A
+/// tombstone a purge could not delete is named as one, and is reported until it is gone: its name
+/// records that the Client meant to remove it, and the start removes it again
+/// ([`crate::reconfigure::reap_tombstones`]).
 fn report_orphaned_supervisor_dirs(config: &ClientConfig) {
     let root = config.supervisors_root();
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -241,7 +252,7 @@ fn report_orphaned_supervisor_dirs(config: &ClientConfig) {
             warn!(
                 path = %entry.path().display(),
                 "this is the tombstone of a removed supervisor's directory, which its purge could \
-                 not delete; leaving it untouched — remove it by hand"
+                 not delete; removing it again"
             );
             continue;
         }
@@ -1147,12 +1158,39 @@ mod tests {
         );
     }
 
-    /// A tombstone a purge could not delete is an orphan like any other: startup reports it as a
-    /// removed Supervisor's for the operator to remove, and leaves it in place (ADR-0017 clauses
-    /// 36 and 37).
-    /// Verifies: ADR-0017
+    /// The start removes a tombstone left behind again, beside the start rather than before it,
+    /// and leaves every other orphan in place (ADR-0053 clause 12, ADR-0017 clause 37).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_start_removes_a_tombstone_left_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig =
+            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+        let root = config.supervisors_root();
+        let tomb = root.join(crate::reconfigure::tombstone_name("gone"));
+        std::fs::create_dir_all(tomb.join("program")).expect("a tombstone");
+        std::fs::create_dir_all(root.join("orphan")).expect("an orphan");
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+
+        let _engine = build_engine(&config, &shutdown, Spawner::Local).expect("build");
+
+        let gone = async {
+            while tomb.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), gone)
+            .await
+            .expect("the tombstone is removed again");
+        assert!(root.join("orphan").is_dir(), "an orphan is the operator's");
+    }
+
+    /// A tombstone a purge could not delete is reported at startup as a removed Supervisor's that
+    /// is removed again, apart from the orphans the operator removes; the report itself deletes
+    /// nothing (ADR-0053 clause 12).
+    /// Verifies: ADR-0053
     #[test]
-    fn a_tombstone_left_behind_is_reported_at_startup_and_not_reaped() {
+    fn a_tombstone_left_behind_is_reported_at_startup() {
         #[derive(Clone, Default)]
         struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
         impl std::io::Write for Captured {
@@ -1191,7 +1229,7 @@ mod tests {
             reported[0].contains("tombstone of a removed supervisor"),
             "{log}"
         );
-        assert!(reported[0].contains("remove it by hand"), "{log}");
+        assert!(reported[0].contains("removing it again"), "{log}");
         assert!(tomb.join("instance-uid").is_file(), "reported, not deleted");
     }
 
