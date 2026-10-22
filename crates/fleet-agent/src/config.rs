@@ -354,20 +354,10 @@ pub fn parse_instance_name(raw: &str) -> Result<InstanceName, String> {
 /// root, by a name no Supervisor can carry — it starts with a dot — so that a Supervisor added
 /// again under the same name gets a fresh directory, whatever is still being removed from the old
 /// one (ADR-0017 clause 34).
-const TOMBSTONE: &str = ".purge-";
+pub(crate) const TOMBSTONE: &str = ".purge-";
 
-/// A fresh tombstone name for the directory of the Supervisor `supervisor`:
-/// `.purge-<supervisor>-<nonce>`, the nonce in lowercase hexadecimal.
-pub(crate) fn tombstone_name(supervisor: &str) -> String {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{TOMBSTONE}{supervisor}-{nanos:x}{next:x}")
-}
-
-/// The Supervisor whose tombstone `name` is ([`tombstone_name`]), or `None` where it is none.
+/// The Supervisor whose tombstone `name` is ([`crate::reconfigure::tombstone_name`]), or `None`
+/// where it is none.
 pub(crate) fn tombstone_of(name: &str) -> Option<&str> {
     let (supervisor, nonce) = name.strip_prefix(TOMBSTONE)?.rsplit_once('-')?;
     let nonce_ok = !nonce.is_empty()
@@ -2158,16 +2148,20 @@ mod tests {
         assert_eq!(clean.leftover_auth_notice(), None, "no section, no notice");
     }
 
-    /// A tombstone name ([`tombstone_name`]) names the Supervisor whose directory it holds, and is
-    /// no name a Supervisor can carry (ADR-0017 clause 34).
+    /// A tombstone name ([`crate::reconfigure::tombstone_name`]) names the Supervisor whose
+    /// directory it holds, and is no name a Supervisor can carry (ADR-0017 clause 34).
     /// Verifies: ADR-0017
     #[test]
     fn a_tombstone_names_its_supervisor_and_no_supervisor_carries_one() {
         for supervisor in ["agent", "a-b", "x1"] {
-            let tomb = tombstone_name(supervisor);
+            let tomb = crate::reconfigure::tombstone_name(supervisor);
             assert_eq!(tombstone_of(&tomb), Some(supervisor), "{tomb}");
             assert!(parse_instance_name(&tomb).is_err(), "{tomb}");
-            assert_ne!(tomb, tombstone_name(supervisor), "each is fresh");
+            assert_ne!(
+                tomb,
+                crate::reconfigure::tombstone_name(supervisor),
+                "each is fresh"
+            );
         }
         for name in [
             "agent",

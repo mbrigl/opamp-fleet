@@ -811,8 +811,8 @@ fn start(launch: &Launch) -> io::Result<Child> {
 /// more:
 ///
 /// - `dir` is absolute, named after the Supervisor or its tombstone
-///   ([`crate::config::tombstone_name`]), and the Client's account owns it and the directory it
-///   is in, the Supervisors' root;
+///   ([`crate::reconfigure::tombstone_name`]), and the Client's account owns it and the
+///   directory it is in, the Supervisors' root;
 /// - `dir` itself is no link;
 /// - each of `shared` is a path beneath it, of plain names alone;
 /// - no link is followed beneath `dir`, and an entry, a link included, is removed as what it is;
@@ -2362,12 +2362,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("supervisors");
-        let tomb = root.join(crate::config::tombstone_name("agent"));
+        let tomb = root.join(crate::reconfigure::tombstone_name("agent"));
         let data = tomb.join("data");
         std::fs::create_dir_all(&data).expect("mkdir");
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
         std::fs::write(data.join("state"), b"x").expect("write");
-        let linked = root.join(crate::config::tombstone_name("agent"));
+        let linked = root.join(crate::reconfigure::tombstone_name("agent"));
         std::os::unix::fs::symlink(&tomb, &linked).expect("a link");
         let me = own_uid();
         let shared = vec![PathBuf::from("data")];

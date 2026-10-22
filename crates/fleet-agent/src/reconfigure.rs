@@ -216,8 +216,19 @@ fn plan(running: &[SupervisorBlock], offered: &[SupervisorBlock]) -> Plan {
     }
 }
 
+/// A fresh tombstone name for the directory of the Supervisor `supervisor`:
+/// `.purge-<supervisor>-<nonce>`, the nonce in lowercase hexadecimal.
+pub(crate) fn tombstone_name(supervisor: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}{supervisor}-{nanos:x}{next:x}", crate::config::TOMBSTONE)
+}
+
 /// A removed Supervisor's directory, moved aside to a tombstone beneath the Supervisors' root
-/// before it is purged ([`crate::config::tombstone_name`]).
+/// before it is purged ([`tombstone_name`]).
 #[derive(Debug)]
 struct Tomb {
     supervisor: String,
@@ -308,7 +319,7 @@ fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
         ));
     }
     loop {
-        let tomb = crate::config::tombstone_name(name);
+        let tomb = tombstone_name(name);
         let tomb_entry = std::ffi::CString::new(tomb.as_str())?;
         match handle::lstat_at(at.as_raw_fd(), &tomb_entry) {
             Ok(_) => continue,
@@ -354,7 +365,7 @@ fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
         }
     }
     loop {
-        let tomb = crate::config::tombstone_name(name);
+        let tomb = tombstone_name(name);
         if std::fs::symlink_metadata(root.join(&tomb)).is_ok() {
             continue;
         }
@@ -1824,9 +1835,7 @@ mod tests {
             dir.path().join("supervisors").to_string_lossy()
         ))
         .expect("config");
-        let left = config
-            .supervisors_root()
-            .join(crate::config::tombstone_name("earlier"));
+        let left = config.supervisors_root().join(tombstone_name("earlier"));
         std::fs::create_dir_all(left.join("program")).expect("a tombstone");
         std::fs::create_dir_all(config.supervisor_dir("gone")).expect("gone");
         std::fs::create_dir_all(config.supervisor_dir("stays")).expect("stays");
