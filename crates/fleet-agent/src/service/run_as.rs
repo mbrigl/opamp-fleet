@@ -235,10 +235,7 @@ pub fn account_of(uid: u32) -> std::io::Result<Option<Account>> {
 /// the accounts that hold it as a supplementary group. Empty where no entry names the group.
 #[cfg(unix)]
 fn group_members(gid: u32) -> std::io::Result<Vec<String>> {
-    // The buffer is laid out as `u64`s so it is aligned for the pointer array `gr_mem` that
-    // `getgrgid_r` places in it: glibc aligns that array itself, macOS does not, and a pointer read
-    // at an unaligned address is undefined behaviour.
-    let mut buffer = vec![0u64; 512];
+    let mut buffer = vec![0 as libc::c_char; 4096];
     loop {
         let mut entry = std::mem::MaybeUninit::<libc::group>::uninit();
         let mut found: *mut libc::group = std::ptr::null_mut();
@@ -248,12 +245,12 @@ fn group_members(gid: u32) -> std::io::Result<Vec<String>> {
             libc::getgrgid_r(
                 gid,
                 entry.as_mut_ptr(),
-                buffer.as_mut_ptr().cast::<libc::c_char>(),
-                buffer.len() * std::mem::size_of::<u64>(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
                 &raw mut found,
             )
         };
-        if rc == libc::ERANGE && buffer.len() < 1 << 21 {
+        if rc == libc::ERANGE && buffer.len() < 1 << 24 {
             buffer.resize(buffer.len() * 2, 0);
             continue;
         }
@@ -265,7 +262,10 @@ fn group_members(gid: u32) -> std::io::Result<Vec<String>> {
         }
         let mut members = Vec::new();
         // SAFETY: `gr_mem` is a null-terminated array of NUL-terminated strings inside `buffer`,
-        // which outlives these reads; each slot is read unaligned, as no libc promises more.
+        // which outlives these reads. Each slot is read unaligned: where in the buffer
+        // `getgrgid_r` places the array is the libc's choice — glibc aligns it, macOS places it
+        // at an offset that follows from the lengths of what it copied there first — so no
+        // alignment of the buffer itself makes it aligned.
         unsafe {
             let mut member = (*found).gr_mem;
             while !member.is_null() {
@@ -2013,6 +2013,37 @@ mod tests {
             "{:?}",
             primary_group_of(gid)
         );
+    }
+
+    /// The members of a group that has some are read, wherever the libc places them in the
+    /// buffer: the groups the test runs in, and on macOS `admin` (gid 80), whose members a GitHub
+    /// runner's account is one of. A pointer read where macOS places it unaligned once aborted
+    /// the install of a process account there.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_members_of_a_group_are_read_wherever_the_libc_places_them() {
+        // SAFETY: getgroups(2) with a count of 0 writes nothing and returns how many there are.
+        let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        let mut gids = vec![0 as libc::gid_t; usize::try_from(count).expect("a count")];
+        // SAFETY: the buffer holds as many as were counted, and as many as it is told.
+        let count = unsafe { libc::getgroups(count, gids.as_mut_ptr()) };
+        gids.truncate(usize::try_from(count).expect("the supplementary groups"));
+        if cfg!(target_os = "macos") {
+            gids.push(80);
+        }
+        let mut read = Vec::new();
+        for gid in gids {
+            let members = group_members(gid).expect("the group database");
+            assert!(members.iter().all(|m| !m.is_empty()), "{gid}: {members:?}");
+            read.extend(members);
+        }
+        if read.is_empty() {
+            crate::skipped_unless_ci(
+                "the_members_of_a_group_are_read_wherever_the_libc_places_them",
+                "group of the test's with a member",
+            );
+        }
     }
 
     /// Where no second service can be registered — the user scope, another service manager, or
