@@ -77,14 +77,15 @@ impl PluginRegistry for Registry {
 
     fn purge<'a>(
         &'a self,
-        supervisor: &'a str,
-        dir: &'a std::path::Path,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        removed: &'a [(String, std::path::PathBuf)],
+    ) -> crate::supervisor::ports::Purged<'a> {
         Box::pin(async move {
             self.spawner
-                .purge(supervisor, dir)
+                .purge(removed)
                 .await
-                .map_err(|e| e.to_string())
+                .into_iter()
+                .map(|result| result.map_err(|e| e.to_string()))
+                .collect()
         })
     }
 }

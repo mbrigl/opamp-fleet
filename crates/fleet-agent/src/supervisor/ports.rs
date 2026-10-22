@@ -412,6 +412,10 @@ impl KindDefaults {
     }
 }
 
+/// What [`PluginRegistry::purge`] answers, once for each Supervisor it was asked about.
+pub type Purged<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Result<(), String>>> + Send + 'a>>;
+
 /// The plugins a run starts its Supervisors with (ADR-0017 clause 2), as the composition root
 /// made them: every one starts its Managed Process the way the run does (ADR-0053 clause 3). The
 /// Engine keeps it, so a Supervisor that a Supervisor-set apply starts later is started the same
@@ -420,21 +424,16 @@ pub trait PluginRegistry: Send + Sync {
     /// Every compiled-in plugin.
     fn plugins(&self) -> Vec<Box<dyn Plugin>>;
 
-    /// Removes what the Managed Processes wrote in `dir`, the directory of the Supervisor named
-    /// `supervisor`, that the Client cannot remove itself, before the purge deletes the rest
-    /// (ADR-0017 clause 34, ADR-0053 clause 5). Nothing where the Client starts its programs
-    /// itself.
+    /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
+    /// directory — that the Client cannot remove itself, before the purge deletes the rest
+    /// (ADR-0017 clause 34, ADR-0053 clause 5), all of them within one wait (ADR-0053 clause 2).
+    /// Nothing where the Client starts its programs itself.
     ///
     /// # Errors
-    /// Returns why something is left: the purge then leaves an orphan, with a warning (ADR-0017
-    /// clause 36).
-    fn purge<'a>(
-        &'a self,
-        supervisor: &'a str,
-        dir: &'a std::path::Path,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-        let _ = (supervisor, dir);
-        Box::pin(std::future::ready(Ok(())))
+    /// Each answer, in the order of `removed`, is why something is left: the purge then leaves an
+    /// orphan, with a warning (ADR-0017 clause 36).
+    fn purge<'a>(&'a self, removed: &'a [(String, std::path::PathBuf)]) -> Purged<'a> {
+        Box::pin(std::future::ready(removed.iter().map(|_| Ok(())).collect()))
     }
 }
 

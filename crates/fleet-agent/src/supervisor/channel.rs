@@ -118,9 +118,10 @@ impl Captured {
     }
 }
 
-/// How long the Client waits for the service to remove what the process account wrote under one
-/// purged Supervisor's directory, reaching the service included: as long as a program has to end
-/// when the Client's connection closes. However much the process account wrote, a purge that
+/// How long the Client waits for the service to remove what the process account wrote under the
+/// directories of the Supervisors one apply purges, all of them together and reaching the service
+/// included: as long as a program has to end when the Client's connection closes. However many
+/// Supervisors are purged and however much the process account wrote, a purge that
 /// outlasts it leaves an orphan, as one the Client cannot delete does (ADR-0017 clause 36), and
 /// the Client's management goes on (ADR-0053 clause 2).
 pub(crate) const PURGE_ANSWER: Duration = CLOSE_GRACE;
@@ -1143,6 +1144,21 @@ struct State {
     refusals: Refusals,
 }
 
+/// A wait for the service, holding the channel's state: dropped after it tried in vain — out of
+/// time, or cut short — it notes the wait as given up on.
+struct Waiting<'a> {
+    state: tokio::sync::MutexGuard<'a, State>,
+    in_vain: bool,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if self.in_vain {
+            self.state.gave_up = Some(Instant::now());
+        }
+    }
+}
+
 /// One connection to the second service.
 struct Connection {
     /// Requests, encoded: one too large for a message is refused before it is queued.
@@ -1307,45 +1323,59 @@ impl Channel {
         self.connection().await.map(|_| ()).map_err(unreachable)
     }
 
-    /// Asks the service to remove what the process account wrote in `dir`, the directory of the
-    /// Supervisor named `supervisor`, and the Client cannot remove itself (ADR-0053 clause 5), in
-    /// one request: the service looks for its own entries in the directories the Client shares
-    /// for writing beneath `dir` ([`crate::storage::handle::shared_for_writing`]). A file the
-    /// process account owns in a directory of the Client's is the Client's to remove too, and the
-    /// purge that follows removes it where the service did not.
+    /// Asks the service to remove what the process account wrote in each of `removed` — the
+    /// Supervisor's name and its directory — and the Client cannot remove itself (ADR-0053
+    /// clause 5), one request per Supervisor: the service looks for its own entries in the
+    /// directories the Client shares for writing beneath the directory
+    /// ([`crate::storage::handle::shared_for_writing`]). A file the process account owns in a
+    /// directory of the Client's is the Client's to remove too, and the purge that follows removes
+    /// it where the service did not.
+    ///
+    /// All of them are asked at once and waited for [`PURGE_ANSWER`] together, reaching the
+    /// service included, however many there are: one apply waits for the service once.
     ///
     /// # Errors
-    /// Returns what the service could not remove, or why it was not reached — in time, too:
-    /// [`PURGE_ANSWER`] for the whole of it.
-    pub(crate) async fn purge(&self, supervisor: &str, dir: &Path) -> io::Result<()> {
-        let shared = {
-            let dir = dir.to_path_buf();
-            tokio::task::spawn_blocking(move || crate::storage::handle::shared_for_writing(&dir))
+    /// Each answer, in the order of `removed`, is what the service could not remove, or why it
+    /// was not reached — in time, too.
+    pub(crate) async fn purge(&self, removed: &[(String, PathBuf)]) -> Vec<io::Result<()>> {
+        let deadline = Instant::now() + PURGE_ANSWER;
+        let asked = removed.iter().map(|(supervisor, dir)| async move {
+            let one = async {
+                let shared = {
+                    let dir = dir.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::storage::handle::shared_for_writing(&dir)
+                    })
+                    .await
+                    .map_err(io::Error::other)??
+                };
+                if shared.is_empty() {
+                    return Ok(());
+                }
+                let connection = self.connection().await.map_err(unreachable)?;
+                connection.purge(supervisor, dir, shared).await
+            };
+            tokio::time::timeout_at(deadline, one)
                 .await
-                .map_err(io::Error::other)??
-        };
-        if shared.is_empty() {
-            return Ok(());
-        }
-        let asked = async {
-            let connection = self.connection().await.map_err(unreachable)?;
-            connection.purge(supervisor, dir, shared).await
-        };
-        tokio::time::timeout(PURGE_ANSWER, asked)
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "the second service did not remove what the process account wrote under {} within {}s",
-                        dir.display(),
-                        PURGE_ANSWER.as_secs()
-                    ),
-                )
-            })?
+                .unwrap_or_else(|_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "the second service did not remove what the process account wrote under {} within {}s",
+                            dir.display(),
+                            PURGE_ANSWER.as_secs()
+                        ),
+                    ))
+                })
+        });
+        futures_util::future::join_all(asked).await
     }
 
     /// The open connection, or a new one once the last is gone.
+    ///
+    /// A wait that tried and did not reach the service is noted as given up on, however it ends:
+    /// out of time, or cut short by whoever waited — a purge's deadline — so that the next wait
+    /// in the same outage tries once.
     async fn connection(&self) -> io::Result<Arc<Connection>> {
         let mut state = self.shared.state.lock().await;
         if let Some(connection) = state.connection.as_ref().filter(|c| !c.is_closed()) {
@@ -1359,11 +1389,16 @@ impl Channel {
             } else {
                 RECONNECT
             };
+        let mut waiting = Waiting {
+            state,
+            in_vain: false,
+        };
         loop {
             match Connection::open(&self.shared.socket, self.shared.service_uid).await {
                 Ok(connection) => {
-                    state.gave_up = None;
-                    state.connection = Some(Arc::clone(&connection));
+                    waiting.state.gave_up = None;
+                    waiting.state.connection = Some(Arc::clone(&connection));
+                    waiting.in_vain = false;
                     return Ok(connection);
                 }
                 Err(e) if is_other_build(&e) && (self.shared.superseded)() => {
@@ -1373,13 +1408,16 @@ impl Channel {
                          this Client is the one left behind"
                     );
                     self.shared.left_behind.send_replace(true);
-                    state.gave_up = Some(Instant::now());
+                    waiting.in_vain = true;
                     return Err(e);
                 }
                 Err(e) => {
+                    waiting.in_vain = true;
                     // Not an outage that ends by itself: the operator is to hear of it.
                     if is_refusal(&e) {
-                        if let Some(unlogged) = state.refusals.note(std::time::Instant::now()) {
+                        if let Some(unlogged) =
+                            waiting.state.refusals.note(std::time::Instant::now())
+                        {
                             warn!(
                                 socket = %self.shared.socket.display(), error = %e, unlogged,
                                 "the second service is refused; no program starts until the process account serves this build on its socket"
@@ -1387,7 +1425,6 @@ impl Channel {
                         }
                     }
                     if Instant::now() >= deadline {
-                        state.gave_up = Some(Instant::now());
                         return Err(e);
                     }
                     debug!(socket = %self.shared.socket.display(), error = %e, "the second service cannot be reached yet");
@@ -2251,7 +2288,10 @@ mod tests {
             .await
             .expect("connect");
 
-        channel.purge("agent", &supervisor).await.expect("purged");
+        let purged = channel
+            .purge(&[("agent".to_string(), supervisor.clone())])
+            .await;
+        assert!(purged.iter().all(Result::is_ok), "{purged:?}");
         std::fs::remove_dir_all(&supervisor).expect("the Client's purge");
         assert!(!supervisor.exists());
         assert_eq!(std::fs::read(&outside).expect("outside"), b"kept");
@@ -2345,7 +2385,10 @@ mod tests {
             });
             let channel = Channel::connect(&socket, own_uid()).await.expect("connect");
             let started = tokio::time::Instant::now();
-            let purged = channel.purge("agent", &supervisor).await;
+            let mut purged = channel
+                .purge(&[("agent".to_string(), supervisor.clone())])
+                .await;
+            let purged = purged.pop().expect("one answer");
             let elapsed = started.elapsed();
             assert!(
                 elapsed < PURGE_ANSWER + Duration::from_secs(1),
@@ -2375,8 +2418,11 @@ mod tests {
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
         let peer = peer::connect(peer::mute).await;
         tokio::time::pause();
-        let purged = peer.channel.purge("agent", &supervisor).await;
-        assert!(purged.is_err(), "the mute service answered");
+        let purged = peer
+            .channel
+            .purge(&[("agent".to_string(), supervisor.clone())])
+            .await;
+        assert!(purged[0].is_err(), "the mute service answered");
         let connection = peer.channel.open_connection().await.expect("connected");
         assert!(connection.routes().purges.is_empty());
     }
