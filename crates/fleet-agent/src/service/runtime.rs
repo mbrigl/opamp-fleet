@@ -150,11 +150,18 @@ fn start_log_file(config: &crate::config::ClientConfig) {
         .dir
         .clone()
         .unwrap_or_else(|| crate::logging::default_dir(&config.state_dir));
-    let private = crate::logging::is_private(
+    let private = match crate::logging::is_private(
         &dir,
         &config.state_dir,
+        &config.supervisors_root(),
         config.process_account_group.is_some(),
-    );
+    ) {
+        Ok(private) => private,
+        Err(e) => {
+            tracing::warn!(error = %e, "running without a log file");
+            return;
+        }
+    };
     match crate::logging::open(&dir, config.logging.keep, private) {
         Ok(dir) => {
             tracing::info!(dir = %dir.display(), keep = config.logging.keep, "logging to file")
