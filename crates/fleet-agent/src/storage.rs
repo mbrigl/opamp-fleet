@@ -501,10 +501,10 @@ impl Shared {
 /// Supervisor's directory. Every component beneath `root` is opened through the handle of the one
 /// before it and none through a link, whoever owns it, so a link the process account placed in a
 /// directory it writes cannot turn the Client's change on something else of its own (ADR-0059
-/// clause 6); on the way to `root` only the system's own links are followed
-/// ([`handle::open_beneath`]). The group and the mode are changed through the directory's own
-/// handle. A parent this creates is passed through, `0710`, so the directory is reached; each
-/// parent that must be more is named by its own call.
+/// clause 6); on the way to `root` only the links of root's and of the Client's own account are
+/// followed, in a directory nobody else may write ([`handle::open_beneath`]). The group and the
+/// mode are changed through the directory's own handle. A parent this creates is passed through,
+/// `0710`, so the directory is reached; each parent that must be more is named by its own call.
 ///
 /// A data directory (`Written`) that was not yet shared — one a Managed Process wrote while it ran
 /// as the Client, before a process account was registered — gives what the Client owns in it to
@@ -640,18 +640,18 @@ pub(crate) mod handle {
     /// through the handle of the one before it: every component searched ([`SEARCH`]), the last
     /// opened with `flags`. `root` is where the Client's own tree begins — the state directory, the
     /// Supervisors' root, a Supervisor's directory — and what the operator configured. On the way
-    /// to it a link is followed only where it is the system's ([`trusted_link`]): root owns it and
-    /// the directory it is in, which nobody else may write, so no account but root can have placed
-    /// or changed it; its target is read once, through the same handle, and walked to the same
-    /// way. Beneath `root` no link is followed, whoever owns it, since an account that writes a
-    /// directory there can place one, and root's own links among them where it can link a file of
-    /// root's into it. With `made`, a missing component is created, `0700`, and handed to `made`,
-    /// opened to read.
+    /// to it a link is followed only where it is trusted ([`trusted_link`]): root or this
+    /// process's own account owns it and the directory it is in, which nobody else may write, so
+    /// no other account can have placed or changed it; its target is read once, through the same
+    /// handle, and walked to the same way. Beneath `root` no link is followed, whoever owns it,
+    /// since an account that writes a directory there can place one, and root's own links among
+    /// them where it can link a file of root's into it. With `made`, a missing component is
+    /// created, `0700`, and handed to `made`, opened to read.
     ///
     /// # Errors
     /// Returns an error when `dir` is not beneath `root` by plain names, or a component is
-    /// missing (without `made`), is no directory, is a link on the way to `root` that is not the
-    /// system's, or is a link beneath `root`.
+    /// missing (without `made`), is no directory, is a link on the way to `root` that is not
+    /// trusted, or is a link beneath `root`.
     pub(crate) fn open_beneath(
         root: &Path,
         dir: &Path,
@@ -715,7 +715,7 @@ pub(crate) mod handle {
     const MAX_HOPS: u32 = 40;
 
     /// The directory `name` in `dir`, opened with `flags` as [`step`] opens it, on the way to a
-    /// root: a link there is followed where it is the system's ([`trusted_link`]), its target read
+    /// root: a link there is followed where it is trusted ([`trusted_link`]), its target read
     /// once and walked to component by component from `dir`, or from `/` where it is absolute,
     /// by the same rule.
     fn step_trusting(
@@ -736,12 +736,13 @@ pub(crate) mod handle {
             // Opened without following: a link swapped in since is refused.
             return step(dir, name, flags, made);
         }
-        if !trusted_link(&fstat(dir)?, &st) {
+        // SAFETY: geteuid(2) cannot fail and touches no memory.
+        if !trusted_link(&fstat(dir)?, &st, unsafe { libc::geteuid() }) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "{} is a link that is not the system's — root owns either not it or not the \
-                     directory it is in, or another account may write that directory — and is \
+                    "{} is a link that is not trusted — root or this process's account must own \
+                     it and the directory it is in, which no other account may write — and is \
                      not followed",
                     name.to_string_lossy()
                 ),
@@ -775,11 +776,15 @@ pub(crate) mod handle {
         step_trusting(&at, last, flags, None, hops)
     }
 
-    /// Whether the link `link` in the directory `dir` is the system's: root owns both, and the
-    /// directory is not writable by its group or others, so no account but root can have placed
-    /// or changed it — `/var/run` → `/run`, or `/var` → `private/var` on macOS.
-    pub(crate) fn trusted_link(dir: &libc::stat, link: &libc::stat) -> bool {
-        link.st_uid == 0 && dir.st_uid == 0 && mode(dir) & 0o022 == 0
+    /// Whether the link `link` in the directory `dir` is trusted on the way to a root: root or
+    /// `own`, this process's account, owns each of them, and the directory is not writable by its
+    /// group or others, so no other account can have placed or changed it. The system's own —
+    /// `/var/run` → `/run`, or `/var` → `private/var` on macOS — and the Client's own, as a link
+    /// beneath a data root the hand-over gave the Client, or `~/.local` → `/data` for `--user`: a
+    /// link that account placed it could have placed as the root itself.
+    pub(crate) fn trusted_link(dir: &libc::stat, link: &libc::stat, own: libc::uid_t) -> bool {
+        let trusted = |uid: libc::uid_t| uid == 0 || uid == own;
+        trusted(link.st_uid) && trusted(dir.st_uid) && mode(dir) & 0o022 == 0
     }
 
     /// The target of the link `name` in `dir`, read once.
@@ -1529,10 +1534,10 @@ mod tests {
     /// Beneath the Supervisor's directory no link is followed, whoever owns it: a link of root's
     /// in a data directory — one a hard link to a link of root's elsewhere can place — that names a
     /// link of the process account's to the Client's records shares nothing of them. Run as root,
-    /// every link here is root's; run as anyone else, the account's own. A link on the way to the
-    /// Supervisor's directory is followed only where it is the system's — run as root, this
-    /// test's own, in a directory only root writes — and a directory that is not beneath it by
-    /// plain names is refused (ADR-0059 clause 6).
+    /// every link here is root's; run as anyone else, the account's own. A link of the Client's
+    /// own account on the way to the Supervisor's directory, in a directory only that account
+    /// writes, is followed, and a directory that is not beneath it by plain names is refused
+    /// (ADR-0059 clause 6).
     /// Verifies: ADR-0059
     #[cfg(unix)]
     #[test]
@@ -1578,21 +1583,14 @@ mod tests {
 
         let through = dir.path().join("through");
         std::os::unix::fs::symlink(&supervisor, &through).expect("a link above the root");
-        let followed = create_shared_dir(
+        create_shared_dir(
             &through,
             &through.join("cache"),
             Some(group),
             Shared::Written,
-        );
-        // SAFETY: geteuid(2) cannot fail and touches no memory.
-        if unsafe { libc::geteuid() } == 0 {
-            followed.expect("root's link in a directory only root writes is the system's");
-            assert_eq!(mode_and_group(&supervisor.join("cache")), (0o2770, group.0));
-        } else {
-            let error = followed.expect_err("the account's own link above the root");
-            assert!(error.to_string().contains("not the system's"), "{error}");
-            assert!(!supervisor.join("cache").exists(), "nothing made behind it");
-        }
+        )
+        .expect("the Client's own link above the root is followed");
+        assert_eq!(mode_and_group(&supervisor.join("cache")), (0o2770, group.0));
 
         let error = create_shared_dir(
             &data,
@@ -1607,13 +1605,14 @@ mod tests {
         assert_eq!(mode_and_group(&private), before.0);
     }
 
-    /// A link on the way to a root is the system's only where root owns it and the directory it is
-    /// in, and nobody else may write that directory: one an account placed, or one in a directory
-    /// its group or anybody may write — `/tmp` among them — is not (ADR-0059 clause 6).
+    /// A link on the way to a root is trusted only where root or the Client's own account owns it
+    /// and the directory it is in, and nobody else may write that directory: one another account
+    /// placed, or one in a directory its group or anybody may write — `/tmp` among them — is not
+    /// (ADR-0059 clause 6).
     /// Verifies: ADR-0059
     #[cfg(unix)]
     #[test]
-    fn a_link_above_a_root_is_followed_only_where_it_is_the_systems() {
+    fn a_link_above_a_root_is_followed_only_where_it_is_trusted() {
         let stat = |uid: libc::uid_t, mode: libc::mode_t| {
             // SAFETY: `stat` is plain data, for which all zeroes is a value.
             let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -1623,12 +1622,18 @@ mod tests {
         };
         let dir = |uid, mode| stat(uid, libc::S_IFDIR | mode);
         let link = |uid| stat(uid, libc::S_IFLNK | 0o777);
-        assert!(handle::trusted_link(&dir(0, 0o755), &link(0)));
-        assert!(handle::trusted_link(&dir(0, 0o700), &link(0)));
-        assert!(!handle::trusted_link(&dir(0, 0o755), &link(1000)));
-        assert!(!handle::trusted_link(&dir(1000, 0o755), &link(0)));
-        assert!(!handle::trusted_link(&dir(0, 0o775), &link(0)));
-        assert!(!handle::trusted_link(&dir(0, 0o1777), &link(0)));
+        let own = 1000;
+        for (owner, by) in [(0, 0), (own, own), (0, own), (own, 0)] {
+            assert!(handle::trusted_link(&dir(owner, 0o755), &link(by), own));
+            assert!(handle::trusted_link(&dir(owner, 0o700), &link(by), own));
+            assert!(!handle::trusted_link(&dir(owner, 0o775), &link(by), own));
+            assert!(!handle::trusted_link(&dir(owner, 0o757), &link(by), own));
+            assert!(!handle::trusted_link(&dir(owner, 0o1777), &link(by), own));
+        }
+        assert!(!handle::trusted_link(&dir(0, 0o755), &link(1001), own));
+        assert!(!handle::trusted_link(&dir(1001, 0o755), &link(0), own));
+        assert!(!handle::trusted_link(&dir(1001, 0o755), &link(own), own));
+        assert!(!handle::trusted_link(&dir(own, 0o755), &link(1001), own));
     }
 
     /// A root reached through the system's own link — `/var/run` → `/run` on Linux, `/var` →
