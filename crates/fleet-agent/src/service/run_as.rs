@@ -436,12 +436,12 @@ impl RunAs {
         walk::chown_tree(path, self.uid, self.gid, kept, skipped)
     }
 
-    /// No process account is registered on Windows yet (ADR-0059), so there is nothing to keep.
+    /// On Windows a grant, which takes nothing from what the process account was granted.
     #[cfg(not(unix))]
     fn own(
         &self,
         path: &Path,
-        _process: Option<&ProcessAccount>,
+        process: Option<&ProcessAccount>,
         _skipped: &mut Vec<Skipped>,
     ) -> Result<(), String> {
         // Asked of the entry itself: a link or junction is never a directory to walk.
@@ -449,7 +449,7 @@ impl RunAs {
             .map(|m| m.is_dir())
             .unwrap_or(false);
         let output = std::process::Command::new("icacls.exe")
-            .args(grant_args(path, &self.account, is_dir))
+            .args(grant_args(path, &self.account, is_dir, process.is_some()))
             .output()
             .map_err(|e| format!("cannot run icacls.exe: {e}"))?;
         if output.status.success() {
@@ -463,23 +463,44 @@ impl RunAs {
     }
 }
 
-/// The `icacls.exe` arguments that grant `account` Modify on `path` (ADR-0042 clause 2).
+/// The `icacls.exe` arguments that grant `account` its [`handover_grant`] on `path` (ADR-0042
+/// clause 2).
 ///
-/// `(OI)(CI)` — inherit to files and subdirectories created later — is a directory-only grant
-/// spec; a file takes the bare right. `/T` re-grants across what already exists, and `/L` acts on a
-/// symbolic link or junction itself, never on what it names: the account holds Modify on the tree
-/// already and could have planted a junction to any directory in it.
+/// `/T` re-grants across what already exists, and `/L` acts on a symbolic link or junction itself,
+/// never on what it names: the account holds Modify on the tree already and could have planted a
+/// junction to any directory in it.
 #[cfg(any(windows, test))]
-fn grant_args(path: &Path, account: &str, is_dir: bool) -> Vec<std::ffi::OsString> {
-    let mut args = vec![path.as_os_str().to_owned(), "/grant".into()];
+fn grant_args(
+    path: &Path,
+    account: &str,
+    is_dir: bool,
+    process_account: bool,
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![
+        path.as_os_str().to_owned(),
+        "/grant".into(),
+        handover_grant(account, is_dir, process_account).into(),
+    ];
     if is_dir {
-        args.push(format!("{account}:(OI)(CI)M").into());
         args.push("/T".into());
-    } else {
-        args.push(format!("{account}:M").into());
     }
     args.push("/L".into());
     args
+}
+
+/// The `icacls.exe` grant the hand-over gives `account` on Windows: Modify, and full control where
+/// a process account is registered — the Client then grants that account its share of what the
+/// install laid out (ADR-0059 clause 6), which needs `WRITE_DAC` on directories the install, not
+/// the Client, created, as a change of owner gives it on Unix. `(OI)(CI)` — inherited by files and
+/// subdirectories created later — is a directory-only grant spec; a file takes the bare right.
+#[cfg(any(not(unix), test))]
+fn handover_grant(account: &str, is_dir: bool, process_account: bool) -> String {
+    let right = if process_account { "F" } else { "M" };
+    if is_dir {
+        format!("{account}:(OI)(CI){right}")
+    } else {
+        format!("{account}:{right}")
+    }
 }
 
 /// Resolve an account name to its uid and primary gid through `id(1)`. `Err(None)` means the
@@ -1440,13 +1461,45 @@ mod tests {
                 .collect()
         };
         assert_eq!(
-            strings(grant_args(Path::new(r"C:\data"), r"NT SERVICE\x", true)),
+            strings(grant_args(
+                Path::new(r"C:\data"),
+                r"NT SERVICE\x",
+                true,
+                false
+            )),
             [r"C:\data", "/grant", r"NT SERVICE\x:(OI)(CI)M", "/T", "/L"]
         );
         assert_eq!(
-            strings(grant_args(Path::new(r"C:\data\f"), r"NT SERVICE\x", false)),
+            strings(grant_args(
+                Path::new(r"C:\data\f"),
+                r"NT SERVICE\x",
+                false,
+                false
+            )),
             [r"C:\data\f", "/grant", r"NT SERVICE\x:M", "/L"]
         );
+    }
+
+    /// On Windows the hand-over grants the Client Modify, and full control where a process
+    /// account is registered, so that the Client can grant that account its share (ADR-0059
+    /// clause 6) of directories the install made.
+    /// Verifies: ADR-0059
+    #[test]
+    fn on_windows_the_handover_lets_the_client_share_with_the_process_account() {
+        let account = r"NT SERVICE\opamp-fleet";
+        assert_eq!(
+            handover_grant(account, true, false),
+            format!("{account}:(OI)(CI)M")
+        );
+        assert_eq!(
+            handover_grant(account, false, false),
+            format!("{account}:M")
+        );
+        assert_eq!(
+            handover_grant(account, true, true),
+            format!("{account}:(OI)(CI)F")
+        );
+        assert_eq!(handover_grant(account, false, true), format!("{account}:F"));
     }
 
     /// On Windows the process account is one of the passwordless forms — the second service's own
