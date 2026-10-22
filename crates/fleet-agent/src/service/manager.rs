@@ -350,8 +350,9 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
                 Ok(ServiceManagerKind::Systemd)
             ),
     )?;
-    manager(spec.level)?
-        .install(ServiceInstallCtx {
+    register(
+        spec.level,
+        ServiceInstallCtx {
             label: label(),
             program: spec.program.clone(),
             args: service_args(spec),
@@ -374,10 +375,33 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
             // (`KeepAlive{SuccessfulExit:false}`). The Windows backend of `service-manager`
             // *discards* this and only logs a warning, which is why `windows_config` exists.
             restart_policy: RESTART_POLICY,
+        },
+    )
+    .map_err(|e| format!("cannot install the service (system scope needs root/Administrator): {e}"))
+}
+
+/// Registers `ctx` with the service manager. On Windows a service the SCM holds already is
+/// reconfigured in place, as `sc create` refuses one that exists: its program, arguments and start
+/// type are rewritten and its logon account kept, and what `windows_config` sets follows as on a
+/// first registration. A re-registration — an upgrade among them — so keeps the second service
+/// and the process account it runs under (ADR-0059 clause 1).
+fn register(level: ServiceLevel, ctx: ServiceInstallCtx) -> Result<(), String> {
+    let manager = manager(level)?;
+    #[cfg(windows)]
+    if manager
+        .status(ServiceStatusCtx {
+            label: ctx.label.clone(),
         })
-        .map_err(|e| {
-            format!("cannot install the service (system scope needs root/Administrator): {e}")
-        })
+        .map_err(|e| e.to_string())?
+        != ServiceStatus::NotInstalled
+    {
+        return super::windows_config::reregister(
+            &ctx.label.to_qualified_name(),
+            &ctx.program,
+            &ctx.args,
+        );
+    }
+    manager.install(ctx).map_err(|e| e.to_string())
 }
 
 /// Registers the second service (ADR-0059 clause 2), which only a host where [`agents_supported`]
@@ -393,13 +417,13 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
 /// `ERROR_SERVICE_DEPENDENCY_FAIL`), where the Client runs without it (ADR-0059 clause 2). The
 /// start names the second service first instead ([`started`]).
 fn install_agents(spec: &InstallSpec, agents: &Agents) -> Result<(), String> {
-    manager(spec.level)?
-        .install(agents_install_ctx(spec, agents, cfg!(target_os = "linux"))?)
-        .map_err(|e| {
-            format!(
-                "cannot install the second service (system scope needs root or Administrator): {e}"
-            )
-        })?;
+    register(
+        spec.level,
+        agents_install_ctx(spec, agents, cfg!(target_os = "linux"))?,
+    )
+    .map_err(|e| {
+        format!("cannot install the second service (system scope needs root or Administrator): {e}")
+    })?;
     super::windows_config::configure_agents(
         &agents_service_name(),
         &agents_display_name(),
@@ -730,7 +754,7 @@ pub fn registration(level: ServiceLevel) -> Result<Option<Registration>, String>
         plist_account,
     );
     #[cfg(windows)]
-    Ok(None)
+    super::windows_config::logon_account(service_name())
 }
 
 #[cfg(unix)]

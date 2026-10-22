@@ -62,66 +62,129 @@ pub fn ensure_can_register(level: ServiceLevel) -> Result<(), String> {
 }
 
 /// Who keeps full control of a system-scope data root once its inherited rights are cut: LocalSystem
-/// and the Administrators group, by SID so a localised group name cannot miss. The service account
-/// is granted its own rights afterwards, by the handover.
+/// and the Administrators group, by their aliases, which no localised name can miss. The service
+/// account is granted its own rights afterwards, by the handover.
 #[cfg(any(windows, test))]
-const KEEPERS: [&str; 2] = ["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"];
+const KEEPERS: [(&str, &str); 2] = [("S-1-5-18", "SY"), ("S-1-5-32-544", "BA")];
 
-/// The `icacls.exe` arguments that cut `path` off from the rights it inherits and leave it to
-/// [`KEEPERS`]. Without the inheritance flags propagated, what is already inside — the configuration
-/// written moments ago — loses the inherited read right with its parent. `/L` acts on a link or
-/// junction itself: the service's account may swap one in under a root it holds between the check
-/// of ADR-0053 clause 4 and this run, and the cut must not reach what it names.
+/// `FILE_ALL_ACCESS`: what `icacls` calls `F`.
 #[cfg(any(windows, test))]
-fn restrict_args(path: &std::path::Path) -> Vec<std::ffi::OsString> {
-    let mut args = vec![path.as_os_str().to_owned(), "/inheritance:r".into()];
-    for keeper in KEEPERS {
-        args.push("/grant:r".into());
-        args.push(keeper.into());
+const FULL: u32 = 0x001f_01ff;
+
+/// The Administrators group, by alias: the owner of a system-scope data root (ADR-0019 clause 18).
+#[cfg(any(windows, test))]
+const OWNER: &str = "BA";
+
+/// The DACL of a root cut off from the rights it inherits (`/inheritance:r`): protected, its own
+/// explicit ACEs kept, and full control for [`KEEPERS`], inherited by everything in it, in place of
+/// what they were granted explicitly before.
+#[cfg(any(windows, test))]
+fn cut(current: &crate::win32::acl::Dacl) -> crate::win32::acl::Dacl {
+    use crate::win32::acl::{allow, Dacl};
+    let mut dacl = Dacl {
+        flags: "PAI".to_string(),
+        aces: current.explicit().aces,
+    };
+    for (sid, alias) in KEEPERS {
+        dacl = dacl.granting(sid, &[allow(alias, FULL, "OICI")]);
     }
-    args.push("/L".into());
-    args
+    dacl
 }
 
-/// The Administrators group, by SID: the owner of a system-scope data root (ADR-0019 clause 18).
+/// The DACL of an entry beneath a root that is taken over (`/reset`): no explicit ACE, and what its
+/// parent `parent` passes on to it.
 #[cfg(any(windows, test))]
-const OWNER: &str = "*S-1-5-32-544";
+fn taken_over(parent: &crate::win32::acl::Dacl, dir: bool) -> crate::win32::acl::Dacl {
+    crate::win32::acl::Dacl {
+        flags: "AI".to_string(),
+        aces: parent.passed_on(dir),
+    }
+}
 
-/// The `icacls.exe` runs, in order, that take the default data root over and leave it and
-/// everything in it to [`KEEPERS`] alone, whoever created it.
+/// Takes the default data root `dir` over and leaves it and everything in it to [`KEEPERS`] alone,
+/// whoever created it.
 ///
 /// `%ProgramData%` lets every local user create a folder, so the data root may already exist and
 /// belong to one of them. Its owner may rewrite its rights at any time, and an explicit grant of
-/// theirs survives removing the inherited ones. So every item is first given to the
-/// Administrators — a link itself, never what it names — and every explicit right in the tree is
-/// reset away, before the root is cut off by [`restrict_args`]. No `/C`: an item that cannot be
-/// taken over fails the install instead of staying behind.
-#[cfg(any(windows, test))]
-fn take_over_commands(path: &std::path::Path) -> Vec<Vec<std::ffi::OsString>> {
-    let path = path.as_os_str().to_owned();
-    vec![
-        vec![
-            path.clone(),
-            "/setowner".into(),
-            OWNER.into(),
-            "/T".into(),
-            "/L".into(),
-        ],
-        vec![path.clone(), "/reset".into(), "/T".into(), "/L".into()],
-        restrict_args(std::path::Path::new(&path)),
-    ]
+/// theirs survives removing the inherited ones. So the root and every entry in it is given to the
+/// Administrators, the root is cut off ([`cut`]) and every entry keeps only what the root passes
+/// on to it ([`taken_over`]). Each entry is changed through a handle of its own: a link is changed
+/// as itself and never entered, and what the process account `process` owns, with everything
+/// beneath it, is left as it is (ADR-0059 clause 10). An entry that cannot be taken over fails the
+/// install instead of staying behind.
+#[cfg(windows)]
+fn take_over(dir: &std::path::Path, process: Option<&crate::win32::Sid>) -> std::io::Result<()> {
+    use crate::win32::files::{walk, Access, Entry};
+    let top = open_root(dir, Access::Owner)?;
+    top.set_owner(OWNER)?;
+    let keepers_alone = crate::win32::acl::Dacl::parse("D:").map_err(std::io::Error::other)?;
+    top.set_dacl(&cut(&keepers_alone))?;
+    let mut skipped = Vec::new();
+    walk(
+        &top,
+        Access::Owner,
+        process,
+        &mut |entry: &Entry, parent: &Entry| {
+            entry.set_owner(OWNER)?;
+            entry.set_dacl(&taken_over(&parent.dacl()?, entry.dir))?;
+            Ok(true)
+        },
+        &mut skipped,
+    )
+}
+
+/// Cuts `dir` off from the rights it inherits and leaves it to [`KEEPERS`] ([`cut`]), and applies
+/// what it then passes on to what it already holds — the configuration written moments ago would
+/// otherwise keep the read right `BUILTIN\Users` passed on before. Through handles, as
+/// [`take_over`] goes, and stopping at an entry protected from what its parent passes on.
+#[cfg(windows)]
+fn cut_off(dir: &std::path::Path, process: Option<&crate::win32::Sid>) -> std::io::Result<()> {
+    use crate::win32::files::{walk, Access, Entry};
+    let top = open_root(dir, Access::Dacl)?;
+    top.set_dacl(&cut(&top.dacl()?))?;
+    let mut skipped = Vec::new();
+    walk(
+        &top,
+        Access::Dacl,
+        process,
+        &mut |entry: &Entry, parent: &Entry| {
+            let dacl = entry.dacl()?;
+            let inherits = dacl.inheriting(&parent.dacl()?, entry.dir);
+            if inherits != dacl {
+                entry.set_dacl(&inherits)?;
+            }
+            Ok(!dacl.protected())
+        },
+        &mut skipped,
+    )
+}
+
+/// Opens the root `dir` as itself, held: a root that is a link is refused.
+#[cfg(windows)]
+fn open_root(
+    dir: &std::path::Path,
+    access: crate::win32::files::Access,
+) -> std::io::Result<crate::win32::files::Entry> {
+    let top = crate::win32::files::Entry::open(dir, access, true)?;
+    if !top.dir {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is a link or no directory", dir.display()),
+        ));
+    }
+    Ok(top)
 }
 
 /// What a system-scope install does to the rights of one directory that holds the Client's
 /// secrets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Treatment {
-    /// The platform's own data root under `%ProgramData%`: taken over whole
-    /// ([`take_over_commands`]), whoever created it.
+    /// The platform's own data root under `%ProgramData%`: taken over whole ([`take_over`]),
+    /// whoever created it.
     TakeOver,
     /// A data root the operator named, a state directory outside it, or a Supervisors' root
-    /// outside both that the install creates: cut off from inherited rights ([`restrict_args`]),
-    /// nothing else changed.
+    /// outside both that the install creates: cut off from inherited rights ([`cut`]), nothing
+    /// else changed.
     Cut,
     /// A Supervisors' root outside the data root and the state directory that already exists, or
     /// that lies outside every root of the install: the operator's, left as it is and named in a
@@ -187,44 +250,40 @@ pub fn plan(
 pub fn restrict(
     level: ServiceLevel,
     plan: &[(std::path::PathBuf, Treatment)],
+    process: Option<&str>,
 ) -> Result<Vec<std::path::PathBuf>, String> {
     let mut created = Vec::new();
     if level != ServiceLevel::System {
         return Ok(created);
     }
+    let process = process
+        .map(crate::win32::Sid::parse)
+        .transpose()
+        .map_err(|e| format!("the process account: {e}"))?;
     for (index, (dir, treatment)) in plan.iter().enumerate() {
-        let commands = match treatment {
-            Treatment::TakeOver => take_over_commands(dir),
-            Treatment::Cut => vec![restrict_args(dir)],
-            Treatment::Untouched => {
-                println!(
-                    "warning: {} is left as it is — it exists already, or lies outside the data \
-                     root, the layout root and the state directory; create it where it is missing \
-                     and restrict it to LocalSystem, the Administrators and the service account \
-                     yourself",
-                    dir.display()
-                );
-                continue;
-            }
-        };
+        if *treatment == Treatment::Untouched {
+            println!(
+                "warning: {} is left as it is — it exists already, or lies outside the data \
+                 root, the layout root and the state directory; create it where it is missing \
+                 and restrict it to LocalSystem, the Administrators and the service account \
+                 yourself",
+                dir.display()
+            );
+            continue;
+        }
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        for args in commands {
-            let output = std::process::Command::new("icacls.exe")
-                .args(&args)
-                .output()
-                .map_err(|e| format!("cannot run icacls.exe: {e}"))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "cannot restrict {} to LocalSystem and the Administrators: icacls.exe {} \
-                     exited with {} ({})",
-                    dir.display(),
-                    args[1].to_string_lossy(),
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout).trim()
-                ));
-            }
-        }
+        let restricted = if *treatment == Treatment::TakeOver {
+            take_over(dir, process.as_ref())
+        } else {
+            cut_off(dir, process.as_ref())
+        };
+        restricted.map_err(|e| {
+            format!(
+                "cannot restrict {} to LocalSystem and the Administrators: {e}",
+                dir.display()
+            )
+        })?;
         if index > 0 {
             created.push(dir.clone());
         }
@@ -240,6 +299,7 @@ pub fn restrict(
 pub fn restrict(
     _level: ServiceLevel,
     _plan: &[(std::path::PathBuf, Treatment)],
+    _process: Option<&str>,
 ) -> Result<Vec<std::path::PathBuf>, String> {
     Ok(Vec::new())
 }
@@ -259,52 +319,35 @@ const NEEDS_ADMINISTRATOR: &str = "the Windows service control manager denied ac
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        plan, restrict_args, take_over_commands, Treatment, ACCESS_DENIED, KEEPERS,
-        NEEDS_ADMINISTRATOR,
-    };
+    use super::{cut, plan, taken_over, Treatment, ACCESS_DENIED, NEEDS_ADMINISTRATOR, OWNER};
+    use crate::win32::acl::Dacl;
     use std::path::{Path, PathBuf};
-
-    fn strings(args: &[std::ffi::OsString]) -> Vec<String> {
-        args.iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
-    }
 
     /// A data root a local user created before the install is theirs: as its owner they could
     /// rewrite its rights at any time, and an explicit grant of theirs survives cutting the
-    /// inherited ones. So the whole tree is first given to the Administrators, every explicit
-    /// right in it is dropped, and only then is the root cut off and left to the keepers — the
-    /// result is the same whoever made the directory.
+    /// inherited ones. So the root and every entry is given to the Administrators, the root keeps
+    /// nothing but the keepers, and every entry beneath it nothing but what the root passes on —
+    /// the result is the same whoever made the directory.
     /// Verifies: ADR-0019
     #[test]
     fn a_data_root_someone_else_made_is_taken_over_before_it_is_cut_off() {
-        let root = Path::new(r"C:\ProgramData\opamp-fleet");
-        let commands: Vec<Vec<String>> = take_over_commands(root)
-            .iter()
-            .map(|args| strings(args))
-            .collect();
-        assert_eq!(commands.len(), 3, "{commands:?}");
+        assert_eq!(OWNER, "BA", "the Administrators own every entry");
+        let root = cut(&Dacl::parse("D:").expect("empty"));
         assert_eq!(
-            commands[0],
-            [
-                root.to_str().unwrap(),
-                "/setowner",
-                "*S-1-5-32-544",
-                "/T",
-                "/L"
-            ],
-            "the Administrators own every item, the links themselves and not what they name"
+            root.text(),
+            "D:PAI(A;OICI;0x1f01ff;;;SY)(A;OICI;0x1f01ff;;;BA)"
         );
+        let planted = Dacl::parse("D:(A;OICI;0x1f01ff;;;S-1-5-21-1-2-3-1001)").expect("theirs");
+        let dir = taken_over(&root, true);
         assert_eq!(
-            commands[1],
-            [root.to_str().unwrap(), "/reset", "/T", "/L"],
-            "no explicit right survives anywhere in the tree"
+            dir.text(),
+            "D:AI(A;OICIID;0x1f01ff;;;SY)(A;OICIID;0x1f01ff;;;BA)",
+            "no explicit right survives beneath the root"
         );
-        assert_eq!(commands[2], strings(&restrict_args(root)), "then the cut");
-        assert!(
-            commands.iter().flatten().all(|arg| arg != "/C"),
-            "an item that cannot be taken over fails the install rather than being skipped"
+        assert!(!dir.text().contains("S-1-5-21"), "{planted:?}");
+        assert_eq!(
+            taken_over(&dir, false).text(),
+            "D:AI(A;ID;0x1f01ff;;;SY)(A;ID;0x1f01ff;;;BA)"
         );
     }
 
@@ -425,28 +468,26 @@ mod tests {
     }
 
     /// The data root keeps no inherited right — `BUILTIN\Users` read among them — and full control
-    /// only for LocalSystem and the Administrators, each granted by SID.
+    /// only for LocalSystem and the Administrators beside its own explicit grants, and what it
+    /// holds then inherits that alone, its own explicit grants kept.
     /// Verifies: ADR-0019, ADR-0053
     #[test]
     fn the_data_root_is_cut_off_from_what_every_local_user_inherits() {
-        let args: Vec<String> = restrict_args(std::path::Path::new(r"C:\ProgramData\opamp-fleet"))
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(args[0], r"C:\ProgramData\opamp-fleet");
+        let inherited = Dacl::parse(
+            "D:AI(A;OICI;0x1301bf;;;S-1-5-80-1-2-3-4-5)(A;OICIID;0x1200a9;;;BU)(A;OICIID;0x1f01ff;;;SY)",
+        )
+        .expect("dacl");
+        let root = cut(&inherited);
         assert_eq!(
-            args[1], "/inheritance:r",
-            "inherited rights are removed, not kept"
+            root.text(),
+            "D:PAI(A;OICI;0x1301bf;;;S-1-5-80-1-2-3-4-5)(A;OICI;0x1f01ff;;;SY)(A;OICI;0x1f01ff;;;BA)"
         );
+        assert!(root.protected(), "inherited rights are removed, not kept");
+        let config = Dacl::parse("D:AI(A;;0x1;;;LS)(A;ID;0x1200a9;;;BU)").expect("file");
         assert_eq!(
-            &args[2..],
-            ["/grant:r", KEEPERS[0], "/grant:r", KEEPERS[1], "/L"],
-            "and on a link or junction itself, never on what it names"
-        );
-        assert!(KEEPERS[0].starts_with("*S-1-5-18:") && KEEPERS[1].starts_with("*S-1-5-32-544:"));
-        assert!(
-            !args.iter().any(|arg| arg.contains("S-1-5-32-545")),
-            "no grant to Users"
+            config.inheriting(&root, false).text(),
+            "D:AI(A;;0x1;;;LS)(A;ID;0x1301bf;;;S-1-5-80-1-2-3-4-5)(A;ID;0x1f01ff;;;SY)(A;ID;0x1f01ff;;;BA)",
+            "no read right for Users"
         );
     }
 

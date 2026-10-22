@@ -101,11 +101,10 @@ pub fn decide(
     }
     #[cfg(not(unix))]
     {
-        let _ = registration;
-        match flag {
-            Some(account) => Ok(Decision {
-                run_as: Some(RunAs::resolve(account, service, &Source::Flag, data_root)?),
-                source: Source::Flag,
+        match choose_on_windows(flag, registration) {
+            Some((account, source)) => Ok(Decision {
+                run_as: Some(RunAs::resolve(&account, service, &source, data_root)?),
+                source,
             }),
             None => Ok(Decision {
                 run_as: None,
@@ -113,6 +112,30 @@ pub fn decide(
             }),
         }
     }
+}
+
+/// The order on Windows: `--run-as`, else the logon account the SCM holds for the service, where
+/// it holds one other than `LocalSystem`, which a registration that names none runs as. A
+/// re-registration — an upgrade of the MSI among them — keeps the account, and with it what the
+/// process account needs of it (ADR-0059 clause 1).
+#[cfg(any(not(unix), test))]
+fn choose_on_windows(
+    flag: Option<&str>,
+    registration: Option<&Registration>,
+) -> Option<(String, Source)> {
+    if let Some(account) = flag {
+        return Some((account.to_string(), Source::Flag));
+    }
+    let registration = registration?;
+    let account = registration.account.as_ref()?;
+    let system = crate::win32::known_account_sid(account)
+        .is_some_and(|sid| sid.as_str() == crate::win32::LOCAL_SYSTEM);
+    (!system).then(|| {
+        (
+            account.clone(),
+            Source::Registered(registration.file.clone()),
+        )
+    })
 }
 
 /// The order of ADR-0042 clause 2, on what was found. `owner` names the data root's owner when it
@@ -436,71 +459,52 @@ impl RunAs {
         walk::chown_tree(path, self.uid, self.gid, kept, skipped)
     }
 
-    /// On Windows a grant, which takes nothing from what the process account was granted.
-    #[cfg(not(unix))]
+    /// On Windows a grant on every entry, each set through its own handle: it never enters a link
+    /// or a junction, which is granted as itself, and leaves what the process account owns, with
+    /// everything beneath it, as it is (ADR-0059 clause 10).
+    #[cfg(windows)]
     fn own(
         &self,
         path: &Path,
         process: Option<&ProcessAccount>,
-        _skipped: &mut Vec<Skipped>,
+        skipped: &mut Vec<Skipped>,
     ) -> Result<(), String> {
-        // Asked of the entry itself: a link or junction is never a directory to walk.
-        let is_dir = std::fs::symlink_metadata(path)
-            .map(|m| m.is_dir())
-            .unwrap_or(false);
-        let output = std::process::Command::new("icacls.exe")
-            .args(grant_args(path, &self.account, is_dir, process.is_some()))
-            .output()
-            .map_err(|e| format!("cannot run icacls.exe: {e}"))?;
-        if output.status.success() {
+        use crate::win32::files::{grant_tree, Access, Entry};
+        let sid = windows_sid(&self.account)?;
+        let [on_dir, on_file] = handover_aces(sid.as_str(), process.is_some());
+        let skip = process.map(ProcessAccount::sid);
+        let top = Entry::open(path, Access::Dacl, true).map_err(|e| e.to_string())?;
+        if skip.is_some_and(|skip| top.owner().ok().as_ref() == Some(skip)) {
+            skipped.push(Skipped::ProcessAccounts(path.to_path_buf()));
             return Ok(());
         }
-        Err(format!(
-            "icacls.exe exited with {} ({})",
-            output.status,
-            String::from_utf8_lossy(&output.stdout).trim()
-        ))
+        let on_top = if top.dir { &on_dir } else { &on_file };
+        let passed = grant_tree(
+            &top,
+            sid.as_str(),
+            [on_top.as_slice(), on_dir.as_slice(), on_file.as_slice()],
+            skip,
+            true,
+        )
+        .map_err(|e| e.to_string())?;
+        skipped.extend(passed.into_iter().map(Skipped::ProcessAccounts));
+        Ok(())
     }
 }
 
-/// The `icacls.exe` arguments that grant `account` its [`handover_grant`] on `path` (ADR-0042
-/// clause 2).
-///
-/// `/T` re-grants across what already exists, and `/L` acts on a symbolic link or junction itself,
-/// never on what it names: the account holds Modify on the tree already and could have planted a
-/// junction to any directory in it.
+/// The ACEs the hand-over grants the Client's account `sid` on Windows, for a directory and for a
+/// file: modify, inherited by what a directory holds, and where a process account is registered
+/// `WRITE_DAC` beside it — the Client grants that account its share of what the install laid out
+/// (ADR-0059 clause 6), on directories the install, not the Client, made — and never `WRITE_OWNER`.
 #[cfg(any(windows, test))]
-fn grant_args(
-    path: &Path,
-    account: &str,
-    is_dir: bool,
-    process_account: bool,
-) -> Vec<std::ffi::OsString> {
-    let mut args = vec![
-        path.as_os_str().to_owned(),
-        "/grant".into(),
-        handover_grant(account, is_dir, process_account).into(),
-    ];
-    if is_dir {
-        args.push("/T".into());
-    }
-    args.push("/L".into());
-    args
-}
-
-/// The `icacls.exe` grant the hand-over gives `account` on Windows: Modify, and full control where
-/// a process account is registered — the Client then grants that account its share of what the
-/// install laid out (ADR-0059 clause 6), which needs `WRITE_DAC` on directories the install, not
-/// the Client, created, as a change of owner gives it on Unix. `(OI)(CI)` — inherited by files and
-/// subdirectories created later — is a directory-only grant spec; a file takes the bare right.
-#[cfg(any(not(unix), test))]
-fn handover_grant(account: &str, is_dir: bool, process_account: bool) -> String {
-    let right = if process_account { "F" } else { "M" };
-    if is_dir {
-        format!("{account}:(OI)(CI){right}")
+fn handover_aces(sid: &str, process_account: bool) -> [Vec<String>; 2] {
+    use crate::win32::acl::{allow, MODIFY, WRITE_DAC};
+    let mask = if process_account {
+        MODIFY | WRITE_DAC
     } else {
-        format!("{account}:{right}")
-    }
+        MODIFY
+    };
+    [vec![allow(sid, mask, "OICI")], vec![allow(sid, mask, "")]]
 }
 
 /// Resolve an account name to its uid and primary gid through `id(1)`. `Err(None)` means the
@@ -1420,10 +1424,11 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
     if BUILT_IN.iter().any(|b| account.eq_ignore_ascii_case(b)) {
         return Ok(());
     }
-    if account.len() >= NT_SERVICE.len()
-        && account[..NT_SERVICE.len()].eq_ignore_ascii_case(NT_SERVICE)
+    if let Some(name) = account
+        .get(..NT_SERVICE.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(NT_SERVICE))
+        .and_then(|_| account.get(NT_SERVICE.len()..))
     {
-        let name = &account[NT_SERVICE.len()..];
         if name.eq_ignore_ascii_case(service) {
             return Ok(());
         }
@@ -1449,57 +1454,124 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// The Windows hand-over never follows a link (ADR-0042 clause 2): every grant acts on a link
-    /// or junction itself, so one the account planted under a root it already holds cannot carry
-    /// Modify to the directory it names.
-    /// Verifies: ADR-0042
+    /// On Windows a re-registration keeps the logon account the SCM holds, as a unit's is kept,
+    /// unless `--run-as` names another; `LocalSystem`, the account a registration that names none
+    /// runs as, is no account kept (ADR-0059 clause 1).
+    /// Verifies: ADR-0059
     #[test]
-    fn the_windows_handover_grants_on_a_link_itself() {
-        let strings = |args: Vec<std::ffi::OsString>| -> Vec<String> {
-            args.iter()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect()
+    fn on_windows_a_reregistration_keeps_the_scms_logon_account() {
+        let key = PathBuf::from(r"HKLM\SYSTEM\CurrentControlSet\Services\opamp-fleet");
+        let held = |account: &str| Registration {
+            file: key.clone(),
+            account: Some(account.to_string()),
         };
         assert_eq!(
-            strings(grant_args(
-                Path::new(r"C:\data"),
-                r"NT SERVICE\x",
-                true,
-                false
-            )),
-            [r"C:\data", "/grant", r"NT SERVICE\x:(OI)(CI)M", "/T", "/L"]
+            choose_on_windows(None, Some(&held(r"NT Service\opamp-fleet"))),
+            Some((
+                r"NT Service\opamp-fleet".to_string(),
+                Source::Registered(key.clone())
+            ))
         );
         assert_eq!(
-            strings(grant_args(
-                Path::new(r"C:\data\f"),
-                r"NT SERVICE\x",
-                false,
-                false
-            )),
-            [r"C:\data\f", "/grant", r"NT SERVICE\x:M", "/L"]
+            choose_on_windows(Some(r"NT AUTHORITY\LocalService"), Some(&held("x"))),
+            Some((r"NT AUTHORITY\LocalService".to_string(), Source::Flag))
+        );
+        assert_eq!(choose_on_windows(None, Some(&held("LocalSystem"))), None);
+        assert_eq!(choose_on_windows(None, None), None);
+    }
+
+    /// On Windows the hand-over enters no junction a Managed Process placed in its data directory,
+    /// and leaves what the process account owns as it is, with everything beneath it (ADR-0059
+    /// clause 10). This test's own account stands in for the process account, `LocalService` for
+    /// the Client's.
+    /// Verifies: ADR-0042, ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_handover_enters_no_junction_and_leaves_the_process_accounts_own() {
+        use crate::win32::files::{Access, Entry};
+        let me = crate::win32::own_sid().expect("own sid");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let data = root.join("data");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&data).expect("data");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(outside.join("secret"), b"x").expect("secret");
+        let linked = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(data.join("link"))
+            .arg(&outside)
+            .status()
+            .expect("run mklink");
+        assert!(linked.success(), "cannot make the junction");
+        let owned = data.join("owned");
+        std::fs::create_dir(&owned).expect("owned");
+        std::fs::write(owned.join("state"), b"x").expect("state");
+        Entry::open(&owned, Access::Owner, false)
+            .and_then(|entry| entry.set_owner(me.as_str()))
+            .expect("owned by the stand-in");
+        let dacl = |path: &Path| {
+            Entry::open(path, Access::Dacl, false)
+                .and_then(|entry| entry.dacl())
+                .expect("dacl")
+                .text()
+        };
+        let before = (dacl(&outside), dacl(&outside.join("secret")), dacl(&owned));
+
+        let client = RunAs::resolve(
+            r"NT AUTHORITY\LocalService",
+            "opamp-fleet",
+            &Source::Flag,
+            &root,
+        )
+        .expect("a passwordless form");
+        let process = ProcessAccount {
+            account: "stand-in".to_string(),
+            sid: me.clone(),
+            client_sid: crate::win32::Sid::parse(crate::win32::LOCAL_SERVICE).expect("sid"),
+            kept_from: None,
+        };
+        let skipped = client
+            .hand_over(&[&root], Some(&process))
+            .expect("hand-over");
+        assert_eq!(skipped, [Skipped::ProcessAccounts(owned.clone())]);
+        assert_eq!(
+            (dacl(&outside), dacl(&outside.join("secret")), dacl(&owned)),
+            before,
+            "nothing through the junction, nothing of the process account's"
+        );
+        assert!(
+            dacl(&data).contains(";;;LS)"),
+            "the Client's own is granted"
         );
     }
 
-    /// On Windows the hand-over grants the Client Modify, and full control where a process
-    /// account is registered, so that the Client can grant that account its share (ADR-0059
-    /// clause 6) of directories the install made.
+    /// On Windows the hand-over grants the Client modify, and where a process account is
+    /// registered `WRITE_DAC` beside it, so that the Client can grant that account its share
+    /// (ADR-0059 clause 6) of directories the install made — never the owner's right.
     /// Verifies: ADR-0059
     #[test]
     fn on_windows_the_handover_lets_the_client_share_with_the_process_account() {
-        let account = r"NT SERVICE\opamp-fleet";
+        let sid = "S-1-5-80-1-2-3-4-5";
         assert_eq!(
-            handover_grant(account, true, false),
-            format!("{account}:(OI)(CI)M")
+            handover_aces(sid, false),
+            [
+                vec![format!("(A;OICI;0x1301bf;;;{sid})")],
+                vec![format!("(A;;0x1301bf;;;{sid})")]
+            ]
         );
         assert_eq!(
-            handover_grant(account, false, false),
-            format!("{account}:M")
+            handover_aces(sid, true),
+            [
+                vec![format!("(A;OICI;0x1701bf;;;{sid})")],
+                vec![format!("(A;;0x1701bf;;;{sid})")]
+            ]
         );
         assert_eq!(
-            handover_grant(account, true, true),
-            format!("{account}:(OI)(CI)F")
+            0x1701bf & 0x0008_0000,
+            0,
+            "no WRITE_OWNER, which full control would bring"
         );
-        assert_eq!(handover_grant(account, false, true), format!("{account}:F"));
     }
 
     /// On Windows the process account is one of the passwordless forms — the second service's own
@@ -1577,6 +1649,10 @@ mod tests {
             "gMSA"
         );
 
+        assert!(
+            windows_account_form("Dienst-äöü", svc).is_err(),
+            "no slice panics"
+        );
         let other = windows_account_form(r"NT SERVICE\mssqlserver", svc).expect_err("not ours");
         assert!(other.contains(r"NT SERVICE\supervisor"), "{other}");
 
@@ -1859,9 +1935,9 @@ mod tests {
             #[cfg(unix)]
             gid: 997,
             #[cfg(windows)]
-            sid: crate::win32::virtual_account_sid("opamp-fleet-agents"),
+            sid: crate::win32::virtual_account_sid("opamp-fleet-agents").expect("ascii"),
             #[cfg(windows)]
-            client_sid: crate::win32::virtual_account_sid("opamp-fleet"),
+            client_sid: crate::win32::virtual_account_sid("opamp-fleet").expect("ascii"),
             kept_from: Some(PathBuf::from(AGENTS_UNIT)),
         };
         assert!(kept.describe().contains(AGENTS_UNIT), "{}", kept.describe());
