@@ -182,7 +182,9 @@ core module names an adapter or a technology, and when a module has no role.
   `supervisor::ports`, so a Supervisor a Supervisor-set apply starts later starts its program
   the same way, and a Supervisor it purges has the same `Spawner` remove first what its
   programs wrote under their own account. What the Client changes where the process account
-  writes, it reaches through `storage::handle`, one directory handle at a time.
+  writes, it reaches through `storage::handle`, one directory handle at a time from a root of its
+  own — the state directory, the Supervisors' root, a Supervisor's directory — beneath which no
+  link is followed.
   `supervisor::agent`, an Agent's decisions, names three more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, `HighWaterMarks`, which
   `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares
