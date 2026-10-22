@@ -830,9 +830,10 @@ fn start(launch: &Launch) -> io::Result<Child> {
 /// them it can read, with everything beneath it. The service holds the request to that and no
 /// more:
 ///
-/// - `dir` is absolute, named after the Supervisor or its tombstone
-///   ([`crate::reconfigure::tombstone_name`]), and the Client's account owns it and the
-///   directory it is in, the Supervisors' root;
+/// - `dir` is absolute, the tombstone of the Supervisor
+///   ([`crate::reconfigure::tombstone_name`]) — never its own directory, which a Supervisor added
+///   again under the same name gets afresh — and the Client's account owns it and the directory
+///   it is in, the Supervisors' root;
 /// - `dir` itself is no link;
 /// - each of `shared` is a path beneath it, of plain names alone;
 /// - no link is followed beneath `dir`, and an entry, a link included, is removed as what it is;
@@ -854,12 +855,10 @@ pub(crate) fn purge(
     let named = dir
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|name| {
-            name == supervisor || crate::config::tombstone_of(name) == Some(supervisor)
-        });
+        .is_some_and(|name| crate::config::tombstone_of(name) == Some(supervisor));
     let (Some(root), true) = (dir.parent().filter(|_| dir.is_absolute()), named) else {
         return Err(format!(
-            "{} is not the directory of the Supervisor {supervisor}",
+            "{} is not the tombstone of the Supervisor {supervisor}",
             dir.display()
         ));
     };
@@ -2314,7 +2313,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let outside = dir.path().join("outside");
         std::fs::write(&outside, b"kept").expect("write");
-        let supervisor = dir.path().join("supervisors").join("agent");
+        let supervisor = dir
+            .path()
+            .join("supervisors")
+            .join(crate::reconfigure::tombstone_name("agent"));
         written_by_an_agent(&supervisor, &outside);
         let service = service(own_uid());
         let channel = Channel::connect(&service.socket, own_uid())
@@ -2331,7 +2333,7 @@ mod tests {
     }
 
     /// The service removes no more than a purge asks of it: its own entries in directories beneath
-    /// the directory of the Supervisor it names, of plain names, reached through no link, in a
+    /// the tombstone of the Supervisor it names, of plain names, reached through no link, in a
     /// directory the Client's account owns (ADR-0059 clause 5).
     /// Verifies: ADR-0059
     #[test]
@@ -2340,7 +2342,9 @@ mod tests {
         let outside = dir.path().join("outside");
         std::fs::create_dir(&outside).expect("mkdir");
         std::fs::write(outside.join("keep"), b"kept").expect("write");
-        let supervisor = dir.path().join("supervisors").join("agent");
+        let tomb = crate::reconfigure::tombstone_name("agent");
+        let supervisor = dir.path().join("supervisors").join(&tomb);
+        let relative = Path::new("supervisors").join(&tomb);
         let data = supervisor.join("data");
         std::fs::create_dir_all(&data).expect("mkdir");
         std::fs::write(data.join("state"), b"x").expect("write");
@@ -2351,7 +2355,7 @@ mod tests {
 
         for (name, at, within) in [
             ("other", supervisor.as_path(), shared("data")),
-            ("agent", Path::new("supervisors/agent"), shared("data")),
+            ("agent", relative.as_path(), shared("data")),
             ("agent", supervisor.as_path(), shared("../outside")),
             ("agent", supervisor.as_path(), shared("data/../../outside")),
             ("agent", supervisor.as_path(), vec![outside.clone()]),
@@ -2375,11 +2379,12 @@ mod tests {
 
     /// The service purges the tombstone of the Supervisor it names, a directory the Client moved
     /// aside beneath the Supervisors' root, and nothing that only looks like one: another
-    /// Supervisor's tombstone, a name of no tombstone, or a link of that name (ADR-0059 clause 5,
-    /// ADR-0017 clause 34).
+    /// Supervisor's tombstone, a name of no tombstone, a link of that name, or the Supervisor's
+    /// own directory, which a Supervisor added again under the same name holds (ADR-0059 clause
+    /// 5, ADR-0017 clause 34).
     /// Verifies: ADR-0059
     #[test]
-    fn a_purge_takes_the_tombstone_of_the_supervisor_it_names() {
+    fn a_purge_takes_only_the_tombstone_of_the_supervisor_it_names() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("supervisors");
@@ -2390,6 +2395,10 @@ mod tests {
         std::fs::write(data.join("state"), b"x").expect("write");
         let linked = root.join(crate::reconfigure::tombstone_name("agent"));
         std::os::unix::fs::symlink(&tomb, &linked).expect("a link");
+        let live = root.join("agent").join("data");
+        std::fs::create_dir_all(&live).expect("mkdir");
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
+        std::fs::write(live.join("state"), b"new").expect("write");
         let me = own_uid();
         let shared = vec![PathBuf::from("data")];
 
@@ -2399,6 +2408,7 @@ mod tests {
             ("agent", root.join(".purge-agent-xyz")),
             ("agent", root.join(".purge-other-1f")),
             ("agent", linked),
+            ("agent", root.join("agent")),
         ] {
             assert!(
                 purge(me, name, &at, &shared).is_err(),
@@ -2407,9 +2417,11 @@ mod tests {
             );
         }
         assert!(data.join("state").exists());
+        assert!(live.join("state").exists());
 
         purge(me, "agent", &tomb, &shared).expect("the tombstone's");
         assert!(!data.join("state").exists());
+        assert!(live.join("state").exists());
     }
 
     /// The Client asks once per purged Supervisor, naming the directories it shares for writing,
