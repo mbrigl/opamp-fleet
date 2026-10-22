@@ -1847,8 +1847,11 @@ mod tests {
     /// it: a directory in the process account's group keeps that group and its mode, and so does
     /// an entry in it, while the rest is handed over as before. A re-registration — every package
     /// upgrade — takes from no Managed Process what it reads or writes.
+    /// Linux alone so far: only systemd registers a process account. The test is not root, and
+    /// macOS, unlike Linux, clears a directory's set-group-ID bit on a chown by anyone but root,
+    /// even one that changes nothing; the hand-over itself runs as root.
     /// Verifies: ADR-0053
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_handover_keeps_the_process_accounts_group_and_its_modes() {
         let dir = tempfile::tempdir().expect("tempdir");
