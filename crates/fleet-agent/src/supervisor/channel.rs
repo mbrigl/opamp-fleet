@@ -2308,8 +2308,10 @@ mod tests {
     }
 
     /// The Client asks once per purged Supervisor, naming the directories it shares for writing,
-    /// and a service that does not answer holds it [`PURGE_ANSWER`] and no longer, however many
-    /// entries the process account wrote (ADR-0059 clause 2, ADR-0017 clause 36).
+    /// so whoever serves the process account's socket holds it [`PURGE_ANSWER`] and no longer,
+    /// however many entries the process account wrote: a service that answers each request just
+    /// before the Client gives up on it is asked once, and one that never answers is given up on
+    /// (ADR-0059 clause 2, ADR-0017 clause 36).
     /// Verifies: ADR-0059
     #[tokio::test]
     async fn a_purge_waits_for_the_service_once_however_much_was_written() {
@@ -2322,28 +2324,49 @@ mod tests {
         for n in 0..20 {
             std::fs::create_dir(data.join(n.to_string())).expect("an entry");
         }
-        let asked = Arc::new(Mutex::new(Vec::new()));
-        let heard = Arc::clone(&asked);
-        let peer = peer::connect(move |request| {
-            if let Request::Purge { shared, .. } = request {
-                heard.lock().expect("lock").push(shared);
-            }
-            Vec::new()
-        })
-        .await;
         tokio::time::pause();
-        let started = tokio::time::Instant::now();
-        let error = peer
-            .channel
-            .purge("agent", &supervisor)
-            .await
-            .expect_err("no answer");
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
-        assert!(started.elapsed() <= PURGE_ANSWER + Duration::from_secs(1));
-        assert_eq!(
-            *asked.lock().expect("lock"),
-            vec![vec![PathBuf::from("data")]]
-        );
+        for answers in [true, false] {
+            let socket = dir.path().join(format!("agents-{answers}.sock"));
+            let listener = UnixListener::bind(&socket).expect("bind");
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let heard = Arc::clone(&asked);
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
+                    let reply = match request {
+                        Request::Hello { .. } => peer::hello(),
+                        Request::Purge { id, shared, .. } => {
+                            heard.lock().expect("lock").push(shared);
+                            if !answers {
+                                continue;
+                            }
+                            tokio::time::sleep(PURGE_ANSWER - Duration::from_secs(1)).await;
+                            Reply::Purged { id, result: Ok(()) }
+                        }
+                        _ => continue,
+                    };
+                    if write_frame(&mut stream, &reply).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            let channel = Channel::connect(&socket, own_uid()).await.expect("connect");
+            let started = tokio::time::Instant::now();
+            let purged = channel.purge("agent", &supervisor).await;
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < PURGE_ANSWER + Duration::from_secs(1),
+                "{elapsed:?}"
+            );
+            match purged {
+                Ok(()) => assert!(answers),
+                Err(e) => assert!(!answers && e.kind() == io::ErrorKind::TimedOut, "{e}"),
+            }
+            assert_eq!(
+                *asked.lock().expect("lock"),
+                vec![vec![PathBuf::from("data")]]
+            );
+        }
     }
 
     /// What a program run to its end writes is kept up to its last [`CAPTURED`] bytes per stream,
