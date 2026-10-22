@@ -211,10 +211,10 @@ pub fn build_engine(
 }
 
 /// A directory under the Supervisor root that no `[[supervisor]]` block names is reported, never
-/// reaped (ADR-0017): it may be a purge a crash or an error cut short — or an operator's
-/// deliberate hand edit, a temporarily commented-out block whose identity and program are not the
-/// Client's to delete. The log line makes the leftover visible; removing it stays the operator's
-/// call.
+/// reaped (ADR-0017 clause 37), a tombstone a purge could not delete among them, named as one: it
+/// may be a purge a crash or an error cut short — or an operator's deliberate hand edit, a
+/// temporarily commented-out block whose identity and program are not the Client's to delete. The
+/// log line makes the leftover visible; removing it stays the operator's call.
 fn report_orphaned_supervisor_dirs(config: &ClientConfig) {
     let root = config.supervisors_root();
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -240,8 +240,8 @@ fn report_orphaned_supervisor_dirs(config: &ClientConfig) {
         {
             warn!(
                 path = %entry.path().display(),
-                "a purge cut short left this removed supervisor's directory; the next purge tries \
-                 it again"
+                "this is the tombstone of a removed supervisor's directory, which its purge could \
+                 not delete; leaving it untouched — remove it by hand"
             );
             continue;
         }
@@ -1145,6 +1145,54 @@ mod tests {
             orphan.join("instance-uid").is_file(),
             "an orphaned directory is reported, not deleted"
         );
+    }
+
+    /// A tombstone a purge could not delete is an orphan like any other: startup reports it as a
+    /// removed Supervisor's for the operator to remove, and leaves it in place (ADR-0017 clauses
+    /// 36 and 37).
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_tombstone_left_behind_is_reported_at_startup_and_not_reaped() {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig =
+            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+        let tomb = config
+            .supervisors_root()
+            .join(crate::reconfigure::tombstone_name("gone"));
+        std::fs::create_dir_all(&tomb).expect("create");
+        std::fs::write(tomb.join("instance-uid"), "uid").expect("write");
+
+        tracing::subscriber::with_default(subscriber, || report_orphaned_supervisor_dirs(&config));
+
+        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
+        let reported: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains(&tomb.display().to_string()))
+            .collect();
+        assert_eq!(reported.len(), 1, "{log}");
+        assert!(
+            reported[0].contains("tombstone of a removed supervisor"),
+            "{log}"
+        );
+        assert!(reported[0].contains("remove it by hand"), "{log}");
+        assert!(tomb.join("instance-uid").is_file(), "reported, not deleted");
     }
 
     /// The self-Agent's effective configuration is its own file, not an echo of a stored offer:
