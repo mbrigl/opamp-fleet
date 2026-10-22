@@ -554,7 +554,7 @@ pub(crate) mod handle {
     use std::io;
     use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _, OwnedFd, RawFd};
     use std::os::unix::ffi::OsStrExt as _;
-    use std::path::{Component, Path};
+    use std::path::{Component, Path, PathBuf};
 
     use tracing::warn;
 
@@ -892,6 +892,42 @@ pub(crate) mod handle {
             }
         }
         Ok(())
+    }
+
+    /// The directories beneath `dir` that this account — the Client — owns and lets its group
+    /// write, its data directories: the outermost of each branch, by their paths relative to
+    /// `dir`. Where alone the process account can have written beneath `dir` (ADR-0059 clause 6).
+    /// Walked through handles from `dir`, its own root ([`open_beneath`]), through the Client's
+    /// own directories alone and never through a link; one it cannot read is passed over.
+    ///
+    /// # Errors
+    /// Returns an error when `dir` itself cannot be opened.
+    pub(crate) fn shared_for_writing(dir: &Path) -> io::Result<Vec<PathBuf>> {
+        fn walk(dir: &OwnedFd, at: &Path, me: libc::uid_t, found: &mut Vec<PathBuf>) {
+            let Ok(names) = entries(dir) else {
+                return;
+            };
+            for name in names {
+                let Ok(st) = lstat_at(dir.as_raw_fd(), &name) else {
+                    continue;
+                };
+                if !is(&st, libc::S_IFDIR) || st.st_uid != me {
+                    continue;
+                }
+                let path = at.join(OsStr::from_bytes(name.as_bytes()));
+                if mode(&st) & 0o020 != 0 {
+                    found.push(path);
+                } else if let Ok(inner) = open(dir.as_raw_fd(), &name, DIRECTORY) {
+                    walk(&inner, &path, me, found);
+                }
+            }
+        }
+        let top = open_beneath(dir, dir, DIRECTORY, None)?;
+        let mut found = Vec::new();
+        // SAFETY: geteuid(2) cannot fail and touches no memory.
+        walk(&top, Path::new(""), unsafe { libc::geteuid() }, &mut found);
+        found.sort();
+        Ok(found)
     }
 
     /// Gives what the Client owns under the data directory `dir` to `group`, writable by it: each
@@ -1468,6 +1504,39 @@ mod tests {
         create_shared_dir(&data, &private, Some(group), Shared::Written)
             .expect_err("not beneath at all");
         assert_eq!(mode_and_group(&private), before.0);
+    }
+
+    /// What a purge names to the second service is where alone the process account can have
+    /// written: the outermost directories the Client shares for writing, found through the
+    /// Client's own directories and through no link (ADR-0059 clauses 5 and 6).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_directories_shared_for_writing_are_found_through_no_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let group = own_group();
+        let supervisor = dir.path().join("agent");
+        let written = |path: &Path| {
+            create_shared_dir(&supervisor, path, Some(group), Shared::Written).expect("shared");
+        };
+        written(&supervisor.join("data").join("certs"));
+        written(&supervisor.join("var").join("cache"));
+        written(&supervisor.join("var").join("cache").join("inner"));
+        create_shared_dir(
+            &supervisor,
+            &supervisor.join("config"),
+            Some(group),
+            Shared::Read,
+        )
+        .expect("read");
+        let elsewhere = dir.path().join("elsewhere");
+        create_shared_dir(&elsewhere, &elsewhere, Some(group), Shared::Written).expect("shared");
+        std::os::unix::fs::symlink(&elsewhere, supervisor.join("link")).expect("a link");
+
+        assert_eq!(
+            handle::shared_for_writing(&supervisor).expect("found"),
+            vec![PathBuf::from("data/certs"), PathBuf::from("var/cache"),]
+        );
     }
 
     /// A parent the Client creates on the way to a shared directory is passed through by the
