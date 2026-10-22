@@ -119,6 +119,43 @@ impl Captured {
     }
 }
 
+/// How long the Client waits for the service to remove one entry of a purged Supervisor's
+/// directory. A purge that outlasts it leaves an orphan, as one the Client cannot delete does
+/// (ADR-0017 clause 36).
+pub(crate) const PURGE_ANSWER: Duration = Duration::from_secs(60);
+
+/// The entries under `dir` that `uid` — the process account — owns and that are directories, by
+/// their path relative to `dir`: what the Client cannot empty itself. Nothing beneath such an
+/// entry is listed, and no link is followed.
+fn written_by(dir: &Path, uid: u32) -> io::Result<Vec<PathBuf>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let mut found = Vec::new();
+    let mut pending = vec![PathBuf::new()];
+    while let Some(relative) = pending.pop() {
+        let entries = match std::fs::read_dir(dir.join(&relative)) {
+            Ok(entries) => entries,
+            // A directory the Client cannot list holds nothing it can name.
+            Err(e) if relative.as_os_str().is_empty() => return Err(e),
+            Err(_) => continue,
+        };
+        for entry in entries {
+            let entry = entry?;
+            let meta = entry.metadata()?;
+            if !meta.is_dir() {
+                continue;
+            }
+            let path = relative.join(entry.file_name());
+            if meta.uid() == uid {
+                found.push(path);
+            } else {
+                pending.push(path);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 /// What the Client asks of the second service.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -133,6 +170,16 @@ pub(crate) enum Request {
     Signal { id: u64, signal: i32, group: bool },
     /// Kill the program, and its process group where it was asked to lead one.
     Stop { id: u64 },
+    /// Remove `entry` — a path relative to `dir`, the directory of the Supervisor named
+    /// `supervisor` — with everything beneath it, when the Supervisor is purged (ADR-0059
+    /// clause 5): what the process account wrote there and the Client cannot remove itself.
+    /// Answered by [`Reply::Purged`].
+    Purge {
+        id: u64,
+        supervisor: String,
+        dir: PathBuf,
+        entry: PathBuf,
+    },
 }
 
 /// What the second service tells the Client.
@@ -162,6 +209,8 @@ pub(crate) enum Reply {
     Signalled { id: u64 },
     /// The signal could not be sent, and why.
     SignalFailed { id: u64, error: String },
+    /// The answer to [`Request::Purge`]: removed, or why not.
+    Purged { id: u64, result: Result<(), String> },
     /// One line the program wrote, without its line end.
     Output {
         id: u64,
@@ -455,7 +504,15 @@ pub async fn serve(
             refuse(stream, reason, &mut refusals);
             continue;
         }
-        match serve_connection(stream, &listener, shutdown.as_mut(), &mut refusals).await {
+        match serve_connection(
+            stream,
+            &listener,
+            client_uid,
+            shutdown.as_mut(),
+            &mut refusals,
+        )
+        .await
+        {
             Ended::Shutdown => return Served::Stopped,
             // The Client's connection closed — the self-update restarts it — or it is another
             // build: either way a service that `current` no longer names makes way for the one it
@@ -532,6 +589,7 @@ enum Control {
 async fn serve_connection<F: Future<Output = ()>>(
     stream: UnixStream,
     listener: &UnixListener,
+    client_uid: u32,
     mut shutdown: Pin<&mut F>,
     refusals: &mut Refusals,
 ) -> Ended {
@@ -652,6 +710,19 @@ async fn serve_connection<F: Future<Output = ()>>(
                     if let Some(control) = programs.get(&id) {
                         let _ = control.send(Control::Stop);
                     }
+                }
+                // Off the connection's loop: a tree takes as long to remove as it is large, and the
+                // programs' output and signals do not wait for it.
+                Some(Request::Purge { id, supervisor, dir, entry }) => {
+                    let replies = replies.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = purge(client_uid, &supervisor, &dir, &entry);
+                        match &result {
+                            Ok(()) => info!(supervisor = %supervisor, entry = %dir.join(&entry).display(), "removed what the process account wrote"),
+                            Err(e) => warn!(supervisor = %supervisor, entry = %dir.join(&entry).display(), error = %e, "cannot remove what the process account wrote"),
+                        }
+                        replies.send(Reply::Purged { id, result });
+                    });
                 }
                 Some(Request::Hello { .. }) => warn!("a second handshake on one connection; ignored"),
                 None => break Ended::Closed,
@@ -775,23 +846,80 @@ fn start(launch: &Launch) -> io::Result<Child> {
     if let Some(dir) = &launch.working_dir {
         command.current_dir(dir);
     }
-    // What the program creates is writable by its group, so that what it makes under a data
-    // directory — set-group-ID and shared with the Client (ADR-0059 clause 6) — is the Client's to
-    // remove when it purges a Supervisor (ADR-0017 clause 34), subdirectories included. Others
-    // keep what a default umask leaves them.
-    // SAFETY: umask(2) is async-signal-safe, allocates nothing, and cannot fail.
-    unsafe {
-        command.pre_exec(|| {
-            libc::umask(PROGRAM_UMASK);
-            Ok(())
-        });
-    }
+    // The program keeps the service's own umask, never one widened for the Client's sake
+    // (ADR-0059 clause 5): what it makes that the Client cannot remove, the service removes for
+    // it when the Supervisor is purged (`Request::Purge`).
     command.spawn()
 }
 
-/// The umask a program the second service starts runs with: group-writable, and nothing more
-/// for others than the usual `022` gives them.
-const PROGRAM_UMASK: libc::mode_t = 0o002;
+/// Removes `entry`, a path relative to `dir`, with everything beneath it: what the process account
+/// wrote in the directory of the Supervisor named `supervisor`, which the Client purges (ADR-0059
+/// clause 5). The service holds the request to that and no more:
+///
+/// - `dir` is absolute and named after the Supervisor, and the Client's account owns it;
+/// - `entry` is a path beneath it, of plain names alone;
+/// - no link is followed on the way — none below `dir`, and above it only one root owns — and the
+///   entry itself, a link included, is removed as what it is;
+/// - the entry is the process account's own.
+///
+/// # Errors
+/// Returns why the request is refused, or the first entry that cannot be removed.
+pub(crate) fn purge(
+    client_uid: u32,
+    supervisor: &str,
+    dir: &Path,
+    entry: &Path,
+) -> Result<(), String> {
+    use crate::storage::handle;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    if !dir.is_absolute() || dir.file_name() != Some(std::ffi::OsStr::new(supervisor)) {
+        return Err(format!(
+            "{} is not the directory of the Supervisor {supervisor}",
+            dir.display()
+        ));
+    }
+    let names = entry
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => std::ffi::CString::new(name.as_bytes()).ok(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .filter(|names| !names.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{} is not a path beneath the Supervisor's directory",
+                entry.display()
+            )
+        })?;
+    let at = |e: io::Error| format!("{}: {e}", dir.display());
+    let top = handle::open_dir(dir, handle::SEARCH, None).map_err(at)?;
+    let owner = handle::fstat(&top).map_err(at)?.st_uid;
+    if owner != client_uid {
+        return Err(format!(
+            "{} belongs to uid {owner}, not to the Client's account",
+            dir.display()
+        ));
+    }
+    let (last, parents) = names.split_last().expect("not empty");
+    let mut parent = top;
+    for name in parents {
+        parent = handle::open(parent.as_raw_fd(), name, handle::SEARCH)
+            .map_err(|e| format!("{}: {e}", dir.join(entry).display()))?;
+    }
+    let path = dir.join(entry);
+    let st = handle::lstat_at(parent.as_raw_fd(), last)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // SAFETY: geteuid(2) cannot fail and touches no memory.
+    if st.st_uid != unsafe { libc::geteuid() } {
+        return Err(format!(
+            "{} is not the process account's, and is not removed",
+            path.display()
+        ));
+    }
+    handle::remove_tree_at(&parent, last, &path).map_err(|e| e.to_string())
+}
 
 /// `HOME`, `USER` and `LOGNAME` of the account this service runs as — the process account — from
 /// the password database, whatever the environment the service was started with says. Empty
@@ -1034,6 +1162,8 @@ struct Routes {
     /// Set once the service is gone: no route is added after that.
     closed: bool,
     by_id: HashMap<u64, Route>,
+    /// The purges asked and not yet answered.
+    purges: HashMap<u64, oneshot::Sender<Result<(), String>>>,
 }
 
 /// Where the replies about one program go, for as long as its [`RemoteChild`] lives.
@@ -1178,6 +1308,46 @@ impl Channel {
     /// Returns why the service was not reached, an error [`is_unreachable`] holds for.
     pub(crate) async fn reach(&self) -> io::Result<()> {
         self.connection().await.map(|_| ()).map_err(unreachable)
+    }
+
+    /// Asks the service to remove what the process account wrote in `dir`, the directory of the
+    /// Supervisor named `supervisor`, and the Client cannot remove itself: each entry the process
+    /// account owns that is a directory, with everything beneath it (ADR-0059 clause 5). A file
+    /// the process account owns in a directory of the Client's is the Client's to remove, and is
+    /// left to the purge that follows.
+    ///
+    /// # Errors
+    /// Returns the first entry the service could not remove, or why it was not reached — in
+    /// time, too: [`PURGE_ANSWER`] for each entry.
+    pub(crate) async fn purge(&self, supervisor: &str, dir: &Path) -> io::Result<()> {
+        let entries = {
+            let (dir, uid) = (dir.to_path_buf(), self.shared.service_uid);
+            tokio::task::spawn_blocking(move || written_by(&dir, uid))
+                .await
+                .map_err(io::Error::other)??
+        };
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let connection = self.connection().await.map_err(unreachable)?;
+        for entry in entries {
+            let answer = tokio::time::timeout(
+                PURGE_ANSWER,
+                Arc::clone(&connection).purge(supervisor, dir, &entry),
+            )
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "the second service did not remove {} in time",
+                        dir.join(&entry).display()
+                    ),
+                )
+            })?;
+            answer?;
+        }
+        Ok(())
     }
 
     /// The open connection, or a new one once the last is gone.
@@ -1388,6 +1558,32 @@ impl Connection {
         })
     }
 
+    async fn purge(self: Arc<Self>, supervisor: &str, dir: &Path, entry: &Path) -> io::Result<()> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (purged_tx, purged) = oneshot::channel();
+        {
+            let mut routes = self.routes();
+            if routes.closed {
+                return Err(closed());
+            }
+            routes.purges.insert(id, purged_tx);
+        }
+        let request = Request::Purge {
+            id,
+            supervisor: supervisor.to_string(),
+            dir: dir.to_path_buf(),
+            entry: entry.to_path_buf(),
+        };
+        if let Err(e) = self.send(&request) {
+            self.routes().purges.remove(&id);
+            return Err(e);
+        }
+        purged
+            .await
+            .map_err(|_| closed())?
+            .map_err(|e| io::Error::other(peer_text(&e)))
+    }
+
     /// Queues `request`. A request too large for a message fails here, with `InvalidInput`, and
     /// the connection carries on.
     fn send(&self, request: &Request) -> io::Result<()> {
@@ -1464,6 +1660,11 @@ impl Connection {
                     }
                 }
             }
+            Reply::Purged { id, result } => {
+                if let Some(purged) = self.routes().purges.remove(&id) {
+                    let _ = purged.send(result);
+                }
+            }
             Reply::Signalled { id } => self.answer_signal(id, Ok(())),
             Reply::SignalFailed { id, error } => self.answer_signal(id, Err(peer_text(&error))),
             Reply::Exited {
@@ -1510,6 +1711,7 @@ impl Connection {
         let mut routes = self.routes();
         routes.closed = true;
         routes.by_id.clear();
+        routes.purges.clear();
         self.writer.abort();
     }
 }
@@ -1809,6 +2011,30 @@ pub(crate) mod peer {
         Peer { channel, _dir: dir }
     }
 
+    /// The second service itself, in process: it runs as this test's uid and serves the Client
+    /// of this test's uid, until it is dropped.
+    pub(crate) struct Real {
+        pub(crate) socket: PathBuf,
+        _stop: oneshot::Sender<()>,
+        _dir: tempfile::TempDir,
+    }
+
+    /// Starts [`Real`].
+    pub(crate) fn real() -> Real {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = bind(&socket).expect("bind");
+        let (stop, stopped) = oneshot::channel::<()>();
+        tokio::spawn(serve(listener, own_uid(), || false, async {
+            let _ = stopped.await;
+        }));
+        Real {
+            socket,
+            _stop: stop,
+            _dir: dir,
+        }
+    }
+
     /// The stand-in's answer to the Client's handshake.
     pub(crate) fn hello() -> Reply {
         Reply::Hello {
@@ -1954,12 +2180,12 @@ mod tests {
         );
     }
 
-    /// A program the second service starts creates what its group may write, so the Client — a
-    /// member of the process account's group — can purge what it left under a data directory,
-    /// nested directories included (ADR-0059 clause 6, ADR-0017 clause 34).
+    /// A program the second service starts keeps the service's own umask, never one widened for
+    /// the Client's sake (ADR-0059 clause 5): what it creates has the modes what the service
+    /// itself creates has.
     /// Verifies: ADR-0059
     #[tokio::test]
-    async fn a_program_creates_what_its_group_may_write() {
+    async fn a_program_keeps_the_services_umask() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().expect("tempdir");
         let service = service(own_uid());
@@ -1971,8 +2197,95 @@ mod tests {
         let output = channel.output("test", launch).await.expect("ran");
         assert!(output.status.success(), "{output:?}");
         let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
-        assert_eq!(mode(&made), 0o775);
-        assert_eq!(mode(&made.join("file")), 0o664);
+        // What this process — the service, here — makes at its own umask.
+        let reference = dir.path().join("reference");
+        std::fs::create_dir(&reference).expect("mkdir");
+        std::fs::write(reference.join("file"), b"").expect("write");
+        assert_eq!(mode(&made), mode(&reference));
+        assert_eq!(mode(&made.join("file")), mode(&reference.join("file")));
+    }
+
+    /// A Supervisor's directory as a Managed Process leaves it under the process account: a data
+    /// directory holding a directory it made with `MkdirAll`'s `0755`, a read-only one inside it
+    /// as a Go module cache makes them, files, and a link out of the directory.
+    fn written_by_an_agent(supervisor: &Path, outside: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let made = supervisor.join("data").join("made");
+        let cache = made.join("cache");
+        std::fs::create_dir_all(&cache).expect("mkdir");
+        std::fs::set_permissions(&made, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::write(cache.join("module"), b"x").expect("write");
+        std::os::unix::fs::symlink(outside, made.join("out")).expect("a link");
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    }
+
+    /// The second service removes what a purged Supervisor's Managed Processes wrote — read-only
+    /// directories included, a link as a link — so the Client's purge that follows leaves
+    /// nothing (ADR-0059 clause 5, ADR-0017 clause 34).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn the_second_service_removes_what_a_purged_supervisors_processes_wrote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"kept").expect("write");
+        let supervisor = dir.path().join("supervisors").join("agent");
+        written_by_an_agent(&supervisor, &outside);
+        let service = service(own_uid());
+        let channel = Channel::connect(&service.socket, own_uid())
+            .await
+            .expect("connect");
+
+        channel.purge("agent", &supervisor).await.expect("purged");
+        std::fs::remove_dir_all(&supervisor).expect("the Client's purge");
+        assert!(!supervisor.exists());
+        assert_eq!(std::fs::read(&outside).expect("outside"), b"kept");
+    }
+
+    /// The service removes no more than a purge asks of it: an entry beneath the directory of the
+    /// Supervisor it names, of plain names, reached through no link, in a directory the Client's
+    /// account owns (ADR-0059 clause 5).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_purge_removes_nothing_outside_the_supervisors_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("mkdir");
+        std::fs::write(outside.join("keep"), b"kept").expect("write");
+        let supervisor = dir.path().join("supervisors").join("agent");
+        std::fs::create_dir_all(supervisor.join("data")).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, supervisor.join("link")).expect("a link");
+        let me = own_uid();
+
+        for (name, at, entry) in [
+            ("other", supervisor.as_path(), Path::new("data")),
+            ("agent", Path::new("supervisors/agent"), Path::new("data")),
+            ("agent", supervisor.as_path(), Path::new("../outside")),
+            (
+                "agent",
+                supervisor.as_path(),
+                Path::new("data/../../outside"),
+            ),
+            ("agent", supervisor.as_path(), outside.as_path()),
+            ("agent", supervisor.as_path(), Path::new("")),
+            ("agent", supervisor.as_path(), Path::new("link/keep")),
+        ] {
+            let refused = purge(me, name, at, entry);
+            assert!(
+                refused.is_err(),
+                "{name} {} {}",
+                at.display(),
+                entry.display()
+            );
+        }
+        assert!(purge(me.wrapping_add(1), "agent", &supervisor, Path::new("data")).is_err());
+        assert_eq!(std::fs::read(outside.join("keep")).expect("kept"), b"kept");
+        assert!(supervisor.join("data").is_dir());
+
+        // A link is removed as a link.
+        purge(me, "agent", &supervisor, Path::new("link")).expect("the link");
+        assert_eq!(std::fs::read(outside.join("keep")).expect("kept"), b"kept");
+        purge(me, "agent", &supervisor, Path::new("data")).expect("the data directory");
+        assert!(!supervisor.join("data").exists());
     }
 
     /// What a program run to its end writes is kept up to its last [`CAPTURED`] bytes per stream,
@@ -2523,7 +2836,9 @@ mod tests {
                             closing: false,
                         },
                     ],
-                    Request::Hello { .. } | Request::Stop { .. } => Vec::new(),
+                    Request::Hello { .. } | Request::Stop { .. } | Request::Purge { .. } => {
+                        Vec::new()
+                    }
                 };
                 for reply in replies {
                     write_frame(&mut stream, &reply).await.expect("reply");
