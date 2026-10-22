@@ -57,7 +57,9 @@ pub fn agents_service_name() -> String {
 }
 
 /// The second service's socket, in a directory named after it that only the process account
-/// writes and its group reaches (ADR-0059 clauses 4 and 6).
+/// writes and its group reaches (ADR-0059 clauses 4 and 6). On Windows its named pipe,
+/// `\\.\pipe\<PRODUCT_NAME>-agents`, whose own security descriptor admits the Client's account
+/// alone.
 ///
 /// Under systemd that is the runtime directory systemd creates for it at every start
 /// (`RuntimeDirectory=`) and removes when it stops. launchd has no such directory, and `/var/run`
@@ -65,9 +67,16 @@ pub fn agents_service_name() -> String {
 /// account beside the default data root, under `/Library/Application Support`, where it outlasts
 /// a reboot; a socket left there by a service that did not stop cleanly is replaced at its next
 /// start.
+#[cfg(unix)]
 #[must_use]
 pub fn agents_socket() -> PathBuf {
     agents_socket_dir().join("agents.sock")
+}
+
+#[cfg(windows)]
+#[must_use]
+pub fn agents_socket() -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\{}", agents_service_name()))
 }
 
 /// Refuses a root that is the directory of the second service's socket, or lies in it: that
@@ -122,7 +131,7 @@ fn agents_socket_dir() -> PathBuf {
     PathBuf::from("/Library/Application Support").join(agents_service_name())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn agents_socket_dir() -> PathBuf {
     PathBuf::from("/run").join(agents_service_name())
 }
@@ -161,6 +170,17 @@ pub fn display_name() -> &'static str {
 pub const WINDOWS_DESCRIPTION: &str =
     "Places this machine under OpAMP management: connects to a Server, supervises the Agents \
      configured for this host, and updates them and itself from packages the Server offers.";
+
+/// The second service's name in the Windows services list (ADR-0059 clause 2).
+#[must_use]
+pub fn agents_display_name() -> String {
+    format!("{PRODUCT_TITLE} Managed Processes")
+}
+
+/// What the Windows services list says the second service does (ADR-0059 clause 2).
+pub const AGENTS_WINDOWS_DESCRIPTION: &str =
+    "Starts, stops and watches the Agents' programs under their own account, on the request of \
+     the OpAMP Fleet Client, which reaches it on a named pipe of its own.";
 
 /// The service label, built so that **every backend renders it identically** (ADR-0019).
 ///
@@ -227,11 +247,20 @@ pub struct Agents {
     /// The process account it runs under.
     pub account: String,
     /// That account's uid, which the Client accepts as the socket's peer.
+    #[cfg(unix)]
     pub uid: u32,
     /// That account's primary group, through which the Client's account reaches the socket.
+    #[cfg(unix)]
     pub gid: u32,
     /// The uid of the Client's account, the one peer the second service serves.
+    #[cfg(unix)]
     pub client_uid: u32,
+    /// That account's SID, which the Client accepts as the owner of the pipe.
+    #[cfg(windows)]
+    pub sid: crate::win32::Sid,
+    /// The SID of the Client's account, the one client the second service serves.
+    #[cfg(windows)]
+    pub client_sid: crate::win32::Sid,
     /// Where it listens: [`agents_socket`].
     pub socket: PathBuf,
 }
@@ -257,25 +286,34 @@ fn service_args(spec: &InstallSpec) -> Vec<OsString> {
         spec.state_dir.clone().into_os_string(),
     ];
     if let Some(agents) = &spec.agents {
+        #[cfg(unix)]
+        let process = ("--process-uid", agents.uid.to_string());
+        #[cfg(windows)]
+        let process = ("--process-sid", agents.sid.to_string());
         args.extend([
             OsString::from("--agents-socket"),
             agents.socket.clone().into_os_string(),
-            OsString::from("--process-uid"),
-            OsString::from(agents.uid.to_string()),
+            OsString::from(process.0),
+            OsString::from(process.1),
         ]);
     }
     args
 }
 
 /// The second service's command line: `run --agents <socket> --client-uid <uid>` (ADR-0059
-/// clause 2). It reads neither the configuration nor the state directory.
+/// clause 2), on Windows `run --agents <pipe> --client-sid <SID>`. It reads neither the
+/// configuration nor the state directory.
 fn agents_args(agents: &Agents) -> Vec<OsString> {
+    #[cfg(unix)]
+    let client = ("--client-uid", agents.client_uid.to_string());
+    #[cfg(windows)]
+    let client = ("--client-sid", agents.client_sid.to_string());
     vec![
         OsString::from("run"),
         OsString::from("--agents"),
         agents.socket.clone().into_os_string(),
-        OsString::from("--client-uid"),
-        OsString::from(agents.client_uid.to_string()),
+        OsString::from(client.0),
+        OsString::from(client.1),
     ]
 }
 
@@ -344,11 +382,30 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
 
 /// Registers the second service (ADR-0059 clause 2), which only a host where [`agents_supported`]
 /// holds gets, and on macOS then the directory of its socket. The registration first, so an
-/// install that may not register a system service is told so before anything else.
+/// install that may not register a system service is told so before anything else. On Windows
+/// what `service-manager` leaves undone follows, as for the Client: the recovery actions, the
+/// display name, the description and the logon account — and the required privileges, cut to
+/// `SeChangeNotifyPrivilege` ([`windows_config::configure_agents`](super::windows_config)).
+///
+/// The Client's service is not made to depend on it (`sc config depend=`): the SCM starts no
+/// service whose dependency failed to start, and stops none a running one depends on, so a second
+/// service that does not come up would hold the Client down with it (StartService,
+/// `ERROR_SERVICE_DEPENDENCY_FAIL`), where the Client runs without it (ADR-0059 clause 2). The
+/// start names the second service first instead ([`started`]).
 fn install_agents(spec: &InstallSpec, agents: &Agents) -> Result<(), String> {
     manager(spec.level)?
         .install(agents_install_ctx(spec, agents, cfg!(target_os = "linux"))?)
-        .map_err(|e| format!("cannot install the second service (system scope needs root): {e}"))?;
+        .map_err(|e| {
+            format!(
+                "cannot install the second service (system scope needs root or Administrator): {e}"
+            )
+        })?;
+    super::windows_config::configure_agents(
+        &agents_service_name(),
+        &agents_display_name(),
+        AGENTS_WINDOWS_DESCRIPTION,
+        &agents.account,
+    )?;
     // The plist is registered `Disabled`: launchd starts nothing until `service start`, by when
     // the directory is in place.
     #[cfg(target_os = "macos")]
@@ -392,14 +449,15 @@ fn agents_install_ctx(
 }
 
 /// Whether this host can register the second service (ADR-0059): a system service under systemd
-/// on Linux, or under launchd on macOS, where a plist's `UserName` applies in the system domain
-/// alone (launchd.plist(5)).
+/// on Linux, under launchd on macOS, where a plist's `UserName` applies in the system domain
+/// alone (launchd.plist(5)), or under the SCM on Windows.
 #[must_use]
 pub fn agents_supported(level: ServiceLevel) -> bool {
     let native = ServiceManagerKind::native();
     level == ServiceLevel::System
         && ((cfg!(target_os = "linux") && matches!(native, Ok(ServiceManagerKind::Systemd)))
-            || (cfg!(target_os = "macos") && matches!(native, Ok(ServiceManagerKind::Launchd))))
+            || (cfg!(target_os = "macos") && matches!(native, Ok(ServiceManagerKind::Launchd)))
+            || (cfg!(windows) && matches!(native, Ok(ServiceManagerKind::Sc))))
 }
 
 /// Creates the directory of the second service's socket, or takes the one there, and gives it to
@@ -707,7 +765,7 @@ pub fn agents_registration(level: ServiceLevel) -> Result<Option<Registration>, 
     #[cfg(target_os = "macos")]
     return read_registration(&agents_file(), plist_account);
     #[cfg(windows)]
-    Ok(None)
+    super::windows_config::logon_account(&agents_service_name())
 }
 
 /// The file the second service's registration is: its unit, or its plist.
@@ -725,11 +783,17 @@ fn agents_file() -> PathBuf {
 fn agents_registered(level: ServiceLevel) -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     return level == ServiceLevel::System && agents_file().exists();
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = level;
-        false
-    }
+    #[cfg(windows)]
+    return level == ServiceLevel::System
+        && manager(level)
+            .and_then(|manager| {
+                manager
+                    .status(ServiceStatusCtx {
+                        label: agents_label(),
+                    })
+                    .map_err(|e| e.to_string())
+            })
+            .is_ok_and(|status| status != ServiceStatus::NotInstalled);
 }
 
 /// The last `User=` of a unit's `[Service]` section; an empty one resets it, as systemd reads it.
@@ -1022,11 +1086,20 @@ pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        manager
-            .stop(ServiceStopCtx {
-                label: agents_label(),
-            })
-            .map_err(|e| format!("cannot stop the second service: {e}"))?;
+        // `sc stop` refuses a service that is not running, which systemd's stop does not.
+        let running = !cfg!(windows)
+            || manager
+                .status(ServiceStatusCtx {
+                    label: agents_label(),
+                })
+                .map_or(true, |status| status == ServiceStatus::Running);
+        if running {
+            manager
+                .stop(ServiceStopCtx {
+                    label: agents_label(),
+                })
+                .map_err(|e| format!("cannot stop the second service: {e}"))?;
+        }
         manager
             .uninstall(ServiceUninstallCtx {
                 label: agents_label(),
@@ -1627,6 +1700,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn agents() -> Agents {
         Agents {
             account: "opamp-fleet-agents".to_string(),
@@ -1634,6 +1708,16 @@ mod tests {
             gid: 997,
             client_uid: 998,
             socket: PathBuf::from("/run/opamp-fleet-agents/agents.sock"),
+        }
+    }
+
+    #[cfg(windows)]
+    fn agents() -> Agents {
+        Agents {
+            account: r"NT SERVICE\opamp-fleet-agents".to_string(),
+            sid: crate::win32::Sid::parse("S-1-5-80-1-2-3-4-5").expect("sid"),
+            client_sid: crate::win32::Sid::parse("S-1-5-80-6-7-8-9-10").expect("sid"),
+            socket: agents_socket(),
         }
     }
 
@@ -1666,6 +1750,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn macos_agents() -> Agents {
         Agents {
             account: "_opamp-fleet-agents".to_string(),
@@ -1755,10 +1840,56 @@ mod tests {
         }
     }
 
+    /// On Windows the second service is the SCM's `<PRODUCT_NAME>-agents` on the pipe
+    /// `\\.\pipe\<PRODUCT_NAME>-agents`: its command line names the pipe and the SID of the
+    /// Client's account it serves, the Client's names the pipe and the process account's SID, and
+    /// both are registered through the same `service-manager` call as on the other platforms,
+    /// the logon account set afterwards (ADR-0059 clauses 2 and 8).
+    /// Verifies: ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_both_command_lines_name_the_pipe_and_a_sid() {
+        assert_eq!(
+            agents_socket(),
+            PathBuf::from(format!(r"\\.\pipe\{PRODUCT_NAME}-agents"))
+        );
+        let spec = InstallSpec {
+            agents: Some(agents()),
+            ..system_spec(r"C:\ProgramData\opamp-fleet")
+        };
+        let pipe = agents_socket().into_os_string();
+        let client = service_args(&spec);
+        assert_eq!(
+            client[client.len() - 4..],
+            [
+                OsString::from("--agents-socket"),
+                pipe.clone(),
+                OsString::from("--process-sid"),
+                OsString::from("S-1-5-80-1-2-3-4-5"),
+            ]
+        );
+        assert_eq!(
+            agents_args(&agents()),
+            [
+                OsString::from("run"),
+                OsString::from("--agents"),
+                pipe,
+                OsString::from("--client-sid"),
+                OsString::from("S-1-5-80-6-7-8-9-10"),
+            ]
+        );
+        let ctx = agents_install_ctx(&spec, &agents(), false).expect("ctx");
+        assert_eq!((ctx.label, ctx.contents), (agents_label(), None));
+        assert_eq!(ctx.restart_policy, RESTART_POLICY);
+        assert!(agents_display_name().starts_with(PRODUCT_TITLE));
+        assert_ne!(AGENTS_WINDOWS_DESCRIPTION, WINDOWS_DESCRIPTION);
+    }
+
     /// The Client's plist, which `service-manager` renders from the command line, names the
     /// socket and the process account's uid where a process account is registered, as its unit
     /// does under systemd (ADR-0059 clause 8).
     /// Verifies: ADR-0059
+    #[cfg(unix)]
     #[test]
     fn the_clients_command_line_names_the_second_service() {
         let spec = InstallSpec {
