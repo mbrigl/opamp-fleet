@@ -464,13 +464,15 @@ pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
 }
 
 /// Whether `current` names a version other than the one this program runs from: a self-update
-/// switched it. `false` outside a layout, where there is nothing to switch to.
+/// switched it. `false` outside a layout, where there is nothing to switch to, and where the
+/// pointer cannot be resolved: the second service, under the process account, ends on nothing
+/// but evidence of a switch.
 pub(crate) fn superseded() -> bool {
     use crate::service::layout::{running_exe, Layout};
     running_exe()
         .ok()
         .and_then(|exe| Layout::enclosing(&exe))
-        .is_some_and(|(layout, running_dir)| !layout.names(&running_dir))
+        .is_some_and(|(layout, running_dir)| layout.names_another(&running_dir))
 }
 
 /// `SIGTERM` (what a service manager stops with) or `SIGINT`.
@@ -1649,6 +1651,9 @@ impl Connection {
         };
         check_service(&peer, service, socket)
             .map_err(|e| io::Error::new(e.kind(), Refusal(e.to_string())))?;
+        #[cfg(unix)]
+        let (mut read, mut write) = stream.into_split();
+        #[cfg(windows)]
         let (mut read, mut write) = tokio::io::split(stream);
         let hello = Request::Hello {
             version: this_build().to_string(),
@@ -1705,25 +1710,12 @@ impl Connection {
         }
 
         let (requests, mut outgoing) = mpsc::unbounded_channel::<Zeroizing<Vec<u8>>>();
-        // Ends when every sender is gone — the last `Channel` and `RemoteChild` dropped — or when
-        // the service is; dropping the write half then tells the service the Client is gone.
-        let writer = tokio::spawn(async move {
-            while let Some(frame) = outgoing.recv().await {
-                if write.write_all(&frame).await.is_err() {
-                    break;
-                }
-            }
-        })
-        .abort_handle();
-        let connection = Arc::new(Connection {
-            requests,
-            writer,
-            next_id: AtomicU64::new(1),
-            routes: Mutex::new(Routes::default()),
-        });
-        // Holds the connection weakly, so it does not keep the senders above alive.
-        let weak = Arc::downgrade(&connection);
-        tokio::spawn(async move {
+        let (connection_tx, connection_rx) = oneshot::channel::<Weak<Connection>>();
+        // Holds the connection weakly, so it does not keep the senders below alive.
+        let reader = tokio::spawn(async move {
+            let Ok(weak) = connection_rx.await else {
+                return;
+            };
             while let Ok(Some(reply)) = read_frame::<_, Reply>(&mut read).await {
                 let Some(connection) = weak.upgrade() else {
                     return;
@@ -1733,7 +1725,28 @@ impl Connection {
             if let Some(connection) = Weak::upgrade(&weak) {
                 connection.fail_all();
             }
+        })
+        .abort_handle();
+        // Ends when every sender is gone — the last `Channel` and `RemoteChild` dropped — or when
+        // the service is. Then the read half goes too, and with both halves the connection: a
+        // named pipe has no half to close, so the service learns that the Client is gone only
+        // once the pipe is closed, and nobody waits for a reply any more.
+        let writer = tokio::spawn(async move {
+            while let Some(frame) = outgoing.recv().await {
+                if write.write_all(&frame).await.is_err() {
+                    break;
+                }
+            }
+            reader.abort();
+        })
+        .abort_handle();
+        let connection = Arc::new(Connection {
+            requests,
+            writer,
+            next_id: AtomicU64::new(1),
+            routes: Mutex::new(Routes::default()),
         });
+        let _ = connection_tx.send(Arc::downgrade(&connection));
         Ok(connection)
     }
 

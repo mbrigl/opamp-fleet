@@ -1568,20 +1568,7 @@ mod tests {
                 .expect("dacl")
                 .text()
         };
-        // What the process account's own grants, however the system writes it: whether a change of
-        // its parent's DACL leaves it marked inherited is the system's affair, not the hand-over's.
-        let grants = |path: &Path| {
-            Entry::open(path, Access::Read, false)
-                .and_then(|entry| entry.dacl())
-                .expect("dacl")
-                .grants()
-        };
-        let before = (
-            dacl(&outside),
-            dacl(&outside.join("secret")),
-            grants(&owned),
-        );
-        let before_owned = dacl(&owned);
+        let before = (dacl(&outside), dacl(&outside.join("secret")), dacl(&owned));
 
         let client = RunAs::resolve(
             r"NT AUTHORITY\LocalService",
@@ -1618,14 +1605,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            (
-                dacl(&outside),
-                dacl(&outside.join("secret")),
-                grants(&owned)
-            ),
+            (dacl(&outside), dacl(&outside.join("secret")), dacl(&owned)),
             before,
-            "nothing through the junction or the hard link, nothing of the process account's: \
-             {before_owned} became {}; data is {}",
+            "nothing through the junction or the hard link, nothing of the process account's; \
+             {} became {}; data is {}",
+            before.2,
             dacl(&owned),
             dacl(&data)
         );

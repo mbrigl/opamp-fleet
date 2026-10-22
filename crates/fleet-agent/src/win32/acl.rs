@@ -98,23 +98,6 @@ impl Dacl {
         }
     }
 
-    /// Who the DACL grants or denies what, whether explicit or inherited and however it is passed
-    /// on: each ACE's type, rights and trustee.
-    #[must_use]
-    pub fn grants(&self) -> std::collections::BTreeSet<String> {
-        self.aces
-            .iter()
-            .map(|ace| {
-                format!(
-                    "{};{};{}",
-                    field(ace, 0).unwrap_or_default(),
-                    field(ace, 2).unwrap_or_default(),
-                    field(ace, 5).unwrap_or_default()
-                )
-            })
-            .collect()
-    }
-
     /// The DACL with its explicit ACEs alone.
     #[must_use]
     pub fn explicit(&self) -> Dacl {
@@ -133,15 +116,16 @@ impl Dacl {
     /// system writes for it.
     #[must_use]
     pub fn holds(&self, ace: &str) -> bool {
-        let Some(trustee) = field(ace, 5) else {
-            return false;
-        };
-        fn head(ace: &str) -> Vec<Option<&str>> {
-            (0..5).map(|i| field(ace, i)).collect()
-        }
-        self.aces
-            .iter()
-            .any(|held| head(held) == head(ace) && trustee_is(held, trustee))
+        self.aces.iter().any(|held| same_ace(held, ace))
+    }
+
+    /// Whether the DACL holds exactly the ACEs of `other`, protected alike: however the system
+    /// writes them, and whatever order it keeps them in.
+    #[must_use]
+    pub fn matches(&self, other: &Dacl) -> bool {
+        self.protected() == other.protected()
+            && self.aces.len() == other.aces.len()
+            && other.aces.iter().all(|ace| self.holds(ace))
     }
 
     /// The explicit ACEs of the DACL, and those a child — a directory where `dir` — inherits
@@ -211,6 +195,59 @@ impl Dacl {
             })
             .collect()
     }
+}
+
+/// Whether two ACEs are the same however the system writes them: the same type, the same flags in
+/// any order, the same rights as a hex mask or as their aliases, and the same trustee as a SID or
+/// as its alias.
+fn same_ace(held: &str, ace: &str) -> bool {
+    fn flags(ace: &str) -> Vec<&str> {
+        let mut flags: Vec<&str> = field(ace, 1)
+            .map(|f| tokens(f).collect())
+            .unwrap_or_default();
+        flags.sort_unstable();
+        flags
+    }
+    let Some(trustee) = field(ace, 5) else {
+        return false;
+    };
+    field(held, 0) == field(ace, 0)
+        && flags(held) == flags(ace)
+        && field(held, 2).and_then(mask) == field(ace, 2).and_then(mask)
+        && field(held, 2).and_then(mask).is_some()
+        && (3..5).all(|i| field(held, i) == field(ace, i))
+        && trustee_is(held, trustee)
+}
+
+/// The rights an ACE's mask field names: a hex number, or the aliases the system writes for file
+/// rights.
+fn mask(text: &str) -> Option<u32> {
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    const ALIASES: [(&str, u32); 12] = [
+        ("FA", 0x001f_01ff),
+        ("FR", 0x0012_0089),
+        ("FW", 0x0012_0116),
+        ("FX", 0x0012_00a0),
+        ("GA", 0x1000_0000),
+        ("GR", 0x8000_0000),
+        ("GW", 0x4000_0000),
+        ("GX", 0x2000_0000),
+        ("SD", 0x0001_0000),
+        ("RC", 0x0002_0000),
+        ("WD", 0x0004_0000),
+        ("WO", 0x0008_0000),
+    ];
+    if text.is_empty() {
+        return None;
+    }
+    tokens(text).try_fold(0u32, |sum, token| {
+        ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == token)
+            .map(|(_, bits)| sum | bits)
+    })
 }
 
 /// An allow ACE of `mask` for `sid`, with the inheritance flags `flags` (`OICI`, `OICIIO`, …).
@@ -319,6 +356,11 @@ mod tests {
             "the alias is the SID"
         );
         assert!(!aliased.holds("(A;OICI;0x1200a9;;;S-1-5-19)"));
+        let written = Dacl::parse("D:P(A;CIOIID;FA;;;SY)").expect("as the system writes it");
+        let set = Dacl::parse("D:PAI(A;OICIID;0x1f01ff;;;S-1-5-18)").expect("as it was set");
+        assert!(written.matches(&set), "flags in any order, rights by alias");
+        assert!(!written.matches(&Dacl::parse("D:AI(A;OICIID;FA;;;SY)").expect("unprotected")));
+        assert!(!written.matches(&Dacl::parse("D:P").expect("empty")));
         let local_service = dacl.granting("S-1-5-19", &[]);
         assert!(
             !local_service.text().contains(";;;LS)"),
