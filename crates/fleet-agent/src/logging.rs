@@ -130,9 +130,41 @@ fn keep_private(dir: &Path) -> std::io::Result<()> {
 /// Whether the log directory `dir` is kept the Client's alone ([`keep_private`]): where a process
 /// account is registered and `dir` lies beneath the state directory `state_dir`, which its group
 /// passes through. A directory an operator chose elsewhere is the operator's, and is left as it is.
-#[must_use]
-pub fn is_private(dir: &Path, state_dir: &Path, process_account: bool) -> bool {
-    process_account && dir.starts_with(state_dir)
+///
+/// # Errors
+/// Where a process account is registered, refuses a `dir` that narrowing would take from the
+/// process account's group, or that would put the log where that group reads or writes: one
+/// named with `..`, the state directory itself, the Supervisors' root `supervisors_root`,
+/// a directory beneath it, or one it lies beneath (ADR-0059 clause 6).
+pub fn is_private(
+    dir: &Path,
+    state_dir: &Path,
+    supervisors_root: &Path,
+    process_account: bool,
+) -> Result<bool, String> {
+    if !process_account {
+        return Ok(false);
+    }
+    let refused = |why: &str| {
+        Err(format!(
+            "the log directory {} {why}, which the process account's group passes through or \
+             writes; name another [logging] dir",
+            dir.display()
+        ))
+    };
+    if dir
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        return refused("is named with '..', and may be the state directory or above it");
+    }
+    if dir == state_dir {
+        return refused("is the state directory");
+    }
+    if dir.starts_with(supervisors_root) || supervisors_root.starts_with(dir) {
+        return refused("is the Supervisors' root, lies beneath it or holds it");
+    }
+    Ok(dir.starts_with(state_dir))
 }
 
 /// Where the log goes for a given state directory, unless `[logging] dir` names somewhere else.
@@ -237,6 +269,47 @@ mod tests {
         assert_eq!(mode(&other), 0o644, "not the appender's");
     }
 
+    /// Where a process account is registered, a log directory narrowing would take from its group
+    /// is refused: the state directory itself, the Supervisors' root, a directory beneath it or
+    /// above it, and a path that reaches any of them through `..`. A real subdirectory of the
+    /// state directory is narrowed, and so is one beside a Supervisors' root the operator moved
+    /// out of it (ADR-0059 clause 6).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_log_directory_the_process_accounts_group_passes_through_is_refused() {
+        let state = Path::new("/var/lib/opamp-fleet/state");
+        let supervisors = state.join("supervisors");
+        for dir in [
+            state.to_path_buf(),
+            supervisors.clone(),
+            supervisors.join("agent").join("logs"),
+            state.join("logs").join("..").join("x"),
+            state.join("..").join("x"),
+        ] {
+            assert!(
+                is_private(&dir, state, &supervisors, true).is_err(),
+                "{}",
+                dir.display()
+            );
+            assert_eq!(is_private(&dir, state, &supervisors, false), Ok(false));
+        }
+        let moved = Path::new("/srv/supervisors");
+        assert!(is_private(Path::new("/srv"), state, moved, true).is_err());
+        assert_eq!(
+            is_private(&state.join("logs"), state, moved, true),
+            Ok(true)
+        );
+        assert_eq!(
+            is_private(
+                &state.join("logs").join("client"),
+                state,
+                &supervisors,
+                true
+            ),
+            Ok(true)
+        );
+    }
+
     /// A log directory is kept private only beneath the state directory and only where a process
     /// account is registered; otherwise — and in a directory the operator chose elsewhere, such
     /// as `/var/log` — the directory and what it holds stay as they are (ADR-0059 clause 6).
@@ -246,9 +319,19 @@ mod tests {
     fn a_log_directory_elsewhere_or_without_a_process_account_is_left_as_it_is() {
         use std::os::unix::fs::PermissionsExt as _;
         let state = Path::new("/var/lib/opamp-fleet/state");
-        assert!(is_private(&default_dir(state), state, true));
-        assert!(!is_private(&default_dir(state), state, false));
-        assert!(!is_private(Path::new("/var/log"), state, true));
+        let supervisors = state.join("supervisors");
+        assert_eq!(
+            is_private(&default_dir(state), state, &supervisors, true),
+            Ok(true)
+        );
+        assert_eq!(
+            is_private(&default_dir(state), state, &supervisors, false),
+            Ok(false)
+        );
+        assert_eq!(
+            is_private(Path::new("/var/log"), state, &supervisors, true),
+            Ok(false)
+        );
 
         let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o7777;
         let dir = tempfile::tempdir().expect("tempdir");
