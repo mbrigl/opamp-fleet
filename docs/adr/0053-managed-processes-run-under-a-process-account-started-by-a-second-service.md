@@ -83,7 +83,8 @@ signals and stops those programs on the Client's request.
      delivers one file (ADR-0042 clause 3).
    - **The two are registered, started, stopped and deregistered together.** `service install`,
      `start`, `stop` and `uninstall` act on both, the second service first on start and last on
-     stop. Its unit carries
+     stop: under systemd the Client's `Wants=` and `After=` start it first, under launchd and the
+     SCM the start names it first. Its unit carries
      the directives ADR-0042 clause 7 sets for its account; its plist names the account in
      `UserName`. On Windows its required privileges are limited to `SeChangeNotifyPrivilege`, so no
      Managed Process holds `SeImpersonatePrivilege`, and the Client's service depends on it.
@@ -208,6 +209,15 @@ signals and stops those programs on the Client's request.
    `ExecStart=` runs `run --agents <socket> --client-uid <uid>`, `RuntimeDirectory=` holds the
    socket, `TimeoutStopSec=` exceeds the time the second service takes to stop what it started,
    and the directives are those of ADR-0042 clause 7 for its account.
+
+   Under launchd the second service's plist is the one `service-manager` renders, with `UserName`
+   naming the process account; launchd's default exit timeout of 20 seconds exceeds the time the
+   second service takes to stop what it started. launchd keeps no runtime directory across a boot
+   (`/var/run` is emptied), so the socket lives in `/Library/Application Support/<PRODUCT_NAME>-agents/`,
+   a directory on a path only root writes, made by `service install` and owned by the process
+   account and its group at `0750`, and removed with the second service's registration. The
+   second service passes through directories it may only search with `O_SEARCH`, which macOS
+   has from macOS 13 on: macOS 13 is the oldest macOS a Client runs on.
 
 10. **Restates ADR-0042 clause 2. The system service runs under the account its registration
    names, and both roots belong to it, except what the process account keeps there.** `service install --run-as <account>` names the account. It
