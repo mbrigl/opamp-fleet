@@ -864,9 +864,11 @@ fn id_text(account: &str, flag: &str) -> Result<String, String> {
 mod walk {
     use std::ffi::{CStr, CString, OsStr};
     use std::io;
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _, OwnedFd, RawFd};
+    use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
     use std::os::unix::ffi::OsStrExt as _;
     use std::path::{Path, PathBuf};
+
+    use crate::storage::handle::{entries, fstat, open};
 
     /// The entry a name stands for, opened as what it is and never through a link. On Linux this
     /// is a path-only handle: it holds a link, a device or a FIFO without opening what it is.
@@ -1007,78 +1009,6 @@ mod walk {
             }
             Ok(())
         }
-    }
-
-    /// The names in `dir`, read from the handle, without `.` and `..`.
-    fn entries(dir: &OwnedFd) -> io::Result<Vec<CString>> {
-        // `fdopendir` takes the descriptor it is given; it gets a duplicate, and `dir` stays ours.
-        let raw = dir.try_clone()?.into_raw_fd();
-        // SAFETY: `raw` is an open directory descriptor this function owns.
-        let stream = unsafe { libc::fdopendir(raw) };
-        if stream.is_null() {
-            let error = io::Error::last_os_error();
-            // SAFETY: `fdopendir` failed, so `raw` is still ours to close.
-            unsafe { libc::close(raw) };
-            return Err(error);
-        }
-        let mut names = Vec::new();
-        let result = loop {
-            // SAFETY: errno is thread-local; clearing it tells the end of the stream from a
-            // failure, which `readdir` both report as null.
-            unsafe { *errno() = 0 };
-            // SAFETY: `stream` is the open stream from `fdopendir`.
-            let entry = unsafe { libc::readdir(stream) };
-            if entry.is_null() {
-                let error = io::Error::last_os_error();
-                break match error.raw_os_error() {
-                    Some(0) | None => Ok(()),
-                    Some(_) => Err(error),
-                };
-            }
-            // SAFETY: `entry` is valid until the next `readdir` on this stream, and `d_name` is
-            // NUL-terminated; the name is copied out at once.
-            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-            if name.to_bytes() != b"." && name.to_bytes() != b".." {
-                names.push(name.to_owned());
-            }
-        };
-        // SAFETY: `stream` is open and closed once; this closes `raw` with it.
-        unsafe { libc::closedir(stream) };
-        result.map(|()| names)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn errno() -> *mut libc::c_int {
-        // SAFETY: returns the calling thread's errno location.
-        unsafe { libc::__errno_location() }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn errno() -> *mut libc::c_int {
-        // SAFETY: returns the calling thread's errno location.
-        unsafe { libc::__error() }
-    }
-
-    /// What `handle` holds, as the kernel sees it.
-    fn fstat(handle: &OwnedFd) -> io::Result<libc::stat> {
-        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: a valid descriptor and room for one `stat`.
-        if unsafe { libc::fstat(handle.as_raw_fd(), st.as_mut_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `fstat` succeeded and filled it.
-        Ok(unsafe { st.assume_init() })
-    }
-
-    /// `name` in `dir`, opened with `flags`; the last component never follows a link.
-    fn open(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
-        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; no `O_CREAT`, so no mode.
-        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `openat` returned a new descriptor that nothing else owns.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
     /// Re-own what `handle` holds, a link as a link. On Linux the handle may be path-only, which
