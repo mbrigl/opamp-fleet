@@ -917,9 +917,11 @@ typo in a name does not destroy an Agent's identity.
 Before it deletes a removed Agent's directory, the Client renames it to a tombstone,
 `.purge-<name>-<hex>`, beside the others, so an Agent added again under the same name starts in a
 fresh directory. A tombstone that could not be deleted — a file held open, or one the process
-account wrote that the second service could not remove — stays, with a warning. Each startup then
-warns that it is the tombstone of a removed Supervisor's directory and leaves it in place; nothing
-in it is used again, and deleting it is yours.
+account wrote that the second service could not remove — stays, with a warning, and nothing in it
+is used again. The Client removes it again at the next start, beside the start and once the second
+service is reached where a process account is registered, and with the next removal of a
+Supervisor; until it is gone, each startup warns about it. No other directory that no block names
+is touched.
 
 `config/` is what `${config_dir}` expands to in a process's arguments, which is how a program is
 pointed at its own configuration without anyone writing an absolute path into a block. Where a
