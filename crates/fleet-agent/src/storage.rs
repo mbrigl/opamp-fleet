@@ -639,15 +639,19 @@ pub(crate) mod handle {
     /// Opens the directory `dir`, which is `root` or beneath it, one component at a time, each
     /// through the handle of the one before it: every component searched ([`SEARCH`]), the last
     /// opened with `flags`. `root` is where the Client's own tree begins — the state directory, the
-    /// Supervisors' root, a Supervisor's directory — and what the operator configured: the links
-    /// on the way to it are resolved, once, as the path says. Beneath it no link is followed, whoever
-    /// owns it, since an account that writes a directory there can place one, and root's own
-    /// links among them where it can link a file of root's into it. With `made`, a missing
-    /// component is created, `0700`, and handed to `made`, opened to read.
+    /// Supervisors' root, a Supervisor's directory — and what the operator configured. On the way
+    /// to it a link is followed only where it is the system's ([`trusted_link`]): root owns it and
+    /// the directory it is in, which nobody else may write, so no account but root can have placed
+    /// or changed it; its target is read once, through the same handle, and walked to the same
+    /// way. Beneath `root` no link is followed, whoever owns it, since an account that writes a
+    /// directory there can place one, and root's own links among them where it can link a file of
+    /// root's into it. With `made`, a missing component is created, `0700`, and handed to `made`,
+    /// opened to read.
     ///
     /// # Errors
     /// Returns an error when `dir` is not beneath `root` by plain names, or a component is
-    /// missing (without `made`), is no directory, or is a link beneath `root`.
+    /// missing (without `made`), is no directory, is a link on the way to `root` that is not the
+    /// system's, or is a link beneath `root`.
     pub(crate) fn open_beneath(
         root: &Path,
         dir: &Path,
@@ -685,14 +689,14 @@ pub(crate) mod handle {
             .collect::<Result<Vec<_>, _>>()?;
         let total = prefix.len() + beneath.len();
         let flags_at = |at: usize| if at + 1 == total { flags } else { SEARCH };
-        let follow = |flags: libc::c_int| flags & !libc::O_NOFOLLOW;
         let mut handle = open(
             libc::AT_FDCWD,
             start,
-            follow(if total == 0 { flags } else { SEARCH }),
+            (if total == 0 { flags } else { SEARCH }) & !libc::O_NOFOLLOW,
         )?;
+        let mut hops = 0;
         for (at, name) in prefix.iter().enumerate() {
-            handle = step(&handle, name, follow(flags_at(at)), made)?;
+            handle = step_trusting(&handle, name, flags_at(at), made, &mut hops)?;
         }
         for (at, name) in beneath.iter().enumerate() {
             handle = step(&handle, name, flags_at(prefix.len() + at), made).map_err(|e| {
@@ -704,6 +708,95 @@ pub(crate) mod handle {
             })?;
         }
         Ok(handle)
+    }
+
+    /// The links [`step_trusting`] follows in one walk, at most: as many as the kernel follows
+    /// in one path (`MAXSYMLINKS` on Linux).
+    const MAX_HOPS: u32 = 40;
+
+    /// The directory `name` in `dir`, opened with `flags` as [`step`] opens it, on the way to a
+    /// root: a link there is followed where it is the system's ([`trusted_link`]), its target read
+    /// once and walked to component by component from `dir`, or from `/` where it is absolute,
+    /// by the same rule.
+    fn step_trusting(
+        dir: &OwnedFd,
+        name: &CStr,
+        flags: libc::c_int,
+        made: Made<'_>,
+        hops: &mut u32,
+    ) -> io::Result<OwnedFd> {
+        let st = match lstat_at(dir.as_raw_fd(), name) {
+            Ok(st) => st,
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+                return step(dir, name, flags, made)
+            }
+            Err(e) => return Err(e),
+        };
+        if !is(&st, libc::S_IFLNK) {
+            // Opened without following: a link swapped in since is refused.
+            return step(dir, name, flags, made);
+        }
+        if !trusted_link(&fstat(dir)?, &st) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is a link that is not the system's — root owns either not it or not the \
+                     directory it is in, or another account may write that directory — and is \
+                     not followed",
+                    name.to_string_lossy()
+                ),
+            ));
+        }
+        *hops += 1;
+        if *hops > MAX_HOPS {
+            return Err(io::Error::from_raw_os_error(libc::ELOOP));
+        }
+        let target = read_link_at(dir.as_raw_fd(), name)?;
+        let mut at = if target.is_absolute() {
+            open(libc::AT_FDCWD, c"/", SEARCH & !libc::O_NOFOLLOW)?
+        } else {
+            dir.try_clone()?
+        };
+        let names = target
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name),
+                Component::ParentDir => Some(OsStr::new("..")),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+            })
+            .map(|name| CString::new(name.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some((last, on_the_way)) = names.split_last() else {
+            return open(at.as_raw_fd(), c".", flags & !libc::O_NOFOLLOW);
+        };
+        for name in on_the_way {
+            at = step_trusting(&at, name, SEARCH, None, hops)?;
+        }
+        step_trusting(&at, last, flags, None, hops)
+    }
+
+    /// Whether the link `link` in the directory `dir` is the system's: root owns both, and the
+    /// directory is not writable by its group or others, so no account but root can have placed
+    /// or changed it — `/var/run` → `/run`, or `/var` → `private/var` on macOS.
+    pub(crate) fn trusted_link(dir: &libc::stat, link: &libc::stat) -> bool {
+        link.st_uid == 0 && dir.st_uid == 0 && mode(dir) & 0o022 == 0
+    }
+
+    /// The target of the link `name` in `dir`, read once.
+    fn read_link_at(dir: RawFd, name: &CStr) -> io::Result<PathBuf> {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut buf = vec![0_u8; 4096];
+        // SAFETY: a valid descriptor, a NUL-terminated name, and a buffer of the length passed.
+        let read =
+            unsafe { libc::readlinkat(dir, name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        let Ok(read) = usize::try_from(read) else {
+            return Err(io::Error::last_os_error());
+        };
+        if read == buf.len() {
+            return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+        }
+        buf.truncate(read);
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)))
     }
 
     /// Why `name` in `dir` was not opened as a directory beneath `root`: a link, which is never
@@ -1436,9 +1529,10 @@ mod tests {
     /// Beneath the Supervisor's directory no link is followed, whoever owns it: a link of root's
     /// in a data directory — one a hard link to a link of root's elsewhere can place — that names a
     /// link of the process account's to the Client's records shares nothing of them. Run as root,
-    /// every link here is root's; run as anyone else, the account's own. The links on the way to
-    /// the Supervisor's directory are followed as its path says, and a directory that is not
-    /// beneath it by plain names is refused (ADR-0059 clause 6).
+    /// every link here is root's; run as anyone else, the account's own. A link on the way to the
+    /// Supervisor's directory is followed only where it is the system's — run as root, this
+    /// test's own, in a directory only root writes — and a directory that is not beneath it by
+    /// plain names is refused (ADR-0059 clause 6).
     /// Verifies: ADR-0059
     #[cfg(unix)]
     #[test]
@@ -1484,14 +1578,21 @@ mod tests {
 
         let through = dir.path().join("through");
         std::os::unix::fs::symlink(&supervisor, &through).expect("a link above the root");
-        create_shared_dir(
+        let followed = create_shared_dir(
             &through,
             &through.join("cache"),
             Some(group),
             Shared::Written,
-        )
-        .expect("the root's own path is followed");
-        assert_eq!(mode_and_group(&supervisor.join("cache")), (0o2770, group.0));
+        );
+        // SAFETY: geteuid(2) cannot fail and touches no memory.
+        if unsafe { libc::geteuid() } == 0 {
+            followed.expect("root's link in a directory only root writes is the system's");
+            assert_eq!(mode_and_group(&supervisor.join("cache")), (0o2770, group.0));
+        } else {
+            let error = followed.expect_err("the account's own link above the root");
+            assert!(error.to_string().contains("not the system's"), "{error}");
+            assert!(!supervisor.join("cache").exists(), "nothing made behind it");
+        }
 
         let error = create_shared_dir(
             &data,
@@ -1504,6 +1605,51 @@ mod tests {
         create_shared_dir(&data, &private, Some(group), Shared::Written)
             .expect_err("not beneath at all");
         assert_eq!(mode_and_group(&private), before.0);
+    }
+
+    /// A link on the way to a root is the system's only where root owns it and the directory it is
+    /// in, and nobody else may write that directory: one an account placed, or one in a directory
+    /// its group or anybody may write — `/tmp` among them — is not (ADR-0059 clause 6).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn a_link_above_a_root_is_followed_only_where_it_is_the_systems() {
+        let stat = |uid: libc::uid_t, mode: libc::mode_t| {
+            // SAFETY: `stat` is plain data, for which all zeroes is a value.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            st.st_uid = uid;
+            st.st_mode = mode;
+            st
+        };
+        let dir = |uid, mode| stat(uid, libc::S_IFDIR | mode);
+        let link = |uid| stat(uid, libc::S_IFLNK | 0o777);
+        assert!(handle::trusted_link(&dir(0, 0o755), &link(0)));
+        assert!(handle::trusted_link(&dir(0, 0o700), &link(0)));
+        assert!(!handle::trusted_link(&dir(0, 0o755), &link(1000)));
+        assert!(!handle::trusted_link(&dir(1000, 0o755), &link(0)));
+        assert!(!handle::trusted_link(&dir(0, 0o775), &link(0)));
+        assert!(!handle::trusted_link(&dir(0, 0o1777), &link(0)));
+    }
+
+    /// A root reached through the system's own link — `/var/run` → `/run` on Linux, `/var` →
+    /// `private/var` on macOS — is reached: the link is root's, in a directory only root writes
+    /// (ADR-0059 clause 6).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn a_root_reached_through_a_link_of_the_systems_is_reached() {
+        let root = Path::new("/var/run");
+        let linked = [Path::new("/var"), root].iter().any(|path| {
+            std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+        });
+        if !linked {
+            crate::skipped_unless_ci(
+                "a_root_reached_through_a_link_of_the_systems_is_reached",
+                "/var/run reached through a link",
+            );
+            return;
+        }
+        handle::open_beneath(root, root, handle::SEARCH, None).expect("the system's link");
     }
 
     /// What a purge names to the second service is where alone the process account can have
