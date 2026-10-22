@@ -301,24 +301,20 @@ fn tombstones(root: &Path) -> Vec<Tomb> {
 
 /// Removes again the tombstones beneath `root` that earlier purges could not delete, the way a
 /// purge removes its own (ADR-0053 clause 12): what the process account wrote through `plugins` —
-/// the second service, once it is reached, however long that takes — and the rest by the Client.
-/// It runs beside the start and never holds it up: the work is spawned, and a `shutdown` ends the
-/// wait for the second service. A tombstone that is still not gone is a warning again, and the
-/// next start or purge tries it once more. No other orphan is touched (ADR-0017 clause 37).
+/// the second service, within the purge's deadline, reaching it included — and the rest by the
+/// Client. It runs beside the start and never holds it up (ADR-0053 clause 2): the work is
+/// spawned, and tried once. A tombstone that is still not gone — the second service was not
+/// reached, or a file will not delete — is a warning, and the next start or purge tries it once
+/// more. No other orphan is touched (ADR-0017 clause 37).
 pub(crate) fn reap_tombstones(
     root: &Path,
     plugins: std::sync::Arc<dyn crate::supervisor::ports::PluginRegistry>,
-    mut shutdown: Shutdown,
 ) {
     let tombs = tombstones(root);
     if tombs.is_empty() {
         return;
     }
     tokio::spawn(async move {
-        tokio::select! {
-            () = plugins.reached() => {}
-            () = shutdown.requested() => return,
-        }
         release_removed(Some(&*plugins), &tombs).await;
         let _ = tokio::task::spawn_blocking(move || bury(&tombs)).await;
     });
@@ -1986,14 +1982,15 @@ mod tests {
     }
 
     /// What a start removes again: the tombstones alone, each named to the second service by its
-    /// Supervisor, and only once the second service is reached — the start does not wait for it
-    /// (ADR-0053 clauses 2 and 12, ADR-0017 clause 37).
+    /// Supervisor and asked once, the Client's part only after the service answered — beside the
+    /// start, which does not wait for the answer (ADR-0053 clauses 2, 5 and 12, ADR-0017 clause
+    /// 37).
     /// Verifies: ADR-0053
     #[tokio::test]
-    async fn a_start_removes_the_tombstones_again_once_the_second_service_is_reached() {
-        use crate::supervisor::ports::{Plugin, PluginRegistry, Purged, Reached};
+    async fn a_start_removes_the_tombstones_again_beside_it() {
+        use crate::supervisor::ports::{Plugin, PluginRegistry, Purged};
         struct Service {
-            reached: tokio::sync::watch::Receiver<bool>,
+            answer: tokio::sync::watch::Receiver<bool>,
             asked: std::sync::Mutex<Vec<String>>,
         }
         impl PluginRegistry for Service {
@@ -2005,12 +2002,10 @@ mod tests {
                     .lock()
                     .expect("lock")
                     .extend(removed.iter().map(|(name, _)| name.clone()));
-                Box::pin(std::future::ready(removed.iter().map(|_| Ok(())).collect()))
-            }
-            fn reached(&self) -> Reached<'_> {
-                let mut reached = self.reached.clone();
+                let mut answer = self.answer.clone();
                 Box::pin(async move {
-                    let _ = reached.wait_for(|reached| *reached).await;
+                    let _ = answer.wait_for(|answer| *answer).await;
+                    removed.iter().map(|_| Ok(())).collect()
                 })
             }
         }
@@ -2021,22 +2016,18 @@ mod tests {
         for orphan in ["orphan", ".purge-orphan"] {
             std::fs::create_dir_all(root.join(orphan)).expect("an orphan");
         }
-        let (reach, reached) = tokio::sync::watch::channel(false);
+        let (answer, answered) = tokio::sync::watch::channel(false);
         let service = std::sync::Arc::new(Service {
-            reached,
+            answer: answered,
             asked: std::sync::Mutex::new(Vec::new()),
         });
-        let (_stop, shutdown) = crate::shutdown::shutdown_channel();
 
-        reap_tombstones(&root, service.clone(), shutdown);
+        reap_tombstones(&root, service.clone());
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            tomb.is_dir(),
-            "removed before the second service was reached"
-        );
-        assert!(service.asked.lock().expect("lock").is_empty());
+        assert!(tomb.is_dir(), "removed before the second service answered");
+        assert_eq!(*service.asked.lock().expect("lock"), vec!["earlier"]);
 
-        reach.send_replace(true);
+        answer.send_replace(true);
         let gone = async {
             while tomb.exists() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -2045,7 +2036,12 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(10), gone)
             .await
             .expect("the tombstone is removed again");
-        assert_eq!(*service.asked.lock().expect("lock"), vec!["earlier"]);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            *service.asked.lock().expect("lock"),
+            vec!["earlier"],
+            "asked once"
+        );
         assert!(root.join("orphan").is_dir() && root.join(".purge-orphan").is_dir());
     }
 

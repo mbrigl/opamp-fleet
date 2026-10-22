@@ -435,18 +435,7 @@ pub trait PluginRegistry: Send + Sync {
     fn purge<'a>(&'a self, removed: &'a [(String, std::path::PathBuf)]) -> Purged<'a> {
         Box::pin(std::future::ready(removed.iter().map(|_| Ok(())).collect()))
     }
-
-    /// Resolves once whatever [`purge`](Self::purge) asks is reached — the second service, where
-    /// a process account is registered — however long that takes: what has no deadline of its
-    /// own waits for it, as the tombstones a start removes again (ADR-0053 clause 12). At once
-    /// where the Client starts its programs itself.
-    fn reached(&self) -> Reached<'_> {
-        Box::pin(std::future::ready(()))
-    }
 }
-
-/// What [`PluginRegistry::reached`] answers.
-pub type Reached<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 
 /// A compiled-in Supervisor Plugin (ADR-0017): the adapter factory on the Managed-Process side.
 /// A new process kind is a new implementation and one line in
