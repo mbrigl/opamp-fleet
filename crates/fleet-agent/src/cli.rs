@@ -306,7 +306,7 @@ pub struct InstallArgs {
     /// The account must exist, must be neither root nor the account the Client runs as, and its
     /// primary group must be its own and a supplementary group of the Client's account, with no
     /// other member; the Client must not run as root. A re-registration without the flag keeps the account the second service's
-    /// unit names. System scope on Linux with systemd only, for now.
+    /// unit or plist names. System scope under systemd on Linux or launchd on macOS, for now.
     #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub process_account: Option<String>,
     // ADR-0059.
