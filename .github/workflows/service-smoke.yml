@@ -61,3 +61,9 @@ jobs:
       - name: No link of root's beneath the Client's directories is followed
         if: runner.os == 'Linux'
         run: sudo -E env "PATH=$PATH" cargo test -p fleet-agent --lib --locked -- --exact storage::tests::no_link_beneath_the_root_is_followed_whoever_owns_it
+      # Run as root, the test gives a link above the Supervisors' root to another account: the
+      # second service follows one of the Client's account and refuses one of a third (ADR-0059
+      # clause 5). The unprivileged run in CI covers a link of the service's own account.
+      - name: The second service follows the Client's links above the root, not its own
+        if: runner.os == 'Linux'
+        run: sudo -E env "PATH=$PATH" cargo test -p fleet-agent --lib --locked -- --exact supervisor::channel::tests::a_purge_follows_the_clients_links_above_the_root_and_not_the_services
