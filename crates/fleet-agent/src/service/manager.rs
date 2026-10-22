@@ -136,7 +136,7 @@ pub const AGENTS_STOP_TIMEOUT_SECS: u32 = 30;
 /// names no `ExitTimeOut` — as the second service's, which `service-manager` renders, does not:
 /// launchd's default, which exceeds the time the second service takes to stop what it started
 /// (ADR-0053 clause 9).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 const LAUNCHD_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// How often the removal of the second service asks launchd whether it still holds the job.
@@ -1442,7 +1442,9 @@ mod tests {
     /// launchd's default exit timeout, which the second service's plist keeps, outlasts the time
     /// the service takes to stop what it started: the grace its programs have to end, and the
     /// drain of their output after it. A stop ends them through the service, not through launchd.
+    /// Not on Windows, which has no second service's channel to read the grace from.
     /// Verifies: ADR-0053
+    #[cfg(unix)]
     #[test]
     fn launchds_default_exit_timeout_outlasts_the_second_services_stop() {
         use crate::supervisor::channel::{CLOSE_GRACE, OUTPUT_DRAIN};
