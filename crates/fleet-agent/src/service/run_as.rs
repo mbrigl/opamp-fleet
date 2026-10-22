@@ -578,11 +578,19 @@ impl Skipped {
 #[derive(Debug, Clone)]
 pub struct ProcessAccount {
     account: String,
+    #[cfg(unix)]
     uid: u32,
     /// The primary group: what the Client shares with the Managed Processes belongs to it
     /// (ADR-0059 clause 6).
     #[cfg(unix)]
     gid: u32,
+    /// Its SID, which the Client accepts as the owner of the second service's pipe, and which the
+    /// Client's shares are granted to (ADR-0059 clauses 4 and 6).
+    #[cfg(windows)]
+    sid: crate::win32::Sid,
+    /// The SID of the Client's account, the one client the second service serves.
+    #[cfg(windows)]
+    client_sid: crate::win32::Sid,
     /// The second service's unit it was kept from; `None` where `--process-account` named it.
     kept_from: Option<PathBuf>,
 }
@@ -595,9 +603,24 @@ impl ProcessAccount {
     }
 
     /// The account's uid, the one the Client accepts as the second service.
+    #[cfg(unix)]
     #[must_use]
     pub fn uid(&self) -> u32 {
         self.uid
+    }
+
+    /// The account's SID, the one the Client accepts as the second service.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn sid(&self) -> &crate::win32::Sid {
+        &self.sid
+    }
+
+    /// The SID of the Client's account, which the second service serves.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn client_sid(&self) -> &crate::win32::Sid {
+        &self.client_sid
     }
 
     /// The account's primary group, which the directory of the second service's socket is given.
@@ -660,22 +683,26 @@ pub fn decide_process_account(
     let Some((account, kept_from)) = choose_process_account(flag, registration)? else {
         return Ok(None);
     };
-    let client = match client {
-        Some(client) if supported => client,
-        _ => {
-            return Err(format!(
-                "a process account needs the second service, which only a system service under \
-                 systemd on Linux or launchd on macOS registers so far; {account} cannot be named \
-                 here. Nothing has been installed or written."
-            ))
-        }
+    let unsupported = || {
+        format!(
+            "a process account needs the second service, which only a system service under \
+             systemd on Linux, launchd on macOS or the SCM on Windows registers; {account} cannot \
+             be named here. Nothing has been installed or written."
+        )
     };
-    // The account goes into the second service's unit: one that cannot be written there is
-    // refused here, before the install writes anything, not when the unit is rendered.
-    super::manager::check_unit_account(&account)
-        .map_err(|e| format!("{e}. Nothing has been installed or written."))?;
+    if !supported {
+        return Err(unsupported());
+    }
     #[cfg(unix)]
     {
+        // A system service on Unix always names its account; a user service names none.
+        let Some(client) = client else {
+            return Err(unsupported());
+        };
+        // The account goes into the second service's unit: one that cannot be written there is
+        // refused here, before the install writes anything, not when the unit is rendered.
+        super::manager::check_unit_account(&account)
+            .map_err(|e| format!("{e}. Nothing has been installed or written."))?;
         let found = account_ids(&account, true)?;
         let client_ids = account_ids(client.account(), false)?.ok_or_else(|| {
             format!(
@@ -699,14 +726,102 @@ pub fn decide_process_account(
             kept_from,
         }))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = (client, kept_from);
-        Err(format!(
-            "a process account cannot be named on this platform yet; {account} is refused. \
-             Nothing has been installed or written."
-        ))
+        let named = |e: String| refuse_on_windows(&account, kept_from.as_deref(), &e);
+        // A first registration runs as LocalSystem; where the SCM keeps another account, the
+        // install does not ask it (ADR-0059 clause 10), so the Client's account is named.
+        let Some(client) = client else {
+            return Err(named(format!(
+                "the Client runs as LocalSystem unless --run-as names its account, and a process \
+                 account separates the Managed Processes from a Client that runs under an account \
+                 of its own. Name the Client's account with --run-as NT SERVICE\\{}",
+                super::manager::service_name()
+            )));
+        };
+        let agents = super::manager::agents_service_name();
+        let sid = windows_sid(&account).map_err(named)?;
+        let client_sid = windows_sid(client.account()).map_err(named)?;
+        check_windows_process_account(&account, &sid, &agents, client.account(), &client_sid)
+            .map_err(named)?;
+        Ok(Some(ProcessAccount {
+            account,
+            sid,
+            client_sid,
+            kept_from,
+        }))
     }
+}
+
+/// The SID of an account in one of the passwordless forms: known from its name where it can be,
+/// else — a group-managed service account — looked up.
+///
+/// # Errors
+/// Returns that the account does not exist.
+#[cfg(windows)]
+fn windows_sid(account: &str) -> Result<crate::win32::Sid, String> {
+    match crate::win32::known_account_sid(account) {
+        Some(sid) => Ok(sid),
+        None => crate::win32::lookup_account(account)
+            .map_err(|e| format!("{account} cannot be found on this host or its domain ({e})")),
+    }
+}
+
+/// The refusal of the process account `account`, kept from `kept_from` or named, for `reason`.
+#[cfg(windows)]
+fn refuse_on_windows(account: &str, kept_from: Option<&Path>, reason: &str) -> String {
+    let named = match kept_from {
+        Some(from) => format!(
+            "the process account {account}, which {} names,",
+            from.display()
+        ),
+        None => format!("the process account {account}"),
+    };
+    let drop = if kept_from.is_some() {
+        format!(" Or drop it with {DROP}")
+    } else {
+        String::new()
+    };
+    format!("{named} is refused: {reason}.{drop} {NOTHING}")
+}
+
+/// The checks of ADR-0059 clause 1 on Windows: the process account `account`, of SID `sid`, is one
+/// of the passwordless forms — the second service `agents`'s own virtual account, a gMSA,
+/// `LocalService` or `NetworkService` — never `LocalSystem`, and never the Client's account
+/// `client`, of SID `client_sid`, which itself is not `LocalSystem`.
+///
+/// # Errors
+/// Returns the reason, with the way out.
+#[cfg(any(windows, test))]
+pub(crate) fn check_windows_process_account(
+    account: &str,
+    sid: &crate::win32::Sid,
+    agents: &str,
+    client: &str,
+    client_sid: &crate::win32::Sid,
+) -> Result<(), String> {
+    if sid.as_str() == crate::win32::LOCAL_SYSTEM {
+        return Err(
+            "it is LocalSystem, and a process account never is. A host whose agents need \
+             LocalSystem runs as LocalSystem as a whole: no --process-account"
+                .to_string(),
+        );
+    }
+    if client_sid.as_str() == crate::win32::LOCAL_SYSTEM {
+        return Err(format!(
+            "the Client runs as LocalSystem ({client}), and a process account separates the \
+             Managed Processes from a Client that runs under an account of its own. Name the \
+             Client's account with --run-as <account>, or run everything as LocalSystem without \
+             --process-account"
+        ));
+    }
+    if sid == client_sid {
+        return Err(format!(
+            "it is the account the Client runs as ({client}); the process account is another \
+             account, which the Client's does not share"
+        ));
+    }
+    windows_account_form(account, agents)
 }
 
 /// The order of ADR-0059 clause 1, on what was found: the flag, else the account the second
@@ -1276,7 +1391,7 @@ pub fn match_owner(like: &Path, data_root: &Path, paths: &[&Path]) -> Result<Vec
 ///
 /// Compiled wherever it is used — the Windows install, and the tests of any platform: the rule is
 /// pure string logic, and testing it must not need a Windows host.
-#[cfg(any(not(unix), test))]
+#[cfg(any(windows, test))]
 fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
     const NT_SERVICE: &str = r"NT SERVICE\";
     const BUILT_IN: [&str; 2] = [r"NT AUTHORITY\LocalService", r"NT AUTHORITY\NetworkService"];
@@ -1332,6 +1447,63 @@ mod tests {
             strings(grant_args(Path::new(r"C:\data\f"), r"NT SERVICE\x", false)),
             [r"C:\data\f", "/grant", r"NT SERVICE\x:M", "/L"]
         );
+    }
+
+    /// On Windows the process account is one of the passwordless forms — the second service's own
+    /// virtual account, a gMSA, `LocalService` or `NetworkService` — never `LocalSystem` and never
+    /// the Client's account, and the Client does not run as `LocalSystem` (ADR-0059 clause 1).
+    /// Verifies: ADR-0059
+    #[test]
+    fn on_windows_the_process_account_is_a_passwordless_account_of_its_own() {
+        use crate::win32::{known_account_sid, Sid};
+        let agents = "opamp-fleet-agents";
+        let client = r"NT SERVICE\opamp-fleet";
+        let client_sid = known_account_sid(client).expect("virtual");
+        let check = |account: &str, sid: Sid| {
+            check_windows_process_account(account, &sid, agents, client, &client_sid)
+        };
+        let virtual_account = r"NT SERVICE\opamp-fleet-agents";
+        assert!(check(
+            virtual_account,
+            known_account_sid(virtual_account).expect("sid")
+        )
+        .is_ok());
+        let local_service = r"NT AUTHORITY\LocalService";
+        assert!(check(
+            local_service,
+            known_account_sid(local_service).expect("sid")
+        )
+        .is_ok());
+        let gmsa = Sid::parse("S-1-5-21-1-2-3-1104").expect("sid");
+        assert!(check(r"CORP\fleet-agents$", gmsa).is_ok());
+
+        let system = check(
+            "LocalSystem",
+            known_account_sid("LocalSystem").expect("sid"),
+        )
+        .expect_err("LocalSystem");
+        assert!(system.contains("LocalSystem as a whole"), "{system}");
+        let own = check(client, client_sid.clone()).expect_err("the Client's");
+        assert!(own.contains("the account the Client runs as"), "{own}");
+        let other = r"NT SERVICE\mssqlserver";
+        let foreign = check(other, known_account_sid(other).expect("sid")).expect_err("another's");
+        assert!(foreign.contains(agents), "{foreign}");
+        assert!(
+            check("bob", Sid::parse("S-1-5-21-1-2-3-1001").expect("sid"))
+                .expect_err("a password")
+                .contains("password")
+        );
+
+        let system_sid = known_account_sid("LocalSystem").expect("sid");
+        let client_is_system = check_windows_process_account(
+            virtual_account,
+            &known_account_sid(virtual_account).expect("sid"),
+            agents,
+            "LocalSystem",
+            &system_sid,
+        )
+        .expect_err("a Client under LocalSystem");
+        assert!(client_is_system.contains("--run-as"), "{client_is_system}");
     }
 
     /// ADR-0019: the accepted Windows forms are exactly the passwordless ones, and the refusal
@@ -1629,9 +1801,14 @@ mod tests {
 
         let kept = ProcessAccount {
             account: "opamp-fleet-agents".to_string(),
+            #[cfg(unix)]
             uid: 997,
             #[cfg(unix)]
             gid: 997,
+            #[cfg(windows)]
+            sid: crate::win32::virtual_account_sid("opamp-fleet-agents"),
+            #[cfg(windows)]
+            client_sid: crate::win32::virtual_account_sid("opamp-fleet"),
             kept_from: Some(PathBuf::from(AGENTS_UNIT)),
         };
         assert!(kept.describe().contains(AGENTS_UNIT), "{}", kept.describe());

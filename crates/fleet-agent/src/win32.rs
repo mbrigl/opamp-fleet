@@ -516,6 +516,113 @@ mod system {
         unsafe { sid_text(sid.as_mut_ptr().cast()) }
     }
 
+    /// SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO.
+    const SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO: u32 = 6;
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn ChangeServiceConfig2W(service: Handle, level: u32, info: *const c_void) -> Bool;
+        fn QueryServiceConfig2W(
+            service: Handle,
+            level: u32,
+            buffer: *mut u8,
+            len: u32,
+            needed: *mut u32,
+        ) -> Bool;
+    }
+
+    /// The privileges `privileges` as a multi-string: each NUL-terminated, then an empty one.
+    fn multi_string(privileges: &[&str]) -> Vec<u16> {
+        let mut text: Vec<u16> = privileges
+            .iter()
+            .flat_map(|name| name.encode_utf16().chain(std::iter::once(0)))
+            .collect();
+        text.push(0);
+        text
+    }
+
+    /// Sets the privileges the service `service` — opened with `SERVICE_CHANGE_CONFIG` — keeps:
+    /// the SCM removes every other from its token when it starts
+    /// (SERVICE_REQUIRED_PRIVILEGES_INFO).
+    ///
+    /// # Errors
+    /// Returns why the configuration could not be changed.
+    ///
+    /// # Safety
+    /// `service` is a valid service handle for the length of the call.
+    pub unsafe fn set_required_privileges(service: Handle, privileges: &[&str]) -> io::Result<()> {
+        let mut text = multi_string(privileges);
+        // SERVICE_REQUIRED_PRIVILEGES_INFOW: one pointer to the multi-string.
+        let info: *mut u16 = text.as_mut_ptr();
+        // SAFETY: a service handle the caller holds, and the structure — one pointer to a
+        // multi-string — alive for the call.
+        check(unsafe {
+            ChangeServiceConfig2W(
+                service,
+                SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
+                std::ptr::from_ref(&info).cast(),
+            )
+        })
+    }
+
+    /// The privileges the service `service` — opened with `SERVICE_QUERY_CONFIG` — keeps.
+    ///
+    /// # Errors
+    /// Returns why the configuration could not be read.
+    ///
+    /// # Safety
+    /// `service` is a valid service handle for the length of the call.
+    pub unsafe fn required_privileges(service: Handle) -> io::Result<Vec<String>> {
+        let mut needed = 0u32;
+        // SAFETY: a size query.
+        let sized = unsafe {
+            QueryServiceConfig2W(
+                service,
+                SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+            )
+        };
+        if sized == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(INSUFFICIENT_BUFFER) {
+                return Err(error);
+            }
+        }
+        let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(1)];
+        // SAFETY: a buffer of at least `needed` bytes.
+        check(unsafe {
+            QueryServiceConfig2W(
+                service,
+                SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
+                buffer.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        })?;
+        // SAFETY: the call wrote the structure, one pointer to a multi-string within the buffer
+        // or null.
+        let mut text = unsafe { *buffer.as_ptr().cast::<*const u16>() };
+        let mut privileges = Vec::new();
+        while !text.is_null() {
+            let mut len = 0;
+            // SAFETY: a NUL-terminated string of the multi-string.
+            while unsafe { *text.add(len) } != 0 {
+                len += 1;
+            }
+            if len == 0 {
+                break;
+            }
+            // SAFETY: `len` characters of it.
+            let name = unsafe { std::slice::from_raw_parts(text, len) };
+            privileges.push(String::from_utf16_lossy(name));
+            // SAFETY: the next string begins after this one's NUL.
+            text = unsafe { text.add(len + 1) };
+        }
+        Ok(privileges)
+    }
+
     /// A security descriptor made from SDDL, freed when dropped.
     pub struct SecurityDescriptor(Local);
 

@@ -137,6 +137,87 @@ pub fn configure(
     Ok(())
 }
 
+/// The privileges the second service keeps (ADR-0059 clause 2): `SeChangeNotifyPrivilege` alone,
+/// which the SCM never removes anyway and which lets the Managed Processes pass through the
+/// Client's directories to what is shared with them. Every other privilege of its account —
+/// `SeImpersonatePrivilege` first, which a `LocalService`-like account holds — is removed from the
+/// service's token when it starts, and from every program it starts, whose token is a copy
+/// (SERVICE_REQUIRED_PRIVILEGES_INFO).
+#[cfg(any(windows, test))]
+pub const AGENTS_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
+
+/// Configure the second service as [`configure`] configures the Client — recovery actions, display
+/// name, description, the logon account `account` — and cut its privileges to
+/// [`AGENTS_PRIVILEGES`] (ADR-0059 clause 2).
+///
+/// # Errors
+/// Returns an error if the service cannot be opened or reconfigured. Never on Unix.
+#[cfg(not(windows))]
+pub fn configure_agents(
+    _service_name: &str,
+    _display_name: &str,
+    _description: &str,
+    _account: &str,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn configure_agents(
+    service_name: &str,
+    display_name: &str,
+    description: &str,
+    account: &str,
+) -> Result<(), String> {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    configure(service_name, display_name, description, Some(account))?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| format!("cannot open the service control manager: {e}"))?;
+    let service = manager
+        .open_service(service_name, ServiceAccess::CHANGE_CONFIG)
+        .map_err(|e| format!("cannot open the service {service_name}: {e}"))?;
+    // SAFETY: the handle of `service`, which lives across the call.
+    unsafe { crate::win32::set_required_privileges(service.raw_handle(), AGENTS_PRIVILEGES) }
+        .map_err(|e| format!("cannot set the required privileges of {service_name}: {e}"))
+}
+
+/// The registration of the service `service_name` as the SCM holds it: its registry key, and the
+/// logon account it names (ADR-0059 clause 1). `None` where no such service is registered.
+///
+/// # Errors
+/// Returns an error if the SCM cannot be asked.
+#[cfg(windows)]
+pub fn logon_account(service_name: &str) -> Result<Option<super::manager::Registration>, String> {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    /// ERROR_SERVICE_DOES_NOT_EXIST.
+    const NO_SERVICE: i32 = 1060;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| format!("cannot open the service control manager: {e}"))?;
+    let service = match manager.open_service(service_name, ServiceAccess::QUERY_CONFIG) {
+        Ok(service) => service,
+        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(NO_SERVICE) => {
+            return Ok(None)
+        }
+        Err(e) => return Err(format!("cannot open the service {service_name}: {e}")),
+    };
+    let config = service
+        .query_config()
+        .map_err(|e| format!("cannot read the configuration of {service_name}: {e}"))?;
+    Ok(Some(super::manager::Registration {
+        file: std::path::PathBuf::from(format!(
+            r"HKLM\SYSTEM\CurrentControlSet\Services\{service_name}"
+        )),
+        account: config
+            .account_name
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty()),
+    }))
+}
+
 /// Runs `sc.exe` with a trailing value argument — the shape both fields above are set with, so
 /// neither can be the one that forgets to check whether `sc.exe` actually accepted it.
 ///
@@ -164,4 +245,18 @@ fn sc(args: &[&str], value: &str, what: &str) -> Result<(), String> {
         output.status,
         String::from_utf8_lossy(&output.stdout).trim()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AGENTS_PRIVILEGES;
+
+    /// The second service keeps `SeChangeNotifyPrivilege` alone, so no Managed Process holds
+    /// `SeImpersonatePrivilege` (ADR-0059 clause 2). The service smoke reads what a Managed
+    /// Process then holds.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_second_service_keeps_no_privilege_but_passing_through() {
+        assert_eq!(AGENTS_PRIVILEGES, ["SeChangeNotifyPrivilege"]);
+    }
 }

@@ -476,13 +476,20 @@ fn agents_spec(
     })
 }
 
-/// No second service is registered here yet (ADR-0059).
-#[cfg(not(unix))]
+/// The second service a registration names on Windows (ADR-0059): it serves the Client's SID on
+/// its named pipe, and the Client accepts the process account's SID as the pipe's owner.
+#[cfg(windows)]
 fn agents_spec(
-    _process: Option<&run_as::ProcessAccount>,
+    process: Option<&run_as::ProcessAccount>,
     _client: Option<&run_as::RunAs>,
 ) -> Option<manager::Agents> {
-    None
+    let process = process?;
+    Some(manager::Agents {
+        account: process.account().to_string(),
+        sid: process.sid().clone(),
+        client_sid: process.client_sid().clone(),
+        socket: manager::agents_socket(),
+    })
 }
 
 /// `service config`: the questionnaire of `install --interactive` against an installed Client, and
