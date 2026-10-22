@@ -472,7 +472,9 @@ impl InstallTarget {
     /// could never have worked costs no downtime at all.
     ///
     /// A tree is staged in a directory the process account's group reads, where a process account
-    /// is registered, so the preflight it runs can reach it (ADR-0053 clause 6).
+    /// is registered, so the preflight it runs can reach it, and what is staged — every member of a
+    /// tree, or the single program — is given to that group, without write for the group or others
+    /// (ADR-0053 clauses 6 and 11).
     fn stage(
         &self,
         artifact: &std::path::Path,
@@ -482,6 +484,10 @@ impl InstallTarget {
         match self {
             InstallTarget::Binary(path) => {
                 let temp = stage_executable(artifact, path, archive_key)?;
+                if let Err(e) = share_staged(&temp, group) {
+                    let _ = std::fs::remove_file(&temp);
+                    return Err(e);
+                }
                 Ok(Staged {
                     root: temp
                         .parent()
@@ -2097,7 +2103,51 @@ fn stage_tree(
     // The tree carries its own modes where the archive had them, but whether the *program* can be
     // executed is not something to inherit from how someone built an archive.
     install::make_executable(&program)?;
+    // Every member is read and run by the process account through its group, at the mode the
+    // archive gave it (ADR-0053 clauses 6 and 11).
+    if let Err(e) = share_staged(&staging, group) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
     Ok(staging)
+}
+
+/// Gives what is staged at `staging` — the program, or every member of a tree — to the process
+/// account's group `group`, without write for the group or others; nothing where no process
+/// account is registered.
+fn share_staged(
+    staging: &std::path::Path,
+    group: Option<crate::storage::ProcessAccountGroup>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    if let Some(group) = group {
+        use crate::storage::handle;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let shared = if std::fs::symlink_metadata(staging).is_ok_and(|meta| meta.is_dir()) {
+            handle::open_dir(staging, None)
+                .and_then(|tree| handle::share_tree(&tree, group, staging))
+        } else {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(staging)
+                .map(OwnedFd::from)
+                .and_then(|program| {
+                    let st = handle::fstat(&program)?;
+                    handle::share(&program, group, handle::mode(&st) & !0o022)
+                })
+        };
+        shared.map_err(|e| {
+            format!(
+                "cannot share {} with the process account: {e}",
+                staging.display()
+            )
+        })?;
+    }
+    #[cfg(not(unix))]
+    let _ = (staging, group);
+    Ok(())
 }
 
 pub(crate) fn unhealthy(status: String, last_error: String) -> ComponentHealth {
@@ -3290,6 +3340,94 @@ mod tests {
         });
         runner.try_spawn().await.expect("started");
         assert_eq!(mode(&data), (0o2770, group.0));
+    }
+
+    /// A group of this test's account other than its effective one, as the process account's group
+    /// is to the Client: `None` where the account is in no other group.
+    #[cfg(unix)]
+    fn another_group() -> Option<crate::storage::ProcessAccountGroup> {
+        // SAFETY: getegid(2) cannot fail and touches no memory.
+        let own = unsafe { libc::getegid() };
+        let mut groups = vec![0 as libc::gid_t; 256];
+        // SAFETY: the buffer holds as many entries as the length passed.
+        let count = unsafe { libc::getgroups(256, groups.as_mut_ptr()) };
+        let count = usize::try_from(count).ok()?;
+        groups[..count]
+            .iter()
+            .find(|gid| **gid != own)
+            .map(|gid| crate::storage::ProcessAccountGroup(*gid))
+    }
+
+    /// Where a process account is registered, every member of an unpacked package is given to its
+    /// group at the mode the archive gave it, so a package whose members are `0750`, `0640` or
+    /// `0700` runs under the process account as the archive meant it to: what the archive grants
+    /// the group, the process account has (ADR-0053 clauses 6 and 11). A single program is given
+    /// to the group too.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn every_member_of_a_staged_package_is_given_to_the_process_accounts_group() {
+        use std::os::unix::fs::MetadataExt as _;
+        let Some(group) = another_group() else {
+            return;
+        };
+        let stat = |path: &std::path::Path| {
+            let meta = std::fs::symlink_metadata(path).expect("metadata");
+            (meta.mode() & 0o7777, meta.gid())
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("package.tar.gz");
+        {
+            let file = std::fs::File::create(&artifact).expect("create");
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            for (name, mode, content) in [
+                ("app/bin/agent", 0o755, &b"the-program"[..]),
+                ("app/bin/helper", 0o750, &b"a-helper"[..]),
+                ("app/etc/agent.conf", 0o640, &b"settings"[..]),
+                ("app/etc/secret", 0o700, &b"the archive's own"[..]),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(mode);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, name, content)
+                    .expect("append");
+            }
+            builder
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+        let target = InstallTarget::Tree {
+            root: dir.path().join("program"),
+            program_path: PathBuf::from("bin/agent"),
+        };
+        target.prepare(Some(group)).expect("prepare");
+        let staged = target.stage(&artifact, None, Some(group)).expect("staged");
+        for (member, mode) in [
+            ("bin", 0o755),
+            ("bin/agent", 0o755),
+            ("bin/helper", 0o750),
+            ("etc", 0o755),
+            ("etc/agent.conf", 0o640),
+            ("etc/secret", 0o700),
+        ] {
+            let (found, gid) = stat(&staged.root.join(member));
+            assert_eq!(gid, group.0, "{member}");
+            assert_eq!(found & 0o7777 & !0o022, mode & !0o022, "{member}");
+            assert_eq!(found & 0o022, 0, "{member} is writable by group or others");
+        }
+
+        let program = dir.path().join("single").join("agent");
+        let single = InstallTarget::Binary(program.clone());
+        single.prepare(Some(group)).expect("prepare");
+        let raw = dir.path().join("downloaded");
+        std::fs::copy("/bin/true", &raw).expect("a bare program");
+        let staged = single.stage(&raw, None, Some(group)).expect("staged");
+        assert_eq!(stat(&staged.program), (0o755, group.0));
     }
 
     /// A preflight that does not reach the second service refuses nothing, however long the wait

@@ -732,6 +732,43 @@ pub(crate) mod handle {
         unsafe { libc::__error() }
     }
 
+    /// Gives every directory and regular file under `dir` to `group`, each at the mode it has
+    /// without the group's and others' write bits: what an unpacked package holds, read and run
+    /// by the process account through its group (ADR-0053 clauses 6 and 11). A link, which no
+    /// unpacked tree holds, and a file with a second hard link are left as they are.
+    ///
+    /// # Errors
+    /// Returns the first entry that cannot be read or changed: a package whose members the
+    /// process account cannot reach would not run.
+    pub(crate) fn share_tree(
+        dir: &OwnedFd,
+        group: ProcessAccountGroup,
+        path: &Path,
+    ) -> io::Result<()> {
+        for name in entries(dir)? {
+            let child = path.join(OsStr::from_bytes(name.as_bytes()));
+            let named =
+                |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", child.display()));
+            let st = lstat_at(dir.as_raw_fd(), &name).map_err(named)?;
+            let flags = if is(&st, libc::S_IFDIR) {
+                DIRECTORY
+            } else if is(&st, libc::S_IFREG) && st.st_nlink == 1 {
+                FILE
+            } else {
+                continue;
+            };
+            let entry = open(dir.as_raw_fd(), &name, flags).map_err(named)?;
+            let st = fstat(&entry).map_err(named)?;
+            if is(&st, libc::S_IFDIR) {
+                share(&entry, group, mode(&st) & !0o022).map_err(named)?;
+                share_tree(&entry, group, &child)?;
+            } else if is(&st, libc::S_IFREG) && st.st_nlink == 1 {
+                share(&entry, group, mode(&st) & !0o022).map_err(named)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Gives what the Client owns under the data directory `dir` to `group`, writable by it: each
     /// directory `2770` at least, each regular file with one name group-readable and -writable.
     /// What the Client does not own, a link, and a file with a second hard link are left as they
