@@ -235,7 +235,10 @@ pub fn account_of(uid: u32) -> std::io::Result<Option<Account>> {
 /// the accounts that hold it as a supplementary group. Empty where no entry names the group.
 #[cfg(unix)]
 fn group_members(gid: u32) -> std::io::Result<Vec<String>> {
-    let mut buffer = vec![0 as libc::c_char; 4096];
+    // The buffer is laid out as `u64`s so it is aligned for the pointer array `gr_mem` that
+    // `getgrgid_r` places in it: glibc aligns that array itself, macOS does not, and a pointer read
+    // at an unaligned address is undefined behaviour.
+    let mut buffer = vec![0u64; 512];
     loop {
         let mut entry = std::mem::MaybeUninit::<libc::group>::uninit();
         let mut found: *mut libc::group = std::ptr::null_mut();
@@ -245,12 +248,12 @@ fn group_members(gid: u32) -> std::io::Result<Vec<String>> {
             libc::getgrgid_r(
                 gid,
                 entry.as_mut_ptr(),
-                buffer.as_mut_ptr(),
-                buffer.len(),
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len() * std::mem::size_of::<u64>(),
                 &raw mut found,
             )
         };
-        if rc == libc::ERANGE && buffer.len() < 1 << 24 {
+        if rc == libc::ERANGE && buffer.len() < 1 << 21 {
             buffer.resize(buffer.len() * 2, 0);
             continue;
         }
@@ -262,12 +265,16 @@ fn group_members(gid: u32) -> std::io::Result<Vec<String>> {
         }
         let mut members = Vec::new();
         // SAFETY: `gr_mem` is a null-terminated array of NUL-terminated strings inside `buffer`,
-        // which outlives these reads.
+        // which outlives these reads; each slot is read unaligned, as no libc promises more.
         unsafe {
             let mut member = (*found).gr_mem;
-            while !member.is_null() && !(*member).is_null() {
+            while !member.is_null() {
+                let name = member.read_unaligned();
+                if name.is_null() {
+                    break;
+                }
                 members.push(
-                    std::ffi::CStr::from_ptr(*member)
+                    std::ffi::CStr::from_ptr(name)
                         .to_string_lossy()
                         .into_owned(),
                 );
