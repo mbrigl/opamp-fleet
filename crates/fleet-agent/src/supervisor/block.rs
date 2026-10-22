@@ -27,12 +27,14 @@ pub struct Resolved<'a> {
 ///
 /// What the core resolves — the program, the Agent type, the Endpoint port and the timings — is
 /// checked here, so a Server-delivered set carrying a value its kind supplies is refused before a
-/// running process is touched (ADR-0017), exactly as a bad plugin setting is.
+/// running process is touched (ADR-0017), exactly as a bad plugin setting is. So is a name whose
+/// directory would be one of the Client's own ([`ClientConfig::check_supervisor_dir`]).
 pub fn resolve<'a>(
     config: &ClientConfig,
     block: &SupervisorBlock,
     plugins: &'a [Box<dyn Plugin>],
 ) -> Result<Resolved<'a>, String> {
+    config.check_supervisor_dir(&block.name)?;
     let plugin = find_plugin(plugins, block)?;
     let (settings, program, program_path) = take_program(config, block, plugin)?;
     let service_name = effective_service_name(block, plugin, &program.path)?;

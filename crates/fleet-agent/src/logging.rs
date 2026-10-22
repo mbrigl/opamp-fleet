@@ -186,8 +186,11 @@ pub fn is_private(
 /// The state directory is the right home: it survives a self-update and `uninstall` deliberately
 /// does not delete it (ADR-0019), so a log explaining a failed install is still there afterwards.
 pub fn default_dir(state_dir: &Path) -> PathBuf {
-    state_dir.join("logs")
+    state_dir.join(DIR_NAME)
 }
+
+/// The name of the default log directory in the state directory ([`default_dir`]).
+pub(crate) const DIR_NAME: &str = "logs";
 
 #[cfg(test)]
 mod tests {
