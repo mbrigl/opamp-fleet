@@ -32,16 +32,18 @@ pub struct RunSpec {
     /// and the whole of the condition for writing the log file: it says no terminal is watching.
     pub service: bool,
     /// The second service every Managed Process is started through, where a process account is
-    /// registered (ADR-0059 clause 3): from the hidden `--agents-socket` and `--process-uid` that
-    /// `service install --process-account` writes into the command line.
+    /// registered (ADR-0059 clause 3): from the hidden `--agents-socket` and `--process-uid` — on
+    /// Windows `--process-sid` — that `service install --process-account` writes into the command
+    /// line.
     pub agents: Option<AgentsChannel>,
 }
 
-/// Where the second service listens, and the uid it must answer as (ADR-0059 clause 4).
+/// Where the second service listens — its socket, or its named pipe on Windows — and the account
+/// it must answer as: its uid, or its SID (ADR-0059 clause 4).
 #[derive(Debug, Clone)]
 pub struct AgentsChannel {
     pub socket: PathBuf,
-    pub process_uid: u32,
+    pub process: crate::supervisor::channel::Account,
 }
 
 /// How a daemon run ended, which decides how the process leaves.
@@ -297,7 +299,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // What the Client shares with the Managed Processes belongs to the process account's group
     // (ADR-0059 clause 6), from before anything is written.
     if let Some(agents) = &spec.agents {
-        config.process_account_group = Some(process_account_group(agents.process_uid)?);
+        config.process_account_group = Some(process_account_group(&agents.process)?);
     }
     // A certificate swap a crash cut short is completed before the identity in force is read.
     crate::csr::recover(&config.state_dir)?;
@@ -335,7 +337,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     let left_behind = Arc::new(AtomicBool::new(false));
     let spawner = match &spec.agents {
         Some(agents) => {
-            let (spawner, told) = through_the_second_service(agents)?;
+            let (spawner, told) = through_the_second_service(agents);
             shutdown = or_left_behind(shutdown, told, Arc::clone(&left_behind));
             spawner
         }
@@ -529,7 +531,8 @@ fn heal_torn_pointer() {
 /// Returns an error when the database names no account for `uid`, or cannot be read: the Client
 /// does not start rather than share its files with a group it cannot name.
 #[cfg(unix)]
-fn process_account_group(uid: u32) -> Result<crate::storage::ProcessAccountGroup, String> {
+fn process_account_group(uid: &u32) -> Result<crate::storage::ProcessAccountGroup, String> {
+    let uid = *uid;
     match crate::service::run_as::account_of(uid) {
         Ok(Some(account)) => Ok(crate::storage::ProcessAccountGroup(account.gid)),
         Ok(None) => Err(format!(
@@ -542,9 +545,18 @@ fn process_account_group(uid: u32) -> Result<crate::storage::ProcessAccountGroup
     }
 }
 
-#[cfg(not(unix))]
-fn process_account_group(_uid: u32) -> Result<crate::storage::ProcessAccountGroup, String> {
-    Err("the second service is not available on this platform".to_string())
+/// On Windows the process account itself, by the SID the registration names: what the Client
+/// shares with the Managed Processes is granted to it (ADR-0059 clause 6).
+///
+/// # Errors
+/// Never; the SID was read when the command line was.
+#[cfg(windows)]
+fn process_account_group(
+    sid: &crate::win32::Sid,
+) -> Result<crate::storage::ProcessAccountGroup, String> {
+    // Once per run, for a value every Supervisor copies.
+    let sid: &'static str = Box::leak(sid.as_str().to_string().into_boxed_str());
+    Ok(crate::storage::ProcessAccountGroup(sid))
 }
 
 /// What resolves once the second service tells this Client that a self-update left it behind.
@@ -554,22 +566,23 @@ type LeftBehind = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// channel connects at the first start; a Client that cannot reach the service reports it per
 /// Supervisor and never starts a program itself. Beside the spawner: what resolves once the
 /// service turns out to be the build `current` names while this Client is not.
-#[cfg(unix)]
 fn through_the_second_service(
     agents: &AgentsChannel,
-) -> Result<(supervisor::process::Spawner, LeftBehind), String> {
+) -> (supervisor::process::Spawner, LeftBehind) {
     use crate::supervisor::channel::Channel;
     tracing::info!(
         socket = %agents.socket.display(),
-        process_uid = agents.process_uid,
+        process = %agents.process,
         "starting every Managed Process through the second service"
     );
-    Ok(watched(Channel::new(&agents.socket, agents.process_uid)))
+    // A uid on Unix, a SID on Windows.
+    #[allow(clippy::clone_on_copy)]
+    let process = agents.process.clone();
+    watched(Channel::new(&agents.socket, process))
 }
 
 /// The spawner that starts every Managed Process through `channel`, and what resolves once the
 /// channel says that the self-update left this Client behind.
-#[cfg(unix)]
 fn watched(
     channel: crate::supervisor::channel::Channel,
 ) -> (supervisor::process::Spawner, LeftBehind) {
@@ -603,15 +616,6 @@ fn or_left_behind(
         let _ = stop.send(true);
     });
     run
-}
-
-/// No second service runs here yet (ADR-0059): a Client told of one refuses to start rather
-/// than start its programs itself.
-#[cfg(not(unix))]
-fn through_the_second_service(
-    _agents: &AgentsChannel,
-) -> Result<(supervisor::process::Spawner, LeftBehind), String> {
-    Err("the second service is not available on this platform".to_string())
 }
 
 /// Resolve to the platform shutdown signal: `SIGTERM` or `SIGINT` on Unix (what systemd and
