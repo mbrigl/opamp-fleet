@@ -603,10 +603,10 @@ pub struct Ids {
     /// Every group the account is in, the primary one included.
     pub groups: Vec<u32>,
     /// The primary group's members, as the group database lists them: the accounts that hold it
-    /// as a supplementary group.
+    /// as a supplementary group. Read for the process account alone.
     pub members: Vec<String>,
     /// The accounts, by name and uid, whose primary group the primary group is — the account
-    /// itself among them.
+    /// itself among them. Read for the process account alone.
     pub primary_of: Vec<(String, u32)>,
 }
 
@@ -651,8 +651,8 @@ pub fn decide_process_account(
         .map_err(|e| format!("{e}. Nothing has been installed or written."))?;
     #[cfg(unix)]
     {
-        let found = account_ids(&account)?;
-        let client_ids = account_ids(client.account())?.ok_or_else(|| {
+        let found = account_ids(&account, true)?;
+        let client_ids = account_ids(client.account(), false)?.ok_or_else(|| {
             format!(
                 "the Client's account {} cannot be resolved. Nothing has been installed or \
                  written.",
@@ -813,8 +813,13 @@ fn refuse_process_account(
         ));
     }
     // The group is the process account's own: whoever else holds it reads what every Managed
-    // Process reads, and a Managed Process what the other account's files grant its group.
-    if let Some(other) = found.members.iter().find(|member| *member != client_name) {
+    // Process reads, and a Managed Process what the other account's files grant its group. The
+    // process account itself, listed as a member of its own group, is no one else.
+    if let Some(other) = found
+        .members
+        .iter()
+        .find(|member| *member != client_name && *member != account)
+    {
         return Err(format!(
             "{named} has the primary group {group}, and {other} is a member of it beside the \
              Client's account {client_name}: {other} would read what the Managed Processes read. \
@@ -834,9 +839,11 @@ fn refuse_process_account(
     Ok(())
 }
 
-/// What `id(1)` answers for `account`; `None` where it does not exist.
+/// What `id(1)` answers for `account`; `None` where it does not exist. With `holders`, who else
+/// holds its primary group too: the members and the accounts it is the primary group of, which
+/// only the process account's checks read.
 #[cfg(unix)]
-fn account_ids(account: &str) -> Result<Option<Ids>, String> {
+fn account_ids(account: &str, holders: bool) -> Result<Option<Ids>, String> {
     let failed = |e: String| format!("cannot resolve the account {account}: {e}");
     let uid = match id(account, "-u") {
         Ok(uid) => uid,
@@ -851,14 +858,21 @@ fn account_ids(account: &str) -> Result<Option<Ids>, String> {
         .split_whitespace()
         .filter_map(|g| g.parse().ok())
         .collect();
-    let members = group_members(gid).map_err(|e| failed(e.to_string()))?;
+    let (members, primary_of) = if holders {
+        (
+            group_members(gid).map_err(|e| failed(e.to_string()))?,
+            primary_group_of(gid),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Ok(Some(Ids {
         uid,
         gid,
         group,
         groups,
         members,
-        primary_of: primary_group_of(gid),
+        primary_of,
     }))
 }
 
@@ -1650,8 +1664,8 @@ mod tests {
 
     /// The process account's primary group is its own (ADR-0053 clause 6): a member beside the
     /// Client's account, or another account whose primary group it is, would read what every
-    /// Managed Process reads, and is refused with the way out. The account itself, under another
-    /// name for its uid, is no other account.
+    /// Managed Process reads, and is refused with the way out. The account itself — a member of
+    /// its own group (`usermod -aG`), or another name for its uid — is no other account.
     /// Verifies: ADR-0053
     #[test]
     fn a_process_account_whose_group_is_shared_with_another_account_is_refused() {
@@ -1686,6 +1700,17 @@ mod tests {
             err.contains("Nothing has been installed or written"),
             "{err}"
         );
+
+        let mut itself = agents_ids();
+        itself.members.push("opamp-fleet-agents".to_string());
+        check_process_account(
+            "opamp-fleet-agents",
+            Some(&itself),
+            "opamp-fleet",
+            &client_ids(),
+            None,
+        )
+        .expect("a member of its own group");
 
         let mut alias = agents_ids();
         alias.primary_of.push(("agents-alias".to_string(), 997));
