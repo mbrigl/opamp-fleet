@@ -1573,10 +1573,13 @@ impl Connection {
             dir: dir.to_path_buf(),
             shared,
         };
-        if let Err(e) = self.send(&request) {
-            self.routes().purges.remove(&id);
-            return Err(e);
-        }
+        // Forgotten however the wait ends: answered, failed, or given up on at the purge's
+        // deadline, after which no answer is waited for.
+        let _route = PurgeRoute {
+            connection: &self,
+            id,
+        };
+        self.send(&request)?;
         purged
             .await
             .map_err(|_| closed())?
@@ -1858,6 +1861,18 @@ impl Drop for Pending<'_> {
     fn drop(&mut self) {
         self.connection.routes().by_id.remove(&self.id);
         let _ = self.connection.send(&Request::Stop { id: self.id });
+    }
+}
+
+/// A purge asked and waited for: its route is forgotten once the wait ends, however it ends.
+struct PurgeRoute<'a> {
+    connection: &'a Connection,
+    id: u64,
+}
+
+impl Drop for PurgeRoute<'_> {
+    fn drop(&mut self) {
+        self.connection.routes().purges.remove(&self.id);
     }
 }
 
@@ -2345,6 +2360,25 @@ mod tests {
                 vec![vec![PathBuf::from("data")]]
             );
         }
+    }
+
+    /// A purge the service does not answer in time is forgotten with the wait: the connection
+    /// keeps no route for an answer nobody waits for (ADR-0053 clause 2).
+    /// Verifies: ADR-0053
+    #[tokio::test]
+    async fn a_purge_given_up_on_leaves_no_route_behind() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let supervisor = dir.path().join("supervisors").join("agent");
+        let data = supervisor.join("data");
+        std::fs::create_dir_all(&data).expect("mkdir");
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
+        let peer = peer::connect(peer::mute).await;
+        tokio::time::pause();
+        let purged = peer.channel.purge("agent", &supervisor).await;
+        assert!(purged.is_err(), "the mute service answered");
+        let connection = peer.channel.open_connection().await.expect("connected");
+        assert!(connection.routes().purges.is_empty());
     }
 
     /// What a program run to its end writes is kept up to its last [`CAPTURED`] bytes per stream,
