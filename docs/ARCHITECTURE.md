@@ -189,7 +189,9 @@ core module names an adapter or a technology, and when a module has no role.
   no Supervisor carries. What the Client changes where the process account
   writes, it reaches through `storage::handle`, one directory handle at a time from a root of its
   own — the state directory, the Supervisors' root, a Supervisor's directory — beneath which no
-  link is followed.
+  link is followed. On Windows that is `win32::files`, which sets a DACL on one handle at a time
+  and walks a tree itself, never into a link, with the ACE inheritance rules in `win32::acl`; the
+  install's hand-over and its take-over of the data root walk the same way.
   `supervisor::agent`, an Agent's decisions, names three more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, `HighWaterMarks`, which
   `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares

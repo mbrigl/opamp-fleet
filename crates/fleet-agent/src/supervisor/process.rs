@@ -2217,7 +2217,35 @@ fn share_staged(
             )
         })?;
     }
-    #[cfg(not(unix))]
+    // On Windows the account is granted read and execute on what is staged, through each entry's
+    // own handle: a program staged elsewhere and renamed into `program/` keeps the DACL it was
+    // made with, and inherits nothing from where it lands.
+    #[cfg(windows)]
+    if let Some(group) = group {
+        use crate::win32::files::{grant_tree, Access, Entry};
+        let shared = crate::storage::grant_aces(group.0, crate::storage::Shared::Read);
+        let Some([_, on_dir, on_file]) = shared else {
+            return Ok(());
+        };
+        Entry::open(staging, Access::Dacl, true)
+            .and_then(|top| {
+                let on_top = if top.dir { &on_dir } else { &on_file };
+                grant_tree(
+                    &top,
+                    group.0,
+                    [on_top.as_slice(), on_dir.as_slice(), on_file.as_slice()],
+                    None,
+                    true,
+                )
+            })
+            .map_err(|e| {
+                format!(
+                    "cannot share {} with the process account: {e}",
+                    staging.display()
+                )
+            })?;
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = (staging, group);
     Ok(())
 }
@@ -2252,6 +2280,28 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On Windows what is staged is granted to the process account — `LocalService` standing in —
+    /// itself: a program staged beside `program/` and renamed into it keeps that grant, where it
+    /// would inherit nothing on the way (ADR-0059 clause 6).
+    /// Verifies: ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_what_is_staged_is_granted_to_the_process_account_itself() {
+        use crate::win32::files::{Access, Entry};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staged = dir.path().join("agent.exe.new");
+        std::fs::write(&staged, b"MZ").expect("staged");
+        let group = crate::storage::ProcessAccountGroup(crate::win32::LOCAL_SERVICE);
+        share_staged(&staged, Some(group)).expect("shared");
+        let program = dir.path().join("program");
+        std::fs::create_dir(&program).expect("program/");
+        std::fs::rename(&staged, program.join("agent.exe")).expect("rename");
+        let dacl = Entry::open(&program.join("agent.exe"), Access::Dacl, false)
+            .and_then(|entry| entry.dacl())
+            .expect("dacl");
+        assert!(dacl.holds("(A;;0x1200a9;;;S-1-5-19)"), "{dacl:?}");
+    }
 
     /// A program held open for writing cannot be exec'd for that moment (`ETXTBSY`); the probe
     /// waits it out instead of reporting a program that cannot run — the race a staged package

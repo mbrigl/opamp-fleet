@@ -143,7 +143,7 @@ pub fn configure(
 /// `SeImpersonatePrivilege` first, which a `LocalService`-like account holds — is removed from the
 /// service's token when it starts, and from every program it starts, whose token is a copy
 /// (SERVICE_REQUIRED_PRIVILEGES_INFO).
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub const AGENTS_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
 
 /// Configure the second service as [`configure`] configures the Client — recovery actions, display
@@ -181,6 +181,45 @@ pub fn configure_agents(
     // SAFETY: the handle of `service`, which lives across the call.
     unsafe { crate::win32::set_required_privileges(service.raw_handle(), AGENTS_PRIVILEGES) }
         .map_err(|e| format!("cannot set the required privileges of {service_name}: {e}"))
+}
+
+/// Rewrites the program, arguments and start type of the service `service_name`, which the SCM
+/// holds already, keeping its logon account: a re-registration, which `sc create` refuses for a
+/// service that exists. Its display name is set again by [`configure`].
+///
+/// # Errors
+/// Returns an error if the service cannot be opened or reconfigured.
+#[cfg(windows)]
+pub fn reregister(
+    service_name: &str,
+    program: &std::path::Path,
+    args: &[std::ffi::OsString],
+) -> Result<(), String> {
+    use windows_service::service::{
+        ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceType,
+    };
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| format!("cannot open the service control manager: {e}"))?;
+    let service = manager
+        .open_service(service_name, ServiceAccess::CHANGE_CONFIG)
+        .map_err(|e| format!("cannot open the service {service_name}: {e}"))?;
+    service
+        .change_config(&ServiceInfo {
+            name: service_name.into(),
+            display_name: service_name.into(),
+            service_type: ServiceType::OWN_PROCESS,
+            start_type: ServiceStartType::AutoStart,
+            error_control: ServiceErrorControl::Normal,
+            executable_path: program.to_path_buf(),
+            launch_arguments: args.to_vec(),
+            dependencies: Vec::new(),
+            // Kept: `ChangeServiceConfigW` changes no account it is given none of.
+            account_name: None,
+            account_password: None,
+        })
+        .map_err(|e| format!("cannot re-register the service {service_name}: {e}"))
 }
 
 /// The registration of the service `service_name` as the SCM holds it: its registry key, and the
@@ -245,18 +284,4 @@ fn sc(args: &[&str], value: &str, what: &str) -> Result<(), String> {
         output.status,
         String::from_utf8_lossy(&output.stdout).trim()
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::AGENTS_PRIVILEGES;
-
-    /// The second service keeps `SeChangeNotifyPrivilege` alone, so no Managed Process holds
-    /// `SeImpersonatePrivilege` (ADR-0059 clause 2). The service smoke reads what a Managed
-    /// Process then holds.
-    /// Verifies: ADR-0059
-    #[test]
-    fn the_second_service_keeps_no_privilege_but_passing_through() {
-        assert_eq!(AGENTS_PRIVILEGES, ["SeChangeNotifyPrivilege"]);
-    }
 }

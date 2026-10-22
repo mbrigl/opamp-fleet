@@ -86,15 +86,19 @@ fn number<T: std::str::FromStr>(part: Option<&str>) -> Option<T> {
 /// The SID of the virtual account `NT SERVICE\<service>`: `S-1-5-80-` followed by the five
 /// little-endian 32-bit words of the SHA-1 of the service name, upper-cased, in UTF-16LE. It needs
 /// no service of that name to exist, so a registration names the account of a service it is about
-/// to create.
+/// to create. `None` for a name that is not ASCII: how the system upper-cases other letters is not
+/// known here, and a product's name is ASCII anyway.
 ///
 /// The derivation is not documented on Microsoft Learn; it reproduces the well-known SID of
 /// `NT SERVICE\TrustedInstaller`, which the tests hold it to, and on Windows they compare it with
 /// what `LookupAccountNameW` answers.
 #[must_use]
-pub fn virtual_account_sid(service: &str) -> Sid {
+pub fn virtual_account_sid(service: &str) -> Option<Sid> {
+    if !service.is_ascii() || service.is_empty() {
+        return None;
+    }
     let name: Vec<u8> = service
-        .to_uppercase()
+        .to_ascii_uppercase()
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect();
@@ -104,7 +108,7 @@ pub fn virtual_account_sid(service: &str) -> Sid {
         let word = u32::from_le_bytes(*word);
         sid.push_str(&format!("-{word}"));
     }
-    Sid(sid)
+    Some(Sid(sid))
 }
 
 /// The SID of an account named in one of the passwordless forms a service may run under
@@ -128,22 +132,33 @@ pub fn known_account_sid(account: &str) -> Option<Sid> {
         return Some(Sid((*sid).to_string()));
     }
     let prefix = account.get(..NT_SERVICE.len())?;
-    prefix
-        .eq_ignore_ascii_case(NT_SERVICE)
-        .then(|| virtual_account_sid(&account[NT_SERVICE.len()..]))
+    if !prefix.eq_ignore_ascii_case(NT_SERVICE) {
+        return None;
+    }
+    virtual_account_sid(account.get(NT_SERVICE.len()..)?)
 }
+
+/// What the Client may do with the second service's pipe: `FILE_GENERIC_READ` — read, its
+/// attributes and its DACL, which the Client reads the owner from — and `FILE_WRITE_DATA`, and no
+/// more. Not `FILE_GENERIC_WRITE`: its `FILE_APPEND_DATA` is `FILE_CREATE_PIPE_INSTANCE`, which
+/// would let the Client's account serve the pipe itself (Named Pipe Security and Access Rights).
+pub const PIPE_CLIENT_ACCESS: u32 = 0x0012_0089 | 0x0000_0002;
 
 /// The security descriptor of the second service's named pipe, in SDDL (ADR-0059 clause 4): owned
 /// by the account the second service runs as, which the Client checks it for, and a protected DACL
-/// that grants the Client's account read and write — nothing to create an instance — and the
-/// second service's own account all access, which it needs to create the pipe's next instance
+/// that grants the Client's account [`PIPE_CLIENT_ACCESS`] — nothing to create an instance — and
+/// the second service's own account all access, which it needs to create the pipe's next instance
 /// (`FILE_CREATE_PIPE_INSTANCE`, CreateNamedPipeW). Nobody else is granted anything: not
 /// `Everyone`, whom the default descriptor grants read, and not `LocalSystem` or the
 /// Administrators, who need no access to the pipe to administer the host.
 #[must_use]
 pub fn pipe_sddl(own: &Sid, client: &Sid) -> String {
-    format!("O:{own}D:P(A;;FA;;;{own})(A;;FRFW;;;{client})")
+    format!("O:{own}D:P(A;;FA;;;{own})(A;;0x{PIPE_CLIENT_ACCESS:x};;;{client})")
 }
+
+pub mod acl;
+#[cfg(windows)]
+pub mod files;
 
 #[cfg(windows)]
 pub use system::*;
@@ -623,6 +638,113 @@ mod system {
         Ok(privileges)
     }
 
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor: *mut c_void,
+            revision: u32,
+            info: u32,
+            text: *mut *mut u16,
+            len: *mut u32,
+        ) -> Bool;
+        fn SetKernelObjectSecurity(handle: Handle, info: u32, descriptor: *mut c_void) -> Bool;
+    }
+
+    /// The parts `info` names of the security descriptor of the file `handle` names, as SDDL.
+    ///
+    /// # Errors
+    /// Returns why the descriptor could not be read: the handle lacks `READ_CONTROL`.
+    pub fn security_text(handle: RawHandle, info: u32) -> io::Result<String> {
+        let mut descriptor: *mut c_void = std::ptr::null_mut();
+        // SAFETY: a handle the caller holds; the descriptor is freed below.
+        let error = unsafe {
+            GetSecurityInfo(
+                handle.cast(),
+                SE_FILE_OBJECT,
+                info,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        let descriptor = Local(descriptor);
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+        let mut text: *mut u16 = std::ptr::null_mut();
+        // SAFETY: the descriptor the call returned; `text` receives a LocalAlloc'd string.
+        check(unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor.0,
+                SDDL_REVISION_1,
+                info,
+                &mut text,
+                std::ptr::null_mut(),
+            )
+        })?;
+        let text = Local(text.cast());
+        let mut len = 0;
+        // SAFETY: a NUL-terminated string the call wrote.
+        while unsafe { *text.0.cast::<u16>().add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: `len` characters of it.
+        let wide = unsafe { std::slice::from_raw_parts(text.0.cast::<u16>(), len) };
+        Ok(String::from_utf16_lossy(wide))
+    }
+
+    /// Sets the parts `info` names of the security descriptor of the object `handle` names to
+    /// those of `sddl`, on that object alone: nothing is propagated to what a directory holds.
+    ///
+    /// # Errors
+    /// Returns why the descriptor is no descriptor or could not be set.
+    pub fn set_security(handle: RawHandle, info: u32, sddl: &str) -> io::Result<()> {
+        let descriptor = SecurityDescriptor::from_sddl(sddl)?;
+        // SAFETY: a handle the caller holds, and a descriptor alive across the call.
+        check(unsafe { SetKernelObjectSecurity(handle.cast(), info, (descriptor.0).0) })
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            attributes: *const SecurityAttributes,
+            disposition: u32,
+            flags: u32,
+            template: Handle,
+        ) -> Handle;
+    }
+
+    /// Opens the client end of the pipe `pipe` for [`super::PIPE_CLIENT_ACCESS`], overlapped, at
+    /// the identification level: the server may identify the Client and act as nobody
+    /// (`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, CreateFileW).
+    ///
+    /// # Errors
+    /// Returns why the pipe cannot be opened: no server listening among them.
+    pub fn open_pipe(pipe: &std::path::Path) -> io::Result<OwnedHandle> {
+        const OPEN_EXISTING: u32 = 3;
+        const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+        const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
+        const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+        let name = wide(pipe.as_os_str());
+        // SAFETY: a NUL-terminated name and no attributes; the handle is owned below.
+        owned(unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                super::PIPE_CLIENT_ACCESS,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                std::ptr::null_mut(),
+            )
+        })
+    }
+
     /// A security descriptor made from SDDL, freed when dropped.
     pub struct SecurityDescriptor(Local);
 
@@ -813,9 +935,14 @@ mod tests {
         const TRUSTED_INSTALLER: &str =
             "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
         assert_eq!(
-            virtual_account_sid("TrustedInstaller").as_str(),
+            virtual_account_sid("TrustedInstaller")
+                .expect("ascii")
+                .as_str(),
             TRUSTED_INSTALLER
         );
+        assert_eq!(virtual_account_sid("Dienst-ä"), None, "not ASCII");
+        assert_eq!(known_account_sid("NT SERVICE\\Dienst-ä"), None);
+        assert_eq!(known_account_sid("ä"), None, "no slice panics");
         assert_eq!(
             known_account_sid(r"nt service\trustedinstaller").map(|sid| sid.0),
             Some(TRUSTED_INSTALLER.to_string())
@@ -846,7 +973,12 @@ mod tests {
         let sddl = pipe_sddl(&own, &client);
         assert_eq!(
             sddl,
-            "O:S-1-5-80-1-2-3-4-5D:P(A;;FA;;;S-1-5-80-1-2-3-4-5)(A;;FRFW;;;S-1-5-80-6-7-8-9-10)"
+            "O:S-1-5-80-1-2-3-4-5D:P(A;;FA;;;S-1-5-80-1-2-3-4-5)(A;;0x12008b;;;S-1-5-80-6-7-8-9-10)"
+        );
+        assert_eq!(
+            PIPE_CLIENT_ACCESS & 0x4,
+            0,
+            "no FILE_CREATE_PIPE_INSTANCE for the Client"
         );
         assert!(sddl.contains("D:P"), "inherits nothing");
         for nobody in ["WD", "AN", "SY", "BA", "BU", "AU"] {
@@ -860,7 +992,7 @@ mod tests {
     #[test]
     fn the_derived_sid_is_the_one_the_system_looks_up() {
         assert_eq!(
-            lookup_account(r"NT SERVICE\TrustedInstaller").expect("lookup"),
+            Some(lookup_account(r"NT SERVICE\TrustedInstaller").expect("lookup")),
             virtual_account_sid("TrustedInstaller")
         );
         assert!(own_sid().expect("own sid").as_str().starts_with("S-1-5-"));

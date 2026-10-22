@@ -183,6 +183,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("transport", Adapter),
             ("update::installer", Adapter),
             ("win32", Adapter),
+            ("win32::acl", Adapter),
+            ("win32::files", Adapter),
         ],
     ),
     (

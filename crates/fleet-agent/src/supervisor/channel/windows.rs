@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 
 use tokio::io::AsyncWriteExt as _;
-use tokio::net::windows::named_pipe::{
-    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
-};
+use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer, ServerOptions};
 use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
@@ -168,13 +166,17 @@ pub(super) fn refuse(mut stream: NamedPipeServer, reason: String, refusals: &mut
     });
 }
 
-/// Connects to the second service's pipe `pipe`, at the identification level: the service may
-/// identify the Client and act as nobody (`tokio`'s default for a pipe client).
+/// Connects to the second service's pipe `pipe` for no more than the pipe grants the Client
+/// ([`win32::PIPE_CLIENT_ACCESS`]: `tokio`'s client asks `GENERIC_WRITE`, which it does not
+/// grant), at the identification level: the service may identify the Client and act as nobody.
 ///
 /// # Errors
 /// Returns why the pipe cannot be opened: no service listening among them.
 pub(super) fn connect(pipe: &Path) -> io::Result<NamedPipeClient> {
-    ClientOptions::new().open(pipe)
+    use std::os::windows::io::IntoRawHandle as _;
+    let handle = win32::open_pipe(pipe)?;
+    // SAFETY: a pipe handle opened for overlapped I/O, owned from here by the client.
+    unsafe { NamedPipeClient::from_raw_handle(handle.into_raw_handle()) }
 }
 
 /// The account that made the pipe `stream` is connected to: its owner, which only that account
@@ -511,24 +513,38 @@ mod tests {
         assert!(purge("otel", &tombstone, &[PathBuf::from("..")]).is_err());
     }
 
-    /// What this account wrote beneath a shared directory of the tombstone is removed, and nothing
-    /// outside it.
+    /// What this account owns beneath a shared directory of the tombstone is removed, with
+    /// everything beneath it, and nothing else. The second service runs under its own account,
+    /// which owns what it creates; a test run elevated creates what the Administrators own, so the
+    /// test makes this account the owner of what stands for the service's own.
     /// Verifies: ADR-0059
     #[test]
     fn the_second_service_removes_what_it_wrote_under_a_tombstone() {
+        use crate::win32::files::{Access, Entry};
+        let me = win32::own_sid().expect("own sid");
         let root = tempfile::tempdir().expect("tempdir");
         let tombstone = root.path().join(crate::reconfigure::tombstone_name("otel"));
         let data = tombstone.join("data");
         std::fs::create_dir_all(data.join("deep")).expect("data");
         std::fs::write(data.join("deep").join("state"), b"x").expect("state");
         std::fs::write(data.join("log"), b"x").expect("log");
+        std::fs::write(data.join("theirs"), b"x").expect("theirs");
+        for own in ["deep", "log"] {
+            Entry::open(&data.join(own), Access::Owner, false)
+                .and_then(|entry| entry.set_owner(me.as_str()))
+                .expect("owned by this account");
+        }
+        let theirs = Entry::open(&data.join("theirs"), Access::Dacl, false)
+            .and_then(|entry| entry.owner())
+            .expect("owner");
         let outside = root.path().join("outside");
         std::fs::write(&outside, b"x").expect("outside");
         purge("otel", &tombstone, &[PathBuf::from("data")]).expect("purge");
+        assert!(!data.join("deep").exists() && !data.join("log").exists());
         assert_eq!(
-            std::fs::read_dir(&data).expect("data stays").count(),
-            0,
-            "what this account owns is gone"
+            data.join("theirs").exists(),
+            theirs != me,
+            "what another account owns stays"
         );
         assert!(outside.exists());
     }
