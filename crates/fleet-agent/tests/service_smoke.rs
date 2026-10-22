@@ -808,6 +808,56 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
 
+/// `service start` on Windows, and on a failure what the SCM holds of both services and what the
+/// layout grants, so that a failed start says why.
+#[cfg(windows)]
+fn start_on_windows(config: &Path, root: &Path) {
+    if let Err(e) = client(&["service", "start"], config) {
+        let mut said = String::new();
+        let mut run = |program: &str, args: &[&std::ffi::OsStr]| {
+            let out = Command::new(program).args(args).output();
+            said.push_str(&format!("\n--- {program} {args:?} ---\n"));
+            match out {
+                Ok(out) => {
+                    said.push_str(&String::from_utf8_lossy(&out.stdout));
+                    said.push_str(&String::from_utf8_lossy(&out.stderr));
+                }
+                Err(e) => said.push_str(&e.to_string()),
+            }
+        };
+        for name in [
+            service_name().to_string(),
+            fleet_agent::service::manager::agents_service_name(),
+        ] {
+            for verb in ["qc", "qprivs", "sdshow", "queryex"] {
+                run(
+                    "sc",
+                    &[std::ffi::OsStr::new(verb), std::ffi::OsStr::new(&name)],
+                );
+            }
+        }
+        for path in [
+            root.to_path_buf(),
+            root.join("versions"),
+            root.join("current"),
+        ] {
+            run("icacls", &[path.as_os_str()]);
+        }
+        run(
+            "wevtutil",
+            &[
+                std::ffi::OsStr::new("qe"),
+                std::ffi::OsStr::new("System"),
+                std::ffi::OsStr::new("/c:10"),
+                std::ffi::OsStr::new("/rd:true"),
+                std::ffi::OsStr::new("/f:text"),
+                std::ffi::OsStr::new("/q:*[System[Provider[@Name='Service Control Manager']]]"),
+            ],
+        );
+        panic!("start the service: {e}{said}");
+    }
+}
+
 /// What the Managed Process below found out about itself on Windows, once it has written it.
 #[cfg(windows)]
 fn reported_on_windows(result: &Path) -> std::collections::BTreeMap<String, String> {
@@ -964,7 +1014,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
                 .expect("its required privileges");
         assert_eq!(privileges, ["SeChangeNotifyPrivilege"]);
     }
-    client(&["service", "start"], &config).expect("start the service");
+    start_on_windows(&config, &root);
     wait_for(
         "the Agent to appear in the fleet",
         Duration::from_secs(60),
@@ -1010,7 +1060,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         reinstalled.contains(&format!("processes: {process_account} (kept from")),
         "{reinstalled}"
     );
-    client(&["service", "start"], &config).expect("start the service again");
+    start_on_windows(&config, &root);
     let upgraded = reported_on_windows(&result);
     assert!(
         upgraded["user"].eq_ignore_ascii_case(&process_account),
@@ -1033,7 +1083,7 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         &config,
     )
     .expect("drop the process account");
-    client(&["service", "start"], &config).expect("start the service again");
+    start_on_windows(&config, &root);
     let dropped = reported_on_windows(&result);
     assert!(
         dropped["user"].eq_ignore_ascii_case(&client_account),

@@ -1745,6 +1745,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn with_agents() -> InstallSpec {
         InstallSpec {
             agents: Some(agents()),
@@ -2036,6 +2037,7 @@ mod tests {
     /// A re-registration keeps the process account the second service's unit names: what the
     /// Client writes there, it reads back.
     /// Verifies: ADR-0059
+    #[cfg(unix)]
     #[test]
     fn the_second_services_account_is_read_back_from_its_unit() {
         let unit = agents_unit(&with_agents(), &agents()).expect("unit");

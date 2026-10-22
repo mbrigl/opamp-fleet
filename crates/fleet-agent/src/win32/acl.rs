@@ -98,6 +98,23 @@ impl Dacl {
         }
     }
 
+    /// Who the DACL grants or denies what, whether explicit or inherited and however it is passed
+    /// on: each ACE's type, rights and trustee.
+    #[must_use]
+    pub fn grants(&self) -> std::collections::BTreeSet<String> {
+        self.aces
+            .iter()
+            .map(|ace| {
+                format!(
+                    "{};{};{}",
+                    field(ace, 0).unwrap_or_default(),
+                    field(ace, 2).unwrap_or_default(),
+                    field(ace, 5).unwrap_or_default()
+                )
+            })
+            .collect()
+    }
+
     /// The DACL with its explicit ACEs alone.
     #[must_use]
     pub fn explicit(&self) -> Dacl {
@@ -154,7 +171,10 @@ impl Dacl {
     /// propagates no further (`NP`); an ACE for objects (`OI`) to a file, and to a directory as
     /// inherit-only, passed on to its files; nothing else. An ACE of `CREATOR OWNER` or
     /// `CREATOR GROUP`, for which the system would grant the child's owner, is passed on to a
-    /// directory as inherit-only and to a file not at all: it grants no one access here.
+    /// directory as inherit-only and to a file not at all: it grants no one access here. A mask
+    /// of generic rights is passed on as it is, never mapped to the file rights the system would
+    /// split it into for an effective ACE: an ACE so passed on grants at most less than the
+    /// system's would.
     #[must_use]
     pub fn passed_on(&self, dir: bool) -> Vec<String> {
         self.aces

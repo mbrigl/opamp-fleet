@@ -564,7 +564,9 @@ pub(crate) fn create_shared_dir(
 /// `Read` is read and execute, inherited by everything in the directory. `Written` is modify on
 /// what is in the directory, inherited, and on the directory itself everything of modify but
 /// `DELETE`: as on Unix, where the process account writes in its data directory and cannot remove
-/// it, the Client's.
+/// it, the Client's. Writing its attributes lets the process account make an empty data directory
+/// a mount point; every path of the Client's refuses a link or a junction, so that stops the
+/// Managed Processes' own directory and nothing of the Client's.
 #[cfg(any(windows, test))]
 pub(crate) fn grant_aces(sid: &str, shared: Shared) -> Option<[Vec<String>; 3]> {
     use crate::win32::acl::{allow, DELETE, MODIFY, READ_EXECUTE};
@@ -607,14 +609,28 @@ fn grant(root: &Path, dir: &Path, group: ProcessAccountGroup, shared: Shared) ->
         return Ok(());
     };
     let process = crate::win32::Sid::parse(group.0).map_err(io::Error::other)?;
-    grant_tree(
+    let passed = grant_tree(
         &made,
         group.0,
         [on_top.as_slice(), on_dir.as_slice(), on_file.as_slice()],
         Some(&process),
         false,
-    )
-    .map(|_| ())
+    )?;
+    for passed in passed {
+        use crate::win32::files::Passed;
+        match passed {
+            Passed::Owned(_) => {}
+            Passed::HardLinked(path) => warn!(
+                file = %path.display(),
+                "the file has a second hard link and is not shared with the process account"
+            ),
+            Passed::Unreadable(path) => warn!(
+                entry = %path.display(),
+                "the entry cannot be opened and is not shared with the process account"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Directories reached through handles, never through a link: what the Client changes where the

@@ -469,11 +469,21 @@ impl RunAs {
         process: Option<&ProcessAccount>,
         skipped: &mut Vec<Skipped>,
     ) -> Result<(), String> {
-        use crate::win32::files::{grant_tree, Access, Entry};
+        use crate::win32::files::{grant_tree, Access, Entry, Passed};
         let sid = windows_sid(&self.account)?;
         let [on_dir, on_file] = handover_aces(sid.as_str(), process.is_some());
         let skip = process.map(ProcessAccount::sid);
+        // For as short as the hand-over takes: what a Managed Process protected from the
+        // Administrators is opened all the same, to be told apart.
+        let _privileges = crate::win32::BackupPrivileges::enable()
+            .map_err(|e| format!("cannot enable the backup and restore privileges: {e}"))?;
         let top = Entry::open(path, Access::Dacl, true).map_err(|e| e.to_string())?;
+        if top.link {
+            return Err(format!(
+                "{} is a link or a junction, and a root is handed over as no link",
+                path.display()
+            ));
+        }
         if skip.is_some_and(|skip| top.owner().ok().as_ref() == Some(skip)) {
             skipped.push(Skipped::ProcessAccounts(path.to_path_buf()));
             return Ok(());
@@ -487,7 +497,11 @@ impl RunAs {
             true,
         )
         .map_err(|e| e.to_string())?;
-        skipped.extend(passed.into_iter().map(Skipped::ProcessAccounts));
+        skipped.extend(passed.into_iter().map(|passed| match passed {
+            Passed::Owned(path) => Skipped::ProcessAccounts(path),
+            Passed::HardLinked(path) => Skipped::HardLinked(path),
+            Passed::Unreadable(path) => Skipped::Unreadable(path),
+        }));
         Ok(())
     }
 }
@@ -578,6 +592,8 @@ pub enum Skipped {
     /// One of the paths handed over, which the process account owns: left to it with everything
     /// beneath it (ADR-0059 clause 10).
     ProcessAccounts(PathBuf),
+    /// An entry that could not be opened to be handed over (Windows).
+    Unreadable(PathBuf),
 }
 
 impl Skipped {
@@ -592,6 +608,10 @@ impl Skipped {
             Skipped::ProcessAccounts(path) => format!(
                 "{} belongs to the process account and was not handed over to {account}, nor \
                  anything beneath it; if the Client is to own it, hand it over with chown",
+                path.display()
+            ),
+            Skipped::Unreadable(path) => format!(
+                "{} could not be opened and was not handed over to {account}",
                 path.display()
             ),
         }
@@ -646,6 +666,31 @@ impl ProcessAccount {
     #[must_use]
     pub fn client_sid(&self) -> &crate::win32::Sid {
         &self.client_sid
+    }
+
+    /// Grants the account read and execute on the layout's `versions` directory and what it
+    /// holds, and on nothing else of the layout: the second service runs
+    /// `current\supervisor.exe` from it, and a root the install took over or cut off grants it
+    /// nothing (ADR-0059 clause 2). A version the self-update stages there later inherits the
+    /// grant. On Unix the layout is world-readable, as a program's directory is.
+    ///
+    /// # Errors
+    /// Returns why the grant could not be made.
+    #[cfg(windows)]
+    pub fn share_layout(&self, versions: &Path) -> Result<(), String> {
+        use crate::win32::acl::{allow, READ_EXECUTE};
+        use crate::win32::files::{grant_tree, Access, Entry};
+        let failed = |e: std::io::Error| format!("cannot share {}: {e}", versions.display());
+        let _privileges = crate::win32::BackupPrivileges::enable().map_err(failed)?;
+        let top = Entry::open(versions, Access::Dacl, true).map_err(failed)?;
+        if !top.dir {
+            return Err(format!("{} is a link or no directory", versions.display()));
+        }
+        let sid = self.sid.as_str();
+        let on_dir = [allow(sid, READ_EXECUTE, "OICI")];
+        let on_file = [allow(sid, READ_EXECUTE, "")];
+        grant_tree(&top, sid, [&on_dir, &on_dir, &on_file], None, true).map_err(failed)?;
+        Ok(())
     }
 
     /// The account's primary group, which the directory of the second service's socket is given.
@@ -754,8 +799,8 @@ pub fn decide_process_account(
     #[cfg(windows)]
     {
         let named = |e: String| refuse_on_windows(&account, kept_from.as_deref(), &e);
-        // A first registration runs as LocalSystem; where the SCM keeps another account, the
-        // install does not ask it (ADR-0059 clause 10), so the Client's account is named.
+        // No account: `--run-as` named none, and the SCM holds none but LocalSystem — a first
+        // registration runs as LocalSystem — so a process account has nothing to be apart from.
         let Some(client) = client else {
             return Err(named(format!(
                 "the Client runs as LocalSystem unless --run-as names its account, and a process \
@@ -1504,6 +1549,13 @@ mod tests {
             .status()
             .expect("run mklink");
         assert!(linked.success(), "cannot make the junction");
+        let hard = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/H"])
+            .arg(data.join("hard"))
+            .arg(outside.join("secret"))
+            .status()
+            .expect("run mklink");
+        assert!(hard.success(), "cannot make the hard link");
         let owned = data.join("owned");
         std::fs::create_dir(&owned).expect("owned");
         std::fs::write(owned.join("state"), b"x").expect("state");
@@ -1511,12 +1563,25 @@ mod tests {
             .and_then(|entry| entry.set_owner(me.as_str()))
             .expect("owned by the stand-in");
         let dacl = |path: &Path| {
-            Entry::open(path, Access::Dacl, false)
+            Entry::open(path, Access::Read, false)
                 .and_then(|entry| entry.dacl())
                 .expect("dacl")
                 .text()
         };
-        let before = (dacl(&outside), dacl(&outside.join("secret")), dacl(&owned));
+        // What the process account's own grants, however the system writes it: whether a change of
+        // its parent's DACL leaves it marked inherited is the system's affair, not the hand-over's.
+        let grants = |path: &Path| {
+            Entry::open(path, Access::Read, false)
+                .and_then(|entry| entry.dacl())
+                .expect("dacl")
+                .grants()
+        };
+        let before = (
+            dacl(&outside),
+            dacl(&outside.join("secret")),
+            grants(&owned),
+        );
+        let before_owned = dacl(&owned);
 
         let client = RunAs::resolve(
             r"NT AUTHORITY\LocalService",
@@ -1531,14 +1596,43 @@ mod tests {
             client_sid: crate::win32::Sid::parse(crate::win32::LOCAL_SERVICE).expect("sid"),
             kept_from: None,
         };
-        let skipped = client
+        // A Managed Process holding its own directory open for deleting holds up no hand-over.
+        let _held = {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .access_mode(0x0001_0000 | 0x0080)
+                .share_mode(0x7)
+                .custom_flags(0x0200_0000)
+                .open(&owned)
+                .expect("held for deleting")
+        };
+        let mut skipped = client
             .hand_over(&[&root], Some(&process))
             .expect("hand-over");
-        assert_eq!(skipped, [Skipped::ProcessAccounts(owned.clone())]);
+        skipped.sort_by_key(|skipped| format!("{skipped:?}"));
         assert_eq!(
-            (dacl(&outside), dacl(&outside.join("secret")), dacl(&owned)),
+            skipped,
+            [
+                Skipped::HardLinked(data.join("hard")),
+                Skipped::ProcessAccounts(owned.clone())
+            ]
+        );
+        assert_eq!(
+            (
+                dacl(&outside),
+                dacl(&outside.join("secret")),
+                grants(&owned)
+            ),
             before,
-            "nothing through the junction, nothing of the process account's"
+            "nothing through the junction or the hard link, nothing of the process account's: \
+             {before_owned} became {}; data is {}",
+            dacl(&owned),
+            dacl(&data)
+        );
+        let link = data.join("link");
+        assert!(
+            client.hand_over(&[&link], None).is_err(),
+            "a root that is a link is refused"
         );
         assert!(
             dacl(&data).contains(";;;LS)"),
