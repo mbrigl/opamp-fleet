@@ -134,12 +134,15 @@ fn keep_private(dir: &Path) -> std::io::Result<()> {
 /// # Errors
 /// Where a process account is registered, refuses a `dir` that narrowing would take from the
 /// process account's group, or that would put the log where that group reads or writes: one
-/// named with `..`, the state directory itself, the Supervisors' root `supervisors_root`,
-/// a directory beneath it, or one it lies beneath (ADR-0053 clause 6).
+/// named with `..`, the state directory itself, the Supervisors' root `supervisors_root` or one
+/// it lies beneath, and the directory of one of `supervisors` or one beneath it (ADR-0053 clause
+/// 6). Another directory beneath the Supervisors' root is not refused: `<state_dir>/logs`, the
+/// default, lies there where the Supervisors' root is the state directory itself.
 pub fn is_private(
     dir: &Path,
     state_dir: &Path,
     supervisors_root: &Path,
+    supervisors: &[&str],
     process_account: bool,
 ) -> Result<bool, String> {
     if !process_account {
@@ -161,8 +164,19 @@ pub fn is_private(
     if dir == state_dir {
         return refused("is the state directory");
     }
-    if dir.starts_with(supervisors_root) || supervisors_root.starts_with(dir) {
-        return refused("is the Supervisors' root, lies beneath it or holds it");
+    if supervisors_root.starts_with(dir) {
+        return refused("is the Supervisors' root or holds it");
+    }
+    let supervisor = dir
+        .strip_prefix(supervisors_root)
+        .ok()
+        .and_then(|beneath| beneath.components().next())
+        .and_then(|first| first.as_os_str().to_str())
+        .filter(|first| supervisors.contains(first));
+    if let Some(supervisor) = supervisor {
+        return refused(&format!(
+            "is the directory of the Supervisor {supervisor} or lies beneath it"
+        ));
     }
     Ok(dir.starts_with(state_dir))
 }
@@ -270,10 +284,10 @@ mod tests {
     }
 
     /// Where a process account is registered, a log directory narrowing would take from its group
-    /// is refused: the state directory itself, the Supervisors' root, a directory beneath it or
-    /// above it, and a path that reaches any of them through `..`. A real subdirectory of the
-    /// state directory is narrowed, and so is one beside a Supervisors' root the operator moved
-    /// out of it (ADR-0053 clause 6).
+    /// is refused: the state directory itself, the Supervisors' root or a directory above it, a
+    /// Supervisor's directory or one beneath it, and a path that reaches any of them through `..`.
+    /// A real subdirectory of the state directory is narrowed, and so is one beside a Supervisors'
+    /// root the operator moved out of it (ADR-0053 clause 6).
     /// Verifies: ADR-0053
     #[test]
     fn a_log_directory_the_process_accounts_group_passes_through_is_refused() {
@@ -282,21 +296,25 @@ mod tests {
         for dir in [
             state.to_path_buf(),
             supervisors.clone(),
+            supervisors.join("agent"),
             supervisors.join("agent").join("logs"),
             state.join("logs").join("..").join("x"),
             state.join("..").join("x"),
         ] {
             assert!(
-                is_private(&dir, state, &supervisors, true).is_err(),
+                is_private(&dir, state, &supervisors, &["agent"], true).is_err(),
                 "{}",
                 dir.display()
             );
-            assert_eq!(is_private(&dir, state, &supervisors, false), Ok(false));
+            assert_eq!(
+                is_private(&dir, state, &supervisors, &["agent"], false),
+                Ok(false)
+            );
         }
         let moved = Path::new("/srv/supervisors");
-        assert!(is_private(Path::new("/srv"), state, moved, true).is_err());
+        assert!(is_private(Path::new("/srv"), state, moved, &["agent"], true).is_err());
         assert_eq!(
-            is_private(&state.join("logs"), state, moved, true),
+            is_private(&state.join("logs"), state, moved, &["agent"], true),
             Ok(true)
         );
         assert_eq!(
@@ -304,10 +322,26 @@ mod tests {
                 &state.join("logs").join("client"),
                 state,
                 &supervisors,
+                &["agent"],
                 true
             ),
             Ok(true)
         );
+    }
+
+    /// Where the Supervisors' root is the state directory itself, the default log directory
+    /// `<state_dir>/logs` is the Client's and narrowed, unless a Supervisor is named `logs`; a
+    /// Supervisor's directory there is refused as anywhere (ADR-0053 clause 6).
+    /// Verifies: ADR-0053
+    #[test]
+    fn the_default_log_directory_is_kept_where_the_supervisors_root_is_the_state_directory() {
+        let state = Path::new("/var/lib/opamp-fleet/state");
+        assert_eq!(
+            is_private(&default_dir(state), state, state, &["agent"], true),
+            Ok(true)
+        );
+        assert!(is_private(&default_dir(state), state, state, &["logs"], true).is_err());
+        assert!(is_private(&state.join("agent"), state, state, &["agent"], true).is_err());
     }
 
     /// A log directory is kept private only beneath the state directory and only where a process
@@ -321,15 +355,15 @@ mod tests {
         let state = Path::new("/var/lib/opamp-fleet/state");
         let supervisors = state.join("supervisors");
         assert_eq!(
-            is_private(&default_dir(state), state, &supervisors, true),
+            is_private(&default_dir(state), state, &supervisors, &["agent"], true),
             Ok(true)
         );
         assert_eq!(
-            is_private(&default_dir(state), state, &supervisors, false),
+            is_private(&default_dir(state), state, &supervisors, &["agent"], false),
             Ok(false)
         );
         assert_eq!(
-            is_private(Path::new("/var/log"), state, &supervisors, true),
+            is_private(Path::new("/var/log"), state, &supervisors, &["agent"], true),
             Ok(false)
         );
 

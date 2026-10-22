@@ -724,8 +724,10 @@ file has turned a diagnostic into an outage.
 
 Where a process account is registered, a `dir` the process account's group passes through or
 writes is refused the same way, and the Client runs without a log file: the state directory itself,
-the Supervisors' root or anything beneath or above it, and a path named with `..`. A directory
-beneath the state directory is kept the Client's alone, `0700`.
+the Supervisors' root or anything above it, a Supervisor's directory or anything beneath it, and a
+path named with `..`. A directory beneath the state directory is kept the Client's alone, `0700`.
+The default `<state_dir>/logs` stays usable where `supervisor_dir` is the state directory itself,
+as long as no Supervisor is named `logs`.
 
 This is a different thing from the Client's own telemetry (`ReportsOwnLogs`), which ships
 log records to a destination the **Server** offers. That needs a Server it can already reach — which
