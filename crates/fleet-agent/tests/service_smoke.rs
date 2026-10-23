@@ -1069,6 +1069,44 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     assert_eq!(upgraded["data"], "written", "{upgraded:?}");
     assert_eq!(upgraded["key"], "denied", "{upgraded:?}");
 
+    // Re-registered while both run, nothing stopped beforehand, as an MSI upgrade on a running host
+    // does: the install stops both and waits for them, and starts both again once it has
+    // succeeded — the program reconnects under the process account, and nothing is left recorded.
+    std::fs::remove_file(&result).expect("remove the result");
+    client(&["service", "install", "--root", &root_arg], &config)
+        .expect("re-install while both run");
+    for name in [service_name().to_string(), agents_service_name()] {
+        wait_for(
+            "the service to run again after the re-install",
+            Duration::from_secs(60),
+            || {
+                let queried = Command::new("sc").args(["query", &name]).output().ok()?;
+                String::from_utf8_lossy(&queried.stdout)
+                    .contains("RUNNING")
+                    .then_some(())
+            },
+        );
+    }
+    let resumed = reported_on_windows(&result);
+    assert!(
+        resumed["user"].eq_ignore_ascii_case(&process_account),
+        "{resumed:?}"
+    );
+    let recorded = Command::new("reg")
+        .args([
+            "query",
+            &format!(r"HKLM\SOFTWARE\{}\WithdrawalPending", service_name()),
+            "/v",
+            "Pending",
+        ])
+        .output()
+        .expect("run reg query");
+    assert!(
+        !recorded.status.success(),
+        "a resumed install leaves no record: {}",
+        String::from_utf8_lossy(&recorded.stdout)
+    );
+
     // Dropped while both run: the install stops both and waits for them, withdraws what the
     // process account was granted, and starts the Client again, which starts its program itself
     // again, under its own account. The record of the withdrawal is gone with it.
