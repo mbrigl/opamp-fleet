@@ -199,7 +199,7 @@ impl Tree {
     }
 
     /// Ends every process left in the tree.
-    pub(super) fn end(self) {
+    pub(super) fn end(&self) {
         let _ = self.0.terminate(ENDED);
     }
 }

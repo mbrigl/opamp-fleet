@@ -126,6 +126,27 @@ const OUTPUT_QUEUE: usize = 256;
 /// connection ends.
 pub(crate) const OUTPUT_DRAIN: Duration = Duration::from_secs(1);
 
+/// How long the end of a connection waits for what its programs' trees still hold to end, once
+/// ended: on Windows a job's processes end asynchronously after `TerminateJobObject`.
+const TREES_END: Duration = Duration::from_secs(5);
+
+/// Ends every process the trees hold and waits, up to [`TREES_END`], until none holds one — so that
+/// a stop that reports the second service stopped leaves nothing it started holding a handle
+/// (ADR-0059 clause 4). Unix holds no tree and waits for nothing.
+async fn end_trees(trees: Vec<Tree>) {
+    for tree in &trees {
+        tree.end();
+    }
+    let until = tokio::time::Instant::now() + TREES_END;
+    while trees.iter().any(Tree::holds_processes) {
+        if tokio::time::Instant::now() >= until {
+            warn!("a program's processes had not ended when the connection's end stopped waiting");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// How long a start waits for the second service to come back when it finds the connection gone:
 /// twice the delay after which the service manager restarts a service that failed, so a start
 /// outlasts one restart of the second service.
@@ -808,14 +829,14 @@ async fn serve_connection<F: Future<Output = ()>>(
         let _ = control.send(Control::Close);
     }
     while let Some(done) = running.join_next().await {
-        if let Ok(Supervised { relays, .. }) = done {
+        if let Ok(Supervised { relays, tree, .. }) = done {
             left_behind.extend(relays);
+            trees.push(tree);
         }
     }
-    // What the programs that ended before left running ends here.
-    for tree in trees {
-        tree.end();
-    }
+    // What the programs left running ends here, and is waited for: before a stop reports the
+    // service stopped, nothing it started holds a handle any more (ADR-0059 clause 4).
+    end_trees(trees).await;
     // A process that left its program's group — through `setsid` — outlives the stop, and its pipe
     // would hold a relay and a descriptor of the service's for as long as it keeps the pipe open.
     // Its output ends with the connection it was relayed to.
@@ -927,7 +948,7 @@ impl Tree {
 
     /// Ends what is left of the tree: nothing on Unix, which holds none.
     #[allow(clippy::unused_self)]
-    fn end(self) {}
+    fn end(&self) {}
 }
 
 /// Removes what the process account wrote under `dir`, the directory of the Supervisor named
