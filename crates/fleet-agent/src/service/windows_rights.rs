@@ -127,6 +127,7 @@ fn take_over(
         access: Access::Owner,
         skip: process,
         lenient: false,
+        takes_away: true,
     };
     walk(
         &top,
@@ -162,6 +163,7 @@ fn cut_off(
         access: Access::Dacl,
         skip: process,
         lenient: false,
+        takes_away: true,
     };
     walk(
         &top,

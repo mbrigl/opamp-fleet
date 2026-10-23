@@ -1756,6 +1756,22 @@ mod tests {
                 .is_empty(),
             "an account kept is not withdrawn"
         );
+
+        // A directory beneath, held open for deleting — as another service of the former account
+        // could hold one — is no directory to pass over: the withdrawal fails and names it.
+        let held = config.join("held");
+        std::fs::create_dir(&held).expect("held");
+        let _held = {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .access_mode(0x0001_0000 | 0x0080)
+                .share_mode(0x7)
+                .custom_flags(0x0200_0000)
+                .open(&held)
+                .expect("held for deleting")
+        };
+        let refused = withdraw(FORMER, None, &[&root]).expect_err("fails closed");
+        assert!(refused.contains("held"), "{refused}");
     }
 
     /// On Windows the hand-over grants the Client modify, and where a process account is
