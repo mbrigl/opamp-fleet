@@ -33,6 +33,9 @@ max_message_size_bytes = 67108864
 # endpoint and the intervals above; delete <state_dir>/connection-settings.pb to revert.
 # A package for the Client itself is streamed to <state_dir>/packages/ first, so this
 # directory needs room for one agent binary.
+# `service install` takes an absolute state_dir from this file only beneath its install roots and
+# refuses one elsewhere: the service's account may rewrite this file, and the install hands the
+# state directory over to it. `service install --state-dir <dir>` names one anywhere.
 state_dir = "client-state"
 
 # The Client's own log on disk, written **only while it runs as a service** — in the
@@ -55,6 +58,8 @@ state_dir = "client-state"
 #
 # Set this when the programs must not live where the state does: /var/lib is often mounted
 # noexec, and it is sized for state rather than for a few hundred megabytes of Collector.
+# Outside the install roots and the state directory, `service install` creates and hands over
+# nothing for it: create it yourself, writable by the service's account only.
 # supervisor_dir = "/opt/opamp-fleet/supervisors"
 
 # Operator-defined attributes describing this *host*, reported by every Agent this Client presents

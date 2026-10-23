@@ -120,24 +120,29 @@ pub enum Treatment {
     /// outside both that the install creates: cut off from inherited rights ([`restrict_args`]),
     /// nothing else changed.
     Cut,
-    /// A Supervisors' root outside the data root and the state directory that already exists: the
-    /// operator's, left as it is and named in a warning.
+    /// A Supervisors' root outside the data root and the state directory that already exists, or
+    /// that lies outside every root of the install: the operator's, left as it is and named in a
+    /// warning.
     Untouched,
 }
 
 /// Which directories a system-scope install restricts, and how: the data root — taken over when it
 /// is the platform default, cut when the operator named it — and the state directory and the
 /// Supervisors' root wherever one lies outside every directory already listed. A state directory
-/// outside the data root is always cut. A Supervisors' root outside both is cut when the install
-/// creates it (`exists` says it does not exist yet) and left untouched when it exists. A directory
-/// inside a listed one inherits its rights and is not listed. Decided before the install creates
-/// anything.
+/// outside the data root is always cut: the install has taken it beneath its roots or from the
+/// operator's `--state-dir`. A Supervisors' root outside both is cut when the install creates it
+/// (`exists` says it does not exist yet) and `ours` says it lies beneath the install's roots, and
+/// left untouched otherwise: `supervisor.toml` is the service account's to rewrite, and a directory
+/// it names elsewhere would have the install create one wherever that account chose and grant it
+/// Modify there. A directory inside a listed one inherits its rights and is not listed. Decided
+/// before the install creates anything.
 #[must_use]
 pub fn plan(
     data_root: &std::path::Path,
     data_root_named: bool,
     state_dir: &std::path::Path,
     supervisors_root: &std::path::Path,
+    ours: bool,
     exists: impl Fn(&std::path::Path) -> bool,
 ) -> Vec<(std::path::PathBuf, Treatment)> {
     let first = if data_root_named {
@@ -150,7 +155,7 @@ pub fn plan(
         if plan.iter().any(|(root, _)| dir.starts_with(root)) {
             continue;
         }
-        let treatment = if !may_exist && exists(dir) {
+        let treatment = if !may_exist && (!ours || exists(dir)) {
             Treatment::Untouched
         } else {
             Treatment::Cut
@@ -189,8 +194,9 @@ pub fn restrict(
             Treatment::Cut => vec![restrict_args(dir)],
             Treatment::Untouched => {
                 println!(
-                    "warning: {} exists already and is left as it is — restrict it to \
-                     LocalSystem, the Administrators and the service account yourself",
+                    "warning: {} exists already or lies outside the install's roots, and is left \
+                     as it is — create it and restrict it to LocalSystem, the Administrators and \
+                     the service account yourself",
                     dir.display()
                 );
                 continue;
@@ -321,6 +327,7 @@ mod tests {
                 false,
                 Path::new("/data/state"),
                 Path::new("/data/state/supervisors"),
+                true,
                 made(&[])
             )),
             [("/data".to_string(), TakeOver)]
@@ -331,6 +338,7 @@ mod tests {
                 true,
                 Path::new("/data/state"),
                 Path::new("/data/supervisors"),
+                true,
                 made(&[])
             )),
             [("/data".to_string(), Cut)],
@@ -342,6 +350,7 @@ mod tests {
                 false,
                 Path::new("/var/state"),
                 Path::new("/srv/supervisors"),
+                true,
                 made(&[])
             )),
             [
@@ -356,6 +365,7 @@ mod tests {
                 false,
                 Path::new("/var/state"),
                 Path::new("/srv/supervisors"),
+                true,
                 made(&["/var/state", "/srv/supervisors"])
             )),
             [
@@ -372,11 +382,39 @@ mod tests {
                 false,
                 Path::new("/var/state"),
                 Path::new("/var/state/supervisors"),
+                true,
                 made(&[])
             )),
             [
                 ("/data".to_string(), TakeOver),
                 ("/var/state".to_string(), Cut)
+            ]
+        );
+    }
+
+    /// `supervisor.toml` is the service account's to rewrite (ADR-0042 clause 2). A Supervisors'
+    /// root it places outside every root of the install is never created, cut or handed over by
+    /// the install — not even when it does not exist yet — or the account would choose where an
+    /// Administrator makes a directory and grants it Modify.
+    /// Verifies: ADR-0042
+    #[test]
+    fn a_supervisors_root_outside_the_installs_roots_is_left_untouched() {
+        let planned = plan(
+            Path::new("/data"),
+            false,
+            Path::new("/data/state"),
+            Path::new("/windows/system32/plugins"),
+            false,
+            |_: &Path| false,
+        );
+        assert_eq!(
+            planned,
+            [
+                (PathBuf::from("/data"), Treatment::TakeOver),
+                (
+                    PathBuf::from("/windows/system32/plugins"),
+                    Treatment::Untouched
+                )
             ]
         );
     }

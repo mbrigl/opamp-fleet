@@ -245,6 +245,65 @@ fn plain(path: PathBuf) -> PathBuf {
     path
 }
 
+/// Whether `dir` lies beneath one of `roots`, through real directories only: the test a directory
+/// taken from `supervisor.toml` passes before `service install` or `service config` acts on it.
+///
+/// The file belongs to the service's account (ADR-0042 clause 2), and the install runs as root or
+/// an Administrator, creates what it names, restricts it on Windows and hands it over to that
+/// account. A directory the file names is therefore that account's word, and it is taken only where
+/// the install's own roots already are (ADR-0042 clause 1): lexically beneath one of them, with no
+/// `.` or `..` after the root, and with every component below the root that exists a directory and
+/// not a symbolic link or junction — a link the account planted there would carry what the install
+/// does out of the root. The roots are the operator's, named by flag or by platform default, and
+/// are not inspected. The spelling is compared, not a resolved path: a directory named by another
+/// spelling of a root is refused, never followed.
+///
+/// # Errors
+/// Returns why `dir` is not beneath any of `roots`.
+pub fn beneath(dir: &Path, roots: &[&Path]) -> Result<(), String> {
+    let mut why = None;
+    for root in roots {
+        let Ok(rest) = dir.strip_prefix(root) else {
+            continue;
+        };
+        match through_directories(root, rest) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                why.get_or_insert(e);
+            }
+        }
+    }
+    Err(why.unwrap_or_else(|| {
+        let roots: Vec<String> = roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect();
+        format!("it is not beneath {}", roots.join(" or "))
+    }))
+}
+
+/// Walks `rest` down from `root`, refusing a `.`, a `..` and anything that exists and is not a
+/// directory reached without a link; what does not exist yet ends the walk.
+fn through_directories(root: &Path, rest: &Path) -> Result<(), String> {
+    let mut at = root.to_path_buf();
+    for component in rest.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(format!(
+                "it steps out of {} with `.` or `..`",
+                root.display()
+            ));
+        };
+        at.push(name);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => return Err(format!("{} is a link or not a directory", at.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("cannot inspect {}: {e}", at.display())),
+        }
+    }
+    Ok(())
+}
+
 /// Writes a version directory's manifest: the full version string and the content hash of the
 /// binary beside it, headed by a comment naming what wrote it.
 pub(crate) fn write_manifest(
