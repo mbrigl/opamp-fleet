@@ -196,6 +196,11 @@ pub(crate) fn passed_warning(passed: &crate::win32::files::Passed) -> String {
             "{} could not be opened and was left as it is",
             path.display()
         ),
+        Passed::Held(path) => format!(
+            "{} is held open for deleting, as the Managed Processes may hold what they write, and \
+             was left as it is, with everything beneath it",
+            path.display()
+        ),
     }
 }
 
@@ -272,8 +277,10 @@ pub fn plan(
     plan
 }
 
-/// Applies a [`plan`] at system scope: creates each directory it cuts or takes over, runs
-/// `icacls.exe`, and warns about each it leaves untouched. Returns the directories it created
+/// Applies a [`plan`] at system scope: creates each directory it cuts or takes over, cuts it off
+/// ([`cut`]) or takes it over ([`take_over`]) one handle at a time with the backup and restore
+/// privileges enabled, and warns about each it leaves untouched and about what a walk passed over.
+/// What the process account `process` owns is left as it is. Returns the directories it created
 /// outside the data root, for the handover to grant the service account.
 ///
 /// Every folder created under `%ProgramData%` inherits `BUILTIN\Users:(OI)(CI)(RX)`: any local
@@ -284,8 +291,8 @@ pub fn plan(
 /// already.
 ///
 /// # Errors
-/// Returns an error when a directory cannot be created, or `icacls.exe` cannot be run or refuses
-/// the change.
+/// Returns an error when a directory cannot be created, is a link, or an entry's owner or DACL
+/// cannot be changed.
 #[cfg(windows)]
 pub fn restrict(
     level: ServiceLevel,

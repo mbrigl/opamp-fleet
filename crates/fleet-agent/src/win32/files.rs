@@ -149,28 +149,14 @@ impl Entry {
     /// # Errors
     /// Returns why it could not be set, or what the object holds instead.
     pub fn set_dacl(&self, dacl: &Dacl) -> io::Result<()> {
-        // `AR` asks for automatic inheritance, so that what the system creates beneath the
-        // object holds what it passes on as inherited; whether a DACL set on a handle keeps it is
-        // not documented, and the comparison below does not depend on it.
-        let requested = |protected: bool| {
-            format!(
-                "{}AR{}",
-                if protected { "P" } else { "" },
-                if dacl.flags.contains("AI") { "AI" } else { "" }
-            )
-        };
         if !dacl.protected() {
             let first = Dacl {
-                flags: requested(true),
+                flags: format!("P{}", dacl.flags),
                 aces: dacl.aces.clone(),
             };
             self.set(&first.text(), DACL_SECURITY_INFORMATION)?;
         }
-        let wanted = Dacl {
-            flags: requested(dacl.protected()),
-            aces: dacl.aces.clone(),
-        };
-        self.set(&wanted.text(), DACL_SECURITY_INFORMATION)?;
+        self.set(&dacl.text(), DACL_SECURITY_INFORMATION)?;
         let held = self.dacl()?;
         if !super::same_dacl(&held.text(), &dacl.text())? {
             return Err(io::Error::other(format!(
@@ -256,6 +242,10 @@ pub enum Passed {
     HardLinked(PathBuf),
     /// It could not be opened to be changed, and the walk may go on without it.
     Unreadable(PathBuf),
+    /// A directory something holds open for deleting, which the walk cannot hold: where the
+    /// Managed Processes write, they may delete what is there, so whoever holds it is taken to be
+    /// the process account, and nothing beneath it was reached.
+    Held(PathBuf),
 }
 
 /// How a walk goes: what it opens each entry for, whose entries it leaves alone, and whether an
@@ -276,7 +266,9 @@ impl Walk<'_> {
         let opened = match Entry::open(path, self.access, true) {
             Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => {
                 match Entry::open(path, self.access, false) {
-                    Ok(entry) if entry.dir && !self.owned(&entry) => return Err(e),
+                    Ok(entry) if entry.dir && !self.owned(&entry) => {
+                        return Ok(Some(Err(Passed::Held(path.to_path_buf()))))
+                    }
                     unheld => unheld,
                 }
             }
@@ -345,6 +337,52 @@ pub fn walk(
         if visit(&entry, top)? && entry.dir {
             walk(&entry, how, visit, passed)?;
         }
+    }
+    Ok(())
+}
+
+/// Withdraws from `sid` whatever it is granted on `top` and everything beneath it — every ACE that
+/// allows it, explicit or inherited, while one that denies it stays — and gives what it owns to
+/// `owner`, as a change of owner withdraws an account's files on Unix: never through a link, and
+/// past a file with a second hard link, as every walk goes. What a parent passes on to `sid` is
+/// withdrawn from what it holds as well, so nothing created after a grant keeps a copy of it.
+///
+/// # Errors
+/// Returns the first entry whose owner or DACL could not be read or set.
+pub fn withdraw_tree(top: &Entry, sid: &Sid, owner: &str) -> io::Result<Vec<Passed>> {
+    let mut passed = Vec::new();
+    if top.hard_linked() {
+        passed.push(Passed::HardLinked(top.path.clone()));
+        return Ok(passed);
+    }
+    withdraw_one(top, sid, owner)?;
+    if top.dir {
+        let how = Walk {
+            access: Access::Owner,
+            skip: None,
+            lenient: false,
+        };
+        walk(
+            top,
+            how,
+            &mut |entry, _| {
+                withdraw_one(entry, sid, owner)?;
+                Ok(true)
+            },
+            &mut passed,
+        )?;
+    }
+    Ok(passed)
+}
+
+fn withdraw_one(entry: &Entry, sid: &Sid, owner: &str) -> io::Result<()> {
+    if entry.owner().ok().as_ref() == Some(sid) {
+        entry.set_owner(owner)?;
+    }
+    let dacl = entry.dacl()?;
+    let without = dacl.without(sid.as_str());
+    if without != dacl {
+        entry.set_dacl(&without)?;
     }
     Ok(())
 }

@@ -22,6 +22,10 @@
 //! Administrators and the account is *granted* Modify with inheritance instead — the platform's
 //! idiom for "these directories are yours to use", and what lets the service create tomorrow's
 //! files (a staged version, a rewritten `supervisor.toml`) in directories it did not create today.
+//! The grant is set through each entry's own handle, never through a link, as the Unix walk goes;
+//! and what a former account was granted — a process account dropped or replaced, a Client's
+//! account replaced — is withdrawn from it (`withdraw`), as a change of owner withdraws it on
+//! Unix.
 
 use std::path::{Path, PathBuf};
 
@@ -500,7 +504,7 @@ impl RunAs {
         skipped.extend(passed.into_iter().map(|passed| match passed {
             Passed::Owned(path) => Skipped::ProcessAccounts(path),
             Passed::HardLinked(path) => Skipped::HardLinked(path),
-            Passed::Unreadable(path) => Skipped::Unreadable(path),
+            Passed::Unreadable(path) | Passed::Held(path) => Skipped::Unreadable(path),
         }));
         Ok(())
     }
@@ -835,6 +839,63 @@ fn windows_sid(account: &str) -> Result<crate::win32::Sid, String> {
         None => crate::win32::lookup_account(account)
             .map_err(|e| format!("{account} cannot be found on this host or its domain ({e})")),
     }
+}
+
+/// Withdraws from the account `former` — a process account dropped or replaced, or a Client's
+/// account replaced — what it was granted in `roots` and what it owns there, on Windows (ADR-0059
+/// clauses 1, 6 and 10): every ACE that allows it, explicit or inherited, on every entry, and what
+/// it owns given to the Administrators, as Unix withdraws it by a change of owner. Nothing where
+/// `former` is the account `current` the registration names now, or `LocalSystem`, which keeps
+/// full control of every root anyway. A root, or a root within one handed already, is walked
+/// once, never through a link and never into one.
+///
+/// # Errors
+/// Returns an error naming the first entry whose owner or DACL could not be changed.
+#[cfg(windows)]
+pub fn withdraw(
+    former: &str,
+    current: Option<&str>,
+    roots: &[&Path],
+) -> Result<Vec<Skipped>, String> {
+    use crate::win32::files::{withdraw_tree, Access, Entry, Passed};
+    let sid = match windows_sid(former) {
+        Ok(sid) => sid,
+        Err(e) => {
+            println!("warning: nothing granted to {former} is withdrawn: {e}");
+            return Ok(Vec::new());
+        }
+    };
+    let kept = current.is_some_and(|current| windows_sid(current).ok().as_ref() == Some(&sid));
+    if kept || sid.as_str() == crate::win32::LOCAL_SYSTEM {
+        return Ok(Vec::new());
+    }
+    let failed = |root: &Path, e: std::io::Error| {
+        format!("cannot withdraw {} from {former}: {e}", root.display())
+    };
+    let _privileges = crate::win32::BackupPrivileges::enable()
+        .map_err(|e| format!("cannot enable the backup and restore privileges: {e}"))?;
+    let mut skipped = Vec::new();
+    let mut walked: Vec<&Path> = Vec::new();
+    for root in roots {
+        if walked.iter().any(|done| root.starts_with(done))
+            || std::fs::symlink_metadata(root).is_err()
+        {
+            continue;
+        }
+        let top = Entry::open(root, Access::Owner, true).map_err(|e| failed(root, e))?;
+        if top.link {
+            return Err(format!("{} is a link or a junction", root.display()));
+        }
+        let passed = withdraw_tree(&top, &sid, "BA").map_err(|e| failed(root, e))?;
+        skipped.extend(passed.into_iter().map(|passed| match passed {
+            Passed::Owned(path) | Passed::Unreadable(path) | Passed::Held(path) => {
+                Skipped::Unreadable(path)
+            }
+            Passed::HardLinked(path) => Skipped::HardLinked(path),
+        }));
+        walked.push(root);
+    }
+    Ok(skipped)
 }
 
 /// The refusal of the process account `account`, kept from `kept_from` or named, for `reason`.
@@ -1583,16 +1644,20 @@ mod tests {
             client_sid: crate::win32::Sid::parse(crate::win32::LOCAL_SERVICE).expect("sid"),
             kept_from: None,
         };
-        // A Managed Process holding its own directory open for deleting holds up no hand-over.
-        let _held = {
+        // A Managed Process holding a directory open for deleting — its own, or one of the
+        // Client's in its data directory, whose entries it may delete — holds up no hand-over.
+        let hold = |path: &Path| {
             use std::os::windows::fs::OpenOptionsExt as _;
             std::fs::OpenOptions::new()
                 .access_mode(0x0001_0000 | 0x0080)
                 .share_mode(0x7)
                 .custom_flags(0x0200_0000)
-                .open(&owned)
+                .open(path)
                 .expect("held for deleting")
         };
+        let theirs = data.join("theirs");
+        std::fs::create_dir(&theirs).expect("theirs");
+        let _held = (hold(&owned), hold(&theirs));
         let mut skipped = client
             .hand_over(&[&root], Some(&process))
             .expect("hand-over");
@@ -1601,7 +1666,8 @@ mod tests {
             skipped,
             [
                 Skipped::HardLinked(data.join("hard")),
-                Skipped::ProcessAccounts(owned.clone())
+                Skipped::ProcessAccounts(owned.clone()),
+                Skipped::Unreadable(theirs.clone())
             ]
         );
         assert_eq!(
@@ -1621,6 +1687,74 @@ mod tests {
         assert!(
             dacl(&data).contains(";;;LS)"),
             "the Client's own is granted"
+        );
+    }
+
+    /// On Windows what a former account was granted is withdrawn from it, and what it owns given
+    /// to the Administrators: no ACE allows it anything anywhere in the tree — not on what was
+    /// created after the grant, which holds a copy — and it owns nothing (ADR-0059 clauses 1 and
+    /// 6). `LocalService` stands in for the former process account; the test runs elevated, as an
+    /// install does.
+    /// Verifies: ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_former_accounts_grants_are_withdrawn() {
+        use crate::win32::acl::{allow, READ_EXECUTE};
+        use crate::win32::files::{grant_tree, Access, Entry};
+        const FORMER: &str = r"NT AUTHORITY\LocalService";
+        let local_service = crate::win32::LOCAL_SERVICE;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).expect("config");
+        std::fs::write(config.join("before"), b"x").expect("before");
+        {
+            let _privileges = crate::win32::BackupPrivileges::enable().expect("privileges");
+            let top = Entry::open(&root, Access::Dacl, true).expect("root");
+            let on_dir = [allow(local_service, READ_EXECUTE, "OICI")];
+            let on_file = [allow(local_service, READ_EXECUTE, "")];
+            grant_tree(
+                &top,
+                local_service,
+                [&on_dir, &on_dir, &on_file],
+                None,
+                true,
+            )
+            .expect("granted");
+            std::fs::write(config.join("after"), b"x").expect("after the grant");
+            Entry::open(&config.join("after"), Access::Owner, false)
+                .and_then(|entry| entry.set_owner(local_service))
+                .expect("owned by the former account");
+        }
+        let skipped = withdraw(FORMER, None, &[&root]).expect("withdrawn");
+        assert!(skipped.is_empty(), "{skipped:?}");
+        for path in [
+            root.clone(),
+            config.clone(),
+            config.join("before"),
+            config.join("after"),
+        ] {
+            let entry = Entry::open(&path, Access::Read, false).expect("entry");
+            let dacl = entry.dacl().expect("dacl");
+            assert_eq!(
+                dacl.without(local_service),
+                dacl,
+                "{}: {}",
+                path.display(),
+                dacl.text()
+            );
+            assert_ne!(
+                entry.owner().expect("owner").as_str(),
+                local_service,
+                "{}",
+                path.display()
+            );
+        }
+        assert!(
+            withdraw(FORMER, Some(FORMER), &[&root])
+                .expect("kept")
+                .is_empty(),
+            "an account kept is not withdrawn"
         );
     }
 
