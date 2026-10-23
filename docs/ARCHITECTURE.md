@@ -185,7 +185,8 @@ core module names an adapter or a technology, and when a module has no role.
   ([ADR-0054](adr/0054-no-privileged-install-step-follows-a-link-the-account-placed.md)).
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0010](adr/0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)); `config_file` reads it from disk, makes its
-  directories absolute, and finds the identity the state directory holds.
+  directories absolute, finds the identity the state directory holds, and redacts the text the
+  Client reports as its effective configuration.
 - **Client connection** — `tls` decides which CA and which identity are in force, and `transport`
   describes the upstream `Connection` from `supervisor.toml` and runs the Engine over it. The
   settings verification in `connection`, the Gateway's upstream pool and its downstream listener,

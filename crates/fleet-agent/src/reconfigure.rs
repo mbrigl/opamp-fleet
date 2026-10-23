@@ -14,7 +14,8 @@ use std::path::Path;
 use opamp::proto::{AgentRemoteConfig, AgentToServer};
 use tracing::{info, instrument, warn, Instrument as _};
 
-use crate::config::{redact_secrets, ClientConfig, SupervisorBlock};
+use crate::config::{ClientConfig, SupervisorBlock};
+use crate::config_file::redact_secrets;
 use crate::engine::Engine;
 use crate::shutdown::Shutdown;
 

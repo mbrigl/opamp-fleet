@@ -86,10 +86,11 @@ pub struct ClientConfig {
     /// signature is checked against. Set from the file at load; not itself a file key.
     #[serde(skip)]
     pub package_key: Option<Vec<u8>>,
-    /// The file's own text with secret values masked (see [`redact_secrets`]), kept from load so
-    /// the Client's own Agent can report it as its effective configuration — the file *is* what
-    /// this Client runs (a file that fails to load fails startup, so a running Client and its file
-    /// never disagree). `None` when no file exists and the defaults run.
+    /// The file's own text with secret values masked (see
+    /// [`redact_secrets`](crate::config_file::redact_secrets)), kept from load so the Client's own
+    /// Agent can report it as its effective configuration — the file *is* what this Client runs (a
+    /// file that fails to load fails startup, so a running Client and its file never disagree).
+    /// `None` when no file exists and the defaults run.
     #[serde(skip)]
     pub source: Option<String>,
     /// The path this configuration was loaded from — where an accepted Supervisor set is written
@@ -497,44 +498,7 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
 /// (ADR-0021 clause 3), but the file's text is reported as it stands, so its values stay masked.
 /// Paths and public keys are not on the list — a path locates a secret, it is not one, and the
 /// `verification_key` is the *public* half of the signing pair.
-const SECRET_KEYS: &[&str] = &["bearer_token", "password", "archive_key"];
-
-/// The file's text with every secret value replaced by `***`, for reporting it off the host —
-/// the Server persists effective configurations to disk, so a credential must never be in one.
-///
-/// Text-based on purpose: parsing and re-serialising would drop the operator's comments and
-/// ordering, which are half of what a configuration file says. A line assigning a secret key
-/// keeps its key with a masked value; any other non-comment line merely *mentioning* a secret
-/// key (an inline table, some spelling this scan does not know) is masked whole — over-redaction
-/// is the cheap failure here, a leaked credential the expensive one.
-pub fn redact_secrets(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        let assigned_key = SECRET_KEYS.iter().find(|key| {
-            trimmed
-                .split_once('=')
-                .is_some_and(|(lhs, _)| lhs.trim() == **key)
-        });
-        if trimmed.starts_with('#') || trimmed.is_empty() {
-            out.push_str(line);
-        } else if let Some(key) = assigned_key {
-            let indent = &line[..line.len() - trimmed.len()];
-            out.push_str(indent);
-            out.push_str(key);
-            out.push_str(" = \"***\"");
-        } else if SECRET_KEYS.iter().any(|key| line.contains(key)) {
-            out.push_str("# (line redacted: it mentions a credential key)");
-        } else {
-            out.push_str(line);
-        }
-        out.push('\n');
-    }
-    if !text.ends_with('\n') {
-        out.pop();
-    }
-    out
-}
+pub(crate) const SECRET_KEYS: &[&str] = &["bearer_token", "password", "archive_key"];
 
 /// The `[packages]` block (ADR-0026): how downloaded package artifacts are verified, and whether
 /// this Client takes its own (ADR-0018). Where they come from is not configurable: always this
@@ -2139,38 +2103,6 @@ mod tests {
         )
         .expect("parses; the duplicate is a semantic error");
         assert!(cfg.check_supervisor_names().is_err());
-    }
-
-    /// The file's text is reported off the host as the effective configuration, and the Server
-    /// persists what it receives — so a credential value must never survive the redaction, while
-    /// the operator's comments and layout must (they are half of what the file says).
-    #[test]
-    fn redaction_masks_credential_values_and_keeps_everything_else() {
-        let text = "# the fleet endpoint\nendpoint = \"wss://fleet:4320/v1/opamp\"\n\n\
-                    [auth]\n  bearer_token = \"s3cret\"\n\
-                    [packages]\narchive_key = \"p4ss\"\nverification_key = \"aabb\"\n";
-        let redacted = redact_secrets(text);
-        assert!(!redacted.contains("s3cret"), "{redacted}");
-        assert!(!redacted.contains("p4ss"), "{redacted}");
-        assert!(redacted.contains("  bearer_token = \"***\""), "{redacted}");
-        assert!(redacted.contains("archive_key = \"***\""), "{redacted}");
-        assert!(
-            redacted.contains("# the fleet endpoint"),
-            "comments stay: {redacted}"
-        );
-        assert!(
-            redacted.contains("endpoint = \"wss://fleet:4320/v1/opamp\""),
-            "{redacted}"
-        );
-        assert!(
-            redacted.contains("verification_key = \"aabb\""),
-            "the public half of the signing pair is no secret: {redacted}"
-        );
-
-        // A spelling the line scan cannot take apart — an inline table — is masked whole:
-        // over-redaction is the cheap failure, a leaked credential the expensive one.
-        let inline = redact_secrets("auth = { username = \"op\", password = \"hunter2\" }\n");
-        assert!(!inline.contains("hunter2"), "{inline}");
     }
 
     /// `load` is the single place the redaction happens, so everything downstream — the
