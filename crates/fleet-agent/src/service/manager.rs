@@ -16,8 +16,7 @@ use std::path::PathBuf;
 
 use service_manager::{
     RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceLevel as SmLevel, ServiceManager,
-    ServiceManagerKind, ServiceStartCtx, ServiceStatus, ServiceStatusCtx, ServiceStopCtx,
-    ServiceUninstallCtx,
+    ServiceManagerKind, ServiceStartCtx, ServiceStatus, ServiceStatusCtx, ServiceUninstallCtx,
 };
 
 use super::{ServiceControl, ServiceLevel, ServiceState};
@@ -1110,12 +1109,11 @@ pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        // `sc stop` refuses a service that is not running, which systemd's stop does not.
-        if NativeService::new(level).to_stop(&agents_label()) {
-            manager
-                .stop(ServiceStopCtx {
-                    label: agents_label(),
-                })
+        // `sc stop` refuses a service that is not running, which systemd's stop does not, and
+        // returns before the service has stopped.
+        let native = NativeService::new(level);
+        if native.to_stop(&agents_label())? {
+            (native.halt)(&native, agents_label())
                 .map_err(|e| format!("cannot stop the second service: {e}"))?;
         }
         manager
@@ -1125,6 +1123,51 @@ pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
             .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
     }
     Ok(true)
+}
+
+/// Which of the two services ran before [`halt_for_change`] stopped them.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Halted {
+    client: bool,
+    agents: bool,
+}
+
+/// Stops the Client, then the second service, and waits until each has stopped and its process
+/// has ended — the second service's programs with it (ADR-0059 clause 4) — so that nothing runs
+/// under an account whose rights an install is about to change or take away. Returns which ran.
+///
+/// # Errors
+/// Returns why one could not be stopped, or that one had not ended within the bound of a stop;
+/// the install then changes nothing.
+#[cfg(windows)]
+pub fn halt_for_change() -> Result<Halted, String> {
+    let client = super::windows_config::stop_and_wait(&label().to_qualified_name(), STOPPING)?;
+    let agents =
+        super::windows_config::stop_and_wait(&agents_label().to_qualified_name(), STOPPING)?;
+    Ok(Halted { client, agents })
+}
+
+/// Starts again what [`halt_for_change`] stopped, once the install has succeeded: where the Client
+/// ran, both services as `service start` starts them — the second service where one is registered
+/// now — and where the second service alone ran and is registered still, that one. What did not
+/// run stays stopped.
+///
+/// # Errors
+/// Returns why a service could not be started.
+#[cfg(windows)]
+pub fn resume(level: ServiceLevel, halted: Halted) -> Result<(), String> {
+    if halted.client {
+        return NativeService::new(level).start();
+    }
+    if halted.agents && agents_registered(level) {
+        manager(level)?
+            .start(ServiceStartCtx {
+                label: agents_label(),
+            })
+            .map_err(|e| format!("cannot start the second service: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Stops and deregisters a launchd job, and waits until launchd holds it no more (ADR-0059
@@ -1146,7 +1189,7 @@ fn remove_launchd_job(
     loaded: &mut dyn FnMut() -> Result<bool, String>,
     within: std::time::Duration,
 ) -> Result<(), String> {
-    if let Err(e) = manager.stop(ServiceStopCtx {
+    if let Err(e) = manager.stop(service_manager::ServiceStopCtx {
         label: label.clone(),
     }) {
         if loaded()? {
@@ -1245,8 +1288,14 @@ pub struct NativeService {
     /// refuses a service that does not run (1062) and one still starting (1061), and whose
     /// stopped and pending states `service-manager` reports alike. `None` where a stop of a
     /// stopped service stops nothing — systemd and launchd.
-    activity: Option<fn(&ServiceLabel) -> Activity>,
+    activity: Option<Asked>,
+    /// How a service that is to be stopped is stopped: by the manager, and under the SCM, whose
+    /// stop returns before the service has, by a stop that waits until its process has ended.
+    halt: fn(&NativeService, ServiceLabel) -> Result<(), String>,
 }
+
+/// How a stop asks what a service is doing.
+type Asked = fn(&ServiceLabel) -> Result<Activity, String>;
 
 /// What a service is doing, as a stop needs to know it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1260,6 +1309,20 @@ pub enum Activity {
 /// How long a stop waits for a service that is still starting before it stops it anyway.
 const STARTING: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a stop under the SCM waits for a service, and its process, to end: longer than the
+/// second service takes to stop its programs, which [`AGENTS_STOP_TIMEOUT_SECS`] bounds on
+/// systemd.
+#[cfg(windows)]
+const STOPPING: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Stops `label` through the manager.
+#[cfg(any(not(windows), test))]
+fn halt_by_the_manager(service: &NativeService, label: ServiceLabel) -> Result<(), String> {
+    (service.manager)(service.level)?
+        .stop(service_manager::ServiceStopCtx { label })
+        .map_err(|e| e.to_string())
+}
+
 impl NativeService {
     /// A handle to the service at the given level.
     #[must_use]
@@ -1272,22 +1335,32 @@ impl NativeService {
             activity: Some(|label| super::windows_config::activity(&label.to_qualified_name())),
             #[cfg(not(windows))]
             activity: None,
+            #[cfg(windows)]
+            halt: |_, label| {
+                super::windows_config::stop_and_wait(&label.to_qualified_name(), STOPPING)
+                    .map(|_| ())
+            },
+            #[cfg(not(windows))]
+            halt: halt_by_the_manager,
         }
     }
 
     /// Whether `label` is to be stopped: not where it does not run or is stopping already, and
     /// where it is still starting, once it has started — or once [`STARTING`] has passed.
-    fn to_stop(&self, label: &ServiceLabel) -> bool {
+    ///
+    /// # Errors
+    /// Returns that the manager cannot say what it is doing.
+    fn to_stop(&self, label: &ServiceLabel) -> Result<bool, String> {
         let Some(activity) = self.activity else {
-            return true;
+            return Ok(true);
         };
         let until = std::time::Instant::now() + STARTING;
-        let mut now = activity(label);
+        let mut now = activity(label)?;
         while now == Activity::Starting && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(250));
-            now = activity(label);
+            now = activity(label)?;
         }
-        !matches!(now, Activity::Stopped | Activity::Stopping)
+        Ok(!matches!(now, Activity::Stopped | Activity::Stopping))
     }
 }
 
@@ -1344,12 +1417,12 @@ impl ServiceControl for NativeService {
             } else {
                 "the service"
             };
-            if !self.to_stop(&label) {
-                continue;
+            let stopped = match self.to_stop(&label) {
+                Ok(false) => continue,
+                Ok(true) => (self.halt)(self, label),
+                Err(e) => Err(e),
             }
-            let stopped = (self.manager)(self.level)?
-                .stop(ServiceStopCtx { label })
-                .map_err(|e| format!("cannot stop {which}: {e}"));
+            .map_err(|e| format!("cannot stop {which}: {e}"));
             if result.is_ok() {
                 result = stopped;
             }
@@ -2131,7 +2204,7 @@ mod tests {
             Recording::note("start", &ctx.label);
             Ok(())
         }
-        fn stop(&self, ctx: ServiceStopCtx) -> std::io::Result<()> {
+        fn stop(&self, ctx: service_manager::ServiceStopCtx) -> std::io::Result<()> {
             Recording::note("stop", &ctx.label);
             if ctx.label == label() {
                 return Err(std::io::Error::other("refused"));
@@ -2159,6 +2232,7 @@ mod tests {
             manager: |_| Ok(Box::new(Recording)),
             agents_registered,
             activity: None,
+            halt: halt_by_the_manager,
         }
     }
 
@@ -2170,28 +2244,30 @@ mod tests {
     fn a_stop_passes_over_a_service_that_does_not_run() {
         let client = label().to_string();
         let agents = agents_label().to_string();
-        let asking = |activity: fn(&ServiceLabel) -> Activity| NativeService {
+        let asking = |activity: Asked| NativeService {
             activity: Some(activity),
             ..recording(ServiceLevel::System, |_| true)
         };
         let _ = asking(|label| {
-            if *label == agents_label() {
+            Ok(if *label == agents_label() {
                 Activity::Stopped
             } else {
                 Activity::Running
-            }
+            })
         })
         .stop();
         assert_eq!(Recording::asked(), vec![format!("stop {client}")]);
-        let _ = asking(|_| Activity::Stopping).stop();
+        let _ = asking(|_| Ok(Activity::Stopping)).stop();
         assert_eq!(Recording::asked(), Vec::<String>::new());
         static STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let _ = asking(|_| {
-            if STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
-                Activity::Starting
-            } else {
-                Activity::Running
-            }
+            Ok(
+                if STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                    Activity::Starting
+                } else {
+                    Activity::Running
+                },
+            )
         })
         .stop();
         assert_eq!(

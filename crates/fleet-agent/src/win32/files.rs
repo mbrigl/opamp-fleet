@@ -191,8 +191,16 @@ impl Entry {
 /// while the next is opened, none a link, and each that is missing created where `create`. Returns
 /// the directories on the way, held, and `dir`.
 ///
+/// Holding shares no deleting, so an open fails with a sharing violation where another handle to a
+/// component already holds it for deleting. At runtime that is the Client's grant to the process
+/// account (`storage::grant`): a Managed Process that holds a directory on the path — one it may
+/// delete through what the Client's directory passes on to it — fails the grant of the next
+/// Supervisor's directory beneath it. Kept so: what is held for deleting may be renamed away while
+/// it is walked, and the process account only stops its own programs' share being granted.
+///
 /// # Errors
-/// Returns why `dir` cannot be reached: a link or a file on the way, or a component missing.
+/// Returns why `dir` cannot be reached: a link or a file on the way, a component missing, or one
+/// held open for deleting by another handle.
 pub fn open_beneath(
     root: &Path,
     dir: &Path,
@@ -453,4 +461,28 @@ pub fn grant_tree(
         )?;
     }
     Ok(passed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory held is held: while the hold is open it cannot be renamed — the open for the
+    /// rename asks to delete, which the hold shares with nobody (`ERROR_SHARING_VIOLATION`) — and
+    /// once it is closed it can (ADR-0059 clause 6).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_held_directory_cannot_be_renamed() {
+        /// ERROR_SHARING_VIOLATION.
+        const SHARING_VIOLATION: i32 = 32;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let held = dir.path().join("held");
+        let moved = dir.path().join("moved");
+        std::fs::create_dir(&held).expect("held");
+        let hold = Entry::open(&held, Access::Read, true).expect("hold");
+        let refused = std::fs::rename(&held, &moved).expect_err("held");
+        assert_eq!(refused.raw_os_error(), Some(SHARING_VIOLATION), "{refused}");
+        drop(hold);
+        std::fs::rename(&held, &moved).expect("renamed once let go");
+    }
 }

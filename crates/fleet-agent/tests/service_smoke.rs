@@ -1069,8 +1069,9 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     assert_eq!(upgraded["data"], "written", "{upgraded:?}");
     assert_eq!(upgraded["key"], "denied", "{upgraded:?}");
 
-    // Dropped: the Client starts its program itself again, under its own account.
-    service_on_windows("stop", &config, &root);
+    // Dropped while both run: the install stops both and waits for them, withdraws what the
+    // process account was granted, and starts the Client again, which starts its program itself
+    // again, under its own account. The record of the withdrawal is gone with it.
     std::fs::remove_file(&result).expect("remove the result");
     client(
         &[
@@ -1083,7 +1084,10 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         &config,
     )
     .expect("drop the process account");
-    service_on_windows("start", &config, &root);
+    assert!(
+        !root.join("withdrawal-pending").exists(),
+        "a completed withdrawal leaves no record"
+    );
     let dropped = reported_on_windows(&result);
     assert!(
         dropped["user"].eq_ignore_ascii_case(&client_account),
