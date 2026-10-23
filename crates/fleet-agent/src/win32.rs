@@ -969,7 +969,21 @@ mod system {
             len: u32,
         ) -> i32;
         fn RegDeleteValueW(key: Hkey, name: *const u16) -> i32;
-        fn RegDeleteKeyW(key: Hkey, subkey: *const u16) -> i32;
+        fn RegDeleteKeyExW(key: Hkey, subkey: *const u16, view: u32, reserved: u32) -> i32;
+        fn RegQueryInfoKeyW(
+            key: Hkey,
+            class: *mut u16,
+            class_len: *mut u32,
+            reserved: *mut u32,
+            subkeys: *mut u32,
+            max_subkey_len: *mut u32,
+            max_class_len: *mut u32,
+            values: *mut u32,
+            max_value_name_len: *mut u32,
+            max_value_len: *mut u32,
+            descriptor_len: *mut u32,
+            written: *mut u64,
+        ) -> i32;
         fn RegCloseKey(key: Hkey) -> i32;
         fn RegGetKeySecurity(key: Hkey, info: u32, descriptor: *mut c_void, len: *mut u32) -> i32;
     }
@@ -1126,6 +1140,34 @@ mod system {
             }
         }
 
+        /// Whether the key holds neither a key nor a value (RegQueryInfoKeyW); the key opened for
+        /// `KEY_QUERY_VALUE`.
+        ///
+        /// # Errors
+        /// Returns why it cannot be asked.
+        pub fn is_empty(&self) -> io::Result<bool> {
+            let (mut subkeys, mut values) = (0u32, 0u32);
+            let none: *mut u32 = std::ptr::null_mut();
+            // SAFETY: two counts to write, every other output left out.
+            status(unsafe {
+                RegQueryInfoKeyW(
+                    self.0,
+                    none.cast(),
+                    none,
+                    none,
+                    &mut subkeys,
+                    none,
+                    none,
+                    &mut values,
+                    none,
+                    none,
+                    none,
+                    none.cast(),
+                )
+            })?;
+            Ok(subkeys == 0 && values == 0)
+        }
+
         /// The parts `info` names of the key's security descriptor, as SDDL (RegGetKeySecurity).
         ///
         /// # Errors
@@ -1148,14 +1190,21 @@ mod system {
     }
 
     /// Deletes the key `HKEY_LOCAL_MACHINE\<subkey>`, which holds no key of its own
-    /// (RegDeleteKeyW); none there is no error.
+    /// in the 64-bit view (RegDeleteKeyExW, `KEY_WOW64_64KEY`); none there is no error.
     ///
     /// # Errors
     /// Returns why it cannot be deleted.
     pub fn delete_key(subkey: &str) -> io::Result<()> {
         let name = wide(OsStr::new(subkey));
         // SAFETY: a NUL-terminated name.
-        match unsafe { RegDeleteKeyW(HKEY_LOCAL_MACHINE as Hkey, name.as_ptr()) } {
+        match unsafe {
+            RegDeleteKeyExW(
+                HKEY_LOCAL_MACHINE as Hkey,
+                name.as_ptr(),
+                KEY_WOW64_64KEY,
+                0,
+            )
+        } {
             0 | NOT_FOUND => Ok(()),
             code => Err(io::Error::from_raw_os_error(code)),
         }
