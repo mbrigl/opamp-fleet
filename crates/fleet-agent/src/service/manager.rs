@@ -1179,6 +1179,64 @@ pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, String> {
     )
 }
 
+/// Which of the two services run now — running, starting, or stopping, which a stop already under
+/// way found running — as the SCM reports it, before anything stops them: what a stop for a change
+/// will have to start again.
+///
+/// # Errors
+/// Returns why the SCM cannot be asked.
+#[cfg(windows)]
+pub fn running() -> Result<Halted, String> {
+    let runs = |label: ServiceLabel| {
+        super::windows_config::activity(&label.to_qualified_name())
+            .map(|activity| activity != Activity::Stopped)
+    };
+    Ok(Halted {
+        client: runs(label())?,
+        agents: runs(agents_label())?,
+    })
+}
+
+/// Stops the Client and the second service for their deregistration, and waits for each as
+/// [`halt_for_change`] does — but starts nothing again where one cannot be stopped: they are going.
+///
+/// # Errors
+/// Returns why each that could not be stopped was not, after trying both.
+#[cfg(windows)]
+pub fn halt_for_removal() -> Result<(), String> {
+    let failed: Vec<String> = [label(), agents_label()]
+        .into_iter()
+        .filter_map(|label| {
+            super::windows_config::stop_and_wait(&label.to_qualified_name(), STOPPING).err()
+        })
+        .collect();
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
+}
+
+/// How the two services stand now, for a message: each running or stopped, as far as the SCM can
+/// say.
+#[cfg(windows)]
+#[must_use]
+pub fn describe_activity() -> String {
+    let say = |label: ServiceLabel, which: &str| match super::windows_config::activity(
+        &label.to_qualified_name(),
+    ) {
+        Ok(Activity::Stopped) => format!("{which} is stopped"),
+        Ok(Activity::Stopping) => format!("{which} is stopping"),
+        Ok(Activity::Starting | Activity::Running) => format!("{which} runs"),
+        Err(e) => format!("what {which} does is not known ({e})"),
+    };
+    format!(
+        "{}, and {}",
+        say(label(), "the Client"),
+        say(agents_label(), "the second service")
+    )
+}
+
 /// What [`resume`] starts, in order: where the Client ran, what `start` starts — the second
 /// service first where one is registered now and nothing pulls it in — and where the second
 /// service alone ran and is registered still, that one. What did not run stays stopped.
@@ -1205,6 +1263,11 @@ pub fn resume(level: ServiceLevel, halted: Halted) -> Result<(), String> {
         } else {
             "the service"
         };
+        // One that runs already — started by hand meanwhile — is not started twice, which the SCM
+        // would refuse.
+        if super::windows_config::activity(&label.to_qualified_name())? != Activity::Stopped {
+            continue;
+        }
         manager(level)?
             .start(ServiceStartCtx { label })
             .map_err(|e| format!("cannot start {which}: {e}"))?;
@@ -2400,6 +2463,7 @@ mod tests {
             })
         );
     }
+
     /// `start` starts the Client alone where its unit wants the second service, and the second
     /// service first where nothing does — launchd — and `stop` stops the Client and then the
     /// second service where one is registered — the second even when the Client's stop failed,

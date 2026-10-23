@@ -295,12 +295,7 @@ pub fn stop_and_wait(service_name: &str, within: std::time::Duration) -> Result<
     /// ERROR_SERVICE_NOT_ACTIVE.
     const NOT_ACTIVE: i32 = 1062;
     let until = std::time::Instant::now() + within;
-    let late = || {
-        format!(
-            "{service_name} has not stopped after {}s, and nothing was changed",
-            within.as_secs()
-        )
-    };
+    let late = || format!("{service_name} has not stopped after {}s", within.as_secs());
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|e| format!("cannot open the service control manager: {e}"))?;
     let service = match manager.open_service(
@@ -327,17 +322,32 @@ pub fn stop_and_wait(service_name: &str, within: std::time::Duration) -> Result<
     // process, and the service not stopped — since a process that ended before it was opened may
     // have left its id to another. Once the service has stopped, the SCM names none.
     let mut process = None;
+    let mut confirmed = false;
     for _ in 0..3 {
         let Some(pid) = status.process_id.filter(|pid| *pid != 0) else {
+            // Stopped meanwhile, or named no process yet: nothing to wait for.
+            confirmed = true;
             break;
         };
         let opened = crate::win32::process_to_wait_for(pid)
             .map_err(|e| format!("cannot open the process of {service_name}: {e}"))?;
         status = query()?;
-        if status.current_state != ServiceState::Stopped && status.process_id == Some(pid) {
-            process = opened;
+        if status.current_state == ServiceState::Stopped {
+            confirmed = true;
             break;
         }
+        if status.process_id == Some(pid) {
+            process = opened;
+            confirmed = true;
+            break;
+        }
+    }
+    // A service whose process changed at every look is restarting faster than it can be stopped
+    // for certain: refused, so that a stop for a change starts again what it stopped.
+    if !confirmed {
+        return Err(format!(
+            "{service_name} changed its process at every look, and is not stopped"
+        ));
     }
     loop {
         match status.current_state {

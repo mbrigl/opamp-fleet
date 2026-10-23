@@ -1212,6 +1212,72 @@ mod system {
 
     #[link(name = "kernel32")]
     extern "system" {
+        fn CreateMutexW(
+            attributes: *const SecurityAttributes,
+            initial_owner: Bool,
+            name: *const u16,
+        ) -> Handle;
+        fn ReleaseMutex(mutex: Handle) -> Bool;
+    }
+
+    /// A named mutex this thread owns, released and closed when dropped.
+    pub struct Held(OwnedHandle);
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            // SAFETY: a mutex this thread owns, released once.
+            unsafe {
+                ReleaseMutex(self.0.as_raw_handle().cast());
+            }
+        }
+    }
+
+    /// Takes the named mutex `name` — created carrying the security descriptor `sddl` where it does
+    /// not exist (CreateMutexW), and refused where it exists owned by anyone but `LocalSystem` or the
+    /// Administrators — waiting up to `within` while another holds it; `None` once that has passed.
+    /// A mutex its last holder left without releasing it (`WAIT_ABANDONED`) is taken.
+    ///
+    /// # Errors
+    /// Returns why it cannot be created, opened or waited for, or whom it is owned by.
+    pub fn hold_mutex(
+        name: &str,
+        sddl: &str,
+        within: std::time::Duration,
+    ) -> io::Result<Option<Held>> {
+        /// ERROR_ALREADY_EXISTS.
+        const EXISTS: i32 = 183;
+        const WAIT_OBJECT_0: u32 = 0;
+        const WAIT_ABANDONED: u32 = 0x80;
+        const WAIT_TIMEOUT: u32 = 0x102;
+        let descriptor = SecurityDescriptor::from_sddl(sddl)?;
+        let attributes = descriptor.attributes();
+        let wide_name = wide(OsStr::new(name));
+        // SAFETY: attributes whose descriptor outlives the call and a NUL-terminated name.
+        let raw = unsafe { CreateMutexW(&attributes, 0, wide_name.as_ptr()) };
+        let existed = io::Error::last_os_error().raw_os_error() == Some(EXISTS);
+        let mutex = owned(raw)?;
+        if existed {
+            let owner = security_text(mutex.as_raw_handle(), OWNER_SECURITY_INFORMATION)?;
+            if !matches!(
+                owner.as_str(),
+                "O:SY" | "O:BA" | "O:S-1-5-18" | "O:S-1-5-32-544"
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("{name} exists, {owner}"),
+                ));
+            }
+        }
+        let milliseconds = u32::try_from(within.as_millis()).unwrap_or(u32::MAX - 1);
+        // SAFETY: a handle owned above, open across the call.
+        match unsafe { WaitForSingleObject(mutex.as_raw_handle().cast(), milliseconds) } {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Some(Held(mutex))),
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
         fn OpenProcess(access: u32, inherit: Bool, process_id: u32) -> Handle;
         fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
     }

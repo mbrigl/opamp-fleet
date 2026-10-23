@@ -149,10 +149,20 @@ fn service_command(
             Ok(())
         }
         ServiceAction::Start(scope) => {
-            manager::NativeService::new(ServiceLevel::from(*scope)).start()
+            #[cfg(windows)]
+            let _held = hold_install_lock()?;
+            manager::NativeService::new(ServiceLevel::from(*scope)).start()?;
+            #[cfg(windows)]
+            operator_owns_the_run_state();
+            Ok(())
         }
         ServiceAction::Stop(scope) => {
-            manager::NativeService::new(ServiceLevel::from(*scope)).stop()
+            #[cfg(windows)]
+            let _held = hold_install_lock()?;
+            manager::NativeService::new(ServiceLevel::from(*scope)).stop()?;
+            #[cfg(windows)]
+            operator_owns_the_run_state();
+            Ok(())
         }
         ServiceAction::Status(scope) => {
             let state = manager::NativeService::new(ServiceLevel::from(*scope)).state()?;
@@ -187,17 +197,20 @@ fn complete_withdrawal(
 #[cfg(windows)]
 fn uninstall(level: ServiceLevel) -> Result<(), String> {
     use fleet_agent::service::withdrawal::{self, Registry, Store as _};
+    let _held = hold_install_lock()?;
     let store = Registry::of_the_install();
     let mut unfinished = Vec::new();
-    if let Err(e) = manager::halt_for_change(level) {
-        println!("warning: {e}; the services are deregistered all the same");
-    }
-    let completed = withdrawal::read(&store).and_then(|mut pending| {
-        if pending.withdrawal_due() {
-            complete_withdrawal(&store, &mut pending, &[])?;
-        }
-        Ok(())
-    });
+    // Stopped for good: what cannot be stopped is not started again, and the withdrawal waits
+    // until nothing runs under an account whose rights it takes away.
+    let completed = match manager::halt_for_removal() {
+        Err(e) => Err(format!("the services are not both stopped ({e})")),
+        Ok(()) => withdrawal::read(&store).and_then(|mut pending| {
+            if pending.withdrawal_due() {
+                complete_withdrawal(&store, &mut pending, &[])?;
+            }
+            Ok(())
+        }),
+    };
     match completed {
         Ok(()) => {
             if let Err(e) = store.remove() {
@@ -211,8 +224,16 @@ fn uninstall(level: ServiceLevel) -> Result<(), String> {
             store.describe()
         )),
     }
-    if manager::registration(level)?.is_some() || manager::agents_registration(level)?.is_some() {
-        manager::uninstall(level)?;
+    let registered = manager::registration(level)
+        .and_then(|client| Ok(client.is_some() || manager::agents_registration(level)?.is_some()));
+    let deregistered = match registered {
+        Ok(true) => manager::uninstall(level),
+        Ok(false) => Ok(()),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = deregistered {
+        unfinished.insert(0, format!("the services are not deregistered: {e}"));
+        return Err(unfinished.join("; "));
     }
     if unfinished.is_empty() {
         Ok(())
@@ -222,6 +243,44 @@ fn uninstall(level: ServiceLevel) -> Result<(), String> {
             manager::service_name(),
             unfinished.join("; ")
         ))
+    }
+}
+
+/// Holds the install's named mutex, `Global\<PRODUCT_NAME>-install`, for as long as the value
+/// lives: one install, uninstall, start or stop at a time, so that no two of them rewrite the
+/// record of what is left to finish over each other.
+///
+/// # Errors
+/// Returns that another holds it still after a while, or why it cannot be taken.
+#[cfg(windows)]
+fn hold_install_lock() -> Result<fleet_agent::win32::Held, String> {
+    const WITHIN: std::time::Duration = std::time::Duration::from_secs(300);
+    let name = format!(r"Global\{}-install", manager::service_name());
+    fleet_agent::win32::hold_mutex(&name, "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)", WITHIN)
+        .map_err(|e| format!("cannot take {name}: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "another install, uninstall, start or stop still holds {name} after {}s",
+                WITHIN.as_secs()
+            )
+        })
+}
+
+/// After `service start` or `service stop` the operator decides when the services run: what an
+/// install that failed recorded to start again is struck, so the next install does not start what
+/// the operator stopped. Said, not failed, where the record cannot be read or rewritten.
+#[cfg(windows)]
+fn operator_owns_the_run_state() {
+    use fleet_agent::service::withdrawal::{self, Registry};
+    let store = Registry::of_the_install();
+    let struck = withdrawal::read(&store).and_then(|mut pending| {
+        if pending.resume.client || pending.resume.agents {
+            withdrawal::resumed(&store, &mut pending)?;
+        }
+        Ok(())
+    });
+    if let Err(e) = struck {
+        println!("warning: {e}");
     }
 }
 
@@ -246,6 +305,10 @@ fn install(
     // while `%ProgramData%` happily takes the layout — so without this the install staged a version
     // and swung `current` at it and only then failed (ADR-0019: fail with a clear message).
     windows_rights::ensure_can_register(level)?;
+    // One install at a time: two would rewrite the record of what is left to finish over each
+    // other.
+    #[cfg(windows)]
+    let _held = hold_install_lock()?;
 
     // Two roots and two flags (ADR-0019 clause 8). The executable layout and the data default to
     // different places on Linux at system scope — and only there — because systemd may not execute
@@ -456,25 +519,48 @@ fn install(
     // a registration it rewrites: on Windows every install stops both services here, and waits
     // until their processes have ended — the second service's programs with them — before the
     // restriction, the take-over, the withdrawal and the switch of the SCM (ADR-0059 clauses 1, 4
-    // and 6). A stop that fails starts again what it stopped, and the install changes nothing.
-    // What ran is recorded with the withdrawal due, in one write before the first change, and
-    // started again once an install has succeeded: this one, or the next where this one fails.
+    // and 6). What runs is recorded first, with the withdrawal due, in one write: a stop is never
+    // left unrecorded, and an install that fails after it — or an MSI that rolls back — leaves the
+    // next install to start again what ran. A record that cannot be written stops nothing; a stop
+    // that fails starts again what it stopped and strikes what this install added to the record.
     #[cfg(windows)]
-    pending
-        .halted(manager::halt_for_change(level).map_err(|e| format!("{e}. Nothing was changed"))?);
+    {
+        let before = pending.resume;
+        pending.halted(manager::running()?);
+        let supervisors_root = config.supervisors_root();
+        let mut roots = vec![
+            layout_root.as_path(),
+            data_root.as_path(),
+            state_dir.as_path(),
+            supervisors_root.as_path(),
+            config_path.as_path(),
+        ];
+        roots.extend(written.copies.iter().map(PathBuf::as_path));
+        pending.add(formers, &roots);
+        fleet_agent::service::withdrawal::record(&withdrawal, &pending)
+            .map_err(|e| format!("{e}. Nothing was stopped"))?;
+        let halted = manager::halt_for_change(level).map_err(|e| {
+            pending.resume = before;
+            let struck = fleet_agent::service::withdrawal::record(&withdrawal, &pending)
+                .err()
+                .map_or(String::new(), |again| {
+                    format!(
+                        "; the record could not be set back ({again}), and still names them to \
+                         start again"
+                    )
+                });
+            format!(
+                "{e}. The services were left as they were found; of this install only the \
+                 configuration it wrote, and the record of what is left to finish, remain{struck}"
+            )
+        })?;
+        pending.halted(halted);
+    }
     let finished = (|| -> Result<(PathBuf, bool), String> {
+        // What a stop found running that the look before it did not — one starting in between —
+        // is recorded too.
         #[cfg(windows)]
-        {
-            let supervisors_root = config.supervisors_root();
-            let mut roots = vec![
-                layout_root.as_path(),
-                data_root.as_path(),
-                state_dir.as_path(),
-                supervisors_root.as_path(),
-                config_path.as_path(),
-            ];
-            roots.extend(written.copies.iter().map(PathBuf::as_path));
-            pending.add(formers, &roots);
+        if fleet_agent::service::withdrawal::read(&withdrawal)?.resume != pending.resume {
             fleet_agent::service::withdrawal::record(&withdrawal, &pending)?;
         }
         // What the process account owns there is its own, and left as it is (ADR-0059 clause 10).
@@ -590,16 +676,26 @@ fn install(
         }
         Ok((program, dropped))
     })();
-    // On Windows both services are stopped from the stop above on: an install that fails after it
-    // says so, and how they come back.
+    // On Windows an install that fails after the stop says how the services stand — as the SCM
+    // reports them now, not as the stop left them: the failure may lie in a resume — and how what
+    // ran comes back.
     #[cfg(windows)]
     let finished = finished.map_err(|e| {
-        format!(
-            "{e}\nBoth services are stopped, and stay stopped. Run `supervisor service install` \
-             again: once it succeeds it starts again what ran before this install, as recorded \
-             in {}. Or start both now with `supervisor service start`.",
-            fleet_agent::service::withdrawal::Store::describe(&withdrawal)
-        )
+        let recorded = fleet_agent::service::withdrawal::read(&withdrawal)
+            .map(|left| left.resume.client || left.resume.agents)
+            .unwrap_or(true);
+        let back = if recorded {
+            format!(
+                "Run `supervisor service install` again: once it succeeds it starts again what ran \
+                 before, as {} records. Or start both now with `supervisor service start`, which \
+                 leaves when they run to you and strikes them from that record.",
+                fleet_agent::service::withdrawal::Store::describe(&withdrawal)
+            )
+        } else {
+            "Nothing is recorded to be started again; `supervisor service start` starts both."
+                .to_string()
+        };
+        format!("{e}\nNow {}. {back}", manager::describe_activity())
     });
     let (program, dropped) = finished?;
 
