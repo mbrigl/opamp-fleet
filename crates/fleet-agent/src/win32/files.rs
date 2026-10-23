@@ -35,6 +35,8 @@ const READ_CONTROL: u32 = 0x0002_0000;
 const WRITE_DAC: u32 = 0x0004_0000;
 const WRITE_OWNER: u32 = 0x0008_0000;
 const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+/// `FILE_READ_DATA`, `FILE_LIST_DIRECTORY` for a directory.
+const FILE_READ_DATA: u32 = 0x0001;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 /// `FILE_FLAG_BACKUP_SEMANTICS`, which opens a directory — and, where the backup and restore
 /// privileges are enabled ([`super::BackupPrivileges`]), whatever its DACL says — and
@@ -89,14 +91,17 @@ pub struct Entry {
 
 impl Entry {
     /// Opens `path` as itself for `access`; held, so that nobody renames it meanwhile, where
-    /// `hold`.
+    /// `hold`. Holding asks to read the entry's data too (`FILE_READ_DATA`, which lists a
+    /// directory): the file system checks the share modes of an open that asks for data or for
+    /// deleting alone, so an open for attributes and the DACL alone, whatever it shares, holds
+    /// nothing and is held up by nothing.
     ///
     /// # Errors
     /// Returns why it cannot be opened: `NotFound` where it does not exist.
     pub fn open(path: &Path, access: Access, hold: bool) -> io::Result<Entry> {
         let share = FILE_SHARE_READ | FILE_SHARE_WRITE | if hold { 0 } else { FILE_SHARE_DELETE };
         let file = std::fs::OpenOptions::new()
-            .access_mode(access.mask())
+            .access_mode(access.mask() | if hold { FILE_READ_DATA } else { 0 })
             .share_mode(share)
             .custom_flags(AS_ITSELF)
             .open(path)?;
@@ -248,13 +253,17 @@ pub enum Passed {
     Held(PathBuf),
 }
 
-/// How a walk goes: what it opens each entry for, whose entries it leaves alone, and whether an
-/// entry it cannot open is passed over rather than an error — for a walk that only adds.
+/// How a walk goes: what it opens each entry for, whose entries it leaves alone, whether an entry
+/// it cannot open is passed over rather than an error — for a walk that only adds — and whether a
+/// directory it cannot hold is passed over — for a walk that only adds or hands over, where what
+/// it leaves undone leaves the process account with less — or fails the walk, for one that takes
+/// away: what it cannot reach safely it must not leave as it was.
 #[derive(Debug, Clone, Copy)]
 pub struct Walk<'a> {
     pub access: Access,
     pub skip: Option<&'a Sid>,
     pub lenient: bool,
+    pub takes_away: bool,
 }
 
 impl Walk<'_> {
@@ -267,7 +276,18 @@ impl Walk<'_> {
             Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => {
                 match Entry::open(path, self.access, false) {
                     Ok(entry) if entry.dir && !self.owned(&entry) => {
-                        return Ok(Some(Err(Passed::Held(path.to_path_buf()))))
+                        if self.takes_away {
+                            return Err(io::Error::new(
+                                e.kind(),
+                                format!(
+                                    "{} is held open for deleting, and what it holds cannot be \
+                                     reached through it safely; stop the services and what else \
+                                     holds it, and install again",
+                                    path.display()
+                                ),
+                            ));
+                        }
+                        return Ok(Some(Err(Passed::Held(path.to_path_buf()))));
                     }
                     unheld => unheld,
                 }
@@ -361,6 +381,7 @@ pub fn withdraw_tree(top: &Entry, sid: &Sid, owner: &str) -> io::Result<Vec<Pass
             access: Access::Owner,
             skip: None,
             lenient: false,
+            takes_away: true,
         };
         walk(
             top,
@@ -419,6 +440,7 @@ pub fn grant_tree(
             access: Access::Dacl,
             skip,
             lenient: true,
+            takes_away: false,
         };
         walk(
             top,
