@@ -1070,14 +1070,24 @@ fn command_line_arguments(line: &str) -> Vec<String> {
 /// deregistration leaves a running service running, and one that outlived its unit would go on
 /// running the Managed Processes with nothing left to stop it by.
 ///
+/// Each is tried whatever became of the other: a Client whose deregistration failed leaves no
+/// second service registered behind it.
+///
 /// # Errors
-/// Returns an error if the manager cannot uninstall the service, or stop or uninstall the second
+/// Returns every error: the manager cannot uninstall the service, or stop or uninstall the second
 /// service.
 pub fn uninstall(level: ServiceLevel) -> Result<(), String> {
-    manager(level)?
-        .uninstall(ServiceUninstallCtx { label: label() })
-        .map_err(|e| format!("cannot uninstall the service: {e}"))?;
-    remove_agents(level).map(|_| ())
+    let client = manager(level).and_then(|manager| {
+        manager
+            .uninstall(ServiceUninstallCtx { label: label() })
+            .map_err(|e| format!("cannot uninstall the service: {e}"))
+    });
+    let agents = remove_agents(level).map(|_| ());
+    match (client, agents) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+        (Err(client), Err(agents)) => Err(format!("{client}; {agents}")),
+    }
 }
 
 /// Stops and deregisters the second service, where one is registered (ADR-0059 clause 1,
@@ -1204,11 +1214,23 @@ pub fn running() -> Result<Halted, String> {
 /// Returns why each that could not be stopped was not, after trying both.
 #[cfg(windows)]
 pub fn halt_for_removal() -> Result<(), String> {
+    halt_for_removal_with(&mut |label| {
+        super::windows_config::stop_and_wait(&label.to_qualified_name(), STOPPING)
+    })
+}
+
+/// Stops the Client, then the second service, through `stop`: each tried whatever became of the
+/// other, and nothing started again.
+///
+/// # Errors
+/// Returns why each that could not be stopped was not.
+#[cfg(any(windows, test))]
+fn halt_for_removal_with(
+    stop: &mut dyn FnMut(&ServiceLabel) -> Result<bool, String>,
+) -> Result<(), String> {
     let failed: Vec<String> = [label(), agents_label()]
-        .into_iter()
-        .filter_map(|label| {
-            super::windows_config::stop_and_wait(&label.to_qualified_name(), STOPPING).err()
-        })
+        .iter()
+        .filter_map(|label| stop(label).err())
         .collect();
     if failed.is_empty() {
         Ok(())
@@ -2505,6 +2527,25 @@ mod tests {
                 agents: true
             })
         );
+    }
+
+    /// A stop for a deregistration tries both services whatever became of the other, and starts
+    /// neither again: they are going (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_halt_for_removal_tries_both_and_restarts_none() {
+        let mut tried = Vec::new();
+        let failed = halt_for_removal_with(&mut |which| {
+            tried.push(which.clone());
+            if *which == label() {
+                Err("the Client did not stop in time".to_string())
+            } else {
+                Ok(true)
+            }
+        });
+        assert_eq!(tried, [label(), agents_label()], "both tried");
+        assert_eq!(failed, Err("the Client did not stop in time".to_string()));
+        assert_eq!(halt_for_removal_with(&mut |_| Ok(true)), Ok(()));
     }
 
     /// A resume passes over only a service that runs; it starts one that is stopped, and waits on
