@@ -359,6 +359,11 @@ Use these exact words in code, comments, documentation, and ADRs.
     artifacts of its Packages under its data directory or in an S3-compatible object store the
     operator names. An Agent receives the same verified bytes from either, through the Server, and
     the fleet never reaches the store itself.
+20. **G-20** — **The fleet is served without a single point of failure.** Several Server
+    instances serve one fleet of up to about 100 000 Agents from one shared database and object
+    store. Losing an instance loses only its connections, whose Agents reconnect to another
+    instance and are served on. No instance holds state the others cannot reach. A revocation
+    committed on any instance ends the sessions it concerns on every instance.
 
 ## Quality Goals
 
