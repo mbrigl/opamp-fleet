@@ -207,6 +207,17 @@ version the artifacts are named after. Each archive is also a
 ready package artifact: the same file an operator downloads is the one a fleet is handed for a Client
 [self-update](docs/manual/client.md#updating-the-client-itself).
 
+The **Server** ships as a container image and nowhere else
+([ADR-0052](docs/adr/0052-the-server-ships-as-a-container-image-built-from-its-attested-release-binary.md)):
+`ghcr.io/mbrigl/opamp-fleet-server:<version>` for `linux/amd64` and `linux/arm64`, built by
+[`packaging/container/Containerfile`](packaging/container/Containerfile) from the Server binaries the
+release built and checked, on a distroless base pinned by digest, with no shell, running as UID
+65532. The release pushes it by digest, attests the digest, verifies it, and only then tags it with
+the version; there is no `latest` tag, and the release notes name the digest to deploy. Its SBOMs are
+`server_<version>_linux_<arch>.cdx.json` beside the other assets. Check an image with
+`gh attestation verify oci://ghcr.io/mbrigl/opamp-fleet-server@<digest> --repo mbrigl/opamp-fleet --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml`;
+running it is in [the Server's manual](docs/manual/server.md#in-a-container).
+
 ## Usage
 
 This section is a tour. The complete operator reference — every option and every configuration key
@@ -371,6 +382,7 @@ docs/HARDENING.md     # candidate hardening measures for the Client-Server link 
 docs/adr/             # Architecture Decision Records (+ template)
 crates/               # Cargo workspace: opamp (shared) · fleet-core · fleet-server · fleet-agent · fleet-tools (operator CLIs)
 config/               # annotated example configuration files (server.toml, supervisor.toml)
+packaging/            # what release.yml packs with: Linux maintainer scripts, the WiX sources, the Server's Containerfile
 scripts/              # consistency checks and sensors (check-all.sh runs them all), run in CI
 scripts/check-docs.sh # documentation & protocol-baseline consistency checks
 interop/              # the Go side of the interop check against opamp-go (ADR-0011)
@@ -459,10 +471,11 @@ configured once by a maintainer and worth re-checking after a repository move or
 - a **ruleset on `main`** that requires pull requests, requires the
   <!-- required-checks begin — compared with the workflow's jobs by scripts/check-docs.sh -->
   `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, `shell`, `rust`,
-  `client-windows`, and `client-macos`
+  `client-windows`, `client-macos`, `s3-store`, and `postgres-store`
   <!-- required-checks end -->
-  jobs as required status checks — every job of the **Checks** workflow, and the Client's
-  Windows and macOS jobs of the **CI** workflow (rulesets list checks by their job name) — and
+  jobs as required status checks — every job of the **Checks** workflow, the Client's Windows and
+  macOS jobs of the **CI** workflow, and its jobs that run the S3 and PostgreSQL stores' tests
+  against a real store (rulesets list checks by their job name) — and
   blocks force pushes and branch deletion;
 - enable **require a review from Code Owners** on that ruleset, so the two artifacts only a human
   decides, [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) and everything under
@@ -472,6 +485,10 @@ configured once by a maintainer and worth re-checking after a repository move or
 - enable **secret scanning with push protection**, the only mechanical backstop behind the secrets
   rule ([`AGENTS.md` §7](AGENTS.md#7-secrets)), which is otherwise carried by review alone;
 - enable **private vulnerability reporting** (see [`SECURITY.md`](SECURITY.md)).
+- after the first release that pushes the Server's image, set the package
+  **`opamp-fleet-server`** on `ghcr.io` to **public** and linked to this repository: a package a
+  workflow publishes for the first time is private, and operators pull the image without an account
+  ([ADR-0052](docs/adr/0052-the-server-ships-as-a-container-image-built-from-its-attested-release-binary.md)).
 
 ## Template
 

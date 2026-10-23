@@ -1,7 +1,7 @@
 # ADR-0050: The Server's records may live in PostgreSQL
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-22
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-23
 - **Deciders:** Markus Brigl
 - **Applies to:** every storage port in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`) and every PostgreSQL adapter beside the filesystem adapters, the embedded schema and its migrations, the wiring in `crates/fleet-server/src/main.rs`, the `[database]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `server migrate-to-postgres` command, the `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls` dependencies in `Cargo.toml` and `deny.toml`, the PostgreSQL adapter's tests and the CI job that runs them, the postgres service in `observability/compose.yaml` and its forward into the Dev Container, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its records
 - **Supersedes:** [ADR-0037](0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md) clauses 1, 2, 6, 7, 8, 9, 11 and 13; [ADR-0039](0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md) clause 2

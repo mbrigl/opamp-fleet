@@ -191,9 +191,15 @@ certificate in the TLS handshake. It holds no credential. A new host gets its ce
 only through an enrolment an operator opens and approves. Software is installed only when it is
 signed with the operator's key and fetched from a source the operator allowed.
 
-**Configuration files.** Both ends read one hand-edited TOML file, named with `--config`.
-Most keys are optional; the TLS material is not. An unknown key is
-refused at startup rather than ignored, and there are no environment-variable fallbacks. The
+**Configuration files.** Both ends read a hand-edited TOML file. The Client's is the one
+`--config` names, `supervisor.toml` by default. The Server's is the one
+`--config` or else `FLEET_SERVER_CONFIG` names — a named file that does not exist stops the start —
+and otherwise `server.toml` in the working directory when there is one; its keys can also be set by
+`FLEET_SERVER__…` environment variables, checked as strictly as the file, so a Server may run from
+its environment alone
+([Configuration from the environment](server.md#configuration-from-the-environment)). The Client
+reads no setting from its environment. Most keys are optional; the TLS material is not. An unknown
+key is refused at startup rather than ignored. The
 annotated examples in [`config/`](../../config/) are the reference copies: [`config/server.toml`](../../config/server.toml) and
 [`config/supervisor.toml`](../../config/supervisor.toml).
 

@@ -1,7 +1,7 @@
 # ADR-0051: The Server's configuration may come from its environment
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-22
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-23
 - **Deciders:** Markus Brigl
 - **Applies to:** the loading of `server.toml` in `crates/fleet-server/src/config.rs` and the argument parsing in `crates/fleet-server/src/main.rs`, every subcommand of the `server` binary that reads its configuration, the `[rest.auth]` and `[telemetry_offer]` sections and their new `basic_users_file` and `headers_file` keys, `config/server.toml`, `docs/ARCHITECTURE.md`, and every document that tells an operator how to configure the Server
 - **Supersedes:** [ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md) clause 23

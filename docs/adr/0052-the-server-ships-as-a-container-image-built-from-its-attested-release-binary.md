@@ -1,7 +1,7 @@
 # ADR-0052: The Server ships as a container image built from its attested release binary
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-22
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-23
 - **Deciders:** Markus Brigl
 - **Applies to:** `packaging/container/Containerfile`, the Linux rows of the `build` job, the `sbom` job, a new `image` job and the attestation, verification and publishing steps of the `publish` job in `.github/workflows/release.yml`, the image `ghcr.io/mbrigl/opamp-fleet-server`, `.github/dependabot.yml`, `crates/fleet-tools/tests/release_workflow.rs`, and every document that tells an operator how to run or verify the Server (`README.md`, `docs/manual/`, `CHANGELOG.md`)
 - **Supersedes:** [ADR-0045](0045-every-release-asset-carries-a-provenance-attestation-and-every-program-an-sbom.md) clauses 2, 3, 4, 5 and 8

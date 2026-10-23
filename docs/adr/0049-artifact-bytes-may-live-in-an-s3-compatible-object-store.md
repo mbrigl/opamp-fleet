@@ -1,7 +1,7 @@
 # ADR-0049: Artifact bytes may live in an S3-compatible object store
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-21
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-23
 - **Deciders:** Markus Brigl
 - **Applies to:** the blob port in `crates/fleet-server/src/blobs.rs`, its filesystem adapter in `crates/fleet-server/src/fs/blobs.rs` and every S3 adapter beside it, the wiring in `crates/fleet-server/src/main.rs`, the `[blobs]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `object_store` dependency in `Cargo.toml` and `deny.toml`, the S3 adapter's tests and the CI job that runs them, the rustfs service in `observability/compose.yaml` and its forward into the Dev Container, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps artifacts
 - **Supersedes:** [ADR-0037](0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md) clauses 4 and 5

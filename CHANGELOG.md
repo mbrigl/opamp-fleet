@@ -13,6 +13,84 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Added
+
+- **The Server ships as a container image**
+  ([ADR-0052](docs/adr/0052-the-server-ships-as-a-container-image-built-from-its-attested-release-binary.md)).
+  Every release pushes `ghcr.io/mbrigl/opamp-fleet-server:<version>` for `linux/amd64` and
+  `linux/arm64`: the Server binary the release built and checked for its version, on
+  `gcr.io/distroless/cc-debian13:nonroot` pinned by digest, with no shell, running as UID and GID
+  `65532`, its data directory the volume `/var/lib/opamp-fleet`, and `4320` and `4321` exposed on
+  `0.0.0.0`. It carries no configuration, certificate, key or secret, so started with nothing
+  mounted it refuses to start and names the missing `[tls]`. It is tagged with the exact version
+  only after its build-provenance attestation verifies; there is no `latest` tag and no
+  `HEALTHCHECK`. The release adds `server_<version>_linux_<arch>.cdx.json`, the SBOM of the binary
+  in each image. **What to do:** to run the Server from the image, deploy it by the digest the
+  release notes name, after `gh attestation verify oci://ghcr.io/mbrigl/opamp-fleet-server@<digest>
+  --repo mbrigl/opamp-fleet --signer-workflow mbrigl/opamp-fleet/.github/workflows/release.yml`;
+  mount the certificates, keys and secret files read-only and the data directory as a volume
+  writable by UID `65532`, and probe `4320` over TCP. A Server built from source and run as before
+  needs nothing. A script that downloads a release's `*.cdx.json` now also gets the Server's two.
+
+- **The Server's records may live in PostgreSQL**
+  ([ADR-0050](docs/adr/0050-the-servers-records-may-live-in-postgresql.md)).
+  `[database] store = "postgres"` with a `[database.postgres]` section (`host`, `port`, `dbname`,
+  `user`, `password_file`, optional `ca_file` and `tls`) keeps the Configurations, Deployments,
+  Package records, Agents, Hosts, the certificate register, the revocation list, the bootstrap
+  certificates with their PKCS#12 files and the enrolment window in one database instead of files
+  under `data_dir`; the audit record and, with the filesystem blob store, the artifacts stay under
+  `data_dir`. The connection is TLS 1.3 with the database's certificate and host name verified;
+  `tls = false` is accepted to `127.0.0.1` or `::1` alone, and no `PG*` variable changes the
+  connection. The Server applies its own schema at startup and holds a lock so one Server runs per
+  database; it creates no database and no role. The default stays `"fs"`.
+  **What to do:** nothing to keep a deployment running. To move to PostgreSQL, create the database
+  and a role that may create tables in it, put the password into a file only the Server's account
+  can read, stop the Server, copy the records with `server migrate-to-postgres --from <data_dir>
+  --data-dir <new>`, point `data_dir` at the new directory, set `[database]`, and start it. Back up
+  the database and `data_dir` together.
+
+- **The Server's configuration may come from its environment**
+  ([ADR-0051](docs/adr/0051-the-servers-configuration-may-come-from-its-environment.md)). Every
+  key of `server.toml` can be set by a variable `FLEET_SERVER__` followed by the key's path, its
+  segments joined by `__` and upper-cased — `FLEET_SERVER__REST__TLS__CERT_FILE` sets
+  `[rest.tls] cert_file` — and the variable wins over the file. The value is TOML, and what is not
+  TOML is a string. The Server logs the name of every key its environment set, never a value.
+  Without `--config`, `FLEET_SERVER_CONFIG` names the file, and without either the Server reads
+  `server.toml` in the working directory when it exists and otherwise starts from its defaults and
+  its environment; `server pki status` reads the same configuration, and its `--config` is
+  optional. `[rest.auth] basic_users_file` and `[telemetry_offer] headers_file` name a TOML file
+  holding the `basic_users` or the `headers` table, the one way the environment reaches either.
+  **What to do:** nothing to keep a deployment running. To configure a container without a file,
+  set the variables; keep secrets in files and set their `*_file` keys to the paths.
+
+- **Artifacts may live in an S3-compatible object store**
+  ([ADR-0049](docs/adr/0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md)).
+  `[blobs] store = "s3"` with a `[blobs.s3]` section (`endpoint`, `bucket`, `region`, optional
+  `prefix` and `ca_file`) keeps one object per artifact in that bucket instead of a file under
+  `data_dir/blobs/`, streamed through the Server both ways over TLS 1.3. The endpoint is `https://`,
+  `http://` only on the loopback. Credentials are `access_key_id` with `secret_access_key_file`, or
+  the platform's workload identity; no `AWS_*` variable changes the endpoint, bucket or TLS. The
+  Server creates no bucket, and copies every referenced artifact the bucket lacks from
+  `data_dir/blobs/` at its first start on it, leaving the files in place. The default stays
+  `"fs"`. **What to do:** nothing to keep a deployment running. To move the artifacts into a
+  bucket, create it, set `[blobs]` and `[blobs.s3]`, and restart; once the Server has started on
+  it, `data_dir/blobs/` may be removed — keep it until a backup of the bucket exists.
+
+### Changed
+
+- **A configuration file the Server is told to read has to exist**
+  ([ADR-0051](docs/adr/0051-the-servers-configuration-may-come-from-its-environment.md)). A
+  `--config` path that does not exist stopped nothing: the Server ran on its defaults. It now
+  fails startup, naming the path, and so does one `FLEET_SERVER_CONFIG` names. A
+  `FLEET_SERVER__…` variable that names no key, or holds a value of the wrong type, fails startup
+  naming the variable, and so does one that sets `[rest.auth.basic_users]` or
+  `[telemetry_offer.headers]`; a `basic_users_file` beside `basic_users`, or a `headers_file`
+  beside `headers`, fails startup naming both. **What to do:** check that every `--config` names a
+  file that exists, and that no `FLEET_SERVER__…` variable is left in the Server's environment
+  that is not meant for it.
+
 ## [0.6.0]
 
 ### Added
