@@ -119,15 +119,6 @@ impl Dacl {
         self.aces.iter().any(|held| same_ace(held, ace))
     }
 
-    /// Whether the DACL holds exactly the ACEs of `other`, protected alike: however the system
-    /// writes them, and whatever order it keeps them in.
-    #[must_use]
-    pub fn matches(&self, other: &Dacl) -> bool {
-        self.protected() == other.protected()
-            && self.aces.len() == other.aces.len()
-            && other.aces.iter().all(|ace| self.holds(ace))
-    }
-
     /// The explicit ACEs of the DACL, and those a child — a directory where `dir` — inherits
     /// from `parent` after them, under the rules of ACE inheritance: where the parent is
     /// protected or not, the child keeps its own flags, and a child that is protected keeps its
@@ -356,11 +347,7 @@ mod tests {
             "the alias is the SID"
         );
         assert!(!aliased.holds("(A;OICI;0x1200a9;;;S-1-5-19)"));
-        let written = Dacl::parse("D:P(A;CIOIID;FA;;;SY)").expect("as the system writes it");
-        let set = Dacl::parse("D:PAI(A;OICIID;0x1f01ff;;;S-1-5-18)").expect("as it was set");
-        assert!(written.matches(&set), "flags in any order, rights by alias");
-        assert!(!written.matches(&Dacl::parse("D:AI(A;OICIID;FA;;;SY)").expect("unprotected")));
-        assert!(!written.matches(&Dacl::parse("D:P").expect("empty")));
+
         let local_service = dacl.granting("S-1-5-19", &[]);
         assert!(
             !local_service.text().contains(";;;LS)"),

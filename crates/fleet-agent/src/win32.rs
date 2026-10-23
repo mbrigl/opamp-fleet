@@ -909,6 +909,78 @@ mod system {
         })
     }
 
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn GetSecurityDescriptorDacl(
+            descriptor: *mut c_void,
+            present: *mut Bool,
+            dacl: *mut *mut u8,
+            defaulted: *mut Bool,
+        ) -> Bool;
+        fn GetSecurityDescriptorControl(
+            descriptor: *mut c_void,
+            control: *mut u16,
+            revision: *mut u32,
+        ) -> Bool;
+    }
+
+    /// `SE_DACL_PROTECTED`.
+    const DACL_PROTECTED: u16 = 0x1000;
+
+    /// The protection of the DACL `sddl` describes and its ACEs, each the bytes the system makes
+    /// of it — type, flags, size, rights and SID — in order. The system reads both an alias and a
+    /// SID, and a mask's alias and its number, alike, so two DACLs written differently that say the
+    /// same come out the same, and nothing else does.
+    fn binary_dacl(sddl: &str) -> io::Result<(bool, Vec<Vec<u8>>)> {
+        let descriptor = SecurityDescriptor::from_sddl(sddl)?;
+        let raw = (descriptor.0).0;
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        // SAFETY: a descriptor the system made, alive across the call.
+        check(unsafe { GetSecurityDescriptorControl(raw, &mut control, &mut revision) })?;
+        let mut present: Bool = 0;
+        let mut defaulted: Bool = 0;
+        let mut acl: *mut u8 = std::ptr::null_mut();
+        // SAFETY: as above; `acl` points into the descriptor.
+        check(unsafe { GetSecurityDescriptorDacl(raw, &mut present, &mut acl, &mut defaulted) })?;
+        let protected = control & DACL_PROTECTED != 0;
+        if present == 0 || acl.is_null() {
+            return Err(io::Error::other(format!("{sddl:?} carries no DACL")));
+        }
+        // SAFETY: an ACL the system made: an eight-byte header — revision, padding, its size, its
+        // count of ACEs, padding — and the ACEs, each beginning with its type, flags and size.
+        unsafe {
+            let size = usize::from(u16::from_le_bytes([*acl.add(2), *acl.add(3)]));
+            let count = usize::from(u16::from_le_bytes([*acl.add(4), *acl.add(5)]));
+            let bytes = std::slice::from_raw_parts(acl, size);
+            let mut aces = Vec::with_capacity(count);
+            let mut at = 8;
+            for _ in 0..count {
+                let ace_size = bytes
+                    .get(at + 2..at + 4)
+                    .map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])))
+                    .ok_or_else(|| io::Error::other("an ACE beyond its ACL"))?;
+                let ace = bytes
+                    .get(at..at + ace_size)
+                    .ok_or_else(|| io::Error::other("an ACE beyond its ACL"))?;
+                aces.push(ace.to_vec());
+                at += ace_size.max(4);
+            }
+            Ok((protected, aces))
+        }
+    }
+
+    /// Whether the DACL `held` — as an object holds it — says what `set` says: the same ACEs in
+    /// the same order, byte for byte as the system makes them, and protected exactly where `set`
+    /// is. Only the other control bits — `SE_DACL_AUTO_INHERITED`, which a DACL set on a handle
+    /// does not carry — are not compared.
+    ///
+    /// # Errors
+    /// Returns why either is no DACL.
+    pub fn same_dacl(held: &str, set: &str) -> io::Result<bool> {
+        Ok(binary_dacl(held)? == binary_dacl(set)?)
+    }
+
     /// A security descriptor made from SDDL, freed when dropped.
     pub struct SecurityDescriptor(Local);
 
@@ -1160,6 +1232,48 @@ mod tests {
             virtual_account_sid("TrustedInstaller")
         );
         assert!(own_sid().expect("own sid").as_str().starts_with("S-1-5-"));
+    }
+
+    /// Two DACLs that say the same are the same however they are written — an alias or its SID,
+    /// a mask's alias or its number, with or without automatic inheritance — and two that differ
+    /// in a SID, a right, a flag, the order of their ACEs or their protection are not.
+    /// Verifies: ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn a_dacl_is_compared_by_what_it_says() {
+        let me = own_sid().expect("own sid");
+        let same = |held: &str, set: &str| same_dacl(held, set).expect("dacls");
+        assert!(same("D:(A;;0x1200a9;;;LS)", "D:(A;;0x1200a9;;;S-1-5-19)"));
+        assert!(same(
+            "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+            "D:PAI(A;OICI;0x1f01ff;;;S-1-5-18)(A;OICI;0x1f01ff;;;S-1-5-32-544)"
+        ));
+        assert!(same(
+            &format!("D:(A;OICIID;FA;;;{me})"),
+            &format!("D:AI(A;CIOIID;FA;;;{me})")
+        ));
+        assert!(
+            !same("D:(A;;0x1200a9;;;LS)", "D:(A;;0x1200a9;;;NS)"),
+            "another SID"
+        );
+        assert!(
+            !same("D:(A;;0x1301bf;;;LS)", "D:(A;;0x1200a9;;;LS)"),
+            "a wider mask"
+        );
+        assert!(!same("D:(A;OICI;FA;;;SY)", "D:(A;;FA;;;SY)"), "other flags");
+        assert!(
+            !same("D:(A;;FA;;;SY)(A;;FA;;;BA)", "D:(A;;FA;;;BA)(A;;FA;;;SY)"),
+            "order"
+        );
+        assert!(!same("D:(A;;FA;;;SY)", "D:P(A;;FA;;;SY)"), "protection");
+        assert!(
+            !same("D:(A;;FA;;;SY)", "D:(A;;FA;;;SY)(A;;FA;;;BA)"),
+            "an ACE more"
+        );
+        assert!(
+            !same("D:(D;;FA;;;SY)", "D:(A;;FA;;;SY)"),
+            "deny is no allow"
+        );
     }
 
     /// A job ends what it holds; the SDDL of the pipe is one the system reads.
