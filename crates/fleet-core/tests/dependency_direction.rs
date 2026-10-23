@@ -169,6 +169,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("service::windows", Adapter),
             ("service::windows_config", Adapter),
             ("service::windows_rights", Adapter),
+            ("service::withdrawal", Adapter),
             ("storage", Adapter),
             ("supervisor::channel", Adapter),
             ("supervisor::channel::windows", Adapter),

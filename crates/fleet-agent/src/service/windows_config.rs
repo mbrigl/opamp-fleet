@@ -222,10 +222,24 @@ pub fn reregister(
         .map_err(|e| format!("cannot re-register the service {service_name}: {e}"))
 }
 
-/// What the service `service_name` is doing, as the SCM reports it: a service it does not know is
-/// stopped.
+/// ERROR_SERVICE_DOES_NOT_EXIST.
 #[cfg(windows)]
-pub fn activity(service_name: &str) -> super::manager::Activity {
+const NO_SERVICE: i32 = 1060;
+
+/// Whether `e` says that the SCM knows no such service.
+#[cfg(windows)]
+fn no_such_service(e: &windows_service::Error) -> bool {
+    matches!(e, windows_service::Error::Winapi(e) if e.raw_os_error() == Some(NO_SERVICE))
+}
+
+/// What the service `service_name` is doing, as the SCM reports it: one it does not know
+/// (`ERROR_SERVICE_DOES_NOT_EXIST`) is stopped.
+///
+/// # Errors
+/// Returns every other refusal of the SCM — access denied among them — which says nothing of what
+/// the service is doing.
+#[cfg(windows)]
+pub fn activity(service_name: &str) -> Result<super::manager::Activity, String> {
     use super::manager::Activity;
     use windows_service::service::{ServiceAccess, ServiceState};
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -235,11 +249,99 @@ pub fn activity(service_name: &str) -> super::manager::Activity {
         .and_then(|service| service.query_status())
         .map(|status| status.current_state);
     match state {
-        Ok(ServiceState::StartPending | ServiceState::ContinuePending) => Activity::Starting,
-        Ok(ServiceState::StopPending) => Activity::Stopping,
-        Ok(ServiceState::Stopped) | Err(_) => Activity::Stopped,
-        Ok(_) => Activity::Running,
+        Ok(ServiceState::StartPending | ServiceState::ContinuePending) => Ok(Activity::Starting),
+        Ok(ServiceState::StopPending) => Ok(Activity::Stopping),
+        Ok(ServiceState::Stopped) => Ok(Activity::Stopped),
+        Ok(_) => Ok(Activity::Running),
+        Err(e) if no_such_service(&e) => Ok(Activity::Stopped),
+        Err(e) => Err(format!(
+            "cannot ask the SCM what {service_name} is doing: {e}"
+        )),
     }
+}
+
+/// Stops the service `service_name` and waits up to `within` until it has stopped and its process
+/// has ended; whether it was running — or starting, pausing or paused — before. One the SCM does
+/// not know, or that is stopped, is passed over.
+///
+/// `SERVICE_STOPPED` is what the service reports before it ends, and its process "can be
+/// terminated at any time" after it (SetServiceStatus) — still running then, under the service's
+/// account. So the process is opened before the stop is sent, and its end is what the wait ends
+/// on. For the second service that end is also the end of every program it started: the last
+/// handle to each job closes with it, and the job kills what it holds (ADR-0059 clause 4).
+///
+/// # Errors
+/// Returns why the SCM cannot be asked or the service stopped, and that it, or its process, had
+/// not ended after `within`.
+#[cfg(windows)]
+pub fn stop_and_wait(service_name: &str, within: std::time::Duration) -> Result<bool, String> {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    /// ERROR_SERVICE_CANNOT_ACCEPT_CTRL: starting or stopping.
+    const NOT_NOW: i32 = 1061;
+    /// ERROR_SERVICE_NOT_ACTIVE.
+    const NOT_ACTIVE: i32 = 1062;
+    let until = std::time::Instant::now() + within;
+    let late = || {
+        format!(
+            "{service_name} has not stopped after {}s, and nothing was changed",
+            within.as_secs()
+        )
+    };
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| format!("cannot open the service control manager: {e}"))?;
+    let service = match manager.open_service(
+        service_name,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::STOP,
+    ) {
+        Ok(service) => service,
+        Err(e) if no_such_service(&e) => return Ok(false),
+        Err(e) => return Err(format!("cannot open the service {service_name}: {e}")),
+    };
+    let query = || {
+        service
+            .query_status()
+            .map_err(|e| format!("cannot ask the SCM what {service_name} is doing: {e}"))
+    };
+    let mut status = query()?;
+    if status.current_state == ServiceState::Stopped {
+        return Ok(false);
+    }
+    let was_running = status.current_state != ServiceState::StopPending;
+    // Its process, while it is the service's: once the service has stopped, the SCM names none.
+    let process = status
+        .process_id
+        .map(crate::win32::process_to_wait_for)
+        .transpose()
+        .map_err(|e| format!("cannot open the process of {service_name}: {e}"))?
+        .flatten();
+    loop {
+        match status.current_state {
+            ServiceState::Stopped => break,
+            ServiceState::StopPending | ServiceState::StartPending => {}
+            _ => match service.stop() {
+                Ok(_) => {}
+                Err(windows_service::Error::Winapi(e))
+                    if matches!(e.raw_os_error(), Some(NOT_NOW | NOT_ACTIVE)) => {}
+                Err(e) => return Err(format!("cannot stop {service_name}: {e}")),
+            },
+        }
+        if std::time::Instant::now() >= until {
+            return Err(late());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        status = query()?;
+    }
+    if let Some(process) = process {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if !crate::win32::ended_within(&process, left)
+            .map_err(|e| format!("cannot wait for the process of {service_name}: {e}"))?
+        {
+            return Err(late());
+        }
+    }
+    Ok(was_running)
 }
 
 /// The registration of the service `service_name` as the SCM holds it: its registry key, and the
@@ -252,15 +354,11 @@ pub fn logon_account(service_name: &str) -> Result<Option<super::manager::Regist
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-    /// ERROR_SERVICE_DOES_NOT_EXIST.
-    const NO_SERVICE: i32 = 1060;
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|e| format!("cannot open the service control manager: {e}"))?;
     let service = match manager.open_service(service_name, ServiceAccess::QUERY_CONFIG) {
         Ok(service) => service,
-        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(NO_SERVICE) => {
-            return Ok(None)
-        }
+        Err(e) if no_such_service(&e) => return Ok(None),
         Err(e) => return Err(format!("cannot open the service {service_name}: {e}")),
     };
     let config = service
