@@ -1111,13 +1111,7 @@ pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
     #[cfg(not(target_os = "macos"))]
     {
         // `sc stop` refuses a service that is not running, which systemd's stop does not.
-        let running = !cfg!(windows)
-            || manager
-                .status(ServiceStatusCtx {
-                    label: agents_label(),
-                })
-                .map_or(true, |status| status == ServiceStatus::Running);
-        if running {
+        if NativeService::new(level).to_stop(&agents_label()) {
             manager
                 .stop(ServiceStopCtx {
                     label: agents_label(),
@@ -1247,7 +1241,24 @@ pub struct NativeService {
     manager: fn(ServiceLevel) -> Result<Box<dyn ServiceManager>, String>,
     /// Whether a second service is registered at a level.
     agents_registered: fn(ServiceLevel) -> bool,
+    /// What a service is doing, where a stop must ask first: under the SCM, whose `sc stop`
+    /// refuses a service that does not run (1062) and one still starting (1061), and whose
+    /// stopped and pending states `service-manager` reports alike. `None` where a stop of a
+    /// stopped service stops nothing — systemd and launchd.
+    activity: Option<fn(&ServiceLabel) -> Activity>,
 }
+
+/// What a service is doing, as a stop needs to know it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    Running,
+    Starting,
+    Stopping,
+    Stopped,
+}
+
+/// How long a stop waits for a service that is still starting before it stops it anyway.
+const STARTING: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl NativeService {
     /// A handle to the service at the given level.
@@ -1257,7 +1268,26 @@ impl NativeService {
             level,
             manager,
             agents_registered,
+            #[cfg(windows)]
+            activity: Some(|label| super::windows_config::activity(&label.to_qualified_name())),
+            #[cfg(not(windows))]
+            activity: None,
         }
+    }
+
+    /// Whether `label` is to be stopped: not where it does not run or is stopping already, and
+    /// where it is still starting, once it has started — or once [`STARTING`] has passed.
+    fn to_stop(&self, label: &ServiceLabel) -> bool {
+        let Some(activity) = self.activity else {
+            return true;
+        };
+        let until = std::time::Instant::now() + STARTING;
+        let mut now = activity(label);
+        while now == Activity::Starting && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            now = activity(label);
+        }
+        !matches!(now, Activity::Stopped | Activity::Stopping)
     }
 }
 
@@ -1314,19 +1344,10 @@ impl ServiceControl for NativeService {
             } else {
                 "the service"
             };
-            let manager = (self.manager)(self.level)?;
-            // `sc stop` refuses a service that does not run (1062), where systemd and launchd
-            // stop nothing: a service that is not running is stopped already.
-            if cfg!(windows)
-                && manager
-                    .status(ServiceStatusCtx {
-                        label: label.clone(),
-                    })
-                    .is_ok_and(|status| status != ServiceStatus::Running)
-            {
+            if !self.to_stop(&label) {
                 continue;
             }
-            let stopped = manager
+            let stopped = (self.manager)(self.level)?
                 .stop(ServiceStopCtx { label })
                 .map_err(|e| format!("cannot stop {which}: {e}"));
             if result.is_ok() {
@@ -2123,8 +2144,8 @@ mod tests {
         fn set_level(&mut self, _level: SmLevel) -> std::io::Result<()> {
             Ok(())
         }
-        /// Every service runs; a query is no request, and is not noted.
-        fn status(&self, _ctx: ServiceStatusCtx) -> std::io::Result<ServiceStatus> {
+        fn status(&self, ctx: ServiceStatusCtx) -> std::io::Result<ServiceStatus> {
+            Recording::note("status", &ctx.label);
             Ok(ServiceStatus::Running)
         }
     }
@@ -2137,7 +2158,47 @@ mod tests {
             level,
             manager: |_| Ok(Box::new(Recording)),
             agents_registered,
+            activity: None,
         }
+    }
+
+    /// Where a stop asks first — under the SCM — a service that does not run or is stopping
+    /// already is not stopped again, and one still starting is stopped once it has started
+    /// (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_stop_passes_over_a_service_that_does_not_run() {
+        let client = label().to_string();
+        let agents = agents_label().to_string();
+        let asking = |activity: fn(&ServiceLabel) -> Activity| NativeService {
+            activity: Some(activity),
+            ..recording(ServiceLevel::System, |_| true)
+        };
+        let _ = asking(|label| {
+            if *label == agents_label() {
+                Activity::Stopped
+            } else {
+                Activity::Running
+            }
+        })
+        .stop();
+        assert_eq!(Recording::asked(), vec![format!("stop {client}")]);
+        let _ = asking(|_| Activity::Stopping).stop();
+        assert_eq!(Recording::asked(), Vec::<String>::new());
+        static STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let _ = asking(|_| {
+            if STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                Activity::Starting
+            } else {
+                Activity::Running
+            }
+        })
+        .stop();
+        assert_eq!(
+            Recording::asked(),
+            vec![format!("stop {client}"), format!("stop {agents}")],
+            "stopped once started"
+        );
     }
 
     /// `start` starts the Client alone where its unit wants the second service, and the second

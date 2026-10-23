@@ -625,6 +625,27 @@ mod tests {
         assert!(!layout.names(&b));
     }
 
+    /// Only a `current` that resolves to another version is evidence of a switch: one that does
+    /// not resolve — missing, or dangling — is none, so the second service does not end on it
+    /// (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn a_pointer_that_does_not_resolve_names_no_other_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = Layout::new(dir.path().canonicalize().expect("canonical tempdir"));
+        let a = layout.version_dir("supervisor-1.0.0-aaaaaaa");
+        let b = layout.version_dir("supervisor-2.0.0-bbbbbbb");
+        std::fs::create_dir_all(&a).expect("create a");
+        std::fs::create_dir_all(&b).expect("create b");
+        assert!(!layout.names_another(&a), "no pointer");
+        layout.set_current(&b).expect("point at b");
+        assert!(layout.names_another(&a), "a switch to b");
+        assert!(!layout.names_another(&b), "its own");
+        std::fs::remove_dir(&b).expect("remove b");
+        assert!(!layout.names_another(&a), "a dangling pointer");
+    }
+
     #[test]
     fn enclosing_detects_a_layout_and_rejects_loose_binaries() {
         let (layout, version_dir) = Layout::enclosing(Path::new(

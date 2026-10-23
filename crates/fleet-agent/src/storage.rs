@@ -624,7 +624,7 @@ fn grant(root: &Path, dir: &Path, group: ProcessAccountGroup, shared: Shared) ->
                 file = %path.display(),
                 "the file has a second hard link and is not shared with the process account"
             ),
-            Passed::Unreadable(path) => warn!(
+            Passed::Unreadable(path) | Passed::Held(path) => warn!(
                 entry = %path.display(),
                 "the entry cannot be opened and is not shared with the process account"
             ),

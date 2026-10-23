@@ -98,6 +98,21 @@ impl Dacl {
         }
     }
 
+    /// The DACL without an ACE that allows `sid` anything, explicit or inherited; one that denies
+    /// it stays.
+    #[must_use]
+    pub fn without(&self, sid: &str) -> Dacl {
+        Dacl {
+            flags: self.flags.clone(),
+            aces: self
+                .aces
+                .iter()
+                .filter(|ace| !(allows(ace) && trustee_is(ace, sid)))
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// The DACL with its explicit ACEs alone.
     #[must_use]
     pub fn explicit(&self) -> Dacl {
@@ -393,6 +408,17 @@ mod tests {
         );
         let protected = Dacl::parse("D:P(A;;0x1;;;LS)").expect("protected");
         assert_eq!(protected.inheriting(&parent, true), protected);
+
+        // A withdrawal takes every ACE that allows the account, explicit or inherited, alias or
+        // SID, and leaves one that denies it and every other account's.
+        let granted = Dacl::parse(
+            "D:AI(D;;0x2;;;LS)(A;OICI;0x1200a9;;;LS)(A;;FA;;;SY)(A;OICIID;0x1301bf;;;S-1-5-19)",
+        )
+        .expect("granted");
+        assert_eq!(
+            granted.without("S-1-5-19").text(),
+            "D:AI(D;;0x2;;;LS)(A;;FA;;;SY)"
+        );
 
         // A parent holding the same ACE as explicit and as inherited passes it on once, and a
         // child holding explicit and inherited ACEs keeps the explicit ones and gets what the
