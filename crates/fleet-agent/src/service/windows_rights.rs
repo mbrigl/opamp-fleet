@@ -194,9 +194,10 @@ pub fn restrict(
             Treatment::Cut => vec![restrict_args(dir)],
             Treatment::Untouched => {
                 println!(
-                    "warning: {} exists already or lies outside the install's roots, and is left \
-                     as it is — create it and restrict it to LocalSystem, the Administrators and \
-                     the service account yourself",
+                    "warning: {} is left as it is — it exists already, or lies outside the data \
+                     root, the layout root and the state directory; create it where it is missing \
+                     and restrict it to LocalSystem, the Administrators and the service account \
+                     yourself",
                     dir.display()
                 );
                 continue;

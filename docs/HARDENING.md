@@ -113,9 +113,19 @@ has:
   that the install does not grant, cuts it off from the read right every local user inherits
   there, and leaves it to LocalSystem, the Administrators and the service account. A data root
   named with `--root` or `--data-root`, a state directory outside the data root, and a Supervisors'
-  root outside both that the install creates, is only cut off from inherited rights and left to the
-  same accounts; such a Supervisors' root that already exists is left as it is, with a warning, and
-  protecting it is the operator's. A local user acting while the install runs is not covered.
+  root outside both that the install creates beneath the layout root, is only cut off from
+  inherited rights and left to the same accounts; a Supervisors' root that already exists, or that
+  lies outside the data root, the layout root and the state directory, is left as it is, with a
+  warning, and protecting it is the operator's. A local user acting while the install runs is not
+  covered.
+- **An install acts only on directories the operator named or its roots hold** (ADR-0042 clauses
+  1 and 2): `supervisor.toml` belongs to the service's account, and `service install` and
+  `service config` run as root or an Administrator. A state directory is taken from the file only
+  beneath the data root or the layout root, with no `..` and no link or junction below the root;
+  one elsewhere is refused before anything is written, and `--state-dir` names it instead. A
+  Supervisors' root the file places outside them is never created, restricted or handed over. The
+  hand-over acts on a link or junction itself on every platform. Enrolment files the install writes
+  as root into the state directory are not yet written without following a link.
 - **A delivered Supervisor block reaches no further than the package signature** (ADR-0017): no
   environment or arguments beyond what the running block has or the operator allowed, and no file
   outside its own `config/` directory. Under clause 38's rule — no variable that steers which code
