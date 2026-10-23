@@ -252,9 +252,9 @@ fn hold_install_lock() -> Result<fleet_agent::win32::Held, String> {
         Taken::Held { held, abandoned } => {
             if abandoned {
                 println!(
-                    "warning: an earlier install, uninstall, start or stop ended without letting \
-                     the install lock go; what it left unfinished is finished by this one where \
-                     it is recorded"
+                    "warning: the install, uninstall, start or stop this one waited for ended \
+                     without letting the install lock go; what it left unfinished is finished by \
+                     this one where it is recorded"
                 );
             }
             Ok(held)
@@ -544,7 +544,7 @@ fn install(
             &mut pending,
             running,
             &mut || manager::halt_for_change(level),
-            &mut manager::running,
+            &mut manager::running_on,
         )
         .map_err(|failed| match failed {
             HaltFailed::Unrecorded(e) => format!("{e}. Nothing was stopped"),

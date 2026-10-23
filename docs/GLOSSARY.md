@@ -57,6 +57,10 @@ ones it uses without defining.
   process account is named, which runs under that account and starts, signals and stops those
   programs on the Client's request, over a channel only the Client's account may use.
   _Avoid:_ helper, launcher, sidecar.
+- **Install lock** — on Windows, the mutex `<PRODUCT_NAME>-install\lock` in a private namespace
+  only elevated Administrators and `LocalSystem` can create, held for the whole of a `service
+  install`, `uninstall`, `start` or `stop` so that one runs at a time.
+  _Avoid:_ install mutex, global mutex.
 - **Tombstone** — the name, `.purge-<name>-<nonce>`, beneath the Supervisors' root that a removed
   Supervisor's directory is moved to before its purge deletes it, a name no Supervisor can carry;
   one the purge could not delete is removed again at the next start and with the next purge.

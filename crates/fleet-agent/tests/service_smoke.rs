@@ -1072,14 +1072,29 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     // Re-registered while both run, nothing stopped beforehand, as an MSI upgrade on a running host
     // does: the install stops both and waits for them, and starts both again once it has
     // succeeded — the program reconnects under the process account, and nothing is left recorded.
+    // Each service's process by its id and its start time: an id the system hands out again at
+    // once is told apart by a later start.
     let pids = || {
         [service_name().to_string(), agents_service_name()].map(|name| {
             let queried = Command::new("sc")
                 .args(["queryex", &name])
                 .output()
                 .expect("run sc queryex");
-            parse_after(&String::from_utf8_lossy(&queried.stdout), "PID")
-                .unwrap_or_else(|| panic!("{name} runs with a process"))
+            let pid = parse_after(&String::from_utf8_lossy(&queried.stdout), "PID")
+                .unwrap_or_else(|| panic!("{name} runs with a process"));
+            let started = Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!("(Get-Process -Id {pid}).StartTime.ToUniversalTime().Ticks"),
+                ])
+                .output()
+                .expect("run powershell");
+            let started: u64 = String::from_utf8_lossy(&started.stdout)
+                .trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("the start time of {name}'s process {pid}: {e}"));
+            (pid, started)
         })
     };
     let running_before = pids();
@@ -1105,7 +1120,10 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     );
     let running_after = pids();
     for (before, after) in running_before.iter().zip(&running_after) {
-        assert_ne!(before, after, "stopped and started again, not left running");
+        assert!(
+            before.0 != after.0 || after.1 > before.1,
+            "stopped and started again, not left running: {before:?}, then {after:?}"
+        );
     }
     let recorded = Command::new("reg")
         .args([
