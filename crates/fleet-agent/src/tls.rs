@@ -67,7 +67,7 @@ pub fn client_tls_for(
             }
             Some(Identity {
                 cert_pem: cert.to_vec(),
-                key_pem: key_file(&key)?,
+                key_pem: key_in(&key, state_file(&key)?)?,
             })
         }
         // An identity opened from a `bootstrap.p12` stands in for the configured one until the
@@ -78,6 +78,14 @@ pub fn client_tls_for(
                 key_pem: bootstrap.key_pem.clone(),
             }),
             _ => match config.client_identity() {
+                // The pair the Server issued lies in the state directory, read without following a
+                // link; a pair the operator named in `[tls]` may be reached through one.
+                Some((cert, key)) if cert.parent() == Some(config.state_dir.as_path()) => {
+                    Some(Identity {
+                        cert_pem: certificates_in(&cert, state_file(&cert)?)?,
+                        key_pem: key_in(&key, state_file(&key)?)?,
+                    })
+                }
                 Some((cert, key)) => Some(Identity {
                     cert_pem: certificates_file(&cert)?,
                     key_pem: key_file(&key)?,
@@ -103,14 +111,20 @@ pub fn trust(config: &ClientConfig) -> Result<ClientTls, String> {
 
 /// A PEM file of certificates, parsed here so that a bad one is named by its path.
 pub(crate) fn certificates_file(path: &Path) -> Result<Vec<u8>, String> {
-    let pem = read(path)?;
+    certificates_in(path, read(path)?)
+}
+
+fn certificates_in(path: &Path, pem: Vec<u8>) -> Result<Vec<u8>, String> {
     opamp::tls::certificates(&pem).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(pem)
 }
 
 /// A PEM file holding a private key, parsed here so that a bad one is named by its path.
 pub(crate) fn key_file(path: &Path) -> Result<Vec<u8>, String> {
-    let pem = read(path)?;
+    key_in(path, read(path)?)
+}
+
+fn key_in(path: &Path, pem: Vec<u8>) -> Result<Vec<u8>, String> {
     opamp::tls::private_key(&pem)
         .map_err(|_| format!("{} contains no private key", path.display()))?;
     Ok(pem)
@@ -168,6 +182,12 @@ fn pem_block(label: &str, der: &[u8]) -> String {
 
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+/// A file of the state directory, never read through a link: an install reads it as root, and the
+/// directory belongs to the service's account (ADR-0054).
+fn state_file(path: &Path) -> Result<Vec<u8>, String> {
+    crate::nofollow::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
 #[cfg(test)]

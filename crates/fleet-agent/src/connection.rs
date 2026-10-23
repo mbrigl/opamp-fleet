@@ -28,7 +28,7 @@ pub const SETTINGS_FILE: &str = "connection-settings.pb";
 /// once; a failed rewrite is warned about and never fails the load.
 pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
     let path = state_dir.join(SETTINGS_FILE);
-    let bytes = std::fs::read(&path).ok()?;
+    let bytes = crate::nofollow::read(&path).ok()?;
     match ConnectionSettingsOffers::decode(bytes.as_slice()) {
         Ok(mut stored) => {
             if let Some(headers) = stored.opamp.as_mut().and_then(|s| s.headers.take()) {
@@ -62,8 +62,13 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
 /// directory holding it no wider than `0700`. On Windows the directory ACL under `%ProgramData%`
 /// protects it (ADR-0019); there is no mode to set.
 pub fn store(state_dir: &Path, settings: &ConnectionSettingsOffers) -> std::io::Result<()> {
-    crate::storage::create_private_dir(state_dir)?;
-    crate::storage::write_private(&state_dir.join(SETTINGS_FILE), &settings.encode_to_vec())
+    // Never through a link at the directory's name or the file's: an install enrols as root in a
+    // directory that belongs to the service's account (ADR-0054).
+    crate::nofollow::HeldDir::create(state_dir, 0o700)?.write(
+        SETTINGS_FILE,
+        &settings.encode_to_vec(),
+        0o600,
+    )
 }
 
 /// Folds a verified offer over what was already in force.

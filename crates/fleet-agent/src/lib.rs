@@ -25,6 +25,7 @@ pub mod gateway;
 pub mod host;
 pub mod install;
 pub mod logging;
+pub mod nofollow;
 pub mod packages;
 pub mod product;
 pub mod reconfigure;

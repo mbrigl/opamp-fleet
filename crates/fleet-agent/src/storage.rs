@@ -45,8 +45,14 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// The storage in `dir`, created owner-only where it is missing. A link at `dir` is refused:
+    /// an install writes here as root, and the directory belongs to the service's account
+    /// (ADR-0054).
+    ///
+    /// # Errors
+    /// Returns an error when the directory cannot be created, or is a link.
     pub fn new(dir: PathBuf) -> io::Result<Self> {
-        create_private_dir(&dir)?;
+        crate::nofollow::HeldDir::create(&dir, 0o700)?;
         Ok(Storage { dir })
     }
 
@@ -192,8 +198,8 @@ impl AgentStorage for Storage {
     /// The persisted identity, or a fresh UUID v7 persisted on first start.
     fn load_or_create_uid(&self) -> io::Result<InstanceUid> {
         let path = self.dir.join(UID_FILE);
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Some(uid) = InstanceUid::parse(&text) {
+        if let Ok(bytes) = crate::nofollow::read(&path) {
+            if let Some(uid) = InstanceUid::parse(&String::from_utf8_lossy(&bytes)) {
                 return Ok(uid);
             }
             warn!(file = %path.display(), "unreadable identity; generating a fresh one");
@@ -206,7 +212,11 @@ impl AgentStorage for Storage {
     /// Persists a Server-assigned identity (AgentIdentification) so the reassignment survives a
     /// restart.
     fn save_uid(&self, uid: &InstanceUid) -> io::Result<()> {
-        std::fs::write(self.dir.join(UID_FILE), format!("{uid}\n"))
+        crate::nofollow::write(
+            &self.dir.join(UID_FILE),
+            format!("{uid}\n").as_bytes(),
+            0o644,
+        )
     }
 
     /// The last stored remote configuration, if any survived a previous run.
@@ -237,7 +247,7 @@ impl AgentStorage for Storage {
         // The protobuf and the entry files can carry secret material (a roled `${file:...}` entry
         // that is a certificate or key), so both the config directory and the files are owner-only.
         let config_dir = self.dir.join(CONFIG_DIR);
-        create_private_dir(&config_dir)?;
+        crate::nofollow::HeldDir::create(&config_dir, 0o700)?;
         for entry in std::fs::read_dir(&config_dir)? {
             let path = entry?.path();
             if path.is_file() {
@@ -255,8 +265,8 @@ impl AgentStorage for Storage {
 
     /// The installed package (ADR-0026), if one survived a previous run.
     fn load_package(&self) -> Option<InstalledPackage> {
-        let text = std::fs::read_to_string(self.dir.join(PACKAGE_FILE)).ok()?;
-        match serde_json::from_str(&text) {
+        let bytes = crate::nofollow::read(&self.dir.join(PACKAGE_FILE)).ok()?;
+        match serde_json::from_slice(&bytes) {
             Ok(package) => Some(package),
             Err(e) => {
                 warn!(error = %e, "stored package record is unreadable; ignoring it");
@@ -268,7 +278,7 @@ impl AgentStorage for Storage {
     /// Records the installed package, so a restarted Client reports what it runs.
     fn store_package(&self, package: &InstalledPackage) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(package).expect("an InstalledPackage serializes");
-        std::fs::write(self.dir.join(PACKAGE_FILE), json)
+        crate::nofollow::write(&self.dir.join(PACKAGE_FILE), &json, 0o644)
     }
 
     /// Drops the record: this Agent does not have that package. No record to drop is the state
@@ -362,27 +372,14 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Write `contents` to `path`, owner-only on Unix — for the files that can carry secret material
-/// (the stored configuration protobuf and each config-map entry). Defence in depth beside the
-/// `0700` directory: the mode is set in the open call so the bytes are never briefly world-readable,
-/// and a pre-existing file is narrowed too.
+/// (the stored configuration protobuf, each config-map entry, the private key). Defence in depth
+/// beside the `0700` directory: the file is created at that mode, so the bytes are never briefly
+/// world-readable, and it replaces a file of any mode whole. Written through a temporary name and a
+/// rename in the directory, never through a link at `path` or at its directory's name: an install
+/// writes the state directory as root, and the directory belongs to the service's account
+/// (ADR-0054).
 pub(crate) fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file.write_all(contents)
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, contents)
-    }
+    crate::nofollow::write(path, contents, 0o600)
 }
 
 /// Refuses a configuration whose entries cannot each be stored as a file of their own on every
@@ -494,9 +491,7 @@ impl HighWaterFile {
     fn write(&self, marks: &BTreeMap<String, String>) -> io::Result<()> {
         let mut json = serde_json::to_vec_pretty(marks).expect("a map of strings serializes");
         json.push(b'\n');
-        let tmp = self.path.with_extension("json.tmp");
-        write_private(&tmp, &json)?;
-        std::fs::rename(&tmp, &self.path)
+        write_private(&self.path, &json)
     }
 }
 
@@ -727,6 +722,51 @@ mod tests {
             }),
             config_hash: vec![7],
         }
+    }
+
+    /// Every entry is written through a temporary name and a rename, and that name is never one an
+    /// entry is stored under: an entry named like another's temporary file stays on disk in
+    /// whichever order the map yields the two.
+    /// Verifies: ADR-0017, ADR-0054
+    #[test]
+    fn no_entry_is_lost_to_another_entrys_temporary_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        // The map's order is random, so each order is stored in turn: the entry named like the
+        // other's temporary file written before it, and after it.
+        for round in 0..16 {
+            let offer = roled_offer(&[("a", b"a", ""), ("a.tmp", b"a.tmp", "")]);
+            storage.store_remote_config(&offer).expect("stored");
+            assert!(
+                storage.config_dir().join("a.tmp").is_file(),
+                "round {round}: a.tmp is on disk"
+            );
+        }
+    }
+
+    /// An entry replaced by a rename is a new file: it belongs to the account the Client runs as,
+    /// and it is owner-only like the one it replaces, whatever mode that one was left at.
+    /// Verifies: ADR-0017, ADR-0054
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_entry_is_the_runtimes_own_and_owner_only() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().to_path_buf()).expect("storage");
+        let offer = roled_offer(&[("a", b"first", "")]);
+        storage.store_remote_config(&offer).expect("stored");
+        let entry = storage.config_dir().join("a");
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).expect("widen");
+        storage
+            .store_remote_config(&roled_offer(&[("a", b"second", "")]))
+            .expect("replaced");
+        let meta = std::fs::metadata(&entry).expect("metadata");
+        assert_eq!(std::fs::read(&entry).expect("read"), b"second");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        // SAFETY: `geteuid` reads the calling process's effective uid and cannot fail.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        assert_eq!(meta.uid(), uid, "the account the Client runs as owns it");
+        assert_eq!(meta.gid(), gid);
     }
 
     /// ADR-0023: a roled entry is written like any other — it has to be on disk for a

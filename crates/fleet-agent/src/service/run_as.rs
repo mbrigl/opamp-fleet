@@ -401,7 +401,7 @@ fn missing_account(
     )
 }
 
-/// The handover walk on Unix: descriptors, never paths below the top (ADR-0042 clause 2).
+/// The handover walk on Unix: descriptors, never paths below the top (ADR-0042 clause 2, ADR-0054).
 #[cfg(unix)]
 mod walk {
     use std::ffi::{CStr, CString, OsStr};
@@ -452,6 +452,34 @@ mod walk {
             between,
         };
         walk.entry(libc::AT_FDCWD, &name, path)
+    }
+
+    /// Re-own the entry `name` in the directory `dir` holds, and nothing below it: through a
+    /// handle on the entry itself, a link as a link. An entry that is no directory and has a
+    /// second hard link is skipped, whoever owns it; one that already has the owner is left alone.
+    /// A missing entry is nothing to do.
+    pub(super) fn chown_entry(
+        dir: RawFd,
+        name: &OsStr,
+        path: &Path,
+        (uid, gid): (u32, u32),
+        skipped: &mut Vec<PathBuf>,
+    ) -> io::Result<()> {
+        let name = CString::new(name.as_bytes())?;
+        let handle = match open(dir, &name, ENTRY) {
+            Ok(handle) => handle,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let st = fstat(&handle)?;
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR && st.st_nlink > 1 {
+            skipped.push(path.to_path_buf());
+            return Ok(());
+        }
+        if (st.st_uid, st.st_gid) == (uid, gid) {
+            return Ok(());
+        }
+        chown(&handle, uid, gid)
     }
 
     struct Walk<'a> {
@@ -609,41 +637,66 @@ mod walk {
 /// `service config` creates belongs to the account the service runs as (ADR-0019 clause 13), not
 /// to the administrator who ran it. A missing path is skipped.
 ///
-/// Each path is re-owned as what it is (`lchown`) and nothing is walked: the state directory
-/// belongs to that account, which could swap a directory for a link while root walked it, so the
-/// caller names exactly the files it wrote.
+/// Each path is re-owned as what it is and nothing is walked: the state directory belongs to that
+/// account, which could swap a directory for a link while root walked it, so the caller names
+/// exactly the files it wrote. Nor is a link followed on the way (ADR-0054): each path's
+/// directory is opened without following a link at its name, and the entry is re-owned through a
+/// handle on it, a link as a link. The data root the administrator named, `data_root`, and the
+/// configuration's own directory are the two directories reached as their paths say (ADR-0054
+/// clause 4); every other is one the account could have swapped. A regular file with a second hard
+/// link is skipped, as the handover skips one: another name for it may stand anywhere.
+///
+/// Returns the files skipped for a second hard link.
 ///
 /// On Windows there is nothing to do: the handover granted the account Modify with inheritance, so
 /// what is created under the data root is the account's to use already.
 ///
 /// # Errors
-/// Returns an error naming the path whose owner could not be changed.
-pub fn match_owner(like: &Path, paths: &[&Path]) -> Result<(), String> {
+/// Returns an error naming the path whose owner could not be changed, or whose directory is a link.
+pub fn match_owner(like: &Path, data_root: &Path, paths: &[&Path]) -> Result<Vec<PathBuf>, String> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut skipped = Vec::new();
     #[cfg(unix)]
     {
+        use std::os::fd::AsRawFd as _;
         use std::os::unix::fs::MetadataExt as _;
         let Ok(owner) = std::fs::symlink_metadata(like) else {
-            return Ok(());
+            return Ok(skipped);
         };
         for path in paths {
-            let Ok(meta) = std::fs::symlink_metadata(path) else {
-                continue;
-            };
-            if (meta.uid(), meta.gid()) == (owner.uid(), owner.gid()) {
-                continue;
-            }
-            std::os::unix::fs::lchown(path, Some(owner.uid()), Some(owner.gid())).map_err(|e| {
+            let refused = |e: std::io::Error| {
                 format!(
                     "cannot give {} the owner of {}: {e}",
                     path.display(),
                     like.display()
                 )
-            })?;
+            };
+            let held = match (path.parent(), path.file_name().and_then(|n| n.to_str())) {
+                (Some(parent), Some(name))
+                    if parent == data_root || Some(parent) == like.parent() =>
+                {
+                    crate::nofollow::HeldDir::open_root(parent).map(|dir| (dir, name))
+                }
+                _ => crate::nofollow::held_parent(path),
+            };
+            let (dir, name) = match held {
+                Ok(held) => held,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(refused(e)),
+            };
+            walk::chown_entry(
+                dir.as_raw_fd(),
+                std::ffi::OsStr::new(name),
+                path,
+                (owner.uid(), owner.gid()),
+                &mut skipped,
+            )
+            .map_err(refused)?;
         }
     }
     #[cfg(not(unix))]
-    let _ = (like, paths);
-    Ok(())
+    let _ = (like, data_root, paths);
+    Ok(skipped)
 }
 
 /// The passwordless Windows account forms — the only ones `--run-as` accepts, because a password
@@ -1001,7 +1054,7 @@ mod tests {
 
     /// A directory inside the tree that is a link to one outside it is re-owned as the link; the
     /// walk never reaches what it points to.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0042, ADR-0054
     #[cfg(unix)]
     #[test]
     fn the_handover_never_follows_a_directory_swapped_for_a_link() {
@@ -1046,7 +1099,7 @@ mod tests {
 
     /// A regular file with a second hard link is left as it is and named: its other name may stand
     /// outside the roots.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0042, ADR-0054
     #[cfg(unix)]
     #[test]
     fn the_handover_skips_a_file_with_a_second_hard_link() {
@@ -1076,7 +1129,7 @@ mod tests {
 
     /// A directory swapped for a link to one outside the tree, after the walk read its name and
     /// before it opened it, is re-owned as the link; nothing outside is reached.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0042, ADR-0054
     #[cfg(unix)]
     #[test]
     fn the_handover_never_follows_a_directory_swapped_for_a_link_mid_walk() {
@@ -1124,7 +1177,7 @@ mod tests {
 
     /// An entry swapped for a hard link to a file outside the tree, after the walk read its name
     /// and before it opened it, is skipped and named; the file outside keeps its owner.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0042, ADR-0054
     #[cfg(unix)]
     #[test]
     fn the_handover_skips_an_entry_swapped_for_a_hard_link_mid_walk() {
