@@ -189,61 +189,40 @@ fn complete_withdrawal(
     })
 }
 
-/// `service uninstall` on Windows: both services are stopped and waited for, a withdrawal an
-/// install left undone is completed — the services go, and nothing would name the former accounts
-/// again — and its record removed; then both are deregistered, always. A withdrawal that cannot be
-/// completed stays recorded and is reported, after the deregistration: an uninstall that left both
-/// services registered would leave them starting at the next boot.
+/// `service uninstall` on Windows ([`withdrawal::uninstall_with`]): both services are stopped and
+/// waited for, starting neither again; a withdrawal an install left undone is completed — the
+/// services go, and nothing would name the former accounts again — and its record removed, where
+/// the install lock is held and both stopped; then both are deregistered, always, with or without
+/// the lock. What was left undone is reported after the deregistration.
+///
+/// [`withdrawal::uninstall_with`]: fleet_agent::service::withdrawal::uninstall_with
 #[cfg(windows)]
 fn uninstall(level: ServiceLevel) -> Result<(), String> {
     use fleet_agent::service::withdrawal::{self, Registry, Store as _};
-    let _held = hold_install_lock()?;
+    let held = hold_install_lock();
     let store = Registry::of_the_install();
-    let mut unfinished = Vec::new();
-    // Stopped for good: what cannot be stopped is not started again, and the withdrawal waits
-    // until nothing runs under an account whose rights it takes away.
-    let completed = match manager::halt_for_removal() {
-        Err(e) => Err(format!("the services are not both stopped ({e})")),
-        Ok(()) => withdrawal::read(&store).and_then(|mut pending| {
+    withdrawal::uninstall_with(
+        held.as_ref().map(|_| ()).map_err(Clone::clone),
+        &mut manager::halt_for_removal,
+        &mut || {
+            let mut pending = withdrawal::read(&store)?;
             if pending.withdrawal_due() {
                 complete_withdrawal(&store, &mut pending, &[])?;
             }
             Ok(())
-        }),
-    };
-    match completed {
-        Ok(()) => {
-            if let Err(e) = store.remove() {
-                unfinished.push(e);
+        },
+        &mut || store.remove(),
+        &mut || {
+            let registered = manager::registration(level)?.is_some()
+                || manager::agents_registration(level)?.is_some();
+            if registered {
+                manager::uninstall(level)
+            } else {
+                Ok(())
             }
-        }
-        Err(e) => unfinished.push(format!(
-            "what former accounts were granted is not withdrawn: {e}. It stays recorded in {}; \
-             `supervisor service install` completes it, and a later `supervisor service \
-             uninstall` too",
-            store.describe()
-        )),
-    }
-    let registered = manager::registration(level)
-        .and_then(|client| Ok(client.is_some() || manager::agents_registration(level)?.is_some()));
-    let deregistered = match registered {
-        Ok(true) => manager::uninstall(level),
-        Ok(false) => Ok(()),
-        Err(e) => Err(e),
-    };
-    if let Err(e) = deregistered {
-        unfinished.insert(0, format!("the services are not deregistered: {e}"));
-        return Err(unfinished.join("; "));
-    }
-    if unfinished.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} was uninstalled, and not all of it: {}",
-            manager::service_name(),
-            unfinished.join("; ")
-        ))
-    }
+        },
+        &store.describe(),
+    )
 }
 
 /// Holds the install lock — the mutex `<PRODUCT_NAME>-install\lock` in a private namespace of that
