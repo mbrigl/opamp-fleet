@@ -158,7 +158,7 @@ impl Entry {
         }
         self.set(&dacl.text(), DACL_SECURITY_INFORMATION)?;
         let held = self.dacl()?;
-        if !held.matches(dacl) {
+        if !super::same_dacl(&held.text(), &dacl.text())? {
             return Err(io::Error::other(format!(
                 "{}: the object holds {} where {} was set",
                 self.path.display(),
