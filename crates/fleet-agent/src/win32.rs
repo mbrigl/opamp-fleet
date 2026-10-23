@@ -1221,6 +1221,7 @@ mod system {
         fn SetLastError(code: u32);
         fn CreateBoundaryDescriptorW(name: *const u16, flags: u32) -> Handle;
         fn AddSIDToBoundaryDescriptor(boundary: *mut Handle, sid: Psid) -> Bool;
+        fn AddIntegrityLabelToBoundaryDescriptor(boundary: *mut Handle, label: Psid) -> Bool;
         fn DeleteBoundaryDescriptor(boundary: Handle);
         fn CreatePrivateNamespaceW(
             attributes: *const SecurityAttributes,
@@ -1239,8 +1240,20 @@ mod system {
     /// ERROR_ALREADY_EXISTS.
     const ALREADY_EXISTS: i32 = 183;
 
-    /// A boundary descriptor named `name` that holds the Administrators' SID alone, deleted when
-    /// dropped (CreateBoundaryDescriptorW, AddSIDToBoundaryDescriptor, DeleteBoundaryDescriptor).
+    /// A SID from its text, freed when dropped (ConvertStringSidToSidW, LocalFree).
+    fn sid_of(text: &str) -> io::Result<Local> {
+        let text = wide(OsStr::new(text));
+        let mut sid: Psid = std::ptr::null_mut();
+        // SAFETY: a NUL-terminated SID string; `sid` receives LocalAlloc'd memory.
+        check(unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) })?;
+        Ok(Local(sid))
+    }
+
+    /// A boundary descriptor named `name` that holds the Administrators' SID and the high
+    /// integrity level, deleted when dropped (CreateBoundaryDescriptorW, AddSIDToBoundaryDescriptor,
+    /// AddIntegrityLabelToBoundaryDescriptor, DeleteBoundaryDescriptor). The label keeps a process
+    /// of lower integrity from creating the namespace first: a process creates one only at its own
+    /// integrity level or lower — an elevated Administrator's high, `LocalSystem`'s system.
     struct Boundary(Handle);
 
     impl Boundary {
@@ -1252,13 +1265,13 @@ mod system {
                 return Err(io::Error::last_os_error());
             }
             let mut boundary = Boundary(raw);
-            let text = wide(OsStr::new("S-1-5-32-544"));
-            let mut sid: Psid = std::ptr::null_mut();
-            // SAFETY: a NUL-terminated SID string; `sid` receives LocalAlloc'd memory.
-            check(unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) })?;
-            let sid = Local(sid);
+            let administrators = sid_of("S-1-5-32-544")?;
             // SAFETY: the descriptor's handle, which the call may replace, and a valid SID.
-            check(unsafe { AddSIDToBoundaryDescriptor(&mut boundary.0, sid.0) })?;
+            check(unsafe { AddSIDToBoundaryDescriptor(&mut boundary.0, administrators.0) })?;
+            // SECURITY_MANDATORY_HIGH_RID.
+            let high = sid_of("S-1-16-12288")?;
+            // SAFETY: as above, with a mandatory label SID.
+            check(unsafe { AddIntegrityLabelToBoundaryDescriptor(&mut boundary.0, high.0) })?;
             Ok(boundary)
         }
     }
@@ -1284,9 +1297,9 @@ mod system {
 
     /// Creates the private namespace `alias` within the Administrators' boundary, carrying the
     /// security descriptor `sddl` (CreatePrivateNamespaceW); where it exists, opens it
-    /// (OpenPrivateNamespaceW). Answers whether this call created it; `None` where it exists but can
+    /// (OpenPrivateNamespaceW). Answers whether this call created it; the inner error where it exists but can
     /// be opened no more — its creator has closed it, and it is about to be gone.
-    fn namespace(alias: &str, sddl: &str) -> io::Result<Option<(Namespace, bool)>> {
+    fn namespace(alias: &str, sddl: &str) -> io::Result<Result<(Namespace, bool), io::Error>> {
         let boundary = Boundary::of_the_administrators(alias)?;
         let descriptor = SecurityDescriptor::from_sddl(sddl)?;
         let attributes = descriptor.attributes();
@@ -1296,7 +1309,7 @@ mod system {
         let created =
             unsafe { CreatePrivateNamespaceW(&attributes, boundary.0, wide_alias.as_ptr()) };
         if !created.is_null() {
-            return Ok(Some((Namespace(created), true)));
+            return Ok(Ok((Namespace(created), true)));
         }
         let error = io::Error::last_os_error();
         if error.raw_os_error() != Some(ALREADY_EXISTS) {
@@ -1304,7 +1317,16 @@ mod system {
         }
         // SAFETY: as above.
         let opened = unsafe { OpenPrivateNamespaceW(boundary.0, wide_alias.as_ptr()) };
-        Ok((!opened.is_null()).then(|| (Namespace(opened), false)))
+        if !opened.is_null() {
+            return Ok(Ok((Namespace(opened), false)));
+        }
+        // Existing, and not to be opened: its creator has closed it (Object Namespaces) — or this
+        // process may not open it, which no decay ends.
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::PermissionDenied {
+            return Err(error);
+        }
+        Ok(Err(error))
     }
 
     /// The install lock this thread owns: a mutex in a private namespace this process created.
@@ -1326,8 +1348,10 @@ mod system {
 
     /// How [`hold_install_lock`] went.
     pub enum Taken {
-        /// Taken; `abandoned` where a holder before ended without releasing it
-        /// (`WAIT_ABANDONED`) — an install, uninstall, start or stop that ended incompletely.
+        /// Taken; `abandoned` where this process was waiting on the lock while its holder ended
+        /// without releasing it (`WAIT_ABANDONED`) — an install, uninstall, start or stop that
+        /// ended incompletely. A holder that ended while nobody waited leaves nothing to tell: its
+        /// namespace goes with it, and the next process creates one anew.
         Held { held: Held, abandoned: bool },
         /// Still held by another after the wait.
         Busy,
@@ -1384,12 +1408,18 @@ mod system {
         const WAIT_TIMEOUT: u32 = 0x102;
         let until = std::time::Instant::now() + within;
         let mut abandoned = false;
+        let mut unopened = None;
         while std::time::Instant::now() < until {
-            let Some((namespace, created)) = namespace(alias, sddl)? else {
-                // Closed by its creator, and about to be gone: create one anew.
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                continue;
+            let (namespace, created) = match namespace(alias, sddl)? {
+                Ok(namespace) => namespace,
+                Err(e) => {
+                    // Closed by its creator, and about to be gone: create one anew.
+                    unopened = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                }
             };
+            unopened = None;
             let mutex = install_mutex(alias, name, sddl)?;
             let left = until.saturating_duration_since(std::time::Instant::now());
             let milliseconds = u32::try_from(left.as_millis()).unwrap_or(u32::MAX - 1);
@@ -1410,7 +1440,15 @@ mod system {
             // Another's namespace, let go by its creator: begin again in one of this process's own.
             drop(held);
         }
-        Ok(Taken::Busy)
+        // A namespace that existed at every look and could not be opened at the last is no lock
+        // another holds, but one that does not decay: said as what it is.
+        match unopened {
+            Some(e) => Err(io::Error::new(
+                e.kind(),
+                format!("the namespace {alias} exists and cannot be opened: {e}"),
+            )),
+            None => Ok(Taken::Busy),
+        }
     }
 
     #[link(name = "kernel32")]
@@ -1938,6 +1976,16 @@ mod lock_tests {
     #[test]
     fn the_install_lock_excludes_across_logon_sessions() {
         let dir = tempfile::tempdir().expect("tempdir");
+        // What LocalSystem runs lies where only it and the Administrators may write: nothing can
+        // put another script in its place before the task runs it.
+        super::files::Entry::open(dir.path(), super::files::Access::Dacl, false)
+            .and_then(|entry| {
+                entry.set_dacl(
+                    &super::acl::Dacl::parse("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+                        .expect("a DACL"),
+                )
+            })
+            .expect("the directory made private");
         let alias = format!("fleet-lock-test-{}", std::process::id());
         let marker = dir.path().join("held");
         let log = dir.path().join("helper.log");
