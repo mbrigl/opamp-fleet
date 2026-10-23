@@ -1709,11 +1709,22 @@ impl Connection {
             None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, CLOSED)),
         }
 
+        Ok(Connection::pumped(read, write))
+    }
+
+    /// The connection over `read` and `write`, its handshake made: a task that writes the requests
+    /// and one that dispatches the replies.
+    fn pumped<R, W>(mut read: R, mut write: W) -> Arc<Connection>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let (requests, mut outgoing) = mpsc::unbounded_channel::<Zeroizing<Vec<u8>>>();
-        let (connection_tx, connection_rx) = oneshot::channel::<Weak<Connection>>();
+        let (reader_tx, reader_rx) = oneshot::channel::<Weak<Connection>>();
+        let (writer_tx, writer_rx) = oneshot::channel::<Weak<Connection>>();
         // Holds the connection weakly, so it does not keep the senders below alive.
         let reader = tokio::spawn(async move {
-            let Ok(weak) = connection_rx.await else {
+            let Ok(weak) = reader_rx.await else {
                 return;
             };
             while let Ok(Some(reply)) = read_frame::<_, Reply>(&mut read).await {
@@ -1731,10 +1742,17 @@ impl Connection {
         // the service is. Where the senders are gone the read half goes too, and with both halves
         // the connection: a named pipe has no half to close, so the service learns that the
         // Client is gone only once the pipe is closed, and nobody waits for a reply any more.
-        // Where the service is gone the reader is left to see it, and to fail what waits.
+        // Where a write fails the service is gone, and what waits for it fails at once, whether
+        // or not the reader has seen the end yet.
         let writer = tokio::spawn(async move {
+            let Ok(weak) = writer_rx.await else {
+                return;
+            };
             while let Some(frame) = outgoing.recv().await {
                 if write.write_all(&frame).await.is_err() {
+                    if let Some(connection) = weak.upgrade() {
+                        connection.fail_all();
+                    }
                     return;
                 }
             }
@@ -1747,8 +1765,9 @@ impl Connection {
             next_id: AtomicU64::new(1),
             routes: Mutex::new(Routes::default()),
         });
-        let _ = connection_tx.send(Arc::downgrade(&connection));
-        Ok(connection)
+        let _ = reader_tx.send(Arc::downgrade(&connection));
+        let _ = writer_tx.send(Arc::downgrade(&connection));
+        connection
     }
 
     /// Whether the service is gone: its replies have ended, or a request could not be written.
@@ -2340,6 +2359,63 @@ pub(crate) mod peer {
             Request::Start { id, .. } => vec![Reply::Started { id, pid: u32::MAX }],
             _ => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod pump_tests {
+    use super::*;
+
+    /// A write half whose every write fails, as one to a service that went does.
+    struct Gone;
+
+    impl AsyncWrite for Gone {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            std::task::Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A request the Client cannot write fails what waits for the service at once, before the
+    /// reader has seen the service go — here it never does: a start must not wait for ever.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_write_that_fails_fails_what_waits() {
+        let (read, _open) = tokio::io::duplex(64);
+        let connection = Connection::pumped(read, Gone);
+        let launch = Launch {
+            program: PathBuf::from("agent"),
+            args: Vec::new(),
+            env: Vec::new(),
+            endpoint_token: None,
+            working_dir: None,
+            own_process_group: false,
+        };
+        let started = tokio::time::timeout(
+            Duration::from_secs(5),
+            Arc::clone(&connection).start("test", launch, None),
+        )
+        .await
+        .expect("the start ends");
+        assert!(started.is_err());
+        assert!(connection.is_closed());
     }
 }
 

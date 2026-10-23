@@ -222,6 +222,26 @@ pub fn reregister(
         .map_err(|e| format!("cannot re-register the service {service_name}: {e}"))
 }
 
+/// What the service `service_name` is doing, as the SCM reports it: a service it does not know is
+/// stopped.
+#[cfg(windows)]
+pub fn activity(service_name: &str) -> super::manager::Activity {
+    use super::manager::Activity;
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let state = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .and_then(|manager| manager.open_service(service_name, ServiceAccess::QUERY_STATUS))
+        .and_then(|service| service.query_status())
+        .map(|status| status.current_state);
+    match state {
+        Ok(ServiceState::StartPending | ServiceState::ContinuePending) => Activity::Starting,
+        Ok(ServiceState::StopPending) => Activity::Stopping,
+        Ok(ServiceState::Stopped) | Err(_) => Activity::Stopped,
+        Ok(_) => Activity::Running,
+    }
+}
+
 /// The registration of the service `service_name` as the SCM holds it: its registry key, and the
 /// logon account it names (ADR-0059 clause 1). `None` where no such service is registered.
 ///

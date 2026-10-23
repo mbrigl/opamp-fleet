@@ -210,10 +210,12 @@ fn install(
     // clause 2): `--run-as`, else the account the existing unit or plist names, else the owner of
     // a data root that unit lost its account on, else root. A name that does not exist, or a
     // Windows form that would need a password, fails here.
+    let registered = manager::registration(level)?;
+    let registered_agents = manager::agents_registration(level)?;
     let account = run_as::decide(
         level,
         args.run_as.as_deref(),
-        manager::registration(level)?.as_ref(),
+        registered.as_ref(),
         &data_root,
         manager::service_name(),
     )?;
@@ -224,7 +226,7 @@ fn install(
     let process = run_as::decide_process_account(
         args.process_account.as_deref(),
         args.no_process_account,
-        manager::agents_registration(level)?.as_ref(),
+        registered_agents.as_ref(),
         run_as.as_ref(),
         manager::agents_supported(level),
     )?;
@@ -389,6 +391,38 @@ fn install(
     // Dropped (ADR-0059 clause 1): the Client's unit no longer names the second service, which is
     // stopped and deregistered after it.
     let dropped = args.no_process_account && manager::remove_agents(level)?;
+
+    // What a process account dropped or replaced, or a Client's account replaced, was granted on
+    // Windows is withdrawn from it, and what it owns given to the Administrators, as a change of
+    // owner withdraws it on Unix (ADR-0059 clauses 1 and 6).
+    #[cfg(windows)]
+    {
+        let supervisors_root = config.supervisors_root();
+        let roots = [
+            layout_root.as_path(),
+            data_root.as_path(),
+            state_dir.as_path(),
+            supervisors_root.as_path(),
+        ];
+        let formers = [
+            (
+                registered_agents.as_ref().and_then(|r| r.account.clone()),
+                process.as_ref().map(|p| p.account().to_string()),
+            ),
+            (
+                registered.as_ref().and_then(|r| r.account.clone()),
+                run_as.as_ref().map(|r| r.account().to_string()),
+            ),
+        ];
+        for (former, current) in formers {
+            let Some(former) = former else {
+                continue;
+            };
+            for skipped in run_as::withdraw(&former, current.as_deref(), &roots)? {
+                println!("warning: {}", skipped.warning(&former));
+            }
+        }
+    }
 
     // The handover (ADR-0042 clause 2), on every registration that runs under an account — a kept
     // one and root included: both roots belong to it — config and state because the service reads
