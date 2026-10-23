@@ -7,11 +7,13 @@
 //! logon account is overwritten — so an install that failed between the switch and the end of the
 //! withdrawal would leave the grants in place with nothing to find them by. And an install stops
 //! both services before it changes anything, so one that failed after the stop would leave a
-//! service that ran stopped, with nothing to say it ran. Both are therefore written down after the
-//! stop and before the first change, in one write; the withdrawal is struck once it is done, the
-//! services once they run again, and the record goes with the last of them. Every install
-//! finishes what it finds written; an uninstall completes the withdrawal and deregisters the
-//! services whether or not it can.
+//! service that ran stopped, with nothing to say it ran. Both are therefore written down before
+//! the stop, in one write — what runs as it is about to be stopped; a stop that fails strikes it
+//! again — and the withdrawal is struck once it is done, the services once they run again, and the
+//! record goes with the last of them. Every install finishes what it finds written; an operator's
+//! `service start` or `service stop` strikes the services, whose run state is the operator's from
+//! then on; an uninstall completes the withdrawal once both services are stopped, and deregisters
+//! them whether or not it can.
 //!
 //! The record is text: a line `client <SID>` or `process <SID>` per former account, by the part it
 //! had, `root <path>` per root, and `resume client` or `resume agents` per service to start again.
@@ -504,6 +506,49 @@ mod tests {
         );
         resumed(&store, &mut next).expect("struck");
         assert_eq!(*store.text.borrow(), None, "and the record is gone");
+    }
+
+    /// An operator's `service start` or `service stop` after a failed install strikes what that
+    /// install recorded to start again — the operator decides when the services run from then on,
+    /// and the next install does not start what was stopped by hand — while a withdrawal still due
+    /// stays recorded (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn an_operators_start_or_stop_strikes_what_is_to_run_again() {
+        let store = Memory::default();
+        let mut failed = Pending::default();
+        failed.add(
+            [(Part::Process, "S-1-5-19".to_string())],
+            &[Path::new("/root")],
+        );
+        failed.halted(Halted {
+            client: true,
+            agents: true,
+        });
+        record(&store, &failed).expect("recorded");
+
+        // `service stop` — or `service start` — then strikes what is to run again.
+        let mut pending = read(&store).expect("read");
+        resumed(&store, &mut pending).expect("struck");
+        let left = read(&store).expect("read");
+        assert_eq!(left.resume, Halted::default(), "nothing to start again");
+        assert_eq!(left.formers, failed.formers, "the withdrawal stays due");
+
+        // The next install's stop finds both stopped and starts nothing again.
+        let mut next = read(&store).expect("read");
+        next.halted(Halted::default());
+        assert_eq!(next.resume, Halted::default());
+
+        // With nothing else recorded, the strike removes the record.
+        let only_resume = Memory::default();
+        let mut pending = Pending::default();
+        pending.halted(Halted {
+            client: true,
+            agents: false,
+        });
+        record(&only_resume, &pending).expect("recorded");
+        resumed(&only_resume, &mut pending).expect("struck");
+        assert_eq!(*only_resume.text.borrow(), None);
     }
 
     /// A record whose removal fails is not passed off as removed: the completion says so, and

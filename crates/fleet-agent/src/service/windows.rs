@@ -198,6 +198,16 @@ fn under_the_scm(
 /// error code that means something else.
 const SERVICE_SPECIFIC_FAILURE: u32 = 1;
 
+/// How long a pending transition may take before the SCM treats the service as hung: a stop of
+/// the second service closes its programs (`CLOSE_GRACE`), drains their output (`OUTPUT_DRAIN`)
+/// and waits for their jobs to empty (`TREES_END`), each bounded; a little more on top.
+const WAIT_HINT: Duration = Duration::from_secs(
+    crate::supervisor::channel::CLOSE_GRACE.as_secs()
+        + crate::supervisor::channel::OUTPUT_DRAIN.as_secs()
+        + crate::supervisor::channel::TREES_END.as_secs()
+        + 5,
+);
+
 /// Build a `ServiceStatus` for the given state and accepted controls. The wait hint bounds how
 /// long the SCM grants for a pending transition; the shutdown path finishes well inside it
 /// (system shutdown grants ~5 s total — `WaitToKillServiceTimeout`).
@@ -211,7 +221,7 @@ fn status(current_state: ScmState, controls_accepted: ServiceControlAccept) -> S
         controls_accepted,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
-        wait_hint: Duration::from_secs(10),
+        wait_hint: WAIT_HINT,
         process_id: None,
     }
 }

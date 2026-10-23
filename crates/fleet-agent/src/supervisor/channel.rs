@@ -128,7 +128,7 @@ pub(crate) const OUTPUT_DRAIN: Duration = Duration::from_secs(1);
 
 /// How long the end of a connection waits for what its programs' trees still hold to end, once
 /// ended: on Windows a job's processes end asynchronously after `TerminateJobObject`.
-const TREES_END: Duration = Duration::from_secs(5);
+pub(crate) const TREES_END: Duration = Duration::from_secs(5);
 
 /// Ends every process the trees hold and waits, up to [`TREES_END`], until none holds one — so that
 /// a stop that reports the second service stopped leaves nothing it started holding a handle
