@@ -167,7 +167,7 @@ fn service_command(
 #[cfg(windows)]
 fn complete_withdrawal(
     store: &dyn fleet_agent::service::withdrawal::Store,
-    pending: &fleet_agent::service::withdrawal::Pending,
+    pending: &mut fleet_agent::service::withdrawal::Pending,
     kept: &[(fleet_agent::service::withdrawal::Part, &str)],
 ) -> Result<(), String> {
     fleet_agent::service::withdrawal::complete(store, pending, kept, |sid, roots| {
@@ -179,24 +179,50 @@ fn complete_withdrawal(
     })
 }
 
-/// `service uninstall` on Windows: a withdrawal an install left undone is completed first, and its
-/// key removed — the services go, and nothing would name the former accounts again. One that cannot
-/// be completed fails the uninstall before anything is deregistered.
+/// `service uninstall` on Windows: both services are stopped and waited for, a withdrawal an
+/// install left undone is completed — the services go, and nothing would name the former accounts
+/// again — and its record removed; then both are deregistered, always. A withdrawal that cannot be
+/// completed stays recorded and is reported, after the deregistration: an uninstall that left both
+/// services registered would leave them starting at the next boot.
 #[cfg(windows)]
 fn uninstall(level: ServiceLevel) -> Result<(), String> {
-    use fleet_agent::service::withdrawal::{self, Registry};
+    use fleet_agent::service::withdrawal::{self, Registry, Store as _};
     let store = Registry::of_the_install();
-    let pending = withdrawal::read(&store)?;
-    if !pending.is_empty() {
-        complete_withdrawal(&store, &pending, &[]).map_err(|e| {
-            format!(
-                "the service is not uninstalled: a withdrawal an install left undone cannot be \
-                 completed ({e}). Nothing was deregistered"
-            )
-        })?;
+    let mut unfinished = Vec::new();
+    if let Err(e) = manager::halt_for_change(level) {
+        println!("warning: {e}; the services are deregistered all the same");
     }
-    store.remove()?;
-    manager::uninstall(level)
+    let completed = withdrawal::read(&store).and_then(|mut pending| {
+        if pending.withdrawal_due() {
+            complete_withdrawal(&store, &mut pending, &[])?;
+        }
+        Ok(())
+    });
+    match completed {
+        Ok(()) => {
+            if let Err(e) = store.remove() {
+                unfinished.push(e);
+            }
+        }
+        Err(e) => unfinished.push(format!(
+            "what former accounts were granted is not withdrawn: {e}. It stays recorded in {}; \
+             `supervisor service install` completes it, and a later `supervisor service \
+             uninstall` too",
+            store.describe()
+        )),
+    }
+    if manager::registration(level)?.is_some() || manager::agents_registration(level)?.is_some() {
+        manager::uninstall(level)?;
+    }
+    if unfinished.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} was uninstalled, and not all of it: {}",
+            manager::service_name(),
+            unfinished.join("; ")
+        ))
+    }
 }
 
 #[cfg(not(windows))]
@@ -304,23 +330,6 @@ fn install(
             }
         }
         formers
-    };
-    // Nothing may run under an account whose rights this install changes or takes away: where a
-    // withdrawal is due, or a process account is or was registered — whose Managed Processes could
-    // hold a directory the restriction, the take-over or the withdrawal must change — both services
-    // are stopped, and waited for until their processes have ended, the second service's programs
-    // with them, before anything is written (ADR-0059 clauses 1, 4 and 6). One that does not end
-    // in time fails the install, changing nothing; once it has succeeded, what ran is started
-    // again.
-    #[cfg(windows)]
-    let halted = if !formers.is_empty()
-        || !pending.is_empty()
-        || registered_agents.is_some()
-        || process.is_some()
-    {
-        Some(manager::halt_for_change()?)
-    } else {
-        None
     };
     // The second service's socket lives in a directory of the process account's, which no root
     // may be (ADR-0059 clause 9).
@@ -443,133 +452,156 @@ fn install(
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
     }
-    // What the process account owns there is its own, and left as it is (ADR-0059 clause 10).
+    // Nothing may run under an account whose rights this install changes or takes away, nor under
+    // a registration it rewrites: on Windows every install stops both services here, and waits
+    // until their processes have ended — the second service's programs with them — before the
+    // restriction, the take-over, the withdrawal and the switch of the SCM (ADR-0059 clauses 1, 4
+    // and 6). A stop that fails starts again what it stopped, and the install changes nothing.
+    // What ran is recorded with the withdrawal due, in one write before the first change, and
+    // started again once an install has succeeded: this one, or the next where this one fails.
     #[cfg(windows)]
-    let process_sid = process.as_ref().map(|p| p.sid().to_string());
-    #[cfg(not(windows))]
-    let process_sid: Option<String> = None;
-    let created_outside = windows_rights::restrict(level, &restrictions, process_sid.as_deref())?;
-    if let Some(bootstrap) = unasked {
-        println!("enrolling with {}", bootstrap.describe());
-        written.bootstrap = Some(bootstrap);
-    }
-    // Before anything is staged or registered (ADR-0020 clause 5): an enrolment that is stopped
-    // leaves the answered file and nothing else.
-    if let Some(bootstrap) = &written.bootstrap {
-        enrol::run(&config, bootstrap)?;
-    }
-    // And held to what the Client needs at startup. A packaged install registers the service even
-    // so — it has an endpoint and no client identity to write — but never starts it, and the
-    // service refuses to run until the file names one (ADR-0019). Said loudly here.
-    if let Err(e) = config.check_admission() {
-        println!(
-            "warning: {}: {e}. The service is registered, and refuses to start until this is set \
-             (or re-run with --interactive).",
-            config_path.display()
-        );
-    }
-
-    let layout = layout::Layout::new(&layout_root);
-    let program = layout::stage_current_exe(&layout)?;
-
-    // Written down before the SCM is switched, which forgets the former accounts: every root the
-    // hand-over grants the Client anything in, a configuration and its copies outside the data
-    // root among them.
-    #[cfg(windows)]
-    {
-        let supervisors_root = config.supervisors_root();
-        let mut roots = vec![
-            layout_root.as_path(),
-            data_root.as_path(),
-            state_dir.as_path(),
-            supervisors_root.as_path(),
-            config_path.as_path(),
-        ];
-        roots.extend(created_outside.iter().map(PathBuf::as_path));
-        roots.extend(written.copies.iter().map(PathBuf::as_path));
-        pending.add(formers, &roots);
-        if !pending.is_empty() {
+    pending
+        .halted(manager::halt_for_change(level).map_err(|e| format!("{e}. Nothing was changed"))?);
+    let finished = (|| -> Result<(PathBuf, bool), String> {
+        #[cfg(windows)]
+        {
+            let supervisors_root = config.supervisors_root();
+            let mut roots = vec![
+                layout_root.as_path(),
+                data_root.as_path(),
+                state_dir.as_path(),
+                supervisors_root.as_path(),
+                config_path.as_path(),
+            ];
+            roots.extend(written.copies.iter().map(PathBuf::as_path));
+            pending.add(formers, &roots);
             fleet_agent::service::withdrawal::record(&withdrawal, &pending)?;
         }
-    }
-
-    manager::install(&manager::InstallSpec {
-        level,
-        program: program.clone(),
-        config_path: config_path.clone(),
-        state_dir: state_dir.clone(),
-        run_as: run_as.as_ref().map(|r| r.account().to_string()),
-        agents: agents_spec(process.as_ref(), run_as.as_ref()),
-    })?;
-    // Dropped (ADR-0059 clause 1): the Client's unit no longer names the second service, which is
-    // stopped and deregistered after it.
-    let dropped = args.no_process_account && manager::remove_agents(level)?;
-
-    // What a former account was granted on Windows is withdrawn from it now that the SCM names it
-    // no more, and what it owns given to the Administrators, as a change of owner withdraws it on
-    // Unix (ADR-0059 clauses 1 and 6); the record goes once all of it is done. Before the
-    // hand-over and the share of the layout, which grant what the accounts named now are to hold.
-    #[cfg(windows)]
-    if !pending.is_empty() {
-        use fleet_agent::service::withdrawal::Part;
-        let kept: Vec<(Part, &str)> = process
-            .iter()
-            .map(|p| (Part::Process, p.sid().as_str()))
-            .chain(run_as.iter().map(|r| (Part::Client, r.sid().as_str())))
-            .collect();
-        complete_withdrawal(&withdrawal, &pending, &kept)?;
-    }
-
-    // The handover (ADR-0042 clause 2), on every registration that runs under an account — a kept
-    // one and root included: both roots belong to it — config and state because the service reads
-    // and rewrites them (ADR-0017), the executable layout because the self-update that stages into
-    // it *is* the service (ADR-0018). The state directory is created first: the daemon must not
-    // need rights on its parent to begin. Where a process account is registered, what it keeps
-    // there stays its own (ADR-0059 clause 10): every package upgrade re-registers.
-    if let Some(run_as) = &run_as {
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| format!("cannot create the state directory: {e}"))?;
-        let kept = process.as_ref();
-        let mut skipped =
-            run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path], kept)?;
-        // A Supervisors' root this install created and cut on Windows is the service's to write
-        // too (ADR-0017 clause 21); none is created on Unix.
-        skipped.extend(
-            run_as.hand_over(
-                &created_outside
-                    .iter()
-                    .filter(|dir| **dir != state_dir)
-                    .map(PathBuf::as_path)
-                    .collect::<Vec<_>>(),
-                kept,
-            )?,
-        );
-        // The copy beside a configuration named outside the data root is not under it.
-        skipped.extend(
-            run_as.hand_over(
-                &written
-                    .copies
-                    .iter()
-                    .map(PathBuf::as_path)
-                    .collect::<Vec<_>>(),
-                kept,
-            )?,
-        );
-        for skipped in skipped {
-            println!("warning: {}", skipped.warning(run_as.account()));
+        // What the process account owns there is its own, and left as it is (ADR-0059 clause 10).
+        #[cfg(windows)]
+        let process_sid = process.as_ref().map(|p| p.sid().to_string());
+        #[cfg(not(windows))]
+        let process_sid: Option<String> = None;
+        let created_outside =
+            windows_rights::restrict(level, &restrictions, process_sid.as_deref())?;
+        if let Some(bootstrap) = unasked {
+            println!("enrolling with {}", bootstrap.describe());
+            written.bootstrap = Some(bootstrap);
         }
-    }
-    // The second service runs from the layout, which a root taken over or cut off on Windows
-    // grants the process account nothing of (ADR-0059 clause 2).
+        // Before anything is staged or registered (ADR-0020 clause 5): an enrolment that is stopped
+        // leaves the answered file and nothing else.
+        if let Some(bootstrap) = &written.bootstrap {
+            enrol::run(&config, bootstrap)?;
+        }
+        // And held to what the Client needs at startup. A packaged install registers the service
+        // even so — it has an endpoint and no client identity to write — but never starts it, and
+        // the service refuses to run until the file names one (ADR-0019). Said loudly here.
+        if let Err(e) = config.check_admission() {
+            println!(
+                "warning: {}: {e}. The service is registered, and refuses to start until this is \
+                 set (or re-run with --interactive).",
+                config_path.display()
+            );
+        }
+
+        let layout = layout::Layout::new(&layout_root);
+        let program = layout::stage_current_exe(&layout)?;
+
+        manager::install(&manager::InstallSpec {
+            level,
+            program: program.clone(),
+            config_path: config_path.clone(),
+            state_dir: state_dir.clone(),
+            run_as: run_as.as_ref().map(|r| r.account().to_string()),
+            agents: agents_spec(process.as_ref(), run_as.as_ref()),
+        })?;
+        // Dropped (ADR-0059 clause 1): the Client's unit no longer names the second service, which
+        // is stopped and deregistered after it.
+        let dropped = args.no_process_account && manager::remove_agents(level)?;
+
+        // What a former account was granted on Windows is withdrawn from it now that the SCM names
+        // it no more, and what it owns given to the Administrators, as a change of owner withdraws
+        // it on Unix (ADR-0059 clauses 1 and 6); it is struck from the record once all of it is
+        // done. Before the hand-over and the share of the layout, which grant what the accounts
+        // named now are to hold.
+        #[cfg(windows)]
+        if pending.withdrawal_due() {
+            use fleet_agent::service::withdrawal::Part;
+            let kept: Vec<(Part, &str)> = process
+                .iter()
+                .map(|p| (Part::Process, p.sid().as_str()))
+                .chain(run_as.iter().map(|r| (Part::Client, r.sid().as_str())))
+                .collect();
+            complete_withdrawal(&withdrawal, &mut pending, &kept)?;
+        }
+
+        // The handover (ADR-0042 clause 2), on every registration that runs under an account — a
+        // kept one and root included: both roots belong to it — config and state because the
+        // service reads and rewrites them (ADR-0017), the executable layout because the
+        // self-update that stages into it *is* the service (ADR-0018). The state directory is
+        // created first: the daemon must not need rights on its parent to begin. Where a process
+        // account is registered, what it keeps there stays its own (ADR-0059 clause 10): every
+        // package upgrade re-registers.
+        if let Some(run_as) = &run_as {
+            std::fs::create_dir_all(&state_dir)
+                .map_err(|e| format!("cannot create the state directory: {e}"))?;
+            let kept = process.as_ref();
+            let mut skipped =
+                run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path], kept)?;
+            // A Supervisors' root this install created and cut on Windows is the service's to
+            // write too (ADR-0017 clause 21); none is created on Unix.
+            skipped.extend(
+                run_as.hand_over(
+                    &created_outside
+                        .iter()
+                        .filter(|dir| **dir != state_dir)
+                        .map(PathBuf::as_path)
+                        .collect::<Vec<_>>(),
+                    kept,
+                )?,
+            );
+            // The copy beside a configuration named outside the data root is not under it.
+            skipped.extend(
+                run_as.hand_over(
+                    &written
+                        .copies
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .collect::<Vec<_>>(),
+                    kept,
+                )?,
+            );
+            for skipped in skipped {
+                println!("warning: {}", skipped.warning(run_as.account()));
+            }
+        }
+        // The second service runs from the layout, which a root taken over or cut off on Windows
+        // grants the process account nothing of (ADR-0059 clause 2).
+        #[cfg(windows)]
+        if let Some(process) = &process {
+            process.share_layout(&layout.versions_dir())?;
+        }
+        // What ran before the stop — before this install's, or an earlier one's that failed —
+        // runs again, now under the registration just made, and is struck from the record.
+        #[cfg(windows)]
+        {
+            manager::resume(level, pending.resume)?;
+            fleet_agent::service::withdrawal::resumed(&withdrawal, &mut pending)?;
+        }
+        Ok((program, dropped))
+    })();
+    // On Windows both services are stopped from the stop above on: an install that fails after it
+    // says so, and how they come back.
     #[cfg(windows)]
-    if let Some(process) = &process {
-        process.share_layout(&layout.versions_dir())?;
-    }
-    // What ran before the stop runs again, now under the registration just made.
-    #[cfg(windows)]
-    if let Some(halted) = halted {
-        manager::resume(level, halted)?;
-    }
+    let finished = finished.map_err(|e| {
+        format!(
+            "{e}\nBoth services are stopped, and stay stopped. Run `supervisor service install` \
+             again: once it succeeds it starts again what ran before this install, as recorded \
+             in {}. Or start both now with `supervisor service start`.",
+            fleet_agent::service::withdrawal::Store::describe(&withdrawal)
+        )
+    });
+    let (program, dropped) = finished?;
 
     drop(held_root);
     println!("installed {}", manager::service_name());

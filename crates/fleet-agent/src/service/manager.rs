@@ -1125,47 +1125,89 @@ pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Which of the two services ran before [`halt_for_change`] stopped them.
-#[cfg(windows)]
-#[derive(Debug, Clone, Copy, Default)]
+/// Which of the two services ran before a stop for a change stopped them, and are to run again
+/// once the change has succeeded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Halted {
-    client: bool,
-    agents: bool,
+    pub client: bool,
+    pub agents: bool,
+}
+
+/// Stops the Client, then the second service, through `stop`, which answers whether the service
+/// ran. Where the second cannot be stopped, the Client is started again through `start` if this
+/// stopped it: a halt that fails leaves both as it found them.
+///
+/// # Errors
+/// Returns why a service could not be stopped, and why the Client could not be started again.
+#[cfg(any(windows, test))]
+fn halt_with(
+    stop: &mut dyn FnMut(&ServiceLabel) -> Result<bool, String>,
+    start: &mut dyn FnMut(&ServiceLabel) -> Result<(), String>,
+) -> Result<Halted, String> {
+    let client = stop(&label())?;
+    match stop(&agents_label()) {
+        Ok(agents) => Ok(Halted { client, agents }),
+        Err(e) if client => match start(&label()) {
+            Ok(()) => Err(e),
+            Err(again) => Err(format!(
+                "{e}; and the Client, stopped for it, cannot be started again: {again}"
+            )),
+        },
+        Err(e) => Err(e),
+    }
 }
 
 /// Stops the Client, then the second service, and waits until each has stopped and its process
 /// has ended — the second service's programs with it (ADR-0059 clause 4) — so that nothing runs
-/// under an account whose rights an install is about to change or take away. Returns which ran.
+/// under an account whose rights an install is about to change or take away, or a registration it
+/// is about to rewrite. Returns which ran.
 ///
 /// # Errors
 /// Returns why one could not be stopped, or that one had not ended within the bound of a stop;
-/// the install then changes nothing.
+/// what this stopped is started again, and nothing is changed.
 #[cfg(windows)]
-pub fn halt_for_change() -> Result<Halted, String> {
-    let client = super::windows_config::stop_and_wait(&label().to_qualified_name(), STOPPING)?;
-    let agents =
-        super::windows_config::stop_and_wait(&agents_label().to_qualified_name(), STOPPING)?;
-    Ok(Halted { client, agents })
+pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, String> {
+    halt_with(
+        &mut |label| super::windows_config::stop_and_wait(&label.to_qualified_name(), STOPPING),
+        &mut |label| {
+            manager(level)?
+                .start(ServiceStartCtx {
+                    label: label.clone(),
+                })
+                .map_err(|e| format!("cannot start {label}: {e}"))
+        },
+    )
 }
 
-/// Starts again what [`halt_for_change`] stopped, once the install has succeeded: where the Client
-/// ran, both services as `service start` starts them — the second service where one is registered
-/// now — and where the second service alone ran and is registered still, that one. What did not
-/// run stays stopped.
+/// What [`resume`] starts, in order: where the Client ran, what `start` starts — the second
+/// service first where one is registered now and nothing pulls it in — and where the second
+/// service alone ran and is registered still, that one. What did not run stays stopped.
+#[cfg(any(windows, test))]
+fn resumed(halted: Halted, agents_registered: bool, pulled_in: bool) -> Vec<ServiceLabel> {
+    if halted.client {
+        return started(agents_registered, pulled_in);
+    }
+    if halted.agents && agents_registered {
+        return vec![agents_label()];
+    }
+    Vec::new()
+}
+
+/// Starts again what a stop for a change stopped, once the change has succeeded ([`resumed`]).
 ///
 /// # Errors
 /// Returns why a service could not be started.
 #[cfg(windows)]
 pub fn resume(level: ServiceLevel, halted: Halted) -> Result<(), String> {
-    if halted.client {
-        return NativeService::new(level).start();
-    }
-    if halted.agents && agents_registered(level) {
+    for label in resumed(halted, agents_registered(level), PULLED_IN) {
+        let which = if label == agents_label() {
+            "the second service"
+        } else {
+            "the service"
+        };
         manager(level)?
-            .start(ServiceStartCtx {
-                label: agents_label(),
-            })
-            .map_err(|e| format!("cannot start the second service: {e}"))?;
+            .start(ServiceStartCtx { label })
+            .map_err(|e| format!("cannot start {which}: {e}"))?;
     }
     Ok(())
 }
@@ -2277,6 +2319,87 @@ mod tests {
         );
     }
 
+    /// What a stop for a change stopped is started again in the order `start` starts it — the
+    /// second service first where nothing pulls it in — and where only the second service ran,
+    /// that one alone, while it is registered still; what did not run stays stopped (ADR-0059
+    /// clause 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_resume_starts_what_ran_in_the_order_start_starts_it() {
+        let both = Halted {
+            client: true,
+            agents: true,
+        };
+        assert_eq!(resumed(both, true, false), [agents_label(), label()]);
+        assert_eq!(resumed(both, true, true), [label()]);
+        assert_eq!(
+            resumed(both, false, false),
+            [label()],
+            "the second one dropped"
+        );
+        let agents_alone = Halted {
+            client: false,
+            agents: true,
+        };
+        assert_eq!(resumed(agents_alone, true, false), [agents_label()]);
+        assert!(resumed(agents_alone, false, false).is_empty(), "dropped");
+        assert!(resumed(Halted::default(), true, false).is_empty());
+    }
+
+    /// A stop for a change that cannot stop the second service starts the Client again where it
+    /// stopped it, and fails: it leaves both as it found them, and the install changes nothing
+    /// (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_halt_that_fails_changes_nothing() {
+        let mut started = Vec::new();
+        let failed = halt_with(
+            &mut |label| {
+                if *label == agents_label() {
+                    Err("did not stop in time".to_string())
+                } else {
+                    Ok(true)
+                }
+            },
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+        );
+        assert_eq!(failed, Err("did not stop in time".to_string()));
+        assert_eq!(started, [label()], "the Client runs again");
+
+        let mut started = Vec::new();
+        let failed = halt_with(
+            &mut |label| {
+                if *label == agents_label() {
+                    Err("did not stop in time".to_string())
+                } else {
+                    Ok(false)
+                }
+            },
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+        );
+        assert!(failed.is_err());
+        assert!(
+            started.is_empty(),
+            "a Client that did not run is not started"
+        );
+
+        let halted = halt_with(&mut |label| Ok(*label == agents_label()), &mut |_| {
+            panic!("nothing is started")
+        });
+        assert_eq!(
+            halted,
+            Ok(Halted {
+                client: false,
+                agents: true
+            })
+        );
+    }
     /// `start` starts the Client alone where its unit wants the second service, and the second
     /// service first where nothing does — launchd — and `stop` stops the Client and then the
     /// second service where one is registered — the second even when the Client's stop failed,

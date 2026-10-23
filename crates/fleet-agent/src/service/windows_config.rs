@@ -223,13 +223,20 @@ pub fn reregister(
 }
 
 /// ERROR_SERVICE_DOES_NOT_EXIST.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const NO_SERVICE: i32 = 1060;
 
 /// Whether `e` says that the SCM knows no such service.
 #[cfg(windows)]
 fn no_such_service(e: &windows_service::Error) -> bool {
     matches!(e, windows_service::Error::Winapi(e) if e.raw_os_error() == Some(NO_SERVICE))
+}
+
+/// What an SCM refusal with the system error `code` says a service is doing: one the SCM does not
+/// know is stopped; every other refusal says nothing of it.
+#[cfg(any(windows, test))]
+fn activity_on_refusal(code: Option<i32>) -> Option<super::manager::Activity> {
+    (code == Some(NO_SERVICE)).then_some(super::manager::Activity::Stopped)
 }
 
 /// What the service `service_name` is doing, as the SCM reports it: one it does not know
@@ -253,16 +260,21 @@ pub fn activity(service_name: &str) -> Result<super::manager::Activity, String> 
         Ok(ServiceState::StopPending) => Ok(Activity::Stopping),
         Ok(ServiceState::Stopped) => Ok(Activity::Stopped),
         Ok(_) => Ok(Activity::Running),
-        Err(e) if no_such_service(&e) => Ok(Activity::Stopped),
-        Err(e) => Err(format!(
-            "cannot ask the SCM what {service_name} is doing: {e}"
-        )),
+        Err(e) => {
+            let code = match &e {
+                windows_service::Error::Winapi(e) => e.raw_os_error(),
+                _ => None,
+            };
+            activity_on_refusal(code)
+                .ok_or_else(|| format!("cannot ask the SCM what {service_name} is doing: {e}"))
+        }
     }
 }
 
 /// Stops the service `service_name` and waits up to `within` until it has stopped and its process
-/// has ended; whether it was running — or starting, pausing or paused — before. One the SCM does
-/// not know, or that is stopped, is passed over.
+/// has ended; whether it was running — or starting, stopping, pausing or paused — before. One the
+/// SCM does not know, or that is stopped, is passed over: the SCM names no process of a stopped
+/// service, so one that reported `SERVICE_STOPPED` before this asked is not waited for.
 ///
 /// `SERVICE_STOPPED` is what the service reports before it ends, and its process "can be
 /// terminated at any time" after it (SetServiceStatus) — still running then, under the service's
@@ -308,14 +320,25 @@ pub fn stop_and_wait(service_name: &str, within: std::time::Duration) -> Result<
     if status.current_state == ServiceState::Stopped {
         return Ok(false);
     }
-    let was_running = status.current_state != ServiceState::StopPending;
-    // Its process, while it is the service's: once the service has stopped, the SCM names none.
-    let process = status
-        .process_id
-        .map(crate::win32::process_to_wait_for)
-        .transpose()
-        .map_err(|e| format!("cannot open the process of {service_name}: {e}"))?
-        .flatten();
+    // Running, starting, pausing or paused — and stopping, which a stop already under way found
+    // running: each is to run again once the change has succeeded.
+    let was_running = true;
+    // Its process, while it is the service's: opened, then confirmed by asking again — the same
+    // process, and the service not stopped — since a process that ended before it was opened may
+    // have left its id to another. Once the service has stopped, the SCM names none.
+    let mut process = None;
+    for _ in 0..3 {
+        let Some(pid) = status.process_id.filter(|pid| *pid != 0) else {
+            break;
+        };
+        let opened = crate::win32::process_to_wait_for(pid)
+            .map_err(|e| format!("cannot open the process of {service_name}: {e}"))?;
+        status = query()?;
+        if status.current_state != ServiceState::Stopped && status.process_id == Some(pid) {
+            process = opened;
+            break;
+        }
+    }
     loop {
         match status.current_state {
             ServiceState::Stopped => break,
@@ -402,4 +425,23 @@ fn sc(args: &[&str], value: &str, what: &str) -> Result<(), String> {
         output.status,
         String::from_utf8_lossy(&output.stdout).trim()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refusal of the SCM is read as a stopped service only where the SCM knows no such service
+    /// (1060); access denied, and every other refusal, says nothing of what it is doing.
+    /// Verifies: ADR-0059
+    #[test]
+    fn only_a_service_the_scm_does_not_know_is_stopped() {
+        assert_eq!(
+            activity_on_refusal(Some(1060)),
+            Some(super::super::manager::Activity::Stopped)
+        );
+        for code in [Some(5), Some(1062), Some(1061), None] {
+            assert_eq!(activity_on_refusal(code), None, "{code:?}");
+        }
+    }
 }
