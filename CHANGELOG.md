@@ -13,7 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [Unreleased]
+## [0.6.1]
 
 ### Added
 
@@ -91,7 +91,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   file that exists, and that no `FLEET_SERVER__…` variable is left in the Server's environment
   that is not meant for it.
 
-## [0.6.0]
+## [0.6.0] - 2026-10-20
 
 ### Added
 
