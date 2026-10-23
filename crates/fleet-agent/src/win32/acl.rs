@@ -184,7 +184,14 @@ impl Dacl {
                 fields[1] = new_flags;
                 Some(format!("({})", fields.join(";")))
             })
-            .collect()
+            .fold(Vec::new(), |mut passed: Vec<String>, ace| {
+                // An explicit ACE and an inherited one alike are passed on alike, once: the
+                // system holds no ACE twice.
+                if !passed.contains(&ace) {
+                    passed.push(ace);
+                }
+                passed
+            })
     }
 }
 
@@ -386,5 +393,27 @@ mod tests {
         );
         let protected = Dacl::parse("D:P(A;;0x1;;;LS)").expect("protected");
         assert_eq!(protected.inheriting(&parent, true), protected);
+
+        // A parent holding the same ACE as explicit and as inherited passes it on once, and a
+        // child holding explicit and inherited ACEs keeps the explicit ones and gets what the
+        // parent passes on in place of what it inherited before — as the CI saw a file under a
+        // directory whose ACEs a DACL set on a handle had left explicit.
+        let sub = Dacl::parse(
+            "D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)(A;OICI;0x1200a9;;;BU)\
+             (A;OICI;0x1200a9;;;WD)(A;OICIID;FA;;;LA)(A;OICIID;0x1200a9;;;BU)\
+             (A;OICIID;0x1200a9;;;WD)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)",
+        )
+        .expect("sub");
+        let file = Dacl::parse(
+            "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;LA)(A;;0x1200a9;;;BU)(A;;0x1200a9;;;WD)\
+             (A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;LA)(A;ID;0x1200a9;;;BU)(A;ID;0x1200a9;;;WD)",
+        )
+        .expect("file");
+        assert_eq!(
+            file.inheriting(&sub, false).text(),
+            "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;LA)(A;;0x1200a9;;;BU)(A;;0x1200a9;;;WD)\
+             (A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;LA)(A;ID;0x1200a9;;;BU)(A;ID;0x1200a9;;;WD)",
+            "no ACE twice"
+        );
     }
 }
