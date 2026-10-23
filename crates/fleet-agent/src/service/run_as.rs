@@ -355,6 +355,8 @@ pub struct RunAs {
     uid: u32,
     #[cfg(unix)]
     gid: u32,
+    #[cfg(windows)]
+    sid: crate::win32::Sid,
 }
 
 impl RunAs {
@@ -390,8 +392,17 @@ impl RunAs {
             windows_account_form(account, service)?;
             Ok(Self {
                 account: account.to_string(),
+                #[cfg(windows)]
+                sid: windows_sid(account)?,
             })
         }
+    }
+
+    /// The account's SID, resolved once, before the install has written anything.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn sid(&self) -> &crate::win32::Sid {
+        &self.sid
     }
 
     /// The account as the service manager must be told it.
@@ -474,7 +485,7 @@ impl RunAs {
         skipped: &mut Vec<Skipped>,
     ) -> Result<(), String> {
         use crate::win32::files::{grant_tree, Access, Entry, Passed};
-        let sid = windows_sid(&self.account)?;
+        let sid = &self.sid;
         let [on_dir, on_file] = handover_aces(sid.as_str(), process.is_some());
         let skip = process.map(ProcessAccount::sid);
         // For as short as the hand-over takes: what a Managed Process protected from the
@@ -815,7 +826,7 @@ pub fn decide_process_account(
         };
         let agents = super::manager::agents_service_name();
         let sid = windows_sid(&account).map_err(named)?;
-        let client_sid = windows_sid(client.account()).map_err(named)?;
+        let client_sid = client.sid().clone();
         check_windows_process_account(&account, &sid, &agents, client.account(), &client_sid)
             .map_err(named)?;
         Ok(Some(ProcessAccount {
@@ -841,32 +852,55 @@ fn windows_sid(account: &str) -> Result<crate::win32::Sid, String> {
     }
 }
 
-/// Withdraws from the account `former` — a process account dropped or replaced, or a Client's
-/// account replaced — what it was granted in `roots` and what it owns there, on Windows (ADR-0059
-/// clauses 1, 6 and 10): every ACE that allows it, explicit or inherited, on every entry, and what
-/// it owns given to the Administrators, as Unix withdraws it by a change of owner. Nothing where
-/// `former` is the account `current` the registration names now, or `LocalSystem`, which keeps
-/// full control of every root anyway. A root, or a root within one handed already, is walked
-/// once, never through a link and never into one.
+/// The SID of the account `former` a registration names, where what it was granted is to be
+/// withdrawn (ADR-0059 clauses 1 and 6): none where there is no former account, where it is named
+/// as one of `current` — the accounts the registration names now, each with its SID — or resolves
+/// to one of their SIDs, or where it is `LocalSystem`, which keeps full control of every root
+/// anyway. An account named as before is not looked up again.
+///
+/// # Errors
+/// Returns that `former` cannot be resolved — a group-managed service account whose domain cannot
+/// be reached among them — before the install has changed anything: what it was granted would
+/// otherwise stay granted.
+#[cfg(windows)]
+pub fn former_sid(
+    former: Option<&str>,
+    current: &[(&str, &crate::win32::Sid)],
+) -> Result<Option<crate::win32::Sid>, String> {
+    let Some(former) = former else {
+        return Ok(None);
+    };
+    if current
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(former))
+    {
+        return Ok(None);
+    }
+    let sid = windows_sid(former).map_err(|e| {
+        format!(
+            "what the former account {former} was granted cannot be withdrawn: {e}. Nothing was \
+             changed; run the install again once it can be found"
+        )
+    })?;
+    if sid.as_str() == crate::win32::LOCAL_SYSTEM || current.iter().any(|(_, kept)| **kept == sid) {
+        return Ok(None);
+    }
+    Ok(Some(sid))
+}
+
+/// Withdraws from the account of SID `former` — a process account dropped or replaced, or a
+/// Client's account replaced — what it was granted in `roots` and what it owns there, on Windows
+/// (ADR-0059 clauses 1, 6 and 10): every ACE that allows it, explicit or inherited, on every entry,
+/// and what it owns given to the Administrators, as Unix withdraws it by a change of owner. Nothing
+/// where `former` is `LocalSystem`, which keeps full control of every root anyway. A root, or a
+/// root within one walked already, is walked once, never through a link and never into one.
 ///
 /// # Errors
 /// Returns an error naming the first entry whose owner or DACL could not be changed.
 #[cfg(windows)]
-pub fn withdraw(
-    former: &str,
-    current: Option<&str>,
-    roots: &[&Path],
-) -> Result<Vec<Skipped>, String> {
+pub fn withdraw(former: &crate::win32::Sid, roots: &[&Path]) -> Result<Vec<Skipped>, String> {
     use crate::win32::files::{withdraw_tree, Access, Entry, Passed};
-    let sid = match windows_sid(former) {
-        Ok(sid) => sid,
-        Err(e) => {
-            println!("warning: nothing granted to {former} is withdrawn: {e}");
-            return Ok(Vec::new());
-        }
-    };
-    let kept = current.is_some_and(|current| windows_sid(current).ok().as_ref() == Some(&sid));
-    if kept || sid.as_str() == crate::win32::LOCAL_SYSTEM {
+    if former.as_str() == crate::win32::LOCAL_SYSTEM {
         return Ok(Vec::new());
     }
     let failed = |root: &Path, e: std::io::Error| {
@@ -886,7 +920,7 @@ pub fn withdraw(
         if top.link {
             return Err(format!("{} is a link or a junction", root.display()));
         }
-        let passed = withdraw_tree(&top, &sid, "BA").map_err(|e| failed(root, e))?;
+        let passed = withdraw_tree(&top, former, "BA").map_err(|e| failed(root, e))?;
         skipped.extend(passed.into_iter().map(|passed| match passed {
             Passed::Owned(path) | Passed::Unreadable(path) | Passed::Held(path) => {
                 Skipped::Unreadable(path)
@@ -1703,6 +1737,10 @@ mod tests {
         use crate::win32::files::{grant_tree, Access, Entry};
         const FORMER: &str = r"NT AUTHORITY\LocalService";
         let local_service = crate::win32::LOCAL_SERVICE;
+        let former = former_sid(Some(FORMER), &[])
+            .expect("resolved")
+            .expect("to withdraw");
+        assert_eq!(former.as_str(), local_service);
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("root");
         let config = root.join("config");
@@ -1726,7 +1764,7 @@ mod tests {
                 .and_then(|entry| entry.set_owner(local_service))
                 .expect("owned by the former account");
         }
-        let skipped = withdraw(FORMER, None, &[&root]).expect("withdrawn");
+        let skipped = withdraw(&former, &[&root]).expect("withdrawn");
         assert!(skipped.is_empty(), "{skipped:?}");
         for path in [
             root.clone(),
@@ -1750,12 +1788,15 @@ mod tests {
                 path.display()
             );
         }
-        assert!(
-            withdraw(FORMER, Some(FORMER), &[&root])
-                .expect("kept")
-                .is_empty(),
-            "an account kept is not withdrawn"
+        // An account kept — named as before, or resolving to an account named now — is no former
+        // account, and neither is LocalSystem.
+        assert_eq!(former_sid(Some(FORMER), &[(FORMER, &former)]), Ok(None));
+        assert_eq!(
+            former_sid(Some(r"NT AUTHORITY\LOCAL SERVICE"), &[("other", &former)]),
+            Ok(None)
         );
+        assert_eq!(former_sid(Some("LocalSystem"), &[]), Ok(None));
+        assert_eq!(former_sid(None, &[]), Ok(None));
 
         // A directory beneath, held open for deleting — as another service of the former account
         // could hold one — is no directory to pass over: the withdrawal fails and names it.
@@ -1770,8 +1811,19 @@ mod tests {
                 .open(&held)
                 .expect("held for deleting")
         };
-        let refused = withdraw(FORMER, None, &[&root]).expect_err("fails closed");
-        assert!(refused.contains("held"), "{refused}");
+        let refused = withdraw(&former, &[&root]).expect_err("fails closed");
+        assert!(refused.contains("held open for deleting"), "{refused}");
+    }
+
+    /// On Windows a former account that cannot be resolved fails the install before it has changed
+    /// anything, rather than leaving what it was granted granted (ADR-0059 clause 1).
+    /// Verifies: ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_former_account_that_cannot_be_found_fails_before_any_change() {
+        let refused =
+            former_sid(Some(r"NO-SUCH-DOMAIN\no-such-gmsa$"), &[]).expect_err("fails closed");
+        assert!(refused.contains("Nothing was changed"), "{refused}");
     }
 
     /// On Windows the hand-over grants the Client modify, and where a process account is

@@ -909,6 +909,76 @@ mod system {
         })
     }
 
+    /// Creates the file `path`, which must not exist, carrying the security descriptor `sddl` from
+    /// its first moment, and opens it for writing shared with nobody (`CREATE_NEW`, a share mode of
+    /// 0 and `lpSecurityAttributes`, CreateFileW): no other handle to it is ever open while this
+    /// one is.
+    ///
+    /// # Errors
+    /// Returns why it cannot be created: one that exists among them.
+    pub fn create_private(path: &std::path::Path, sddl: &str) -> io::Result<std::fs::File> {
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const CREATE_NEW: u32 = 1;
+        const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+        let descriptor = SecurityDescriptor::from_sddl(sddl)?;
+        let attributes = descriptor.attributes();
+        let name = wide(path.as_os_str());
+        // SAFETY: a NUL-terminated name and attributes whose descriptor outlives the call; the
+        // handle is owned below.
+        let handle = owned(unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        })?;
+        Ok(std::fs::File::from(handle))
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: Bool, process_id: u32) -> Handle;
+        fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    }
+
+    /// A handle to the process `pid` that can be waited for (`SYNCHRONIZE`, OpenProcess), or
+    /// `None` where no such process runs any more (`ERROR_INVALID_PARAMETER`).
+    ///
+    /// # Errors
+    /// Returns why it cannot be opened otherwise.
+    pub fn process_to_wait_for(pid: u32) -> io::Result<Option<OwnedHandle>> {
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        /// ERROR_INVALID_PARAMETER.
+        const GONE: i32 = 87;
+        // SAFETY: no pointers; the handle is owned below.
+        match owned(unsafe { OpenProcess(SYNCHRONIZE, 0, pid) }) {
+            Ok(handle) => Ok(Some(handle)),
+            Err(e) if e.raw_os_error() == Some(GONE) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Waits up to `within` for the process `process` to end (WaitForSingleObject); whether it
+    /// did.
+    ///
+    /// # Errors
+    /// Returns why it cannot be waited for.
+    pub fn ended_within(process: &OwnedHandle, within: std::time::Duration) -> io::Result<bool> {
+        const WAIT_OBJECT_0: u32 = 0;
+        const WAIT_TIMEOUT: u32 = 0x102;
+        // Below INFINITE, which never times out.
+        let milliseconds = u32::try_from(within.as_millis()).unwrap_or(u32::MAX - 1);
+        // SAFETY: a handle owned by the caller, open across the call.
+        match unsafe { WaitForSingleObject(process.as_raw_handle().cast(), milliseconds) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
     #[link(name = "advapi32")]
     extern "system" {
         fn GetSecurityDescriptorDacl(

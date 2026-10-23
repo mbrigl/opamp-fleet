@@ -230,6 +230,56 @@ fn install(
         run_as.as_ref(),
         manager::agents_supported(level),
     )?;
+    // What a former account was granted is withdrawn from it on Windows (ADR-0059 clauses 1 and 6):
+    // a process account dropped or replaced, and a Client's account replaced. Each is resolved
+    // here, before anything changes — one that cannot be found fails the install now, not after
+    // the SCM has forgotten it — and a withdrawal an earlier install left undone is read with
+    // them, to be completed by this one.
+    #[cfg(windows)]
+    let withdrawal = data_root.join(fleet_agent::service::withdrawal::FILE_NAME);
+    #[cfg(windows)]
+    let mut pending = fleet_agent::service::withdrawal::read(&withdrawal)?;
+    #[cfg(windows)]
+    let formers = {
+        use fleet_agent::service::withdrawal::Part;
+        let mut formers = Vec::new();
+        for (part, former, current) in [
+            (
+                Part::Process,
+                registered_agents
+                    .as_ref()
+                    .and_then(|r| r.account.as_deref()),
+                process.as_ref().map(|p| (p.account(), p.sid())),
+            ),
+            (
+                Part::Client,
+                registered.as_ref().and_then(|r| r.account.as_deref()),
+                run_as.as_ref().map(|r| (r.account(), r.sid())),
+            ),
+        ] {
+            if let Some(sid) = run_as::former_sid(former, current.as_slice())? {
+                formers.push((part, sid.as_str().to_string()));
+            }
+        }
+        formers
+    };
+    // Nothing may run under an account whose rights this install changes or takes away: where a
+    // withdrawal is due, or a process account is or was registered — whose Managed Processes could
+    // hold a directory the restriction, the take-over or the withdrawal must change — both services
+    // are stopped, and waited for until their processes have ended, the second service's programs
+    // with them, before anything is written (ADR-0059 clauses 1, 4 and 6). One that does not end
+    // in time fails the install, changing nothing; once it has succeeded, what ran is started
+    // again.
+    #[cfg(windows)]
+    let halted = if !formers.is_empty()
+        || !pending.is_empty()
+        || registered_agents.is_some()
+        || process.is_some()
+    {
+        Some(manager::halt_for_change()?)
+    } else {
+        None
+    };
     // The second service's socket lives in a directory of the process account's, which no root
     // may be (ADR-0059 clause 9).
     #[cfg(unix)]
@@ -380,6 +430,27 @@ fn install(
     let layout = layout::Layout::new(&layout_root);
     let program = layout::stage_current_exe(&layout)?;
 
+    // Written down before the SCM is switched, which forgets the former accounts: every root the
+    // hand-over grants the Client anything in, a configuration and its copies outside the data
+    // root among them.
+    #[cfg(windows)]
+    {
+        let supervisors_root = config.supervisors_root();
+        let mut roots = vec![
+            layout_root.as_path(),
+            data_root.as_path(),
+            state_dir.as_path(),
+            supervisors_root.as_path(),
+            config_path.as_path(),
+        ];
+        roots.extend(created_outside.iter().map(PathBuf::as_path));
+        roots.extend(written.copies.iter().map(PathBuf::as_path));
+        pending.add(formers, &roots);
+        if !pending.is_empty() {
+            fleet_agent::service::withdrawal::record(&withdrawal, &pending)?;
+        }
+    }
+
     manager::install(&manager::InstallSpec {
         level,
         program: program.clone(),
@@ -392,36 +463,25 @@ fn install(
     // stopped and deregistered after it.
     let dropped = args.no_process_account && manager::remove_agents(level)?;
 
-    // What a process account dropped or replaced, or a Client's account replaced, was granted on
-    // Windows is withdrawn from it, and what it owns given to the Administrators, as a change of
-    // owner withdraws it on Unix (ADR-0059 clauses 1 and 6).
+    // What a former account was granted on Windows is withdrawn from it now that the SCM names it
+    // no more, and what it owns given to the Administrators, as a change of owner withdraws it on
+    // Unix (ADR-0059 clauses 1 and 6); the record goes once all of it is done. Before the
+    // hand-over and the share of the layout, which grant what the accounts named now are to hold.
     #[cfg(windows)]
-    {
-        let supervisors_root = config.supervisors_root();
-        let roots = [
-            layout_root.as_path(),
-            data_root.as_path(),
-            state_dir.as_path(),
-            supervisors_root.as_path(),
-        ];
-        let formers = [
-            (
-                registered_agents.as_ref().and_then(|r| r.account.clone()),
-                process.as_ref().map(|p| p.account().to_string()),
-            ),
-            (
-                registered.as_ref().and_then(|r| r.account.clone()),
-                run_as.as_ref().map(|r| r.account().to_string()),
-            ),
-        ];
-        for (former, current) in formers {
-            let Some(former) = former else {
-                continue;
-            };
-            for skipped in run_as::withdraw(&former, current.as_deref(), &roots)? {
-                println!("warning: {}", skipped.warning(&former));
+    if !pending.is_empty() {
+        use fleet_agent::service::withdrawal::Part;
+        let kept: Vec<(Part, &str)> = process
+            .iter()
+            .map(|p| (Part::Process, p.sid().as_str()))
+            .chain(run_as.iter().map(|r| (Part::Client, r.sid().as_str())))
+            .collect();
+        fleet_agent::service::withdrawal::complete(&withdrawal, &pending, &kept, |sid, roots| {
+            let former = fleet_agent::win32::Sid::parse(sid)?;
+            for skipped in run_as::withdraw(&former, roots)? {
+                println!("warning: {}", skipped.warning(sid));
             }
-        }
+            Ok(())
+        })?;
     }
 
     // The handover (ADR-0042 clause 2), on every registration that runs under an account — a kept
@@ -468,6 +528,11 @@ fn install(
     #[cfg(windows)]
     if let Some(process) = &process {
         process.share_layout(&layout.versions_dir())?;
+    }
+    // What ran before the stop runs again, now under the registration just made.
+    #[cfg(windows)]
+    if let Some(halted) = halted {
+        manager::resume(level, halted)?;
     }
 
     drop(held_root);
