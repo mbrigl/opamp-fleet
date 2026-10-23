@@ -592,6 +592,30 @@ mod tests {
             let sub = root.join("sub");
             std::fs::create_dir_all(&sub).expect("sub");
             std::fs::write(sub.join("file"), b"x").expect("file");
+            std::fs::write(sub.join("kept"), b"x").expect("kept");
+            // What the parent passes on, held as inherited — a DACL set on a handle carries no
+            // automatic inheritance, so what the system creates beneath it holds it as explicit —
+            // and on `kept` an explicit grant to every local user beside it.
+            let passed = |dir: bool| {
+                let flags = if dir { "OICIID" } else { "ID" };
+                format!(
+                    "(A;{flags};FA;;;SY)(A;{flags};FA;;;BA)(A;{flags};FA;;;{me})\
+                     (A;{flags};0x1200a9;;;BU)(A;{flags};0x1200a9;;;WD)"
+                )
+            };
+            for (path, dacl) in [
+                (&root, format!("D:AI{}", passed(true))),
+                (&sub, format!("D:AI{}", passed(true))),
+                (&sub.join("file"), format!("D:AI{}", passed(false))),
+                (
+                    &sub.join("kept"),
+                    format!("D:AI(A;;0x1200a9;;;BU){}", passed(false)),
+                ),
+            ] {
+                Entry::open(path, Access::Dacl, false)
+                    .and_then(|entry| entry.set_dacl(&Dacl::parse(&dacl).expect("dacl")))
+                    .expect("inherited as the parent passes it on");
+            }
             let outside = dir.path().join("outside");
             std::fs::create_dir(&outside).expect("outside");
             std::fs::write(outside.join("secret"), b"x").expect("secret");
@@ -630,6 +654,18 @@ mod tests {
             assert!(
                 sddl(&sub).contains("(A;OICIID;FA;;;SY)"),
                 "{treatment:?}: inherited"
+            );
+            // A cut changes nothing explicit beneath the root, as `icacls /inheritance:r` did not;
+            // a take-over resets it away (ADR-0019).
+            let kept = sddl(&sub.join("kept"));
+            assert_eq!(
+                kept.contains("(A;;0x1200a9;;;BU)"),
+                treatment == Treatment::Cut,
+                "{treatment:?}: {kept}"
+            );
+            assert!(
+                !kept.contains("(A;ID;0x1200a9;;;BU)"),
+                "{treatment:?}: {kept}"
             );
             assert_eq!(
                 (sddl(&outside), sddl(&outside.join("secret")), sddl(&owned)),
