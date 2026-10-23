@@ -141,7 +141,7 @@ fn service_command(
         ServiceAction::Install(args) => install(config_path, config_named, state_dir, args),
         ServiceAction::Config(args) => configure(config_path, config_named, state_dir, args),
         ServiceAction::Uninstall(scope) => {
-            manager::uninstall(ServiceLevel::from(*scope))?;
+            uninstall(ServiceLevel::from(*scope))?;
             println!(
                 "service {} uninstalled (the install layout and state remain)",
                 manager::service_name()
@@ -160,6 +160,48 @@ fn service_command(
             Ok(())
         }
     }
+}
+
+/// Completes the withdrawal `pending` recorded in `store` but for the accounts `kept`, naming in a
+/// warning what each walk passed over (ADR-0059 clauses 1 and 6).
+#[cfg(windows)]
+fn complete_withdrawal(
+    store: &dyn fleet_agent::service::withdrawal::Store,
+    pending: &fleet_agent::service::withdrawal::Pending,
+    kept: &[(fleet_agent::service::withdrawal::Part, &str)],
+) -> Result<(), String> {
+    fleet_agent::service::withdrawal::complete(store, pending, kept, |sid, roots| {
+        let former = fleet_agent::win32::Sid::parse(sid)?;
+        for skipped in run_as::withdraw(&former, roots)? {
+            println!("warning: {}", skipped.warning(sid));
+        }
+        Ok(())
+    })
+}
+
+/// `service uninstall` on Windows: a withdrawal an install left undone is completed first, and its
+/// key removed — the services go, and nothing would name the former accounts again. One that cannot
+/// be completed fails the uninstall before anything is deregistered.
+#[cfg(windows)]
+fn uninstall(level: ServiceLevel) -> Result<(), String> {
+    use fleet_agent::service::withdrawal::{self, Registry};
+    let store = Registry::of_the_install();
+    let pending = withdrawal::read(&store)?;
+    if !pending.is_empty() {
+        complete_withdrawal(&store, &pending, &[]).map_err(|e| {
+            format!(
+                "the service is not uninstalled: a withdrawal an install left undone cannot be \
+                 completed ({e}). Nothing was deregistered"
+            )
+        })?;
+    }
+    store.remove()?;
+    manager::uninstall(level)
+}
+
+#[cfg(not(windows))]
+fn uninstall(level: ServiceLevel) -> Result<(), String> {
+    manager::uninstall(level)
 }
 
 /// `service install`: write the configuration if asked to (ADR-0019), validate it, lay out the
@@ -236,7 +278,7 @@ fn install(
     // the SCM has forgotten it — and a withdrawal an earlier install left undone is read with
     // them, to be completed by this one.
     #[cfg(windows)]
-    let withdrawal = data_root.join(fleet_agent::service::withdrawal::FILE_NAME);
+    let withdrawal = fleet_agent::service::withdrawal::Registry::of_the_install();
     #[cfg(windows)]
     let mut pending = fleet_agent::service::withdrawal::read(&withdrawal)?;
     #[cfg(windows)]
@@ -475,13 +517,7 @@ fn install(
             .map(|p| (Part::Process, p.sid().as_str()))
             .chain(run_as.iter().map(|r| (Part::Client, r.sid().as_str())))
             .collect();
-        fleet_agent::service::withdrawal::complete(&withdrawal, &pending, &kept, |sid, roots| {
-            let former = fleet_agent::win32::Sid::parse(sid)?;
-            for skipped in run_as::withdraw(&former, roots)? {
-                println!("warning: {}", skipped.warning(sid));
-            }
-            Ok(())
-        })?;
+        complete_withdrawal(&withdrawal, &pending, &kept)?;
     }
 
     // The handover (ADR-0042 clause 2), on every registration that runs under an account — a kept

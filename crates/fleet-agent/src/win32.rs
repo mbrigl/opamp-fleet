@@ -692,6 +692,11 @@ mod system {
                 &mut needed,
             )
         })?;
+        descriptor_text(&mut descriptor, info)
+    }
+
+    /// The parts `info` names of the self-relative security descriptor `descriptor`, as SDDL.
+    fn descriptor_text(descriptor: &mut [u64], info: u32) -> io::Result<String> {
         let mut text: *mut u16 = std::ptr::null_mut();
         // SAFETY: the self-relative descriptor the call wrote; `text` receives a LocalAlloc'd
         // string.
@@ -909,34 +914,251 @@ mod system {
         })
     }
 
-    /// Creates the file `path`, which must not exist, carrying the security descriptor `sddl` from
-    /// its first moment, and opens it for writing shared with nobody (`CREATE_NEW`, a share mode of
-    /// 0 and `lpSecurityAttributes`, CreateFileW): no other handle to it is ever open while this
-    /// one is.
+    type Hkey = *mut c_void;
+
+    /// `HKEY_LOCAL_MACHINE`, `(HKEY)(ULONG_PTR)((LONG)0x80000002)`.
+    const HKEY_LOCAL_MACHINE: isize = 0x8000_0002_u32 as i32 as isize;
+    /// What a key is opened for: its values read (`KEY_QUERY_VALUE`).
+    pub const KEY_QUERY_VALUE: u32 = 0x0001;
+    /// Its values set and deleted (`KEY_SET_VALUE`).
+    pub const KEY_SET_VALUE: u32 = 0x0002;
+    /// Its owner and DACL read (`READ_CONTROL`).
+    pub const KEY_READ_CONTROL: u32 = 0x0002_0000;
+    /// The 64-bit view of the registry, whatever the program (`KEY_WOW64_64KEY`).
+    const KEY_WOW64_64KEY: u32 = 0x0100;
+    const REG_SZ: u32 = 1;
+    /// ERROR_FILE_NOT_FOUND: no such key or value.
+    const NOT_FOUND: i32 = 2;
+    /// ERROR_MORE_DATA.
+    const MORE_DATA: i32 = 234;
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegCreateKeyExW(
+            key: Hkey,
+            subkey: *const u16,
+            reserved: u32,
+            class: *mut u16,
+            options: u32,
+            access: u32,
+            attributes: *const SecurityAttributes,
+            result: *mut Hkey,
+            disposition: *mut u32,
+        ) -> i32;
+        fn RegOpenKeyExW(
+            key: Hkey,
+            subkey: *const u16,
+            options: u32,
+            access: u32,
+            result: *mut Hkey,
+        ) -> i32;
+        fn RegQueryValueExW(
+            key: Hkey,
+            name: *const u16,
+            reserved: *mut u32,
+            kind: *mut u32,
+            data: *mut u8,
+            len: *mut u32,
+        ) -> i32;
+        fn RegSetValueExW(
+            key: Hkey,
+            name: *const u16,
+            reserved: u32,
+            kind: u32,
+            data: *const u8,
+            len: u32,
+        ) -> i32;
+        fn RegDeleteValueW(key: Hkey, name: *const u16) -> i32;
+        fn RegDeleteKeyW(key: Hkey, subkey: *const u16) -> i32;
+        fn RegCloseKey(key: Hkey) -> i32;
+        fn RegGetKeySecurity(key: Hkey, info: u32, descriptor: *mut c_void, len: *mut u32) -> i32;
+    }
+
+    /// The `LSTATUS` a registry function returned, as a result.
+    fn status(code: i32) -> io::Result<()> {
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(code))
+        }
+    }
+
+    /// A key of `HKEY_LOCAL_MACHINE`, open, and closed when dropped.
+    pub struct Key(Hkey);
+
+    impl Drop for Key {
+        fn drop(&mut self) {
+            // SAFETY: a key this process opened and closes once.
+            unsafe {
+                RegCloseKey(self.0);
+            }
+        }
+    }
+
+    impl Key {
+        /// Opens `HKEY_LOCAL_MACHINE\<subkey>` for `access` (RegOpenKeyExW); `None` where it does
+        /// not exist.
+        ///
+        /// # Errors
+        /// Returns why it cannot be opened otherwise: access denied among them.
+        pub fn open(subkey: &str, access: u32) -> io::Result<Option<Key>> {
+            let name = wide(OsStr::new(subkey));
+            let mut key: Hkey = std::ptr::null_mut();
+            // SAFETY: a NUL-terminated name; `key` receives a handle owned below.
+            match unsafe {
+                RegOpenKeyExW(
+                    HKEY_LOCAL_MACHINE as Hkey,
+                    name.as_ptr(),
+                    0,
+                    access | KEY_WOW64_64KEY,
+                    &mut key,
+                )
+            } {
+                0 => Ok(Some(Key(key))),
+                NOT_FOUND => Ok(None),
+                code => Err(io::Error::from_raw_os_error(code)),
+            }
+        }
+
+        /// Opens `HKEY_LOCAL_MACHINE\<parent>\<child>` for `access`, creating what is missing
+        /// (RegCreateKeyExW): `parent` with the security its own parent passes on, `child`
+        /// carrying the security descriptor `sddl` from its first moment. A key that exists
+        /// keeps the descriptor it has, which the caller is to check.
+        ///
+        /// # Errors
+        /// Returns why either cannot be created or opened.
+        pub fn create(parent: &str, child: &str, sddl: &str, access: u32) -> io::Result<Key> {
+            let descriptor = SecurityDescriptor::from_sddl(sddl)?;
+            let attributes = descriptor.attributes();
+            let create = |under: Hkey, name: &str, attributes: *const SecurityAttributes| {
+                let name = wide(OsStr::new(name));
+                let mut key: Hkey = std::ptr::null_mut();
+                // SAFETY: a NUL-terminated name, attributes alive across the call or none; `key`
+                // receives a handle owned below.
+                status(unsafe {
+                    RegCreateKeyExW(
+                        under,
+                        name.as_ptr(),
+                        0,
+                        std::ptr::null_mut(),
+                        0,
+                        access | KEY_WOW64_64KEY,
+                        attributes,
+                        &mut key,
+                        std::ptr::null_mut(),
+                    )
+                })
+                .map(|()| Key(key))
+            };
+            let parent = create(HKEY_LOCAL_MACHINE as Hkey, parent, std::ptr::null())?;
+            create(parent.0, child, &attributes)
+        }
+
+        /// The string value `name` (`REG_SZ`), without the terminating NULs it was stored with;
+        /// `None` where there is no such value.
+        ///
+        /// # Errors
+        /// Returns why it cannot be read, and `InvalidData` for a value that is no string.
+        pub fn string(&self, name: &str) -> io::Result<Option<String>> {
+            let name = wide(OsStr::new(name));
+            let mut data: Vec<u16> = vec![0; 256];
+            loop {
+                let mut kind = 0u32;
+                let mut len = u32::try_from(data.len() * 2).unwrap_or(u32::MAX);
+                // SAFETY: a NUL-terminated name and a buffer of `len` bytes.
+                match unsafe {
+                    RegQueryValueExW(
+                        self.0,
+                        name.as_ptr(),
+                        std::ptr::null_mut(),
+                        &mut kind,
+                        data.as_mut_ptr().cast(),
+                        &mut len,
+                    )
+                } {
+                    0 if kind == REG_SZ => {
+                        data.truncate((len as usize).div_ceil(2));
+                        while data.last() == Some(&0) {
+                            data.pop();
+                        }
+                        return String::from_utf16(&data)
+                            .map(Some)
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+                    }
+                    0 => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("a value of type {kind}, not a string"),
+                        ))
+                    }
+                    NOT_FOUND => return Ok(None),
+                    MORE_DATA => data.resize((len as usize).div_ceil(2) + 1, 0),
+                    code => return Err(io::Error::from_raw_os_error(code)),
+                }
+            }
+        }
+
+        /// Sets the string value `name` to `text` (`REG_SZ`, RegSetValueExW), NUL-terminated.
+        ///
+        /// # Errors
+        /// Returns why it cannot be set.
+        pub fn set_string(&self, name: &str, text: &str) -> io::Result<()> {
+            let name = wide(OsStr::new(name));
+            let data = wide(OsStr::new(text));
+            let len = u32::try_from(data.len() * 2)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too long"))?;
+            // SAFETY: a NUL-terminated name and `len` bytes of data.
+            status(unsafe {
+                RegSetValueExW(self.0, name.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), len)
+            })
+        }
+
+        /// Deletes the value `name` (RegDeleteValueW); none there is no error.
+        ///
+        /// # Errors
+        /// Returns why it cannot be deleted.
+        pub fn delete_value(&self, name: &str) -> io::Result<()> {
+            let name = wide(OsStr::new(name));
+            // SAFETY: a NUL-terminated name.
+            match unsafe { RegDeleteValueW(self.0, name.as_ptr()) } {
+                0 | NOT_FOUND => Ok(()),
+                code => Err(io::Error::from_raw_os_error(code)),
+            }
+        }
+
+        /// The parts `info` names of the key's security descriptor, as SDDL (RegGetKeySecurity).
+        ///
+        /// # Errors
+        /// Returns why it cannot be read: the key opened without `READ_CONTROL` among them.
+        pub fn security_text(&self, info: u32) -> io::Result<String> {
+            let mut needed = 0u32;
+            // SAFETY: a size query.
+            match unsafe { RegGetKeySecurity(self.0, info, std::ptr::null_mut(), &mut needed) } {
+                0 => {}
+                code if code == INSUFFICIENT_BUFFER => {}
+                code => return Err(io::Error::from_raw_os_error(code)),
+            }
+            let mut descriptor = vec![0u64; (needed as usize).div_ceil(8).max(1)];
+            // SAFETY: a buffer of at least `needed` bytes.
+            status(unsafe {
+                RegGetKeySecurity(self.0, info, descriptor.as_mut_ptr().cast(), &mut needed)
+            })?;
+            descriptor_text(&mut descriptor, info)
+        }
+    }
+
+    /// Deletes the key `HKEY_LOCAL_MACHINE\<subkey>`, which holds no key of its own
+    /// (RegDeleteKeyW); none there is no error.
     ///
     /// # Errors
-    /// Returns why it cannot be created: one that exists among them.
-    pub fn create_private(path: &std::path::Path, sddl: &str) -> io::Result<std::fs::File> {
-        const GENERIC_WRITE: u32 = 0x4000_0000;
-        const CREATE_NEW: u32 = 1;
-        const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
-        let descriptor = SecurityDescriptor::from_sddl(sddl)?;
-        let attributes = descriptor.attributes();
-        let name = wide(path.as_os_str());
-        // SAFETY: a NUL-terminated name and attributes whose descriptor outlives the call; the
-        // handle is owned below.
-        let handle = owned(unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                GENERIC_WRITE,
-                0,
-                &attributes,
-                CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL,
-                std::ptr::null_mut(),
-            )
-        })?;
-        Ok(std::fs::File::from(handle))
+    /// Returns why it cannot be deleted.
+    pub fn delete_key(subkey: &str) -> io::Result<()> {
+        let name = wide(OsStr::new(subkey));
+        // SAFETY: a NUL-terminated name.
+        match unsafe { RegDeleteKeyW(HKEY_LOCAL_MACHINE as Hkey, name.as_ptr()) } {
+            0 | NOT_FOUND => Ok(()),
+            code => Err(io::Error::from_raw_os_error(code)),
+        }
     }
 
     #[link(name = "kernel32")]
