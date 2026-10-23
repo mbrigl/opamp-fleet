@@ -126,8 +126,9 @@ those roots.
    - Below the root, no component may be `.` or `..`.
    - Every component below the root that exists must be a directory and not a symbolic link or
      junction. What does not exist yet ends the check.
-   - The roots themselves are the operator's, named by `--root` and `--data-root` or by the platform
-     default, and are not inspected.
+   - The roots themselves are named by `--root` and `--data-root` or by the platform default, and
+     this check does not inspect them. Whether a root may itself be a link is a question of its
+     own, which this clause leaves open.
    - This holds for a state directory from any source that lies beneath one of the roots: the
      service's account owns what is under them.
    - A state directory from the file that fails it is refused, naming the directory, why, and
