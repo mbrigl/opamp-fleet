@@ -177,6 +177,12 @@ core module names an adapter or a technology, and when a module has no role.
   and `HostFacts`, which `host::SystemHost` implements from the platform. It answers each Server message in `handle` and leaves three
   channels and its description each to a submodule: `packages`, `remote_config`,
   `connection_settings`, and `description`, what the Agent reports about itself.
+  `storage`, `csr`, `connection`, `tls`, the staging in `service::layout` and the re-owning in
+  `service::run_as` reach the state directory and the layout root through the adapter `nofollow`:
+  a directory held open without following a link at its name, read from and written to by name,
+  each file written whole and renamed into place, because a privileged install works in
+  directories the service's account owns
+  ([ADR-0054](adr/0054-no-privileged-install-step-follows-a-link-the-account-placed.md)).
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
   ([ADR-0010](adr/0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)); `config_file` reads it from disk, makes its
   directories absolute, and finds the identity the state directory holds.

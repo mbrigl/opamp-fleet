@@ -134,6 +134,15 @@ has:
   the names and placeholders the clause lists, and further loader variables (`PATHEXT`, `COMSPEC`,
   `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB`, `RUBYLIB`) and new values that start with a path
   under the Supervisors' root.
+- **A privileged install follows no link the service's account placed** (ADR-0054):
+  `service install` and `service config` run as root or an Administrator and write into the state
+  directory and the layout root, which belong to the account. Each file there is read without
+  following a link and written whole to a new name, then renamed over its own, so a link at the
+  name is replaced and never written through. A state directory, `versions/` or version directory
+  that is a link or junction is refused, and on Windows so is a data or layout root that is a
+  reparse point; the data root is held open from the install's first write to its last. What
+  `service config` re-owns is re-owned as the entry itself, and a file with a second hard link is
+  skipped with a warning.
 - **No credential in `server.toml` authenticates on its own** (ADR-0021 clause 26): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0014).
