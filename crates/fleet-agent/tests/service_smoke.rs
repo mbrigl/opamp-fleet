@@ -1084,9 +1084,19 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         &config,
     )
     .expect("drop the process account");
+    let recorded = Command::new("reg")
+        .args([
+            "query",
+            &format!(r"HKLM\SOFTWARE\{}\WithdrawalPending", service_name()),
+            "/v",
+            "Pending",
+        ])
+        .output()
+        .expect("run reg query");
     assert!(
-        !root.join("withdrawal-pending").exists(),
-        "a completed withdrawal leaves no record"
+        !recorded.status.success(),
+        "a completed withdrawal leaves no record: {}",
+        String::from_utf8_lossy(&recorded.stdout)
     );
     let dropped = reported_on_windows(&result);
     assert!(
