@@ -1,6 +1,6 @@
 # ADR-0022: The Server keeps an append-only audit record of every security decision, each entry chained to the one before by its hash
 
-- **Status:** 🟢 accepted · clause 4 superseded by [ADR-0037](0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)
+- **Status:** 🟢 accepted · clause 4 superseded by [ADR-0037](0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md) · clauses 2 and 3 superseded by [ADR-0055](0055-the-audit-record-is-one-hash-chain-per-server-process.md)
 - **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
 - **Applies to:** the audit port in `crates/fleet-server/src/audit.rs`, its writer in `crates/fleet-server/src/audit_log.rs` and its filesystem adapter, every place in `crates/fleet-server/src/` that admits or refuses a peer, issues or revokes a certificate, takes an operator's act or records a package outcome, the `[audit]` section of `server.toml`, and the `audit/` directory under `config_dir`
