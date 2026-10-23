@@ -255,7 +255,22 @@ fn install(
     // The state directory the service will run with — where an issued certificate counts. Asked
     // again of the file as it is now, which the service's account may have rewritten meanwhile.
     let state_dir = config.service_state_dir(&roots)?;
+    let state_dir_source = config.service_state_dir_source(&roots);
     config.state_dir.clone_from(&state_dir);
+    // A registration an earlier install wrote is kept wherever it points (ADR-0053 clause 3), and
+    // that install may have taken it from a file the service's account had rewritten. Said, so an
+    // operator who did not choose it sees it on every upgrade.
+    if roots.named.is_none()
+        && roots.registered.is_some()
+        && layout::beneath(&state_dir, &[&data_root, &layout_root]).is_err()
+    {
+        println!(
+            "warning: the service's registration names the state directory {}, outside the data \
+             root and the layout root; it is kept and handed over to the service's account. \
+             If you did not choose it, name the right one with --state-dir.",
+            state_dir.display()
+        );
+    }
     // A Supervisors' root the file places outside every root this install acts on is not the
     // install's to create, restrict or hand over.
     let supervisors_root = config.supervisors_root();
@@ -355,7 +370,7 @@ fn install(
     println!("installed {}", manager::service_name());
     println!("  program:   {}", program.display());
     println!("  config:    {}", config_path.display());
-    println!("  state dir: {}", state_dir.display());
+    println!("  state dir: {} ({state_dir_source})", state_dir.display());
     if let Some(run_as) = &run_as {
         println!(
             "  runs as:   {} ({})",
@@ -438,7 +453,7 @@ fn ask(
 ) -> Result<config_init::Written, String> {
     let current = ClientConfig::load(config_path)?;
     let mut in_service = current.clone();
-    in_service.state_dir = current.service_state_dir(&roots)?;
+    in_service.state_dir = current.service_state_dir(roots)?;
     config_init::run(
         config_path,
         &current,

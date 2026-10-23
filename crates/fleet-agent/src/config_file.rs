@@ -62,28 +62,51 @@ impl ClientConfig {
         roots: &crate::service::layout::Roots,
     ) -> Result<PathBuf, String> {
         let bounds = [roots.data.as_path(), roots.layout.as_path()];
-        let (dir, from_file) = match (&roots.named, &roots.registered) {
-            (Some(dir), _) | (None, Some(dir)) => (dir.clone(), false),
-            (None, None) if self.state_dir_as_written.is_absolute() => {
-                (self.state_dir_as_written.clone(), true)
-            }
-            (None, None) => (
-                roots.data.join(crate::service::layout::STATE_DIR_NAME),
-                false,
-            ),
-        };
-        if from_file || bounds.iter().any(|root| dir.starts_with(root)) {
+        let (dir, source) = self.state_dir_candidate(roots);
+        if source == StateDirSource::File || bounds.iter().any(|root| dir.starts_with(root)) {
             crate::service::layout::beneath(&dir, &bounds).map_err(|why| {
+                let rule = if source == StateDirSource::File {
+                    "The configuration is the service account's to rewrite, so a state directory \
+                     is taken from it only beneath the data root or the layout root, and reached \
+                     there through directories only; name one with --state-dir"
+                } else {
+                    "Beneath the data root or the layout root a state directory is reached through \
+                     directories only, because the service's account owns what lies there; remove \
+                     the link, or name another with --state-dir"
+                };
                 format!(
-                    "refusing the state directory {}: {why}. The configuration is the service \
-                     account's to rewrite, so a state directory is taken from it only beneath the \
-                     data root or the layout root, and reached there through directories only; \
-                     name one with --state-dir",
-                    dir.display()
+                    "refusing the state directory {} that {} names: {why}. {rule}",
+                    dir.display(),
+                    source.describe()
                 )
             })?;
         }
         Ok(dir)
+    }
+
+    /// Where [`service_state_dir`](Self::service_state_dir) takes the state directory from, in the
+    /// words the install prints after it.
+    #[must_use]
+    pub fn service_state_dir_source(&self, roots: &crate::service::layout::Roots) -> &'static str {
+        self.state_dir_candidate(roots).1.describe()
+    }
+
+    /// The state directory ADR-0053 clause 3 names, before it is checked, and its source.
+    fn state_dir_candidate(
+        &self,
+        roots: &crate::service::layout::Roots,
+    ) -> (PathBuf, StateDirSource) {
+        match (&roots.named, &roots.registered) {
+            (Some(dir), _) => (dir.clone(), StateDirSource::Flag),
+            (None, Some(dir)) => (dir.clone(), StateDirSource::Registration),
+            (None, None) if self.state_dir_as_written.is_absolute() => {
+                (self.state_dir_as_written.clone(), StateDirSource::File)
+            }
+            (None, None) => (
+                roots.data.join(crate::service::layout::STATE_DIR_NAME),
+                StateDirSource::Default,
+            ),
+        }
     }
 
     /// What this Client must hold before it connects (ADR-0021, ADR-0019): a client certificate —
@@ -130,6 +153,30 @@ impl ClientConfig {
         }
         let tls = self.tls.as_ref()?;
         Some((tls.cert_file.clone()?, tls.key_file.clone()?))
+    }
+}
+
+/// Where an installed Client's state directory comes from (ADR-0053 clause 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateDirSource {
+    /// `--state-dir`.
+    Flag,
+    /// The service's system registration.
+    Registration,
+    /// The absolute `state_dir` of `supervisor.toml`.
+    File,
+    /// `<data root>/state`.
+    Default,
+}
+
+impl StateDirSource {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Flag => "--state-dir",
+            Self::Registration => "the service's registration",
+            Self::File => "the configuration",
+            Self::Default => "the default",
+        }
     }
 }
 

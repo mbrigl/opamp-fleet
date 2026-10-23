@@ -1137,6 +1137,27 @@ mod tests {
         assert!(plist_arguments("<dict></dict>").is_empty());
     }
 
+    /// A registration on disk is read back to the state directory the Client wrote into it, and a
+    /// host with no registration offers none.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn a_registration_on_disk_offers_the_state_directory_it_was_written_with() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("opamp-fleet.service");
+        let mut spec = system_spec("/opt/opamp-fleet");
+        spec.state_dir = PathBuf::from("/srv/fleet/state");
+        std::fs::write(&file, systemd_unit(&spec, "opamp-fleet").expect("unit")).expect("write");
+        assert_eq!(
+            read_state_dir(&file, unit_arguments).expect("read"),
+            Some(spec.state_dir)
+        );
+        assert_eq!(
+            read_state_dir(&dir.path().join("absent.service"), unit_arguments).expect("read"),
+            None
+        );
+    }
+
     /// The state directory the SCM's binary path name carries is read with the C runtime's
     /// splitting rules, by which `service-manager` quotes it: a path with spaces, a trailing
     /// backslash and an embedded quote come back as written.

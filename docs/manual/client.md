@@ -278,7 +278,7 @@ $ opamp-fleet --version
 | Global flag | Meaning |
 |---|---|
 | `--config <path>` | The TOML configuration file. Defaults to `supervisor.toml`. A missing file means the defaults, which hold no client certificate, so `run` refuses to start. `service install` is the one place where "not given" means something else: there the file is `supervisor.toml` inside the data root, because a path resolved against this shell's working directory is not one the service manager shares. |
-| `--state-dir <dir>` | Overrides the configuration file's `state_dir`. `service install` bakes this into the unit, so an installed service never depends on a relative path. |
+| `--state-dir <dir>` | Overrides the configuration file's `state_dir`. `service install` bakes this into the unit, so an installed service never depends on a relative path, and every later `service install` keeps the state directory the unit names unless this flag names another. It is how to place the state directory outside the data root and the layout root. |
 
 There are no environment-variable fallbacks for configuration — the flags say only where
 the file is and which instance is meant. Logging goes to stderr and is controlled by `RUST_LOG`
@@ -871,8 +871,11 @@ and macOS, and a directory junction on Windows, where junctions need no special 
 restarts and upgrades; delete it and the Server sees a host it has never met, while the old row
 lingers. Nothing regenerates it, which is why the data root survives an uninstall.
 
-The state directory's location follows `state_dir` in the configuration file when that names an
-absolute path. Left alone, it is `<data-root>/state`.
+The state directory is the one `--state-dir` names, else the one the existing service registration
+names, so an upgrade never moves it. A first install takes `state_dir` from the configuration file
+when that names an absolute path beneath the data root or the layout root, and refuses one
+elsewhere: the service's account may rewrite the file, and the install hands the state directory
+over to that account. Left alone, it is `<data-root>/state`.
 
 Logs rotate daily and seven files are kept. On Linux and macOS the service's output also reaches the
 system journal; on Windows the file is the only copy, because the service manager discards a
@@ -967,7 +970,7 @@ notice.
 | `heartbeat_interval_secs` | `30` | Heartbeat interval on WebSocket. `0` disables heartbeats and undeclares the capability; on plain HTTP every poll already is the periodic report. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message sent or accepted, in either direction — including on the Supervisor Endpoint. A message past it is never sent, and an oversized one from the Server is refused. |
 | `state_dir` | `"client-state"` | Where the Client persists its own Agent's identity, its remote configuration, and any Server-offered connection settings. A self-update artifact is streamed here first, so it needs room for one agent binary. |
-| `supervisor_dir` | `<state_dir>/supervisors` | Where the per-Supervisor directories live. Set it when the programs must not live where the state does — `/var/lib` is often mounted `noexec`, and sized for state rather than for a few hundred megabytes of Collector. |
+| `supervisor_dir` | `<state_dir>/supervisors` | Where the per-Supervisor directories live. Set it when the programs must not live where the state does — `/var/lib` is often mounted `noexec`, and sized for state rather than for a few hundred megabytes of Collector. Outside the data root, the layout root and the state directory, `service install` creates and hands over nothing for it: create it yourself, writable by the service's account only. |
 
 > **Moving `supervisor_dir` on a running host leaves the old tree behind**, `instance-uid` included,
 > so every Supervisor re-registers as a **new** Agent on the Server. Nothing migrates automatically.
