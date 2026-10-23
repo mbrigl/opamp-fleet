@@ -197,6 +197,12 @@ readers are pinned by tests against what the Client itself writes.
   - A first installation whose file names such a directory is refused until the operator names it
     with `--state-dir`.
   - On Windows a Supervisors' root outside the roots must now be created by the operator.
+  - A state directory beneath the layout root goes with it when a Linux package is removed
+    (ADR-0042 clause 4), the identity included; the data root keeps it.
+  - A registration is kept wherever it points. One that an earlier install wrote from a file the
+    service's account had rewritten stays until an administrator names another with
+    `--state-dir`. The install warns of a registered state directory outside the roots on every
+    re-registration.
   - The install reads three command-line formats.
 - **Follow-ups:**
   - A fix for the enrolment's root writes through links in the state directory.
