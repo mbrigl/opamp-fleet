@@ -125,8 +125,7 @@ has:
   and from that only beneath the data root or the layout root. Beneath a root it is reached with no
   `..` and through no link or junction; anything else is refused before anything is written. A
   Supervisors' root the file places outside them is never created, restricted or handed over. The
-  hand-over and the cut act on a link or junction itself on every platform. Enrolment files the
-  install writes as root into the state directory may follow a link there.
+  hand-over and the cut act on a link or junction itself on every platform.
 - **A delivered Supervisor block reaches no further than the package signature** (ADR-0017): no
   environment or arguments beyond what the running block has or the operator allowed, and no file
   outside its own `config/` directory. Under clause 38's rule — no variable that steers which code
