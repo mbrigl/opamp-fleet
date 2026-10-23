@@ -4,7 +4,7 @@
 - **Date:** 2026-10-20
 - **Deciders:** Markus Brigl
 - **Applies to:** the `--process-account` flag of `service install` and the second service it registers in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/windows_config.rs` and `crates/fleet-agent/src/service/windows_rights.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel between the Client and the second service, the modes and ownership of the Supervisors' directories in `crates/fleet-agent/src/storage.rs`, and every document that tells an operator which account a Managed Process runs as
-- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clauses 3 and 9, [ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) clauses 2 and 6, [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 60, [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clauses 21 and 37
+- **Supersedes:** [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md) clause 3; [ADR-0042](0042-the-linux-packages-run-the-client-under-its-own-account.md) clause 6; [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 60; [ADR-0017](0017-supervisor-mode-kinds-directories-and-what-the-server-may-change.md) clauses 21 and 37; [ADR-0053](0053-the-state-directory-comes-from-the-registration-not-the-file.md) clause 1; [ADR-0054](0054-no-privileged-install-step-follows-a-link-the-account-placed.md) clause 1
 
 ## Context
 
@@ -52,20 +52,20 @@ signals and stops those programs on the Client's request.
 1. **The process account is named at registration, and kept.** `service install --process-account
    <account>` names it, at system scope only; it conflicts with `--user`. A re-registration without
    the flag keeps the account the second service's registration names (clause 2), read the way
-   ADR-0042 clause 2 reads the Client's. Without the flag and without such a registration, there is
+   clause 10 reads the Client's. Without the flag and without such a registration, there is
    no process account and no second service, and the Client starts its programs itself, as before
    (clauses 11 and 13 hold on every host).
    - **The operator creates the account.** On Linux and macOS it must exist, and an install naming
      one that does not is refused before anything is written, with a message that shows the
      `useradd --system` line, and on macOS the `sysadminctl -roleAccount` line, that creates it. The
-     binary never creates an account (ADR-0042 clause 2).
-   - **Windows accepts only passwordless forms**, as ADR-0042 clause 2 does: the second service's
+     binary never creates an account (clause 10).
+   - **Windows accepts only passwordless forms**, as clause 10 does: the second service's
      own virtual account `NT SERVICE\<PRODUCT_NAME>-agents` (recommended), a gMSA, or
      `NT AUTHORITY\LocalService` / `NetworkService`.
    - **It is never root and never the Client's account.** `--process-account root`,
      `LocalSystem` or the account the Client runs as is refused, naming `--run-as root` as the way
-     to run everything as root. A host whose agents need root runs as root as a whole (ADR-0042
-     clause 2), with no second service.
+     to run everything as root. A host whose agents need root runs as root as a whole (clause 10),
+     with no second service.
    - **It is dropped on request.** `service install --no-process-account` stops and deregisters the
      second service, and the Client starts its programs itself again. It conflicts with
      `--process-account`, and a refusal that a kept process account causes names it.
@@ -79,7 +79,7 @@ signals and stops those programs on the Client's request.
    Windows the SCM additionally carries each service's display name and a Description that says
    what the program does.
    - **It is the same program.** The second service runs `supervisor run --agents` from the same
-     layout and `current` (ADR-0019 clause 9), under the process account. The package still
+     layout and `current` (clause 8), under the process account. The package still
      delivers one file (ADR-0042 clause 3).
    - **The two are registered, started, stopped and deregistered together.** `service install`,
      `start`, `stop` and `uninstall` act on both, the second service first on start and last on
@@ -154,7 +154,11 @@ signals and stops those programs on the Client's request.
    | a kind's data directories | Client : the process account's group | `2770` |
 
    On Windows the same split is made by ACL grants to the process account's SID instead of the
-   group.
+   group. A file the Client replaces through the no-follow adapter (ADR-0054 clause 6) is
+   created with the owner, group and mode this table names. An install grants and withdraws
+   the process account's rights in the data root, the layout root and the state directory
+   alone: a Supervisors' root outside them is the operator's (ADR-0053 clause 5), left as it is
+   and named in a warning.
 
 7. **A program inherits nothing of the Client's.** Its environment is the second service's own
    with `HOME`, `USER` and `LOGNAME` set to the process account's, then the block's `env` laid over
@@ -162,8 +166,9 @@ signals and stops those programs on the Client's request.
    ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)
    clause 16).
 
-8. **Restates ADR-0019 clause 9. The executable layout is versioned side by side behind a `current`
-   pointer, and the registered command line names the second service where there is one.**
+8. **Restates ADR-0053 clause 1. The executable layout is versioned side by side behind a
+   `current` pointer, and the registered command line names the second service where there is
+   one.**
 
    ```text
    <layout root>/versions/supervisor-<MAJOR.MINOR.PATCH>-<hash>/supervisor[.exe]
@@ -171,20 +176,23 @@ signals and stops those programs on the Client's request.
    <layout root>/current -> versions/supervisor-…/      # symlink on Unix, junction on Windows
    ```
 
-   The directory name is the bare base and the commit short-hash of
-   [ADR-0012](0012-versions-resolved-in-the-internal-crate.md)'s version, never the pre-release: the release `1.2.3` and a
-   development build heading for it are told apart by their commit, and the manifest's full string
-   answers release-or-dev. The service's program is `<layout root>/current/supervisor`, so a
-   version switch never re-registers anything. On Unix the pointer is switched atomically — a
-   temporary symlink `rename`d over `current`, never unlink-then-relink; on Windows the junction
-   (which needs no symlink privilege) is recreated only while the service is stopped. At start the
-   daemon verifies that `current` resolves to the version directory it runs from and repairs a torn
-   switch. Staging a version already present replaces its contents and rewrites its manifest, and
-   skips the write when the staged binary already holds the same bytes (an install arriving through
-   the `PATH` symlink runs from that file). The default state directory is `<data root>/state` when
-   the configuration names no absolute one. Every path is absolute at install time, and the
-   registered command line is `run --service --config <abs> --state-dir <abs>`, followed, where a
-   process account is registered, by `--agents-socket <abs> --process-uid <uid>` (clause 2).
+   - **Directory name.** It is the bare base and the commit short-hash of
+     [ADR-0012](0012-versions-resolved-in-the-internal-crate.md)'s version, never the pre-release.
+     The release `1.2.3` and a development build heading for it are told apart by their commit,
+     and the manifest's full string answers release-or-dev.
+   - **The program.** The service's program is `<layout root>/current/supervisor`, so a version
+     switch never re-registers anything.
+   - **The switch.** On Unix the pointer is switched atomically: a temporary symlink is `rename`d
+     over `current`, never unlink-then-relink. On Windows the junction, which needs no symlink
+     privilege, is recreated only while the service is stopped. At start the daemon verifies that
+     `current` resolves to the version directory it runs from, and repairs a torn switch.
+   - **Restaging.** Staging a version already present replaces its contents and rewrites its
+     manifest. It skips the write when the staged binary already holds the same bytes, because an
+     install arriving through the `PATH` symlink runs from that file.
+   - **The state directory** is the one ADR-0053 clause 3 decides.
+   - **Absolute paths.** Every path is absolute at install time, and the registered command line
+     is `run --service --config <abs> --state-dir <abs>`, followed, where a process account is
+     registered, by `--agents-socket <abs> --process-uid <uid>` (clause 2).
 
 9. **Restates ADR-0042 clause 6. The Client writes its systemd system units itself, and
    `service-manager` installs them.**
@@ -197,8 +205,8 @@ signals and stops those programs on the Client's request.
    - `[Service]`: `ExecStart=` with the program and every argument in double quotes. A `\` and a
      `"` are escaped, a `%` is written `%%` and a `$` is written `$$`, so any absolute path reaches
      the program as it was given. Then `Restart=on-failure`, `RestartSec=` set to the restart delay
-     the SCM's recovery actions use (ADR-0019 clause 11), `User=` set to the account of ADR-0042
-     clause 2, and the directives of ADR-0042 clause 7.
+     the SCM's recovery actions use (ADR-0019 clause 11), `User=` set to the account of clause 10,
+     and the directives of ADR-0042 clause 7.
    - `[Install]`: `WantedBy=multi-user.target`.
 
    The user scope and the launchd plist stay as `service-manager` renders them. `service install`
@@ -219,61 +227,63 @@ signals and stops those programs on the Client's request.
    second service passes through directories it may only search with `O_SEARCH`, which macOS
    has from macOS 13 on: macOS 13 is the oldest macOS a Client runs on.
 
-10. **Restates ADR-0042 clause 2. The system service runs under the account its registration
-   names, and both roots belong to it, except what the process account keeps there.** `service install --run-as <account>` names the account. It
-   applies at system scope only and conflicts with `--user`. On Linux and macOS, `--run-as root` is
-   how an operator chooses root. It is written as `User=root` or `UserName` `root`, so a unit
-   records that root was chosen. Without the flag, the account is taken in this order:
-   - **A re-registration keeps the account the registration names.** That is `User=` in the system
-     unit `/etc/systemd/system/<PRODUCT_NAME>.service`, `UserName` in
-     `/Library/LaunchDaemons/<PRODUCT_NAME>.plist`. The install reads the file the Client wrote, not
-     a drop-in and not the loaded state of the service manager. On Windows the install does not ask
-     the SCM: a re-registration without `--run-as` sets no logon account, so the SCM keeps the one
-     it holds (`windows_config`), and the install names no account.
-   - **A unit or plist that names no account, on a data root that a non-root account owns,** was
-     rewritten by a re-registration that dropped its account. The install takes the owner of the
-     data root and prints that it did, naming the data root. Every other registration that names no
-     account stays root.
-   - **A first registration**, one where no unit, plist or SCM entry exists, runs as root under
-     systemd and launchd and as `LocalSystem` under the SCM. The Linux packages name their account
-     themselves (ADR-0042 clause 5).
+10. **Restates ADR-0054 clause 1. The system service runs under the account its registration names,
+    and both roots belong to it, except what the process account keeps there.** `service install
+    --run-as <account>` names the account. It applies at system scope only and conflicts with
+    `--user`. On Linux and macOS, `--run-as root` is how an operator chooses root. It is written as
+    `User=root` or `UserName` `root`, so a unit records that root was chosen. Without the flag, the
+    account is taken in this order:
+    - **A re-registration keeps the account the registration names.** That is `User=` in the system
+      unit `/etc/systemd/system/<PRODUCT_NAME>.service`, `UserName` in
+      `/Library/LaunchDaemons/<PRODUCT_NAME>.plist`. The install reads the file the Client wrote,
+      not a drop-in and not the loaded state of the service manager. On Windows the install does not
+      ask the SCM: a re-registration without `--run-as` sets no logon account, so the SCM keeps the
+      one it holds (`windows_config`), and the install names no account.
+    - **A unit or plist that names no account, on a data root that a non-root account owns,** was
+      rewritten by a re-registration that dropped its account. The install takes the owner of the
+      data root and prints that it did, naming the data root. Every other registration that names no
+      account stays root.
+    - **A first registration**, one where no unit, plist or SCM entry exists, runs as root under
+      systemd and launchd and as `LocalSystem` under the SCM. The Linux packages name their account
+      themselves (ADR-0042 clause 5).
 
-   On Linux and macOS the install prints the account and where it came from: `--run-as`, the unit,
-   the plist, the owner of the data root, or the default.
-   - **The service runs as the account.** Under systemd this is `User=` in the unit the Client
-     writes (clause 9). Under launchd it is `UserName`, through `service-manager`'s `username`. On
-     Windows it is an `sc config obj=` step in `windows_config`. No *Log on as a service* grant is
-     performed: the default policy grants it to `NT SERVICE\ALL SERVICES`, built-in accounts carry
-     it, and a gMSA receives it from its domain. A host hardened against the default grant must
-     restore it.
-   - **Windows accepts only passwordless forms:** the service's own virtual account
-     `NT SERVICE\<PRODUCT_NAME>` (recommended), a gMSA (`name$`), or
-     `NT AUTHORITY\LocalService` / `NetworkService`. There is no password parameter, because it
-     would stand in the process list and the installer log. A form that needs a password is refused
-     with a message naming the passwordless forms.
-   - **The account must exist** on Linux and macOS, whether it was named or kept. An account that
-     does not exist is refused before anything is written, and the install fails closed. For a kept
-     account, the message names the account and the file or directory it came from. It shows the
-     `useradd --system` line that creates the account, and says that `--run-as <account>` or
-     `--run-as root` names another. The binary never creates an account; that is the packages' job
-     (ADR-0042 clause 5).
-   - **The hand-over covers both roots, on every registration that runs under an account.** That
-     includes a kept account and root. After laying out and registering, the install hands the
-     account the data root (`supervisor.toml`, `state/`), because the service reads and rewrites
-     them. It also hands over the layout root (`versions/`, `current`), because the self-update that
-     stages into it is the service itself. On Unix this is an ownership change. On Windows it is an
-     inheritable Modify ACL grant. Where the roots coincide this is one operation. Where they split,
-     an install that hands over only one has not succeeded.
-   - **Where a process account is registered, the hand-over leaves its data alone.** An entry the
-     process account owns is skipped together with everything beneath it, and an entry in the
-     process account's group keeps that group, a directory its mode too, so a re-registration —
-     every package upgrade — takes from no Managed Process the data it wrote or reads.
-   - **The hand-over never follows a link.** The account owns the trees that root walks, and
-     ADR-0042 clause 5 makes that walk part of every package upgrade. So each directory is opened
-     without following a link, and its owner is changed through that open handle. Its entries are
-     read from the handle, and a symbolic link is re-owned as a link. A regular file with more than
-     one hard link is skipped and named in a warning. Re-running `install` with another `--run-as`
-     re-owns the same directories.
+    On Linux and macOS the install prints the account and where it came from: `--run-as`, the unit,
+    the plist, the owner of the data root, or the default.
+    - **The service runs as the account.** Under systemd this is `User=` in the unit the Client
+      writes (clause 9). Under launchd it is `UserName`, through `service-manager`'s `username`. On
+      Windows it is an `sc config obj=` step in `windows_config`. No *Log on as a service* grant is
+      performed: the default policy grants it to `NT SERVICE\ALL SERVICES`, built-in accounts carry
+      it, and a gMSA receives it from its domain. A host hardened against the default grant must
+      restore it.
+    - **Windows accepts only passwordless forms:** the service's own virtual account `NT
+      SERVICE\<PRODUCT_NAME>` (recommended), a gMSA (`name$`), or `NT AUTHORITY\LocalService` /
+      `NetworkService`. There is no password parameter, because it would stand in the process list
+      and the installer log. A form that needs a password is refused with a message naming the
+      passwordless forms.
+    - **The account must exist** on Linux and macOS, whether it was named or kept. An account that
+      does not exist is refused before anything is written, and the install fails closed. For a kept
+      account, the message names the account and the file or directory it came from. It shows the
+      `useradd --system` line that creates the account, and says that `--run-as <account>` or
+      `--run-as root` names another. The binary never creates an account; that is the packages' job
+      (ADR-0042 clause 5).
+    - **The hand-over covers both roots, on every registration that runs under an account.** That
+      includes a kept account and root. After laying out and registering, the install hands the
+      account the data root (`supervisor.toml`, `state/`), because the service reads and rewrites
+      them. It also hands over the layout root (`versions/`, `current`), because the self-update
+      that stages into it is the service itself. On Unix this is an ownership change. On Windows it
+      is an inheritable Modify ACL grant. Where the roots coincide this is one operation. Where they
+      split, an install that hands over only one has not succeeded.
+    - **Where a process account is registered, the hand-over leaves its data alone.** An entry the
+      process account owns is skipped together with everything beneath it, and an entry in the
+      process account's group keeps that group, a directory its mode too, so a re-registration —
+      every package upgrade — takes from no Managed Process the data it wrote or reads.
+    - **The hand-over never follows a link, and neither does any other privileged step** (ADR-0054
+      clause 2). The account owns the trees that root walks, and ADR-0042 clause 5 makes that walk
+      part of every package upgrade. So each directory is opened without following a link, and its
+      owner is changed through that open handle. Its entries are read from the handle, and a
+      symbolic link is re-owned as a link. A regular file with more than one hard link is skipped
+      and named in a warning (ADR-0054 clause 5). Re-running `install` with another `--run-as`
+      re-owns the same directories.
 
 11. **Restates ADR-0026 clause 60. Modes come from a `.tar.gz` on Unix, never with write for group
     or others; the program is always made executable.** A tar's member modes are applied, each
