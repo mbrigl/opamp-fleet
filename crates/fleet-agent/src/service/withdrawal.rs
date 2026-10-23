@@ -34,7 +34,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::manager::Halted;
+use super::manager::{HaltError, Halted};
 
 /// Where a record is kept: a string, or none.
 pub trait Store {
@@ -275,9 +275,11 @@ pub enum HaltFailed {
 /// what `running` says runs is added to what `pending` already names to run again, and written —
 /// with the withdrawal due — before `halt` stops anything; what `halt` found running beyond that is
 /// added after it. Where `halt` fails, what is to run again is set from what the SCM reports then,
-/// asked through `now`: what ran before this install, and what ran when it began and runs no more
-/// — a restart that failed, or a stop that timed out and completed after all. Where the SCM cannot
-/// be asked, the record stays as written before the stop.
+/// asked through `now`, which counts only a service that runs settled — running or paused — and
+/// one still stopping or starting as not running: what ran before this install, and what ran when
+/// it began or was stopped by `halt` and runs no more — a restart that failed, or a stop that timed
+/// out and is still under way or completed after all. Where the SCM cannot be asked, the record
+/// keeps all of that.
 ///
 /// # Errors
 /// Returns [`HaltFailed::Unrecorded`] where the record could not be written before the stop, and
@@ -286,7 +288,7 @@ pub fn halt_recorded(
     store: &dyn Store,
     pending: &mut Pending,
     running: Halted,
-    halt: &mut dyn FnMut() -> Result<Halted, String>,
+    halt: &mut dyn FnMut() -> Result<Halted, HaltError>,
     now: &mut dyn FnMut() -> Result<Halted, String>,
 ) -> Result<(), HaltFailed> {
     let before = pending.resume;
@@ -301,18 +303,25 @@ pub fn halt_recorded(
             }
             Ok(())
         }
-        Err(e) => {
-            let Ok(now) = now() else {
-                return Err(HaltFailed::Stopped(e));
+        Err(HaltError { error, stopped }) => {
+            let ran = Halted {
+                client: running.client || stopped.client,
+                agents: running.agents || stopped.agents,
             };
-            pending.resume = Halted {
-                client: before.client || (running.client && !now.client),
-                agents: before.agents || (running.agents && !now.agents),
+            pending.resume = match now() {
+                Ok(now) => Halted {
+                    client: before.client || (ran.client && !now.client),
+                    agents: before.agents || (ran.agents && !now.agents),
+                },
+                Err(_) => Halted {
+                    client: before.client || ran.client,
+                    agents: before.agents || ran.agents,
+                },
             };
             match record(store, pending) {
-                Ok(()) => Err(HaltFailed::Stopped(e)),
+                Ok(()) => Err(HaltFailed::Stopped(error)),
                 Err(again) => Err(HaltFailed::Stopped(format!(
-                    "{e}; and the record cannot be set to what runs now ({again}), and names \
+                    "{error}; and the record cannot be set to what runs now ({again}), and names \
                      what ran when this install began to be started again"
                 ))),
             }
@@ -746,7 +755,7 @@ mod tests {
             &store,
             &mut pending,
             BOTH,
-            &mut || Err("did not stop in time".to_string()),
+            &mut || Err(timed_out(Halted::default())),
             &mut || Ok(Halted::default()),
         );
         assert_eq!(
@@ -762,7 +771,7 @@ mod tests {
             &store,
             &mut pending,
             BOTH,
-            &mut || Err("did not stop in time".to_string()),
+            &mut || Err(timed_out(Halted::default())),
             &mut || Ok(BOTH),
         );
         assert_eq!(read(&store), Ok(Pending::default()), "nothing left");
@@ -776,7 +785,7 @@ mod tests {
             &store,
             &mut pending,
             CLIENT,
-            &mut || Err("did not stop in time".to_string()),
+            &mut || Err(timed_out(Halted::default())),
             &mut || Ok(AGENTS),
         );
         assert_eq!(read(&store).expect("read").resume, BOTH);
@@ -788,10 +797,59 @@ mod tests {
             &store,
             &mut pending,
             CLIENT,
-            &mut || Err("did not stop in time".to_string()),
+            &mut || Err(timed_out(Halted::default())),
             &mut || Err("access denied".to_string()),
         );
         assert_eq!(read(&store).expect("read").resume, CLIENT);
+
+        // A stop that timed out leaves the service still stopping, which the SCM reports as not
+        // running settled: it is to run again — the resume waits it out.
+        let store = Memory::default();
+        let mut pending = Pending::default();
+        let _ = halt_recorded(
+            &store,
+            &mut pending,
+            AGENTS,
+            &mut || Err(timed_out(Halted::default())),
+            &mut || Ok(Halted::default()),
+        );
+        assert_eq!(read(&store).expect("read").resume, AGENTS, "still stopping");
+
+        // A Client that started between the look and the stop, was stopped by it and could not be
+        // started again counts, though the look before found it stopped.
+        let store = Memory::default();
+        let mut pending = Pending::default();
+        let _ = halt_recorded(
+            &store,
+            &mut pending,
+            Halted::default(),
+            &mut || Err(timed_out(CLIENT)),
+            &mut || Ok(Halted::default()),
+        );
+        assert_eq!(
+            read(&store).expect("read").resume,
+            CLIENT,
+            "what the stop stopped"
+        );
+
+        // And where the SCM cannot be asked, too.
+        let store = Memory::default();
+        let mut pending = Pending::default();
+        let _ = halt_recorded(
+            &store,
+            &mut pending,
+            AGENTS,
+            &mut || Err(timed_out(CLIENT)),
+            &mut || Err("access denied".to_string()),
+        );
+        assert_eq!(read(&store).expect("read").resume, BOTH);
+    }
+
+    fn timed_out(stopped: Halted) -> HaltError {
+        HaltError {
+            error: "did not stop in time".to_string(),
+            stopped,
+        }
     }
 
     /// An uninstall withdraws only once both services are stopped and the install lock is held,
