@@ -159,6 +159,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("host", Adapter),
             ("install", Adapter),
             ("logging", Adapter),
+            ("nofollow", Adapter),
             ("packages", Adapter),
             ("reconfigure", Adapter),
             ("service", Adapter),

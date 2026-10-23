@@ -1,6 +1,6 @@
 # ADR-0054: No privileged install step follows a link the service's account placed, and the Client keeps its state through the same no-follow adapter
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-23
 - **Deciders:** Markus Brigl
 - **Applies to:** every read, write, rename, removal, mode change and ownership change `service install` and `service config` make in the data root, the state directory and the layout root in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/layout.rs` and `crates/fleet-agent/src/service/run_as.rs`, the state the Client keeps in `crates/fleet-agent/src/storage.rs`, `crates/fleet-agent/src/csr.rs`, `crates/fleet-agent/src/connection.rs` and `crates/fleet-agent/src/tls.rs`, and the adapter `crates/fleet-agent/src/nofollow.rs` they go through

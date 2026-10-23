@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::nofollow::HeldDir;
+
 /// The platform's binary filename inside a version directory (ADR-0019).
 ///
 /// It is two contracts at once: the program a service unit is registered against, and the archive
@@ -327,10 +329,15 @@ pub(crate) fn write_manifest(
     version: &str,
     sha256: &str,
 ) -> std::io::Result<()> {
-    std::fs::write(
-        dir.join(MANIFEST_FILENAME),
-        format!("# Written by {written_by}.\nversion = \"{version}\"\nsha256 = \"{sha256}\"\n"),
+    HeldDir::open(dir)?.write(
+        MANIFEST_FILENAME,
+        manifest(written_by, version, sha256).as_bytes(),
+        0o644,
     )
+}
+
+fn manifest(written_by: &str, version: &str, sha256: &str) -> String {
+    format!("# Written by {written_by}.\nversion = \"{version}\"\nsha256 = \"{sha256}\"\n")
 }
 
 /// Stage the running executable into its version directory, write the manifest, and point
@@ -341,6 +348,12 @@ pub(crate) fn write_manifest(
 /// can arrive through the `PATH` symlink (ADR-0019) and then *runs from* the staged file, and
 /// Linux refuses to write over a running executable (`ETXTBSY`).
 ///
+/// The layout root belongs to the service's account (ADR-0054), and this runs as root. So
+/// `versions/` and the version directory are each opened without following a link at their name,
+/// and the program and the manifest are written whole to new temporary names and renamed into
+/// place, the program executable from its creation: a link the account put anywhere below the root
+/// is refused or replaced, never written through.
+///
 /// # Errors
 /// Returns an error if the executable cannot be read or the layout cannot be written.
 pub fn stage_current_exe(layout: &Layout) -> Result<PathBuf, String> {
@@ -349,27 +362,38 @@ pub fn stage_current_exe(layout: &Layout) -> Result<PathBuf, String> {
     let sha256 = hex::encode(Sha256::digest(&bytes));
 
     let version = fleet_core::version::current();
-    let dir = layout.version_dir(&version_dir_name(version));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let name = version_dir_name(version);
+    std::fs::create_dir_all(&layout.root)
+        .map_err(|e| format!("cannot create {}: {e}", layout.root.display()))?;
+    let dir = HeldDir::open_root(&layout.root)
+        .and_then(|root| root.dir("versions", 0o755))
+        .and_then(|versions| versions.dir(&name, 0o755))
+        .map_err(|e| format!("cannot create {}: {e}", layout.version_dir(&name).display()))?;
 
-    let binary = dir.join(BINARY_FILENAME);
+    let binary = dir.path().join(BINARY_FILENAME);
     // Compared with the staged file itself, never trusted from the manifest beside it: the manifest
     // says what was staged, the file is what would run.
-    let already_staged = std::fs::read(&binary).is_ok_and(|staged| staged == bytes);
+    let already_staged = dir
+        .read(BINARY_FILENAME)
+        .is_ok_and(|staged| staged == bytes);
     if !already_staged {
-        std::fs::write(&binary, &bytes)
+        dir.write(BINARY_FILENAME, &bytes, 0o755)
             .map_err(|e| format!("cannot write {}: {e}", binary.display()))?;
-        crate::install::make_executable(&binary)?;
     }
 
-    write_manifest(&dir, "`supervisor service install`", version, &sha256).map_err(|e| {
+    dir.write(
+        MANIFEST_FILENAME,
+        manifest("`supervisor service install`", version, &sha256).as_bytes(),
+        0o644,
+    )
+    .map_err(|e| {
         format!(
             "cannot write {}: {e}",
-            dir.join(MANIFEST_FILENAME).display()
+            dir.path().join(MANIFEST_FILENAME).display()
         )
     })?;
 
-    layout.set_current(&dir)?;
+    layout.set_current(dir.path())?;
     Ok(layout.current_binary())
 }
 

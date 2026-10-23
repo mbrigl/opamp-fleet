@@ -228,6 +228,9 @@ fn install(
         about_to_run.state_dir = about_to_run.service_state_dir(&roots)?;
         beside.unasked_enrolment(&about_to_run, password.as_deref())?
     };
+    // Held from the first write to the last, so the account cannot swap the data root for a link
+    // while this privileged run writes into it (ADR-0054).
+    let mut held_root = hold_data_root(&data_root)?;
     let mut written = config_init::Written::default();
     if args.interactive {
         written = ask(&config_path, &roots, &beside, password.as_deref())?;
@@ -291,6 +294,9 @@ fn install(
     );
     std::fs::create_dir_all(&data_root)
         .map_err(|e| format!("cannot create {}: {e}", data_root.display()))?;
+    if held_root.is_none() {
+        held_root = hold_data_root(&data_root)?;
+    }
     if !state_dir.starts_with(&data_root) {
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| format!("cannot create the state directory: {e}"))?;
@@ -367,6 +373,7 @@ fn install(
         }
     }
 
+    drop(held_root);
     println!("installed {}", manager::service_name());
     println!("  program:   {}", program.display());
     println!("  config:    {}", config_path.display());
@@ -413,6 +420,8 @@ fn configure(
     } else {
         data_root.join(config_init::FILE_NAME)
     };
+    // Held while this privileged run writes into it, as `install` holds it (ADR-0054).
+    let _held_root = hold_data_root(&data_root)?;
     // The installed copy runs from the layout, where no fleet files lie (ADR-0020, out of scope).
     let written = ask(&config_path, &roots, &config_init::Beside::default(), None)?;
 
@@ -426,10 +435,18 @@ fn configure(
     // it runs as one (ADR-0019 clause 13) — not to the administrator who ran it.
     let mut created = enrol::written(&state_dir);
     created.extend(written.copies.iter().cloned());
-    run_as::match_owner(
+    let skipped = run_as::match_owner(
         &config_path,
+        &data_root,
         &created.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
     )?;
+    for file in skipped {
+        println!(
+            "warning: {} has a second hard link and was not given the owner of {}",
+            file.display(),
+            config_path.display()
+        );
+    }
     if let Err(e) = config.check_admission() {
         println!("warning: {}: {e}", config_path.display());
     }
@@ -461,6 +478,20 @@ fn ask(
         beside,
         password,
     )
+}
+
+/// The data root, held where it exists already; `None` where it does not yet.
+///
+/// On Windows the service's account holds Modify, delete included, on the data root itself, so it
+/// could rename the root away and put a junction at its name: a root that is a reparse point is
+/// refused, and the held handle keeps it in place (ADR-0054). On Unix the root's name lies
+/// in a directory only root writes, and holding it costs nothing.
+fn hold_data_root(data_root: &Path) -> Result<Option<fleet_agent::nofollow::HeldDir>, String> {
+    match fleet_agent::nofollow::HeldDir::open_root(data_root) {
+        Ok(held) => Ok(Some(held)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot open {}: {e}", data_root.display())),
+    }
 }
 
 /// Absolutize without requiring existence (`canonicalize` would fail for a config file that
