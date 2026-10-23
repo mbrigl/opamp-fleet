@@ -1,6 +1,9 @@
-//! What the Linux post-install prints (`packaging/linux/postinst`), read as text the way
-//! `msi_exe_command.rs` reads the WiX source: the package is not built here, so the guidance it
-//! shows an operator is checked by `cargo test` on every platform.
+//! What the Linux maintainer scripts say and do (`packaging/linux/`), read as text the way
+//! `msi_exe_command.rs` reads the WiX source: the package is not built here, so the guidance the
+//! post-install shows an operator is checked by `cargo test` on every platform. The pre-removal is
+//! also run, on Unix, against a stub `systemctl`; its `service uninstall` names the installed
+//! payload, which a host without the package does not have — run as root on a host with the
+//! package installed, that test would unregister its service.
 
 use std::path::Path;
 
@@ -217,5 +220,55 @@ fn no_maintainer_script_removes_the_account() {
                 assert!(!command.contains(removes), "{name}: {command}");
             }
         }
+    }
+}
+
+/// The pre-removal stops and unregisters only on a real removal: dpkg's `remove` and rpm's `0`.
+/// An upgrade — dpkg's `upgrade`, `failed-upgrade` and `deconfigure`, and any rpm count above 0,
+/// which says how many instances stay — falls straight through, or an `apt upgrade` or an
+/// `rpm -U` beside a second instance would leave the Client stopped.
+/// Verifies: ADR-0042
+#[cfg(unix)]
+#[test]
+fn the_pre_removal_acts_only_on_a_real_removal() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("systemctl.log");
+    let stub = dir.path().join("systemctl");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()),
+    )
+    .expect("write the stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/linux/prerm");
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for (argument, removal) in [
+        ("remove", true),
+        ("0", true),
+        ("upgrade", false),
+        ("failed-upgrade", false),
+        ("deconfigure", false),
+        ("1", false),
+        ("2", false),
+    ] {
+        let _ = std::fs::remove_file(&log);
+        let status = std::process::Command::new("sh")
+            .arg(&script)
+            .arg(argument)
+            .env("PATH", &path)
+            .status()
+            .expect("run the pre-removal");
+        assert!(status.success(), "{argument}: {status}");
+        assert_eq!(
+            log.exists(),
+            removal,
+            "{argument}: stopped the service = {}",
+            log.exists()
+        );
     }
 }
