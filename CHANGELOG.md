@@ -33,6 +33,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   first install whose `supervisor.toml` names a `state_dir` outside the roots needs `--state-dir`.
   On Windows, create a `supervisor_dir` outside the roots yourself.
 
+- **No privileged install step follows a link the service's account placed**
+  ([ADR-0054](docs/adr/0054-no-privileged-install-step-follows-a-link-the-account-placed.md)).
+  `service install` and `service config`, which run as root or an Administrator, wrote, truncated,
+  changed the mode of and re-owned files in the state directory and the layout root through a
+  symbolic link, junction or hard link the service's account placed there — for example after the
+  account deleted its own issued certificate to force a new enrolment — and so could be made to
+  overwrite or re-own an arbitrary file. They now follow no such link, and the Client keeps its
+  state through the same no-follow paths at run time. A state directory that is itself a symbolic
+  link is refused at install and at start, a link at a file the Client writes there is replaced,
+  a file with a second hard link is skipped and named, and on Windows a data or layout root that
+  is a reparse point is refused. **What to do:** move such a directory to its real path, or name
+  the real path with `--state-dir`, `--root` or `--data-root`, before upgrading.
+
 ## [0.6.1]
 
 ### Added
