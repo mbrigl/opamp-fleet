@@ -300,20 +300,12 @@ impl RunAs {
 
     #[cfg(not(unix))]
     fn own(&self, path: &Path, _skipped: &mut Vec<PathBuf>) -> Result<(), String> {
-        // `(OI)(CI)` — inherit to files and subdirectories created later — is a directory-only
-        // grant spec; a file takes the bare right. `/T` re-grants across what already exists.
-        let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
-        let grant = if is_dir {
-            format!("{}:(OI)(CI)M", self.account)
-        } else {
-            format!("{}:M", self.account)
-        };
-        let mut cmd = std::process::Command::new("icacls.exe");
-        cmd.arg(path).arg("/grant").arg(&grant);
-        if is_dir {
-            cmd.arg("/T");
-        }
-        let output = cmd
+        // Asked of the entry itself: a link or junction is never a directory to walk.
+        let is_dir = std::fs::symlink_metadata(path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
+        let output = std::process::Command::new("icacls.exe")
+            .args(grant_args(path, &self.account, is_dir))
             .output()
             .map_err(|e| format!("cannot run icacls.exe: {e}"))?;
         if output.status.success() {
@@ -325,6 +317,25 @@ impl RunAs {
             String::from_utf8_lossy(&output.stdout).trim()
         ))
     }
+}
+
+/// The `icacls.exe` arguments that grant `account` Modify on `path` (ADR-0042 clause 2).
+///
+/// `(OI)(CI)` — inherit to files and subdirectories created later — is a directory-only grant
+/// spec; a file takes the bare right. `/T` re-grants across what already exists, and `/L` acts on a
+/// symbolic link or junction itself, never on what it names: the account holds Modify on the tree
+/// already and could have planted a junction to any directory in it.
+#[cfg(any(windows, test))]
+fn grant_args(path: &Path, account: &str, is_dir: bool) -> Vec<std::ffi::OsString> {
+    let mut args = vec![path.as_os_str().to_owned(), "/grant".into()];
+    if is_dir {
+        args.push(format!("{account}:(OI)(CI)M").into());
+        args.push("/T".into());
+    } else {
+        args.push(format!("{account}:M").into());
+    }
+    args.push("/L".into());
+    args
 }
 
 /// Resolve an account name to its uid and primary gid through `id(1)`. `Err(None)` means the
@@ -676,6 +687,27 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Windows hand-over never follows a link (ADR-0042 clause 2): every grant acts on a link
+    /// or junction itself, so one the account planted under a root it already holds cannot carry
+    /// Modify to the directory it names.
+    /// Verifies: ADR-0042
+    #[test]
+    fn the_windows_handover_grants_on_a_link_itself() {
+        let strings = |args: Vec<std::ffi::OsString>| -> Vec<String> {
+            args.iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            strings(grant_args(Path::new(r"C:\data"), r"NT SERVICE\x", true)),
+            [r"C:\data", "/grant", r"NT SERVICE\x:(OI)(CI)M", "/T", "/L"]
+        );
+        assert_eq!(
+            strings(grant_args(Path::new(r"C:\data\f"), r"NT SERVICE\x", false)),
+            [r"C:\data\f", "/grant", r"NT SERVICE\x:M", "/L"]
+        );
+    }
 
     /// ADR-0019: the accepted Windows forms are exactly the passwordless ones, and the refusal
     /// names them — an operator typing a plain account must learn the forms, not a Win32 error.
