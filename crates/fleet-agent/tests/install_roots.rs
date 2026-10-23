@@ -1,6 +1,6 @@
-//! `service install` against a `supervisor.toml` the service's account rewrote (ADR-0042 clauses 1
-//! and 2): driven through the real command line, because the refusal is only worth anything if it
-//! comes before the install has created, restricted or handed over a thing.
+//! `service install` against a `supervisor.toml` the service's account rewrote (ADR-0053, ADR-0042
+//! clause 2): driven through the real command line, because the refusal is only worth anything
+//! if it comes before the install has created, restricted or handed over a thing.
 //!
 //! Unix only: the command is run at `--user` scope so that it can never register anything on the
 //! host running the test, and Windows has no user-scope service to stand in.
@@ -28,7 +28,7 @@ fn install(config: &Path, root: &Path, home: &Path) -> Output {
 
 /// A state directory the file names outside the install's roots is refused, naming it and
 /// `--state-dir`, and the install has created nothing: not the root, not that directory.
-/// Verifies: ADR-0042, ADR-0019
+/// Verifies: ADR-0053, ADR-0042
 #[test]
 fn an_install_refuses_a_state_directory_the_file_names_outside_its_roots_before_any_change() {
     let dir = tempfile::tempdir().expect("tempdir");

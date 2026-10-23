@@ -31,8 +31,10 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "supervisor.toml")]
     pub config: PathBuf,
     /// Overrides the configuration file's state directory. `service install` bakes this into the
-    /// unit so an installed service never depends on a relative path. It is how an operator names
-    /// a state directory outside the install's roots: one the file names there is refused.
+    /// unit so an installed service never depends on a relative path, and every later install
+    /// keeps the one the unit names unless this flag names another (ADR-0053). It is how an
+    /// operator names a state directory outside the data root and the layout root: one the file
+    /// names there is refused.
     #[arg(long, global = true)]
     pub state_dir: Option<PathBuf>,
     /// The subcommand to run. Absent means `run` (foreground daemon).

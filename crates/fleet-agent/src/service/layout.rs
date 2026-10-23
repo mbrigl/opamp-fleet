@@ -245,13 +245,28 @@ fn plain(path: PathBuf) -> PathBuf {
     path
 }
 
+/// What a `service` verb knows of where an installed Client lives before it reads the
+/// configuration: its two roots, and the state directory an administrator named — by
+/// `--state-dir`, or by the registration an earlier install wrote (ADR-0053 clause 3).
+#[derive(Debug, Clone)]
+pub struct Roots {
+    /// The absolute `--state-dir` this command was given.
+    pub named: Option<PathBuf>,
+    /// The state directory the service's system registration carries.
+    pub registered: Option<PathBuf>,
+    /// The data root, holding `supervisor.toml` and by default the state directory.
+    pub data: PathBuf,
+    /// The layout root, holding `versions/` and `current`.
+    pub layout: PathBuf,
+}
+
 /// Whether `dir` lies beneath one of `roots`, through real directories only: the test a directory
 /// taken from `supervisor.toml` passes before `service install` or `service config` acts on it.
 ///
 /// The file belongs to the service's account (ADR-0042 clause 2), and the install runs as root or
 /// an Administrator, creates what it names, restricts it on Windows and hands it over to that
 /// account. A directory the file names is therefore that account's word, and it is taken only where
-/// the install's own roots already are (ADR-0042 clause 1): lexically beneath one of them, with no
+/// the install's own roots already are (ADR-0053 clause 4): lexically beneath one of them, with no
 /// `.` or `..` after the root, and with every component below the root that exists a directory and
 /// not a symbolic link or junction — a link the account planted there would carry what the install
 /// does out of the root. The roots are the operator's, named by flag or by platform default, and

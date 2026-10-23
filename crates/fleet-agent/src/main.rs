@@ -169,11 +169,12 @@ fn install(
             manager::default_root(level)?,
         ),
     };
-    // The roots that bound every directory taken from the configuration, which the service's
-    // account may rewrite (ADR-0042 clauses 1 and 2): the state directory comes from the file only
-    // beneath them, and from `--state-dir` anywhere.
-    let roots = Roots {
+    // Where the state directory comes from (ADR-0053 clause 3): `--state-dir`, else the existing
+    // registration — so an upgrade keeps it (clause 2) — and only then the configuration, which the
+    // service's account may rewrite, and from that only beneath these roots.
+    let roots = layout::Roots {
         named: state_dir_named.map(absolute).transpose()?,
+        registered: manager::registered_state_dir(level)?,
         data: data_root.clone(),
         layout: layout_root.clone(),
     };
@@ -224,7 +225,7 @@ fn install(
         if let (false, Some(endpoint)) = (config_path.exists(), &args.endpoint) {
             about_to_run.endpoint.clone_from(endpoint);
         }
-        about_to_run.state_dir = roots.state_dir(&about_to_run)?;
+        about_to_run.state_dir = about_to_run.service_state_dir(&roots)?;
         beside.unasked_enrolment(&about_to_run, password.as_deref())?
     };
     let mut written = config_init::Written::default();
@@ -253,7 +254,7 @@ fn install(
     let mut config = ClientConfig::load(&config_path)?;
     // The state directory the service will run with — where an issued certificate counts. Asked
     // again of the file as it is now, which the service's account may have rewritten meanwhile.
-    let state_dir = roots.state_dir(&config)?;
+    let state_dir = config.service_state_dir(&roots)?;
     config.state_dir.clone_from(&state_dir);
     // A Supervisors' root the file places outside every root this install acts on is not the
     // install's to create, restrict or hand over.
@@ -383,8 +384,9 @@ fn configure(
         Some(data) => absolute(data)?,
         None => manager::default_root(level)?,
     };
-    let roots = Roots {
+    let roots = layout::Roots {
         named: state_dir_named.map(absolute).transpose()?,
+        registered: manager::registered_state_dir(level)?,
         layout: match &args.root {
             Some(root) => absolute(root)?,
             None => manager::default_layout_root(level)?,
@@ -400,7 +402,7 @@ fn configure(
     let written = ask(&config_path, &roots, &config_init::Beside::default(), None)?;
 
     let mut config = ClientConfig::load(&config_path)?;
-    let state_dir = roots.state_dir(&config)?;
+    let state_dir = config.service_state_dir(&roots)?;
     config.state_dir.clone_from(&state_dir);
     if let Some(bootstrap) = &written.bootstrap {
         enrol::run(&config, bootstrap)?;
@@ -425,33 +427,18 @@ fn configure(
     Ok(())
 }
 
-/// The roots a `service` verb was given or defaulted to, and the `--state-dir` it was given.
-struct Roots {
-    named: Option<PathBuf>,
-    data: PathBuf,
-    layout: PathBuf,
-}
-
-impl Roots {
-    /// The state directory a service installed from `config` runs with, refused when the file
-    /// names one outside these roots ([`ClientConfig::service_state_dir`]).
-    fn state_dir(&self, config: &ClientConfig) -> Result<PathBuf, String> {
-        config.service_state_dir(self.named.as_deref(), &self.data, &self.layout)
-    }
-}
-
 /// The questionnaire against the file at `config_path`, offering what it holds and asking for the
 /// bootstrap identity only while the service's state directory holds no issued certificate
 /// (ADR-0019 clauses 16, 17). That directory is decided, and refused, before anything is asked.
 fn ask(
     config_path: &Path,
-    roots: &Roots,
+    roots: &layout::Roots,
     beside: &config_init::Beside,
     password: Option<&str>,
 ) -> Result<config_init::Written, String> {
     let current = ClientConfig::load(config_path)?;
     let mut in_service = current.clone();
-    in_service.state_dir = roots.state_dir(&current)?;
+    in_service.state_dir = current.service_state_dir(&roots)?;
     config_init::run(
         config_path,
         &current,

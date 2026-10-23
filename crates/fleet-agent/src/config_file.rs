@@ -40,15 +40,16 @@ impl ClientConfig {
         config.checked(path)
     }
 
-    /// The state directory a service installed from this file runs with (ADR-0019 clause 9,
-    /// ADR-0042 clause 1): `named`, the absolute `--state-dir` the operator gave the command, else
-    /// the absolute one the file names, else `<data root>/state`.
+    /// The state directory a service installed from this file runs with (ADR-0053 clause 3):
+    /// `--state-dir`, else the one the service's registration carries, else the absolute one the
+    /// file names, else `<data root>/state`.
     ///
     /// The file is the service account's to rewrite (ADR-0042 clause 2), and the install that reads
-    /// it runs as root or an Administrator and hands the state directory over to that account. So a
-    /// directory taken from the file — the default under the data root included — must lie beneath
-    /// `data_root` or `layout_root` as [`beneath`](crate::service::layout::beneath) decides; one
-    /// anywhere else is refused. Only the operator's flag names one outside them.
+    /// it runs as root or an Administrator and hands the state directory over to that account. So
+    /// a directory the file names is taken only beneath the data root or the layout root, and one
+    /// from any source that lies beneath them is reached through directories only, as
+    /// [`beneath`](crate::service::layout::beneath) decides (ADR-0053 clause 4). The flag and the
+    /// registration are an administrator's word and may name one outside them.
     ///
     /// Decided on the value as written, because [`state_dir`](Self::state_dir) is already resolved
     /// against the installing shell's working directory, which the service never shares. Meaningful
@@ -58,26 +59,30 @@ impl ClientConfig {
     /// Returns a refusal naming the directory, why it is refused, and `--state-dir`.
     pub fn service_state_dir(
         &self,
-        named: Option<&Path>,
-        data_root: &Path,
-        layout_root: &Path,
+        roots: &crate::service::layout::Roots,
     ) -> Result<PathBuf, String> {
-        if let Some(named) = named {
-            return Ok(named.to_path_buf());
-        }
-        let dir = if self.state_dir_as_written.is_absolute() {
-            self.state_dir_as_written.clone()
-        } else {
-            data_root.join(crate::service::layout::STATE_DIR_NAME)
+        let bounds = [roots.data.as_path(), roots.layout.as_path()];
+        let (dir, from_file) = match (&roots.named, &roots.registered) {
+            (Some(dir), _) | (None, Some(dir)) => (dir.clone(), false),
+            (None, None) if self.state_dir_as_written.is_absolute() => {
+                (self.state_dir_as_written.clone(), true)
+            }
+            (None, None) => (
+                roots.data.join(crate::service::layout::STATE_DIR_NAME),
+                false,
+            ),
         };
-        crate::service::layout::beneath(&dir, &[data_root, layout_root]).map_err(|why| {
-            format!(
-                "refusing the state directory {}: {why}. The configuration is the service \
-                 account's to rewrite, so a state directory is taken from it only beneath the \
-                 install's roots; name one elsewhere with --state-dir",
-                dir.display()
-            )
-        })?;
+        if from_file || bounds.iter().any(|root| dir.starts_with(root)) {
+            crate::service::layout::beneath(&dir, &bounds).map_err(|why| {
+                format!(
+                    "refusing the state directory {}: {why}. The configuration is the service \
+                     account's to rewrite, so a state directory is taken from it only beneath the \
+                     data root or the layout root, and reached there through directories only; \
+                     name one with --state-dir",
+                    dir.display()
+                )
+            })?;
+        }
         Ok(dir)
     }
 
@@ -218,41 +223,52 @@ mod tests {
             .expect("a leftover [auth] beside a certificate");
     }
 
+    use crate::service::layout::Roots;
+
+    /// The roots under `dir`, with what an administrator named.
+    fn roots(dir: &Path, named: Option<&Path>, registered: Option<&Path>) -> Roots {
+        Roots {
+            named: named.map(Path::to_path_buf),
+            registered: registered.map(Path::to_path_buf),
+            data: dir.join("data"),
+            layout: dir.join("layout"),
+        }
+    }
+
     /// An installed service keeps its state in `<data root>/state` unless the file names an
-    /// absolute directory beneath the install's roots — whatever the working directory of the shell
-    /// that installs. `load` resolves a relative `state_dir` against that directory; the install
-    /// must not take it.
-    /// Verifies: ADR-0019, ADR-0042
+    /// absolute directory beneath the data root or the layout root — whatever the working
+    /// directory of the shell that installs. `load` resolves a relative `state_dir` against that
+    /// directory; the install must not take it.
+    /// Verifies: ADR-0053, ADR-0019
     #[test]
     fn an_installed_service_keeps_its_state_under_the_data_root_unless_named_absolutely() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let data_root = dir.path().join("data");
-        let layout_root = dir.path().join("layout");
+        let roots = roots(dir.path(), None, None);
         let path = dir.path().join("supervisor.toml");
         let installed = |text: &str| {
             std::fs::write(&path, text).expect("write");
             ClientConfig::load(&path)
                 .expect("load")
-                .service_state_dir(None, &data_root, &layout_root)
+                .service_state_dir(&roots)
                 .expect("beneath the roots")
         };
 
         // The file the questionnaire writes names none: the default `client-state` is relative.
-        assert_eq!(installed(""), data_root.join("state"));
+        assert_eq!(installed(""), roots.data.join("state"));
         assert_eq!(
             installed("state_dir = \"elsewhere\"\n"),
-            data_root.join("state")
+            roots.data.join("state")
         );
         // Absent file, defaults: the same.
         assert_eq!(
             ClientConfig::load(&dir.path().join("absent.toml"))
                 .expect("defaults")
-                .service_state_dir(None, &data_root, &layout_root)
+                .service_state_dir(&roots)
                 .expect("the default"),
-            data_root.join("state")
+            roots.data.join("state")
         );
 
-        for named in [data_root.join("other/state"), layout_root.join("state")] {
+        for named in [roots.data.join("other/state"), roots.layout.join("state")] {
             assert_eq!(
                 installed(&format!("state_dir = '{}'\n", named.display())),
                 named,
@@ -263,15 +279,14 @@ mod tests {
 
     /// `supervisor.toml` is the service account's to rewrite (ADR-0042 clause 2), and the install
     /// that reads it runs as root or an Administrator and hands the state directory over to that
-    /// account. A state directory the file names outside the install's roots, or one that leaves
-    /// them by `..`, is refused, so the account cannot have another tree handed over to itself.
-    /// The operator's `--state-dir` names one anywhere.
-    /// Verifies: ADR-0042, ADR-0019
+    /// account. With nothing registered and no `--state-dir`, a state directory the file names
+    /// outside the data root and the layout root, or one that leaves them by `..`, is refused, so
+    /// the account cannot have another tree handed over to itself. The operator's `--state-dir`
+    /// names one anywhere.
+    /// Verifies: ADR-0053, ADR-0042
     #[test]
     fn a_state_directory_the_file_names_outside_the_installs_roots_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let data_root = dir.path().join("data");
-        let layout_root = dir.path().join("layout");
         let path = dir.path().join("supervisor.toml");
         let outside = dir.path().join("elsewhere");
         let loaded = |state_dir: &Path| {
@@ -280,9 +295,13 @@ mod tests {
             ClientConfig::load(&path).expect("load")
         };
 
-        for state_dir in [outside.clone(), data_root.join("..").join("elsewhere")] {
+        let unregistered = roots(dir.path(), None, None);
+        for state_dir in [
+            outside.clone(),
+            unregistered.data.join("..").join("elsewhere"),
+        ] {
             let err = loaded(&state_dir)
-                .service_state_dir(None, &data_root, &layout_root)
+                .service_state_dir(&unregistered)
                 .expect_err("outside the roots");
             assert!(err.contains(&state_dir.display().to_string()), "{err}");
             assert!(err.contains("--state-dir"), "{err}");
@@ -290,42 +309,82 @@ mod tests {
 
         assert_eq!(
             loaded(&outside)
-                .service_state_dir(Some(&outside), &data_root, &layout_root)
+                .service_state_dir(&roots(dir.path(), Some(&outside), None))
                 .expect("named by the operator"),
             outside,
             "the operator's --state-dir is taken wherever it lies"
         );
     }
 
+    /// A re-registration keeps the state directory its registration carries, whatever the file
+    /// now says — outside the roots, beneath them, or nothing — so an upgrade never moves it and
+    /// the service's account cannot move it. Only `--state-dir` names another.
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_reregistration_keeps_the_registered_state_directory_whatever_the_file_says() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let registered = dir.path().join("relocated");
+        let kept = roots(dir.path(), None, Some(&registered));
+        for text in [
+            format!("state_dir = '{}'\n", dir.path().join("elsewhere").display()),
+            format!("state_dir = '{}'\n", kept.data.join("state").display()),
+            String::new(),
+        ] {
+            std::fs::write(&path, &text).expect("write");
+            assert_eq!(
+                ClientConfig::load(&path)
+                    .expect("load")
+                    .service_state_dir(&kept)
+                    .expect("registered"),
+                registered,
+                "{text}"
+            );
+        }
+
+        let moved = dir.path().join("moved");
+        assert_eq!(
+            ClientConfig::load(&path)
+                .expect("load")
+                .service_state_dir(&roots(dir.path(), Some(&moved), Some(&registered)))
+                .expect("named"),
+            moved,
+            "an administrator's --state-dir outranks the registration"
+        );
+    }
+
     /// A link the service's account planted beneath the data root would carry the state directory
-    /// out of it, so a component that is a link is refused — the default `<data root>/state`
-    /// included.
-    /// Verifies: ADR-0042
+    /// out of it, so a component that is a link is refused — the default `<data root>/state` and a
+    /// registered directory beneath the root included.
+    /// Verifies: ADR-0053, ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_state_directory_reached_through_a_link_beneath_the_root_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let data_root = dir.path().join("data");
-        let layout_root = dir.path().join("layout");
+        let unregistered = roots(dir.path(), None, None);
         let outside = dir.path().join("elsewhere");
-        std::fs::create_dir_all(&data_root).expect("data root");
+        std::fs::create_dir_all(&unregistered.data).expect("data root");
         std::fs::create_dir_all(&outside).expect("outside");
-        std::os::unix::fs::symlink(&outside, data_root.join("link")).expect("link");
+        std::os::unix::fs::symlink(&outside, unregistered.data.join("link")).expect("link");
         let path = dir.path().join("supervisor.toml");
 
-        let through = data_root.join("link").join("state");
+        let through = unregistered.data.join("link").join("state");
         std::fs::write(&path, format!("state_dir = '{}'\n", through.display())).expect("write");
         let err = ClientConfig::load(&path)
             .expect("load")
-            .service_state_dir(None, &data_root, &layout_root)
+            .service_state_dir(&unregistered)
             .expect_err("through a link");
         assert!(err.contains("is a link"), "{err}");
-
-        std::fs::write(&path, "").expect("write");
-        std::os::unix::fs::symlink(&outside, data_root.join("state")).expect("link");
         ClientConfig::load(&path)
             .expect("load")
-            .service_state_dir(None, &data_root, &layout_root)
+            .service_state_dir(&roots(dir.path(), None, Some(&through)))
+            .expect_err("registered, through a link");
+
+        std::fs::write(&path, "").expect("write");
+        std::os::unix::fs::symlink(&outside, unregistered.data.join("state")).expect("link");
+        ClientConfig::load(&path)
+            .expect("load")
+            .service_state_dir(&unregistered)
             .expect_err("the default, planted as a link");
     }
 }

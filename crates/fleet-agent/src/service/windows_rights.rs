@@ -69,7 +69,9 @@ const KEEPERS: [&str; 2] = ["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"];
 
 /// The `icacls.exe` arguments that cut `path` off from the rights it inherits and leave it to
 /// [`KEEPERS`]. Without the inheritance flags propagated, what is already inside — the configuration
-/// written moments ago — loses the inherited read right with its parent.
+/// written moments ago — loses the inherited read right with its parent. `/L` acts on a link or
+/// junction itself: the service's account may swap one in under a root it holds between the check
+/// of ADR-0053 clause 4 and this run, and the cut must not reach what it names.
 #[cfg(any(windows, test))]
 fn restrict_args(path: &std::path::Path) -> Vec<std::ffi::OsString> {
     let mut args = vec![path.as_os_str().to_owned(), "/inheritance:r".into()];
@@ -77,6 +79,7 @@ fn restrict_args(path: &std::path::Path) -> Vec<std::ffi::OsString> {
         args.push("/grant:r".into());
         args.push(keeper.into());
     }
+    args.push("/L".into());
     args
 }
 
@@ -129,9 +132,10 @@ pub enum Treatment {
 /// Which directories a system-scope install restricts, and how: the data root — taken over when it
 /// is the platform default, cut when the operator named it — and the state directory and the
 /// Supervisors' root wherever one lies outside every directory already listed. A state directory
-/// outside the data root is always cut: the install has taken it beneath its roots or from the
-/// operator's `--state-dir`. A Supervisors' root outside both is cut when the install creates it
-/// (`exists` says it does not exist yet) and `ours` says it lies beneath the install's roots, and
+/// outside the data root is always cut: the install has taken it beneath its roots, from the
+/// operator's `--state-dir` or from the registration (ADR-0053 clause 3). A Supervisors' root
+/// outside both is cut when the install creates it (`exists` says it does not exist yet) and
+/// `ours` says it lies beneath the install's roots, and
 /// left untouched otherwise: `supervisor.toml` is the service account's to rewrite, and a directory
 /// it names elsewhere would have the install create one wherever that account chose and grant it
 /// Modify there. A directory inside a listed one inherits its rights and is not listed. Decided
@@ -397,7 +401,7 @@ mod tests {
     /// root it places outside every root of the install is never created, cut or handed over by
     /// the install — not even when it does not exist yet — or the account would choose where an
     /// Administrator makes a directory and grants it Modify.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0053, ADR-0042
     #[test]
     fn a_supervisors_root_outside_the_installs_roots_is_left_untouched() {
         let planned = plan(
@@ -422,7 +426,7 @@ mod tests {
 
     /// The data root keeps no inherited right — `BUILTIN\Users` read among them — and full control
     /// only for LocalSystem and the Administrators, each granted by SID.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0053
     #[test]
     fn the_data_root_is_cut_off_from_what_every_local_user_inherits() {
         let args: Vec<String> = restrict_args(std::path::Path::new(r"C:\ProgramData\opamp-fleet"))
@@ -434,7 +438,11 @@ mod tests {
             args[1], "/inheritance:r",
             "inherited rights are removed, not kept"
         );
-        assert_eq!(&args[2..], ["/grant:r", KEEPERS[0], "/grant:r", KEEPERS[1]]);
+        assert_eq!(
+            &args[2..],
+            ["/grant:r", KEEPERS[0], "/grant:r", KEEPERS[1], "/L"],
+            "and on a link or junction itself, never on what it names"
+        );
         assert!(KEEPERS[0].starts_with("*S-1-5-18:") && KEEPERS[1].starts_with("*S-1-5-32-544:"));
         assert!(
             !args.iter().any(|arg| arg.contains("S-1-5-32-545")),
