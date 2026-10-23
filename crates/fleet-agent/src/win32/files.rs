@@ -149,14 +149,28 @@ impl Entry {
     /// # Errors
     /// Returns why it could not be set, or what the object holds instead.
     pub fn set_dacl(&self, dacl: &Dacl) -> io::Result<()> {
+        // `AR` asks for automatic inheritance, so that what the system creates beneath the
+        // object holds what it passes on as inherited; whether a DACL set on a handle keeps it is
+        // not documented, and the comparison below does not depend on it.
+        let requested = |protected: bool| {
+            format!(
+                "{}AR{}",
+                if protected { "P" } else { "" },
+                if dacl.flags.contains("AI") { "AI" } else { "" }
+            )
+        };
         if !dacl.protected() {
             let first = Dacl {
-                flags: format!("P{}", dacl.flags),
+                flags: requested(true),
                 aces: dacl.aces.clone(),
             };
             self.set(&first.text(), DACL_SECURITY_INFORMATION)?;
         }
-        self.set(&dacl.text(), DACL_SECURITY_INFORMATION)?;
+        let wanted = Dacl {
+            flags: requested(dacl.protected()),
+            aces: dacl.aces.clone(),
+        };
+        self.set(&wanted.text(), DACL_SECURITY_INFORMATION)?;
         let held = self.dacl()?;
         if !super::same_dacl(&held.text(), &dacl.text())? {
             return Err(io::Error::other(format!(

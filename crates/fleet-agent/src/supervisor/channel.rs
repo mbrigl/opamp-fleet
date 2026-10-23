@@ -1728,13 +1728,14 @@ impl Connection {
         })
         .abort_handle();
         // Ends when every sender is gone — the last `Channel` and `RemoteChild` dropped — or when
-        // the service is. Then the read half goes too, and with both halves the connection: a
-        // named pipe has no half to close, so the service learns that the Client is gone only
-        // once the pipe is closed, and nobody waits for a reply any more.
+        // the service is. Where the senders are gone the read half goes too, and with both halves
+        // the connection: a named pipe has no half to close, so the service learns that the
+        // Client is gone only once the pipe is closed, and nobody waits for a reply any more.
+        // Where the service is gone the reader is left to see it, and to fail what waits.
         let writer = tokio::spawn(async move {
             while let Some(frame) = outgoing.recv().await {
                 if write.write_all(&frame).await.is_err() {
-                    break;
+                    return;
                 }
             }
             reader.abort();
