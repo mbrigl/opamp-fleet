@@ -1254,23 +1254,66 @@ fn resumed(halted: Halted, agents_registered: bool, pulled_in: bool) -> Vec<Serv
 /// Starts again what a stop for a change stopped, once the change has succeeded ([`resumed`]).
 ///
 /// # Errors
-/// Returns why a service could not be started.
+/// Returns why a service could not be started, or that one still starting or stopping did not
+/// settle in time.
 #[cfg(windows)]
 pub fn resume(level: ServiceLevel, halted: Halted) -> Result<(), String> {
-    for label in resumed(halted, agents_registered(level), PULLED_IN) {
-        let which = if label == agents_label() {
+    resume_with(
+        &resumed(halted, agents_registered(level), PULLED_IN),
+        &mut |label| super::windows_config::activity(&label.to_qualified_name()),
+        &mut |label| {
+            manager(level)?
+                .start(ServiceStartCtx {
+                    label: label.clone(),
+                })
+                .map_err(|e| e.to_string())
+        },
+        STOPPING,
+    )
+}
+
+/// Starts each of `labels` through `start`, asking `activity` first: one that runs — started by
+/// hand meanwhile — is not started twice, which the SCM would refuse; one still starting or
+/// stopping is asked again until it has settled, up to `within`; one stopped is started. One that
+/// has not settled by then is an error, and what is recorded to run again stays recorded.
+///
+/// # Errors
+/// Returns why a service could not be asked or started, or that it did not settle.
+#[cfg(any(windows, test))]
+fn resume_with(
+    labels: &[ServiceLabel],
+    activity: &mut dyn FnMut(&ServiceLabel) -> Result<Activity, String>,
+    start: &mut dyn FnMut(&ServiceLabel) -> Result<(), String>,
+    within: std::time::Duration,
+) -> Result<(), String> {
+    for label in labels {
+        let which = if *label == agents_label() {
             "the second service"
         } else {
             "the service"
         };
-        // One that runs already — started by hand meanwhile — is not started twice, which the SCM
-        // would refuse.
-        if super::windows_config::activity(&label.to_qualified_name())? != Activity::Stopped {
-            continue;
+        let until = std::time::Instant::now() + within;
+        loop {
+            match activity(label)? {
+                Activity::Running => break,
+                Activity::Stopped => {
+                    start(label).map_err(|e| format!("cannot start {which}: {e}"))?;
+                    break;
+                }
+                pending if std::time::Instant::now() >= until => {
+                    return Err(format!(
+                        "{which} is still {} after {}s, and is not started again",
+                        if pending == Activity::Starting {
+                            "starting"
+                        } else {
+                            "stopping"
+                        },
+                        within.as_secs()
+                    ));
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(250)),
+            }
         }
-        manager(level)?
-            .start(ServiceStartCtx { label })
-            .map_err(|e| format!("cannot start {which}: {e}"))?;
     }
     Ok(())
 }
@@ -2462,6 +2505,68 @@ mod tests {
                 agents: true
             })
         );
+    }
+
+    /// A resume passes over only a service that runs; it starts one that is stopped, and waits on
+    /// one still starting or stopping until it has settled — starting it once it has stopped — or,
+    /// where it does not settle in time, fails, so that what is to run again stays recorded
+    /// (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_resume_passes_over_only_what_runs_and_waits_on_what_is_pending() {
+        let both = [agents_label(), label()];
+        let mut started = Vec::new();
+        let mut asked = 0;
+        resume_with(
+            &both,
+            &mut |label| {
+                asked += 1;
+                Ok(if *label == agents_label() {
+                    Activity::Running
+                } else if asked < 4 {
+                    Activity::Stopping
+                } else {
+                    Activity::Stopped
+                })
+            },
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+            std::time::Duration::from_secs(5),
+        )
+        .expect("resumed");
+        assert_eq!(started, [label()], "the running one passed over");
+        assert!(asked >= 4, "the stopping one asked until it settled");
+
+        let mut started = Vec::new();
+        let pending = resume_with(
+            &both,
+            &mut |_| Ok(Activity::Starting),
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+            std::time::Duration::ZERO,
+        );
+        assert!(
+            pending.is_err_and(|e| e.contains("still starting")),
+            "one that does not settle fails"
+        );
+        assert!(started.is_empty());
+
+        let mut started = Vec::new();
+        resume_with(
+            &both,
+            &mut |_| Ok(Activity::Stopped),
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+            std::time::Duration::ZERO,
+        )
+        .expect("resumed");
+        assert_eq!(started, both, "both stopped, both started, in order");
     }
 
     /// `start` starts the Client alone where its unit wants the second service, and the second
