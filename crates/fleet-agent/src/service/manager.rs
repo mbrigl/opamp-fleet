@@ -1077,12 +1077,25 @@ fn command_line_arguments(line: &str) -> Vec<String> {
 /// Returns every error: the manager cannot uninstall the service, or stop or uninstall the second
 /// service.
 pub fn uninstall(level: ServiceLevel) -> Result<(), String> {
-    let client = manager(level).and_then(|manager| {
+    let manager = manager(level);
+    uninstall_with(manager.as_deref(), &mut || remove_agents(level).map(|_| ()))
+}
+
+/// Deregisters the Client through `manager`, then the second service through `remove_agents`,
+/// the second whatever became of the first.
+///
+/// # Errors
+/// Returns every error, the Client's first.
+fn uninstall_with(
+    manager: Result<&dyn ServiceManager, &String>,
+    remove_agents: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let client = manager.map_err(Clone::clone).and_then(|manager| {
         manager
             .uninstall(ServiceUninstallCtx { label: label() })
             .map_err(|e| format!("cannot uninstall the service: {e}"))
     });
-    let agents = remove_agents(level).map(|_| ());
+    let agents = remove_agents();
     match (client, agents) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
@@ -1143,27 +1156,46 @@ pub struct Halted {
     pub agents: bool,
 }
 
+/// How a stop for a change failed: why, and which services it found running and stopped before it
+/// failed — the Client, where it then could not be started again too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HaltError {
+    pub error: String,
+    pub stopped: Halted,
+}
+
 /// Stops the Client, then the second service, through `stop`, which answers whether the service
 /// ran. Where the second cannot be stopped, the Client is started again through `start` if this
-/// stopped it: a halt that fails leaves both as it found them.
+/// stopped it: a halt that fails leaves both as it found them, as far as it can.
 ///
 /// # Errors
-/// Returns why a service could not be stopped, and why the Client could not be started again.
+/// Returns why a service could not be stopped, and why the Client could not be started again,
+/// with what this stopped.
 #[cfg(any(windows, test))]
 fn halt_with(
     stop: &mut dyn FnMut(&ServiceLabel) -> Result<bool, String>,
     start: &mut dyn FnMut(&ServiceLabel) -> Result<(), String>,
-) -> Result<Halted, String> {
-    let client = stop(&label())?;
+) -> Result<Halted, HaltError> {
+    let client = stop(&label()).map_err(|error| HaltError {
+        error,
+        stopped: Halted::default(),
+    })?;
+    let stopped = Halted {
+        client,
+        agents: false,
+    };
     match stop(&agents_label()) {
         Ok(agents) => Ok(Halted { client, agents }),
         Err(e) if client => match start(&label()) {
-            Ok(()) => Err(e),
-            Err(again) => Err(format!(
-                "{e}; and the Client, stopped for it, cannot be started again: {again}"
-            )),
+            Ok(()) => Err(HaltError { error: e, stopped }),
+            Err(again) => Err(HaltError {
+                error: format!(
+                    "{e}; and the Client, stopped for it, cannot be started again: {again}"
+                ),
+                stopped,
+            }),
         },
-        Err(e) => Err(e),
+        Err(error) => Err(HaltError { error, stopped }),
     }
 }
 
@@ -1173,10 +1205,10 @@ fn halt_with(
 /// is about to rewrite. Returns which ran.
 ///
 /// # Errors
-/// Returns why one could not be stopped, or that one had not ended within the bound of a stop;
-/// what this stopped is started again, and nothing is changed.
+/// Returns why one could not be stopped, or that one had not ended within the bound of a stop,
+/// with what this stopped; that is started again, and nothing is changed.
 #[cfg(windows)]
-pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, String> {
+pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, HaltError> {
     halt_with(
         &mut |label| super::windows_config::stop_and_wait(&label.to_qualified_name(), STOPPING),
         &mut |label| {
@@ -1197,13 +1229,28 @@ pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, String> {
 /// Returns why the SCM cannot be asked.
 #[cfg(windows)]
 pub fn running() -> Result<Halted, String> {
-    let runs = |label: ServiceLabel| {
-        super::windows_config::activity(&label.to_qualified_name())
-            .map(|activity| activity != Activity::Stopped)
-    };
+    runs_as(|activity| activity != Activity::Stopped)
+}
+
+/// Which of the two services run on, settled — running or paused, not starting or stopping — as
+/// the SCM reports it after a stop for a change failed: one still stopping counts as stopped, and
+/// one still starting as not yet run again, both to be started again by a resume that waits them
+/// out.
+///
+/// # Errors
+/// Returns why the SCM cannot be asked.
+#[cfg(windows)]
+pub fn running_on() -> Result<Halted, String> {
+    runs_as(|activity| activity == Activity::Running)
+}
+
+#[cfg(windows)]
+fn runs_as(runs: fn(Activity) -> bool) -> Result<Halted, String> {
+    let asked =
+        |label: ServiceLabel| super::windows_config::activity(&label.to_qualified_name()).map(runs);
     Ok(Halted {
-        client: runs(label())?,
-        agents: runs(agents_label())?,
+        client: asked(label())?,
+        agents: asked(agents_label())?,
     })
 }
 
@@ -2494,7 +2541,17 @@ mod tests {
                 Ok(())
             },
         );
-        assert_eq!(failed, Err("did not stop in time".to_string()));
+        assert_eq!(
+            failed,
+            Err(HaltError {
+                error: "did not stop in time".to_string(),
+                stopped: Halted {
+                    client: true,
+                    agents: false
+                }
+            }),
+            "with what it stopped"
+        );
         assert_eq!(started, [label()], "the Client runs again");
 
         let mut started = Vec::new();
@@ -2527,6 +2584,68 @@ mod tests {
                 agents: true
             })
         );
+    }
+
+    /// A deregistration of the Client that fails still removes the second service, and both
+    /// errors are reported: no second service stays registered behind a Client that could not be
+    /// (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn an_uninstall_removes_the_second_service_when_the_clients_fails() {
+        struct Refusing;
+        impl ServiceManager for Refusing {
+            fn available(&self) -> std::io::Result<bool> {
+                Ok(true)
+            }
+            fn install(&self, _ctx: ServiceInstallCtx) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn uninstall(&self, _ctx: ServiceUninstallCtx) -> std::io::Result<()> {
+                Err(std::io::Error::other("marked for deletion"))
+            }
+            fn start(&self, _ctx: ServiceStartCtx) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn stop(&self, _ctx: service_manager::ServiceStopCtx) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn level(&self) -> SmLevel {
+                SmLevel::System
+            }
+            fn set_level(&mut self, _level: SmLevel) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn status(&self, _ctx: ServiceStatusCtx) -> std::io::Result<ServiceStatus> {
+                Ok(ServiceStatus::Running)
+            }
+        }
+        let mut removed = 0;
+        let both = uninstall_with(Ok(&Refusing), &mut || {
+            removed += 1;
+            Err("the second service did not stop".to_string())
+        });
+        assert_eq!(removed, 1, "the second service removed all the same");
+        let both = both.expect_err("both failed");
+        assert!(
+            both.contains("marked for deletion") && both.contains("did not stop"),
+            "{both}"
+        );
+
+        let mut removed = 0;
+        let client = uninstall_with(Ok(&Refusing), &mut || {
+            removed += 1;
+            Ok(())
+        });
+        assert_eq!(removed, 1);
+        assert!(client.is_err_and(|e| e.contains("marked for deletion")));
+
+        let unreachable = "no service manager".to_string();
+        let mut removed = 0;
+        let _ = uninstall_with(Err(&unreachable), &mut || {
+            removed += 1;
+            Ok(())
+        });
+        assert_eq!(removed, 1, "and where the manager cannot be reached");
     }
 
     /// A stop for a deregistration tries both services whatever became of the other, and starts
