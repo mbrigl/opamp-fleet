@@ -246,24 +246,45 @@ fn uninstall(level: ServiceLevel) -> Result<(), String> {
     }
 }
 
-/// Holds the install's named mutex, `Global\<PRODUCT_NAME>-install`, for as long as the value
-/// lives: one install, uninstall, start or stop at a time, so that no two of them rewrite the
-/// record of what is left to finish over each other.
+/// Holds the install lock — the mutex `<PRODUCT_NAME>-install\lock` in a private namespace of that
+/// name, whose boundary is the Administrators' group, so that no other account can create it first
+/// — for as long as the value lives: one install, uninstall, start or stop at a time, so that no
+/// two of them rewrite the record of what is left to finish over each other. Where a holder before
+/// ended without letting it go, says so: what it left is in the record, and this run finishes it.
 ///
 /// # Errors
-/// Returns that another holds it still after a while, or why it cannot be taken.
+/// Returns that another holds it still after a while — another run of this program; wait for it,
+/// or end it — or why it cannot be taken: access denied for a process that is not elevated, and,
+/// where an object of another kind or another owner holds the name inside the namespace, which only
+/// an Administrator can have made there.
 #[cfg(windows)]
 fn hold_install_lock() -> Result<fleet_agent::win32::Held, String> {
+    use fleet_agent::win32::Taken;
     const WITHIN: std::time::Duration = std::time::Duration::from_secs(300);
-    let name = format!(r"Global\{}-install", manager::service_name());
-    fleet_agent::win32::hold_mutex(&name, "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)", WITHIN)
-        .map_err(|e| format!("cannot take {name}: {e}"))?
-        .ok_or_else(|| {
-            format!(
-                "another install, uninstall, start or stop still holds {name} after {}s",
-                WITHIN.as_secs()
-            )
-        })
+    let alias = format!("{}-install", manager::service_name());
+    match fleet_agent::win32::hold_install_lock(
+        &alias,
+        "lock",
+        "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)",
+        WITHIN,
+    )
+    .map_err(|e| format!(r"cannot take the install lock {alias}\lock: {e}"))?
+    {
+        Taken::Held { held, abandoned } => {
+            if abandoned {
+                println!(
+                    "warning: an earlier install, uninstall, start or stop ended without letting \
+                     the install lock go; what it left unfinished is finished by this one where \
+                     it is recorded"
+                );
+            }
+            Ok(held)
+        }
+        Taken::Busy => Err(format!(
+            "another install, uninstall, start or stop still holds the install lock after {}s",
+            WITHIN.as_secs()
+        )),
+    }
 }
 
 /// After `service start` or `service stop` the operator decides when the services run: what an

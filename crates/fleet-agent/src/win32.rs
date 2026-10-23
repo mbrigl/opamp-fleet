@@ -1218,43 +1218,132 @@ mod system {
             name: *const u16,
         ) -> Handle;
         fn ReleaseMutex(mutex: Handle) -> Bool;
+        fn SetLastError(code: u32);
+        fn CreateBoundaryDescriptorW(name: *const u16, flags: u32) -> Handle;
+        fn AddSIDToBoundaryDescriptor(boundary: *mut Handle, sid: Psid) -> Bool;
+        fn DeleteBoundaryDescriptor(boundary: Handle);
+        fn CreatePrivateNamespaceW(
+            attributes: *const SecurityAttributes,
+            boundary: *mut c_void,
+            alias: *const u16,
+        ) -> Handle;
+        fn OpenPrivateNamespaceW(boundary: *mut c_void, alias: *const u16) -> Handle;
+        fn ClosePrivateNamespace(namespace: Handle, flags: u32) -> u8;
     }
 
-    /// A named mutex this thread owns, released and closed when dropped.
-    pub struct Held(OwnedHandle);
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn ConvertStringSidToSidW(text: *const u16, sid: *mut Psid) -> Bool;
+    }
 
-    impl Drop for Held {
+    /// ERROR_ALREADY_EXISTS.
+    const ALREADY_EXISTS: i32 = 183;
+
+    /// A boundary descriptor named `name` that holds the Administrators' SID alone, deleted when
+    /// dropped (CreateBoundaryDescriptorW, AddSIDToBoundaryDescriptor, DeleteBoundaryDescriptor).
+    struct Boundary(Handle);
+
+    impl Boundary {
+        fn of_the_administrators(name: &str) -> io::Result<Boundary> {
+            let wide_name = wide(OsStr::new(name));
+            // SAFETY: a NUL-terminated name.
+            let raw = unsafe { CreateBoundaryDescriptorW(wide_name.as_ptr(), 0) };
+            if raw.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let mut boundary = Boundary(raw);
+            let text = wide(OsStr::new("S-1-5-32-544"));
+            let mut sid: Psid = std::ptr::null_mut();
+            // SAFETY: a NUL-terminated SID string; `sid` receives LocalAlloc'd memory.
+            check(unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) })?;
+            let sid = Local(sid);
+            // SAFETY: the descriptor's handle, which the call may replace, and a valid SID.
+            check(unsafe { AddSIDToBoundaryDescriptor(&mut boundary.0, sid.0) })?;
+            Ok(boundary)
+        }
+    }
+
+    impl Drop for Boundary {
         fn drop(&mut self) {
-            // SAFETY: a mutex this thread owns, released once.
+            // SAFETY: a boundary descriptor this process created and deletes once.
+            unsafe { DeleteBoundaryDescriptor(self.0) }
+        }
+    }
+
+    /// A private namespace, its handle closed when dropped (ClosePrivateNamespace).
+    struct Namespace(Handle);
+
+    impl Drop for Namespace {
+        fn drop(&mut self) {
+            // SAFETY: a namespace handle this process holds and closes once.
             unsafe {
-                ReleaseMutex(self.0.as_raw_handle().cast());
+                ClosePrivateNamespace(self.0, 0);
             }
         }
     }
 
-    /// Takes the named mutex `name` — created carrying the security descriptor `sddl` where it does
-    /// not exist (CreateMutexW), and refused where it exists owned by anyone but `LocalSystem` or the
-    /// Administrators — waiting up to `within` while another holds it; `None` once that has passed.
-    /// A mutex its last holder left without releasing it (`WAIT_ABANDONED`) is taken.
-    ///
-    /// # Errors
-    /// Returns why it cannot be created, opened or waited for, or whom it is owned by.
-    pub fn hold_mutex(
-        name: &str,
-        sddl: &str,
-        within: std::time::Duration,
-    ) -> io::Result<Option<Held>> {
-        /// ERROR_ALREADY_EXISTS.
-        const EXISTS: i32 = 183;
-        const WAIT_OBJECT_0: u32 = 0;
-        const WAIT_ABANDONED: u32 = 0x80;
-        const WAIT_TIMEOUT: u32 = 0x102;
+    /// Creates the private namespace `alias` within the Administrators' boundary, carrying the
+    /// security descriptor `sddl` (CreatePrivateNamespaceW); where it exists, opens it
+    /// (OpenPrivateNamespaceW). Answers whether this call created it; `None` where it exists but can
+    /// be opened no more — its creator has closed it, and it is about to be gone.
+    fn namespace(alias: &str, sddl: &str) -> io::Result<Option<(Namespace, bool)>> {
+        let boundary = Boundary::of_the_administrators(alias)?;
         let descriptor = SecurityDescriptor::from_sddl(sddl)?;
         let attributes = descriptor.attributes();
-        let wide_name = wide(OsStr::new(name));
+        let wide_alias = wide(OsStr::new(alias));
+        // SAFETY: attributes whose descriptor outlives the call, a boundary descriptor and a
+        // NUL-terminated alias.
+        let created =
+            unsafe { CreatePrivateNamespaceW(&attributes, boundary.0, wide_alias.as_ptr()) };
+        if !created.is_null() {
+            return Ok(Some((Namespace(created), true)));
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ALREADY_EXISTS) {
+            return Err(error);
+        }
+        // SAFETY: as above.
+        let opened = unsafe { OpenPrivateNamespaceW(boundary.0, wide_alias.as_ptr()) };
+        Ok((!opened.is_null()).then(|| (Namespace(opened), false)))
+    }
+
+    /// The install lock this thread owns: a mutex in a private namespace this process created.
+    /// Dropped, the namespace is closed before the mutex is released.
+    pub struct Held {
+        namespace: Option<Namespace>,
+        mutex: OwnedHandle,
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            drop(self.namespace.take());
+            // SAFETY: a mutex this thread owns, released once.
+            unsafe {
+                ReleaseMutex(self.mutex.as_raw_handle().cast());
+            }
+        }
+    }
+
+    /// How [`hold_install_lock`] went.
+    pub enum Taken {
+        /// Taken; `abandoned` where a holder before ended without releasing it
+        /// (`WAIT_ABANDONED`) — an install, uninstall, start or stop that ended incompletely.
+        Held { held: Held, abandoned: bool },
+        /// Still held by another after the wait.
+        Busy,
+    }
+
+    /// Opens or creates the mutex `<alias>\<name>` carrying `sddl`, refused where it exists owned
+    /// by anyone but `LocalSystem` or the Administrators.
+    fn install_mutex(alias: &str, name: &str, sddl: &str) -> io::Result<OwnedHandle> {
+        let descriptor = SecurityDescriptor::from_sddl(sddl)?;
+        let attributes = descriptor.attributes();
+        let full = wide(OsStr::new(&format!(r"{alias}\{name}")));
+        // SAFETY: no pointers; the error read below is the one CreateMutexW leaves.
+        unsafe { SetLastError(0) };
         // SAFETY: attributes whose descriptor outlives the call and a NUL-terminated name.
-        let raw = unsafe { CreateMutexW(&attributes, 0, wide_name.as_ptr()) };
-        let existed = io::Error::last_os_error().raw_os_error() == Some(EXISTS);
+        let raw = unsafe { CreateMutexW(&attributes, 0, full.as_ptr()) };
+        let existed = io::Error::last_os_error().raw_os_error() == Some(ALREADY_EXISTS);
         let mutex = owned(raw)?;
         if existed {
             let owner = security_text(mutex.as_raw_handle(), OWNER_SECURITY_INFORMATION)?;
@@ -1264,18 +1353,66 @@ mod system {
             ) {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    format!("{name} exists, {owner}"),
+                    format!(r"{alias}\{name} exists, {owner}"),
                 ));
             }
         }
-        let milliseconds = u32::try_from(within.as_millis()).unwrap_or(u32::MAX - 1);
-        // SAFETY: a handle owned above, open across the call.
-        match unsafe { WaitForSingleObject(mutex.as_raw_handle().cast(), milliseconds) } {
-            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Some(Held(mutex))),
-            WAIT_TIMEOUT => Ok(None),
-            _ => Err(io::Error::last_os_error()),
-        }
+        Ok(mutex)
     }
+
+    /// Takes the install lock: the mutex `<alias>\<name>` in the private namespace `alias`,
+    /// whose boundary is the Administrators' group — only a process whose token holds it enabled,
+    /// elevated or `LocalSystem`, can create the namespace, and its DACL (`sddl`) lets nobody else
+    /// open it, so nobody else can make an object in it (Object Namespaces). A namespace and its
+    /// mutex hold the lock only for the process that created the namespace: while it holds the
+    /// namespace open, no other can create one of that name, so two holders never hold at once. A
+    /// process that finds the namespace there waits on its mutex until its creator lets it go,
+    /// then begins again and creates one of its own. Waits up to `within` in all.
+    ///
+    /// # Errors
+    /// Returns why the namespace or the mutex cannot be created, opened or waited for: access
+    /// denied for a caller outside the boundary, the wrong object type where an object of another
+    /// kind holds the name, and whom an existing mutex is owned by.
+    pub fn hold_install_lock(
+        alias: &str,
+        name: &str,
+        sddl: &str,
+        within: std::time::Duration,
+    ) -> io::Result<Taken> {
+        const WAIT_OBJECT_0: u32 = 0;
+        const WAIT_ABANDONED: u32 = 0x80;
+        const WAIT_TIMEOUT: u32 = 0x102;
+        let until = std::time::Instant::now() + within;
+        let mut abandoned = false;
+        while std::time::Instant::now() < until {
+            let Some((namespace, created)) = namespace(alias, sddl)? else {
+                // Closed by its creator, and about to be gone: create one anew.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            };
+            let mutex = install_mutex(alias, name, sddl)?;
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            let milliseconds = u32::try_from(left.as_millis()).unwrap_or(u32::MAX - 1);
+            // SAFETY: a handle owned above, open across the call.
+            match unsafe { WaitForSingleObject(mutex.as_raw_handle().cast(), milliseconds) } {
+                WAIT_OBJECT_0 => {}
+                WAIT_ABANDONED => abandoned = true,
+                WAIT_TIMEOUT => return Ok(Taken::Busy),
+                _ => return Err(io::Error::last_os_error()),
+            }
+            let held = Held {
+                namespace: Some(namespace),
+                mutex,
+            };
+            if created {
+                return Ok(Taken::Held { held, abandoned });
+            }
+            // Another's namespace, let go by its creator: begin again in one of this process's own.
+            drop(held);
+        }
+        Ok(Taken::Busy)
+    }
+
     #[link(name = "kernel32")]
     extern "system" {
         fn OpenProcess(access: u32, inherit: Bool, process_id: u32) -> Handle;
