@@ -1072,6 +1072,17 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     // Re-registered while both run, nothing stopped beforehand, as an MSI upgrade on a running host
     // does: the install stops both and waits for them, and starts both again once it has
     // succeeded — the program reconnects under the process account, and nothing is left recorded.
+    let pids = || {
+        [service_name().to_string(), agents_service_name()].map(|name| {
+            let queried = Command::new("sc")
+                .args(["queryex", &name])
+                .output()
+                .expect("run sc queryex");
+            parse_after(&String::from_utf8_lossy(&queried.stdout), "PID")
+                .unwrap_or_else(|| panic!("{name} runs with a process"))
+        })
+    };
+    let running_before = pids();
     std::fs::remove_file(&result).expect("remove the result");
     client(&["service", "install", "--root", &root_arg], &config)
         .expect("re-install while both run");
@@ -1092,6 +1103,10 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
         resumed["user"].eq_ignore_ascii_case(&process_account),
         "{resumed:?}"
     );
+    let running_after = pids();
+    for (before, after) in running_before.iter().zip(&running_after) {
+        assert_ne!(before, after, "stopped and started again, not left running");
+    }
     let recorded = Command::new("reg")
         .args([
             "query",
