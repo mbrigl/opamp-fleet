@@ -117,7 +117,7 @@ pub struct InstallSpec {
 /// marker is what routes into the Windows SCM dispatcher; it is ignored on Unix.
 ///
 /// Both paths are absolute and both are baked in, which is what makes an upgrade a re-registration
-/// rather than a migration (ADR-0042 clause 1): the program path and the rest of the unit are
+/// rather than a migration (ADR-0053 clause 2): the program path and the rest of the unit are
 /// rewritten from the version that registers, and the configuration, identity and state stay
 /// where they are.
 fn service_args(spec: &InstallSpec) -> Vec<OsString> {
@@ -368,13 +368,223 @@ fn plist_account(plist: &str) -> Option<String> {
     let (_, after) = plist.split_once("<key>UserName</key>")?;
     let value = after.trim_start().strip_prefix("<string>")?;
     let (value, _) = value.split_once("</string>")?;
-    let value = value
+    let value = xml_text(value);
+    (!value.is_empty()).then_some(value)
+}
+
+/// The state directory the system registration of this service carries (ADR-0053 clause 3): the
+/// value after `--state-dir` in the command line the Client wrote — `ExecStart=` of the systemd
+/// unit, `ProgramArguments` of the launchd plist, the binary path name the SCM holds. Read from
+/// what the Client wrote, never a drop-in and never the manager's loaded state, and only an
+/// administrator can change any of them. `None` at user scope, where no registration exists, and
+/// where it names no absolute `--state-dir`.
+///
+/// # Errors
+/// Returns an error if the registration exists and cannot be read.
+pub fn registered_state_dir(level: ServiceLevel) -> Result<Option<PathBuf>, String> {
+    if level == ServiceLevel::User {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    return read_state_dir(
+        &service_manager::systemd_global_dir_path().join(format!("{}.service", service_name())),
+        unit_arguments,
+    );
+    #[cfg(target_os = "macos")]
+    return read_state_dir(
+        &Path::new("/Library/LaunchDaemons").join(format!("{}.plist", service_name())),
+        plist_arguments,
+    );
+    #[cfg(windows)]
+    scm_command_line().map(|line| line.and_then(|line| state_dir_of(command_line_arguments(&line))))
+}
+
+#[cfg(unix)]
+fn read_state_dir(
+    file: &Path,
+    arguments: fn(&str) -> Vec<String>,
+) -> Result<Option<PathBuf>, String> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Ok(state_dir_of(arguments(&text))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", file.display())),
+    }
+}
+
+/// The binary path name — the whole command line — the SCM holds for this service, or `None`
+/// where no such service is registered.
+#[cfg(windows)]
+fn scm_command_line() -> Result<Option<String>, String> {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    /// `ERROR_SERVICE_DOES_NOT_EXIST`.
+    const NO_SUCH_SERVICE: i32 = 1060;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| format!("cannot reach the service control manager: {e}"))?;
+    let service = match manager.open_service(service_name(), ServiceAccess::QUERY_CONFIG) {
+        Ok(service) => service,
+        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(NO_SUCH_SERVICE) => {
+            return Ok(None)
+        }
+        Err(e) => return Err(format!("cannot open the service {}: {e}", service_name())),
+    };
+    let config = service
+        .query_config()
+        .map_err(|e| format!("cannot read the registration of {}: {e}", service_name()))?;
+    Ok(Some(config.executable_path.to_string_lossy().into_owned()))
+}
+
+/// The absolute path after the first `--state-dir` among `arguments`.
+fn state_dir_of(arguments: Vec<String>) -> Option<PathBuf> {
+    let mut arguments = arguments.into_iter();
+    arguments.find(|argument| argument == "--state-dir")?;
+    let dir = PathBuf::from(arguments.next()?);
+    dir.is_absolute().then_some(dir)
+}
+
+/// The words of the last `ExecStart=` of a unit's `[Service]` section, as [`systemd_unit`] writes
+/// them: each in double quotes with [`exec_word`]'s escapes. An unquoted word ends at whitespace,
+/// as `service-manager`'s own rendering writes it.
+#[cfg(any(target_os = "linux", test))]
+fn unit_arguments(unit: &str) -> Vec<String> {
+    let mut section = "";
+    let mut line = None;
+    for text in unit.lines().map(str::trim) {
+        if text.starts_with('[') {
+            section = text;
+        } else if section == "[Service]" {
+            if let Some(value) = text.strip_prefix("ExecStart=") {
+                line = Some(value);
+            }
+        }
+    }
+    let Some(line) = line else {
+        return Vec::new();
+    };
+    let mut words = Vec::new();
+    let mut chars = line.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        let Some(first) = chars.next() else {
+            return words;
+        };
+        // Bytes, because a `\x` escape writes one byte of a character's UTF-8 encoding.
+        let mut word = Vec::new();
+        let push = |word: &mut Vec<u8>, c: char| {
+            word.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+        };
+        let quoted = first == '"';
+        if !quoted {
+            push(&mut word, first);
+        }
+        while let Some(c) = chars.next() {
+            match c {
+                '"' if quoted => break,
+                c if !quoted && c.is_whitespace() => break,
+                '\\' => match chars.next() {
+                    Some('n') => word.push(b'\n'),
+                    Some('t') => word.push(b'\t'),
+                    Some('x') => {
+                        let hex: String = chars.by_ref().take(2).collect();
+                        if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                            word.push(byte);
+                        }
+                    }
+                    Some(other) => push(&mut word, other),
+                    None => {}
+                },
+                '%' | '$' if chars.peek() == Some(&c) => {
+                    chars.next();
+                    push(&mut word, c);
+                }
+                c => push(&mut word, c),
+            }
+        }
+        words.push(String::from_utf8_lossy(&word).into_owned());
+    }
+}
+
+/// The strings of the `ProgramArguments` array of a plist as `service-manager` writes it: XML,
+/// the key followed by its array. No plist parser is linked for this.
+#[cfg(any(target_os = "macos", test))]
+fn plist_arguments(plist: &str) -> Vec<String> {
+    let Some((_, after)) = plist.split_once("<key>ProgramArguments</key>") else {
+        return Vec::new();
+    };
+    let Some(array) = after.trim_start().strip_prefix("<array>") else {
+        return Vec::new();
+    };
+    let array = array
+        .split_once("</array>")
+        .map_or(array, |(inside, _)| inside);
+    array
+        .split("<string>")
+        .skip(1)
+        .filter_map(|item| item.split_once("</string>"))
+        .map(|(value, _)| xml_text(value))
+        .collect()
+}
+
+/// The text of an XML string element, its five predefined entities resolved.
+#[cfg(any(target_os = "macos", test))]
+fn xml_text(value: &str) -> String {
+    value
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
-        .replace("&amp;", "&");
-    (!value.is_empty()).then_some(value)
+        .replace("&amp;", "&")
+}
+
+/// The arguments of a Windows command line as the C runtime splits it (`CommandLineToArgvW`):
+/// whitespace separates outside double quotes, `2n` backslashes before a quote are `n` and the
+/// quote toggles quoting, `2n+1` are `n` and a literal quote, and backslashes before anything else
+/// stand as they are. `service-manager` quotes the binary path name by exactly these rules.
+#[cfg(any(windows, test))]
+fn command_line_arguments(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let mut slashes = 1;
+                while chars.next_if_eq(&'\\').is_some() {
+                    slashes += 1;
+                }
+                in_word = true;
+                if chars.peek() == Some(&'"') {
+                    word.extend(std::iter::repeat_n('\\', slashes / 2));
+                    if slashes % 2 == 1 {
+                        chars.next();
+                        word.push('"');
+                    }
+                } else {
+                    word.extend(std::iter::repeat_n('\\', slashes));
+                }
+            }
+            '"' => {
+                in_word = true;
+                quoted = !quoted;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
 }
 
 /// Deregister the service. The install layout and state are never deleted.
@@ -850,6 +1060,126 @@ mod tests {
         assert_eq!(
             plist_account("<dict><key>Label</key><string>x</string></dict>"),
             None
+        );
+    }
+
+    /// The state directory a systemd unit carries is read back from `ExecStart=` exactly as
+    /// [`systemd_unit`] wrote it, whatever characters its path holds — and from an unquoted line as
+    /// `service-manager`'s own rendering writes one.
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_units_state_directory_is_read_back_from_its_exec_start() {
+        let mut spec = system_spec("/opt/opamp-fleet");
+        spec.state_dir = PathBuf::from("/srv/fleet state/100%\"$HOME\"\\\u{7}é");
+        let unit = systemd_unit(&spec, "opamp-fleet").expect("unit");
+        let words: Vec<PathBuf> = unit_arguments(&unit).iter().map(PathBuf::from).collect();
+        assert_eq!(words.last(), Some(&spec.state_dir));
+        assert_eq!(words[words.len() - 2], PathBuf::from("--state-dir"));
+
+        let rendered = "[Unit]\nDescription=x\n\n[Service]\nExecStart=/opt/x/current/supervisor \
+                        run --service --config /var/lib/x/supervisor.toml --state-dir \
+                        /var/lib/x/state\nRestart=on-failure\n";
+        assert_eq!(
+            unit_arguments(rendered)[3..],
+            [
+                "--config",
+                "/var/lib/x/supervisor.toml",
+                "--state-dir",
+                "/var/lib/x/state"
+            ]
+        );
+    }
+
+    /// The registered state directory is the absolute path after `--state-dir`; a registration
+    /// naming none, or a relative one, offers none.
+    /// Verifies: ADR-0053
+    #[test]
+    fn only_an_absolute_state_dir_after_the_flag_is_registered() {
+        let absolute = std::env::temp_dir().join("state");
+        let words = |rest: &[&str]| -> Vec<String> {
+            ["supervisor", "run"]
+                .iter()
+                .chain(rest)
+                .map(ToString::to_string)
+                .collect()
+        };
+        assert_eq!(
+            state_dir_of(words(&["--state-dir", absolute.to_str().expect("utf-8")])),
+            Some(absolute.clone())
+        );
+        assert_eq!(state_dir_of(words(&["--service"])), None);
+        assert_eq!(state_dir_of(words(&["--state-dir"])), None);
+        assert_eq!(state_dir_of(words(&["--state-dir", "state"])), None);
+    }
+
+    /// The state directory a launchd plist carries is read from its `ProgramArguments`, in the
+    /// XML `service-manager` writes.
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_plists_state_directory_is_read_from_its_program_arguments() {
+        let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\
+                     \n\t<key>Label</key>\n\t<string>opamp-fleet</string>\n\t\
+                     <key>ProgramArguments</key>\n\t<array>\n\t\t<string>/Library/Application \
+                     Support/opamp-fleet/current/supervisor</string>\n\t\t<string>run</string>\
+                     \n\t\t<string>--service</string>\n\t\t<string>--config</string>\n\t\t\
+                     <string>/x/supervisor.toml</string>\n\t\t<string>--state-dir</string>\n\t\t\
+                     <string>/Volumes/Fleet &amp; Co/state</string>\n\t</array>\n\t\
+                     <key>UserName</key>\n\t<string>--state-dir</string>\n</dict>\n</plist>";
+        assert_eq!(
+            plist_arguments(plist)[3..],
+            [
+                "--config",
+                "/x/supervisor.toml",
+                "--state-dir",
+                "/Volumes/Fleet & Co/state"
+            ]
+        );
+        assert!(plist_arguments("<dict></dict>").is_empty());
+    }
+
+    /// A registration on disk is read back to the state directory the Client wrote into it, and a
+    /// host with no registration offers none.
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn a_registration_on_disk_offers_the_state_directory_it_was_written_with() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("opamp-fleet.service");
+        let mut spec = system_spec("/opt/opamp-fleet");
+        spec.state_dir = PathBuf::from("/srv/fleet/state");
+        std::fs::write(&file, systemd_unit(&spec, "opamp-fleet").expect("unit")).expect("write");
+        assert_eq!(
+            read_state_dir(&file, unit_arguments).expect("read"),
+            Some(spec.state_dir)
+        );
+        assert_eq!(
+            read_state_dir(&dir.path().join("absent.service"), unit_arguments).expect("read"),
+            None
+        );
+    }
+
+    /// The state directory the SCM's binary path name carries is read with the C runtime's
+    /// splitting rules, by which `service-manager` quotes it: a path with spaces, a trailing
+    /// backslash and an embedded quote come back as written.
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_windows_command_lines_state_directory_is_split_as_the_runtime_splits_it() {
+        let line = r#"C:\ProgramData\opamp-fleet\current\supervisor.exe run --service --config "C:\Program Files\x\supervisor.toml" --state-dir "D:\fleet state\\""#;
+        assert_eq!(
+            command_line_arguments(line),
+            [
+                r"C:\ProgramData\opamp-fleet\current\supervisor.exe",
+                "run",
+                "--service",
+                "--config",
+                r"C:\Program Files\x\supervisor.toml",
+                "--state-dir",
+                r"D:\fleet state\",
+            ]
+        );
+        assert_eq!(
+            command_line_arguments(r#"a "b\"c" d\\e"#),
+            ["a", "b\"c", r"d\\e"]
         );
     }
 

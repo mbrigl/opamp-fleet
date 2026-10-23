@@ -1,6 +1,6 @@
 # ADR-0053: An installed Client's state directory comes from `--state-dir` or its registration, and from `supervisor.toml` only beneath the install's roots
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-23
 - **Deciders:** Markus Brigl
 - **Applies to:** the state directory `service install` and `service config` take in `crates/fleet-agent/src/main.rs` and `ClientConfig::service_state_dir` in `crates/fleet-agent/src/config_file.rs`, the registration a re-registration reads in `crates/fleet-agent/src/service/manager.rs`, the directories a system-scope install restricts in `crates/fleet-agent/src/service/windows_rights.rs`, the `state_dir` and `supervisor_dir` comments of `config/supervisor.toml`, and every document that tells an operator where an installed Client keeps its state

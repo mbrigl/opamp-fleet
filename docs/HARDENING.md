@@ -113,9 +113,20 @@ has:
   that the install does not grant, cuts it off from the read right every local user inherits
   there, and leaves it to LocalSystem, the Administrators and the service account. A data root
   named with `--root` or `--data-root`, a state directory outside the data root, and a Supervisors'
-  root outside both that the install creates, is only cut off from inherited rights and left to the
-  same accounts; such a Supervisors' root that already exists is left as it is, with a warning, and
-  protecting it is the operator's. A local user acting while the install runs is not covered.
+  root outside both that the install creates beneath the layout root, is only cut off from
+  inherited rights and left to the same accounts; a Supervisors' root that already exists, or that
+  lies outside the data root, the layout root and the state directory, is left as it is, with a
+  warning, and protecting it is the operator's. A local user acting while the install runs is not
+  covered.
+- **An install acts only on directories an administrator named or its roots hold** (ADR-0053,
+  ADR-0042 clause 2): `supervisor.toml` belongs to the service's account, and `service install`
+  and `service config` run as root or an Administrator. The state directory comes from
+  `--state-dir`, else from the registration an earlier install wrote, and only then from the file,
+  and from that only beneath the data root or the layout root. Beneath a root it is reached with no
+  `..` and through no link or junction; anything else is refused before anything is written. A
+  Supervisors' root the file places outside them is never created, restricted or handed over. The
+  hand-over and the cut act on a link or junction itself on every platform. Enrolment files the
+  install writes as root into the state directory may follow a link there.
 - **A delivered Supervisor block reaches no further than the package signature** (ADR-0017): no
   environment or arguments beyond what the running block has or the operator allowed, and no file
   outside its own `config/` directory. Under clause 38's rule — no variable that steers which code

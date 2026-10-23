@@ -13,6 +13,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Security
+
+- **An install acts only on a state directory an administrator named**
+  ([ADR-0053](docs/adr/0053-the-state-directory-comes-from-the-registration-not-the-file.md)).
+  `service install` and `service config` run as root or an Administrator, on every package
+  upgrade too, and took the state directory from `supervisor.toml`, a file the service's account
+  may rewrite. A compromised Client could name any directory and have the next install hand it
+  over (Linux and macOS: ownership; Windows: Modify) and write the enrolment's files into it. The
+  state directory now comes from `--state-dir`, else from the existing service registration, else
+  from `supervisor.toml` only beneath the data root or the layout root, else `<data root>/state`;
+  a link or junction beneath a root is refused. On Windows the hand-over and the cut act on a link
+  or junction itself, and a `supervisor_dir` outside the data root, the layout root and the state
+  directory is no longer created or handed over by the install. **What to do:** upgrade. A host
+  whose state directory lies outside the data root keeps the one its registration names; check
+  that `service install` prints the one you chose, and name another with `--state-dir` if not. A
+  first install whose `supervisor.toml` names a `state_dir` outside the roots needs `--state-dir`.
+  On Windows, create a `supervisor_dir` outside the roots yourself.
+
 ## [0.6.1]
 
 ### Added

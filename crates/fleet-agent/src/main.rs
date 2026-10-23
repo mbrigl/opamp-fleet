@@ -70,7 +70,9 @@ fn main() {
             };
             run_command(spec, args)
         }
-        Some(Command::Service { action }) => service_command(&cli.config, config_named, &action),
+        Some(Command::Service { action }) => {
+            service_command(&cli.config, config_named, cli.state_dir.as_deref(), &action)
+        }
         // Answer for this executable so a self-update can prove it before pointing at it
         // (ADR-0018). Deliberately does nothing else: it must work on a binary that has no
         // configuration, no state directory, and no Server.
@@ -105,11 +107,12 @@ fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
 fn service_command(
     config_path: &Path,
     config_named: bool,
+    state_dir: Option<&Path>,
     action: &ServiceAction,
 ) -> Result<(), String> {
     match action {
-        ServiceAction::Install(args) => install(config_path, config_named, args),
-        ServiceAction::Config(args) => configure(config_path, config_named, args),
+        ServiceAction::Install(args) => install(config_path, config_named, state_dir, args),
+        ServiceAction::Config(args) => configure(config_path, config_named, state_dir, args),
         ServiceAction::Uninstall(scope) => {
             manager::uninstall(ServiceLevel::from(*scope))?;
             println!(
@@ -135,7 +138,12 @@ fn service_command(
 /// `service install`: write the configuration if asked to (ADR-0019), validate it, lay out the
 /// versioned install at the chosen root, and register the service against the `current` pointer
 /// (ADR-0019).
-fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result<(), String> {
+fn install(
+    config_path: &Path,
+    config_named: bool,
+    state_dir_named: Option<&Path>,
+    args: &InstallArgs,
+) -> Result<(), String> {
     let level = ServiceLevel::from(args.scope);
 
     // Ask whether this process may register a service at all, before the first thing is written.
@@ -160,6 +168,15 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
             manager::default_layout_root(level)?,
             manager::default_root(level)?,
         ),
+    };
+    // Where the state directory comes from (ADR-0053 clause 3): `--state-dir`, else the existing
+    // registration — so an upgrade keeps it (clause 2) — and only then the configuration, which the
+    // service's account may rewrite, and from that only beneath these roots.
+    let roots = layout::Roots {
+        named: state_dir_named.map(absolute).transpose()?,
+        registered: manager::registered_state_dir(level)?,
+        data: data_root.clone(),
+        layout: layout_root.clone(),
     };
 
     // The account, decided and resolved with the same before-anything-is-written rule (ADR-0042
@@ -208,12 +225,12 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         if let (false, Some(endpoint)) = (config_path.exists(), &args.endpoint) {
             about_to_run.endpoint.clone_from(endpoint);
         }
-        about_to_run.state_dir = about_to_run.service_state_dir(&data_root);
+        about_to_run.state_dir = about_to_run.service_state_dir(&roots)?;
         beside.unasked_enrolment(&about_to_run, password.as_deref())?
     };
     let mut written = config_init::Written::default();
     if args.interactive {
-        written = ask(&config_path, &data_root, &beside, password.as_deref())?;
+        written = ask(&config_path, &roots, &beside, password.as_deref())?;
     } else if let Some(endpoint) = &args.endpoint {
         // The same file, from an answer given rather than asked for (ADR-0019): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with
@@ -235,9 +252,30 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     // Fail on a broken configuration now, not at the service's first start. After the write, so
     // that a file just answered into existence is held to the same rule as any other.
     let mut config = ClientConfig::load(&config_path)?;
-    // The state directory the service will run with — where an issued certificate counts.
-    let state_dir = config.service_state_dir(&data_root);
+    // The state directory the service will run with — where an issued certificate counts. Asked
+    // again of the file as it is now, which the service's account may have rewritten meanwhile.
+    let state_dir = config.service_state_dir(&roots)?;
+    let state_dir_source = config.service_state_dir_source(&roots);
     config.state_dir.clone_from(&state_dir);
+    // A registration an earlier install wrote is kept wherever it points (ADR-0053 clause 3), and
+    // that install may have taken it from a file the service's account had rewritten. Said, so an
+    // operator who did not choose it sees it on every upgrade.
+    if roots.named.is_none()
+        && roots.registered.is_some()
+        && layout::beneath(&state_dir, &[&data_root, &layout_root]).is_err()
+    {
+        println!(
+            "warning: the service's registration names the state directory {}, outside the data \
+             root and the layout root; it is kept and handed over to the service's account. \
+             If you did not choose it, name the right one with --state-dir.",
+            state_dir.display()
+        );
+    }
+    // A Supervisors' root the file places outside every root this install acts on is not the
+    // install's to create, restrict or hand over.
+    let supervisors_root = config.supervisors_root();
+    let supervisors_root_ours =
+        layout::beneath(&supervisors_root, &[&data_root, &layout_root, &state_dir]).is_ok();
     // On Windows every local user inherits read access under %ProgramData%; the data root, a state
     // directory placed elsewhere, and a Supervisors' root this install creates outside both are cut
     // off from it before anyone is granted anything (H8) — and before an enrolment writes its
@@ -247,7 +285,8 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
         &data_root,
         args.root.is_some() || args.data_root.is_some(),
         &state_dir,
-        &config.supervisors_root(),
+        &supervisors_root,
+        supervisors_root_ours,
         Path::exists,
     );
     std::fs::create_dir_all(&data_root)
@@ -331,7 +370,7 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
     println!("installed {}", manager::service_name());
     println!("  program:   {}", program.display());
     println!("  config:    {}", config_path.display());
-    println!("  state dir: {}", state_dir.display());
+    println!("  state dir: {} ({state_dir_source})", state_dir.display());
     if let Some(run_as) = &run_as {
         println!(
             "  runs as:   {} ({})",
@@ -348,12 +387,26 @@ fn install(config_path: &Path, config_named: bool, args: &InstallArgs) -> Result
 
 /// `service config`: the questionnaire of `install --interactive` against an installed Client, and
 /// its enrolment when it holds no certificate yet — registering nothing (ADR-0019 clause 15).
-fn configure(config_path: &Path, config_named: bool, args: &ConfigArgs) -> Result<(), String> {
+fn configure(
+    config_path: &Path,
+    config_named: bool,
+    state_dir_named: Option<&Path>,
+    args: &ConfigArgs,
+) -> Result<(), String> {
     let level = ServiceLevel::from(args.scope);
     // The file and the state directory, found as `install` laid them out.
     let data_root = match args.data_root() {
         Some(data) => absolute(data)?,
         None => manager::default_root(level)?,
+    };
+    let roots = layout::Roots {
+        named: state_dir_named.map(absolute).transpose()?,
+        registered: manager::registered_state_dir(level)?,
+        layout: match &args.root {
+            Some(root) => absolute(root)?,
+            None => manager::default_layout_root(level)?,
+        },
+        data: data_root.clone(),
     };
     let config_path = if config_named {
         absolute(config_path)?
@@ -361,15 +414,10 @@ fn configure(config_path: &Path, config_named: bool, args: &ConfigArgs) -> Resul
         data_root.join(config_init::FILE_NAME)
     };
     // The installed copy runs from the layout, where no fleet files lie (ADR-0020, out of scope).
-    let written = ask(
-        &config_path,
-        &data_root,
-        &config_init::Beside::default(),
-        None,
-    )?;
+    let written = ask(&config_path, &roots, &config_init::Beside::default(), None)?;
 
     let mut config = ClientConfig::load(&config_path)?;
-    let state_dir = config.service_state_dir(&data_root);
+    let state_dir = config.service_state_dir(&roots)?;
     config.state_dir.clone_from(&state_dir);
     if let Some(bootstrap) = &written.bootstrap {
         enrol::run(&config, bootstrap)?;
@@ -395,17 +443,17 @@ fn configure(config_path: &Path, config_named: bool, args: &ConfigArgs) -> Resul
 }
 
 /// The questionnaire against the file at `config_path`, offering what it holds and asking for the
-/// bootstrap identity only while the state directory under `data_root` holds no issued certificate
-/// (ADR-0019 clauses 16, 17).
+/// bootstrap identity only while the service's state directory holds no issued certificate
+/// (ADR-0019 clauses 16, 17). That directory is decided, and refused, before anything is asked.
 fn ask(
     config_path: &Path,
-    data_root: &Path,
+    roots: &layout::Roots,
     beside: &config_init::Beside,
     password: Option<&str>,
 ) -> Result<config_init::Written, String> {
     let current = ClientConfig::load(config_path)?;
     let mut in_service = current.clone();
-    in_service.state_dir = current.service_state_dir(data_root);
+    in_service.state_dir = current.service_state_dir(roots)?;
     config_init::run(
         config_path,
         &current,
