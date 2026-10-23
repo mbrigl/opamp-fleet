@@ -1,6 +1,6 @@
 # ADR-0045: Every release asset carries a build-provenance attestation, and every shipped program a CycloneDX SBOM per target
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clauses 2, 3, 4, 5 and 8 superseded by [ADR-0052](0052-the-server-ships-as-a-container-image-built-from-its-attested-release-binary.md)
 - **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** `.github/workflows/release.yml` (the `sbom` job, the permissions and the attestation and verification steps of the `publish` job, the assets it publishes and the release notes), `crates/fleet-tools/tests/release_workflow.rs`, and every document that tells an operator how to check a release asset (`README.md`, `docs/manual/tools.md`, `CHANGELOG.md`)
