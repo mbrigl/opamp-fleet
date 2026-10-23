@@ -287,9 +287,11 @@ fn hold_install_lock() -> Result<fleet_agent::win32::Held, String> {
     }
 }
 
-/// After `service start` or `service stop` the operator decides when the services run: what an
-/// install that failed recorded to start again is struck, so the next install does not start what
-/// the operator stopped. Said, not failed, where the record cannot be read or rewritten.
+/// After `service start` or `service stop` has succeeded the operator decides when the services
+/// run: what an install that failed recorded to start again is struck, so the next install does not
+/// start what the operator stopped. Only these two verbs of this program hand the run state over:
+/// `sc.exe` and the Services console know nothing of the record, and a `service stop` that failed
+/// in part strikes nothing. Said, not failed, where the record cannot be read or rewritten.
 #[cfg(windows)]
 fn operator_owns_the_run_state() {
     use fleet_agent::service::withdrawal::{self, Registry};
@@ -542,12 +544,12 @@ fn install(
     // restriction, the take-over, the withdrawal and the switch of the SCM (ADR-0059 clauses 1, 4
     // and 6). What runs is recorded first, with the withdrawal due, in one write: a stop is never
     // left unrecorded, and an install that fails after it — or an MSI that rolls back — leaves the
-    // next install to start again what ran. A record that cannot be written stops nothing; a stop
-    // that fails starts again what it stopped and strikes what this install added to the record.
+    // next install to start again what ran. A record that cannot be written stops nothing; where
+    // the stop fails, what is to run again is set from what the SCM reports then.
     #[cfg(windows)]
     {
-        let before = pending.resume;
-        pending.halted(manager::running()?);
+        use fleet_agent::service::withdrawal::{halt_recorded, HaltFailed};
+        let running = manager::running()?;
         let supervisors_root = config.supervisors_root();
         let mut roots = vec![
             layout_root.as_path(),
@@ -558,32 +560,24 @@ fn install(
         ];
         roots.extend(written.copies.iter().map(PathBuf::as_path));
         pending.add(formers, &roots);
-        fleet_agent::service::withdrawal::record(&withdrawal, &pending)
-            .map_err(|e| format!("{e}. Nothing was stopped"))?;
-        let halted = manager::halt_for_change(level).map_err(|e| {
-            pending.resume = before;
-            let struck = fleet_agent::service::withdrawal::record(&withdrawal, &pending)
-                .err()
-                .map_or(String::new(), |again| {
-                    format!(
-                        "; the record could not be set back ({again}), and still names them to \
-                         start again"
-                    )
-                });
-            format!(
-                "{e}. The services were left as they were found; of this install only the \
-                 configuration it wrote, and the record of what is left to finish, remain{struck}"
-            )
+        halt_recorded(
+            &withdrawal,
+            &mut pending,
+            running,
+            &mut || manager::halt_for_change(level),
+            &mut manager::running,
+        )
+        .map_err(|failed| match failed {
+            HaltFailed::Unrecorded(e) => format!("{e}. Nothing was stopped"),
+            HaltFailed::Stopped(e) => format!(
+                "{e}\nNow {}. Of this install, the configuration it wrote and the record of what \
+                 is left to finish remain, and nothing else was changed; `supervisor service \
+                 install` again starts what ran once it succeeds.",
+                manager::describe_activity()
+            ),
         })?;
-        pending.halted(halted);
     }
     let finished = (|| -> Result<(PathBuf, bool), String> {
-        // What a stop found running that the look before it did not — one starting in between —
-        // is recorded too.
-        #[cfg(windows)]
-        if fleet_agent::service::withdrawal::read(&withdrawal)?.resume != pending.resume {
-            fleet_agent::service::withdrawal::record(&withdrawal, &pending)?;
-        }
         // What the process account owns there is its own, and left as it is (ADR-0059 clause 10).
         #[cfg(windows)]
         let process_sid = process.as_ref().map(|p| p.sid().to_string());

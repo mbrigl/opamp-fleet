@@ -8,12 +8,15 @@
 //! withdrawal would leave the grants in place with nothing to find them by. And an install stops
 //! both services before it changes anything, so one that failed after the stop would leave a
 //! service that ran stopped, with nothing to say it ran. Both are therefore written down before
-//! the stop, in one write — what runs as it is about to be stopped; a stop that fails strikes it
-//! again — and the withdrawal is struck once it is done, the services once they run again, and the
-//! record goes with the last of them. Every install finishes what it finds written; an operator's
-//! `service start` or `service stop` strikes the services, whose run state is the operator's from
-//! then on; an uninstall completes the withdrawal once both services are stopped, and deregisters
-//! them whether or not it can.
+//! the stop, in one write — what runs as it is about to be stopped; where the stop fails, the
+//! services to start again are set from what the SCM reports then, and the rest of the record
+//! stays — and the withdrawal is struck once it is done, the services once they run again, and the
+//! record goes with the last of them. Every install finishes what it finds written. The CLI's
+//! `service start` and `service stop`, once they have succeeded, strike the services, whose run
+//! state is the operator's from then on; `sc.exe` and the Services console know nothing of the
+//! record and strike nothing, and a `service stop` that failed in part strikes nothing either. An
+//! uninstall completes the withdrawal once both services are stopped, and deregisters them
+//! whether or not it can.
 //!
 //! The record is text: a line `client <SID>` or `process <SID>` per former account, by the part it
 //! had, `root <path>` per root, and `resume client` or `resume agents` per service to start again.
@@ -259,6 +262,64 @@ pub fn resumed(store: &dyn Store, pending: &mut Pending) -> Result<(), String> {
     Ok(())
 }
 
+/// How a stop for a change went wrong, as [`halt_recorded`] reports it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HaltFailed {
+    /// The record could not be written; nothing was stopped.
+    Unrecorded(String),
+    /// The stop failed; the record names what is to run again as the SCM left it.
+    Stopped(String),
+}
+
+/// Stops both services for a change, recorded around it in `store` (ADR-0059 clauses 1 and 2):
+/// what `running` says runs is added to what `pending` already names to run again, and written —
+/// with the withdrawal due — before `halt` stops anything; what `halt` found running beyond that is
+/// added after it. Where `halt` fails, what is to run again is set from what the SCM reports then,
+/// asked through `now`: what ran before this install, and what ran when it began and runs no more
+/// — a restart that failed, or a stop that timed out and completed after all. Where the SCM cannot
+/// be asked, the record stays as written before the stop.
+///
+/// # Errors
+/// Returns [`HaltFailed::Unrecorded`] where the record could not be written before the stop, and
+/// [`HaltFailed::Stopped`] where the stop, or the record after it, failed.
+pub fn halt_recorded(
+    store: &dyn Store,
+    pending: &mut Pending,
+    running: Halted,
+    halt: &mut dyn FnMut() -> Result<Halted, String>,
+    now: &mut dyn FnMut() -> Result<Halted, String>,
+) -> Result<(), HaltFailed> {
+    let before = pending.resume;
+    pending.halted(running);
+    record(store, pending).map_err(HaltFailed::Unrecorded)?;
+    match halt() {
+        Ok(halted) => {
+            let recorded = pending.resume;
+            pending.halted(halted);
+            if pending.resume != recorded {
+                record(store, pending).map_err(HaltFailed::Stopped)?;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let Ok(now) = now() else {
+                return Err(HaltFailed::Stopped(e));
+            };
+            pending.resume = Halted {
+                client: before.client || (running.client && !now.client),
+                agents: before.agents || (running.agents && !now.agents),
+            };
+            match record(store, pending) {
+                Ok(()) => Err(HaltFailed::Stopped(e)),
+                Err(again) => Err(HaltFailed::Stopped(format!(
+                    "{e}; and the record cannot be set to what runs now ({again}), and names \
+                     what ran when this install began to be started again"
+                ))),
+            }
+        }
+    }
+}
+
 /// The record on Windows: [`VALUE`] of `HKEY_LOCAL_MACHINE\<parent>\<KEY>`.
 #[cfg(windows)]
 pub struct Registry {
@@ -372,6 +433,7 @@ mod tests {
     struct Memory {
         text: std::cell::RefCell<Option<String>>,
         stuck: bool,
+        unwritable: std::cell::Cell<bool>,
     }
 
     impl Store for Memory {
@@ -379,6 +441,9 @@ mod tests {
             Ok(self.text.borrow().clone())
         }
         fn save(&self, text: &str) -> Result<(), String> {
+            if self.unwritable.get() {
+                return Err("access denied".to_string());
+            }
             *self.text.borrow_mut() = Some(text.to_string());
             Ok(())
         }
@@ -549,6 +614,127 @@ mod tests {
         record(&only_resume, &pending).expect("recorded");
         resumed(&only_resume, &mut pending).expect("struck");
         assert_eq!(*only_resume.text.borrow(), None);
+    }
+
+    const BOTH: Halted = Halted {
+        client: true,
+        agents: true,
+    };
+    const CLIENT: Halted = Halted {
+        client: true,
+        agents: false,
+    };
+    const AGENTS: Halted = Halted {
+        client: false,
+        agents: true,
+    };
+
+    /// What runs is recorded before anything is stopped: the stop finds it written, and a record
+    /// that cannot be written stops nothing. What the stop found running beyond it is added after
+    /// it (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn what_runs_is_recorded_before_the_stop_and_amended_after_it() {
+        let store = Memory::default();
+        let mut pending = Pending::default();
+        pending.add(
+            [(Part::Process, "S-1-5-19".to_string())],
+            &[Path::new("/root")],
+        );
+        let mut seen = None;
+        halt_recorded(
+            &store,
+            &mut pending,
+            CLIENT,
+            &mut || {
+                seen = Some(read(&store).expect("read"));
+                Ok(BOTH)
+            },
+            &mut || panic!("asked only after a failed stop"),
+        )
+        .expect("stopped");
+        let seen = seen.expect("stopped");
+        assert_eq!(seen.resume, CLIENT, "written before the stop");
+        assert!(seen.withdrawal_due(), "with the withdrawal due");
+        assert_eq!(read(&store).expect("read").resume, BOTH, "amended after it");
+
+        let store = Memory::default();
+        store.unwritable.set(true);
+        let mut pending = Pending::default();
+        let failed = halt_recorded(
+            &store,
+            &mut pending,
+            BOTH,
+            &mut || panic!("nothing is stopped"),
+            &mut || panic!("nothing is asked"),
+        );
+        assert!(
+            matches!(failed, Err(HaltFailed::Unrecorded(_))),
+            "{failed:?}"
+        );
+    }
+
+    /// Where the stop fails, what is to run again is set from what the SCM reports then: what ran
+    /// before this install, and what ran when it began and runs no more — a restart that failed,
+    /// or a stop that timed out and completed after all — and nothing that runs again or never ran
+    /// (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_failed_stop_records_what_runs_no_more() {
+        // Both ran; the stop of the second timed out, the Client's restart failed, and the second
+        // stopped after all: both are to run again.
+        let store = Memory::default();
+        let mut pending = Pending::default();
+        let failed = halt_recorded(
+            &store,
+            &mut pending,
+            BOTH,
+            &mut || Err("did not stop in time".to_string()),
+            &mut || Ok(Halted::default()),
+        );
+        assert_eq!(
+            failed,
+            Err(HaltFailed::Stopped("did not stop in time".to_string()))
+        );
+        assert_eq!(read(&store).expect("read").resume, BOTH);
+
+        // Both ran, and run again after the failed stop: nothing is to be started.
+        let store = Memory::default();
+        let mut pending = Pending::default();
+        let _ = halt_recorded(
+            &store,
+            &mut pending,
+            BOTH,
+            &mut || Err("did not stop in time".to_string()),
+            &mut || Ok(BOTH),
+        );
+        assert_eq!(read(&store), Ok(Pending::default()), "nothing left");
+
+        // An earlier install's record of the second service stays; the Client, which ran and runs
+        // no more, joins it.
+        let store = Memory::default();
+        let mut pending = Pending::default();
+        pending.halted(AGENTS);
+        let _ = halt_recorded(
+            &store,
+            &mut pending,
+            CLIENT,
+            &mut || Err("did not stop in time".to_string()),
+            &mut || Ok(AGENTS),
+        );
+        assert_eq!(read(&store).expect("read").resume, BOTH);
+
+        // Where the SCM cannot be asked, the record written before the stop stays.
+        let store = Memory::default();
+        let mut pending = Pending::default();
+        let _ = halt_recorded(
+            &store,
+            &mut pending,
+            CLIENT,
+            &mut || Err("did not stop in time".to_string()),
+            &mut || Err("access denied".to_string()),
+        );
+        assert_eq!(read(&store).expect("read").resume, CLIENT);
     }
 
     /// A record whose removal fails is not passed off as removed: the completion says so, and

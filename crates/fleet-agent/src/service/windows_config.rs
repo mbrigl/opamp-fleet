@@ -271,6 +271,45 @@ pub fn activity(service_name: &str) -> Result<super::manager::Activity, String> 
     }
 }
 
+/// What a look at a service tells a stop: whether it has stopped, and the process the SCM names.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Look {
+    stopped: bool,
+    pid: Option<u32>,
+}
+
+/// The service's process, to wait for: opened through `open`, then confirmed by looking again
+/// through `query` — the same process, and the service not stopped — since a process that ended
+/// before it was opened may have left its id to another. `None` where the service stopped
+/// meanwhile, or names no process; a process the service changed for another is looked at again.
+///
+/// # Errors
+/// Returns `()` where the process changed at every one of three looks — a service restarting
+/// faster than it can be stopped for certain — and why a process could not be opened or the SCM
+/// asked.
+#[cfg(any(windows, test))]
+fn confirmed_process<H>(
+    mut look: Look,
+    open: &mut dyn FnMut(u32) -> Result<Option<H>, String>,
+    query: &mut dyn FnMut() -> Result<Look, String>,
+) -> Result<Option<H>, Result<(), String>> {
+    for _ in 0..3 {
+        let Some(pid) = look.pid.filter(|pid| *pid != 0) else {
+            return Ok(None);
+        };
+        let opened = open(pid).map_err(Err)?;
+        look = query().map_err(Err)?;
+        if look.stopped {
+            return Ok(None);
+        }
+        if look.pid == Some(pid) {
+            return Ok(opened);
+        }
+    }
+    Err(Ok(()))
+}
+
 /// Stops the service `service_name` and waits up to `within` until it has stopped and its process
 /// has ended; whether it was running — or starting, stopping, pausing or paused — before. One the
 /// SCM does not know, or that is stopped, is passed over: the SCM names no process of a stopped
@@ -321,34 +360,24 @@ pub fn stop_and_wait(service_name: &str, within: std::time::Duration) -> Result<
     // Its process, while it is the service's: opened, then confirmed by asking again — the same
     // process, and the service not stopped — since a process that ended before it was opened may
     // have left its id to another. Once the service has stopped, the SCM names none.
-    let mut process = None;
-    let mut confirmed = false;
-    for _ in 0..3 {
-        let Some(pid) = status.process_id.filter(|pid| *pid != 0) else {
-            // Stopped meanwhile, or named no process yet: nothing to wait for.
-            confirmed = true;
-            break;
-        };
-        let opened = crate::win32::process_to_wait_for(pid)
-            .map_err(|e| format!("cannot open the process of {service_name}: {e}"))?;
-        status = query()?;
-        if status.current_state == ServiceState::Stopped {
-            confirmed = true;
-            break;
-        }
-        if status.process_id == Some(pid) {
-            process = opened;
-            confirmed = true;
-            break;
-        }
-    }
-    // A service whose process changed at every look is restarting faster than it can be stopped
-    // for certain: refused, so that a stop for a change starts again what it stopped.
-    if !confirmed {
-        return Err(format!(
-            "{service_name} changed its process at every look, and is not stopped"
-        ));
-    }
+    let look = |status: &windows_service::service::ServiceStatus| Look {
+        stopped: status.current_state == ServiceState::Stopped,
+        pid: status.process_id,
+    };
+    let process = confirmed_process(
+        look(&status),
+        &mut |pid| {
+            crate::win32::process_to_wait_for(pid)
+                .map_err(|e| format!("cannot open the process of {service_name}: {e}"))
+        },
+        &mut || query().map(|status| look(&status)),
+    )
+    .map_err(|failed| {
+        failed.map_or_else(std::convert::identity, |()| {
+            format!("{service_name} changed its process at every look, and is not stopped")
+        })
+    })?;
+    status = query()?;
     loop {
         match status.current_state {
             ServiceState::Stopped => break,
@@ -453,5 +482,45 @@ mod tests {
         for code in [Some(5), Some(1062), Some(1061), None] {
             assert_eq!(activity_on_refusal(code), None, "{code:?}");
         }
+    }
+
+    /// A stop waits for the process it confirmed: the one opened, named again by the SCM and the
+    /// service not stopped. One that changed is looked at again, and one that changed at every one
+    /// of three looks fails the stop, so that a stop for a change starts again what it stopped
+    /// (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_stop_waits_for_the_process_it_confirmed_and_fails_on_one_that_keeps_changing() {
+        let running = |pid| Look {
+            stopped: false,
+            pid: Some(pid),
+        };
+        let mut opened = Vec::new();
+        let mut looks = vec![running(8), running(8)].into_iter();
+        let confirmed = confirmed_process(
+            running(7),
+            &mut |pid| {
+                opened.push(pid);
+                Ok(Some(pid))
+            },
+            &mut || Ok(looks.next().expect("a look")),
+        );
+        assert_eq!(confirmed, Ok(Some(8)), "the second process, confirmed");
+        assert_eq!(opened, [7, 8]);
+
+        let mut next = 10;
+        let restless = confirmed_process(running(9), &mut |pid| Ok(Some(pid)), &mut || {
+            next += 1;
+            Ok(running(next))
+        });
+        assert_eq!(restless, Err(Ok(())), "changed at every look");
+
+        let stopped = confirmed_process(running(9), &mut |pid| Ok(Some(pid)), &mut || {
+            Ok(Look {
+                stopped: true,
+                pid: None,
+            })
+        });
+        assert_eq!(stopped, Ok(None), "stopped meanwhile: nothing to wait for");
     }
 }
