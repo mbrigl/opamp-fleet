@@ -3,7 +3,7 @@
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-20
 - **Deciders:** Markus Brigl
-- **Applies to:** the `zeroize` crate in `Cargo.toml` and in the manifests of `crates/fleet-core/`, `crates/fleet-agent/`, `crates/fleet-server/` and `crates/fleet-tools/`, every value of those crates that holds a private key, a password, a `bootstrap.p12` being read or the Supervisor Endpoint token (among them `BootstrapIdentity` in `crates/fleet-agent/src/config.rs`, `crates/fleet-agent/src/tls.rs`, `crates/fleet-agent/src/csr.rs`, `read_password_file` and the questionnaire in `crates/fleet-agent/src/config_init.rs`, the token in `crates/fleet-agent/src/supervisor/`, `crates/fleet-core/src/pkcs12/file.rs`, `crates/fleet-server/src/ca.rs`, `Password` in `crates/fleet-server/src/bootstrap.rs`, the Basic password in `crates/fleet-server/src/credentials.rs`, the Server's own TLS key, `[packages] archive_key` in `crates/fleet-agent/src/config.rs` and `crates/fleet-agent/src/config_file.rs`, the text of `supervisor.toml` where `crates/fleet-agent/src/reconfigure.rs` and `crates/fleet-agent/src/config_init.rs` rewrite it, the Gateway's listener key, and the password and key handling of `crates/fleet-tools/src/pki.rs` and `crates/fleet-tools/src/package.rs` with `package pack --archive-key`)
+- **Applies to:** the `zeroize` crate in `Cargo.toml` and in the manifests of `crates/fleet-core/`, `crates/fleet-agent/`, `crates/fleet-server/` and `crates/fleet-tools/`, every value of those crates that holds a private key, a password, the S3 secret access key, a `bootstrap.p12` being read or the Supervisor Endpoint token (among them `BootstrapIdentity` in `crates/fleet-agent/src/config.rs`, `crates/fleet-agent/src/tls.rs`, `crates/fleet-agent/src/csr.rs`, `read_password_file` and the questionnaire in `crates/fleet-agent/src/config_init.rs`, the token in `crates/fleet-agent/src/supervisor/`, `crates/fleet-core/src/pkcs12/file.rs`, `crates/fleet-server/src/ca.rs`, `Password` in `crates/fleet-server/src/bootstrap.rs`, the Basic password in `crates/fleet-server/src/credentials.rs`, the Server's own TLS key, `read_secret_file` in `crates/fleet-server/src/config.rs`, the contents of `[database.postgres] password_file` in `crates/fleet-server/src/postgres/mod.rs` and of `[blobs.s3] secret_access_key_file` in `crates/fleet-server/src/s3.rs`, `[packages] archive_key` in `crates/fleet-agent/src/config.rs` and `crates/fleet-agent/src/config_file.rs`, the text of `supervisor.toml` where `crates/fleet-agent/src/reconfigure.rs` and `crates/fleet-agent/src/config_init.rs` rewrite it, the Gateway's listener key, and the password and key handling of `crates/fleet-tools/src/pki.rs` and `crates/fleet-tools/src/package.rs` with `package pack --archive-key`)
 
 ## Context
 
@@ -19,8 +19,12 @@ overwriting them:
   ([ADR-0048](0048-a-bootstrap-pkcs12-password-of-8-to-128-characters.md)) from the
   questionnaire or a password file;
 - the Server's client-CA and bootstrap-CA keys as PEM while they are loaded, the DER of every key
-  it seals into a PKCS#12 file, the bootstrap password of an issuing request, and the password of an
-  Operator plane Basic login before it is verified;
+  it seals into a PKCS#12 file, the bootstrap password of an issuing request, the password of an
+  Operator plane Basic login before it is verified, and the PostgreSQL password and the S3 secret
+  access key `read_secret_file` reads from `[database.postgres] password_file` and
+  `[blobs.s3] secret_access_key_file`
+  ([ADR-0050](0050-the-servers-records-may-live-in-postgresql.md),
+  [ADR-0049](0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md));
 - the Supervisor Endpoint token ([ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md));
 - the passwords and keys `opamp-fleetctl` reads and writes.
 
@@ -45,6 +49,9 @@ What the crates around the secrets do, read in the locked sources:
 - `p12-keystore` 0.4.1 wipes nothing. `pkcs12` 0.2.0-pre.0 wipes its derived keys and its copy of
   the password.
 - `dialoguer` 0.12.0 holds the typed password in `Zeroizing` and returns a plain `String` clone.
+- `tokio-postgres` 0.7.18 copies the password `Config::password` is handed into a `Vec<u8>` of its
+  own, and `object_store` 0.14.2 keeps the key `AmazonS3Builder::with_secret_access_key` is handed
+  as a `String`. Neither names `zeroize`.
 
 `opamp::tls::Identity` carries the key as PEM into every connection
 ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)
@@ -54,9 +61,9 @@ not among them.
 ## Decision
 
 We will make `zeroize` a direct dependency of the application crates and hold every secret their
-own code keeps — a private key in any encoding, a password, the bytes of a `bootstrap.p12` while
-the Client reads it, and the Supervisor Endpoint token — in a `Zeroizing` buffer from the moment it
-is read or made until it is dropped.
+own code keeps — a private key in any encoding, a password, the S3 secret access key, the bytes of
+a `bootstrap.p12` while the Client reads it, and the Supervisor Endpoint token — in a `Zeroizing`
+buffer from the moment it is read or made until it is dropped.
 
 1. **One dependency, default features.** `zeroize` is pinned once in `[workspace.dependencies]`
    ([ADR-0010](0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)
@@ -73,9 +80,10 @@ is read or made until it is dropped.
    that implement `Zeroize`, such as `PrivateKeyDer`, are wrapped in `Zeroizing` while this
    project's code owns them.
 4. **What a library keeps is not wiped.** The keys `ring` holds inside `rcgen::KeyPair` and inside
-   a rustls configuration, the copies `reqwest` and `p12-keystore` make, and the token the
-   Managed Process receives are outside the reach of this project's code. This decision makes no
-   claim about them.
+   a rustls configuration, the copies `reqwest` and `p12-keystore` make, the PostgreSQL password
+   `tokio_postgres::Config::password` copies and the S3 secret access key
+   `AmazonS3Builder::with_secret_access_key` keeps, and the token the Managed Process receives are
+   outside the reach of this project's code. This decision makes no claim about them.
 
 **Out of scope:** `opamp`. Wiping the key `opamp::tls::Identity` carries adds `zeroize` to both
 features of the publishable crate and changes a public field's type, which supersedes ADR-0010
@@ -105,7 +113,8 @@ which lies on disk under `config_dir` anyway.
   `crypto/cipher.rs`, `crypto/hmac.rs`, `crypto/hpke.rs`, `crypto/ring/mod.rs`;
   `rustls-pki-types` 1.15.1 `lib.rs`; `ring` 0.17.14 `agreement.rs` and `ec/suite_b/ecdh.rs`;
   `rcgen` 0.14.10 `lib.rs`; `p12-keystore` 0.4.1; `pkcs12` 0.2.0-pre.0 `kdf.rs`; `pkcs8` 0.11.0
-  `traits.rs`; `dialoguer` 0.12.0 `prompts/password.rs`.
+  `traits.rs`; `dialoguer` 0.12.0 `prompts/password.rs`. Read 2026-10-23: `tokio-postgres` 0.7.18
+  `src/config.rs`; `object_store` 0.14.2 `src/aws/builder.rs` and `src/aws/credential.rs`.
 - [`zeroize` 1.9.1](https://docs.rs/zeroize/1.9.1/zeroize/), its crate documentation read in the
   locked source: volatile writes and a compiler fence, and that a buffer reallocated or a value
   moved on the stack leaves copies it cannot reach.
@@ -116,7 +125,8 @@ which lies on disk under `config_dir` anyway.
 - Positive: a key, password or token this project's code dropped no longer stays readable in freed
   memory. The dependency is one the tree already builds.
 - Negative / trade-offs: the protection is partial. `ring`, `reqwest` and `p12-keystore` keep
-  copies that live as long as a connection or a parse, and `opamp`'s `Identity` keeps the
+  copies that live as long as a connection or a parse, `tokio-postgres` and `object_store` keep
+  theirs as long as the Server's record and blob stores, and `opamp`'s `Identity` keeps the
   Client's key in plain memory until the follow-up below. A `Vec` that grows reallocates and leaves
   the old buffer behind, so a secret buffer is read at its final size.
 - Negative / trade-offs: the signatures that carry a secret change inside the application crates.
@@ -127,10 +137,11 @@ which lies on disk under `config_dir` anyway.
 
 Tests that will carry `Verifies: ADR-0057`: the types of the secrets the Applies-to line names are
 pinned at compile time, by a test in each crate that binds `BootstrapIdentity::key_pem`, what
-`key_file`, `read_password_file` and `fleet_core::pkcs12::file::open` return, `Password`'s field and
-the Endpoint token to a `Zeroizing` type, so a change back to a plain buffer stops compiling. That
-the bytes are overwritten on drop is `zeroize`'s own tested behaviour; reading freed memory from a
-test is undefined behaviour and is not done.
+`key_file`, `read_password_file`, the Server's `read_secret_file` and
+`fleet_core::pkcs12::file::open` return, `Password`'s field and the Endpoint token to a `Zeroizing`
+type, so a change back to a plain buffer stops compiling. That the bytes are overwritten on drop is
+`zeroize`'s own tested behaviour; reading freed memory from a test is undefined behaviour and is not
+done.
 
 **Not mechanically decidable:** whether a new secret is held in `Zeroizing`, and whether a copy is
 made earlier than clause 3 allows. No check can tell a secret from other bytes; review decides it.
