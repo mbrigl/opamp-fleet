@@ -1846,3 +1846,143 @@ mod tests {
         SecurityDescriptor::from_sddl(&pipe_sddl(&own, &own)).expect("the system reads it");
     }
 }
+
+/// The install lock across logon sessions: held by `LocalSystem` — as an MSI's custom action holds
+/// it — it must keep out an Administrator's elevated run in a session of its own, as the CLI is.
+#[cfg(all(test, windows))]
+mod lock_tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    const SDDL: &str = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    const HELPER: &str = "win32::lock_tests::hold_the_install_lock_as_asked";
+    const ALIAS: &str = "FLEET_HOLD_LOCK_ALIAS";
+    const SECONDS: &str = "FLEET_HOLD_LOCK_SECONDS";
+    const MARKER: &str = "FLEET_HOLD_LOCK_MARKER";
+
+    /// Not a test of its own: what the scheduled task runs under `LocalSystem`. It takes the
+    /// install lock named in its environment, writes its own SID into the marker, holds the lock
+    /// for the seconds asked, and writes the marker's `.released` sibling once it has let go.
+    #[test]
+    #[ignore = "run as LocalSystem by the_install_lock_excludes_across_logon_sessions"]
+    fn hold_the_install_lock_as_asked() {
+        let (Ok(alias), Ok(seconds), Ok(marker)) = (
+            std::env::var(ALIAS),
+            std::env::var(SECONDS),
+            std::env::var(MARKER),
+        ) else {
+            return;
+        };
+        let seconds: u64 = seconds.parse().expect("seconds");
+        let marker = PathBuf::from(marker);
+        let taken = super::hold_install_lock(&alias, "lock", SDDL, Duration::from_secs(60))
+            .expect("the lock");
+        let super::Taken::Held { held, .. } = taken else {
+            panic!("busy");
+        };
+        let me = super::own_sid().expect("own SID");
+        std::fs::write(&marker, me.as_str()).expect("marker");
+        std::thread::sleep(Duration::from_secs(seconds));
+        drop(held);
+        std::fs::write(marker.with_extension("released"), "").expect("released");
+    }
+
+    /// Deletes the scheduled task when dropped, whatever the test came to.
+    struct Task(String);
+
+    impl Drop for Task {
+        fn drop(&mut self) {
+            let _ = Command::new("schtasks")
+                .args(["/delete", "/tn", &self.0, "/f"])
+                .output();
+        }
+    }
+
+    fn schtasks(args: &[&str]) {
+        let out = Command::new("schtasks")
+            .args(args)
+            .output()
+            .expect("run schtasks");
+        assert!(
+            out.status.success(),
+            "schtasks {args:?} failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn wait_for(path: &Path, within: Duration, log: &Path) -> String {
+        let until = Instant::now() + within;
+        while Instant::now() < until {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                return text;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        panic!(
+            "{} did not appear within {}s; the task's log: {}",
+            path.display(),
+            within.as_secs(),
+            std::fs::read_to_string(log).unwrap_or_else(|e| e.to_string())
+        );
+    }
+
+    /// The install lock a `LocalSystem` process holds — in session 0, under a logon session of
+    /// its own, as an MSI's custom action runs — keeps out this elevated process in another, and
+    /// is taken once it is let go: a private namespace bounded by the Administrators excludes
+    /// across logon sessions (ADR-0059 clauses 1 and 2). The `LocalSystem` process is a scheduled
+    /// task running this test binary's helper above; the test fails where the task cannot be
+    /// created or run.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_install_lock_excludes_across_logon_sessions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let alias = format!("fleet-lock-test-{}", std::process::id());
+        let marker = dir.path().join("held");
+        let log = dir.path().join("helper.log");
+        let script = dir.path().join("hold.cmd");
+        let exe = std::env::current_exe().expect("the test binary");
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\nset {ALIAS}={alias}\r\nset {SECONDS}=20\r\nset {MARKER}={}\r\n\
+                 \"{}\" {HELPER} --exact --ignored --nocapture > \"{}\" 2>&1\r\n",
+                marker.display(),
+                exe.display(),
+                log.display()
+            ),
+        )
+        .expect("script");
+        let task = Task(alias.clone());
+        let tr = format!("\"{}\"", script.display());
+        schtasks(&[
+            "/create", "/tn", &task.0, "/ru", "SYSTEM", "/sc", "once", "/st", "00:00", "/tr", &tr,
+            "/f",
+        ]);
+        schtasks(&["/run", "/tn", &task.0]);
+
+        let holder = wait_for(&marker, Duration::from_secs(90), &log);
+        assert_eq!(holder.trim(), "S-1-5-18", "held by LocalSystem");
+        let busy =
+            super::hold_install_lock(&alias, "lock", SDDL, Duration::from_secs(2)).expect("asked");
+        assert!(
+            matches!(busy, super::Taken::Busy),
+            "the install lock LocalSystem holds in another logon session did not keep this one \
+             out: a private namespace does not exclude across logon sessions"
+        );
+
+        wait_for(
+            &marker.with_extension("released"),
+            Duration::from_secs(90),
+            &log,
+        );
+        let taken =
+            super::hold_install_lock(&alias, "lock", SDDL, Duration::from_secs(30)).expect("asked");
+        assert!(
+            matches!(taken, super::Taken::Held { .. }),
+            "the install lock, let go, is taken"
+        );
+        drop(task);
+    }
+}
