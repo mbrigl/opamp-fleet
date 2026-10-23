@@ -1152,13 +1152,19 @@ mod tests {
         let err = crate::configs::ConfigBackend::remove(&store, "base").expect_err("refused");
         assert!(err.contains("lost its lock"), "{err}");
         assert!(err.contains(&test.config.dbname), "{err}");
-        let logged = String::from_utf8(log.lock().expect("log").clone()).expect("utf-8");
-        assert!(
-            logged
+        // The flag is set before the line is written, so the Server refuses at once; the line
+        // follows on the watcher's thread.
+        loop {
+            let logged = String::from_utf8(log.lock().expect("log").clone()).expect("utf-8");
+            if logged
                 .lines()
-                .any(|line| line.contains("ERROR") && line.contains("lost its lock")),
-            "{logged}"
-        );
+                .any(|line| line.contains("ERROR") && line.contains("lost its lock"))
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{logged}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// A second Server against the same database fails startup naming it; once the first is
