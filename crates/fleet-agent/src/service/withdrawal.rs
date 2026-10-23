@@ -320,6 +320,63 @@ pub fn halt_recorded(
     }
 }
 
+/// What an uninstall does, over its seams (ADR-0059 clauses 1 and 6): it stops both services
+/// through `halt`, which starts nothing again; completes the recorded withdrawal through
+/// `complete`, and then removes the record through `remove` — only where it holds the install lock
+/// (`locked`) and both services stopped; and deregisters both through `deregister`, always: an
+/// uninstall that left them registered would leave them starting at the next boot. Without the
+/// lock the record is left alone — another run may be rewriting it. Every error is reported, after
+/// the deregistration; `recorded` says where the record is kept.
+///
+/// # Errors
+/// Returns every step that failed, the deregistration first.
+pub fn uninstall_with(
+    locked: Result<(), String>,
+    halt: &mut dyn FnMut() -> Result<(), String>,
+    complete: &mut dyn FnMut() -> Result<(), String>,
+    remove: &mut dyn FnMut() -> Result<(), String>,
+    deregister: &mut dyn FnMut() -> Result<(), String>,
+    recorded: &str,
+) -> Result<(), String> {
+    let mut unfinished = Vec::new();
+    let halted = halt();
+    match (locked, halted) {
+        (Err(e), _) => unfinished.push(format!(
+            "the install lock could not be taken ({e}), so {recorded} was left as it is; \
+             `supervisor service uninstall` again finishes it"
+        )),
+        (Ok(()), Err(e)) => unfinished.push(format!(
+            "what former accounts were granted is not withdrawn: the services are not both \
+             stopped ({e}). It stays recorded in {recorded}; `supervisor service install` \
+             completes it, and a later `supervisor service uninstall` too"
+        )),
+        (Ok(()), Ok(())) => match complete() {
+            Ok(()) => {
+                if let Err(e) = remove() {
+                    unfinished.push(e);
+                }
+            }
+            Err(e) => unfinished.push(format!(
+                "what former accounts were granted is not withdrawn: {e}. It stays recorded in \
+                 {recorded}; `supervisor service install` completes it, and a later `supervisor \
+                 service uninstall` too"
+            )),
+        },
+    }
+    if let Err(e) = deregister() {
+        unfinished.insert(0, format!("the services are not deregistered: {e}"));
+        return Err(unfinished.join("; "));
+    }
+    if unfinished.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the services were deregistered, and not all else was done: {}",
+            unfinished.join("; ")
+        ))
+    }
+}
+
 /// The record on Windows: [`VALUE`] of `HKEY_LOCAL_MACHINE\<parent>\<KEY>`.
 #[cfg(windows)]
 pub struct Registry {
@@ -735,6 +792,79 @@ mod tests {
             &mut || Err("access denied".to_string()),
         );
         assert_eq!(read(&store).expect("read").resume, CLIENT);
+    }
+
+    /// An uninstall withdraws only once both services are stopped and the install lock is held,
+    /// and leaves the record alone otherwise; it deregisters both always — after a failed stop,
+    /// without the lock, after a failed withdrawal — and reports every step that failed (ADR-0059
+    /// clauses 1 and 6).
+    /// Verifies: ADR-0059
+    #[test]
+    fn an_uninstall_always_deregisters_and_withdraws_only_once_both_are_stopped() {
+        #[derive(Default)]
+        struct Steps(std::cell::RefCell<Vec<&'static str>>);
+        impl Steps {
+            fn note(&self, step: &'static str, result: Result<(), String>) -> Result<(), String> {
+                self.0.borrow_mut().push(step);
+                result
+            }
+            fn taken(&self) -> Vec<&'static str> {
+                std::mem::take(&mut self.0.borrow_mut())
+            }
+        }
+        let steps = Steps::default();
+        let run = |locked: Result<(), String>,
+                   halt: Result<(), String>,
+                   complete: Result<(), String>,
+                   deregister: Result<(), String>| {
+            uninstall_with(
+                locked,
+                &mut || steps.note("halt", halt.clone()),
+                &mut || steps.note("complete", complete.clone()),
+                &mut || steps.note("remove", Ok(())),
+                &mut || steps.note("deregister", deregister.clone()),
+                "the record",
+            )
+        };
+        let fail = |e: &str| Err(e.to_string());
+
+        assert_eq!(run(Ok(()), Ok(()), Ok(()), Ok(())), Ok(()));
+        assert_eq!(steps.taken(), ["halt", "complete", "remove", "deregister"]);
+
+        let after_a_failed_stop = run(Ok(()), fail("did not stop"), Ok(()), Ok(()));
+        assert_eq!(steps.taken(), ["halt", "deregister"], "no withdrawal");
+        assert!(after_a_failed_stop
+            .is_err_and(|e| e.contains("did not stop") && e.contains("the record")),);
+
+        let without_the_lock = run(fail("busy"), Ok(()), Ok(()), Ok(()));
+        assert_eq!(
+            steps.taken(),
+            ["halt", "deregister"],
+            "the record left alone"
+        );
+        assert!(without_the_lock.is_err_and(|e| e.contains("busy")));
+
+        let after_a_failed_withdrawal = run(Ok(()), Ok(()), fail("held"), Ok(()));
+        assert_eq!(
+            steps.taken(),
+            ["halt", "complete", "deregister"],
+            "the record kept"
+        );
+        assert!(after_a_failed_withdrawal.is_err_and(|e| e.contains("held")));
+
+        let all_failed = run(
+            fail("busy"),
+            fail("did not stop"),
+            Ok(()),
+            fail("access denied"),
+        );
+        assert_eq!(steps.taken(), ["halt", "deregister"]);
+        let all_failed = all_failed.expect_err("failed");
+        assert!(
+            all_failed.starts_with("the services are not deregistered: access denied")
+                && all_failed.contains("busy"),
+            "{all_failed}"
+        );
     }
 
     /// A record whose removal fails is not passed off as removed: the completion says so, and
