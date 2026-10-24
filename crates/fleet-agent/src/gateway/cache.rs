@@ -537,11 +537,12 @@ impl PackageCache {
     }
 
     /// Binds `uid` to `host` unless it is bound already: the first report wins, and every report
-    /// refreshes when it was last reported (ADR-0039 clause 6). `host` is the one a downstream
+    /// refreshes when it was last reported (ADR-0060 clause 1). `host` is the one a downstream
     /// certificate speaks as ([`speaker_of`]), `end` where that certificate ends ([`end_of`]). A host
-    /// binds at most `max_carried_agents`; at the global cap the least recently reported binding
-    /// whose `instance_uid` has neither a route (`routed`) nor a current offer makes room, and
-    /// without one nothing is bound.
+    /// binds at most `max_carried_agents`, the Gateway at most its global cap; past either the
+    /// host's own least recently reported binding whose `instance_uid` has neither a route
+    /// (`routed`) nor a current offer makes room, never another host's, and without one nothing is
+    /// bound.
     ///
     /// The first half of a bind: [`PackageCache::written`] waits for the ticket of a
     /// [`Begun::Writing`], and [`PackageCache::finish_bind`] decides. A report for an `instance_uid`
@@ -1808,11 +1809,13 @@ mod tests {
         assert_eq!(fetches(&count, "1"), 2);
     }
 
-    /// One host reporting fresh `instance_uid`s binds no more than its share, and at the global cap
-    /// an idle binding makes room: another host's new Agent is still bound and its offer recorded.
-    /// Verifies: ADR-0026
+    /// One host reporting fresh `instance_uid`s binds no more than its share, and hosts that fill
+    /// the Gateway's total cannot free another host's binding to claim it: at the total a host
+    /// without an idle binding of its own binds nothing and every binding stays, while a host with
+    /// one gives it up for its new Agent, whose offer is then recorded.
+    /// Verifies: ADR-0060
     #[tokio::test]
-    async fn a_host_flooding_instance_uids_cannot_keep_another_hosts_agent_from_being_bound() {
+    async fn at_the_total_a_new_binding_never_takes_another_hosts_place() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config: Arc<ClientConfig> = Arc::new(
             toml::from_str(&format!(
@@ -1842,31 +1845,31 @@ mod tests {
             "its share and no more"
         );
         let other = InstanceUid::default();
-        cache.bind(other, "other", |_| false).await;
+        assert!(cache.bind(other, "other", |_| false).await.0);
         assert_eq!(cache.inner().bindings.len(), 4, "the global cap");
 
+        let shut_out = InstanceUid::default();
+        let (bound, evicted) = cache.bind(shut_out, "new-host", |_| false).await;
+        assert!(
+            !bound && evicted.is_empty(),
+            "no other host's binding made room"
+        );
+        let held = cache.inner().bindings.snapshot();
+        assert_eq!(
+            held.len(),
+            2 + 4,
+            "two hosts' ends, four bindings: nothing of the new host"
+        );
+
         let real = InstanceUid::default();
-        cache.bind(real, "real", |uid| *uid == other).await;
-        {
-            let inner = cache.inner();
-            assert_eq!(
-                inner.bindings.host_of(&real),
-                Some("real"),
-                "an idle binding made room"
-            );
-            assert!(
-                inner.bindings.host_of(&other).is_some(),
-                "a routed one did not"
-            );
-            assert!(
-                inner.bindings.host_of(&flood[0]).is_none(),
-                "the least recently reported did"
-            );
-        }
+        let (bound, evicted) = cache.bind(real, "other", |_| false).await;
+        assert!(bound);
+        assert_eq!(evicted, vec![other], "its own idle binding made room");
+        assert_eq!(cache.inner().bindings.count_of("flood"), 3);
         let one = artifact("1", b"x");
         cache.inner().refused.insert(one.hash.clone());
-        cache.observe(real, Some("real".to_string()), &offer(real, &[&one]));
-        assert_eq!(cache.offered_to("real", &one.path), Some(one));
+        cache.observe(real, Some("other".to_string()), &offer(real, &[&one]));
+        assert_eq!(cache.offered_to("other", &one.path), Some(one));
     }
 
     /// Past its grace a fetch must keep an average of 64 KiB/s since the grace ended.

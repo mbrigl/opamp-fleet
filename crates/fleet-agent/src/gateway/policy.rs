@@ -81,8 +81,8 @@ pub struct Bindings {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Outcome {
     pub bound: Bound,
-    /// The `instance_uid`s whose bindings made room, at most two, so what else the Gateway holds
-    /// for them can go too.
+    /// The `instance_uid` whose binding made room, if one did, so what else the Gateway holds for
+    /// it can go too.
     pub evicted: Vec<InstanceUid>,
     /// What the store must hold before the report is forwarded (ADR-0060 clause 2): the new
     /// binding, the removals that made room for it, and the host's certificate end where the
@@ -92,10 +92,10 @@ pub struct Outcome {
 
 impl Bindings {
     /// Binds `uid` to `host` on its first report, and on every report marks it the most recently
-    /// reported. A host binds at most `limits.per_host`: past that its own least recently reported
-    /// binding whose `instance_uid` is `idle` makes room, so a host whose Agents come and go is not
-    /// shut out by its own past (ADR-0039 clause 6). At `limits.total` the least recently reported
-    /// idle binding of any host makes room. Without one nothing is bound.
+    /// reported. A host binds at most `limits.per_host`, and the Gateway at most `limits.total`:
+    /// past either the host's own least recently reported binding whose `instance_uid` is `idle`
+    /// makes room, so a host whose Agents come and go is not shut out by its own past, and never
+    /// another host's (ADR-0060 clause 1). Without one nothing is bound.
     ///
     /// A report under a certificate that ends later than the one the host's end was kept from moves
     /// it to `end` (ADR-0060 clause 2). A new binding is pending until [`Bindings::commit`]: a
@@ -135,7 +135,16 @@ impl Bindings {
         }
         let idle = |uid: &InstanceUid, binding: &Binding| !binding.pending && idle(uid);
         let mut evicted = Vec::new();
-        if self.per_host.get(host).copied().unwrap_or(0) >= limits.per_host {
+        let full = if self.per_host.get(host).copied().unwrap_or(0) >= limits.per_host {
+            Some("the host holds as many bindings as max_carried_agents allows, none of them idle")
+        } else if self.bound.len() >= limits.total {
+            Some(
+                "the Gateway holds as many bindings as it may, and none of this host's own is idle",
+            )
+        } else {
+            None
+        };
+        if let Some(why) = full {
             let Some(victim) = self
                 .bound
                 .iter()
@@ -143,26 +152,7 @@ impl Bindings {
                 .min_by_key(|(_, binding)| binding.reported)
                 .map(|(uid, _)| *uid)
             else {
-                return refused(
-                    "the host holds as many bindings as max_carried_agents allows, none of them idle",
-                    evicted,
-                );
-            };
-            self.unbind(&victim);
-            evicted.push(victim);
-        }
-        if self.bound.len() >= limits.total {
-            let Some(victim) = self
-                .bound
-                .iter()
-                .filter(|(uid, binding)| idle(uid, binding))
-                .min_by_key(|(_, binding)| binding.reported)
-                .map(|(uid, _)| *uid)
-            else {
-                return refused(
-                    "the Gateway holds as many bindings as it may, none of them idle",
-                    evicted,
-                );
+                return refused(why, evicted);
             };
             self.unbind(&victim);
             evicted.push(victim);
@@ -414,34 +404,56 @@ mod tests {
         ));
     }
 
-    /// At the total, the least recently reported idle binding makes room — a report refreshing
-    /// how recent a binding is — and with none idle nothing is bound.
-    /// Verifies: ADR-0026
+    /// At the total, a host's report for a new `instance_uid` takes the place of the host's own
+    /// least recently reported idle binding — a report refreshing how recent a binding is — and
+    /// never another host's: a host without one of its own binds nothing.
+    /// Verifies: ADR-0060
     #[test]
-    fn at_the_total_the_least_recently_reported_idle_binding_makes_room() {
+    fn at_the_total_only_the_reporting_hosts_own_idle_binding_makes_room() {
         let mut bindings = Bindings::default();
-        let [first, second, third] = [(); 3].map(|()| InstanceUid::default());
+        let [first, second, other] = [(); 3].map(|()| InstanceUid::default());
         bind(&mut bindings, first, "a", |_| true);
-        bind(&mut bindings, second, "b", |_| true);
-        bind(&mut bindings, third, "c", |_| true);
+        bind(&mut bindings, other, "b", |_| true);
+        bind(&mut bindings, second, "a", |_| true);
         assert_eq!(bind(&mut bindings, first, "a", |_| true).0, Bound::Kept);
+        let limits = Limits {
+            per_host: 3,
+            total: 3,
+        };
+        let new = InstanceUid::default();
+        let outcome = bindings.bind(new, "a", &end(i64::MAX), limits, |_| true);
         assert_eq!(
-            bind(&mut bindings, InstanceUid::default(), "d", |_| true),
-            (Bound::New, vec![second])
+            (outcome.bound, outcome.evicted),
+            (Bound::New, vec![second]),
+            "its own least recently reported"
         );
-        assert!(
-            bindings.host_of(&first).is_some(),
+        bindings.commit(&new);
+        assert_eq!(
+            bindings.host_of(&first),
+            Some("a"),
             "reported again, so kept"
         );
-        assert!(
-            bindings.host_of(&second).is_none(),
-            "now the least recently reported, so evicted"
-        );
+        assert_eq!(bindings.host_of(&other), Some("b"), "another host's stayed");
         assert_eq!(bindings.len(), 3);
-        assert!(matches!(
-            bind(&mut bindings, InstanceUid::default(), "e", |_| false).0,
-            Bound::Refused(_)
-        ));
+
+        let outcome = bindings.bind(InstanceUid::default(), "c", &end(i64::MAX), limits, |_| {
+            true
+        });
+        assert!(
+            matches!(outcome.bound, Bound::Refused(_)) && outcome.evicted.is_empty(),
+            "a host with no binding of its own binds nothing"
+        );
+        let outcome = bindings.bind(InstanceUid::default(), "b", &end(i64::MAX), limits, |_| {
+            false
+        });
+        assert!(
+            matches!(outcome.bound, Bound::Refused(_)) && outcome.evicted.is_empty(),
+            "nor one whose own are not idle"
+        );
+        assert_eq!(
+            [first, other, new].map(|uid| bindings.host_of(&uid).is_some()),
+            [true; 3]
+        );
     }
 
     /// Replaying a store keeps each host's last certificate end and only for a host left with a
