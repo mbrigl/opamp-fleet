@@ -1182,3 +1182,501 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
     service_on_windows("stop", &config, &root);
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
+
+/// The password of the `bootstrap.p12` the enrolment smoke test installs with.
+const P12_PASSWORD: &str = "a password of the operator";
+
+/// A throwaway CA as PEM: its certificate and its key.
+fn smoke_ca(name: &str) -> (String, String) {
+    let key = rcgen::KeyPair::generate().expect("ca key");
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("ca params");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, name);
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let cert = params.self_signed(&key).expect("ca");
+    (cert.pem(), key.serialize_pem())
+}
+
+/// A leaf certificate for `name` signed by `ca`, and its key. A bootstrap certificate names the
+/// customer and the site an approval requires (ADR-0036 clause 3).
+fn smoke_leaf(ca: &(String, String), name: &str, bootstrap: bool) -> (String, rcgen::KeyPair) {
+    let issuer =
+        rcgen::Issuer::from_ca_cert_pem(&ca.0, rcgen::KeyPair::from_pem(&ca.1).expect("ca key"))
+            .expect("issuer");
+    let key = rcgen::KeyPair::generate().expect("key");
+    let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).expect("params");
+    if bootstrap {
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationName, "Kunde GmbH");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationalUnitName, "Werk Nord");
+    }
+    let cert = params.signed_by(&key, &issuer).expect("signed");
+    (cert.pem(), key)
+}
+
+/// A Server that enrols, as `main` builds it from `server.toml`: mutual TLS on loopback with a
+/// client CA that also signs the Server's own certificate, a bootstrap CA, the register, and an
+/// open enrolment window. Its runtime lives as long as it does.
+struct EnrollingServer {
+    _runtime: tokio::runtime::Runtime,
+    port: u16,
+    state: Arc<AppState>,
+    enrolment: Arc<fleet_server::enrolment::Enrolment>,
+    revocations: Arc<fleet_server::revocation::Revocations>,
+    /// The client CA, which is also the CA of the Server's certificate: the `server-ca.pem` of the
+    /// fleet's files.
+    client_ca_pem: String,
+    /// The bootstrap certificate as DER, and its key, for a `bootstrap.p12`.
+    bootstrap: (Vec<u8>, rcgen::KeyPair),
+}
+
+impl EnrollingServer {
+    fn start(pki: &Path) -> Self {
+        std::fs::create_dir_all(pki).expect("pki dir");
+        let client_ca = smoke_ca("client-ca");
+        let bootstrap_ca = smoke_ca("bootstrap-ca");
+        let (server_pem, server_key) = smoke_leaf(&client_ca, "localhost", false);
+        let (bootstrap_pem, bootstrap_key) = smoke_leaf(&bootstrap_ca, "bootstrap", true);
+        let file = |name: &str, content: &str| {
+            let path = pki.join(name);
+            std::fs::write(&path, content).expect("write the server's pki");
+            path.display().to_string()
+        };
+        let client_ca_file = file("client-ca.pem", &client_ca.0);
+        let client_ca_key_file = file("client-ca-key.pem", &client_ca.1);
+        let bootstrap_ca_file = file("bootstrap-ca.pem", &bootstrap_ca.0);
+        let cert_file = file("localhost.pem", &server_pem);
+        let key_file = file("localhost-key.pem", &server_key.serialize_pem());
+        let authority = |pem: &str, role: &str| {
+            let der = opamp::tls::certificates(pem.as_bytes()).expect("pem");
+            let facts = fleet_server::ca::facts(der[0].as_ref()).expect("facts");
+            fleet_server::revocation::Authority {
+                role: role.to_string(),
+                subject: facts.id.issuer,
+                name: facts.issuer_name,
+            }
+        };
+
+        let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
+        let enrolment = Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone()));
+        let revocations = Arc::new(
+            fleet_server::revocation::Revocations::open(
+                Box::new(
+                    fleet_server::fs::FsLedgerStore::open(&pki.join("fleet-configs"))
+                        .expect("ledger"),
+                ),
+                clock,
+                vec![
+                    authority(&client_ca.0, "client"),
+                    authority(&bootstrap_ca.0, "bootstrap"),
+                ],
+            )
+            .expect("revocations"),
+        );
+        let signer = fleet_server::ca::ClientCa::from_config(
+            &toml::from_str::<fleet_server::config::ClientCaConfig>(&format!(
+                "cert_file = {client_ca_file:?}\nkey_file = {client_ca_key_file:?}\n"
+            ))
+            .expect("client_ca config"),
+        )
+        .expect("client ca");
+        let state = Arc::new(
+            AppState::new(pki.join("fleet-configs"))
+                .expect("state")
+                .with_client_ca(Some(signer))
+                .with_enrolment(Some(enrolment.clone()))
+                .with_revocations(Some(revocations.clone())),
+        );
+        let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
+            "cert_file = {cert_file:?}\nkey_file = {key_file:?}\nclient_ca_file = {client_ca_file:?}\n"
+        ))
+        .expect("tls config");
+        let planes = fleet_server::tls::server_tls(
+            &tls,
+            None,
+            Some(&fleet_server::config::EnrolmentConfig {
+                bootstrap_ca_file: bootstrap_ca_file.into(),
+                bootstrap_ca_key_file: None,
+                max_pending_per_bootstrap:
+                    fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
+            }),
+        )
+        .expect("server material");
+        let admission = fleet_server::transport::Admission::new(true)
+            .with_enrolment(planes.issuers, Some(enrolment.clone()))
+            .with_revocations(Some(revocations.clone()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let served = state.clone();
+        runtime.spawn(async move {
+            fleet_server::listen::plane(
+                listener,
+                Some(planes.agent.rustls_config().expect("agent plane config")),
+                64,
+                opamp::server::listen::Handle::new(),
+            )
+            .serve(fleet_server::agent_app(served, admission))
+            .await
+        });
+        enrolment.open(600).expect("open the window");
+        let bootstrap_der =
+            opamp::tls::certificates(bootstrap_pem.as_bytes()).expect("pem")[0].to_vec();
+        EnrollingServer {
+            _runtime: runtime,
+            port,
+            state,
+            enrolment,
+            revocations,
+            client_ca_pem: client_ca.0,
+            bootstrap: (bootstrap_der, bootstrap_key),
+        }
+    }
+
+    /// The fleet's files a script puts in the directory `--fleet-files` names (ADR-0029 clause
+    /// 11): `bootstrap.p12` under [`P12_PASSWORD`] and `server-ca.pem`.
+    fn fleet_files(&self, dir: &Path) {
+        std::fs::create_dir_all(dir).expect("fleet files dir");
+        let p12 = fleet_core::pkcs12::file::seal(
+            &self.bootstrap.0,
+            &self.bootstrap.1.serialize_der(),
+            P12_PASSWORD,
+        )
+        .expect("seal");
+        std::fs::write(dir.join(fleet_agent::config_init::BOOTSTRAP_P12_FILE), p12)
+            .expect("write bootstrap.p12");
+        std::fs::write(
+            dir.join(fleet_agent::config_init::SERVER_CA_FILE),
+            &self.client_ca_pem,
+        )
+        .expect("write server-ca.pem");
+    }
+}
+
+/// `service install` running in the background while the test approves its enrolment. Killed
+/// however the test ends, so an install still waiting for an approval does not outlive it.
+struct Installing {
+    child: std::process::Child,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+impl Installing {
+    fn spawn(args: &[&str], config: &Path, logs: &Path) -> Self {
+        let stdout = logs.join("install.out");
+        let stderr = logs.join("install.err");
+        let child = Command::new(env!("CARGO_BIN_EXE_supervisor"))
+            .arg("--config")
+            .arg(config)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::fs::File::create(&stdout).expect("install.out"))
+            .stderr(std::fs::File::create(&stderr).expect("install.err"))
+            .spawn()
+            .expect("run the client");
+        Installing {
+            child,
+            stdout,
+            stderr,
+        }
+    }
+
+    /// What the install said, once it has ended; `None` while it runs.
+    fn ended(&mut self) -> Option<String> {
+        let status = self.child.try_wait().expect("wait for the install")?;
+        Some(self.said(status))
+    }
+
+    /// Waits for the install to end: its stdout when it succeeded, everything it said when not.
+    fn finish(mut self, timeout: Duration) -> Result<String, String> {
+        let status = wait_for("the install to end", timeout, || {
+            self.child.try_wait().expect("wait for the install")
+        });
+        if status.success() {
+            Ok(std::fs::read_to_string(&self.stdout).unwrap_or_default())
+        } else {
+            Err(self.said(status))
+        }
+    }
+
+    fn said(&self, status: std::process::ExitStatus) -> String {
+        format!(
+            "the install ended with {status}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            std::fs::read_to_string(&self.stdout).unwrap_or_default(),
+            std::fs::read_to_string(&self.stderr).unwrap_or_default()
+        )
+    }
+}
+
+impl Drop for Installing {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Every regular file beneath `dir` whose content `holds`, links not followed. A file that cannot
+/// be read fails the test: it could not be checked.
+fn files_where(dir: &Path, holds: &dyn Fn(&[u8]) -> bool) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("list {}: {e}", dir.display())) {
+        let path = entry.expect("entry").path();
+        let kind = std::fs::symlink_metadata(&path)
+            .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+            .file_type();
+        if kind.is_dir() {
+            found.extend(files_where(&path, holds));
+        } else if kind.is_file()
+            && holds(
+                &std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())),
+            )
+        {
+            found.push(path);
+        }
+    }
+    found
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// The install a script runs after the package (ADR-0029 clause 11): `service install --endpoint
+/// --fleet-files --bootstrap-password-file` opens the `bootstrap.p12` in that directory, waits for
+/// an operator's approval with nothing staged or registered, and only then stages and registers.
+/// The configuration it wrote names the copied CA and no bootstrap identity, the Client's identity
+/// is the certificate the approval issued, and the bootstrap key is in no file under the root. The
+/// service started then reaches the Server on the issued certificate: the Server takes it into the
+/// fleet as the Host that certificate names, and has issued no other.
+/// Verifies: ADR-0029, ADR-0020, ADR-0021
+#[test]
+#[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
+fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_certificate() {
+    assert_eq!(
+        service().state().expect("query the service"),
+        ServiceState::NotInstalled,
+        "a leftover {} service from an earlier run — remove it before running this",
+        service_name()
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = EnrollingServer::start(&dir.path().join("pki"));
+    let fleet_files = dir.path().join("fleet");
+    server.fleet_files(&fleet_files);
+    let password_file = dir.path().join("bootstrap.pass");
+    std::fs::write(&password_file, format!("{P12_PASSWORD}\n")).expect("write the password");
+    let root = dir.path().join("install");
+    let config = root.join(fleet_agent::config_init::FILE_NAME);
+    let state_dir = root.join(fleet_agent::service::layout::STATE_DIR_NAME);
+
+    let mut installing = Installing::spawn(
+        &[
+            "service",
+            "install",
+            "--root",
+            &root.to_string_lossy(),
+            "--endpoint",
+            &format!("wss://localhost:{}/v1/opamp", server.port),
+            "--fleet-files",
+            &fleet_files.to_string_lossy(),
+            "--bootstrap-password-file",
+            &password_file.to_string_lossy(),
+        ],
+        &config,
+        dir.path(),
+    );
+    let _registered = Registered;
+    let id = wait_for(
+        "the install's enrolment request",
+        Duration::from_secs(120),
+        || {
+            if let Some(said) = installing.ended() {
+                panic!("the install ended before it enrolled: {said}");
+            }
+            server
+                .enrolment
+                .pending()
+                .first()
+                .map(|pending| pending.id.clone())
+        },
+    );
+    // Enrolled before anything is staged or registered (ADR-0020 clause 5).
+    assert_eq!(
+        service().state().expect("query the service"),
+        ServiceState::NotInstalled,
+        "registered while the enrolment waits for its approval"
+    );
+    let layout = fleet_agent::service::layout::Layout::new(&root);
+    assert!(
+        !layout.versions_dir().exists(),
+        "staged while the enrolment waits for its approval"
+    );
+    server.state.approve_enrolment(&id).expect("approve");
+    let installed = installing
+        .finish(Duration::from_secs(120))
+        .expect("install the service");
+    assert!(installed.contains("enrolling with"), "{installed}");
+
+    let issued = server.revocations.issued();
+    assert_eq!(issued.len(), 1, "the approval issued {}", issued.len());
+    let issued = &issued[0];
+    assert_eq!(
+        issued.facts.key_fingerprint, id,
+        "issued for the approved request"
+    );
+    let host = issued
+        .facts
+        .host
+        .clone()
+        .expect("the issued certificate names a host");
+
+    let mut loaded =
+        fleet_agent::config::ClientConfig::load(&config).expect("load the configuration");
+    let tls = loaded.tls.clone().expect("a [tls] table");
+    assert_eq!(
+        tls.ca_file.as_deref(),
+        Some(
+            root.join(fleet_agent::config_init::SERVER_CA_FILE)
+                .as_path()
+        ),
+        "the configuration names the CA copied from the fleet's files"
+    );
+    assert_eq!(
+        (tls.cert_file, tls.key_file),
+        (None, None),
+        "the bootstrap identity is written into the configuration"
+    );
+    loaded.state_dir.clone_from(&state_dir);
+    assert_eq!(
+        loaded.client_identity(),
+        Some((
+            state_dir.join(fleet_agent::tls::ISSUED_CERT_FILE),
+            state_dir.join(fleet_agent::tls::ISSUED_KEY_FILE),
+        )),
+        "the Client's identity is not the issued certificate"
+    );
+    let held = std::fs::read(state_dir.join(fleet_agent::tls::ISSUED_CERT_FILE)).expect("held");
+    let (_, block) = x509_parser::pem::parse_x509_pem(&held).expect("PEM");
+    let held = block.parse_x509().expect("a certificate");
+    assert_eq!(
+        fleet_server::revocation::normalize_serial(&hex::encode(held.raw_serial())),
+        issued.facts.id.serial,
+        "the state directory holds another certificate than the one issued"
+    );
+
+    // The decrypted bootstrap key, in either encoding, is in no file the install wrote (ADR-0029
+    // clause 7).
+    let key_der = server.bootstrap.1.serialize_der();
+    let key_body: String = server
+        .bootstrap
+        .1
+        .serialize_pem()
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    let holding = files_where(&root, &|bytes| {
+        let unwrapped: Vec<u8> = bytes
+            .iter()
+            .copied()
+            .filter(|b| !matches!(b, b'\r' | b'\n'))
+            .collect();
+        contains(bytes, &key_der) || contains(&unwrapped, key_body.as_bytes())
+    });
+    assert!(holding.is_empty(), "the bootstrap key is in {holding:?}");
+
+    client(&["service", "start"], &config).expect("start the service");
+    wait_for(
+        "the service to report running",
+        Duration::from_secs(60),
+        || (service().state().ok()? == ServiceState::Running).then_some(()),
+    );
+    // A member connection presents a certificate of the client CA, and the Host it arrives over is
+    // the one that certificate names: the issued one, the only one there is.
+    wait_for(
+        "the Agent to arrive on the issued certificate",
+        Duration::from_secs(60),
+        || {
+            server
+                .state
+                .snapshot()
+                .into_iter()
+                .find(|agent| agent.connected && agent.host == host)
+                .map(|_| ())
+        },
+    );
+    assert_eq!(
+        server.revocations.issued().len(),
+        1,
+        "the service was issued another certificate"
+    );
+
+    client(&["service", "stop"], &config).expect("stop the service");
+    wait_for(
+        "the service to report stopped",
+        Duration::from_secs(60),
+        || (service().state().ok()? == ServiceState::Stopped).then_some(()),
+    );
+    client(&["service", "uninstall"], &config).expect("uninstall the service");
+    wait_for(
+        "the service to be deregistered",
+        Duration::from_secs(30),
+        || (service().state().ok()? == ServiceState::NotInstalled).then_some(()),
+    );
+}
+
+/// A `bootstrap.p12` that does not open under the password `--bootstrap-password-file` names fails
+/// the install before anything is written, staged or registered, naming the flag (ADR-0029 clause
+/// 10, ADR-0020 clause 5).
+/// Verifies: ADR-0029, ADR-0020
+#[test]
+#[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
+fn a_wrong_bootstrap_password_fails_the_install_before_anything_is_written() {
+    assert_eq!(
+        service().state().expect("query the service"),
+        ServiceState::NotInstalled,
+        "a leftover {} service from an earlier run — remove it before running this",
+        service_name()
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = EnrollingServer::start(&dir.path().join("pki"));
+    let fleet_files = dir.path().join("fleet");
+    server.fleet_files(&fleet_files);
+    let password_file = dir.path().join("bootstrap.pass");
+    std::fs::write(&password_file, "not the password of the file\n").expect("write the password");
+    let root = dir.path().join("install");
+    let config = root.join(fleet_agent::config_init::FILE_NAME);
+
+    let refused = client(
+        &[
+            "service",
+            "install",
+            "--root",
+            &root.to_string_lossy(),
+            "--endpoint",
+            &format!("wss://localhost:{}/v1/opamp", server.port),
+            "--fleet-files",
+            &fleet_files.to_string_lossy(),
+            "--bootstrap-password-file",
+            &password_file.to_string_lossy(),
+        ],
+        &config,
+    );
+    let _registered = Registered;
+    let refused = refused.expect_err("an install with the wrong password");
+    assert!(refused.contains("--bootstrap-password-file"), "{refused}");
+    assert!(!root.exists(), "the install wrote into {}", root.display());
+    assert!(
+        server.enrolment.pending().is_empty(),
+        "the install enrolled"
+    );
+    assert_eq!(
+        service().state().expect("query the service"),
+        ServiceState::NotInstalled,
+        "the install registered the service"
+    );
+}
