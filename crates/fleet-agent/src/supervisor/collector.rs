@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::supervisor::ports::{parse_settings, Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
+use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0010.
 ///
@@ -158,6 +158,9 @@ impl Plugin for CollectorPlugin {
             // The Collector has no reload convention — a configuration is applied by restart,
             // the generic behaviour (ADR-0017), which is also what the reference supervisor does.
             reload_signal: None,
+            // The Client starts the program itself: nothing registers a process account yet
+            // (ADR-0059 clause 1).
+            spawner: Spawner::Local,
             events: ctx.events,
             commands: command_rx,
             build: Box::new(move || collector_spec(&binary, &config_dir, &extra_args, &env)),
