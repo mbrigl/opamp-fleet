@@ -119,7 +119,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   connection when it reports again.
 
 - **The audit record syncs what is queued together once**
-  ([ADR-0022](docs/adr/0022-an-append-only-audit-record-chained-by-hash.md)). The Server synced
+  ([ADR-0022](docs/adr/0022-an-append-only-audit-record-chained-by-hash.md),
+  [ADR-0037](docs/adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)
+  clause 12). The Server synced
   the disk after every audit entry, so it recorded no more decisions a second than the disk
   synced, and a burst of them, such as refusals from many addresses, could fill the 10 000-entry
   channel and have every admission, CSR and operator act refused with `503` until it drained.
