@@ -495,6 +495,16 @@ fn install(
     let supervisors_root = config.supervisors_root();
     let supervisors_root_ours =
         layout::beneath(&supervisors_root, &[&data_root, &layout_root, &state_dir]).is_ok();
+    // Nor is it the install's to grant the process account anything in, or to withdraw a former
+    // one's rights from (ADR-0059 clause 6); Windows names it where it plans the restrictions.
+    #[cfg(unix)]
+    if let Some(warning) = run_as::supervisors_root_left(
+        &supervisors_root,
+        supervisors_root_ours,
+        process.is_some() || registered_agents.is_some(),
+    ) {
+        println!("{warning}");
+    }
     // On Windows every local user inherits read access under %ProgramData%; the data root, a state
     // directory placed elsewhere, and a Supervisors' root this install creates outside both are cut
     // off from it before anyone is granted anything (H8) — and before an enrolment writes its
@@ -529,16 +539,17 @@ fn install(
     {
         use fleet_agent::service::withdrawal::{halt_recorded, HaltFailed};
         let running = manager::running()?;
-        let supervisors_root = config.supervisors_root();
-        let mut roots = vec![
-            layout_root.as_path(),
-            data_root.as_path(),
-            state_dir.as_path(),
-            supervisors_root.as_path(),
-            config_path.as_path(),
-        ];
-        roots.extend(written.copies.iter().map(PathBuf::as_path));
-        pending.add(formers, &roots);
+        pending.add(
+            formers,
+            &fleet_agent::service::withdrawal::roots(
+                &layout_root,
+                &data_root,
+                &state_dir,
+                &supervisors_root,
+                &config_path,
+                &written.copies,
+            ),
+        );
         halt_recorded(
             &withdrawal,
             &mut pending,
@@ -556,6 +567,28 @@ fn install(
             ),
         })?;
     }
+    // On Linux and macOS an install that changes an account — the process account named anew or
+    // dropped, or another account for the Client — stops the Client and then the second service
+    // first, and waits until their processes have ended, so nothing runs under an account whose
+    // files it re-owns (ADR-0059 clause 16). Where one cannot be stopped, what was stopped is
+    // started again and nothing more is changed. Unix keeps no record: what ran is started again
+    // once the install has succeeded, and an install that fails leaves it stopped, and says so.
+    #[cfg(unix)]
+    let halted = if manager::account_changes(
+        registered.as_ref(),
+        run_as.as_ref().map(|r| r.account()),
+        registered_agents.as_ref(),
+        process.as_ref().map(|p| p.account()),
+    ) {
+        Some(manager::halt_for_change(level).map_err(|failed| {
+            format!(
+                "{}. Nothing was changed but the configuration this install wrote.",
+                failed.error
+            )
+        })?)
+    } else {
+        None
+    };
     let finished = (|| -> Result<(PathBuf, bool), String> {
         // What the process account owns there is its own, and left as it is (ADR-0059 clause 10).
         #[cfg(windows)]
@@ -661,6 +694,11 @@ fn install(
         if let Some(process) = &process {
             process.share_layout(&layout.versions_dir())?;
         }
+        // What a stop for an account change stopped runs again, under the accounts named now.
+        #[cfg(unix)]
+        if let Some(halted) = halted {
+            manager::resume(level, halted)?;
+        }
         // What ran before the stop — before this install's, or an earlier one's that failed —
         // runs again, now under the registration just made, and is struck from the record.
         #[cfg(windows)]
@@ -690,6 +728,16 @@ fn install(
                 .to_string()
         };
         format!("{e}\nNow {}. {back}", manager::describe_activity())
+    });
+    // On Linux and macOS an install that fails after a stop for an account change names what it
+    // stopped, which stays stopped: nothing records it for a later install.
+    #[cfg(unix)]
+    let finished = finished.map_err(|e| match halted.map(manager::describe_halted) {
+        Some(Some(stopped)) => format!(
+            "{e}\nThis install stopped {stopped} before it changed an account, and no later \
+             install starts it again: `supervisor service start` does."
+        ),
+        _ => e,
     });
     let (program, dropped) = finished?;
 
