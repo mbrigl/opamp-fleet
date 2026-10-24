@@ -495,6 +495,16 @@ fn install(
     let supervisors_root = config.supervisors_root();
     let supervisors_root_ours =
         layout::beneath(&supervisors_root, &[&data_root, &layout_root, &state_dir]).is_ok();
+    // Nor is it the install's to grant the process account anything in, or to withdraw a former
+    // one's rights from (ADR-0059 clause 6); Windows names it where it plans the restrictions.
+    #[cfg(unix)]
+    if let Some(warning) = run_as::supervisors_root_left(
+        &supervisors_root,
+        supervisors_root_ours,
+        process.is_some() || registered_agents.is_some(),
+    ) {
+        println!("{warning}");
+    }
     // On Windows every local user inherits read access under %ProgramData%; the data root, a state
     // directory placed elsewhere, and a Supervisors' root this install creates outside both are cut
     // off from it before anyone is granted anything (H8) — and before an enrolment writes its
