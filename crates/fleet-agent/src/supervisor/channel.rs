@@ -1113,6 +1113,7 @@ impl Channel {
 
     /// The connection open now, for a test to look into.
     #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     async fn open_connection(&self) -> Option<Arc<Connection>> {
         self.shared.state.lock().await.connection.clone()
     }
