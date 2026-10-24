@@ -633,12 +633,15 @@ impl Forwarding {
         let Some(replies) = &downstream.replies else {
             return Reply::Nothing;
         };
-        if !self.registry.attach(
+        let (attached, evicted) = self.registry.attach(
             uid,
             replies.clone(),
             downstream.host.clone(),
             &downstream.speaker,
-        ) {
+        );
+        // A binding that made room for this one takes its Agent's place upstream along.
+        self.pool.release(evicted);
+        if !attached {
             return Reply::Nothing;
         }
         if !carried {
@@ -714,11 +717,13 @@ impl Forwarding {
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         // Forwarded only for an `instance_uid` bound to the host that sent it; the binding logs
-        // a refusal (ADR-0039 clause 5).
-        let Some(exchange) =
+        // a refusal (ADR-0039 clause 5). A binding that made room for it takes its Agent's place
+        // upstream along: no socket going releases a plain-HTTP Agent's.
+        let (exchange, evicted) =
             self.registry
-                .expect_once(uid, reply_tx, downstream.host.clone(), &downstream.speaker)
-        else {
+                .expect_once(uid, reply_tx, downstream.host.clone(), &downstream.speaker);
+        self.pool.release(evicted);
+        let Some(exchange) = exchange else {
             return Reply::Refuse(
                 StatusCode::FORBIDDEN,
                 "this instance_uid is not this host's to report for".into(),
@@ -851,7 +856,7 @@ mod tests {
     /// A peer that goes takes its Agents' places on the upstream connections with it, so a peer
     /// coming back under ever new `instance_uid`s grows nothing; an Agent another socket of the
     /// same host carries by then keeps its place and its route.
-    /// Verifies: ADR-0015
+    /// Verifies: ADR-0015, ADR-0058
     #[tokio::test]
     async fn the_agents_a_departed_peer_carried_are_released_from_the_pool() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -908,6 +913,85 @@ mod tests {
             instance_uid: uid.as_bytes().to_vec(),
             ..Default::default()
         }
+    }
+
+    /// One plain-HTTP exchange of `peer` for `uid`, answered as the Server would answer it.
+    async fn poll(forwarding: &Forwarding, peer: &Downstream, uid: InstanceUid) {
+        let answer = async {
+            while !forwarding.registry.routes(&uid) {
+                tokio::task::yield_now().await;
+            }
+            forwarding.registry.deliver(uid, reply_for(uid)).await;
+        };
+        let (reply, ()) = tokio::join!(forwarding.forward_exchange(peer, report(uid)), answer);
+        assert!(matches!(reply, Reply::Send(_)), "the exchange was answered");
+    }
+
+    /// A plain-HTTP peer that polls under ever new `instance_uid`s holds no more places on the
+    /// upstream connections than its host holds bindings: the place of an Agent whose binding made
+    /// room goes with it, and the Agents still bound keep theirs, on the same connection.
+    /// Verifies: ADR-0039, ADR-0058
+    #[tokio::test]
+    async fn a_polling_peer_under_new_instance_uids_holds_no_more_places_than_bindings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let peer = downstream(Transport::Http, None, certificate());
+        let uids: Vec<InstanceUid> = (0..10).map(|_| InstanceUid::default()).collect();
+        let mut placed = std::collections::HashMap::new();
+        for uid in &uids {
+            poll(&forwarding, &peer, *uid).await;
+            placed.insert(*uid, forwarding.pool.connection_of(uid).expect("a place"));
+        }
+
+        assert_eq!(
+            forwarding.pool.assignments(),
+            (uids[7..].iter().copied().collect(), 3),
+            "max_carried_agents is 3"
+        );
+        for uid in &uids[7..] {
+            poll(&forwarding, &peer, *uid).await;
+            assert_eq!(
+                forwarding.pool.connection_of(uid),
+                Some(placed[uid]),
+                "an Agent still bound kept its connection"
+            );
+        }
+    }
+
+    /// A WebSocket peer whose report makes room among its host's bindings frees the place of the
+    /// plain-HTTP Agent whose binding went.
+    /// Verifies: ADR-0039, ADR-0058
+    #[tokio::test]
+    async fn a_binding_a_socket_makes_room_with_frees_the_place_of_the_agent_it_displaced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let host = certificate();
+        let polled = InstanceUid::default();
+        poll(
+            &forwarding,
+            &downstream(Transport::Http, None, host.clone()),
+            polled,
+        )
+        .await;
+        let (tx, _rx) = mpsc::channel(64);
+        let mut socket = downstream(Transport::WebSocket, Some(tx), host);
+        let carried: Vec<InstanceUid> = (0..3).map(|_| InstanceUid::default()).collect();
+        for uid in &carried {
+            forwarding
+                .forward_from_socket(&mut socket, report(*uid))
+                .await;
+        }
+
+        assert_eq!(
+            socket.carried.len(),
+            3,
+            "the socket's Agents were all bound"
+        );
+        assert_eq!(
+            forwarding.pool.assignments(),
+            (carried.iter().copied().collect(), 3),
+            "the displaced Agent's place went with its binding"
+        );
     }
 
     /// A second host reporting for an `instance_uid` bound to the first is not forwarded and takes

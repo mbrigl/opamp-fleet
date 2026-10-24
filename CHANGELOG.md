@@ -47,6 +47,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   read. What libraries keep, the key in `opamp::tls::Identity` and the copies `tokio-postgres` and
   `object_store` hold among it, is not wiped.
 
+- **A Gateway holds a place upstream only for an Agent it carries**
+  ([ADR-0058](docs/adr/0058-a-gateways-bindings-outlast-its-restart-and-end-with-their-hosts-certificate.md)). A
+  plain-HTTP Agent's place in the upstream pool now goes when its binding makes room for another,
+  so a peer that polls under ever new `instance_uid`s holds no more places than its host's
+  `max_carried_agents` bindings. An Agent whose binding gave way may be placed on another upstream
+  connection when it reports again.
+
 ## [0.6.2]
 
 ### Security

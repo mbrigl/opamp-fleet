@@ -65,22 +65,23 @@ impl Registry {
     /// when the Agent's `instance_uid` is bound to `speaker`: then the route is its, and `false`
     /// leaves the route where it was (ADR-0039 clause 5). Claiming again from the same host
     /// replaces the route: an Agent that reconnects through a second socket is reachable on the
-    /// new one.
+    /// new one. Beside it, the `instance_uid`s whose bindings made room for this one, whose places
+    /// upstream the caller releases.
     pub fn attach(
         &self,
         uid: InstanceUid,
         sink: mpsc::Sender<ServerToAgent>,
         host: Option<String>,
         speaker: &str,
-    ) -> bool {
+    ) -> (bool, Vec<InstanceUid>) {
         // A report binds its `instance_uid` to its host, the first one only (ADR-0039 clause 6);
         // an `instance_uid` with a route here is never the binding that makes room.
         let mut routes = self.routes.lock().expect("registry lock");
-        if !self
+        let (bound, evicted) = self
             .cache
-            .bind(uid, speaker, |uid| routes.contains_key(uid))
-        {
-            return false;
+            .bind(uid, speaker, |uid| routes.contains_key(uid));
+        if !bound {
+            return (false, evicted);
         }
         routes.insert(
             uid,
@@ -89,26 +90,27 @@ impl Registry {
                 host,
             },
         );
-        true
+        (true, evicted)
     }
 
     /// A plain-HTTP peer whose certificate speaks as `speaker` waits for exactly one reply for
     /// this Agent, when the Agent's `instance_uid` is bound to `speaker` (ADR-0039 clause 5).
     /// Returns the number that [`Registry::abandon`] takes once the exchange ends without one, and
-    /// `None` for an `instance_uid` that is not the host's.
+    /// `None` for an `instance_uid` that is not the host's; beside it, as [`Registry::attach`]
+    /// does, the `instance_uid`s whose bindings made room.
     pub fn expect_once(
         &self,
         uid: InstanceUid,
         reply: oneshot::Sender<ServerToAgent>,
         host: Option<String>,
         speaker: &str,
-    ) -> Option<u64> {
+    ) -> (Option<u64>, Vec<InstanceUid>) {
         let mut routes = self.routes.lock().expect("registry lock");
-        if !self
+        let (bound, evicted) = self
             .cache
-            .bind(uid, speaker, |uid| routes.contains_key(uid))
-        {
-            return None;
+            .bind(uid, speaker, |uid| routes.contains_key(uid));
+        if !bound {
+            return (None, evicted);
         }
         let exchange = self.exchanges.fetch_add(1, Ordering::Relaxed);
         routes.insert(
@@ -118,7 +120,7 @@ impl Registry {
                 host,
             },
         );
-        Some(exchange)
+        (Some(exchange), evicted)
     }
 
     /// An enrolling peer's plain-HTTP exchange waits for exactly one reply for `uid`, binding
