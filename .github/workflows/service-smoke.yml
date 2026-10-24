@@ -33,8 +33,13 @@ jobs:
         # asserted anywhere else.
         # Linux: the unit the Client writes itself (ADR-0042) — a re-registration keeps its
         # account, the service keeps the privileges `sudo` and setuid helpers need, and systemd
-        # accepts the unit. The run step needs `sudo -E` there, which the Windows runner does not
-        # (its shell is already elevated).
+        # accepts the unit. And the process account (ADR-0059): with two real accounts, a Managed
+        # Process runs under the process account through the second service, cannot read the
+        # Client's key or write its program, reads its config and writes its data, runs again after
+        # the second service restarts, keeps its data across a re-registration as a package upgrade
+        # makes one, and runs under the Client's account once the process account is dropped. The
+        # run step needs `sudo -E` there, which the Windows runner does not (its shell is already
+        # elevated).
         os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
@@ -47,6 +52,18 @@ jobs:
       - name: Install, start, kill, restart, stop, uninstall
         if: runner.os == 'Windows'
         run: cargo test -p fleet-agent --test service_smoke --locked -- --ignored --nocapture --test-threads=1
-      - name: Install, start, kill, restart, stop, uninstall; keep the account and the privileges
+      - name: Install, start, kill, restart, stop, uninstall; keep the account and the privileges; the process account
         if: runner.os == 'Linux'
         run: sudo -E env "PATH=$PATH" cargo test -p fleet-agent --test service_smoke --locked -- --ignored --nocapture --test-threads=1
+      # Run as root, every link the test places is root's, and none beneath the Client's
+      # directories is followed all the same (ADR-0059 clause 6). The unprivileged run in CI covers
+      # the links of every other account.
+      - name: No link of root's beneath the Client's directories is followed
+        if: runner.os == 'Linux'
+        run: sudo -E env "PATH=$PATH" cargo test -p fleet-agent --lib --locked -- --exact storage::tests::no_link_beneath_the_root_is_followed_whoever_owns_it
+      # Run as root, the test gives a link above the Supervisors' root to another account: the
+      # second service follows one of the Client's account and refuses one of a third (ADR-0059
+      # clause 5). The unprivileged run in CI covers a link of the service's own account.
+      - name: The second service follows the Client's links above the root, not its own
+        if: runner.os == 'Linux'
+        run: sudo -E env "PATH=$PATH" cargo test -p fleet-agent --lib --locked -- --exact supervisor::channel::tests::a_purge_follows_the_clients_links_above_the_root_and_not_the_services

@@ -180,7 +180,12 @@ core module names an adapter or a technology, and when a module has no role.
   `service install --process-account` writes names the second service's socket there — and
   hands `build_engine`. The Engine keeps that registry behind the port `PluginRegistry` of
   `supervisor::ports`, so a Supervisor a Supervisor-set apply starts later starts its program
-  the same way.
+  the same way, and a Supervisor it purges has the same `Spawner` remove first what its
+  programs wrote under their own account, in the directory the purge first moved aside to a name
+  no Supervisor carries. What the Client changes where the process account
+  writes, it reaches through `storage::handle`, one directory handle at a time from a root of its
+  own — the state directory, the Supervisors' root, a Supervisor's directory — beneath which no
+  link is followed.
   `supervisor::agent`, an Agent's decisions, names three more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, `HighWaterMarks`, which
   `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares

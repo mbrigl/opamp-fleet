@@ -47,9 +47,17 @@ ones it uses without defining.
 - **Rollout** — the explicit act that releases a Deployment to Agents and pins what each receives.
   _Avoid:_ publish, push, deploy.
 - **Process account** — the account the operator names at a Client's registration for every
-  program its Supervisors start; never root and never the Client's own account.
-  _Avoid:_ agent user, run-as account (that is the Client's).
+  program its Supervisors start; never root and never the Client's own account. Its primary
+  group, the *process account's group*, is its own: the Client's account is its one member, and
+  no other account's primary group it is. What the Client shares with the Managed Processes
+  belongs to that group, and nothing else does.
+  _Avoid:_ agent user, run-as account (that is the Client's), process group (that is a Unix
+  process group, which a Managed Process may lead).
 - **Second service** — the service `<PRODUCT_NAME>-agents`, registered beside the Client where a
   process account is named, which runs under that account and starts, signals and stops those
   programs on the Client's request, over a channel only the Client's account may use.
   _Avoid:_ helper, launcher, sidecar.
+- **Tombstone** — the name, `.purge-<name>-<nonce>`, beneath the Supervisors' root that a removed
+  Supervisor's directory is moved to before its purge deletes it, a name no Supervisor can carry;
+  one the purge could not delete is removed again at the next start and with the next purge.
+  _Avoid:_ trash directory, purge directory.

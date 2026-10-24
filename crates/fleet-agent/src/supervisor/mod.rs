@@ -74,6 +74,20 @@ impl PluginRegistry for Registry {
     fn plugins(&self) -> Vec<Box<dyn Plugin>> {
         registry(&self.spawner)
     }
+
+    fn purge<'a>(
+        &'a self,
+        removed: &'a [(String, std::path::PathBuf)],
+    ) -> crate::supervisor::ports::Purged<'a> {
+        Box::pin(async move {
+            self.spawner
+                .purge(removed)
+                .await
+                .into_iter()
+                .map(|result| result.map_err(|e| e.to_string()))
+                .collect()
+        })
+    }
 }
 
 /// The compiled-in plugins, for what reads a block — its kind, its program, its settings — and
@@ -119,6 +133,7 @@ pub fn build_engine(
 ) -> Result<Engine, String> {
     let plugins: Arc<dyn PluginRegistry> = Arc::new(Registry::new(spawner));
     report_orphaned_supervisor_dirs(config);
+    crate::reconfigure::reap_tombstones(&config.supervisors_root(), Arc::clone(&plugins));
     for notice in remote_config_disabled_notices(config) {
         warn!("{notice}");
     }
@@ -129,7 +144,7 @@ pub fn build_engine(
     // otherwise it would be invisible on exactly the hosts that manage something, and the Server
     // would have nobody to offer the Client's own package to. It is index 0 so the Supervisors that
     // follow keep a stable, obvious offset.
-    let storage = Storage::new(config.state_dir.clone())
+    let storage = Storage::client(config.state_dir.clone(), config.process_account_group)
         .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
     // A host that keeps its Supervisor set takes none from the Server, and the set stored from
     // before leaves rather than be reported as applied (ADR-0017 clauses 42 and 44).
@@ -197,10 +212,12 @@ pub fn build_engine(
 }
 
 /// A directory under the Supervisor root that no `[[supervisor]]` block names is reported, never
-/// reaped (ADR-0017): it may be a purge a crash or an error cut short — or an operator's
-/// deliberate hand edit, a temporarily commented-out block whose identity and program are not the
-/// Client's to delete. The log line makes the leftover visible; removing it stays the operator's
-/// call.
+/// reaped (ADR-0059 clause 12): it may be a purge a crash cut short, or an operator's deliberate
+/// hand edit, a temporarily commented-out block whose identity and program are not the Client's
+/// to delete. The log line makes the leftover visible; removing it stays the operator's call. A
+/// tombstone a purge could not delete is named as one, and is reported until it is gone: its name
+/// records that the Client meant to remove it, and the start removes it again
+/// ([`crate::reconfigure::reap_tombstones`]).
 fn report_orphaned_supervisor_dirs(config: &ClientConfig) {
     let root = config.supervisors_root();
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -217,6 +234,18 @@ fn report_orphaned_supervisor_dirs(config: &ClientConfig) {
             .iter()
             .any(|block| name == std::ffi::OsStr::new(&block.name))
         {
+            continue;
+        }
+        if name
+            .to_str()
+            .and_then(crate::config::tombstone_of)
+            .is_some()
+        {
+            warn!(
+                path = %entry.path().display(),
+                "this is the tombstone of a removed supervisor's directory, which its purge could \
+                 not delete; removing it again"
+            );
             continue;
         }
         warn!(
@@ -310,7 +339,19 @@ pub fn start_supervisor(
     } = resolve(config, block, &plugins)?;
 
     let supervisor_dir = config.supervisor_dir(&block.name);
-    let storage = Storage::new(supervisor_dir.clone())
+    // The Managed Process passes through the Supervisors' root on its way to its own directory
+    // (ADR-0059 clause 6). Left as it is made where no process account is registered.
+    if config.process_account_group.is_some() {
+        let root = config.supervisors_root();
+        crate::storage::create_shared_dir(
+            &root,
+            &root,
+            config.process_account_group,
+            crate::storage::Shared::Traversed,
+        )
+        .map_err(|e| format!("cannot prepare {}: {e}", root.display()))?;
+    }
+    let storage = Storage::supervised(supervisor_dir.clone(), config.process_account_group)
         .map_err(|e| format!("cannot prepare {}: {e}", supervisor_dir.display()))?;
     let config_dir = storage.config_dir();
 
@@ -361,7 +402,7 @@ pub fn start_supervisor(
     //
     // What the target itself needs — for a tree that is its root and nothing below it, since the
     // live tree arrives by renaming a directory over that name (ADR-0026).
-    install.prepare()?;
+    install.prepare(config.process_account_group)?;
     // Only a Client holding the operator's verification key takes packages: there is no unsigned
     // posture (ADR-0026). Without it the program stays as installed, and the startup notice says
     // why.
@@ -405,6 +446,7 @@ pub fn start_supervisor(
         apply_grace: timing.apply_grace,
         retain_previous: timing.retain_previous,
         archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
+        process_account_group: config.process_account_group,
         settings,
         events: EventSender::new(index, event_tx.clone()),
         shutdown: stop,
@@ -738,6 +780,50 @@ mod tests {
         )
     }
 
+    /// Where a process account is registered, the Engine lays out the path to each Managed
+    /// Process for its group (ADR-0059 clause 6): the state directory, the Supervisors' root and
+    /// each Supervisor's directory passed through, `0710`, and `program/` read, `0750`. Without
+    /// one, those directories are what they were: `0700`, and `program/` and the root as they are
+    /// made.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_engine_lays_out_the_path_to_each_managed_process_for_the_process_accounts_group() {
+        use std::os::unix::fs::MetadataExt as _;
+        let mode = |path: &std::path::Path| {
+            let meta = std::fs::metadata(path).expect("metadata");
+            (meta.mode() & 0o7777, meta.gid())
+        };
+        // SAFETY: getegid(2) cannot fail and touches no memory.
+        let gid = unsafe { libc::getegid() };
+        let (_tx, shutdown) = shutdown_channel();
+
+        let shared = tempfile::tempdir().expect("tempdir");
+        let mut config = two_of_a_type(shared.path());
+        config.process_account_group = Some(crate::storage::ProcessAccountGroup(gid));
+        let _engine = build_engine(&config, &shutdown, Spawner::Local).expect("build");
+        assert_eq!(mode(&config.state_dir), (0o710, gid));
+        assert_eq!(mode(&config.supervisors_root()), (0o710, gid));
+        assert_eq!(mode(&config.supervisor_dir("a")), (0o710, gid));
+        assert_eq!(
+            mode(&config.supervisor_dir("a").join(crate::config::PROGRAM_DIR)),
+            (0o750, gid)
+        );
+
+        let private = tempfile::tempdir().expect("tempdir");
+        let reference = private.path().join("reference");
+        std::fs::create_dir(&reference).expect("a plain directory");
+        let config = two_of_a_type(private.path());
+        let _engine = build_engine(&config, &shutdown, Spawner::Local).expect("build");
+        assert_eq!(mode(&config.state_dir).0, 0o700);
+        assert_eq!(mode(&config.supervisor_dir("a")).0, 0o700);
+        assert_eq!(mode(&config.supervisors_root()), mode(&reference));
+        assert_eq!(
+            mode(&config.supervisor_dir("a").join(crate::config::PROGRAM_DIR)),
+            mode(&reference)
+        );
+    }
+
     /// Writes the installed-package record of Supervisor `name`, as an install would have.
     fn installed(config: &ClientConfig, name: &str, version: &str) {
         use crate::supervisor::ports::AgentStorage as _;
@@ -1062,6 +1148,81 @@ mod tests {
             orphan.join("instance-uid").is_file(),
             "an orphaned directory is reported, not deleted"
         );
+    }
+
+    /// The start removes a tombstone left behind again, beside the start rather than before it,
+    /// and leaves every other orphan in place (ADR-0059 clause 12, ADR-0017 clause 37).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_start_removes_a_tombstone_left_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig =
+            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+        let root = config.supervisors_root();
+        let tomb = root.join(crate::reconfigure::tombstone_name("gone"));
+        std::fs::create_dir_all(tomb.join("program")).expect("a tombstone");
+        std::fs::create_dir_all(root.join("orphan")).expect("an orphan");
+        let (_tx, shutdown) = crate::shutdown::shutdown_channel();
+
+        let _engine = build_engine(&config, &shutdown, Spawner::Local).expect("build");
+
+        let gone = async {
+            while tomb.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), gone)
+            .await
+            .expect("the tombstone is removed again");
+        assert!(root.join("orphan").is_dir(), "an orphan is the operator's");
+    }
+
+    /// A tombstone a purge could not delete is reported at startup as a removed Supervisor's that
+    /// is removed again, apart from the orphans the operator removes; the report itself deletes
+    /// nothing (ADR-0059 clause 12).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_tombstone_left_behind_is_reported_at_startup() {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: ClientConfig =
+            toml::from_str(&config(dir.path(), "managed-agent", None)).expect("parse");
+        let tomb = config
+            .supervisors_root()
+            .join(crate::reconfigure::tombstone_name("gone"));
+        std::fs::create_dir_all(&tomb).expect("create");
+        std::fs::write(tomb.join("instance-uid"), "uid").expect("write");
+
+        tracing::subscriber::with_default(subscriber, || report_orphaned_supervisor_dirs(&config));
+
+        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
+        let reported: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains(&tomb.display().to_string()))
+            .collect();
+        assert_eq!(reported.len(), 1, "{log}");
+        assert!(
+            reported[0].contains("tombstone of a removed supervisor"),
+            "{log}"
+        );
+        assert!(reported[0].contains("removing it again"), "{log}");
+        assert!(tomb.join("instance-uid").is_file(), "reported, not deleted");
     }
 
     /// The self-Agent's effective configuration is its own file, not an echo of a stored offer:
