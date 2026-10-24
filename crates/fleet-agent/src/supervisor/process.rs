@@ -2028,7 +2028,7 @@ mod tests {
         let live = dir.path().join("agent");
         let target = InstallTarget::Binary(live.clone());
         let artifact = dir.path().join("downloaded");
-        std::fs::copy("/bin/false", &artifact).expect("a program that exits at once");
+        std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
         let staged = target.stage(&artifact, None).expect("stage");
         let (event_tx, mut events) = mpsc::channel(64);
         let (_commands, command_rx) = mpsc::channel(1);
@@ -2086,7 +2086,7 @@ mod tests {
         std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let target = InstallTarget::Binary(live.clone());
         let artifact = dir.path().join("downloaded");
-        std::fs::copy("/bin/false", &artifact).expect("a program that exits at once");
+        std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
         let staged = target.stage(&artifact, None).expect("stage");
         let (event_tx, mut events) = mpsc::channel(64);
         let (_commands, command_rx) = mpsc::channel(1);
