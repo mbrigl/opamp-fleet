@@ -458,10 +458,12 @@ pub enum Served {
 /// its programs running.
 ///
 /// # Errors
-/// Returns an error when the service runs as root, `client_uid` is root's or the service's own,
-/// the runtime cannot be built, or the socket cannot be bound.
+/// Returns an error when the service is dumpable or traced (on Linux), runs as root, `client_uid`
+/// is root's or the service's own, the runtime cannot be built, or the socket cannot be bound.
 #[cfg(unix)]
 pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
+    #[cfg(target_os = "linux")]
+    check_closed()?;
     // SAFETY: geteuid(2) cannot fail and touches no memory.
     check_client_uid(client_uid, unsafe { libc::geteuid() })?;
     let runtime = tokio::runtime::Runtime::new()
@@ -471,6 +473,15 @@ pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
         crate::service::runtime::ignore_sighup();
         let listener =
             bind(socket).map_err(|e| format!("cannot listen on {}: {e}", socket.display()))?;
+        #[cfg(target_os = "linux")]
+        info!(
+            socket = %socket.display(),
+            client_uid,
+            // SAFETY: prctl(2) with no argument to read; no memory is touched.
+            dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE) },
+            "second service listening"
+        );
+        #[cfg(not(target_os = "linux"))]
         info!(socket = %socket.display(), client_uid, "second service listening");
         let served = serve(listener, client_uid, superseded, terminated()).await;
         let _ = std::fs::remove_file(socket);
@@ -482,6 +493,62 @@ pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
         }
         Ok(served)
     })
+}
+
+/// Whether the command line `args`, the program's name left out, runs the second service
+/// (`run --agents`): read before anything else, so that its program marks itself not dumpable
+/// first ([`mark_not_dumpable`]).
+pub fn runs_the_second_service(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    args.any(|arg| {
+        arg == "--agents" || arg.to_str().is_some_and(|arg| arg.starts_with("--agents="))
+    })
+}
+
+/// Closes the second service's process to the Managed Processes (ADR-0061): marked not dumpable,
+/// no process of its account without `CAP_SYS_PTRACE` attaches to it, reads or writes its memory,
+/// or takes its descriptors, whatever `kernel.yama.ptrace_scope` says. The first thing its program
+/// does, before it parses its command line or sets up its log; the programs it starts are dumpable
+/// as usual, since `execve(2)` resets the mark. [`run_service`] does not listen where the mark is
+/// not set.
+#[cfg(target_os = "linux")]
+pub fn mark_not_dumpable() {
+    // SAFETY: prctl(2) with an integer argument; no memory is touched.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, libc::c_ulong::from(0u8)) };
+}
+
+/// Whether the second service's process is closed (ADR-0061): it is not dumpable, and no process
+/// traces it. A tracer attached before the mark stays attached, so a service that is traced does
+/// not listen, and the service manager starts it again.
+///
+/// # Errors
+/// Returns that the process is dumpable, or that a process traces it.
+#[cfg(target_os = "linux")]
+fn check_closed() -> Result<(), String> {
+    // SAFETY: prctl(2) with no argument to read; no memory is touched.
+    if unsafe { libc::prctl(libc::PR_GET_DUMPABLE) } != 0 {
+        return Err(
+            "the second service is dumpable: its program did not mark it otherwise at its start"
+                .to_string(),
+        );
+    }
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| format!("cannot read /proc/self/status for a tracer: {e}"))?;
+    match tracer(&status) {
+        Some(0) => Ok(()),
+        Some(tracer) => Err(format!(
+            "the second service is traced by process {tracer}, and does not listen while it is"
+        )),
+        None => Err("/proc/self/status names no TracerPid".to_string()),
+    }
+}
+
+/// The process `/proc/<pid>/status` names as the tracer: 0 for none.
+#[cfg(target_os = "linux")]
+fn tracer(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("TracerPid:"))
+        .and_then(|pid| pid.trim().parse().ok())
 }
 
 /// Whether `current` names a version other than the one this program runs from: a self-update
@@ -3779,6 +3846,49 @@ mod tests {
             .expect("the process that listened has ended");
         assert!(refused.to_string().contains("has ended"), "{refused}");
         refused_unheard(&refused, Some(listened), heard).await;
+    }
+
+    /// A second service whose program did not mark it not dumpable does not listen: this test's
+    /// process, which nothing marked, is refused as dumpable (ADR-0061).
+    /// Verifies: ADR-0061
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_second_service_that_is_dumpable_does_not_listen() {
+        let refused = check_closed().expect_err("a dumpable process passed");
+        assert!(refused.contains("is dumpable"), "{refused}");
+    }
+
+    /// The second service's command line is told by `--agents` alone, before it is parsed, so
+    /// that its program marks itself not dumpable first; the Client's `--agents-socket` is not it
+    /// (ADR-0061).
+    /// Verifies: ADR-0061
+    #[test]
+    fn the_second_services_command_line_is_known_before_it_is_parsed() {
+        let args = |line: &[&str]| {
+            line.iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        assert!(runs_the_second_service(args(&[
+            "run",
+            "--agents",
+            "/run/x/agents.sock",
+            "--client-uid",
+            "998"
+        ])));
+        assert!(runs_the_second_service(args(&[
+            "run",
+            "--agents=/run/x/agents.sock"
+        ])));
+        assert!(!runs_the_second_service(args(&[
+            "run",
+            "--agents-socket",
+            "/run/x/agents.sock",
+            "--process-uid",
+            "999"
+        ])));
+        assert!(!runs_the_second_service(args(&["run"])));
     }
 
     /// An error of `SO_PEERPIDFD` other than `ENOPROTOOPT` is the error the peer is refused with:

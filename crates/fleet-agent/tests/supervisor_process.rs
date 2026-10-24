@@ -614,6 +614,230 @@ async fn the_shipped_program_serves_as_the_second_service() {
     assert!(!socket.exists(), "the service removes its socket");
 }
 
+/// Whether this process holds `CAP_SYS_PTRACE` (capability 19) in its effective set.
+#[cfg(target_os = "linux")]
+fn holds_cap_sys_ptrace() -> bool {
+    let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
+    let effective = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .and_then(|caps| u64::from_str_radix(caps.trim(), 16).ok())
+        .expect("CapEff");
+    effective & (1 << 19) != 0
+}
+
+/// The shipped second service closes its process to its own account (ADR-0061): once listening it
+/// reports itself not dumpable, and this test — its parent, of its account and without
+/// `CAP_SYS_PTRACE`, which Yama's `ptrace_scope` 1 would let attach to a descendant — is refused
+/// `PTRACE_ATTACH`, its `/proc/<pid>/mem` and `pidfd_getfd`.
+/// Verifies: ADR-0061
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_second_service_closes_its_process_to_its_own_account() {
+    use tokio::io::AsyncBufReadExt as _;
+
+    assert!(
+        !holds_cap_sys_ptrace(),
+        "this test holds CAP_SYS_PTRACE, which passes every check it makes: run it without"
+    );
+    // At 2 and 3 Yama refuses the attach whatever the service does, and nothing would be decided.
+    let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+        .map_or(0, |scope| scope.trim().parse::<u8>().expect("ptrace_scope"));
+    assert!(
+        scope < 2,
+        "kernel.yama.ptrace_scope is {scope}, which refuses this test's attach to a child itself: \
+         run it where it is 0 or 1"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("agents.sock");
+    // SAFETY: getuid(2) cannot fail and touches no memory.
+    let uid = unsafe { libc::getuid() };
+    let mut service = tokio::process::Command::new(env!("CARGO_BIN_EXE_supervisor"))
+        .args(["run", "--agents"])
+        .arg(&socket)
+        .args(["--client-uid", &uid.wrapping_add(1).max(1).to_string()])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start the second service");
+    let pid = service.id().expect("running");
+    let mut lines = tokio::io::BufReader::new(service.stdout.take().expect("stdout")).lines();
+    let listening = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(line) = lines.next_line().await.expect("stdout") {
+            if line.contains("second service listening") {
+                return line;
+            }
+        }
+        panic!("the second service ended before it listened");
+    })
+    .await
+    .expect("the second service listened in time");
+    assert!(listening.contains("dumpable=0"), "{listening}");
+    // What the service smoke looks at: the files under /proc/<pid>/ of a process that is not
+    // dumpable belong to root, while the directory keeps the process's own uid.
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let owner = |path: String| std::fs::metadata(&path).expect("/proc").uid();
+        assert_eq!(owner(format!("/proc/{pid}/environ")), 0, "dumpable");
+        assert_eq!(
+            owner(format!("/proc/{pid}")),
+            uid,
+            "the directory changed hands"
+        );
+    }
+
+    let target = libc::pid_t::try_from(pid).expect("a pid");
+    // SAFETY: ptrace(2) with no memory passed; a successful attach is undone below.
+    let attached = unsafe {
+        libc::ptrace(
+            libc::PTRACE_ATTACH,
+            target,
+            std::ptr::null_mut::<libc::c_void>(),
+            std::ptr::null_mut::<libc::c_void>(),
+        )
+    };
+    let attach_error = std::io::Error::last_os_error();
+    if attached == 0 {
+        let _ = service.start_kill();
+    }
+    assert_eq!(attached, -1, "attached to the second service");
+    assert_eq!(
+        attach_error.raw_os_error(),
+        Some(libc::EPERM),
+        "{attach_error}"
+    );
+
+    let mem = std::fs::File::open(format!("/proc/{pid}/mem"))
+        .expect_err("opened the second service's memory");
+    assert_eq!(mem.kind(), std::io::ErrorKind::PermissionDenied, "{mem}");
+
+    // SAFETY: pidfd_open(2) with no memory passed; the descriptor is owned below.
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, target, 0) };
+    assert!(
+        pidfd >= 0,
+        "pidfd_open: {}",
+        std::io::Error::last_os_error()
+    );
+    let pidfd = i32::try_from(pidfd).expect("a descriptor");
+    // SAFETY: a descriptor just opened, owned from here.
+    let pidfd = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(pidfd) };
+    // Its stderr: a descriptor the service holds for certain.
+    // SAFETY: pidfd_getfd(2) with no memory passed; a descriptor it returns is closed below.
+    let taken = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_getfd,
+            std::os::fd::AsRawFd::as_raw_fd(&pidfd),
+            2,
+            0,
+        )
+    };
+    let take_error = std::io::Error::last_os_error();
+    if let Ok(taken) = i32::try_from(taken) {
+        if taken >= 0 {
+            // SAFETY: the descriptor pidfd_getfd(2) just gave this process.
+            unsafe { libc::close(taken) };
+        }
+    }
+    assert_eq!(taken, -1, "took a descriptor of the second service");
+    assert_eq!(take_error.raw_os_error(), Some(libc::EPERM), "{take_error}");
+
+    // SAFETY: plain kill(2) on the service's pid; no memory is touched.
+    unsafe { libc::kill(target, libc::SIGTERM) };
+    let ended = tokio::time::timeout(Duration::from_secs(15), service.wait())
+        .await
+        .expect("the service ended in time")
+        .expect("a status");
+    assert!(ended.success(), "{ended}");
+}
+
+/// The shipped second service does not listen while it is traced: a tracer attached before it
+/// marks itself not dumpable stays attached, so it ends with an error, and the service manager
+/// starts it again (ADR-0061).
+/// Verifies: ADR-0061
+#[cfg(target_os = "linux")]
+#[test]
+fn the_second_service_does_not_listen_while_it_is_traced() {
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("agents.sock");
+    // SAFETY: getuid(2) cannot fail and touches no memory.
+    let uid = unsafe { libc::getuid() };
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_supervisor"));
+    command
+        .args(["run", "--agents"])
+        .arg(&socket)
+        .args(["--client-uid", &uid.wrapping_add(1).max(1).to_string()])
+        .stderr(std::process::Stdio::piped());
+    // SAFETY: ptrace(2) alone between the fork and the exec, which is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::ptrace(
+                libc::PTRACE_TRACEME,
+                0,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    // Reaped by waitpid(2) below, which also sees its stops: `Child::wait` would see neither.
+    #[allow(clippy::zombie_processes)]
+    let mut service = command.spawn().expect("start the second service traced");
+    let pid = libc::pid_t::try_from(service.id()).expect("a pid");
+    // This thread is the tracer: it lets every stop go on until the service ends, or gives up.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        let mut status = 0;
+        // SAFETY: waits for this test's own child, without blocking.
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert!(waited >= 0, "waitpid: {}", std::io::Error::last_os_error());
+        if waited == 0 {
+            if std::time::Instant::now() >= deadline {
+                // SAFETY: plain kill(2) on this test's child.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                panic!("the traced second service did not end: it listens");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        if libc::WIFSTOPPED(status) {
+            let signal = match libc::WSTOPSIG(status) {
+                libc::SIGTRAP => 0,
+                other => other,
+            };
+            // SAFETY: continues the stopped tracee with the signal it stopped for, or none.
+            unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    pid,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    signal as usize as *mut libc::c_void,
+                )
+            };
+            continue;
+        }
+        break status;
+    };
+    assert!(
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) != 0,
+        "the traced service ended with {status:#x}"
+    );
+    let mut said = String::new();
+    service
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut said)
+        .expect("stderr");
+    assert!(said.contains("traced by process"), "{said}");
+    assert!(!socket.exists(), "it listened while it was traced");
+}
+
 // ── Reload and uninstall (ADR-0017) ──────────────────────────────────────────
 
 /// The pid the spawn reported — how these tests tell a kept process from a fresh one.
