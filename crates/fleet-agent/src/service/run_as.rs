@@ -1620,10 +1620,10 @@ mod tests {
         assert_eq!(choose_on_windows(None, None), None);
     }
 
-    /// On Windows the hand-over enters no junction a Managed Process placed in its data directory,
-    /// and leaves what the process account owns as it is, with everything beneath it (ADR-0059
-    /// clause 10). This test's own account stands in for the process account, `LocalService` for
-    /// the Client's.
+    /// On Windows the hand-over enters no junction or symlink a Managed Process placed in its data
+    /// directory, with a process account or without, and leaves what the process account owns as
+    /// it is, with everything beneath it (ADR-0059 clause 10). This test's own account stands in
+    /// for the process account, `LocalService` for the Client's.
     /// Verifies: ADR-0042, ADR-0059
     #[cfg(windows)]
     #[test]
@@ -1651,6 +1651,15 @@ mod tests {
             .status()
             .expect("run mklink");
         assert!(hard.success(), "cannot make the hard link");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        let symlinked = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/D"])
+            .arg(data.join("symlink"))
+            .arg(&elsewhere)
+            .status()
+            .expect("run mklink");
+        assert!(symlinked.success(), "cannot make the directory symlink");
         let owned = data.join("owned");
         std::fs::create_dir(&owned).expect("owned");
         std::fs::write(owned.join("state"), b"x").expect("state");
@@ -1664,6 +1673,7 @@ mod tests {
                 .text()
         };
         let before = (dacl(&outside), dacl(&outside.join("secret")), dacl(&owned));
+        let elsewhere_before = dacl(&elsewhere);
 
         let client = RunAs::resolve(
             r"NT AUTHORITY\LocalService",
@@ -1713,11 +1723,24 @@ mod tests {
             dacl(&owned),
             dacl(&data)
         );
-        let link = data.join("link");
-        assert!(
-            client.hand_over(&[&link], None).is_err(),
-            "a root that is a link is refused"
+        // Without a process account the hand-over walks the same tree, and enters no link either.
+        client.hand_over(&[&root], None).expect("hand-over");
+        assert_eq!(
+            (
+                dacl(&outside),
+                dacl(&outside.join("secret")),
+                dacl(&elsewhere)
+            ),
+            (before.0.clone(), before.1.clone(), elsewhere_before),
+            "nothing through the junction, the hard link or the directory symlink"
         );
+        for link in [data.join("link"), data.join("symlink")] {
+            assert!(
+                client.hand_over(&[&link], None).is_err(),
+                "a root that is a link is refused: {}",
+                link.display()
+            );
+        }
         assert!(
             dacl(&data).contains(";;;LS)"),
             "the Client's own is granted"
