@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -224,8 +224,8 @@ impl RefusalLog {
     }
 }
 
-/// Set once the changes it waits for are written and synced, to whether they were.
-pub type Ticket = Arc<OnceLock<bool>>;
+/// Answered once the changes it waits for are written and synced, with whether they were.
+pub type Ticket = tokio::sync::oneshot::Receiver<bool>;
 
 /// What a report's binding came to before the store is asked (ADR-0060 clause 2).
 pub enum Begun {
@@ -246,7 +246,7 @@ struct Inner {
     /// The changes to the bindings not yet handed to the store, in the order they were made.
     queue: Vec<Change>,
     /// Who waits for them.
-    waiting: Vec<Ticket>,
+    waiting: Vec<tokio::sync::oneshot::Sender<bool>>,
     offers: HashMap<InstanceUid, Vec<Artifact>>,
     /// The `instance_uid`s with a current offer, by the host they are bound to.
     by_host: HashMap<String, HashSet<InstanceUid>>,
@@ -357,6 +357,53 @@ fn drop_offer(inner: &mut Inner, uid: InstanceUid, host: &str) {
     }
 }
 
+/// The cache that writes each store in this process. A Gateway restarted in the same process —
+/// when an offer moves its endpoint — opens its store while the cache it replaces may still be
+/// held by its last tasks; only one of them may write it.
+fn owners() -> MutexGuard<'static, Vec<(PathBuf, Weak<PackageCache>)>> {
+    static OWNERS: Mutex<Vec<(PathBuf, Weak<PackageCache>)>> = Mutex::new(Vec::new());
+    OWNERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Stops the cache that wrote the store in `dir` until now from writing it again: it waits for
+/// a write in progress and then holds no store, so its later reports bind nothing.
+fn retire(dir: &Path) {
+    let retired: Vec<Arc<PackageCache>> = {
+        let mut owners = owners();
+        owners.retain(|(_, owner)| owner.strong_count() > 0);
+        owners
+            .iter()
+            .filter(|(owned, _)| owned == dir)
+            .filter_map(|(_, owner)| owner.upgrade())
+            .collect()
+    };
+    for cache in retired {
+        *cache
+            .journal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+/// How many lines of reports a store may hold per live line before it is rewritten whole: the
+/// order of reports is written once a minute, and an Agent reports more often, so these lines grow
+/// with the Agents carried rather than with the bindings made, and are not counted with them.
+const REPORT_LINES_PER_LIVE: usize = 8;
+
+/// The one task that writes a cache's store: whoever queues changes wakes it, and each wake
+/// writes everything queued by then in one append and one sync. It ends with the cache.
+async fn write_store(cache: Weak<PackageCache>, wake: Arc<tokio::sync::Notify>) {
+    loop {
+        wake.notified().await;
+        let Some(cache) = cache.upgrade() else {
+            return;
+        };
+        let _ = tokio::task::spawn_blocking(move || cache.flush()).await;
+    }
+}
+
 /// Deletes a file; `true` once it is gone.
 fn remove_file(path: &Path) -> bool {
     match std::fs::remove_file(path) {
@@ -406,6 +453,8 @@ pub struct PackageCache {
     journal: Mutex<Option<Journal>>,
     /// Counts the store's writes, each announced once what it wrote is settled.
     writes: tokio::sync::watch::Sender<u64>,
+    /// Wakes the one task that writes the store ([`write_store`]).
+    wake: Arc<tokio::sync::Notify>,
     /// Why the store could not be read at start, while it cannot: the Gateway then carries no
     /// downstream Agent (ADR-0060 clause 2).
     unreadable: Option<String>,
@@ -472,7 +521,7 @@ fn open_dir(
     };
     // What ended while the Gateway was down ends now, and the rewrite below leaves it out
     // (ADR-0060 clause 3); the revocation list is asked once the Gateway holds one.
-    for (host, uids) in bindings.end(now(), |_| false) {
+    for (host, uids) in bindings.end(now(), None) {
         log_ended(&host, uids.len());
     }
     match create(held, &bindings.snapshot()) {
@@ -540,9 +589,12 @@ impl PackageCache {
         let dir = config.state_dir.join(DIR);
         let opened = dir.clone();
         let create = knobs.create_journal;
-        let opened = tokio::task::spawn_blocking(move || open_dir(&opened, create))
-            .await
-            .map_err(|e| e.to_string())??;
+        let opened = tokio::task::spawn_blocking(move || {
+            retire(&opened);
+            open_dir(&opened, create)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let (bindings, journal, unreadable) = match opened {
             Opened::Store(opened) => {
                 let (bindings, journal) = *opened;
@@ -557,7 +609,7 @@ impl PackageCache {
                 (Bindings::default(), None, Some(why))
             }
         };
-        Ok(Arc::new(PackageCache {
+        let cache = Arc::new(PackageCache {
             limit: capacity.min(config.max_artifact_size_bytes),
             capacity,
             dir,
@@ -568,12 +620,16 @@ impl PackageCache {
             knobs,
             journal: Mutex::new(journal),
             writes: tokio::sync::watch::Sender::new(0),
+            wake: Arc::default(),
             unreadable,
             inner: Mutex::new(Inner {
                 bindings,
                 ..Inner::default()
             }),
-        }))
+        });
+        owners().push((cache.dir.clone(), Arc::downgrade(&cache)));
+        tokio::spawn(write_store(Arc::downgrade(&cache), cache.wake.clone()));
+        Ok(cache)
     }
 
     /// The state, whether or not a task panicked while holding it: every update leaves it whole.
@@ -658,19 +714,24 @@ impl PackageCache {
             );
             return (Begun::Refused, evicted);
         }
-        let ticket = Ticket::default();
-        inner.queue.extend(outcome.changes);
-        inner.waiting.push(ticket.clone());
+        let ticket = self.enqueue(inner, outcome.changes);
         (Begun::Writing(ticket), evicted)
     }
 
-    /// Whether the changes `ticket` waits for are written and synced (ADR-0060 clause 2). They are
-    /// written off the async workers, with whatever else is queued by then.
-    pub async fn written(self: &Arc<Self>, ticket: Ticket) -> bool {
-        let cache = self.clone();
-        tokio::task::spawn_blocking(move || cache.flush(&ticket))
-            .await
-            .unwrap_or(false)
+    /// Queues `changes` for the store and wakes its writer; the ticket answers once they are
+    /// written. Called under the lock, so the store takes them in the order they were made.
+    fn enqueue(&self, inner: &mut Inner, changes: impl IntoIterator<Item = Change>) -> Ticket {
+        let (done, ticket) = tokio::sync::oneshot::channel();
+        inner.queue.extend(changes);
+        inner.waiting.push(done);
+        self.wake.notify_one();
+        ticket
+    }
+
+    /// Whether the changes `ticket` waits for are written and synced (ADR-0060 clause 2): by the
+    /// store's one writer, off the async workers, with whatever else is queued by then.
+    pub async fn written(ticket: Ticket) -> bool {
+        ticket.await.unwrap_or(false)
     }
 
     /// The second half of a bind: whether `uid` is now bound to `host` and its report may be
@@ -686,26 +747,25 @@ impl PackageCache {
         let changes = inner.bindings.abort(&uid);
         if !changes.is_empty() {
             drop_offer(&mut inner, uid, host);
+            // Should the store hold the binding after all, its removal follows.
+            drop(self.enqueue(&mut inner, changes));
         }
-        inner.queue.extend(changes);
         if inner.refusals.note(host, Instant::now()) != Note::Count {
             warn!(agent = %uid, %host, "not forwarding a report: the bindings' store cannot be written");
         }
         false
     }
 
-    /// Writes the queued changes and wakes who waits for them, unless an earlier call already did
-    /// for `ticket`. A store that cannot take an append is rewritten whole from the bindings, which
-    /// hold the queued changes too; so is one that has grown to twice the lines it holds live
-    /// (ADR-0060 clause 2).
-    fn flush(&self, ticket: &Ticket) -> bool {
+    /// Writes the queued changes and answers who waits for them. A store that cannot take an
+    /// append is rewritten whole from the bindings, which hold the queued changes too; so is one
+    /// that has grown to twice the lines it holds live, or whose lines of reports have outgrown
+    /// [`REPORT_LINES_PER_LIVE`] times them (ADR-0060 clause 2). Each call is announced once its
+    /// moved ends are settled.
+    fn flush(&self) {
         let mut guard = self
             .journal
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(written) = ticket.get() {
-            return *written;
-        }
         let (changes, waiting) = {
             let mut inner = self.inner();
             (
@@ -713,47 +773,52 @@ impl PackageCache {
                 std::mem::take(&mut inner.waiting),
             )
         };
-        let Some(journal) = guard.as_mut() else {
-            self.inner().bindings.ends_written(&changes, false);
-            for waiter in waiting {
-                let _ = waiter.set(false);
-            }
-            self.writes.send_modify(|n| *n = n.wrapping_add(1));
-            return false;
-        };
-        let appended = journal.append(&changes);
-        if let Err(e) = &appended {
-            debug!(error = %e, "cannot append to the bindings' store; rewriting it whole");
+        if changes.is_empty() && waiting.is_empty() {
+            return;
         }
-        let written = if appended.is_ok() {
-            self.inner().bindings.ends_written(&changes, true);
-            true
-        } else {
-            self.compact(journal)
+        let written = match guard.as_mut() {
+            None => {
+                self.inner().bindings.ends_written(&changes, false);
+                false
+            }
+            Some(journal) => match journal.append(&changes) {
+                Ok(()) => {
+                    self.inner().bindings.ends_written(&changes, true);
+                    true
+                }
+                Err(e) => {
+                    debug!(error = %e, "cannot append to the bindings' store; rewriting it whole");
+                    self.compact(journal)
+                }
+            },
         };
         for waiter in waiting {
-            let _ = waiter.set(written);
+            let _ = waiter.send(written);
         }
-        let live = self.inner().bindings.live();
-        if written && journal.lines() > 0 && journal.lines() >= 2 * live {
-            self.compact(journal);
+        if let Some(journal) = guard.as_mut() {
+            let live = self.inner().bindings.live();
+            let grown = journal.lines() > 0 && journal.lines() >= 2 * live;
+            let reported = journal.reports() > REPORT_LINES_PER_LIVE * live.max(1);
+            if written && (grown || reported) {
+                self.compact(journal);
+            }
         }
         self.writes.send_modify(|n| *n = n.wrapping_add(1));
-        ticket.get().copied().unwrap_or(false)
     }
 
-    /// Rewrites the store whole from the bindings, the queued changes taken in with them.
+    /// Rewrites the store whole from the bindings, the queued changes taken in with them. The
+    /// bindings are copied under the lock and ordered after it is released.
     fn compact(&self, journal: &mut Journal) -> bool {
-        let (snapshot, moving, waiting) = {
+        let (raw, moving, waiting) = {
             let mut inner = self.inner();
             inner.queue.clear();
             (
-                inner.bindings.snapshot(),
+                inner.bindings.raw(),
                 inner.bindings.moving(),
                 std::mem::take(&mut inner.waiting),
             )
         };
-        let written = match journal.compact(&snapshot) {
+        let written = match journal.compact(&raw.changes()) {
             Ok(()) => true,
             Err(e) => {
                 warn!(error = %e, "cannot write the bindings' store");
@@ -762,39 +827,38 @@ impl PackageCache {
         };
         self.inner().bindings.compacted(&moving, written);
         for waiter in waiting {
-            let _ = waiter.set(written);
+            let _ = waiter.send(written);
         }
         written
     }
 
     /// Writes the order in which the bindings were reported since the last call (ADR-0060
     /// clause 2): once a minute and at shutdown.
-    pub async fn write_reports(self: &Arc<Self>) {
+    pub async fn write_reports(&self) {
+        let reports = self.inner().bindings.reports();
+        if reports.is_empty() {
+            return;
+        }
+        let changes = reports.changes();
         let ticket = {
             let mut inner = self.inner();
-            let reports = inner.bindings.reports();
-            if reports.is_empty() {
-                return;
-            }
-            inner.queue.extend(reports);
-            let ticket = Ticket::default();
-            inner.waiting.push(ticket.clone());
-            ticket
+            self.enqueue(&mut inner, changes)
         };
-        if !self.written(ticket).await {
+        if !Self::written(ticket).await {
             warn!("cannot write the order of the bindings' reports");
         }
     }
 
-    /// Ends every binding of each host whose kept certificate end has passed by `now`, or whose
-    /// certificate `revoked` says the revocation list names (ADR-0060 clause 3), each host logged
-    /// with how many went. Their current offers go with them, and their removals are queued for the
-    /// store. Returns the `instance_uid`s whose bindings ended, whose routes and places upstream the
-    /// caller releases, and the ticket their removals are written under.
+    /// Ends every binding of each host whose kept certificate end has passed by `now`, or, when
+    /// `revoked` is given, whose certificate it says the revocation list names (ADR-0060 clause
+    /// 3), each host logged with how many went. Their current offers go with them, and their
+    /// removals are queued for the store. Returns the `instance_uid`s whose bindings ended, whose
+    /// routes and places upstream the caller releases, and the ticket their removals are written
+    /// under.
     pub fn end_certificates(
         &self,
         now: i64,
-        revoked: impl Fn(&End) -> bool,
+        revoked: Option<&dyn Fn(&End) -> bool>,
     ) -> (Vec<InstanceUid>, Option<Ticket>) {
         let mut inner = self.inner();
         let ended = inner.bindings.end(now, revoked);
@@ -806,12 +870,11 @@ impl PackageCache {
             log_ended(&host, held.len());
             for uid in &held {
                 drop_offer(&mut inner, *uid, &host);
-                inner.queue.push(Change::Unbound(*uid));
             }
             uids.extend(held);
         }
-        let ticket = Ticket::default();
-        inner.waiting.push(ticket.clone());
+        let removals: Vec<Change> = uids.iter().map(|uid| Change::Unbound(*uid)).collect();
+        let ticket = self.enqueue(&mut inner, removals);
         (uids, Some(ticket))
     }
 
@@ -863,7 +926,7 @@ impl PackageCache {
         let written = match begun {
             Begun::Refused | Begun::Waiting(_) => return (false, evicted),
             Begun::Bound => true,
-            Begun::Writing(ticket) => self.written(ticket).await,
+            Begun::Writing(ticket) => Self::written(ticket).await,
         };
         (self.finish_bind(uid, host, written), evicted)
     }
@@ -2214,6 +2277,17 @@ mod tests {
             .snapshot()
     }
 
+    /// Waits for the store's writer to finish what it is writing: a rewrite runs after the report
+    /// that grew the store is answered.
+    fn settled(cache: &PackageCache) {
+        drop(
+            cache
+                .journal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+    }
+
     /// How many lines the store under `dir` holds, its first line not counted.
     fn store_lines(dir: &Path) -> usize {
         std::fs::read_to_string(dir.join(DIR).join(store::NAME))
@@ -2238,6 +2312,7 @@ mod tests {
         assert!(cache.bind(InstanceUid::default(), "h1", |_| false).await.0);
         assert_eq!(store_lines(dir.path()), 6);
         assert!(cache.bind(InstanceUid::default(), "h1", |_| false).await.0);
+        settled(&cache);
         assert_eq!(store_lines(dir.path()), 4, "eight lines for four live ones");
         assert_eq!(stored(dir.path()), cache.inner().bindings.snapshot());
 
@@ -2436,5 +2511,71 @@ mod tests {
             "undone"
         );
         assert_eq!(ends(stored(dir.path())), vec![later]);
+    }
+
+    /// A Gateway restarted in the same process takes its store over from the cache it replaces,
+    /// which binds nothing more: nothing it writes can land beside or over the store.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_cache_that_replaces_another_alone_writes_the_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = cache_binding(dir.path(), 3).await;
+        let first = InstanceUid::default();
+        assert!(old.bind(first, "h1", |_| false).await.0);
+        let new = cache_binding(dir.path(), 3).await;
+        assert!(new.is_bound(&first));
+        assert!(
+            !old.bind(InstanceUid::default(), "h1", |_| false).await.0,
+            "the replaced cache binds nothing"
+        );
+        let second = InstanceUid::default();
+        assert!(new.bind(second, "h1", |_| false).await.0);
+        settled(&new);
+        assert_eq!(stored(dir.path()), new.inner().bindings.snapshot());
+        drop((old, new));
+        let again = cache_binding(dir.path(), 3).await;
+        assert!(again.is_bound(&first) && again.is_bound(&second));
+    }
+
+    /// A host's report refreshes its own binding's order, and another host's report for it does
+    /// not: neither its order nor the reports the store is told of.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn only_the_bound_hosts_report_orders_its_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_binding(dir.path(), 2).await;
+        let [first, second] = [(); 2].map(|()| InstanceUid::default());
+        cache.bind(first, "h1", |_| false).await;
+        cache.bind(second, "h1", |_| false).await;
+        assert!(!cache.bind(first, "h2", |_| false).await.0);
+        assert!(
+            cache.inner().bindings.reports().is_empty(),
+            "nothing reported"
+        );
+        let (bound, evicted) = cache.bind(InstanceUid::default(), "h1", |_| false).await;
+        assert!(bound);
+        assert_eq!(evicted, vec![first], "still the least recently reported");
+    }
+
+    /// The lines of reports, which grow with the Agents carried, do not count toward the rewrite
+    /// at twice the live lines; the store is rewritten once they pass their own bound.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn reports_are_rewritten_by_a_bound_of_their_own() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_binding(dir.path(), 3).await;
+        let uid = InstanceUid::default();
+        assert!(cache.bind(uid, "h1", |_| false).await.0);
+        let live = 2;
+        for written in 1..=REPORT_LINES_PER_LIVE * live {
+            assert!(cache.bind(uid, "h1", |_| false).await.0);
+            cache.write_reports().await;
+            settled(&cache);
+            assert_eq!(store_lines(dir.path()), live + written, "no rewrite yet");
+        }
+        assert!(cache.bind(uid, "h1", |_| false).await.0);
+        cache.write_reports().await;
+        settled(&cache);
+        assert_eq!(store_lines(dir.path()), live, "rewritten past their bound");
     }
 }

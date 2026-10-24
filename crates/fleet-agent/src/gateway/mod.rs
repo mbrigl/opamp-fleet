@@ -70,6 +70,9 @@ struct Forwarding {
     revocations: RevocationList,
     /// Tells a member from an enrolling peer (ADR-0039 clause 4).
     members: Members,
+    /// The version of the revocation list the bindings were last held against (ADR-0060
+    /// clause 3), so an unchanged list is not asked about every host again.
+    list_checked: std::sync::atomic::AtomicU64,
 }
 
 /// What tells a downstream member from an **enrolling peer** (ADR-0039 clause 4). Without
@@ -294,6 +297,7 @@ pub async fn run_on_timed(
         max_agents: gateway.max_carried_agents,
         revocations,
         members,
+        list_checked: std::sync::atomic::AtomicU64::new(u64::MAX),
     });
     // What the first list names ends now; what a later one names, when it comes (ADR-0060
     // clause 3).
@@ -342,21 +346,23 @@ async fn keep_bindings(
     let every = std::time::Duration::from_secs(3600);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     loop {
-        tokio::select! {
+        let hourly = tokio::select! {
             _ = tick.tick() => {
                 let cache = forwarding.registry.cache();
                 if let Some(why) = cache.unreadable() {
                     cache::log_unreadable(why, &cache.store_path());
                 }
+                true
             }
             changed = changes.changed() => {
                 if changed.is_err() {
                     return;
                 }
+                false
             }
             () = shutdown.requested() => return,
-        }
-        forwarding.end_certificates(cache::now()).await;
+        };
+        forwarding.end_bindings(cache::now(), hourly).await;
     }
 }
 
@@ -681,14 +687,27 @@ impl Forwarding {
     /// upstream, as a binding that makes room goes (ADR-0060 clause 3, ADR-0058 clause 1), and
     /// writes their removals.
     async fn end_certificates(&self, now: i64) {
-        let cache = self.registry.cache();
-        let (ended, ticket) = self
-            .registry
-            .end_certificates(now, |end| self.revocations.lists(&end.issuer, &end.serial));
+        self.end_bindings(now, true).await;
+    }
+
+    /// [`Forwarding::end_certificates`], asking the revocation list about every host's end only
+    /// when `every`, or when the list changed since it was last asked: an ended end is found by
+    /// its order, a revoked one only by asking.
+    async fn end_bindings(&self, now: i64, every: bool) {
+        let version = self.revocations.version();
+        let changed = self
+            .list_checked
+            .swap(version, std::sync::atomic::Ordering::Relaxed)
+            != version;
+        let revoked = |end: &policy::End| self.revocations.lists(&end.issuer, &end.serial);
+        let (ended, ticket) = self.registry.end_certificates(
+            now,
+            (every || changed).then_some(&revoked as &dyn Fn(&policy::End) -> bool),
+        );
         // An `instance_uid` bound anew since keeps the place its new route stands on.
         self.pool.release(ended);
         if let Some(ticket) = ticket {
-            if !cache.written(ticket).await {
+            if !cache::PackageCache::written(ticket).await {
                 warn!(
                     "cannot write the removal of ended bindings; they end again at the next start"
                 );
@@ -935,6 +954,7 @@ mod tests {
             max_agents: 10,
             revocations,
             members: Members::default(),
+            list_checked: std::sync::atomic::AtomicU64::new(u64::MAX),
         }
     }
 
@@ -2024,9 +2044,10 @@ mod tests {
 
         let id = revocations::certificate_id(&owner).expect("id");
         forwarding.revocations.replace(HashSet::from([id]), None);
-        let (ended, _) = forwarding.registry.end_certificates(cache::now(), |end| {
-            forwarding.revocations.lists(&end.issuer, &end.serial)
-        });
+        let revoked = |end: &policy::End| forwarding.revocations.lists(&end.issuer, &end.serial);
+        let (ended, _) = forwarding
+            .registry
+            .end_certificates(cache::now(), Some(&revoked));
         assert_eq!(ended, vec![uid]);
         assert!(!forwarding.registry.routes(&uid), "its route went with it");
 

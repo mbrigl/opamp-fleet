@@ -233,8 +233,11 @@ pub struct Journal {
     file: Option<File>,
     /// The bytes written and synced: where the next line goes.
     len: u64,
-    /// How many changes it holds.
+    /// How many changes it holds, the reports aside.
     lines: usize,
+    /// How many reports it holds, which grow with the Agents carried rather than with the
+    /// bindings made.
+    reports: usize,
     /// What the file holds may not be what `len` says, or may not be the file at its name: nothing
     /// more is appended until the store is rewritten whole.
     damaged: bool,
@@ -273,6 +276,7 @@ impl Journal {
             file: None,
             len: 0,
             lines: 0,
+            reports: 0,
             damaged: true,
             #[cfg(test)]
             faults: Faults::default(),
@@ -303,7 +307,11 @@ impl Journal {
             return Err(e);
         }
         self.len = bytes.len() as u64;
-        self.lines = changes.len();
+        let reports = changes
+            .iter()
+            .filter(|change| matches!(change, Change::Reported(_)));
+        self.reports = reports.count();
+        self.lines = changes.len() - self.reports;
         self.damaged = true;
         // The rename is what a waiting report relies on.
         self.fault(&Stage::Renamed)?;
@@ -356,7 +364,12 @@ impl Journal {
             return Err(e);
         }
         self.len += bytes.len() as u64;
-        self.lines += changes.len();
+        let reports = changes
+            .iter()
+            .filter(|change| matches!(change, Change::Reported(_)));
+        let reports = reports.count();
+        self.reports += reports;
+        self.lines += changes.len() - reports;
         Ok(())
     }
 
@@ -378,10 +391,16 @@ impl Journal {
         Ok(())
     }
 
-    /// How many changes the store holds.
+    /// How many changes the store holds, the reports aside.
     #[must_use]
     pub fn lines(&self) -> usize {
         self.lines
+    }
+
+    /// How many reports the store holds.
+    #[must_use]
+    pub fn reports(&self) -> usize {
+        self.reports
     }
 }
 
@@ -434,7 +453,7 @@ mod tests {
         let mut journal = Journal::create(held(&dir), &changes[..2]).expect("create");
         journal.append(&changes[2..]).expect("append");
         assert_eq!(load(&held(&dir)), Ok(changes));
-        assert_eq!(journal.lines(), 4);
+        assert_eq!((journal.lines(), journal.reports()), (3, 1));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;

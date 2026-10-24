@@ -65,14 +65,14 @@ impl Registry {
         &self.cache
     }
 
-    /// Ends the bindings of every host whose kept certificate end has passed by `now`, or whose
-    /// certificate `revoked` says the revocation list names, and removes their routes under the
+    /// Ends the bindings of every host whose kept certificate end has passed by `now`, or, when
+    /// `revoked` is given, whose certificate it says the revocation list names, and removes their routes under the
     /// same lock a bind takes, so no report binds an ended `instance_uid` anew before its old route
     /// is gone (ADR-0060 clause 3). Returns what [`PackageCache::end_certificates`] does.
     pub fn end_certificates(
         &self,
         now: i64,
-        revoked: impl Fn(&End) -> bool,
+        revoked: Option<&dyn Fn(&End) -> bool>,
     ) -> (Vec<InstanceUid>, Option<crate::gateway::cache::Ticket>) {
         let mut routes = self.routes.lock().expect("registry lock");
         let (ended, ticket) = self.cache.end_certificates(now, revoked);
@@ -106,7 +106,7 @@ impl Registry {
             match begun {
                 Begun::Refused => return (false, evicted),
                 Begun::Bound => break (true, evicted),
-                Begun::Writing(ticket) => break (self.cache.written(ticket).await, evicted),
+                Begun::Writing(ticket) => break (PackageCache::written(ticket).await, evicted),
                 Begun::Waiting(mut writes) if asked < ASKS => {
                     asked += 1;
                     if writes.changed().await.is_err() {

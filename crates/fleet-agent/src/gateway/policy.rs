@@ -4,7 +4,8 @@
 //! is decided against this binding; the state is the core's, and the package cache holds it and
 //! asks it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use opamp::uid::InstanceUid;
 
@@ -59,7 +60,7 @@ pub enum Change {
 
 /// An `instance_uid`'s host, and when it last reported.
 struct Binding {
-    host: String,
+    host: Arc<str>,
     reported: u64,
     /// Made, and not yet in the store.
     pending: bool,
@@ -69,13 +70,15 @@ struct Binding {
 #[derive(Default)]
 pub struct Bindings {
     bound: HashMap<InstanceUid, Binding>,
-    /// How many `instance_uid`s each host has bound.
-    per_host: HashMap<String, usize>,
+    /// The `instance_uid`s each host has bound, so a host's bindings are found without a scan.
+    hosts: HashMap<Arc<str>, HashSet<InstanceUid>>,
     /// Where the certificate of each host with a binding ends.
-    ends: HashMap<String, End>,
+    ends: HashMap<Arc<str>, Arc<End>>,
+    /// The same ends by `notAfter`, so those that have passed are found without a scan.
+    expiring: BTreeSet<(i64, Arc<str>)>,
     /// The hosts whose end a report moved and the store does not hold yet, each with the end it
     /// holds, if any: restored should the write fail.
-    moving: HashMap<String, Option<End>>,
+    moving: HashMap<Arc<str>, Option<Arc<End>>>,
     /// Orders the reports, so the least recently reported binding is known.
     tick: u64,
     /// The bindings reported since their order was last written.
@@ -104,12 +107,61 @@ fn refused_waiting() -> Outcome {
     }
 }
 
+/// The bindings as a rewrite of the store needs them, copied cheaply under the lock that guards
+/// them and turned into changes after it is released.
+pub struct Raw {
+    ends: Vec<(Arc<str>, Arc<End>)>,
+    bound: Vec<(u64, InstanceUid, Arc<str>)>,
+}
+
+impl Raw {
+    /// What the store holds when it is rewritten whole: each host's certificate end, then every
+    /// binding, the least recently reported first, so that [`Bindings::replay`] restores the order.
+    #[must_use]
+    pub fn changes(mut self) -> Vec<Change> {
+        self.bound
+            .sort_unstable_by_key(|(reported, _, _)| *reported);
+        self.ends
+            .into_iter()
+            .map(|(host, end)| Change::Ends(host.to_string(), (*end).clone()))
+            .chain(
+                self.bound
+                    .into_iter()
+                    .map(|(_, uid, host)| Change::Bound(uid, host.to_string())),
+            )
+            .collect()
+    }
+}
+
+/// The bindings reported since their order was last written, copied under the lock and ordered
+/// after it is released.
+pub struct Reports(Vec<(u64, InstanceUid)>);
+
+impl Reports {
+    /// Whether there are none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The reports as the store keeps them, the least recently reported first.
+    #[must_use]
+    pub fn changes(mut self) -> Vec<Change> {
+        self.0.sort_unstable_by_key(|(reported, _)| *reported);
+        self.0
+            .into_iter()
+            .map(|(_, uid)| Change::Reported(uid))
+            .collect()
+    }
+}
+
 impl Bindings {
-    /// Binds `uid` to `host` on its first report, and on every report marks it the most recently
-    /// reported. A host binds at most `limits.per_host`, and the Gateway at most `limits.total`:
-    /// past either the host's own least recently reported binding whose `instance_uid` is `idle`
-    /// makes room, so a host whose Agents come and go is not shut out by its own past, and never
-    /// another host's (ADR-0060 clause 1). Without one nothing is bound.
+    /// Binds `uid` to `host` on its first report, and on every report of that host marks it the
+    /// most recently reported; another host's report for it changes nothing. A host binds at most
+    /// `limits.per_host`, and the Gateway at most `limits.total`: past either the host's own least
+    /// recently reported binding whose `instance_uid` is `idle` makes room, so a host whose Agents
+    /// come and go is not shut out by its own past, and never another host's (ADR-0060 clause 1).
+    /// Without one nothing is bound.
     ///
     /// A report under a certificate whose `notAfter` has passed by `now` binds nothing and moves
     /// no end (ADR-0060 clause 3); one under a certificate that ends later than the one the host's
@@ -137,35 +189,35 @@ impl Bindings {
                 Vec::new(),
             );
         }
-        self.tick += 1;
-        let tick = self.tick;
         if let Some(binding) = self.bound.get(&uid) {
             if binding.pending {
                 return refused("its binding is still being written", Vec::new());
             }
-            if binding.host == host && self.waits_for_end(host, end) {
-                return refused_waiting();
+            if &*binding.host != host {
+                return Outcome {
+                    bound: Bound::Kept,
+                    evicted: Vec::new(),
+                    changes: Vec::new(),
+                };
             }
-        } else if self.waits_for_end(host, end) {
+        }
+        if self.waits_for_end(host, end) {
             return refused_waiting();
         }
+        self.tick += 1;
+        let tick = self.tick;
         if let Some(binding) = self.bound.get_mut(&uid) {
             binding.reported = tick;
-            let own = binding.host == host;
             self.reported.insert(uid);
             return Outcome {
                 bound: Bound::Kept,
                 evicted: Vec::new(),
-                changes: if own {
-                    self.move_end(host, end).into_iter().collect()
-                } else {
-                    Vec::new()
-                },
+                changes: self.move_end(host, end).into_iter().collect(),
             };
         }
-        let idle = |uid: &InstanceUid, binding: &Binding| !binding.pending && idle(uid);
         let mut evicted = Vec::new();
-        let full = if self.per_host.get(host).copied().unwrap_or(0) >= limits.per_host {
+        let own = self.hosts.get(host);
+        let full = if own.map_or(0, HashSet::len) >= limits.per_host {
             Some("the host holds as many bindings as max_carried_agents allows, none of them idle")
         } else if self.bound.len() >= limits.total {
             Some(
@@ -175,37 +227,30 @@ impl Bindings {
             None
         };
         if let Some(why) = full {
-            let Some(victim) = self
-                .bound
-                .iter()
-                .filter(|(uid, binding)| binding.host == host && idle(uid, binding))
-                .min_by_key(|(_, binding)| binding.reported)
-                .map(|(uid, _)| *uid)
+            let victim = own.into_iter().flatten().copied().filter(|uid| {
+                self.bound
+                    .get(uid)
+                    .is_some_and(|binding| !binding.pending && idle(uid))
+            });
+            let Some(victim) = victim.min_by_key(|uid| self.bound.get(uid).map(|b| b.reported))
             else {
                 return refused(why, evicted);
             };
             // The host keeps its end through giving up its last binding for this one, so an
             // earlier certificate does not move it back.
-            let kept = self.ends.get(host).cloned();
-            let moving = self.moving.get(host).cloned();
-            self.unbind(&victim);
-            if let Some(kept) = kept {
-                self.ends.entry(host.to_string()).or_insert(kept);
-            }
-            if let Some(moving) = moving {
-                self.moving.entry(host.to_string()).or_insert(moving);
-            }
+            self.unbind(&victim, true);
             evicted.push(victim);
         }
+        let key = self.key(host);
         self.bound.insert(
             uid,
             Binding {
-                host: host.to_string(),
+                host: key.clone(),
                 reported: tick,
                 pending: true,
             },
         );
-        *self.per_host.entry(host.to_string()).or_default() += 1;
+        self.hosts.entry(key).or_default().insert(uid);
         let mut changes: Vec<Change> = evicted.iter().map(|uid| Change::Unbound(*uid)).collect();
         changes.extend(self.move_end(host, end));
         changes.push(Change::Bound(uid, host.to_string()));
@@ -213,6 +258,27 @@ impl Bindings {
             bound: Bound::New,
             evicted,
             changes,
+        }
+    }
+
+    /// The one shared name of `host`.
+    fn key(&self, host: &str) -> Arc<str> {
+        self.hosts
+            .get_key_value(host)
+            .map(|(key, _)| key.clone())
+            .or_else(|| self.ends.get_key_value(host).map(|(key, _)| key.clone()))
+            .unwrap_or_else(|| Arc::from(host))
+    }
+
+    fn set_end(&mut self, host: Arc<str>, end: Arc<End>) {
+        self.drop_end(&host);
+        self.expiring.insert((end.not_after, host.clone()));
+        self.ends.insert(host, end);
+    }
+
+    fn drop_end(&mut self, host: &str) {
+        if let Some((host, end)) = self.ends.remove_entry(host) {
+            self.expiring.remove(&(end.not_after, host));
         }
     }
 
@@ -228,12 +294,16 @@ impl Bindings {
     /// Moves `host`'s certificate end to `end` when it ends later, or when the host has none yet;
     /// the move is pending until [`Bindings::ends_written`] or [`Bindings::compacted`] settles it.
     fn move_end(&mut self, host: &str, end: &End) -> Option<Change> {
-        let kept = self.ends.get(host);
-        if kept.is_some_and(|kept| kept.not_after >= end.not_after) {
+        let kept = self.ends.get(host).cloned();
+        if kept
+            .as_ref()
+            .is_some_and(|kept| kept.not_after >= end.not_after)
+        {
             return None;
         }
-        self.moving.insert(host.to_string(), kept.cloned());
-        self.ends.insert(host.to_string(), end.clone());
+        let key = self.key(host);
+        self.moving.insert(key.clone(), kept);
+        self.set_end(key, Arc::new(end.clone()));
         Some(Change::Ends(host.to_string(), end.clone()))
     }
 
@@ -247,33 +317,29 @@ impl Bindings {
         }
     }
 
-    /// The hosts whose end moves a store rewritten whole from [`Bindings::snapshot`] settles.
+    /// The hosts whose end moves a store rewritten whole from [`Bindings::raw`] settles.
     #[must_use]
-    pub fn moving(&self) -> Vec<String> {
+    pub fn moving(&self) -> Vec<Arc<str>> {
         self.moving.keys().cloned().collect()
     }
 
     /// A rewrite of the store that held the ends of `hosts` succeeded, or failed.
-    pub fn compacted(&mut self, hosts: &[String], written: bool) {
+    pub fn compacted(&mut self, hosts: &[Arc<str>], written: bool) {
         for host in hosts {
             self.settle_end(host, written);
         }
     }
 
     fn settle_end(&mut self, host: &str, written: bool) {
-        let Some(held) = self.moving.remove(host) else {
+        let Some((key, held)) = self.moving.remove_entry(host) else {
             return;
         };
         if written {
             return;
         }
         match held {
-            Some(held) => {
-                self.ends.insert(host.to_string(), held);
-            }
-            None => {
-                self.ends.remove(host);
-            }
+            Some(held) => self.set_end(key, held),
+            None => self.drop_end(host),
         }
     }
 
@@ -290,7 +356,7 @@ impl Bindings {
         if !self.bound.get(uid).is_some_and(|binding| binding.pending) {
             return Vec::new();
         }
-        self.unbind(uid);
+        self.unbind(uid, false);
         vec![Change::Unbound(*uid)]
     }
 
@@ -299,62 +365,75 @@ impl Bindings {
     pub fn holds(&self, uid: &InstanceUid, host: &str) -> bool {
         self.bound
             .get(uid)
-            .is_some_and(|binding| binding.host == host && !binding.pending)
+            .is_some_and(|binding| &*binding.host == host && !binding.pending)
     }
 
-    /// The bindings reported since the last call, the least recently reported first: what keeps
-    /// their order across a restart (ADR-0060 clause 2).
-    pub fn reports(&mut self) -> Vec<Change> {
-        let mut reported: Vec<(u64, InstanceUid)> = std::mem::take(&mut self.reported)
-            .into_iter()
-            .filter_map(|uid| self.bound.get(&uid).map(|binding| (binding.reported, uid)))
-            .collect();
-        reported.sort_unstable_by_key(|(reported, _)| *reported);
-        reported
-            .into_iter()
-            .map(|(_, uid)| Change::Reported(uid))
-            .collect()
+    /// The bindings reported since the last call: what keeps their order across a restart
+    /// (ADR-0060 clause 2).
+    pub fn reports(&mut self) -> Reports {
+        Reports(
+            std::mem::take(&mut self.reported)
+                .into_iter()
+                .filter_map(|uid| self.bound.get(&uid).map(|binding| (binding.reported, uid)))
+                .collect(),
+        )
     }
 
-    /// Ends every binding of each host whose kept certificate end has passed by `now`, or whose
-    /// certificate `revoked` says the revocation list names (ADR-0060 clause 3). Returns each such
-    /// host, and the `instance_uid`s it held.
+    /// Ends every binding of each host whose kept certificate end has passed by `now`, or, when
+    /// `revoked` is given, whose certificate it says the revocation list names (ADR-0060 clause
+    /// 3). Returns each such host, and the `instance_uid`s it held. The ends that have passed are
+    /// found by their order; the revocation list is asked about every host's end.
     pub fn end(
         &mut self,
         now: i64,
-        revoked: impl Fn(&End) -> bool,
+        revoked: Option<&dyn Fn(&End) -> bool>,
     ) -> Vec<(String, Vec<InstanceUid>)> {
-        let ended: HashSet<&String> = self
-            .ends
-            .iter()
-            .filter(|(_, end)| end.not_after < now || revoked(end))
-            .map(|(host, _)| host)
+        let mut ended: HashSet<Arc<str>> = self
+            .expiring
+            .range(..(now, Arc::from("")))
+            .map(|(_, host)| host.clone())
             .collect();
-        if ended.is_empty() {
-            return Vec::new();
+        if let Some(revoked) = revoked {
+            ended.extend(
+                self.ends
+                    .iter()
+                    .filter(|(_, end)| revoked(end))
+                    .map(|(host, _)| host.clone()),
+            );
         }
-        let mut by_host: HashMap<String, Vec<InstanceUid>> = HashMap::new();
-        for (uid, binding) in &self.bound {
-            if ended.contains(&binding.host) {
-                by_host.entry(binding.host.clone()).or_default().push(*uid);
-            }
-        }
-        for uid in by_host.values().flatten() {
-            self.unbind(uid);
-        }
-        by_host.into_iter().collect()
+        ended
+            .into_iter()
+            .map(|host| {
+                let uids: Vec<InstanceUid> = self
+                    .hosts
+                    .remove(&host)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                for uid in &uids {
+                    self.bound.remove(uid);
+                }
+                self.drop_end(&host);
+                self.moving.remove(&host);
+                (host.to_string(), uids)
+            })
+            .collect()
     }
 
-    /// Removes `uid`'s binding; a host left with none keeps no certificate end.
-    fn unbind(&mut self, uid: &InstanceUid) {
+    /// Removes `uid`'s binding. A host left with none keeps no certificate end, unless
+    /// `keep_end`: it gives the binding up for another.
+    fn unbind(&mut self, uid: &InstanceUid, keep_end: bool) {
         let Some(binding) = self.bound.remove(uid) else {
             return;
         };
-        if let Some(count) = self.per_host.get_mut(&binding.host) {
-            *count -= 1;
-            if *count == 0 {
-                self.per_host.remove(&binding.host);
-                self.ends.remove(&binding.host);
+        let Some(own) = self.hosts.get_mut(&binding.host) else {
+            return;
+        };
+        own.remove(uid);
+        if own.is_empty() {
+            self.hosts.remove(&binding.host);
+            if !keep_end {
+                self.drop_end(&binding.host);
                 self.moving.remove(&binding.host);
             }
         }
@@ -375,18 +454,19 @@ impl Bindings {
             let tick = bindings.tick;
             match change {
                 Change::Bound(uid, host) => {
-                    bindings.unbind(&uid);
-                    *bindings.per_host.entry(host.clone()).or_default() += 1;
+                    bindings.unbind(&uid, false);
+                    let key = bindings.key(&host);
+                    bindings.hosts.entry(key.clone()).or_default().insert(uid);
                     bindings.bound.insert(
                         uid,
                         Binding {
-                            host,
+                            host: key,
                             reported: tick,
                             pending: false,
                         },
                     );
                 }
-                Change::Unbound(uid) => bindings.unbind(&uid),
+                Change::Unbound(uid) => bindings.unbind(&uid, false),
                 Change::Reported(uid) => {
                     if let Some(binding) = bindings.bound.get_mut(&uid) {
                         binding.reported = tick;
@@ -397,30 +477,38 @@ impl Bindings {
                 }
             }
         }
-        for host in bindings.per_host.keys() {
+        let hosts: Vec<Arc<str>> = bindings.hosts.keys().cloned().collect();
+        for host in hosts {
             let end = ends
-                .remove(host)
+                .remove(&*host)
                 .ok_or_else(|| format!("the host {host} has a binding and no certificate end"))?;
-            bindings.ends.insert(host.clone(), end);
+            bindings.set_end(host, Arc::new(end));
         }
         Ok(bindings)
     }
 
-    /// What the store holds when it is rewritten whole: each host's certificate end, then every
-    /// binding, the least recently reported first, so that [`Bindings::replay`] restores the order.
+    /// A copy of the bindings, cheap enough to take under the lock that guards them, that
+    /// [`Raw::changes`] turns into what the store holds when it is rewritten whole.
+    #[must_use]
+    pub fn raw(&self) -> Raw {
+        Raw {
+            ends: self
+                .ends
+                .iter()
+                .map(|(host, end)| (host.clone(), end.clone()))
+                .collect(),
+            bound: self
+                .bound
+                .iter()
+                .map(|(uid, binding)| (binding.reported, *uid, binding.host.clone()))
+                .collect(),
+        }
+    }
+
+    /// What the store holds when it is rewritten whole: [`Raw::changes`] of [`Bindings::raw`].
     #[must_use]
     pub fn snapshot(&self) -> Vec<Change> {
-        let mut bound: Vec<(&InstanceUid, &Binding)> = self.bound.iter().collect();
-        bound.sort_by_key(|(_, binding)| binding.reported);
-        self.ends
-            .iter()
-            .map(|(host, end)| Change::Ends(host.clone(), end.clone()))
-            .chain(
-                bound
-                    .into_iter()
-                    .map(|(uid, binding)| Change::Bound(*uid, binding.host.clone())),
-            )
-            .collect()
+        self.raw().changes()
     }
 
     /// How many lines a store rewritten whole holds: one per binding, one per host's end.
@@ -431,13 +519,13 @@ impl Bindings {
 
     /// The host `uid` is bound to.
     pub fn host_of(&self, uid: &InstanceUid) -> Option<&str> {
-        self.bound.get(uid).map(|binding| binding.host.as_str())
+        self.bound.get(uid).map(|binding| &*binding.host)
     }
 
     /// How many `instance_uid`s `host` has bound.
     #[cfg(test)]
     pub fn count_of(&self, host: &str) -> usize {
-        self.per_host.get(host).copied().unwrap_or(0)
+        self.hosts.get(host).map_or(0, HashSet::len)
     }
 
     /// How many bindings there are.
@@ -690,8 +778,8 @@ mod tests {
             .changes
             .is_empty());
 
-        assert!(bindings.end(100, |_| false).is_empty(), "not yet passed");
-        let mut ended = bindings.end(101, |end| end.serial == "none");
+        assert!(bindings.end(100, None).is_empty(), "not yet passed");
+        let mut ended = bindings.end(101, Some(&|end: &End| end.serial == "none"));
         for (_, uids) in &mut ended {
             uids.sort_by_key(InstanceUid::to_string);
         }
@@ -707,7 +795,7 @@ mod tests {
         bindings.bind(first, "c", &end(500), 200, LIMITS, |_| true);
         commit(&mut bindings, &first);
         assert_eq!(bindings.host_of(&first), Some("c"), "bound anew");
-        let revoked = bindings.end(200, |end| end.serial == "1");
+        let revoked = bindings.end(200, Some(&|end: &End| end.serial == "1"));
         assert_eq!(revoked, vec![("c".to_string(), vec![first])]);
     }
 
