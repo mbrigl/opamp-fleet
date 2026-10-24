@@ -596,11 +596,12 @@ What the install registers and sets:
   Client's connection closes; a program that has a broker start a process for it — a WMI process
   creation, a scheduled task — outlives that. Windows has no signals: a kind that reloads by a
   signal is restarted instead.
-- ACL grants to the process account's SID: read and execute on `program/`, the preflight's staging,
-  `config/` and the layout's `versions\`; modify without `DELETE` on a kind's data directories;
-  nothing on the state directory, a Supervisor's directory, the Client's key or its logs, which it
-  passes by `SeChangeNotifyPrivilege` alone. The Client's own account gets `WRITE_DAC` with its
-  Modify, so it can make these grants.
+- ACL grants to the process account's SID. The install grants it read and execute on the layout's
+  `versions\`. At its next start the Client grants it read and execute on `program/`, the
+  preflight's staging and `config/`, and modify without `DELETE` on a kind's data directories. It
+  gets nothing on the state directory or a Supervisor's directory, which it passes by
+  `SeChangeNotifyPrivilege` alone, and nothing on the Client's key or logs. The Client's own
+  account gets `WRITE_DAC` with its Modify, so it can make these grants.
 
 **Every `service install` stops both services first**, with a process account or without one, and
 every MSI upgrade among them: the Managed Processes stop for as long as the install runs. Before it
@@ -613,8 +614,8 @@ Only this program's `service start` and `service stop` strike the record — `sc
 Services console do not.
 
 The record's key is created owned by the Administrators, with full control for `LocalSystem` and
-the Administrators and nothing for anyone else. An install that finds the key owned by anyone else,
-or carrying another DACL, changes nothing until an Administrator has looked at it and removed it.
+the Administrators and nothing for anyone else. An install that finds the key owned by anyone but
+`LocalSystem` or the Administrators, or carrying another DACL, changes nothing until an Administrator has looked at it and removed it.
 
 `service install`, `uninstall`, `start` and `stop` run one at a time, under the install lock: a
 second waits for the first, for up to 300 seconds, then fails.
@@ -648,7 +649,7 @@ it once nothing else uses it.
   the process account, or names another `--run-as`, first stops the Client and then the second
   service, waiting up to 60 seconds for each process to end, and once it has succeeded starts
   again what ran, the second service first. Where a service cannot be stopped, the install starts
-  again what it stopped and changes nothing more. An install that fails after the stop leaves the
+  again what it stopped and changes nothing but the configuration it wrote. An install that fails after the stop leaves the
   services stopped and names them; nothing records them, so no later install starts them —
   `opamp-fleet service start` does.
 - **On Windows** every entry that allows the former account anything is removed from the layout
@@ -684,12 +685,14 @@ Every refusal comes before anything is written and names the way out. The ones y
 
 | Message about | What to do |
 |---|---|
-| `… does not exist on this host. Create it first (…)` | Create the account with the command it shows, or name another. |
+| `… does not exist on this host. Create it first (…)` | Linux and macOS: create the account with the command it shows, or name another. |
+| `… cannot be found on this host or its domain` | Windows: name an account that exists, or a gMSA whose domain is reachable. |
 | `… is root, and a process account never is` / `it is LocalSystem` | Run everything as root (`--run-as root`, no `--process-account`), or name an account of its own. |
 | `the Client runs as root` / `the Client runs as LocalSystem` | Name the Client's account with `--run-as`; on Windows `NT SERVICE\opamp-fleet`. |
 | `… is the account the Client runs as` | Name another account for the processes. |
 | `… has the primary group …, and the Client's account … is not in it` | Add the Client's account to the group with the command it shows. |
-| `… is a member of it beside the Client's account`, `… also the primary group of …`, `(gid 0)`, `… the primary group of the Client's account` | Give the process account a group of its own whose one member is the Client's account. |
+| `… is a member of it beside the Client's account`, `… also the primary group of …`, `(gid 0)` | Give the process account a group of its own whose one member is the Client's account. |
+| `… is a member of the primary group of the Client's account` | Take the process account out of that group with the command it shows (`gpasswd --delete`, `dseditgroup -d`). |
 | `… names no account for the second service` | The unit or plist was edited: name one with `--process-account`, or drop it with `--no-process-account`. |
 | `a process account needs the second service, which only a system service under systemd …` | Not available at user scope or under another service manager. |
 | `… is, or lies in, …, the directory of the second service's socket` | Name a data root and a layout root outside it. |
@@ -1235,10 +1238,15 @@ command line would, so a Windows host ends up with the same structure by a diffe
 
 | What you do | What goes | What stays |
 |---|---|---|
-| `service uninstall` | the service registration | everything on disk |
+| `service uninstall` | the service registration, and the second service's where a process account is registered; on macOS the directory of its socket | everything on disk |
 | `apt remove` / `dnf remove` | the registration, the layout root, the `PATH` symlink | the data root: configuration, state, every Agent's identity |
-| `apt purge` | all of the above | nothing |
+| `apt purge` | all of the above | nothing the package made |
 | MSI uninstall | the registration and the installation folder | everything under `%ProgramData%\<product>`: layout, configuration, state |
+
+The process account stays in every case, after `apt purge` too: you created it, and you delete it
+once nothing else uses it. On Windows an uninstall that did not hold the install lock leaves
+`HKLM\SOFTWARE\opamp-fleet\WithdrawalPending` in place and says so; the next `service install`
+or `service uninstall` completes it (see [Uninstalling](#uninstalling)).
 
 The pattern is the same everywhere: **removing the program is not removing the host from the
 fleet.** A reinstall over a surviving data root comes back as the same Agent, with the same identity
