@@ -1,7 +1,7 @@
 # ADR-0056: A repack follows no link out of its tree, and a link that leads out fails the repack naming it
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-20
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-24
 - **Deciders:** Markus Brigl
 - **Applies to:** the deterministic repack of `opamp-fleetctl package fetch` (`pack_tree` and `collect_members` in `crates/fleet-tools/src/fetch.rs`) and every kind whose upstream tree it packs, and every document that tells an operator what a repacked package carries
 - **Supersedes:** [ADR-0026](0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md) clause 67

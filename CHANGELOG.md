@@ -28,6 +28,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   Managed Process states in both attribute lists is now reported among the identifying ones, so
   its `service.version` reaches the fleet view.
 
+### Security
+
+- **A repack carries nothing from outside its tree**
+  ([ADR-0056](docs/adr/0056-a-repack-follows-no-link-out-of-its-tree.md)). `opamp-fleetctl package
+  fetch` resolves links inside the upstream tree alone: a link with an absolute target, or one that
+  climbs above the tree's root, fails the repack, naming it, instead of packing files of the
+  operator's host into the signed artifact. A pipe, socket or device in the tree fails it too, the
+  walk stops as soon as the tree passes the 10 000-member cap, a link back to the tree's root is no
+  longer packed as a second copy, and the names it reports are quoted.
+
 ## [0.6.2]
 
 ### Security
