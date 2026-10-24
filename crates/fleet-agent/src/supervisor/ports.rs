@@ -164,6 +164,15 @@ pub enum InstallTarget {
     },
 }
 
+/// The process account's primary group, where a process account is registered (ADR-0059 clause 6).
+/// What the Client shares with the Managed Processes belongs to this group, and nothing else does.
+///
+/// Resolved from the `--process-uid` of the Client's command line when it starts, never from the
+/// configuration file: the registration that names the process account is the only place it is
+/// stated (ADR-0059 clause 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessAccountGroup(pub u32);
+
 /// The package this Supervisor's Managed Process currently runs (ADR-0026), persisted so a
 /// restarted Client reports the version it has and is not re-offered it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -305,6 +314,9 @@ pub struct SupervisorContext {
     /// The key that opens an encrypted `.7z` package artifact (ADR-0026); `None` when none is
     /// configured. Client-wide, like the package verification key.
     pub archive_key: Option<zeroize::Zeroizing<String>>,
+    /// The process account's primary group, where a process account is registered: what the
+    /// Supervisor shares with its Managed Process belongs to it (ADR-0059 clause 6).
+    pub process_account_group: Option<ProcessAccountGroup>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
     /// Where the adapter reports events.
@@ -401,6 +413,10 @@ impl KindDefaults {
     }
 }
 
+/// What [`PluginRegistry::purge`] answers, once for each Supervisor it was asked about.
+pub type Purged<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Result<(), String>>> + Send + 'a>>;
+
 /// The plugins a run starts its Supervisors with (ADR-0017 clause 2), as the composition root
 /// made them: every one starts its Managed Process the way the run does (ADR-0059 clause 3). The
 /// Engine keeps it, so a Supervisor that a Supervisor-set apply starts later is started the same
@@ -408,6 +424,18 @@ impl KindDefaults {
 pub trait PluginRegistry: Send + Sync {
     /// Every compiled-in plugin.
     fn plugins(&self) -> Vec<Box<dyn Plugin>>;
+
+    /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
+    /// directory — that the Client cannot remove itself, before the purge deletes the rest
+    /// (ADR-0017 clause 34, ADR-0059 clause 5), all of them within one wait (ADR-0059 clause 2).
+    /// Nothing where the Client starts its programs itself.
+    ///
+    /// # Errors
+    /// Each answer, in the order of `removed`, is why something is left: the purge then leaves an
+    /// orphan, with a warning (ADR-0017 clause 36).
+    fn purge<'a>(&'a self, removed: &'a [(String, std::path::PathBuf)]) -> Purged<'a> {
+        Box::pin(std::future::ready(removed.iter().map(|_| Ok(())).collect()))
+    }
 }
 
 /// A compiled-in Supervisor Plugin (ADR-0017): the adapter factory on the Managed-Process side.
@@ -521,6 +549,7 @@ mod tests {
             apply_grace: Duration::from_secs(0),
             retain_previous: Duration::from_secs(0),
             archive_key: None,
+            process_account_group: None,
             settings: toml::Table::new(),
             events: EventSender::new(0, event_tx),
             shutdown,

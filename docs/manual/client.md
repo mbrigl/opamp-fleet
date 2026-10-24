@@ -722,6 +722,13 @@ unbounded setting is the one that eventually fills a disk, so turning the log of
 Client says so and runs anyway: a monitoring agent that refuses to start because of its own log
 file has turned a diagnostic into an outage.
 
+Where a process account is registered, a `dir` the process account's group passes through or
+writes is refused the same way, and the Client runs without a log file: the state directory itself,
+the Supervisors' root or anything above it, a Supervisor's directory or anything beneath it, and a
+path named with `..`. A directory beneath the state directory is kept the Client's alone, `0700`.
+The default `<state_dir>/logs` stays usable where `supervisor_dir` is the state directory itself,
+where no Supervisor can be named `logs`.
+
 This is a different thing from the Client's own telemetry (`ReportsOwnLogs`), which ships
 log records to a destination the **Server** offers. That needs a Server it can already reach — which
 is exactly what a bad `supervisor.toml`, an unusable certificate, or a refused endpoint does not give
@@ -907,6 +914,17 @@ Client stops the process and deletes everything above — program, packages, con
 identity. A directory that no block names is reported at startup and never deleted on its own, so a
 typo in a name does not destroy an Agent's identity.
 
+Before it deletes a removed Agent's directory, the Client renames it to a tombstone,
+`.purge-<name>-<hex>`, beside the others, so an Agent added again under the same name starts in a
+fresh directory. `<hex>` is 17 lowercase hexadecimal digits or more; a directory named alike with
+a shorter suffix, such as `.purge-backup-20241001`, is no tombstone. A tombstone that could not be deleted — a file held open, or one the process
+account wrote that the second service could not remove — stays, with a warning, and nothing in it
+is used again. The Client removes it again at the next start, beside the start, and with the next
+removal of a Supervisor. Where a process account is registered, each try waits for the second
+service as long as a purge does; a try that does not reach it warns, and the next start or removal
+tries again. Until it is gone, each startup warns about it. No other directory that no block names
+is touched.
+
 `config/` is what `${config_dir}` expands to in a process's arguments, which is how a program is
 pointed at its own configuration without anyone writing an absolute path into a block. Where a
 Configuration carries a role rather than configuration text, it is written here too and named in a
@@ -970,7 +988,7 @@ notice.
 | `heartbeat_interval_secs` | `30` | Heartbeat interval on WebSocket. `0` disables heartbeats and undeclares the capability; on plain HTTP every poll already is the periodic report. |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message sent or accepted, in either direction — including on the Supervisor Endpoint. A message past it is never sent, and an oversized one from the Server is refused. |
 | `state_dir` | `"client-state"` | Where the Client persists its own Agent's identity, its remote configuration, and any Server-offered connection settings. A self-update artifact is streamed here first, so it needs room for one agent binary. |
-| `supervisor_dir` | `<state_dir>/supervisors` | Where the per-Supervisor directories live. Set it when the programs must not live where the state does — `/var/lib` is often mounted `noexec`, and sized for state rather than for a few hundred megabytes of Collector. Outside the data root, the layout root and the state directory, `service install` creates and hands over nothing for it: create it yourself, writable by the service's account only. |
+| `supervisor_dir` | `<state_dir>/supervisors` | Where the per-Supervisor directories live. Set it when the programs must not live where the state does — `/var/lib` is often mounted `noexec`, and sized for state rather than for a few hundred megabytes of Collector. Where it is the state directory itself, a Supervisor named after what the Client keeps there — `instance-uid`, `config`, `packages`, `logs`, `gateway-packages`, `supervisors` — is refused at startup and in a set the Server offers, and no Supervisor's directory may be the state directory or hold it. Outside the data root, the layout root and the state directory, `service install` creates and hands over nothing for it: create it yourself, writable by the service's account only. |
 
 > **Moving `supervisor_dir` on a running host leaves the old tree behind**, `instance-uid` included,
 > so every Supervisor re-registers as a **new** Agent on the Server. Nothing migrates automatically.
@@ -1365,8 +1383,9 @@ as its new set:
   process is not touched — a fleet-wide change to one collector does not cycle its neighbours.
 - **A removed Supervisor is purged**. Once the rewritten file no longer names it, its
   whole directory `<supervisor_dir>/<name>/` is deleted — identity, written configuration,
-  staged packages, and the Client-owned program. A changed Supervisor restarts under its name
-  and keeps its directory; the program itself is
+  staged packages, and the Client-owned program — by way of a tombstone
+  ([one directory per Agent](#one-directory-per-agent)). A changed Supervisor restarts under its
+  name and keeps its directory; the program itself is
   never touched. Removal is destructive on the host: re-adding the same name later starts a
   genuinely fresh Agent, restoring service, not history.
 - **`supervisor.toml` stays the single truth.** The blocks are written into the file itself,

@@ -28,6 +28,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   Managed Process states in both attribute lists is now reported among the identifying ones, so
   its `service.version` reaches the fleet view.
 
+- **A Supervisor is never named after an entry the Client keeps in its state directory**
+  ([ADR-0059](docs/adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)
+  clause 13). Where `supervisor_dir` is `state_dir`, a Supervisor named `instance-uid`, `config`,
+  `packages`, `logs`, `gateway-packages` or `supervisors` took the Client's own entry of that name
+  as its directory: removing the Supervisor deleted it, and a process account's group could read
+  it. Such a name is now refused on every host, with a process account or without one: a
+  `supervisor.toml` that carries one fails the Client's startup, naming the Supervisor and the
+  entry, and an offered set that carries one is reported `FAILED` whole before anything stops. A
+  Supervisor whose directory would be `state_dir` or hold it is refused the same way.
+  **What to do:** on a host whose `supervisor_dir` is `state_dir`, rename a Supervisor of one of
+  these names before the update, in `supervisor.toml` and in the set the Server offers; on any
+  host, rename a Supervisor whose directory would be `state_dir` or hold it, or move
+  `supervisor_dir`. Otherwise the Client does not start, or the set is reported `FAILED`. A
+  renamed Supervisor registers as a new Agent. The default `supervisor_dir`,
+  `<state_dir>/supervisors`, is not affected.
+
 ### Security
 
 - **A repack carries nothing from outside its tree**

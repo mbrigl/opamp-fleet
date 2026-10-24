@@ -108,6 +108,11 @@ pub struct ClientConfig {
     /// certificate; set by the install, never by the file.
     #[serde(skip)]
     pub bootstrap_identity: Option<BootstrapIdentity>,
+    /// The process account's primary group, where a process account is registered (ADR-0059
+    /// clause 6): what the Client shares with the Managed Processes belongs to it. Set by the run
+    /// from the `--process-uid` its registration names, never by the file.
+    #[serde(skip)]
+    pub process_account_group: Option<crate::supervisor::ports::ProcessAccountGroup>,
     /// The largest OpAMP message the Client accepts or sends, on either transport and in either
     /// direction — the Supervisor Endpoint included. The Baseline requires the limit, recommends
     /// this default, and asks that it be configurable.
@@ -218,6 +223,23 @@ pub const TREE_DIR: &str = "tree";
 
 /// The subdirectory a downloaded artifact is staged in, per Supervisor.
 const PACKAGES_DIR: &str = "packages";
+
+/// The default Supervisors' root in the state directory, where `supervisor_dir` names none.
+const SUPERVISORS_DIR: &str = "supervisors";
+
+/// What the Client keeps in its state directory under a name a Supervisor could carry, with what
+/// it is: no Supervisor takes one of these names where `supervisor_dir` is the state directory
+/// ([`ClientConfig::check_supervisor_dir`]). The rest of what is kept there has a `.` in its name,
+/// which no Supervisor's name holds ([`parse_instance_name`]). Spelled here, in the core, and held
+/// to the adapters' own constants by a test of `storage`.
+pub(crate) const CLIENT_ENTRIES: [(&str, &str); 6] = [
+    ("instance-uid", "the Client's own identity"),
+    ("config", "the Client's own configuration entries"),
+    (PACKAGES_DIR, "the staging of the Client's self-update"),
+    ("logs", "the Client's default log directory"),
+    ("gateway-packages", "the Gateway's package cache"),
+    (SUPERVISORS_DIR, "the default Supervisors' root"),
+];
 
 /// Where a Supervisor's Managed Process lives — and, as the same fact, whether this Client may
 /// replace it (ADR-0017).
@@ -344,6 +366,29 @@ pub fn parse_instance_name(raw: &str) -> Result<InstanceName, String> {
         return Err(format!("{raw:?} is a reserved device name on Windows"));
     }
     Ok(InstanceName(raw.to_string()))
+}
+
+/// How the directory of a removed Supervisor is named while it is purged: beneath the Supervisors'
+/// root, by a name no Supervisor can carry — it starts with a dot — so that a Supervisor added
+/// again under the same name gets a fresh directory, whatever is still being removed from the old
+/// one (ADR-0017 clause 34).
+pub(crate) const TOMBSTONE: &str = ".purge-";
+
+/// How many digits a tombstone's nonce has at least: the nanoseconds since the Unix epoch, 16
+/// lowercase hexadecimal digits at least, and a counter, one at least
+/// ([`crate::reconfigure::tombstone_name`]).
+pub(crate) const TOMBSTONE_NONCE: usize = 17;
+
+/// The Supervisor whose tombstone `name` is ([`crate::reconfigure::tombstone_name`]), or `None`
+/// where it is none: its nonce is [`TOMBSTONE_NONCE`] lowercase hexadecimal digits at least, so a
+/// directory an operator named alike — `.purge-backup-20241001` — is never taken for one.
+pub(crate) fn tombstone_of(name: &str) -> Option<&str> {
+    let (supervisor, nonce) = name.strip_prefix(TOMBSTONE)?.rsplit_once('-')?;
+    let nonce_ok = nonce.len() >= TOMBSTONE_NONCE
+        && nonce
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (nonce_ok && parse_instance_name(supervisor).is_ok()).then_some(supervisor)
 }
 
 impl TryFrom<toml::Table> for SupervisorBlock {
@@ -914,6 +959,7 @@ impl Default for ClientConfig {
             path: None,
             state_dir_as_written: default_state_dir(),
             bootstrap_identity: None,
+            process_account_group: None,
             max_message_size_bytes: default_max_message_size(),
             max_artifact_size_bytes: default_max_artifact_size(),
             supervisors: Vec::new(),
@@ -1048,7 +1094,36 @@ impl ClientConfig {
     pub fn supervisors_root(&self) -> PathBuf {
         self.supervisor_dir
             .clone()
-            .unwrap_or_else(|| self.state_dir.join("supervisors"))
+            .unwrap_or_else(|| self.state_dir.join(SUPERVISORS_DIR))
+    }
+
+    /// Checks that the directory of the Supervisor `name` is none of the Client's own: not the
+    /// state directory or one that holds it, and, where `supervisor_dir` is the state directory
+    /// itself, none of the entries the Client keeps there ([`CLIENT_ENTRIES`]). A Supervisor
+    /// there would share that entry with the process account's group, and its purge would delete
+    /// it — a Supervisor named `logs` the Client's log, one named `instance-uid` its identity.
+    ///
+    /// # Errors
+    /// Returns the reason, naming the Supervisor and the entry its directory would be.
+    pub fn check_supervisor_dir(&self, name: &str) -> Result<(), String> {
+        let dir = self.supervisor_dir(name);
+        if self.state_dir.starts_with(&dir) {
+            return Err(format!(
+                "supervisor {name:?}: its directory {} would be the state directory or hold it; \
+                 choose another name",
+                dir.display()
+            ));
+        }
+        if self.supervisors_root() == self.state_dir {
+            if let Some((_, what)) = CLIENT_ENTRIES.iter().find(|(entry, _)| *entry == name) {
+                return Err(format!(
+                    "supervisor {name:?}: its directory {} would be {what}, which the Client keeps \
+                     in the state directory that supervisor_dir names too; choose another name",
+                    dir.display()
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// One Supervisor's own directory: its state, its `program/`, and its package staging, under
@@ -2097,6 +2172,108 @@ mod tests {
         std::fs::write(&path, "endpoint = \"wss://fleet:4320/v1/opamp\"\n").expect("write");
         let clean = ClientConfig::load(&path).expect("loads");
         assert_eq!(clean.leftover_auth_notice(), None, "no section, no notice");
+    }
+
+    /// Where `supervisor_dir` is the state directory, no Supervisor takes the name of an entry the
+    /// Client keeps there, and the refusal names the Supervisor and the entry; under the default
+    /// root the same names are Supervisors like any other. A Supervisor's directory is never the
+    /// state directory or one that holds it (ADR-0059 clause 6, ADR-0017 clause 21).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_supervisor_never_takes_a_directory_of_the_clients() {
+        let state = Path::new("/var/lib/opamp-fleet/state");
+        let shared = ClientConfig {
+            state_dir: state.to_path_buf(),
+            supervisor_dir: Some(state.to_path_buf()),
+            ..ClientConfig::default()
+        };
+        let apart = ClientConfig {
+            state_dir: state.to_path_buf(),
+            ..ClientConfig::default()
+        };
+        for name in [
+            "instance-uid",
+            "config",
+            "packages",
+            "logs",
+            "gateway-packages",
+            "supervisors",
+        ] {
+            parse_instance_name(name).expect("a name a Supervisor could carry");
+            let error = shared
+                .check_supervisor_dir(name)
+                .expect_err("the Client's own entry");
+            assert!(error.contains(&format!("{name:?}")), "{error}");
+            assert!(error.contains("the Client keeps"), "{error}");
+            apart
+                .check_supervisor_dir(name)
+                .expect("a Supervisor beneath the default root");
+        }
+        assert!(shared
+            .check_supervisor_dir("logs")
+            .expect_err("logs")
+            .contains("default log directory"));
+        shared
+            .check_supervisor_dir("agent")
+            .expect("a name of its own");
+
+        let above = ClientConfig {
+            state_dir: state.to_path_buf(),
+            supervisor_dir: Some(PathBuf::from("/var/lib/opamp-fleet")),
+            ..ClientConfig::default()
+        };
+        let error = above
+            .check_supervisor_dir("state")
+            .expect_err("the state directory itself");
+        assert!(error.contains("\"state\""), "{error}");
+        above.check_supervisor_dir("agent").expect("beside it");
+    }
+
+    /// A tombstone name ([`crate::reconfigure::tombstone_name`]) names the Supervisor whose
+    /// directory it holds, and is no name a Supervisor can carry (ADR-0017 clause 34).
+    /// Verifies: ADR-0017
+    #[test]
+    fn a_tombstone_names_its_supervisor_and_no_supervisor_carries_one() {
+        for supervisor in ["agent", "a-b", "x1"] {
+            let tomb = crate::reconfigure::tombstone_name(supervisor);
+            assert_eq!(tombstone_of(&tomb), Some(supervisor), "{tomb}");
+            assert!(parse_instance_name(&tomb).is_err(), "{tomb}");
+            assert_ne!(
+                tomb,
+                crate::reconfigure::tombstone_name(supervisor),
+                "each is fresh"
+            );
+        }
+        for name in [
+            "agent",
+            ".purge-agent",
+            ".purge-agent-",
+            ".purge-agent-1G",
+            ".purge--1f",
+            ".purge-Agent-1f",
+            "purge-agent-1f",
+        ] {
+            assert_eq!(tombstone_of(name), None, "{name}");
+        }
+    }
+
+    /// Only the nonce a tombstone name is made with marks one: a directory an operator named
+    /// alike is no tombstone, so neither a start nor a purge removes it (ADR-0059 clause 12).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_directory_named_alike_is_no_tombstone() {
+        for name in [
+            ".purge-foo-abc",
+            ".purge-backup-20241001",
+            ".purge-agent-18f3a2b4c5d6e7f8",
+            ".purge-agent-18F3A2B4C5D6E7F80",
+        ] {
+            assert_eq!(tombstone_of(name), None, "{name}");
+        }
+        assert_eq!(
+            tombstone_of(".purge-agent-18f3a2b4c5d6e7f80"),
+            Some("agent")
+        );
     }
 
     #[test]
