@@ -70,8 +70,8 @@ signals and stops those programs on the Client's request.
    - **On Windows the Client then runs under an account of its own.** A process account separates
      the Managed Processes from a Client that runs under its own account, so the install refuses
      one where the Client would run as `LocalSystem`: `--run-as` names the Client's account, or
-     the registration keeps the one the SCM holds (clause 10). The refusal names
-     `--run-as NT SERVICE\<PRODUCT_NAME>`.
+     the registration keeps the one the SCM holds (clause 10). The refusal names `--run-as` as
+     the way to name it, with `NT SERVICE\<PRODUCT_NAME>` where no account was named.
    - **It is dropped on request.** `service install --no-process-account` stops and deregisters the
      second service, and the Client starts its programs itself again. It conflicts with
      `--process-account`, and a refusal that a kept process account causes names it. What the
@@ -200,8 +200,10 @@ signals and stops those programs on the Client's request.
    | runs (`versions\` of the layout) | read and execute, `(OI)(CI)` | read and execute |
 
    Every grant is explicit on what exists and inherited by what is created after it, and replaces
-   the explicit allow entries the process account held there. Every file and directory the table
-   does not name grants it nothing, the Client's key and logs among them.
+   the explicit allow entries the process account held there. No other entry grants the process
+   account anything by name, the Client's key and logs among them. In a root the install takes
+   over, nothing grants it anything through a group either; a root the operator named keeps the
+   explicit entries it had.
 
    - **Every walk goes one handle at a time.** Each entry is opened as itself, never through a
      symbolic link or junction, and no walk enters one. A directory on the way is held open
@@ -212,8 +214,9 @@ signals and stops those programs on the Client's request.
    - **What it cannot hold, it either fails on or reports.** A walk that takes rights away — a
      withdrawal (clause 16), or the take-over or cut-off of a root a system-scope install
      restricts to `LocalSystem` and the Administrators — fails where it finds a directory it
-     cannot hold, or an entry it cannot open, so nothing it cannot reach safely is left as it was. A walk that only adds rights — a grant, the hand-over —
-     skips such an entry and names it in a warning.
+     cannot hold, or an entry it cannot open, so nothing it cannot reach safely is left as it was.
+     A walk that only adds rights — a grant, the hand-over — skips such an entry and names it in a
+     warning.
    - **Every DACL set is read back.** A DACL is set on the entry's own handle and changes that
      object alone; what a directory passes on to what it already holds is applied by the walk
      itself. The DACL the object then holds is read back and compared with what was set by what it
@@ -322,9 +325,9 @@ signals and stops those programs on the Client's request.
       account the SCM holds for the service (`QueryServiceConfig`) and keeps it, unless that is
       `LocalSystem`, which a registration that names no account runs as. The second service's
       account is read and kept the same way (clause 1). A service the SCM holds already is
-      reconfigured in place: its program, arguments and start type are rewritten and its logon
-      account is left as it is, and what clause 9 and `windows_config` set follows as on a first
-      registration.
+      reconfigured in place: its program, arguments and start type are rewritten, its logon
+      account is set only by the `sc config obj=` step of `windows_config`, and what clause 9 and
+      `windows_config` set follows as on a first registration.
     - **A unit or plist that names no account, on a data root that a non-root account owns,** was
       rewritten by a re-registration that dropped its account. The install takes the owner of the
       data root and prints that it did, naming the data root. Every other registration that names no
@@ -426,14 +429,16 @@ signals and stops those programs on the Client's request.
    of such a Supervisor would delete the Client's own entry and its share would expose it to the
    process account's group. The changelog names the rename this asks of a host that has one.
 
-14. **Restates ADR-0029 clause 13. No installer starts a service it registers anew; an upgrade
+14. **Restates [ADR-0029](0029-a-bootstrap-certificate-as-a-password-protected-pkcs12-file-the-server-keeps.md)
+    clause 13. No installer starts a service it registers anew; an upgrade
     starts again what ran.** The Linux post-install and the MSI register the service and leave it
     stopped — knowingly departing from Debian Policy and `dh_installsystemd` — because a Client
     with no configuration holds no client certificate and is refused at startup, at fleet scale
     where nobody watches a terminal. The exceptions are upgrades of a host whose services were
     running. On Linux a running service is restarted, so a configured host finishes the upgrade on
     the delivered binary. On Windows every `service install` — every upgrade of the MSI among
-    them, with a process account or without one — stops both services before it changes anything,
+    them, with a process account or without one — stops both services before it changes any
+    right or SCM entry,
     and once it has succeeded starts again what ran before it; a first install finds nothing to
     stop and starts nothing. The post-install prints the two remaining steps:
 
@@ -488,7 +493,8 @@ signals and stops those programs on the Client's request.
       starts what the operator stopped. `sc.exe` and the Services console know nothing of the
       record and strike nothing, and a `service stop` that failed in part strikes nothing either.
 
-15. **Restates ADR-0019 clause 39. The MSI asks for the installation folder, the endpoint and the
+15. **Restates [ADR-0019](0019-the-client-supervisor-installed-service-releases-and-installers.md)
+    clause 39. The MSI asks for the installation folder, the endpoint and the
     self-update consent, all as public properties, and stops and unregisters only on a real
     removal.** The UI is a copy of the stock `WixUI_InstallDir` set with one dialog inserted —
     `WelcomeDlg → InstallDirDlg → EndpointDlg → VerifyReadyDlg` — and **no licence page**:
@@ -537,16 +543,18 @@ signals and stops those programs on the Client's request.
 
 16. **A former account keeps no share.** Where an install drops the process account
     (`--no-process-account`), names another, or names another `--run-as` for the Client, every
-    share with the former account is withdrawn, on every platform.
+    share with the former account in the roots an install acts on (clause 6) is withdrawn, on
+    every platform, except a file with a second hard link, which is named in a warning (clause 6).
+    A Supervisors' root outside those roots stays the operator's.
     - **On Linux and macOS a change of owner withdraws it.** The hand-over (clause 10) gives what
-      the former account owns, and what is in its group, to the Client's account and group, and
-      what the process account named now keeps is left to it.
+      the former account owns there, and what is in its group, to the Client's account and group,
+      and what the process account named now keeps is left to it.
     - **On Windows its entries are removed and what it owns is taken over.** Every entry that
       allows the former account anything, explicit or inherited, is removed from every entry of
-      the layout root, the data root, the state directory, the configuration and the copies beside
-      it, and an entry the former account owns is given to the Administrators. An entry that denies it
-      stays. The walk goes as clause 6 says and fails closed. `LocalSystem` is never withdrawn: it
-      keeps full control of every root.
+      the layout root, the data root, the state directory, the configuration file and the fleet
+      files copied beside it, and an entry the former account owns is given to the
+      Administrators. An entry that denies it stays. The walk goes as clause 6 says and fails
+      closed. `LocalSystem` is never withdrawn: it keeps full control of every root.
     - **Former accounts are resolved before anything changes.** The install reads the accounts the
       two SCM entries name and resolves each that is to go to its SID before it writes anything; one
       that cannot be resolved — a gMSA whose domain cannot be reached — fails the install there,
@@ -621,9 +629,9 @@ under `program/`.
 - **Re-register on Windows without stopping the services, as Linux restarts only what runs.** A
   running service would go on under an account whose grants the install is taking away, or under
   a registration it rewrites. Rejected for clause 14's stop.
-- **Keep the install lock as a mutex under `Global\`.** Any account may create an object of that
+- **A mutex under `Global\` as the install lock.** Any account may create an object of that
   name first and hold it. Rejected for the private namespace of clause 17.
-- **Keep the record in the data root or beneath the service's SCM key.** The Client may change the
+- **The record in the data root or beneath the service's SCM key.** The Client may change the
   data root's DACL where a process account is registered, a later `--data-root` may name it
   differently, and the SCM's key carries the system's own, undocumented DACL and goes with
   `sc delete`. Rejected for the install's own registry key.
