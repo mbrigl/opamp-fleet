@@ -309,10 +309,13 @@ $ opamp-fleet service uninstall      # deregisters; never deletes the install la
 | `--interactive` | `service install` | Ask for the settings a fresh host cannot guess, write or edit the configuration file, and enrol a host that holds no certificate yet, before registering the service. See below. |
 | `--endpoint <url>` | `service install` | Write the configuration file with this endpoint instead of asking for it — the same file, from an answer given rather than typed at a prompt. Mutually exclusive with `--interactive`, and it keeps an existing file untouched. `ws://` and `http://` are refused unless the host is `127.0.0.1` or `::1`. It has no siblings for the CA file or the client identity: it takes them from [beside the program](#files-beside-the-program), or they are files the operator names in the file. |
 | `--run-as <account>` | `service install` | Run the service as this account, and hand its files over to it. Without it, a re-registration keeps the account the existing registration names. `--run-as root` chooses root. See [Running it under its own account](#running-it-under-its-own-account). System scope only — a `--user` service already runs as its user. |
+| `--process-account <account>` | `service install` | Run every Managed Process under this account, through a second service that runs under it. Without it, a re-registration keeps the account the second service's registration names. See [Managed Processes under a process account](#managed-processes-under-a-process-account). System scope only. |
+| `--no-process-account` | `service install` | Stop and deregister the second service; the Client starts its Managed Processes itself again. Mutually exclusive with `--process-account`. |
 
 ### Running it under its own account
 
-The system service — and every Managed Process its Supervisors spawn — runs as one account, and the
+The system service — and, unless a [process account](#managed-processes-under-a-process-account)
+is registered, every Managed Process its Supervisors spawn — runs as one account, and the
 install hands its files over to it: the configuration file, the state directory, **and the
 executable layout**. The layout too because the self-update runs *inside* the service — a layout the
 account cannot write would silently end [server-driven updates](#updating-the-client-itself) for
@@ -421,6 +424,283 @@ SupplementaryGroups=adm
 A drop-in that removes a directive the unit sets assigns it its default, for example
 `ProtectKernelTunables=no`. A `User=` in a drop-in governs the process, but the install hands the
 roots to the account the unit names; name the account with `--run-as` instead.
+
+### Managed Processes under a process account
+
+Without a process account, every Managed Process runs as the Client's account and can read what the
+Client can: its private key `client-key.pem`, every other Supervisor's `config/`, and the program it
+runs, which it can also rewrite. A **process account** separates them. `service install
+--process-account <account>` registers a **second service**, `opamp-fleet-agents`, that runs under
+that account and starts, signals and stops every program a Supervisor starts — the Managed Process,
+its version probe, and the preflight of a staged package — on the Client's request. The Client
+starts none of them itself.
+
+```text
+service manager ─┬─ opamp-fleet         Client, its own account   (supervisor run --service …)
+                 └─ opamp-fleet-agents  the process account        (supervisor run --agents …)
+                        ▲
+                        └── Unix socket / named pipe; only the Client's account is admitted
+```
+
+What the separation gives and what it does not:
+
+- A Managed Process, and anything it starts, can no longer read the Client's key, certificates,
+  package state, logs or environment, nor write the program it runs. A command a Configuration
+  makes it run — a Telegraf `inputs.exec`, an Icinga `CheckCommand` — runs as the process account.
+- All Managed Processes share the one process account, so they still read one another's `config/`
+  and environment.
+- What used to be granted to the Client's account for an agent must name the process account
+  instead: a `sudoers` rule for Telegraf's `use_sudo`, the rights Icinga 2 needs on its
+  directories, a supplementary group such as `adm`. On Linux, what a Managed Process needs from
+  systemd — a capability for a port below 1024, a supplementary group — goes into a drop-in for
+  the second service, `/etc/systemd/system/opamp-fleet-agents.service.d/`, which `service install`
+  never touches either.
+- A restart of the second service stops every Managed Process; the Client starts them again once
+  it reaches the service.
+
+The rules every platform holds the account to:
+
+- **The operator creates it.** The binary never creates an account, and an install naming one
+  that does not exist is refused before anything is written, with the command that creates it.
+- **It is never root or `LocalSystem`, and never the Client's account.** A host whose agents need
+  root runs as root as a whole: `--run-as root` and no `--process-account`, with no second service.
+- **The Client runs under an account of its own.** On Linux and macOS a Client that runs as root is
+  refused; on Windows one that runs as `LocalSystem` is.
+- **System scope only**: systemd on Linux, launchd on macOS, the SCM on Windows. `--user` is
+  refused with it.
+- **It is kept.** A re-registration without the flag — every package upgrade, every MSI upgrade —
+  keeps the account the second service's registration names:
+  `/etc/systemd/system/opamp-fleet-agents.service`, `/Library/LaunchDaemons/opamp-fleet-agents.plist`,
+  or the SCM's entry. The install prints it:
+
+  ```console
+  # opamp-fleet service install
+  installed opamp-fleet
+    …
+    runs as:   opamp-fleet (kept from /etc/systemd/system/opamp-fleet.service)
+    processes: opamp-fleet-agents (kept from /etc/systemd/system/opamp-fleet-agents.service), started by opamp-fleet-agents
+  ```
+
+`service install`, `start`, `stop` and `uninstall` act on both services. The second service is
+started first and stopped last. The Client does not depend on it: while it is down the Client stays
+connected, its Supervisors report that their programs do not start, and they start again once it
+is back. A package offered meanwhile is staged and stays `Installing`, and a Configuration stays
+`APPLYING`, each naming the second service as the reason, until it is reached again. `service
+status` reports the Client; ask the service manager for the second service
+(`systemctl status opamp-fleet-agents`, `launchctl print system/opamp-fleet-agents`,
+`sc query opamp-fleet-agents`).
+
+Both services run the same program from the same `current` pointer, and a self-update restarts the
+one that is behind: two ends of different builds refuse each other, and the one whose version
+`current` no longer names exits and is started again by its service manager.
+
+#### On Linux
+
+The Client must run under its own account, which the `.deb` and `.rpm` make `opamp-fleet`. The
+process account needs a primary group of its own whose one member is the Client's account: the
+install refuses a group that is gid 0, that is the Client's primary group, that has another member,
+or that is another account's primary group, and a process account that is a member of the Client's
+primary group. Create it, put the Client's account into its group, and register:
+
+```console
+# useradd --system --user-group --no-create-home --shell /usr/sbin/nologin opamp-fleet-agents
+# usermod --append --groups opamp-fleet-agents opamp-fleet
+# opamp-fleet service install --process-account opamp-fleet-agents
+# opamp-fleet service stop && opamp-fleet service start
+```
+
+Adding a process account where there was none stops nothing; the Client that runs goes on starting
+its programs itself until it is restarted, which the last line does.
+
+What the install registers:
+
+- `/etc/systemd/system/opamp-fleet-agents.service`, `User=opamp-fleet-agents`, running
+  `run --agents /run/opamp-fleet-agents/agents.sock --client-uid <uid>`, with
+  `RuntimeDirectory=opamp-fleet-agents`, `RuntimeDirectoryMode=0750`, `TimeoutStopSec=30`,
+  `Restart=on-failure` and `ProtectControlGroups=yes`. systemd creates the socket's directory at
+  every start, owned by the process account, and removes it at the stop.
+- In the Client's unit, `Wants=opamp-fleet-agents.service` and `After=opamp-fleet-agents.service`,
+  never `Requires=`, and `--agents-socket <socket> --process-uid <uid>` on its command line.
+
+No data root or layout root may be, or lie in, the socket's directory. The second service admits
+only a peer whose uid is the Client's, serves one connection at a time, and when that connection
+closes stops every program it started, by its process group. Its programs get its own
+environment, with `HOME`, `USER` and `LOGNAME` of the process account, then the block's `env`, then
+the Supervisor Endpoint's token; they keep its umask.
+
+At its next start the Client lays out what it keeps for the process account's group; everything
+else under `state_dir`, its logs among them, stays its own:
+
+| Path | Owner : group | Mode |
+|---|---|---|
+| `state_dir`, the Supervisors' root, each Supervisor's directory | Client : process account's group | `0710` |
+| the Client's key, certificates, `remote-config.pb`, `instance-uid`, package state and staging | Client | `0600` / `0700` |
+| `program/` and its files, the preflight's staging | Client : process account's group | `0750`, no group or other write |
+| `config/` and its files | Client : process account's group | `0750` / `0640` |
+| a kind's data directories | Client : process account's group | `2770` |
+
+A re-registration leaves what the process account owns, and what is in its group, as it is. A
+member of a `.tar.gz` package never lands writable by group or others, on every host: `0777` lands
+`0755`, `0666` lands `0644`.
+
+#### On macOS
+
+The same rules, with launchd: macOS 13 or later, the Client under an account of its own (not root),
+and the process account a role account whose name begins with `_`, with a primary group of its own
+that the Client's account joins:
+
+```console
+# dseditgroup -o create -i <gid> _opamp-fleet-agents
+# sysadminctl -addUser _opamp-fleet-agents -UID <uid> -GID <gid> -roleAccount
+# dseditgroup -o edit -a <client account> -t user _opamp-fleet-agents
+# opamp-fleet service install --run-as <client account> --process-account _opamp-fleet-agents
+# opamp-fleet service stop && opamp-fleet service start
+```
+
+`<gid>` and `<uid>` are ones no group or account holds. The install registers
+`/Library/LaunchDaemons/opamp-fleet-agents.plist` with `UserName` naming the process account, and
+creates the socket's directory `/Library/Application Support/opamp-fleet-agents/`, owned by the
+process account and its group, `0750`; the socket is `agents.sock` in it. The install refuses to
+create it where `/Library/Application Support` is writable by an account other than root, and it
+removes the directory with the second service's registration. Modes and ownership are those of the
+Linux table.
+
+#### On Windows
+
+The Client must run under an account of its own, so name it with `--run-as` on the same install;
+a registration that runs as `LocalSystem`, which is what the MSI's first install makes, is refused.
+The process account is passwordless, as `--run-as` is: the second service's own virtual account
+`NT SERVICE\opamp-fleet-agents` (recommended), a gMSA (`DOMAIN\name$`), which is looked up in its
+domain, or `NT AUTHORITY\LocalService` / `NetworkService`, which other services share and so
+separate less. From an elevated prompt:
+
+```console
+> opamp-fleet service install --run-as "NT SERVICE\opamp-fleet" ^
+    --process-account "NT SERVICE\opamp-fleet-agents"
+```
+
+Where the Client ran, the install starts it again afterwards, and the second service before it.
+
+What the install registers and sets:
+
+- The SCM entry `opamp-fleet-agents`, automatic start, under the process account, running
+  `run --agents \\.\pipe\opamp-fleet-agents --client-sid <SID>`, with the Client's recovery
+  actions. Its required privileges are `SeChangeNotifyPrivilege` alone, so no Managed Process holds
+  `SeImpersonatePrivilege`. The Client's entry does not depend on it: `service start` starts the
+  second service first, then the Client.
+- The named pipe `\\.\pipe\opamp-fleet-agents`, owned by the process account. Only the Client's
+  account may read and write data on it, and nobody may create an instance of it but the process
+  account; it rejects remote clients, and a pipe of that name made by anyone first fails the second
+  service's start. Each end checks the other's account.
+- A job object per program. Every program, and everything it starts, ends with its job when the
+  Client's connection closes; a program that has a broker start a process for it — a WMI process
+  creation, a scheduled task — outlives that. Windows has no signals: a kind that reloads by a
+  signal is restarted instead.
+- ACL grants to the process account's SID: read and execute on `program/`, the preflight's staging,
+  `config/` and the layout's `versions\`; modify without `DELETE` on a kind's data directories;
+  nothing on the state directory, a Supervisor's directory, the Client's key or its logs, which it
+  passes by `SeChangeNotifyPrivilege` alone. The Client's own account gets `WRITE_DAC` with its
+  Modify, so it can make these grants.
+
+**Every `service install` stops both services first**, with a process account or without one, and
+every MSI upgrade among them: the Managed Processes stop for as long as the install runs. Before it
+stops anything it writes which of the two ran to `HKLM\SOFTWARE\opamp-fleet\WithdrawalPending`
+(the value `Pending`), and once it has succeeded it starts again what ran, the second service
+first, and strikes the record. A first install finds nothing to stop and starts nothing. An install
+that fails after its stop leaves both stopped and says how the SCM reports them; the next `service
+install` that succeeds starts again what ran, and `opamp-fleet service start` starts both at once.
+Only this program's `service start` and `service stop` strike the record — `sc.exe` and the
+Services console do not.
+
+The record's key is created owned by the Administrators, with full control for `LocalSystem` and
+the Administrators and nothing for anyone else. An install that finds the key owned by anyone else,
+or carrying another DACL, changes nothing until an Administrator has looked at it and removed it.
+
+`service install`, `uninstall`, `start` and `stop` run one at a time, under the install lock: a
+second waits for the first, for up to 300 seconds, then fails.
+
+The MSI passes no `--process-account`: register one with `service install` after the MSI, and every
+later MSI upgrade keeps it. The MSI stops and unregisters the services only on a real removal from
+Add or Remove Programs or `msiexec /x`, never in the middle of an upgrade.
+
+#### Changing or dropping the process account
+
+`service install --process-account <other>` names another account; `service install
+--no-process-account` stops and deregisters the second service, and the Client starts its programs
+itself again:
+
+```console
+# opamp-fleet service install --no-process-account
+installed opamp-fleet
+  …
+  processes: started by the Client itself once it restarts; opamp-fleet-agents was stopped and removed
+```
+
+Either way the former account keeps nothing in the roots the install acts on — the layout root,
+the data root and the state directory, with a Supervisors' root that lies beneath them. A
+Supervisors' root outside them is yours: the install leaves it as it is, on Windows with a warning,
+and on Linux and macOS you re-own what the former account wrote there yourself (`chown -R`). The
+account itself is never removed; delete it once nothing else uses it.
+
+- **On Linux and macOS** the withdrawal is a change of owner: what the former account owns, and
+  what is in its group, goes to the Client's account and group. An install that changes or drops
+  the process account, or names another `--run-as`, first stops the Client and then the second
+  service, waiting up to 60 seconds for each process to end, and once it has succeeded starts
+  again what ran, the second service first. Where a service cannot be stopped, the install starts
+  again what it stopped and changes nothing more. An install that fails after the stop leaves the
+  services stopped and names them; nothing records them, so no later install starts them —
+  `opamp-fleet service start` does.
+- **On Windows** every entry that allows the former account anything is removed from the layout
+  root, the data root, the state directory, `supervisor.toml` and the fleet files copied beside
+  it, and what it owns there is given to the Administrators; an entry that denies it stays, and
+  `LocalSystem` is never withdrawn. The former accounts are resolved before anything changes — a
+  gMSA whose domain cannot be reached fails the install there — and written to the record before
+  the stop; an install that finds a withdrawal recorded completes it.
+
+A file with a second hard link is never re-owned or withdrawn; the install names it in a warning.
+
+#### Uninstalling
+
+`service uninstall` deregisters both services and leaves the files on disk. Stop them first, as the
+`.deb` and `.rpm` removal does: `opamp-fleet service stop`, then `opamp-fleet service uninstall`. On
+macOS the socket's directory goes with the second service. On Windows `service uninstall` stops both
+itself and starts neither again; where it holds the install lock and both are stopped it completes
+a recorded withdrawal and removes the record, otherwise it says that the next `service install` or
+`service uninstall` completes it. It deregisters both services in every case.
+
+#### Before going back to an older release
+
+A release before the second service knows nothing of it: its `service install` rewrites the
+Client's registration without the second service, but neither stops, rewrites nor removes
+`opamp-fleet-agents`, withdraws nothing from the process account, and leaves a Windows record
+unread. The second service then runs a program that does not know `run --agents` and fails at every
+start. Before installing such a release, drop the process account with the release you run —
+`opamp-fleet service install --no-process-account` — and then install the older one.
+
+#### When the install refuses
+
+Every refusal comes before anything is written and names the way out. The ones you will meet:
+
+| Message about | What to do |
+|---|---|
+| `… does not exist on this host. Create it first (…)` | Create the account with the command it shows, or name another. |
+| `… is root, and a process account never is` / `it is LocalSystem` | Run everything as root (`--run-as root`, no `--process-account`), or name an account of its own. |
+| `the Client runs as root` / `the Client runs as LocalSystem` | Name the Client's account with `--run-as`; on Windows `NT SERVICE\opamp-fleet`. |
+| `… is the account the Client runs as` | Name another account for the processes. |
+| `… has the primary group …, and the Client's account … is not in it` | Add the Client's account to the group with the command it shows. |
+| `… is a member of it beside the Client's account`, `… also the primary group of …`, `(gid 0)`, `… the primary group of the Client's account` | Give the process account a group of its own whose one member is the Client's account. |
+| `… names no account for the second service` | The unit or plist was edited: name one with `--process-account`, or drop it with `--no-process-account`. |
+| `a process account needs the second service, which only a system service under systemd …` | Not available at user scope or under another service manager. |
+| `… is, or lies in, …, the directory of the second service's socket` | Name a data root and a layout root outside it. |
+| `would need a password` / `belongs to another service` | Use a passwordless form: `NT SERVICE\opamp-fleet-agents`, a gMSA, `LocalService`, `NetworkService`. |
+| `what the former account … was granted cannot be withdrawn` | Windows: the former account, a gMSA among them, cannot be resolved. Run the install again once its domain is reachable. |
+| `… records what an install left to finish and cannot be read` | Windows: the record's key is not the install's own. Look at it, remove it, and install again. |
+| `another install, uninstall, start or stop still holds the install lock` | Windows: wait for the other run, or end it. |
+
+At run time, the Client logs `the second service is refused; no program starts until the process
+account serves this build on its socket` when the second service does not admit it: it serves
+another account than the one the Client runs as, or another build. `service install` again writes
+both registrations from one decision.
 
 ### Files beside the program
 
@@ -680,7 +960,9 @@ One name on every platform, and it is the **product's** name — not the program
 | **Windows** (SCM) | `opamp-fleet` |
 
 So the same command works everywhere it exists: `systemctl status opamp-fleet`,
-`launchctl list opamp-fleet`, `sc query opamp-fleet`.
+`launchctl list opamp-fleet`, `sc query opamp-fleet`. Where a
+[process account](#managed-processes-under-a-process-account) is registered, the second service
+is `opamp-fleet-agents` on every platform.
 
 The name is fixed when the program is built, which is why there is no flag to change it. A second
 Client on one host is a second build with its own product name, and it therefore has its own
@@ -1436,7 +1718,9 @@ effect when the Client next starts.
   Supervisor whose configuration language can run commands as the Client's account — a Telegraf
   `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command` Supervisor's program
   reads — is named in `remote_config_disabled`. Otherwise the Server can configure such a
-  Supervisor to rewrite this file, and the key changes at the next start. A signed Client build
+  Supervisor to rewrite this file, and the key changes at the next start. Where a
+  [process account](#managed-processes-under-a-process-account) is registered, those commands run
+  under it, and it cannot write this file. A signed Client build
   can still replace the Client itself where `[packages] self_update` consents, and that build reads the
   key.
 - **Switching it back on.** Set the key to `true`, or remove it, and restart the Client. Its own
@@ -2055,6 +2339,9 @@ its platform carries no signature, and the Server offers no unsigned entry.
 **A download fails naming an origin.** The offered URL, or a redirect hop, leads off this Client's
 own Server origin (see [Where a download may come from](#where-a-download-may-come-from)). This
 Server offers only paths, so the URL comes from a redirect or from a foreign Server.
+
+**An install refuses the process account, or no program starts behind it.** See
+[When the install refuses](#when-the-install-refuses).
 
 **Everything re-registered as new Agents after a move.** `supervisor_dir` changed, and the
 `instance-uid` files stayed behind in the old tree. That is expected; nothing migrates
