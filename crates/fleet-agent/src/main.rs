@@ -61,12 +61,19 @@ fn main() {
             config_path: cli.config,
             state_dir: cli.state_dir,
             service: false,
+            agents: None,
         }),
         Some(Command::Run(args)) => {
             let spec = RunSpec {
                 config_path: cli.config,
                 state_dir: cli.state_dir,
                 service: args.service,
+                agents: args.agents_socket.clone().zip(args.process_uid).map(
+                    |(socket, process_uid)| runtime::AgentsChannel {
+                        socket,
+                        process_uid,
+                    },
+                ),
             };
             run_command(spec, args)
         }
@@ -111,12 +118,18 @@ fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
 /// account (ADR-0059). Its channel is a Unix socket; Windows has none of it here.
 #[cfg(unix)]
 fn agents_service(socket: &Path, client_uid: u32) -> Result<(), String> {
-    fleet_agent::supervisor::channel::run_service(socket, client_uid)
+    use fleet_agent::supervisor::channel::{run_service, Served};
+    if run_service(socket, client_uid)? == Served::Superseded {
+        // Non-zero, as the Client's own exit for an update is: the service manager restarts only
+        // a service that failed (ADR-0019 clause 11).
+        std::process::exit(update::EXIT_RESTART_FOR_UPDATE);
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
 fn agents_service(_socket: &Path, _client_uid: u32) -> Result<(), String> {
-    Err("the agents service is not available on this platform".to_string())
+    Err("the second service is not available on this platform".to_string())
 }
 
 /// Dispatch a `service` verb (ADR-0019).
@@ -207,6 +220,16 @@ fn install(
         manager::service_name(),
     )?;
     let run_as = account.run_as;
+    // The process account, decided and checked by the same rule (ADR-0059 clause 1):
+    // `--process-account`, else the account the second service's unit names, else none — and then
+    // no second service, and nothing changes.
+    let process = run_as::decide_process_account(
+        args.process_account.as_deref(),
+        args.no_process_account,
+        manager::agents_registration(level)?.as_ref(),
+        run_as.as_ref(),
+        manager::agents_supported(level),
+    )?;
 
     // Everything baked into the unit is absolute: a service's working directory is `/` or
     // `System32`, so a relative path would silently point nowhere. An operator who named no path
@@ -352,7 +375,11 @@ fn install(
         config_path: config_path.clone(),
         state_dir: state_dir.clone(),
         run_as: run_as.as_ref().map(|r| r.account().to_string()),
+        agents: agents_spec(process.as_ref(), run_as.as_ref()),
     })?;
+    // Dropped (ADR-0059 clause 1): the Client's unit no longer names the second service, which is
+    // stopped and deregistered after it.
+    let dropped = args.no_process_account && manager::remove_agents(level)?;
 
     // The handover (ADR-0042 clause 2), on every registration that runs under an account — a kept
     // one and root included: both roots belong to it — config and state because the service reads
@@ -406,11 +433,50 @@ fn install(
             account.source.describe()
         );
     }
+    if let Some(process) = &process {
+        println!(
+            "  processes: {} ({}), started by {}",
+            process.account(),
+            process.describe(),
+            manager::agents_service_name()
+        );
+    }
+    if dropped {
+        println!(
+            "  processes: started by the Client itself once it restarts; {} was stopped and \
+             removed",
+            manager::agents_service_name()
+        );
+    }
     // Since service-manager 0.10, launchd installs do not auto-start; say the next step instead
     // of pretending.
     let user = if args.scope.user { " --user" } else { "" };
     println!("start it with: supervisor service start{user}");
     Ok(())
+}
+
+/// The second service a registration names, where a process account was decided (ADR-0059): it
+/// serves the Client's account, and the Client accepts the process account as its peer.
+#[cfg(unix)]
+fn agents_spec(
+    process: Option<&run_as::ProcessAccount>,
+    client: Option<&run_as::RunAs>,
+) -> Option<manager::Agents> {
+    let (process, client) = (process?, client?);
+    Some(manager::Agents {
+        account: process.account().to_string(),
+        uid: process.uid(),
+        client_uid: client.uid(),
+    })
+}
+
+/// No second service is registered here yet (ADR-0059).
+#[cfg(not(unix))]
+fn agents_spec(
+    _process: Option<&run_as::ProcessAccount>,
+    _client: Option<&run_as::RunAs>,
+) -> Option<manager::Agents> {
+    None
 }
 
 /// `service config`: the questionnaire of `install --interactive` against an installed Client, and

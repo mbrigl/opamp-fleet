@@ -154,15 +154,21 @@ impl Layout {
     /// # Errors
     /// Returns an error if the pointer cannot be inspected or repaired.
     pub fn heal_current(&self, running_dir: &Path) -> Result<bool, String> {
-        let points_at_us = std::fs::canonicalize(self.current())
-            .ok()
-            .zip(std::fs::canonicalize(running_dir).ok())
-            .is_some_and(|(current, running)| current == running);
-        if points_at_us {
+        if self.names(running_dir) {
             return Ok(false);
         }
         self.set_current(running_dir)?;
         Ok(true)
+    }
+
+    /// Whether `current` resolves to `version_dir`. A pointer or a directory that cannot be
+    /// resolved names nothing.
+    #[must_use]
+    pub fn names(&self, version_dir: &Path) -> bool {
+        std::fs::canonicalize(self.current())
+            .ok()
+            .zip(std::fs::canonicalize(version_dir).ok())
+            .is_some_and(|(current, version)| current == version)
     }
 }
 
@@ -588,6 +594,24 @@ mod tests {
         assert_eq!(std::fs::canonicalize(layout.current()).expect("resolve"), b);
         // Second run: nothing to do.
         assert!(!layout.heal_current(&b).expect("heal again"));
+    }
+
+    /// What tells the second service that a self-update left it behind (ADR-0059 clause 2):
+    /// `current` names one version directory, and no other.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn current_names_the_version_it_points_at_and_no_other() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = Layout::new(dir.path().canonicalize().expect("canonical tempdir"));
+        let a = layout.version_dir("supervisor-1.0.0-aaaaaaa");
+        let b = layout.version_dir("supervisor-2.0.0-bbbbbbb");
+        std::fs::create_dir_all(&a).expect("create a");
+        std::fs::create_dir_all(&b).expect("create b");
+        assert!(!layout.names(&a), "no pointer names nothing");
+        layout.set_current(&a).expect("point at a");
+        assert!(layout.names(&a));
+        assert!(!layout.names(&b));
     }
 
     #[test]
