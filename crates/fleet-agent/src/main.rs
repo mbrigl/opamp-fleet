@@ -535,6 +535,7 @@ fn install(
                 &layout_root,
                 &data_root,
                 &state_dir,
+                &supervisors_root,
                 &config_path,
                 &written.copies,
             ),
