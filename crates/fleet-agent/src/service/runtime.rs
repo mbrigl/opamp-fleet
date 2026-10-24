@@ -6,7 +6,11 @@
 //! `agent_disconnect` goodbye (the Baseline's final message) fires on every stop path, not only
 //! on Ctrl-C.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::shutdown::{shutdown_channel, Shutdown};
 
@@ -27,6 +31,17 @@ pub struct RunSpec {
     /// hidden `--service` marker `service install` writes into the command line on every platform,
     /// and the whole of the condition for writing the log file: it says no terminal is watching.
     pub service: bool,
+    /// The second service every Managed Process is started through, where a process account is
+    /// registered (ADR-0059 clause 3): from the hidden `--agents-socket` and `--process-uid` that
+    /// `service install --process-account` writes into the command line.
+    pub agents: Option<AgentsChannel>,
+}
+
+/// Where the second service listens, and the uid it must answer as (ADR-0059 clause 4).
+#[derive(Debug, Clone)]
+pub struct AgentsChannel {
+    pub socket: PathBuf,
+    pub process_uid: u32,
 }
 
 /// How a daemon run ended, which decides how the process leaves.
@@ -292,7 +307,18 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         crate::update::installer::Startup::RolledBack(_) => return Ok(Exit::RestartForUpdate),
     };
 
-    let mut engine = supervisor::build_engine(&config, &shutdown)?;
+    // A Client the self-update left behind ends as for its own update, through the shutdown that
+    // stops its Supervisors and says goodbye (ADR-0059 clause 2).
+    let left_behind = Arc::new(AtomicBool::new(false));
+    let spawner = match &spec.agents {
+        Some(agents) => {
+            let (spawner, told) = through_the_second_service(agents)?;
+            shutdown = or_left_behind(shutdown, told, Arc::clone(&left_behind));
+            spawner
+        }
+        None => supervisor::process::Spawner::Local,
+    };
+    let mut engine = supervisor::build_engine(&config, &shutdown, spawner)?;
     if config.self_update_package().is_some() {
         engine.arm_self_update(crate::update::installer::Installer::new(
             config.state_dir.clone(),
@@ -374,6 +400,9 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             // the last records are worth having — a crash-and-restart is what they explain.
             RunOutcome::Shutdown => {
                 telemetry.shutdown();
+                if left_behind.load(Ordering::SeqCst) {
+                    return Ok(Exit::RestartForUpdate);
+                }
                 return Ok(Exit::Normal);
             }
             RunOutcome::RestartForUpdate => {
@@ -469,6 +498,73 @@ fn heal_torn_pointer() {
     }
 }
 
+/// What resolves once the second service tells this Client that a self-update left it behind.
+type LeftBehind = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Every Managed Process of this run is started by the second service (ADR-0059 clause 3). The
+/// channel connects at the first start; a Client that cannot reach the service reports it per
+/// Supervisor and never starts a program itself. Beside the spawner: what resolves once the
+/// service turns out to be the build `current` names while this Client is not.
+#[cfg(unix)]
+fn through_the_second_service(
+    agents: &AgentsChannel,
+) -> Result<(supervisor::process::Spawner, LeftBehind), String> {
+    use crate::supervisor::channel::Channel;
+    tracing::info!(
+        socket = %agents.socket.display(),
+        process_uid = agents.process_uid,
+        "starting every Managed Process through the second service"
+    );
+    Ok(watched(Channel::new(&agents.socket, agents.process_uid)))
+}
+
+/// The spawner that starts every Managed Process through `channel`, and what resolves once the
+/// channel says that the self-update left this Client behind.
+#[cfg(unix)]
+fn watched(
+    channel: crate::supervisor::channel::Channel,
+) -> (supervisor::process::Spawner, LeftBehind) {
+    let watched = channel.clone();
+    (
+        supervisor::process::Spawner::Channel(channel),
+        Box::pin(async move { watched.left_behind().await }),
+    )
+}
+
+/// The run's shutdown where the second service starts its programs: `shutdown`, or `told`
+/// resolving — the self-update left this Client behind, and `left_behind` then says so, which
+/// ends the run for the restart that starts the version `current` names (ADR-0059 clause 2).
+fn or_left_behind(
+    mut shutdown: Shutdown,
+    told: LeftBehind,
+    left_behind: Arc<AtomicBool>,
+) -> Shutdown {
+    let (stop, run) = shutdown_channel();
+    tokio::spawn(async move {
+        tokio::select! {
+            () = shutdown.requested() => {}
+            () = told => {
+                tracing::info!(
+                    "the second service runs the version current names and this Client does \
+                     not; ending for the restart"
+                );
+                left_behind.store(true, Ordering::SeqCst);
+            }
+        }
+        let _ = stop.send(true);
+    });
+    run
+}
+
+/// No second service runs here yet (ADR-0059): a Client told of one refuses to start rather
+/// than start its programs itself.
+#[cfg(not(unix))]
+fn through_the_second_service(
+    _agents: &AgentsChannel,
+) -> Result<(supervisor::process::Spawner, LeftBehind), String> {
+    Err("the second service is not available on this platform".to_string())
+}
+
 /// Resolve to the platform shutdown signal: `SIGTERM` or `SIGINT` on Unix (what systemd and
 /// launchd send on stop), Ctrl-C on Windows (a console run; the SCM path never comes through
 /// here).
@@ -508,6 +604,67 @@ pub(crate) fn ignore_sighup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Client whose start meets a second service of another build, while `current` no longer
+    /// names its own version, ends its run as for its own update; one the operator stops ends as
+    /// stopped (ADR-0059 clause 2). From the start through the Spawner the run hands its
+    /// Supervisors to the end of the run's shutdown; what the run returns on it is the one line
+    /// after, reached only by a whole run against a Server.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_client_left_behind_ends_its_run_for_the_restart() {
+        use crate::supervisor::channel::{peer, read_frame, write_frame, Channel, Reply, Request};
+        use crate::supervisor::process::Launch;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        // The second service `current` names, which this Client is not.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let _ = read_frame::<_, Request>(&mut stream).await;
+                let hello = Reply::Hello {
+                    version: "0.0.0-the-build-current-names".to_string(),
+                };
+                let _ = write_frame(&mut stream, &hello).await;
+            }
+        });
+        let (spawner, told) = watched(Channel::with_superseded(&socket, peer::own_uid(), || true));
+        let (_operator, shutdown) = shutdown_channel();
+        let left_behind = Arc::new(AtomicBool::new(false));
+        let mut run = or_left_behind(shutdown, told, Arc::clone(&left_behind));
+        let started = spawner
+            .spawn(
+                "test",
+                Launch {
+                    program: PathBuf::from("/bin/true"),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    endpoint_token: None,
+                    working_dir: None,
+                    own_process_group: false,
+                },
+            )
+            .await;
+        assert!(started.is_err(), "started through another build");
+        tokio::time::timeout(std::time::Duration::from_secs(5), run.requested())
+            .await
+            .expect("the run ends");
+        assert!(left_behind.load(Ordering::SeqCst));
+
+        let (operator, shutdown) = shutdown_channel();
+        let left_behind = Arc::new(AtomicBool::new(false));
+        let mut run = or_left_behind(
+            shutdown,
+            Box::pin(std::future::pending()),
+            Arc::clone(&left_behind),
+        );
+        operator.send(true).expect("stop");
+        tokio::time::timeout(std::time::Duration::from_secs(5), run.requested())
+            .await
+            .expect("the run ends");
+        assert!(!left_behind.load(Ordering::SeqCst));
+    }
 
     /// A destination that comes into force while the connection holds is sampled from then on —
     /// not from the next reconnect, which on a healthy connection never comes.
@@ -579,6 +736,7 @@ mod tests {
             config_path: config.to_path_buf(),
             state_dir,
             service: false,
+            agents: None,
         };
         assert_eq!(
             recovery_state_dir(&spec(Some(flagged.clone()), &config_path)),
@@ -625,6 +783,7 @@ mod tests {
                 config_path: dir.path().join("supervisor.toml"),
                 state_dir: Some(state_dir.clone()),
                 service: true,
+                agents: None,
             },
             "supervisor \"x\": `main_config` is no longer a supervisor key".to_string(),
         );

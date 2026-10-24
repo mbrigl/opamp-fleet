@@ -1,9 +1,8 @@
 //! What the Linux maintainer scripts say and do (`packaging/linux/`), read as text the way
 //! `msi_exe_command.rs` reads the WiX source: the package is not built here, so the guidance the
 //! post-install shows an operator is checked by `cargo test` on every platform. The pre-removal is
-//! also run, on Unix, against a stub `systemctl`; its `service uninstall` names the installed
-//! payload, which a host without the package does not have — run as root on a host with the
-//! package installed, that test would unregister its service.
+//! also run, on Unix, from a copy whose payload path names a stub that only records its arguments,
+//! so the test touches no installed service.
 
 use std::path::Path;
 
@@ -231,22 +230,29 @@ fn no_maintainer_script_removes_the_account() {
 #[cfg(unix)]
 #[test]
 fn the_pre_removal_acts_only_on_a_real_removal() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const PAYLOAD: &str = "/usr/libexec/opamp-fleet/supervisor";
+    let original = maintainer_script("prerm");
+    assert!(
+        original.contains(PAYLOAD),
+        "the pre-removal names the payload"
+    );
     let dir = tempfile::tempdir().expect("tempdir");
-    let log = dir.path().join("systemctl.log");
-    let stub = dir.path().join("systemctl");
+    let calls = dir.path().join("calls");
+    let stub = dir.path().join("supervisor");
     std::fs::write(
         &stub,
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()),
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", calls.display()),
     )
     .expect("write the stub");
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/linux/prerm");
-    let path = format!(
-        "{}:{}",
-        dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let script = dir.path().join("prerm");
+    std::fs::write(
+        &script,
+        original.replace(PAYLOAD, &stub.display().to_string()),
+    )
+    .expect("write the copy");
     for (argument, removal) in [
         ("remove", true),
         ("0", true),
@@ -256,19 +262,41 @@ fn the_pre_removal_acts_only_on_a_real_removal() {
         ("1", false),
         ("2", false),
     ] {
-        let _ = std::fs::remove_file(&log);
+        // The stub's record shows whether the script went on past its fall-through.
+        let _ = std::fs::remove_file(&calls);
         let status = std::process::Command::new("sh")
             .arg(&script)
             .arg(argument)
-            .env("PATH", &path)
             .status()
             .expect("run the pre-removal");
         assert!(status.success(), "{argument}: {status}");
+        let record = std::fs::read_to_string(&calls).unwrap_or_default();
+        let stopped = record.lines().any(|line| line == "service stop");
         assert_eq!(
-            log.exists(),
-            removal,
-            "{argument}: stopped the service = {}",
-            log.exists()
+            stopped, removal,
+            "{argument}: stopped the service = {stopped}\n{record}"
         );
     }
+}
+
+/// A removal runs `service stop`, then `service uninstall` (ADR-0042 clause 3), and stops nothing
+/// by its unit name: the stop takes down the second service too, where a process account is
+/// registered (ADR-0059).
+/// Verifies: ADR-0042, ADR-0059
+#[test]
+fn the_pre_removal_stops_both_services_before_it_deregisters() {
+    let commands = commands(&maintainer_script("prerm"));
+    let position = |needle: &str| {
+        commands
+            .iter()
+            .position(|c| c.starts_with(needle))
+            .unwrap_or_else(|| panic!("no {needle} in {commands:#?}"))
+    };
+    let stop = position("/usr/libexec/opamp-fleet/supervisor service stop");
+    let uninstall = position("/usr/libexec/opamp-fleet/supervisor service uninstall");
+    assert!(stop < uninstall, "{commands:#?}");
+    assert!(
+        !commands.iter().any(|c| c.contains("systemctl stop")),
+        "{commands:#?}"
+    );
 }

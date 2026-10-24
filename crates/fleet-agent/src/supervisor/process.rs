@@ -20,7 +20,9 @@ use tracing::{info, instrument, warn, Instrument as _};
 
 use crate::install;
 use crate::shutdown::Shutdown;
-use crate::supervisor::ports::{EventSender, InstallTarget, ProcessCommand, ProcessEvent};
+use crate::supervisor::ports::{
+    EventSender, InstallTarget, ProcessCommand, ProcessEvent, REFUSED, UNREACHABLE,
+};
 use crate::supervisor::restart::{AfterFailure, RestartPolicy};
 use opamp::client::Backoff;
 
@@ -132,9 +134,10 @@ mod zeroizing_token {
 /// Who starts a Managed Process (ADR-0059): the Client itself, or the second service under the
 /// process account, through its channel. The Client starts its programs itself wherever no process
 /// account is registered.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Spawner {
     /// The Client starts the program as a child of its own.
+    #[default]
     Local,
     /// The second service starts it, on the Client's request (ADR-0059 clause 3).
     #[cfg(unix)]
@@ -161,6 +164,20 @@ impl Spawner {
                 .map(ManagedChild::Remote),
         }
     }
+
+    /// Reaches the second service now, or says why it is not reached; at once for the Client,
+    /// which starts its programs itself. A start may still not reach it: the service can go
+    /// between the two.
+    ///
+    /// # Errors
+    /// Returns why the second service was not reached, an error [`is_unreachable`] holds for.
+    pub async fn reach(&self) -> std::io::Result<()> {
+        match self {
+            Spawner::Local => Ok(()),
+            #[cfg(unix)]
+            Spawner::Channel(channel) => channel.reach().await,
+        }
+    }
 }
 
 fn spawn_local(launch: &Launch) -> std::io::Result<Child> {
@@ -180,6 +197,133 @@ fn spawn_local(launch: &Launch) -> std::io::Result<Child> {
         command.process_group(0);
     }
     command.spawn()
+}
+
+/// Whether `error` says that the second service was not reached, rather than that the program did
+/// not start or failed (ADR-0059 clause 2). Never so for a program the Client starts itself.
+#[must_use]
+pub fn is_unreachable(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    return crate::supervisor::channel::is_unreachable(error);
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Whether `error` says that the second service was reached and refused, or was refused: another
+/// account serves its socket, it is another build, or it refused the Client (ADR-0059 clauses 4
+/// and 5). [`is_unreachable`] holds for it too. Never so for a program the Client starts itself.
+#[must_use]
+pub fn is_refused(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    return crate::supervisor::channel::is_refused(error);
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// A start that found the second service unreachable, or a program that went with the service:
+/// no failed start of the program's, so the [`RestartPolicy`] does not count it and never holds
+/// for it. The start is tried again, with a backoff of its own, until the service is back
+/// (ADR-0059 clause 2).
+struct Waiting {
+    /// When the next start is due; `None` while nothing waits for the service.
+    due: Option<tokio::time::Instant>,
+    /// Whether the last start did not reach the second service. A start made due at once by one
+    /// that did reach it (`due_now`) is due without the service being away.
+    away: bool,
+    backoff: Backoff,
+}
+
+impl Waiting {
+    fn new() -> Self {
+        Waiting {
+            due: None,
+            away: false,
+            backoff: Backoff::new(),
+        }
+    }
+
+    /// The service was not reached: the next start is due after the backoff.
+    fn arm(&mut self) {
+        self.due = Some(tokio::time::Instant::now() + self.backoff.advance());
+        self.away = true;
+    }
+
+    /// The service was reached by a start that decided nothing that waits for it: the start that
+    /// does is due now, and the service is not away.
+    fn due_now(&mut self) {
+        self.due = Some(tokio::time::Instant::now());
+        self.away = false;
+    }
+
+    /// The service was reached, or nothing is to start: nothing waits.
+    fn clear(&mut self) {
+        self.due = None;
+        self.away = false;
+        self.backoff.reset();
+    }
+
+    /// Resolves when the next start is due; never while nothing waits.
+    async fn due(&self) {
+        match self.due {
+            Some(due) => tokio::time::sleep_until(due).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Whether the last start did not reach the second service.
+    fn armed(&self) -> bool {
+        self.away
+    }
+}
+
+/// A configuration whose start did not reach the second service, or whose program went with the
+/// service during the apply grace: neither applied nor failed, so the Agent stays `APPLYING`, and
+/// the first start that reaches the service and survives the apply grace acknowledges it
+/// (ADR-0059 clause 2).
+struct OwedConfig {
+    hash: Vec<u8>,
+    /// The span of its apply.
+    span: tracing::Span,
+}
+
+/// A package that arrived while the second service could not be reached, or whose start did not
+/// reach it: staged and checked, never swapped in, so what ran before stays in place. It is
+/// swapped in, and gated, by the next start that may reach the service (ADR-0059 clause 2); until
+/// then the Agent reports it `Installing`.
+struct Parked {
+    staged: Staged,
+    version: String,
+    hash: Vec<u8>,
+    span: tracing::Span,
+}
+
+/// What the supervision loop of [`Runner::run`] carries from one event to the next.
+struct Supervision {
+    /// The Managed Process, while one runs.
+    child: Option<ManagedChild>,
+    /// Consecutive start failures, and when the current process started (ADR-0026): together they
+    /// stop a program that keeps crashing from being restarted forever. A process that runs
+    /// stably clears the streak; a command (config, package, restart) resets it.
+    policy: RestartPolicy,
+    backoff: Backoff,
+    waiting: Waiting,
+    /// A configuration whose acknowledgement waits for a start that reaches the second service
+    /// (ADR-0059 clause 2).
+    owed: Option<OwedConfig>,
+    /// A package that waits for the second service to be swapped in (ADR-0059 clause 2).
+    parked: Option<Parked>,
+}
+
+/// What a swap came to: gated, or taken back out to wait for the second service.
+enum Swapped {
+    Gated(GraceOutcome),
+    Parked(Staged),
 }
 
 /// A running Managed Process, whichever [`Spawner`] started it.
@@ -348,12 +492,35 @@ impl InstallTarget {
         self.remove(&staged.temp);
     }
 
-    /// Puts back what ran before.
+    /// Puts back what ran before. Where nothing is there to put back, what is live stays, so a
+    /// failed rollback never empties `program/` (ADR-0026 clause 62).
     fn restore(&self) -> Result<(), String> {
         let (live, backup) = (self.live(), self.backup());
+        if let Err(e) = std::fs::symlink_metadata(&backup) {
+            return Err(format!("cannot restore {}: {e}", live.display()));
+        }
         self.remove(&live);
         std::fs::rename(&backup, &live)
             .map_err(|e| format!("cannot restore {}: {e}", live.display()))
+    }
+
+    /// Takes a package that was swapped in back out to its staged name, and puts back what ran
+    /// before it (ADR-0059 clause 2). On an error what was live is live again: where the package
+    /// cannot be taken out it stays, and where what ran before cannot be put back the package is
+    /// put back, so `program/` is never left empty (ADR-0026 clause 62).
+    fn take_back(&self, staged: &Staged, has_backup: bool) -> Result<(), String> {
+        let live = self.live();
+        std::fs::rename(&live, &staged.temp)
+            .map_err(|e| format!("cannot take {} back out: {e}", live.display()))?;
+        if has_backup {
+            if let Err(e) = self.restore() {
+                return match std::fs::rename(&staged.temp, &live) {
+                    Ok(()) => Err(e),
+                    Err(back) => Err(format!("{e}; nor can the package be put back: {back}")),
+                };
+            }
+        }
+        Ok(())
     }
 
     /// The marker beside a retained backup (ADR-0026): a sibling file holding the Unix-seconds
@@ -492,18 +659,25 @@ pub struct Runner {
 
 impl Runner {
     pub async fn run(mut self, mut shutdown: Shutdown) {
-        // Consecutive start failures, and when the current process started (ADR-0026): together they
-        // stop a program that keeps crashing from being restarted forever. A process that runs
-        // stably clears the streak; a command (config, package, restart) resets it.
-        let mut policy = RestartPolicy::new(self.apply_grace, Instant::now());
-        let mut backoff = Backoff::new();
+        let mut s = Supervision {
+            child: None,
+            policy: RestartPolicy::new(self.apply_grace, Instant::now()),
+            backoff: Backoff::new(),
+            waiting: Waiting::new(),
+            owed: None,
+            parked: None,
+        };
         // Clear any predecessor whose retention window already elapsed while the Client was down
         // (ADR-0026) — the deadline is wall-clock, so a restart is exactly when one may have passed.
         self.sweep_backup();
         // What runs today, before it runs: a Collector without the opampextension never reports
         // its own version, and one that is not configured yet never even starts.
         self.probe_version();
-        let mut child = self.spawn_if_due().await;
+        // A start through the second service may wait for it to come back; a shutdown does not.
+        s.child = tokio::select! {
+            child = self.spawn_if_due(&mut s.waiting) => child,
+            _ = shutdown.requested() => None,
+        };
 
         // Honour the retention window even when the Client stays up past it. Cheap and coarse: a
         // day-long window does not need a tight tick, and the sweep itself is a stat plus a delete.
@@ -511,23 +685,58 @@ impl Runner {
         sweep.tick().await; // the first tick is immediate; the startup sweep above already ran
 
         loop {
+            // The retry is the start for what waits for the second service, so it is due with a
+            // program running too: one a restart command started on the current files.
+            let retry = s.child.is_none() || s.owed.is_some() || s.parked.is_some();
             let exited = async {
-                match child.as_mut() {
+                match s.child.as_mut() {
                     Some(c) => c.wait().await,
                     None => std::future::pending().await,
                 }
             };
             tokio::select! {
                 _ = sweep.tick() => self.sweep_backup(),
+                // The second service was not reached: try again, as long as no shutdown comes
+                // first (ADR-0059 clause 2). A package that waits for it is what is started then,
+                // and a configuration owed its acknowledgement is decided by this start.
+                () = s.waiting.due(), if retry => {
+                    if let Some(package) = s.parked.take() {
+                        if self.install(package, &mut s, &mut shutdown).await {
+                            break;
+                        }
+                        continue;
+                    }
+                    // What a restart command started acknowledges nothing (ADR-0017 clause 8).
+                    stop(&mut s.child, self.stop_timeout, &self.name).await;
+                    let started = tokio::select! {
+                        started = self.spawn_if_due(&mut s.waiting) => started,
+                        _ = shutdown.requested() => break,
+                    };
+                    if self.started(started, &mut s, &mut shutdown).await {
+                        break;
+                    }
+                }
                 command = self.commands.recv() => match command {
                     Some(ProcessCommand::ApplyConfig { config, span }) => {
-                        policy.fresh_chance(); // a new configuration (ADR-0026)
-                        backoff.reset();
+                        s.policy.fresh_chance(); // a new configuration (ADR-0026)
+                        s.backoff.reset();
+                        // A configuration still owed its acknowledgement is superseded by this
+                        // one, whose status the Agent reports from now on.
+                        s.owed = None;
+                        // A package waits for the second service: the start that swaps it in is
+                        // this configuration's start too, and decides it.
+                        if let Some(package) = s.parked.take() {
+                            s.owed = Some(OwedConfig { hash: config.config_hash, span });
+                            if self.install(package, &mut s, &mut shutdown).await {
+                                break;
+                            }
+                            continue;
+                        }
                         // In place first (ADR-0017): a kind that declared a reload keeps its
                         // process — and its in-flight state — across the change; anything short
                         // of a survived grace falls back to the restart below.
                         match self
-                            .try_reload(&mut child, &mut shutdown)
+                            .try_reload(&mut s.child, &mut shutdown)
                             .instrument(span.clone())
                             .await
                         {
@@ -550,51 +759,24 @@ impl Runner {
                         // work to this apply. An unentered span still carries the phase's duration,
                         // which is what this one is here for.
                         let restart = tracing::info_span!(parent: &span, "restart");
-                        stop(&mut child, self.stop_timeout, &self.name).await;
-                        child = self.spawn_if_due().await;
+                        stop(&mut s.child, self.stop_timeout, &self.name).await;
+                        let started = self.spawn_if_due(&mut s.waiting).await;
                         drop(restart);
-                        policy.started(Instant::now());
-                        // Applying means running on the new files — and surviving the apply
-                        // grace (ADR-0017's health-gated acknowledgement): a process that exits
-                        // right away has rejected its configuration the only way a process can.
-                        let started = child.take();
-                        let ran = started.is_some();
-                        let outcome = if !ran && (self.build)().is_none() {
-                            GraceOutcome::Ok // nothing should run; that is the config
-                        } else {
-                            self.gate(started, &mut child, &mut shutdown)
-                                .instrument(span.clone())
-                                .await
-                        };
-                        let result = match outcome {
-                            GraceOutcome::Ok => Ok(()),
-                            GraceOutcome::Failed(e) => Err(e),
-                            // Shutting down mid-grace: no acknowledgement — the goodbyes carry no
-                            // status anyway — just stop gracefully on the way out.
-                            GraceOutcome::ShuttingDown => break,
-                        };
-                        // A process that started and then failed the gate exited within the grace.
-                        let exited_in_grace = ran && result.is_err();
-                        match &result {
-                            Ok(()) => crate::telemetry::succeeded(&span),
-                            Err(e) => crate::telemetry::failed(&span, e),
-                        }
-                        self.events
-                            .send(ProcessEvent::ConfigApplied { hash: config.config_hash, result })
-                            .await;
-                        if exited_in_grace {
-                            // Stay supervised: a flaky-but-valid configuration is retried with
-                            // backoff — but not forever (ADR-0026): a configuration that will not
-                            // start is held after a few tries rather than spun on.
-                            if self
-                                .respawn_or_hold(&mut child, &mut policy, &mut backoff, &mut shutdown)
-                                .await
-                            {
-                                break;
-                            }
+                        // The configuration is owed its acknowledgement until its start decides
+                        // it, exactly as one that waits for the second service is.
+                        s.owed = Some(OwedConfig { hash: config.config_hash, span });
+                        if self.started(started, &mut s, &mut shutdown).await {
+                            break;
                         }
                     }
                     Some(ProcessCommand::ApplyPackage { staged, version, hash, span }) => {
+                        // A newer offer replaces the one that waits for the second service: what
+                        // was staged for it goes, and nothing is reported for it — the Agent
+                        // reports the newer one (ADR-0059 clause 2).
+                        if let Some(superseded) = s.parked.take() {
+                            info!(supervisor = %self.name, version = %superseded.version, "a package that waited for the second service is replaced by a newer one");
+                            self.discard(&superseded);
+                        }
                         // Unpack beside what runs and prove it starts, *before* anything is
                         // stopped (ADR-0017): a package that could never have run costs no
                         // downtime, and the reason it could not is the linker's own.
@@ -615,62 +797,43 @@ impl Runner {
                                 continue;
                             }
                         };
-                        // Swap the binary, restart, and health-gate on the apply grace — a binary
-                        // that will not stay up is rolled back to the bytes it replaced (ADR-0026).
-                        stop(&mut child, self.stop_timeout, &self.name).await;
-                        policy.fresh_chance(); // a new package (ADR-0026)
-                        backoff.reset();
-                        let result = self
-                            .swap_and_gate(prepared, &version, &mut child, &mut shutdown)
-                            .instrument(span.clone())
-                            .await;
-                        if child.is_none() && !matches!(result, GraceOutcome::ShuttingDown) {
-                            child = self.spawn_if_due().await;
-                            policy.started(Instant::now());
+                        s.policy.fresh_chance(); // a new package (ADR-0026)
+                        s.backoff.reset();
+                        let package = Parked { staged: prepared, version, hash, span };
+                        // The second service is away: staged and kept, never swapped in, so what
+                        // ran stays in place until a start can reach the service (ADR-0059
+                        // clause 2).
+                        if s.waiting.armed() {
+                            info!(supervisor = %self.name, version = %package.version, "package staged; it is swapped in once the second service is back");
+                            s.parked = Some(package);
+                            continue;
                         }
-                        match result {
-                            GraceOutcome::Ok => {
-                                policy.started(Instant::now());
-                                // A new binary is a new version, and the Agent's `service.version`
-                                // is what the program says about itself — so ask it again. Without
-                                // this the swap is reported as installed while the Agent goes on
-                                // describing the version it replaced, until the Client restarts.
-                                self.probe_version();
-                                crate::telemetry::succeeded(&span);
-                                self.events
-                                    .send(ProcessEvent::PackageApplied { hash, result: Ok(version) })
-                                    .await;
-                            }
-                            GraceOutcome::Failed(error) => {
-                                crate::telemetry::failed(&span, &error);
-                                self.events
-                                    .send(ProcessEvent::PackageApplied { hash, result: Err(error) })
-                                    .await;
-                                // Stay supervised, exactly as a failed ApplyConfig does — and, like
-                                // it, held rather than spun on once it keeps failing (ADR-0026).
-                                if self
-                                     .respawn_or_hold(&mut child, &mut policy, &mut backoff, &mut shutdown)
-                                    .await
-                                {
-                                    break;
-                                }
-                            }
-                            GraceOutcome::ShuttingDown => break,
+                        if self.install(package, &mut s, &mut shutdown).await {
+                            break;
                         }
                     }
+                    // A respawn on the current files, and nothing more (ADR-0017 clause 8): it
+                    // acknowledges no configuration and swaps in no package that waits for the
+                    // second service. Unless it found the service away, the retry for what waits
+                    // is due at once (ADR-0059 clause 2).
                     Some(ProcessCommand::Restart) => {
-                        stop(&mut child, self.stop_timeout, &self.name).await;
-                        policy.fresh_chance(); // an operator restart (ADR-0026)
-                        backoff.reset();
-                        child = self.spawn_if_due().await;
-                        policy.started(Instant::now());
+                        stop(&mut s.child, self.stop_timeout, &self.name).await;
+                        s.policy.fresh_chance(); // an operator restart (ADR-0026)
+                        s.backoff.reset();
+                        s.child = self.spawn_if_due(&mut s.waiting).await;
+                        if s.child.is_some() {
+                            s.policy.started(Instant::now());
+                        }
+                        if !s.waiting.armed() && (s.owed.is_some() || s.parked.is_some()) {
+                            s.waiting.due_now();
+                        }
                     }
                     Some(ProcessCommand::Uninstall) => {
                         // Retired for good (ADR-0017): the generic uninstall is exactly the
                         // graceful stop — nothing the generic Runner installs lives outside the
                         // Supervisor's directory, and that directory is the core's to purge
                         // (ADR-0017) once this answer is out.
-                        stop(&mut child, self.stop_timeout, &self.name).await;
+                        stop(&mut s.child, self.stop_timeout, &self.name).await;
                         self.events
                             .send(ProcessEvent::Uninstalled { result: Ok(()) })
                             .await;
@@ -679,9 +842,23 @@ impl Runner {
                     Some(ProcessCommand::Shutdown) | None => break,
                 },
                 status = exited => {
+                    // The program went with the second service, which the service manager brings
+                    // back: no exit of the program's, and nothing to hold (ADR-0059 clause 2).
+                    if status.as_ref().is_err_and(is_unreachable) {
+                        warn!(supervisor = %self.name, "the second service went, and the program with it; starting it again once the service is back");
+                        s.child = None;
+                        self.events
+                            .send(ProcessEvent::Health(unhealthy(
+                                UNREACHABLE.to_string(),
+                                "the second service went, and the program with it".to_string(),
+                            )))
+                            .await;
+                        s.waiting.arm();
+                        continue;
+                    }
                     let describe = describe_exit(status);
                     warn!(supervisor = %self.name, status = %describe, "process exited unexpectedly");
-                    child = None;
+                    s.child = None;
                     self.events
                         .send(ProcessEvent::Health(unhealthy(
                             format!("exited unexpectedly ({describe})"),
@@ -691,18 +868,21 @@ impl Runner {
                     // A process that had been up a while is ordinary supervision, not a start loop:
                     // its exit clears the streak (ADR-0026). One that keeps exiting quickly does not,
                     // so it is held after a few tries rather than restarted forever.
-                    policy.exited(Instant::now());
-                    if self
-                        .respawn_or_hold(&mut child, &mut policy, &mut backoff, &mut shutdown)
-                        .await
-                    {
+                    s.policy.exited(Instant::now());
+                    if self.respawn_or_hold(&mut s, &mut shutdown).await {
                         break;
                     }
                 }
                 _ = shutdown.requested() => break,
             }
         }
-        stop(&mut child, self.stop_timeout, &self.name).await;
+        stop(&mut s.child, self.stop_timeout, &self.name).await;
+        // A package that waits was never swapped in: what runs is what the record names, and its
+        // staged files go with the Client (ADR-0059 clause 2). A restarted Client is offered it
+        // again.
+        if let Some(package) = s.parked.take() {
+            self.discard(&package);
+        }
     }
 
     /// Unpacks the artifact beside what runs and — when the plugin said how — proves the staged
@@ -724,10 +904,133 @@ impl Runner {
         Ok(staged)
     }
 
+    /// Throws away what was staged for a package that will not be swapped in.
+    fn discard(&self, package: &Parked) {
+        if let Some(target) = &self.install {
+            target.discard(&package.staged);
+        }
+    }
+
+    /// Swaps a staged package in, starts it and gates it (ADR-0026), and reports the outcome;
+    /// a package that fails is rolled back to its predecessor, which is started again.
+    ///
+    /// Swapped in only once the second service is reached (ADR-0059 clause 2): until then the
+    /// package waits in `parked`, and what ran before stays in place, its retained predecessor
+    /// with it, so no package is live before a start that can run it — and a Client that ends
+    /// meanwhile, however it ends, leaves the program the record names. Where the service goes
+    /// after all, before the start reaches it or during the apply grace, the package is taken
+    /// back out to wait. A configuration owed its acknowledgement is decided by the start that
+    /// reaches the service: the package's, or, where the package fails, its predecessor's.
+    /// Returns `true` when shutdown was requested meanwhile.
+    async fn install(&self, package: Parked, s: &mut Supervision, shutdown: &mut Shutdown) -> bool {
+        let reached = tokio::select! {
+            reached = self.spawner.reach() => reached,
+            _ = shutdown.requested() => {
+                s.parked = Some(package);
+                return true;
+            }
+        };
+        if let Err(e) = reached {
+            info!(supervisor = %self.name, version = %package.version, error = %e, "the second service cannot be reached; the package waits for it, and what runs stays in place");
+            s.waiting.arm();
+            self.events
+                .send(ProcessEvent::Health(unhealthy(
+                    why_unreached(&e).to_string(),
+                    format!("a package waits for it: {e}"),
+                )))
+                .await;
+            s.parked = Some(package);
+            return false;
+        }
+        let Parked {
+            staged,
+            version,
+            hash,
+            span,
+        } = package;
+        // Swap the binary, restart, and health-gate on the apply grace — a binary that will not
+        // stay up is rolled back to the bytes it replaced (ADR-0026).
+        stop(&mut s.child, self.stop_timeout, &self.name).await;
+        let swapped = self
+            .swap_and_gate(staged, &version, &mut s.child, &mut s.waiting, shutdown)
+            .instrument(span.clone())
+            .await;
+        let outcome = match swapped {
+            Swapped::Gated(outcome) => outcome,
+            Swapped::Parked(staged) => {
+                let package = Parked {
+                    staged,
+                    version,
+                    hash,
+                    span,
+                };
+                s.parked = Some(package);
+                return false;
+            }
+        };
+        match outcome {
+            GraceOutcome::Ok => {
+                if s.child.is_none() {
+                    // Nothing to run yet: the configuration that arrives starts it.
+                    s.child = self.spawn_if_due(&mut s.waiting).await;
+                }
+                s.policy.started(Instant::now());
+                // A new binary is a new version, and the Agent's `service.version` is what the
+                // program says about itself — so ask it again. Without this the swap is reported
+                // as installed while the Agent goes on describing the version it replaced, until
+                // the Client restarts.
+                self.probe_version();
+                crate::telemetry::succeeded(&span);
+                self.events
+                    .send(ProcessEvent::PackageApplied {
+                        hash,
+                        result: Ok(version),
+                    })
+                    .await;
+                // The start that survived is the owed configuration's too.
+                if let Some(config) = s.owed.take() {
+                    self.settle(config, Ok(())).await;
+                }
+                false
+            }
+            GraceOutcome::Failed(error) => {
+                crate::telemetry::failed(&span, &error);
+                self.events
+                    .send(ProcessEvent::PackageApplied {
+                        hash,
+                        result: Err(error),
+                    })
+                    .await;
+                // The package's start failed, and counts as a failed start (ADR-0026 clause 63):
+                // what runs now — the predecessor, rolled back, or a first install kept in place
+                // — is started again once, unless the streak holds it, and stays supervised
+                // exactly as after a failed ApplyConfig. That start, not the package's, decides
+                // an owed configuration, and one that does not happen is not tried again, whether
+                // a configuration is owed or not (see `started`).
+                if let AfterFailure::Hold(failures) = s.policy.failed() {
+                    self.hold(failures, s).await;
+                    return false;
+                }
+                let started = tokio::select! {
+                    started = self.spawn_if_due(&mut s.waiting) => started,
+                    _ = shutdown.requested() => return true,
+                };
+                self.started(started, s, shutdown).await
+            }
+            GraceOutcome::ShuttingDown => true,
+            // Does not occur: the swap returns its gate's `Unreachable` as `Swapped::Parked`,
+            // handled above. Nothing to do were it to.
+            GraceOutcome::Unreachable => false,
+        }
+    }
+
     /// Swaps the staged artifact over the binary, respawns, and health-gates on the apply grace,
     /// rolling the binary back on failure (ADR-0026). The process is already stopped. On success
     /// `child` holds the running process; on failure the previous binary is restored (and the
-    /// caller respawns it).
+    /// caller respawns it). The second service was reached just before; where it has gone by the
+    /// start, or goes during the grace, the package is taken back out to its staged name and what
+    /// ran before is put back: it is [`Swapped::Parked`], neither installed nor failed (ADR-0059
+    /// clause 2).
     ///
     /// Everything here moves *files*: the old binary is renamed aside rather than read into
     /// memory, and the artifact is moved or streamed rather than loaded. A program can weigh
@@ -742,12 +1045,13 @@ impl Runner {
         staged: Staged,
         version: &str,
         child: &mut Option<ManagedChild>,
+        waiting: &mut Waiting,
         shutdown: &mut Shutdown,
-    ) -> GraceOutcome {
+    ) -> Swapped {
         let Some(target) = &self.install else {
-            return GraceOutcome::Failed(
+            return Swapped::Gated(GraceOutcome::Failed(
                 "this supervisor manages nothing a package can replace".to_string(),
-            );
+            ));
         };
         // Move what runs today aside — a rename, so it is atomic and costs nothing — and it is
         // what a failed package is rolled back from.
@@ -755,7 +1059,7 @@ impl Runner {
             Ok(has_backup) => has_backup,
             Err(e) => {
                 target.discard(&staged);
-                return GraceOutcome::Failed(e);
+                return Swapped::Gated(GraceOutcome::Failed(e));
             }
         };
         if let Err(e) = target.commit(&staged) {
@@ -764,31 +1068,72 @@ impl Runner {
                 let _ = target.restore();
             }
             target.discard(&staged);
-            return GraceOutcome::Failed(e);
+            return Swapped::Gated(GraceOutcome::Failed(e));
         }
         info!(supervisor = %self.name, version = %version, program = %target.live().display(), "package staged; restarting");
 
-        let started = self.try_spawn().await;
-        // "Nothing started" has two meanings, and only one of them is a failed install. A plugin
-        // with no process to run — a Collector that has not been configured yet — has not rejected
-        // the artifact: the binary is in place and will be started by the configuration when it
-        // arrives. `ApplyConfig` has always drawn this distinction; the package path must too, or
-        // installing onto a host that is not yet configured deletes what it just installed.
-        let nothing_to_run = started.is_err() && (self.build)().is_none();
-        match (&started, nothing_to_run) {
-            (Err(_), true) => {
-                info!(supervisor = %self.name, version = %version, "package installed; nothing to run until a configuration arrives");
+        // A start through the second service may wait for it to come back; a shutdown does not,
+        // and leaves what ran before in place, as the record names it.
+        let started = tokio::select! {
+            started = self.try_spawn() => started,
+            _ = shutdown.requested() => {
+                match target.take_back(&staged, has_backup) {
+                    Ok(()) => target.discard(&staged),
+                    Err(e) => warn!(supervisor = %self.name, error = %e, "cannot take the package back out; it stays live"),
+                }
+                return Swapped::Gated(GraceOutcome::ShuttingDown);
             }
-            (Err(e), false) => {
-                warn!(supervisor = %self.name, error = %e, "the new binary would not start");
-            }
-            _ => {}
-        }
-        let outcome = if nothing_to_run {
-            GraceOutcome::Ok
-        } else {
-            self.gate(started.ok(), child, shutdown).await
         };
+        let outcome = match started {
+            // Not started because the second service was not reached: the package rejected
+            // nothing, and waits for the service out of the way (ADR-0059 clause 2).
+            Err(e) if is_unreachable(&e) => {
+                waiting.arm();
+                GraceOutcome::Unreachable
+            }
+            // "Nothing started" has two meanings, and only one of them is a failed install. A
+            // plugin with no process to run — a Collector that has not been configured yet — has
+            // not rejected the artifact: the binary is in place and will be started by the
+            // configuration when it arrives. `ApplyConfig` has always drawn this distinction; the
+            // package path must too, or installing onto a host that is not yet configured deletes
+            // what it just installed.
+            Err(_) if (self.build)().is_none() => {
+                waiting.clear();
+                info!(supervisor = %self.name, version = %version, "package installed; nothing to run until a configuration arrives");
+                GraceOutcome::Ok
+            }
+            Err(e) => {
+                waiting.clear();
+                warn!(supervisor = %self.name, error = %e, "the new binary would not start");
+                self.gate(None, child, shutdown).await
+            }
+            Ok(proc) => {
+                waiting.clear();
+                let outcome = self.gate(Some(proc), child, shutdown).await;
+                if matches!(outcome, GraceOutcome::Unreachable) {
+                    waiting.arm();
+                }
+                outcome
+            }
+        };
+        if matches!(outcome, GraceOutcome::Unreachable) {
+            info!(supervisor = %self.name, version = %version, "the second service went before the package proved itself; the package waits for it, and what ran before is put back");
+            return match target.take_back(&staged, has_backup) {
+                Ok(()) => Swapped::Parked(staged),
+                // The package stays live: concluded as a failed install, which puts back what
+                // ran before where there is one to put back.
+                Err(e) => {
+                    warn!(supervisor = %self.name, error = %e, "cannot take the package back out");
+                    self.conclude(target, has_backup, GraceOutcome::Failed(e))
+                }
+            };
+        }
+        self.conclude(target, has_backup, outcome)
+    }
+
+    /// Concludes a swap on its gate's `outcome` (ADR-0026): rolls back to the predecessor after a
+    /// failure, keeps it for the retention window after a success.
+    fn conclude(&self, target: &InstallTarget, has_backup: bool, outcome: GraceOutcome) -> Swapped {
         match (&outcome, has_backup) {
             // Roll back to what ran before, so the next respawn is the old, known one.
             (GraceOutcome::Failed(_), true) => {
@@ -814,7 +1159,78 @@ impl Runner {
             (_, true) => self.retain_backup(target),
             (_, false) => {}
         }
-        outcome
+        Swapped::Gated(outcome)
+    }
+
+    /// Reports the acknowledgement of a configuration: `APPLIED`, or `FAILED` with the reason.
+    async fn settle(&self, config: OwedConfig, result: Result<(), String>) {
+        match &result {
+            Ok(()) => crate::telemetry::succeeded(&config.span),
+            Err(e) => crate::telemetry::failed(&config.span, e),
+        }
+        self.events
+            .send(ProcessEvent::ConfigApplied {
+                hash: config.hash,
+                result,
+            })
+            .await;
+    }
+
+    /// Takes in a program just started — by an apply, by the retry after the second service was
+    /// not reached, or after a failed package — and, where a configuration is owed its
+    /// acknowledgement, gates it and settles it (ADR-0017's health-gated acknowledgement): applying
+    /// means running on the new files and surviving the apply grace. A start that did not reach
+    /// the service leaves it owed (ADR-0059 clause 2). Returns `true` when shutdown was requested
+    /// meanwhile.
+    ///
+    /// Only a program that ran and exited within the grace is started again (ADR-0026 clause 63):
+    /// a start that did not happen — the program is not there, or cannot be executed — has
+    /// already said why in its health, and starting the same files again would only say so once
+    /// more.
+    async fn started(
+        &self,
+        started: Option<ManagedChild>,
+        s: &mut Supervision,
+        shutdown: &mut Shutdown,
+    ) -> bool {
+        let ran = started.is_some();
+        if ran {
+            s.policy.started(Instant::now());
+        }
+        let Some(config) = s.owed.take() else {
+            s.child = started;
+            return false;
+        };
+        let outcome = if !ran && s.waiting.armed() {
+            s.owed = Some(config);
+            return false; // still away: owed on
+        } else if !ran && (self.build)().is_none() {
+            GraceOutcome::Ok // nothing should run, as the apply itself would have found
+        } else {
+            self.gate(started, &mut s.child, shutdown)
+                .instrument(config.span.clone())
+                .await
+        };
+        let result = match outcome {
+            GraceOutcome::Ok => Ok(()),
+            GraceOutcome::Failed(e) => Err(e),
+            // Shutting down mid-grace: no acknowledgement — the goodbyes carry no status anyway —
+            // just stop gracefully on the way out.
+            GraceOutcome::ShuttingDown => return true,
+            // Neither applied nor failed: the start that reaches the second service again decides
+            // it (ADR-0059 clause 2).
+            GraceOutcome::Unreachable => {
+                s.waiting.arm();
+                s.owed = Some(config);
+                return false;
+            }
+        };
+        let exited_in_grace = ran && result.is_err();
+        self.settle(config, result).await;
+        // Stay supervised: a flaky-but-valid configuration is retried with backoff — but not
+        // forever (ADR-0026): a configuration that will not start is held after a few tries
+        // rather than spun on.
+        exited_in_grace && self.respawn_or_hold(s, shutdown).await
     }
 
     /// Keeps the version a successful update superseded, or drops it now (ADR-0026). With retention
@@ -848,37 +1264,52 @@ impl Runner {
     /// failing to stay up, **holds** it down instead of spinning (ADR-0026). A held Supervisor
     /// reports unhealthy and waits: the next configuration, package, or restart is a fresh chance
     /// and resets the streak. Returns `true` when shutdown was requested mid-wait.
-    async fn respawn_or_hold(
-        &self,
-        child: &mut Option<ManagedChild>,
-        policy: &mut RestartPolicy,
-        backoff: &mut Backoff,
-        shutdown: &mut Shutdown,
-    ) -> bool {
-        let delay = match policy.failed() {
-            AfterFailure::Retry => backoff.advance(),
+    ///
+    /// A start that finds the second service unreachable is no failed start: it is left to
+    /// `waiting`, and the streak is not counted for it (ADR-0059 clause 2).
+    async fn respawn_or_hold(&self, s: &mut Supervision, shutdown: &mut Shutdown) -> bool {
+        let delay = match s.policy.failed() {
+            AfterFailure::Retry => s.backoff.advance(),
             AfterFailure::Hold(failures) => {
-                warn!(
-                    supervisor = %self.name, restarts = failures,
-                    "not restarting: the program keeps failing to start — holding until a new configuration, package, or restart"
-                );
-                self.events
-                    .send(ProcessEvent::Health(unhealthy(
-                        "not restarting: the program keeps failing to start".to_string(),
-                        format!("held after {failures} failed starts in a row"),
-                    )))
-                    .await;
-                *child = None;
+                self.hold(failures, s).await;
                 return false;
             }
         };
         tokio::select! {
-            _ = tokio::time::sleep(delay) => {
-                *child = self.spawn_if_due().await;
-                policy.started(Instant::now());
+            _ = tokio::time::sleep(delay) => {}
+            _ = shutdown.requested() => return true,
+        }
+        // A start through the second service may wait for it to come back; a shutdown does not.
+        tokio::select! {
+            started = self.spawn_if_due(&mut s.waiting) => {
+                s.child = started;
+                s.policy.started(Instant::now());
                 false
             }
             _ = shutdown.requested() => true,
+        }
+    }
+
+    /// Holds the program down after `failures` failed starts in a row, and says so (ADR-0026
+    /// clause 63): it is not started again until a new configuration, package, or restart. A
+    /// configuration owed its acknowledgement — held after the package that was to be its start
+    /// failed — is no longer waited for: no start comes to decide it, so it is `FAILED`
+    /// (ADR-0059 clause 2).
+    async fn hold(&self, failures: usize, s: &mut Supervision) {
+        warn!(
+            supervisor = %self.name, restarts = failures,
+            "not restarting: the program keeps failing to start — holding until a new configuration, package, or restart"
+        );
+        let held = format!("held after {failures} failed starts in a row");
+        self.events
+            .send(ProcessEvent::Health(unhealthy(
+                "not restarting: the program keeps failing to start".to_string(),
+                held.clone(),
+            )))
+            .await;
+        s.child = None;
+        if let Some(config) = s.owed.take() {
+            self.settle(config, Err(held)).await;
         }
     }
 
@@ -898,6 +1329,18 @@ impl Runner {
             Some(mut proc) if !self.apply_grace.is_zero() => {
                 tokio::select! {
                     status = proc.wait() => {
+                        // The program went with the second service: it rejected nothing, and the
+                        // start that reaches the service again decides (ADR-0059 clause 2).
+                        if status.as_ref().is_err_and(is_unreachable) {
+                            warn!(supervisor = %self.name, "the second service went during the apply grace, and the program with it");
+                            self.events
+                                .send(ProcessEvent::Health(unhealthy(
+                                    UNREACHABLE.to_string(),
+                                    "the second service went, and the program with it".to_string(),
+                                )))
+                                .await;
+                            return GraceOutcome::Unreachable;
+                        }
                         let describe = describe_exit(status);
                         warn!(supervisor = %self.name, status = %describe, "process exited during the apply grace");
                         self.events
@@ -999,9 +1442,23 @@ impl Runner {
         }
     }
 
-    /// Spawns when the plugin says something should run, reporting health either way.
-    async fn spawn_if_due(&self) -> Option<ManagedChild> {
-        self.try_spawn().await.ok()
+    /// Spawns when the plugin says something should run, reporting health either way. A start
+    /// that does not reach the second service arms `waiting`; any other outcome clears it.
+    async fn spawn_if_due(&self, waiting: &mut Waiting) -> Option<ManagedChild> {
+        match self.try_spawn().await {
+            Ok(child) => {
+                waiting.clear();
+                Some(child)
+            }
+            Err(e) if is_unreachable(&e) => {
+                waiting.arm();
+                None
+            }
+            Err(_) => {
+                waiting.clear();
+                None
+            }
+        }
     }
 
     /// Spawns the Managed Process, keeping the reason when it fails.
@@ -1010,7 +1467,7 @@ impl Runner {
     /// with `ETXTBSY`, which is transient and says nothing about the artifact
     /// ([`install::is_text_file_busy`] states why). So the swap retries briefly rather than rolling
     /// back a binary that is perfectly good.
-    async fn try_spawn(&self) -> Result<ManagedChild, String> {
+    async fn try_spawn(&self) -> std::io::Result<ManagedChild> {
         let mut attempt = 0;
         loop {
             match self.spawn_once().await {
@@ -1022,7 +1479,7 @@ impl Runner {
                     );
                     tokio::time::sleep(install::BUSY_DELAY).await;
                 }
-                other => return other.map_err(|e| e.to_string()),
+                other => return other,
             }
         }
     }
@@ -1038,8 +1495,9 @@ impl Runner {
             return Err(std::io::Error::other("nothing to run"));
         };
         // What the agent writes into, guaranteed before it runs. A failure here is a spawn failure
-        // like any other: the Runner reports it and retries with backoff, rather than the process
-        // starting and exiting on a directory nobody made.
+        // like any other — reported in the health, and tried again with the next configuration,
+        // package, or restart — rather than the process starting and exiting on a directory nobody
+        // made.
         for dir in &spec.ensure_dirs {
             if let Err(e) = crate::storage::create_private_dir(dir) {
                 warn!(supervisor = %self.name, dir = %dir.display(), error = %e, "cannot prepare a directory the agent writes into");
@@ -1100,7 +1558,9 @@ impl Runner {
                 // is not there — a first install that failed and was undone, or a program never
                 // installed — is a Supervisor with no process, and saying so is more use to an
                 // operator than "spawn failed".
-                let status = if e.kind() == std::io::ErrorKind::NotFound {
+                let status = if is_unreachable(&e) {
+                    why_unreached(&e)
+                } else if e.kind() == std::io::ErrorKind::NotFound {
                     "no process installed"
                 } else {
                     "spawn failed"
@@ -1114,6 +1574,15 @@ impl Runner {
                 Err(e)
             }
         }
+    }
+}
+
+/// Why a start that did not reach the second service did not: [`REFUSED`] or [`UNREACHABLE`].
+fn why_unreached(error: &std::io::Error) -> &'static str {
+    if is_refused(error) {
+        REFUSED
+    } else {
+        UNREACHABLE
     }
 }
 
@@ -1349,6 +1818,10 @@ enum GraceOutcome {
     Failed(String),
     /// A shutdown was requested mid-grace; the caller stops without an acknowledgement.
     ShuttingDown,
+    /// The start did not reach the second service, or the program went with it during the grace:
+    /// neither applied nor failed, and the start that reaches the service again decides
+    /// (ADR-0059 clause 2).
+    Unreachable,
 }
 
 /// Installs a downloaded artifact as `path`: put in place beside it, made executable, then renamed
@@ -1527,6 +2000,165 @@ mod tests {
         assert!(output.status.success());
     }
 
+    /// A retry made due at once by a start that reached the second service — a restart command's —
+    /// is due without the service being away: a package offered before it runs is swapped in, not
+    /// parked for a service that is back (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_retry_due_at_once_does_not_say_the_service_is_away() {
+        let mut waiting = Waiting::new();
+        waiting.arm();
+        assert!(waiting.armed(), "a start that did not reach the service");
+        waiting.clear();
+        waiting.due_now();
+        assert!(!waiting.armed(), "the service was reached");
+        tokio::time::timeout(Duration::from_secs(1), waiting.due())
+            .await
+            .expect("the retry is due at once");
+    }
+
+    /// A Supervisor held after a package that failed leaves no configuration waiting: one owed its
+    /// acknowledgement — its start waited for the second service, and the package was to be its
+    /// start — is `FAILED`, not left `APPLYING` while nothing starts (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hold_after_a_failed_package_fails_the_configuration_it_owes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("agent");
+        let target = InstallTarget::Binary(live.clone());
+        let artifact = dir.path().join("downloaded");
+        std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
+        let staged = target.stage(&artifact, None).expect("stage");
+        let (event_tx, mut events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(1);
+        let (_shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
+        let apply_grace = Duration::from_millis(300);
+        let runner = package_runner(live, apply_grace, event_tx, command_rx);
+        let mut s = Supervision {
+            child: None,
+            policy: RestartPolicy::new(apply_grace, Instant::now()),
+            backoff: Backoff::new(),
+            waiting: Waiting::new(),
+            owed: Some(OwedConfig {
+                hash: b"cfg".to_vec(),
+                span: tracing::Span::none(),
+            }),
+            parked: None,
+        };
+        // Two failed starts already: the package's is the one the streak holds on.
+        for _ in 1..crate::supervisor::restart::MAX_CRASH_RESTARTS {
+            assert_eq!(s.policy.failed(), AfterFailure::Retry);
+        }
+        let package = Parked {
+            staged,
+            version: "9.9.9".to_string(),
+            hash: b"9.9.9".to_vec(),
+            span: tracing::Span::none(),
+        };
+        assert!(!runner.install(package, &mut s, &mut shutdown).await);
+        assert!(s.child.is_none(), "held");
+        assert!(s.owed.is_none(), "a configuration left waiting");
+        let mut config = None;
+        while let Ok((_, event)) = events.try_recv() {
+            if let ProcessEvent::ConfigApplied { hash, result } = event {
+                config = Some((hash, result));
+            }
+        }
+        let (hash, result) = config.expect("the configuration is decided");
+        assert_eq!(hash, b"cfg".to_vec());
+        let error = result.expect_err("FAILED");
+        assert!(error.contains("held after"), "{error}");
+    }
+
+    /// After a package that failed, only a predecessor that ran and exited within the grace is
+    /// started again: one that does not start at all — its interpreter is missing — has said why
+    /// in its health, and is not tried again, with no configuration owed just as with one
+    /// (ADR-0026 clause 63).
+    /// Verifies: ADR-0026
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_predecessor_that_does_not_start_after_a_failed_package_is_not_started_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("agent");
+        std::fs::write(&live, "#!/nonexistent/interpreter\n").expect("a predecessor");
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let target = InstallTarget::Binary(live.clone());
+        let artifact = dir.path().join("downloaded");
+        std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
+        let staged = target.stage(&artifact, None).expect("stage");
+        let (event_tx, mut events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(1);
+        let (_shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
+        let apply_grace = Duration::from_millis(300);
+        let runner = package_runner(live, apply_grace, event_tx, command_rx);
+        let mut s = Supervision {
+            child: None,
+            policy: RestartPolicy::new(apply_grace, Instant::now()),
+            backoff: Backoff::new(),
+            waiting: Waiting::new(),
+            owed: None,
+            parked: None,
+        };
+        let package = Parked {
+            staged,
+            version: "9.9.9".to_string(),
+            hash: b"9.9.9".to_vec(),
+            span: tracing::Span::none(),
+        };
+        assert!(!runner.install(package, &mut s, &mut shutdown).await);
+        assert!(s.child.is_none(), "nothing runs");
+        let mut not_started = 0;
+        while let Ok((_, event)) = events.try_recv() {
+            if let ProcessEvent::Health(health) = event {
+                if health.status == "no process installed" {
+                    not_started += 1;
+                }
+            }
+        }
+        assert_eq!(
+            not_started, 1,
+            "the predecessor is started once, after the package"
+        );
+    }
+
+    /// A Runner that installs packages over `live` and runs what is there.
+    #[cfg(unix)]
+    fn package_runner(
+        live: PathBuf,
+        apply_grace: Duration,
+        event_tx: mpsc::Sender<(usize, ProcessEvent)>,
+        command_rx: mpsc::Receiver<ProcessCommand>,
+    ) -> Runner {
+        let program = live.clone();
+        Runner {
+            name: "test".to_string(),
+            endpoint_token: zeroize::Zeroizing::default(),
+            stop_timeout: Duration::from_secs(5),
+            apply_grace,
+            install: Some(InstallTarget::Binary(live)),
+            retain_previous: Duration::ZERO,
+            archive_key: None,
+            version_probe: None,
+            preflight: None,
+            reload_signal: None,
+            spawner: Spawner::Local,
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || {
+                Some(ProcessSpec {
+                    program: program.clone(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: None,
+                    ensure_dirs: Vec::new(),
+                    own_process_group: false,
+                })
+            }),
+        }
+    }
+
     /// What the stand-in for the second service is asked to start; it runs nothing.
     #[cfg(unix)]
     fn shell(script: &str) -> Launch {
@@ -1558,6 +2190,30 @@ mod tests {
         let mut child = Some(ManagedChild::Remote(child));
         tokio::time::timeout(
             SIGNAL_ANSWER * 2 + timeout + Duration::from_secs(2),
+            stop(&mut child, timeout, "test"),
+        )
+        .await
+        .expect("the stop ends within its bound");
+        assert!(child.is_none());
+    }
+
+    /// The stop's bound holds too when the service reports no end of the program it was asked to
+    /// kill: the stop gives up on the report rather than waiting for it without end.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_is_not_held_up_by_a_kill_the_service_does_not_report() {
+        use crate::supervisor::channel::{peer, KILL_ANSWER, SIGNAL_ANSWER};
+        let peer = peer::connect(peer::deaf).await;
+        let child = peer
+            .channel
+            .start("test", shell("true"))
+            .await
+            .expect("start");
+        let timeout = Duration::from_millis(100);
+        let mut child = Some(ManagedChild::Remote(child));
+        tokio::time::timeout(
+            SIGNAL_ANSWER * 2 + timeout + KILL_ANSWER + Duration::from_secs(2),
             stop(&mut child, timeout, "test"),
         )
         .await
@@ -1614,6 +2270,278 @@ mod tests {
         };
         assert!(matches!(reloaded, Reloaded::ShuttingDown));
         assert!(child.is_some(), "the process is left for the stop");
+    }
+
+    /// A Runner whose every start goes to a second service at `socket`, and runs `/bin/true`.
+    #[cfg(unix)]
+    fn through_the_second_service(
+        socket: &std::path::Path,
+    ) -> (Runner, mpsc::Receiver<(usize, ProcessEvent)>) {
+        let (runner, events, commands) =
+            running_through_the_second_service(socket, PathBuf::from("/bin/true"), Vec::new());
+        // Never sent on: an end of the commands would end the Runner.
+        std::mem::forget(commands);
+        (runner, events)
+    }
+
+    /// A Runner whose every start goes to a second service at `socket`, and runs `program`; the
+    /// sender of its commands.
+    #[cfg(unix)]
+    fn running_through_the_second_service(
+        socket: &std::path::Path,
+        program: PathBuf,
+        args: Vec<String>,
+    ) -> (
+        Runner,
+        mpsc::Receiver<(usize, ProcessEvent)>,
+        mpsc::Sender<ProcessCommand>,
+    ) {
+        use crate::supervisor::channel::{peer, Channel};
+        let (event_tx, events) = mpsc::channel(256);
+        let (commands, command_rx) = mpsc::channel(16);
+        let runner = Runner {
+            endpoint_token: zeroize::Zeroizing::default(),
+            name: "test".to_string(),
+            stop_timeout: Duration::from_millis(100),
+            apply_grace: Duration::ZERO,
+            retain_previous: Duration::ZERO,
+            install: None,
+            archive_key: None,
+            version_probe: None,
+            preflight: None,
+            reload_signal: None,
+            spawner: Spawner::Channel(Channel::new(socket, peer::own_uid())),
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(move || {
+                Some(ProcessSpec {
+                    program: program.clone(),
+                    args: args.clone(),
+                    env: Vec::new(),
+                    working_dir: None,
+                    ensure_dirs: Vec::new(),
+                    own_process_group: false,
+                })
+            }),
+        };
+        (runner, events, commands)
+    }
+
+    /// The real second service on `socket`, until the sender is used or dropped.
+    #[cfg(unix)]
+    fn second_service(
+        socket: &std::path::Path,
+    ) -> (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<crate::supervisor::channel::Served>,
+    ) {
+        use crate::supervisor::channel::{bind, peer, serve};
+        let listener = bind(socket).expect("bind");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve(listener, peer::own_uid(), || false, async {
+            let _ = stopped.await;
+        }));
+        (stop, task)
+    }
+
+    /// The next health the Runner reports, within `within`.
+    #[cfg(unix)]
+    async fn next_health(
+        events: &mut mpsc::Receiver<(usize, ProcessEvent)>,
+        within: Duration,
+    ) -> ComponentHealth {
+        loop {
+            let (_, event) = tokio::time::timeout(within, events.recv())
+                .await
+                .expect("a health report in time")
+                .expect("an event");
+            if let ProcessEvent::Health(health) = event {
+                return health;
+            }
+        }
+    }
+
+    /// The second service stopped — its service manager restarts it, an operator stops it, the
+    /// host goes down — and stops the programs it started on the way: none of them exited on its
+    /// own, so however often the service goes, no exit is counted and the Supervisor is never
+    /// held; it starts the program again once the service is back (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_of_the_second_service_is_no_exit_of_the_programs() {
+        use crate::supervisor::restart::MAX_CRASH_RESTARTS;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let mut service = second_service(&socket);
+        let (runner, mut events, _commands) = running_through_the_second_service(
+            &socket,
+            PathBuf::from("/bin/sleep"),
+            vec!["300".to_string()],
+        );
+        let (shutdown_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let run = tokio::spawn(runner.run(shutdown));
+        for _ in 0..=MAX_CRASH_RESTARTS {
+            let running = next_health(&mut events, Duration::from_secs(30)).await;
+            assert_eq!(running.status, "running", "{running:?}");
+            let (stop, task) = service;
+            let _ = stop.send(());
+            assert_eq!(
+                task.await.expect("the service ended"),
+                crate::supervisor::channel::Served::Stopped
+            );
+            let gone = next_health(&mut events, Duration::from_secs(30)).await;
+            assert_eq!(
+                gone.status, UNREACHABLE,
+                "counted as the program's own exit"
+            );
+            service = second_service(&socket);
+        }
+        let running = next_health(&mut events, Duration::from_secs(30)).await;
+        assert_eq!(running.status, "running", "held: {running:?}");
+        shutdown_tx.send(true).expect("request the shutdown");
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("the Runner ends on the shutdown")
+            .expect("cleanly");
+        drop(service);
+    }
+
+    /// A start that finds the second service unreachable is no failed start: the Supervisor says
+    /// so and tries again with backoff, past the streak after which a program that keeps failing
+    /// is held (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_start_that_finds_the_second_service_unreachable_is_tried_again_and_never_held() {
+        use crate::supervisor::restart::MAX_CRASH_RESTARTS;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (runner, mut events) = through_the_second_service(&dir.path().join("agents.sock"));
+        let (shutdown_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let run = tokio::spawn(runner.run(shutdown));
+        let mut unreachable = 0;
+        while unreachable <= MAX_CRASH_RESTARTS + 1 {
+            let (_, event) = tokio::time::timeout(Duration::from_secs(600), events.recv())
+                .await
+                .expect("the Supervisor keeps trying")
+                .expect("an event");
+            if let ProcessEvent::Health(health) = event {
+                assert!(
+                    !health.status.contains("not restarting"),
+                    "held: {health:?}"
+                );
+                if health.status == UNREACHABLE {
+                    unreachable += 1;
+                }
+            }
+        }
+        shutdown_tx.send(true).expect("request the shutdown");
+        tokio::time::timeout(Duration::from_secs(60), run)
+            .await
+            .expect("the Runner ends on the shutdown")
+            .expect("cleanly");
+    }
+
+    /// A program that went with the second service did not exit on its own: the Supervisor says
+    /// that the service went, counts no failure, and waits for the service (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_program_that_went_with_the_second_service_is_no_failure_of_its_own() {
+        use crate::supervisor::channel::{peer, read_frame, write_frame, Reply, Request};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        // Starts one program, then goes — and stays away.
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            drop(listener);
+            while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
+                let reply = match request {
+                    Request::Hello { .. } => peer::hello(),
+                    Request::Start { id, .. } => {
+                        let _ =
+                            write_frame(&mut stream, &Reply::Started { id, pid: u32::MAX }).await;
+                        return;
+                    }
+                    _ => continue,
+                };
+                if write_frame(&mut stream, &reply).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let (runner, mut events) = through_the_second_service(&socket);
+        let (shutdown_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let run = tokio::spawn(runner.run(shutdown));
+        let mut running = false;
+        let gone = loop {
+            let (_, event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+                .await
+                .expect("an event in time")
+                .expect("an event");
+            let ProcessEvent::Health(health) = event else {
+                continue;
+            };
+            assert!(
+                !health.status.starts_with("exited unexpectedly"),
+                "counted as the program's own exit: {health:?}"
+            );
+            if health.status == "running" {
+                running = true;
+            } else if running {
+                break health;
+            }
+        };
+        assert_eq!(gone.status, UNREACHABLE);
+        shutdown_tx.send(true).expect("request the shutdown");
+        tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .expect("the Runner ends on the shutdown")
+            .expect("cleanly");
+    }
+
+    /// A socket another account serves is no outage: the Supervisor reports it as a refusal of its
+    /// own, so the Server tells a misconfigured host from a stopped service (ADR-0059 clause 4).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_socket_of_another_account_is_reported_refused_not_unreachable() {
+        use crate::supervisor::channel::{peer, Channel};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let (_stop, _service) = second_service(&socket);
+        let (mut runner, mut events, _commands) =
+            running_through_the_second_service(&socket, PathBuf::from("/bin/true"), Vec::new());
+        // The socket is served by this test's uid; the process account is said to be another.
+        runner.spawner = Spawner::Channel(Channel::new(&socket, peer::own_uid().wrapping_add(1)));
+        let (shutdown_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let run = tokio::spawn(runner.run(shutdown));
+        let health = next_health(&mut events, Duration::from_secs(30)).await;
+        assert_eq!(health.status, REFUSED, "{health:?}");
+        shutdown_tx.send(true).expect("request the shutdown");
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("the Runner ends on the shutdown")
+            .expect("cleanly");
+    }
+
+    /// A start that waits for the second service to come back is cut short by a shutdown: the
+    /// Supervisor does not wait out the reconnect before it stops (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shutdown_ends_a_start_waiting_for_the_second_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (runner, _events) = through_the_second_service(&dir.path().join("agents.sock"));
+        let (shutdown_tx, shutdown) = crate::shutdown::shutdown_channel();
+        let run = tokio::spawn(runner.run(shutdown));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!run.is_finished(), "the start waits for the service");
+        shutdown_tx.send(true).expect("request the shutdown");
+        tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .expect("the shutdown ends the waiting start")
+            .expect("cleanly");
     }
 
     // What remains here are the cases that reach *into* this module — a private helper and the
@@ -1755,6 +2683,51 @@ mod tests {
         assert!(target.sweep(1000), "at the deadline it is swept");
         assert!(!target.backup().exists(), "the previous version is gone");
         assert!(!target.backup_marker().exists(), "and so is its marker");
+    }
+
+    /// A package taken back out whose predecessor cannot be put back — here it is gone — is put
+    /// back itself, a file and a tree alike: `program/` is never left empty (ADR-0026 clause 62).
+    /// Verifies: ADR-0026
+    #[test]
+    fn a_package_taken_back_whose_predecessor_cannot_be_put_back_stays_live() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let targets = [
+            InstallTarget::Binary(dir.path().join("prog")),
+            InstallTarget::Tree {
+                root: dir.path().join("tree-root"),
+                program_path: PathBuf::from("bin/prog"),
+            },
+        ];
+        for target in targets {
+            let live = target.live();
+            let temp = live.with_extension("staged");
+            if matches!(target, InstallTarget::Tree { .. }) {
+                std::fs::create_dir_all(live.join("bin")).expect("mkdir");
+                std::fs::write(live.join("bin/prog"), b"the package").expect("write");
+            } else {
+                std::fs::write(&live, b"the package").expect("write");
+            }
+            let staged = Staged {
+                root: dir.path().to_path_buf(),
+                program: temp.clone(),
+                temp: temp.clone(),
+            };
+            let error = target
+                .take_back(&staged, true)
+                .expect_err("nothing to put back");
+            assert!(error.contains("cannot restore"), "{error}");
+            let program = match &target {
+                InstallTarget::Tree { .. } => live.join("bin/prog"),
+                InstallTarget::Binary(_) => live.clone(),
+            };
+            assert_eq!(
+                std::fs::read(&program).expect("live"),
+                b"the package",
+                "{}",
+                live.display()
+            );
+            assert!(!temp.exists(), "{}", temp.display());
+        }
     }
 
     /// A backup with no marker is not something this Runner retained (a half-finished install
