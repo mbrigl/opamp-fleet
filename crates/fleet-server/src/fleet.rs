@@ -2933,9 +2933,10 @@ pub struct HostAgentView {
 pub struct AgentView {
     pub instance_uid: String,
     /// The Agent *type* — the Baseline's "reverse FQDN that uniquely identifies the Agent type"
-    /// (ADR-0016). For a managed Collector this is the `dist.name` it was built with, so every
-    /// Collector of one distribution reports the same value. It answers "what is this", never
-    /// "which one is this": that is [`service_instance_name`](Self::service_instance_name).
+    /// (ADR-0055). For a Supervisor-backed Agent this is the type its Supervisor states, never one
+    /// its Managed Process reports, so every Agent of one configured type reports the same value.
+    /// It answers "what is this", never "which one is this": that is
+    /// [`service_instance_name`](Self::service_instance_name).
     pub service_name: String,
     /// The operator's name for this Agent — the `[[supervisor]]` block's `name` (ADR-0016). Empty
     /// for a foreign OpAMP client that reports no `service.instance.name`, which is why the UI

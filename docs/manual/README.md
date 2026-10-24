@@ -121,8 +121,8 @@ development set of them.
    **roll out** control of its own.
 
    A Configuration reaches only the Agents of the Deployment that report its `service_name`. A
-   Collector put under the Client later reports a type of its own and needs a Configuration of
-   its own: content for several Agent types is one Configuration per type.
+   Collector put under the Client later has a type of its own and needs a Configuration of its
+   own: content for several Agent types is one Configuration per type.
 
 For a deployment that crosses a network, with certificates of your own, follow
 [Setting up a fleet](setup.md). From here, [Server](server.md) covers targeting a subset of the

@@ -1392,29 +1392,11 @@ mod tests {
     /// Verifies: ADR-0017
     #[tokio::test]
     async fn the_removed_stored_set_is_logged_naming_its_hash() {
-        #[derive(Clone, Default)]
-        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Captured {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().expect("lock").extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-
         let dir = tempfile::tempdir().expect("tempdir");
         let (_tx, shutdown) = shutdown_channel();
         let config = kept_set_config(dir.path(), false);
         store_offer(&config.state_dir);
-        tracing::subscriber::with_default(subscriber, || {
+        let ((), log) = crate::test_support::capture_logs(|| {
             let mut engine = build_engine(&config, &shutdown).expect("build");
             let uid = engine.poll_reports()[SELF_AGENT_INDEX].instance_uid.clone();
             for hash in [b"set-a", b"set-a", b"set-b", b"set-a"] {
@@ -1432,7 +1414,6 @@ mod tests {
                 "a set reached the apply"
             );
         });
-        let log = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf-8");
         let removed: Vec<&str> = log
             .lines()
             .filter(|line| line.contains("removed the stored supervisor set"))

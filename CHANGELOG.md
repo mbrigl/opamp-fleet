@@ -13,6 +13,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Changed
+
+- **An Agent's type is always its Supervisor's**
+  ([ADR-0055](docs/adr/0055-an-agents-type-is-its-supervisors-and-a-process-never-chooses-it.md)):
+  the kind's type, the block's `service_name`, or the program's file name. A `service.name` a
+  Managed Process reports — a Collector's `dist.name` among them — no longer decides which
+  Configurations and Deployments reach its Agent; the Client names a differing one in a warning.
+  **What to do:** a Collector whose `dist.name` differs from its program's file name now reports
+  the file name. If your Configurations, Deployments or packages are made for the `dist.name`,
+  set `service_name = "<dist.name>"` in its `[[supervisor]]` block before upgrading. A key a
+  Managed Process states in both attribute lists is now reported among the identifying ones, so
+  its `service.version` reaches the fleet view.
+
 ## [0.6.2]
 
 ### Security
