@@ -129,8 +129,13 @@ has:
   a job that ends with the Client's connection. An install that drops or changes the account
   withdraws what the former one was granted. Residual: the separation is opt-in, and a host
   without a process account runs every Managed Process as the Client; all Managed Processes share
-  the one account, so they read one another's `config/`, and on Windows one of them can create an
-  instance of the pipe and answer the Client in the second service's place.
+  the one account, so they read one another's `config/`, and one of them can take the second
+  service's place: on Linux and macOS by replacing the socket in the directory the process account
+  owns, on Windows by creating an instance of the pipe. It then answers the Client's next
+  connection — after a restart of the Client or of the second service — and sees the requests the
+  Client sends: each program, its arguments and environment, and the Supervisor Endpoint's token.
+  It gains no account it does not already run under, but what it starts no longer ends with the
+  Client's connection, and what it reports of a program's start and exit is its own word.
 - **An install acts only on directories an administrator named or its roots hold** (ADR-0053,
   ADR-0042 clause 2): `supervisor.toml` belongs to the service's account, and `service install`
   and `service config` run as root or an Administrator. The state directory comes from
