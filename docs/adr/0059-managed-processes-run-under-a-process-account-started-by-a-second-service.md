@@ -436,11 +436,13 @@ signals and stops those programs on the Client's request.
     with no configuration holds no client certificate and is refused at startup, at fleet scale
     where nobody watches a terminal. The exceptions are upgrades of a host whose services were
     running. On Linux a running service is restarted, so a configured host finishes the upgrade on
-    the delivered binary. On Windows every `service install` — every upgrade of the MSI among
-    them, with a process account or without one — stops both services before it changes any
-    right or SCM entry,
-    and once it has succeeded starts again what ran before it; a first install finds nothing to
-    stop and starts nothing. The post-install prints the two remaining steps:
+    the delivered binary. On Linux and macOS an install that names another process account than
+    the registration, drops it, or names another `--run-as` stops the services first and starts
+    again what ran once it has succeeded (clause 16). On Windows every
+    `service install` — every upgrade of the MSI among them, with a process account or without
+    one — stops both services before it changes any right or SCM entry, and once it has succeeded
+    starts again what ran before it; a first install finds nothing to stop and starts nothing. The
+    post-install prints the two remaining steps:
 
     ```console
     sudo opamp-fleet service install --interactive
@@ -549,6 +551,23 @@ signals and stops those programs on the Client's request.
     - **On Linux and macOS a change of owner withdraws it.** The hand-over (clause 10) gives what
       the former account owns there, and what is in its group, to the Client's account and group,
       and what the process account named now keeps is left to it.
+    - **On Linux and macOS an account change stops the services first.** Where the registration
+      names a process account and the install names another or drops it
+      (`--no-process-account`), or where `--run-as` names another account than the registration,
+      the install stops the Client and then, where one is registered, the second service, before
+      it rewrites a unit or plist or changes an owner. It waits for each until its process has
+      ended, up to 60 seconds each as clause 9's stop does; a service whose process has not ended
+      by then has not stopped. So nothing runs under an account whose files are being re-owned.
+      What ran is what systemd reports active or activating, and what launchd reports loaded
+      with a process. Once the install has succeeded it starts again what ran of what is still
+      registered, the second service first (clause 2). An install that changes no account —
+      one that adds a process account where none was among them — stops nothing beyond what
+      clause 14 says.
+      - **A failed stop changes nothing more.** Where a service cannot be stopped, the install
+        starts again what it stopped, changes nothing more, and says so.
+      - **A failed install leaves the services stopped, and says so.** Its message names which
+        services ran before it and that `service start` starts them. Unix keeps no record of
+        them, so no later install starts them; `service start` does.
     - **On Windows its entries are removed and what it owns is taken over.** Every entry that
       allows the former account anything, explicit or inherited, is removed from every entry of
       the layout root, the data root, the state directory, the configuration file and the fleet
@@ -717,8 +736,11 @@ under `program/`.
   sharing one account (Out of scope). `LocalService` and `NetworkService` are
   shared with other services of the host, so as a process account they separate less than the
   second service's own virtual account. Every `service install` on Windows stops the Managed
-  Processes for as long as it runs, an MSI upgrade among them. An install that fails after its
-  stop leaves both services stopped until the next one succeeds, or until `service start`.
+  Processes for as long as it runs, an MSI upgrade among them, and one that fails after its stop
+  leaves both services stopped until the next one succeeds, or until `service start`. On Linux
+  and macOS an install that changes or drops an account (clause 16) stops them too, and one that
+  fails after that stop leaves the services stopped until the operator's `service start`, since
+  no record names what ran.
 - Follow-ups: an account per Supervisor; making the separation the default; job objects for the
   process tree on a host without a process account.
 
@@ -778,3 +800,8 @@ Tests that will carry `Verifies: ADR-0059`:
     and `the_install_lock_excludes_across_logon_sessions`.
 - In `crates/fleet-agent/tests/msi_exe_command.rs`, which reads `packaging/windows/supervisor.wxs`:
   the stop and unregister actions run under the condition of clause 15 and no other.
+- On Linux and macOS, in `crates/fleet-agent/src/service/` (clause 16): an install that changes
+  or drops the process account, or changes `--run-as`, stops both services and waits for their
+  processes before it re-owns anything, and starts again what ran once it has succeeded; a stop
+  that fails, a wait that runs out among them, changes nothing more; an install that changes no
+  account, or adds a process account where none was, stops nothing.
