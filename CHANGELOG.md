@@ -104,8 +104,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   A host's bindings end once the latest certificate it reported under has expired or is revoked; a
   report under an expired certificate binds nothing. While that file cannot be read — a link, not
   `0600` or not the Client's on Linux and macOS, larger than 512 MiB, of an unknown version, or
-  damaged before its last line — the Gateway answers every Client behind it `503` and logs why,
-  while its own Supervisors go on. **What to do:** nothing on upgrade; the first start writes the
+  damaged before its last line — or cannot be rewritten at start, as on a full disk, the Gateway
+  answers every Client behind it `503` and logs why, while its own Supervisors go on.
+  **What to do:** nothing on upgrade; the first start writes the
   file. An Agent that moves to another host behind the same Gateway is refused there until the old
   host's certificate expires: revoke that certificate to free it at once. Should the Gateway
   refuse the file, follow [the manual](docs/manual/client.md#what-a-gateway-keeps-on-disk): remove

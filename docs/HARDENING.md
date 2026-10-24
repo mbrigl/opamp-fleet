@@ -236,7 +236,7 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     the latest certificate it reported under has expired or is revoked, and a report under an
     expired certificate binds nothing · ✅ while the store cannot be read — a link, not `0600` or
     not the Client's on Unix, past 512 MiB, an unknown version, a damaged line before the last —
-    every downstream Agent is refused `503` and the Gateway's own Supervisors go on (ADR-0060)
+    or cannot be rewritten at start, every downstream Agent is refused `503` and the Gateway's own Supervisors go on (ADR-0060)
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
   - ✅ headers ≤ 30 s (HTTP/1), from the same listener · ✅ connections served concurrently ·
     ✅ message size in both directions

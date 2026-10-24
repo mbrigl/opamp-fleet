@@ -1639,7 +1639,9 @@ Client's account, is larger than 512 MiB, names a format or version this Client 
 holds a line it cannot parse before its last, and one it cannot rewrite at start, as on a full
 disk; a last line cut off without its newline, as a crash leaves it, is dropped. While it refuses the file, the Gateway answers every WebSocket upgrade, every
 plain-HTTP report and every download from the Clients behind it `503`, and still relays an enrolling
-peer's one request. It does not touch the file, and it logs why at start and once an hour. The
+peer's one request. It does not change a file it cannot read — one it could read but not rewrite
+may already have been replaced by a copy of the same bindings — and it logs why at start and once
+an hour. The
 Client's own connection and its Supervisors go on. To recover, look at why the file was refused, then
 remove it and restart the Client: the Gateway starts with no binding, and each Agent behind it is
 bound again by the next report for it — by whichever host sends that report first, which is what the
