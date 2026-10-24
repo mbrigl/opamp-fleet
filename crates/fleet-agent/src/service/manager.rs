@@ -525,7 +525,8 @@ fn socket_dir(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
 /// The parent of the socket's directory, held, and the directory's name in it. The parent must be
 /// root's or the running account's and writable by neither its group nor others: the rule a link
 /// on the way to a root is trusted by (`trusted_link`), so the process account, which owns the
-/// directory, can neither move it nor put anything else at its name.
+/// directory, can neither move it nor put anything else at its name. The parent alone is held to
+/// it: the path to it is the platform's, `/Library/Application Support`, and root's.
 #[cfg(all(unix, any(target_os = "macos", test)))]
 fn socket_parent(dir: &Path) -> std::io::Result<(std::os::fd::OwnedFd, std::ffi::CString)> {
     use crate::storage::handle;
@@ -548,7 +549,8 @@ fn socket_parent(dir: &Path) -> std::io::Result<(std::os::fd::OwnedFd, std::ffi:
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
-                "{} is not root's alone: another account could replace what is in it",
+                "{} is writable by another account than root and this one, which could \
+                 replace what is in it",
                 parent.display()
             ),
         ));
