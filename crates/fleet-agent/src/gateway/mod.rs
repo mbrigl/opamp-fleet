@@ -23,6 +23,7 @@ pub mod policy;
 pub mod pool;
 pub mod registry;
 pub mod revocations;
+pub mod store;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

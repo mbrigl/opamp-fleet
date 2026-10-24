@@ -27,6 +27,32 @@ pub enum Bound {
     Refused(&'static str),
 }
 
+/// Where a host's certificate ends, as the Gateway keeps it (ADR-0060 clause 2): the latest
+/// `notAfter` among the valid certificates the host reported under, and that certificate as the
+/// revocation list names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct End {
+    /// The `notAfter`, in seconds since the Unix epoch.
+    pub not_after: i64,
+    /// The SHA-256 of the issuer's DER-encoded name, in lowercase hex.
+    pub issuer: String,
+    /// The serial in lowercase hex without leading zeros.
+    pub serial: String,
+}
+
+/// One change to the bindings, as the store keeps it (ADR-0060 clause 2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// An `instance_uid` is bound to a host.
+    Bound(InstanceUid, String),
+    /// A binding is given up or ended.
+    Unbound(InstanceUid),
+    /// A binding was reported: it is now the most recently reported.
+    Reported(InstanceUid),
+    /// A host's certificate ends here.
+    Ends(String, End),
+}
+
 /// An `instance_uid`'s host, and when it last reported.
 struct Binding {
     host: String,
@@ -39,6 +65,8 @@ pub struct Bindings {
     bound: HashMap<InstanceUid, Binding>,
     /// How many `instance_uid`s each host has bound.
     per_host: HashMap<String, usize>,
+    /// Where the certificate of each host with a binding ends.
+    ends: HashMap<String, End>,
     /// Orders the reports, so the least recently reported binding is known.
     tick: u64,
 }
@@ -113,6 +141,7 @@ impl Bindings {
         (Bound::New, evictions)
     }
 
+    /// Removes `uid`'s binding; a host left with none keeps no certificate end.
     fn unbind(&mut self, uid: &InstanceUid) {
         let Some(binding) = self.bound.remove(uid) else {
             return;
@@ -121,8 +150,77 @@ impl Bindings {
             *count -= 1;
             if *count == 0 {
                 self.per_host.remove(&binding.host);
+                self.ends.remove(&binding.host);
             }
         }
+    }
+
+    /// The bindings `changes` leave, applied in order: the store read back (ADR-0060 clause 2). A
+    /// later report orders a binding after the earlier ones, and a removal of what is not bound
+    /// changes nothing.
+    ///
+    /// # Errors
+    /// Returns an error when a host is left with a binding and no certificate end, which only a
+    /// damaged store holds: such a binding could never end.
+    pub fn replay(changes: impl IntoIterator<Item = Change>) -> Result<Bindings, String> {
+        let mut bindings = Bindings::default();
+        let mut ends = HashMap::new();
+        for change in changes {
+            bindings.tick += 1;
+            let tick = bindings.tick;
+            match change {
+                Change::Bound(uid, host) => {
+                    bindings.unbind(&uid);
+                    *bindings.per_host.entry(host.clone()).or_default() += 1;
+                    bindings.bound.insert(
+                        uid,
+                        Binding {
+                            host,
+                            reported: tick,
+                        },
+                    );
+                }
+                Change::Unbound(uid) => bindings.unbind(&uid),
+                Change::Reported(uid) => {
+                    if let Some(binding) = bindings.bound.get_mut(&uid) {
+                        binding.reported = tick;
+                    }
+                }
+                Change::Ends(host, end) => {
+                    ends.insert(host, end);
+                }
+            }
+        }
+        for host in bindings.per_host.keys() {
+            let end = ends
+                .remove(host)
+                .ok_or_else(|| format!("the host {host} has a binding and no certificate end"))?;
+            bindings.ends.insert(host.clone(), end);
+        }
+        Ok(bindings)
+    }
+
+    /// What the store holds when it is rewritten whole: each host's certificate end, then every
+    /// binding, the least recently reported first, so that [`Bindings::replay`] restores the order.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<Change> {
+        let mut bound: Vec<(&InstanceUid, &Binding)> = self.bound.iter().collect();
+        bound.sort_by_key(|(_, binding)| binding.reported);
+        self.ends
+            .iter()
+            .map(|(host, end)| Change::Ends(host.clone(), end.clone()))
+            .chain(
+                bound
+                    .into_iter()
+                    .map(|(uid, binding)| Change::Bound(*uid, binding.host.clone())),
+            )
+            .collect()
+    }
+
+    /// How many lines a store rewritten whole holds: one per binding, one per host's end.
+    #[must_use]
+    pub fn live(&self) -> usize {
+        self.bound.len() + self.ends.len()
     }
 
     /// The host `uid` is bound to.
@@ -228,5 +326,38 @@ mod tests {
                 .0,
             Bound::Refused(_)
         ));
+    }
+
+    /// Replaying a store keeps each host's last certificate end and only for a host left with a
+    /// binding; a binding whose host has no end is a damaged store.
+    /// Verifies: ADR-0060
+    #[test]
+    fn a_replayed_binding_keeps_its_hosts_last_end() {
+        let end = |not_after| End {
+            not_after,
+            issuer: "ab".repeat(32),
+            serial: "1".to_string(),
+        };
+        let (kept, gone) = (InstanceUid::default(), InstanceUid::default());
+        let bindings = Bindings::replay([
+            Change::Ends("a".into(), end(1)),
+            Change::Bound(kept, "a".into()),
+            Change::Ends("a".into(), end(2)),
+            Change::Ends("b".into(), end(3)),
+            Change::Bound(gone, "b".into()),
+            Change::Unbound(gone),
+            Change::Unbound(InstanceUid::default()),
+        ])
+        .expect("replay");
+        assert_eq!(bindings.host_of(&kept), Some("a"));
+        assert_eq!(
+            bindings.snapshot(),
+            vec![
+                Change::Ends("a".into(), end(2)),
+                Change::Bound(kept, "a".into())
+            ]
+        );
+        assert_eq!(bindings.live(), 2);
+        assert!(Bindings::replay([Change::Bound(kept, "a".into())]).is_err());
     }
 }
