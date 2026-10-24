@@ -97,9 +97,10 @@ allows, the Managed Processes cannot reach into.
      for a second service that is not running, each time on a new connection checked anew, and the
      Supervisors report the second service unreachable as they do then (ADR-0059 clause 3).
    - **The second service closes its process to the Managed Processes where it can.** On Linux it
-     marks itself not dumpable (`PR_SET_DUMPABLE` 0) first thing at its start, and does not listen
-     while `/proc/self/status` names a tracer (`TracerPid` other than 0), so no process of its own
-     account without `CAP_SYS_PTRACE` can attach to it, read or write its memory, or take its file
+     marks itself not dumpable (`PR_SET_DUMPABLE` 0) as the first thing its program does, before it
+     reads its configuration or sets up its log, and does not listen while `/proc/self/status`
+     names a tracer (`TracerPid` other than 0), so from then on no process of its own account
+     without `CAP_SYS_PTRACE` can attach to it, read or write its memory, or take its file
      descriptors, whatever `kernel.yama.ptrace_scope` says; the programs it starts are dumpable as
      usual, since `execve` resets the mark. On macOS the platform already refuses `task_for_pid`
      to a caller of the same user without the debugging entitlement. On Windows the process keeps
@@ -111,14 +112,16 @@ allows, the Managed Processes cannot reach into.
      waits, up to five seconds, until none holds a process.
 
 **Out of scope:** on Windows, a Managed Process that opens the second service's process with the
-rights its own account holds on it — to duplicate its pipe handle or run code in it — which no
-check of the peer can tell; a process id reused on Linux before 6.5, on macOS and on Windows,
-where the platform gives the Client no handle that pins the peer's process; the second service
-noticing that its socket was replaced; a socket the service manager creates and owns (socket
-activation); what the Managed Processes can do to one another under the one account beyond taking
-the second service's place, which ADR-0059 leaves to them; a peer that is the second service's
-process but runs a build other than the Client's, which the handshake already refuses (ADR-0059
-clause 5).
+rights its own account holds on it — to duplicate its pipe handle or run code in it — which no check
+of the peer can tell; on Linux where Yama is absent or `ptrace_scope` is 0, a Managed Process that
+attaches to the second service between its `execve` and the mark — after killing it so that its
+service manager starts it again — and that, as a tracer, can also make the second service read a
+`TracerPid` of 0; a process id reused on Linux before 6.5, on macOS and on Windows, where the
+platform gives the Client no handle that pins the peer's process; the second service noticing that
+its socket was replaced; a socket the service manager creates and owns (socket activation); what the
+Managed Processes can do to one another under the one account beyond taking the second service's
+place, which ADR-0059 leaves to them; a peer that is the second service's process but runs a build
+other than the Client's, which the handshake already refuses (ADR-0059 clause 5).
 
 ## Alternatives considered
 
@@ -211,7 +214,11 @@ Tests that will carry `Verifies: ADR-0061`:
   permits it, is refused `PTRACE_ATTACH`, `/proc/<pid>/mem` and `pidfd_getfd`; a program it starts
   is dumpable. The second service does not listen while it is traced.
 - The service smoke test: on Linux and macOS a Managed Process the second service started leaves
-  its process group and replaces the socket; on Windows, with `NT AUTHORITY\LocalService` as the
-  process account, a task scheduled under that account creates an instance of the pipe. The
-  Client, restarted, refuses it, writes it nothing, logs it, and starts no Managed Process until
-  the second service is restarted.
+  its process group and replaces the socket, and the Client, restarted, refuses it, writes it
+  nothing, logs it, and starts no Managed Process until the second service is restarted. On
+  Windows, with `NT AUTHORITY\LocalService` as the process account and the second service
+  stopped, a task scheduled under that account creates the pipe; the Client, restarted, refuses
+  it as a peer the SCM names no process for, writes it nothing and logs it, and once the task has
+  ended and the second service runs again, reaches the second service. Which instance of a pipe a
+  client opens while the second service holds one too is not determined, so the case of a
+  differing process is decided on Windows by the test with a fake service manager.
