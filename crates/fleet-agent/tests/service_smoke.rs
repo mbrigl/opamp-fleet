@@ -786,10 +786,11 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(upgraded["config"], "from the config", "{upgraded:?}");
     assert_eq!(upgraded["key"], "denied", "{upgraded:?}");
 
-    // Dropped: the Client starts its program itself again, under its own account.
+    // Dropped while both run: the install stops them before it re-owns, and starts the Client
+    // again once it has succeeded, with no `service start` (ADR-0059 clause 16). The Client then
+    // starts its program itself again, under its own account.
     let again_pid: u32 = upgraded["pid"].parse().expect("a pid");
-    client(&["service", "stop"], &config).expect("stop the service");
-    client(
+    let dropping = client(
         &[
             "service",
             "install",
@@ -800,7 +801,10 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
         &config,
     )
     .expect("drop the process account");
-    client(&["service", "start"], &config).expect("start the service again");
+    assert!(
+        dropping.contains(&format!("{agents} was stopped and removed")),
+        "{dropping}"
+    );
     let dropped = reported(&result, Some(again_pid));
     assert_eq!(dropped["user"], client_account.0, "{dropped:?}");
 

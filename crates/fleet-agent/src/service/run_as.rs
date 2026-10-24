@@ -1590,9 +1590,37 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
     ))
 }
 
+/// The warning an install gives where the process account's rights are granted or withdrawn and
+/// the Supervisors' root lies outside the roots it acts on (ADR-0059 clause 6): that root is the
+/// operator's (ADR-0053 clause 5), left as it is. `None` where it is beneath them, or where no
+/// process account is named and none was.
+#[must_use]
+pub fn supervisors_root_left(root: &Path, ours: bool, process_account: bool) -> Option<String> {
+    (process_account && !ours).then(|| {
+        format!(
+            "warning: the Supervisors' root {} lies outside the data root, the layout root and \
+             the state directory, and is left as it is: grant the process account what it is to \
+             hold there, or withdraw what a former one held, yourself",
+            root.display()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Supervisors' root outside the install's roots is named in a warning wherever a process
+    /// account's rights are granted or withdrawn, and only there (ADR-0059 clause 6).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_supervisors_root_outside_the_roots_is_named_where_a_process_account_is_involved() {
+        let root = Path::new("/srv/supervisors");
+        let warning = supervisors_root_left(root, false, true).expect("a warning");
+        assert!(warning.contains("/srv/supervisors"), "{warning}");
+        assert_eq!(supervisors_root_left(root, true, true), None);
+        assert_eq!(supervisors_root_left(root, false, false), None);
+    }
 
     /// On Windows a re-registration keeps the logon account the SCM holds, as a unit's is kept,
     /// unless `--run-as` names another; `LocalSystem`, the account a registration that names none

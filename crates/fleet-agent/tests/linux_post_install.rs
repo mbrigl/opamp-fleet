@@ -276,6 +276,8 @@ fn the_pre_removal_acts_only_on_a_real_removal() {
             stopped, removal,
             "{argument}: stopped the service = {stopped}\n{record}"
         );
+        let unregistered = record.lines().any(|line| line == "service uninstall");
+        assert_eq!(unregistered, removal, "{argument}: {record}");
     }
 }
 
