@@ -2487,9 +2487,10 @@ struct IssueBootstrapRequest {
     /// file of the certificate and its key under this password, to be downloaded until the
     /// certificate ends or is revoked; the key is never answered in PEM. The password is kept
     /// nowhere. Read as absent when it is missing, so the refusal names it.
+    // Wiped when it is dropped, from the moment it is read (ADR-0057).
     #[serde(default)]
-    #[schema(format = Password, required = true)]
-    password: Option<String>,
+    #[schema(value_type = Option<String>, format = Password, required = true)]
+    password: Option<crate::bootstrap::Password>,
 }
 
 /// The subject of a bootstrap certificate: these attributes only, `organization` and
@@ -2617,7 +2618,7 @@ async fn issue_bootstrap_certificate(
                     organization_identifier: subject.organization_identifier,
                 },
                 validity_days: request.validity_days,
-                password: request.password.map(crate::bootstrap::Password),
+                password: request.password,
             }
         }
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),

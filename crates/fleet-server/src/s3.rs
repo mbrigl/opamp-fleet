@@ -405,12 +405,13 @@ fn builder(
         .with_http_connector(TlsConnector::new(config.ca_file.as_deref(), limits)?);
     match (&config.access_key_id, &config.secret_access_key_file) {
         (Some(key_id), Some(file)) => {
+            let secret =
+                crate::config::read_secret_file("[blobs.s3] secret_access_key_file", file)?;
+            // `object_store` takes the key as its own `String`: the copy is made at this call, and
+            // the one read is wiped when it is dropped (ADR-0057 clauses 3 and 4).
             builder = builder
                 .with_access_key_id(key_id.clone())
-                .with_secret_access_key(crate::config::read_secret_file(
-                    "[blobs.s3] secret_access_key_file",
-                    file,
-                )?);
+                .with_secret_access_key(secret.as_str());
         }
         _ => {
             for (name, key) in WORKLOAD_IDENTITY {

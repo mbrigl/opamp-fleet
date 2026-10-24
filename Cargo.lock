@@ -991,6 +991,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-service",
  "x509-parser",
+ "zeroize",
  "zip",
 ]
 
@@ -1007,6 +1008,7 @@ dependencies = [
  "rcgen",
  "sha2",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
@@ -1046,6 +1048,7 @@ dependencies = [
  "utoipa-axum",
  "webpki-roots 1.0.10",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
@@ -1074,6 +1077,7 @@ dependencies = [
  "tokio",
  "toml",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

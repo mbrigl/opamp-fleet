@@ -161,6 +161,8 @@ impl Database {
             &config.password_file,
         )?;
         let tls = tls(config)?;
+        // `tokio-postgres` copies the password into its own `Config`; the one read is wiped when it
+        // is dropped (ADR-0057 clauses 3 and 4).
         let pg = pg_config(config, &password, schema);
         let bridge = Bridge::new("records-postgres")?;
         let (lost, closing) = (
@@ -819,7 +821,8 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
             assert_eq!(
                 crate::config::read_secret_file("[database.postgres] password_file", &path)
-                    .expect("group read is allowed"),
+                    .expect("group read is allowed")
+                    .as_str(),
                 "secret"
             );
         }

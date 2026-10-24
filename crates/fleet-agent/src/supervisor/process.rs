@@ -273,8 +273,9 @@ pub const ENDPOINT_TOKEN_ENV: &str = "OPAMP_SUPERVISOR_TOKEN";
 
 pub struct Runner {
     pub name: String,
-    /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0015).
-    pub endpoint_token: String,
+    /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0015); wiped when it is
+    /// dropped (ADR-0057).
+    pub endpoint_token: zeroize::Zeroizing<String>,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// (ADR-0017's health-gated acknowledgement); zero acknowledges on start.
@@ -286,7 +287,7 @@ pub struct Runner {
     /// an operator has a fallback window. Zero deletes it on success.
     pub retain_previous: Duration,
     /// Opens an encrypted `.7z` artifact (ADR-0026); `None` when no key is configured.
-    pub archive_key: Option<String>,
+    pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
     /// How to prove a staged package runs before it replaces what does (ADR-0017 clause 57). `None` proves
@@ -525,7 +526,7 @@ impl Runner {
             .install
             .as_ref()
             .ok_or_else(|| "this supervisor manages nothing a package can replace".to_string())?;
-        let staged = target.stage(artifact, self.archive_key.as_deref())?;
+        let staged = target.stage(artifact, self.archive_key.as_deref().map(String::as_str))?;
         if let Some(preflight) = &self.preflight {
             if let Err(e) = run_preflight(&staged, preflight).await {
                 target.discard(&staged);
@@ -867,9 +868,10 @@ impl Runner {
         };
         let mut command = Command::new(&program);
         command.args(&spec.args).envs(spec.env.iter().cloned());
-        // Last, so no block's `env` can replace it (ADR-0015).
+        // Last, so no block's `env` can replace it (ADR-0015). The copy `Command` keeps, and the
+        // one the process receives, are beyond this code's reach (ADR-0057 clause 4).
         if !self.endpoint_token.is_empty() {
-            command.env(ENDPOINT_TOKEN_ENV, &self.endpoint_token);
+            command.env(ENDPOINT_TOKEN_ENV, self.endpoint_token.as_str());
         }
         if let Some(dir) = working_dir {
             command.current_dir(dir);

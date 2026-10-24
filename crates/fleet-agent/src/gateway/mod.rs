@@ -354,9 +354,11 @@ fn server_tls(tls: &GatewayTlsConfig) -> Result<(ServerTls, Members), String> {
     }
     Ok((
         ServerTls {
+            // `opamp` takes the key as its own buffer; the copy is made here and the one read is
+            // wiped (ADR-0057 clause 3).
             identity: Identity {
                 cert_pem: crate::tls::certificates_file(&tls.cert_file)?,
-                key_pem: crate::tls::key_file(&tls.key_file)?,
+                key_pem: crate::tls::key_file(&tls.key_file)?.to_vec(),
             },
             client_auth: ClientAuth::Required { ca_pem },
         },

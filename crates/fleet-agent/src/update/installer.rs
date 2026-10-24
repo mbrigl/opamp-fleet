@@ -142,7 +142,7 @@ fn store_marker(state_dir: &Path, marker: &UpdateMarker) -> Result<(), String> {
 /// installed version.
 pub struct Installer {
     state_dir: PathBuf,
-    archive_key: Option<String>,
+    archive_key: Option<zeroize::Zeroizing<String>>,
     probation: Option<UpdateMarker>,
 }
 
@@ -150,7 +150,7 @@ impl Installer {
     #[must_use]
     pub fn new(
         state_dir: PathBuf,
-        archive_key: Option<String>,
+        archive_key: Option<zeroize::Zeroizing<String>>,
         probation: Option<UpdateMarker>,
     ) -> Self {
         Installer {
@@ -168,7 +168,7 @@ impl SelfUpdater for Installer {
             staged,
             version,
             hash,
-            self.archive_key.as_deref(),
+            self.archive_key.as_deref().map(String::as_str),
         );
         // Whatever the outcome, the staged artifact has served its purpose.
         let _ = std::fs::remove_file(staged);
