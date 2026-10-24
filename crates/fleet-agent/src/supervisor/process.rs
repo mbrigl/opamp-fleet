@@ -241,10 +241,8 @@ impl Spawner {
 /// `launch` as the Client runs it to its end itself.
 fn local_command(launch: &Launch) -> Command {
     let mut command = Command::new(&launch.program);
-    command
-        .args(&launch.args)
-        .envs(launch.env.iter().cloned())
-        .kill_on_drop(true);
+    command.args(&launch.args).kill_on_drop(true);
+    launch.set_env(&mut command);
     if let Some(dir) = &launch.working_dir {
         command.current_dir(dir);
     }
