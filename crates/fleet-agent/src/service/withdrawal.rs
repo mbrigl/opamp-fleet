@@ -490,9 +490,51 @@ impl Store for Registry {
     }
 }
 
+/// The roots a withdrawal walks (ADR-0059 clause 16): the layout root, the data root, the state
+/// directory, the configuration file and the fleet files copied beside it. A Supervisors' root
+/// beneath one of them is walked with it; one outside them all stays the operator's, and is not
+/// among them.
+#[must_use]
+pub fn roots<'a>(
+    layout: &'a Path,
+    data: &'a Path,
+    state: &'a Path,
+    config: &'a Path,
+    copies: &'a [PathBuf],
+) -> Vec<&'a Path> {
+    let mut roots = vec![layout, data, state, config];
+    roots.extend(copies.iter().map(PathBuf::as_path));
+    roots
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Supervisors' root the configuration places outside every root the install acts on is not
+    /// walked by a withdrawal: it stays the operator's.
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_withdrawal_walks_no_supervisors_root_outside_the_installs_roots() {
+        let config = crate::config::ClientConfig {
+            supervisor_dir: Some(PathBuf::from("/srv/elsewhere/supervisors")),
+            ..Default::default()
+        };
+        let outside = config.supervisors_root();
+        let copies = [PathBuf::from("/etc/fleet/ca.pem")];
+        let walked = roots(
+            Path::new("/opt/fleet"),
+            Path::new("/var/lib/fleet"),
+            Path::new("/var/lib/fleet/state"),
+            Path::new("/etc/fleet/supervisor.toml"),
+            &copies,
+        );
+        assert!(
+            walked.iter().all(|root| !outside.starts_with(root)),
+            "{walked:?}"
+        );
+        assert!(walked.contains(&Path::new("/etc/fleet/ca.pem")));
+    }
 
     /// A record kept in memory, as a test keeps it; one whose removal fails where `stuck`.
     #[derive(Default)]
