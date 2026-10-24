@@ -569,7 +569,7 @@ type LeftBehind = Pin<Box<dyn Future<Output = ()> + Send>>;
 fn through_the_second_service(
     agents: &AgentsChannel,
 ) -> (supervisor::process::Spawner, LeftBehind) {
-    use crate::supervisor::channel::Channel;
+    use crate::supervisor::channel::{Channel, ServiceProcess};
     tracing::info!(
         socket = %agents.socket.display(),
         process = %agents.process,
@@ -578,7 +578,13 @@ fn through_the_second_service(
     // A uid on Unix, a SID on Windows.
     #[allow(clippy::clone_on_copy)]
     let process = agents.process.clone();
-    watched(Channel::new(&agents.socket, process))
+    // Each connection is also checked against the process the service manager runs as the second
+    // service (ADR-0061).
+    watched(Channel::new(
+        &agents.socket,
+        process,
+        ServiceProcess::manager(),
+    ))
 }
 
 /// The spawner that starts every Managed Process through `channel`, and what resolves once the
@@ -682,7 +688,12 @@ mod tests {
                 let _ = write_frame(&mut stream, &hello).await;
             }
         });
-        let (spawner, told) = watched(Channel::with_superseded(&socket, peer::own_uid(), || true));
+        let (spawner, told) = watched(Channel::with_superseded(
+            &socket,
+            peer::own_uid(),
+            peer::this_process(),
+            || true,
+        ));
         let (_operator, shutdown) = shutdown_channel();
         let left_behind = Arc::new(AtomicBool::new(false));
         let mut run = or_left_behind(shutdown, told, Arc::clone(&left_behind));

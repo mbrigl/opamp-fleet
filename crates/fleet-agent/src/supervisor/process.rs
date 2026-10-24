@@ -2783,7 +2783,7 @@ mod tests {
             version_probe: None,
             preflight: None,
             reload_signal: None,
-            spawner: Spawner::Channel(Channel::new(socket, peer::own_uid())),
+            spawner: Spawner::Channel(Channel::new(socket, peer::own_uid(), peer::this_process())),
             process_account_group: None,
             supervisor_dir: std::env::temp_dir(),
             events: EventSender::new(0, event_tx),
@@ -2988,7 +2988,11 @@ mod tests {
         let (mut runner, mut events, _commands) =
             running_through_the_second_service(&socket, PathBuf::from("/bin/true"), Vec::new());
         // The socket is served by this test's uid; the process account is said to be another.
-        runner.spawner = Spawner::Channel(Channel::new(&socket, peer::own_uid().wrapping_add(1)));
+        runner.spawner = Spawner::Channel(Channel::new(
+            &socket,
+            peer::own_uid().wrapping_add(1),
+            peer::this_process(),
+        ));
         let (shutdown_tx, shutdown) = crate::shutdown::shutdown_channel();
         let run = tokio::spawn(runner.run(shutdown));
         let health = next_health(&mut events, Duration::from_secs(30)).await;
@@ -3670,7 +3674,11 @@ mod tests {
     async fn a_preflight_that_does_not_reach_the_second_service_refuses_nothing() {
         use crate::supervisor::channel::{peer, Channel};
         let dir = tempfile::tempdir().expect("tempdir");
-        let channel = Channel::new(&dir.path().join("agents.sock"), peer::own_uid());
+        let channel = Channel::new(
+            &dir.path().join("agents.sock"),
+            peer::own_uid(),
+            peer::this_process(),
+        );
         let staged = Staged {
             root: dir.path().to_path_buf(),
             program: dir.path().join("agent.staged"),

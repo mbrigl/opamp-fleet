@@ -1328,13 +1328,84 @@ fn systemd_activity(state: &str) -> Activity {
     }
 }
 
-/// Whether `launchctl print` shows the job with a process: its own `pid = ` line, one tab deep.
+/// The process `launchctl print` shows the job with: its own `pid = ` line, one tab deep.
 #[cfg(any(target_os = "macos", test))]
-fn launchd_has_process(print: &str) -> bool {
-    print.lines().any(|line| {
+fn launchd_pid(print: &str) -> Option<u32> {
+    print.lines().find_map(|line| {
         line.strip_prefix("\tpid = ")
-            .is_some_and(|pid| pid.trim().parse::<u32>().is_ok())
+            .and_then(|pid| pid.trim().parse::<u32>().ok())
     })
+}
+
+/// The process `systemctl show --property=MainPID --value` names: none where it says `0`.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_main_pid(show: &str) -> Option<u32> {
+    show.trim().parse::<u32>().ok().filter(|pid| *pid != 0)
+}
+
+/// The process the service manager runs as the second service (ADR-0061): systemd the unit's
+/// `MainPID`, through its system bus. `None` where it runs none.
+///
+/// # Errors
+/// Returns why systemd could not be asked.
+#[cfg(target_os = "linux")]
+pub fn agents_process() -> Result<Option<u32>, String> {
+    use std::process::Stdio;
+    let unit = format!("{}.service", agents_label().to_qualified_name());
+    let output = std::process::Command::new("systemctl")
+        .args(["show", "--property=MainPID", "--value"])
+        .arg(&unit)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run systemctl: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "systemctl show {unit} failed ({}): systemd was not asked",
+            output.status
+        ));
+    }
+    Ok(systemd_main_pid(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The process the service manager runs as the second service (ADR-0061): launchd the job's
+/// `pid`, read from `launchctl print`, whose output launchd does not promise as an interface.
+/// `None` where launchd holds no such job (`launchctl` exits 113, "Could not find service"), or
+/// holds it without a process.
+///
+/// # Errors
+/// Returns an error if `launchctl` cannot be run, or fails otherwise.
+#[cfg(target_os = "macos")]
+pub fn agents_process() -> Result<Option<u32>, String> {
+    use std::process::Stdio;
+    let output = std::process::Command::new("launchctl")
+        .arg("print")
+        .arg(format!("system/{}", agents_label().to_qualified_name()))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run launchctl: {e}"))?;
+    /// What `launchctl` exits with for a service it does not know.
+    const NOT_FOUND: i32 = 113;
+    match output.status.code() {
+        Some(0) => Ok(launchd_pid(&String::from_utf8_lossy(&output.stdout))),
+        Some(NOT_FOUND) => Ok(None),
+        _ => Err(format!(
+            "launchctl print system/{} failed ({}): launchd was not asked",
+            agents_label().to_qualified_name(),
+            output.status
+        )),
+    }
+}
+
+/// The process the service manager runs as the second service (ADR-0061): the SCM the service's
+/// process id (`QueryServiceStatusEx`). `None` where it runs none.
+///
+/// # Errors
+/// Returns why the SCM could not be asked.
+#[cfg(windows)]
+pub fn agents_process() -> Result<Option<u32>, String> {
+    super::windows_config::service_process(&agents_service_name())
 }
 
 /// Whether a plist is registered `Disabled`.
@@ -1380,7 +1451,8 @@ fn activity(label: &ServiceLabel) -> Result<Activity, String> {
         .output()
         .map_err(|e| format!("cannot run launchctl: {e}"))?;
     Ok(
-        if output.status.success() && launchd_has_process(&String::from_utf8_lossy(&output.stdout))
+        if output.status.success()
+            && launchd_pid(&String::from_utf8_lossy(&output.stdout)).is_some()
         {
             Activity::Running
         } else {
@@ -2881,8 +2953,8 @@ mod tests {
             assert_eq!(systemd_activity(stopped), Activity::Stopped, "{stopped}");
         }
         let print = "system/opamp-fleet = {\n\tactive count = 1\n\tpath = /Library/LaunchDaemons/opamp-fleet.plist\n\tstate = running\n\n\tpid = 4242\n\tendpoints = {\n\t\tpid = 7\n\t}\n}\n";
-        assert!(launchd_has_process(print));
-        assert!(!launchd_has_process(&print.replace("\tpid = 4242\n", "")));
+        assert_eq!(launchd_pid(print), Some(4242));
+        assert_eq!(launchd_pid(&print.replace("\tpid = 4242\n", "")), None);
         assert!(plist_disabled(
             "<dict>\n\t<key>Disabled</key>\n\t<true/>\n</dict>"
         ));
@@ -2892,6 +2964,21 @@ mod tests {
         assert!(!plist_disabled(
             "<dict>\n\t<key>RunAtLoad</key>\n\t<true/>\n</dict>"
         ));
+    }
+
+    /// The second service's process is the one systemd names its unit's `MainPID`, and the one
+    /// launchd prints as the job's own `pid` rather than an endpoint's; `0`, or no such line, is
+    /// none (ADR-0061).
+    /// Verifies: ADR-0061
+    #[test]
+    fn the_second_services_process_is_the_one_the_manager_names() {
+        assert_eq!(systemd_main_pid("4242\n"), Some(4242));
+        for none in ["0\n", "", "[not set]\n"] {
+            assert_eq!(systemd_main_pid(none), None, "{none:?}");
+        }
+        let print = "system/opamp-fleet-agents = {\n\tstate = running\n\tendpoints = {\n\t\tpid = 7\n\t}\n\tpid = 4242\n}\n";
+        assert_eq!(launchd_pid(print), Some(4242));
+        assert_eq!(launchd_pid(&print.replace("\tpid = 4242\n", "")), None);
     }
 
     /// A stop for a change that cannot stop the second service starts the Client again where it

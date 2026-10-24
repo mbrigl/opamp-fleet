@@ -914,6 +914,23 @@ mod system {
         })
     }
 
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetNamedPipeServerProcessId(pipe: Handle, process_id: *mut u32) -> Bool;
+    }
+
+    /// The process that serves the named pipe the client end `pipe` is connected to
+    /// (GetNamedPipeServerProcessId; ADR-0061).
+    ///
+    /// # Errors
+    /// Returns why it could not be read.
+    pub fn pipe_server_process(pipe: RawHandle) -> io::Result<u32> {
+        let mut process_id = 0u32;
+        // SAFETY: a pipe handle the caller holds for the length of the call, and a u32 to fill.
+        check(unsafe { GetNamedPipeServerProcessId(pipe.cast(), &mut process_id) })?;
+        Ok(process_id)
+    }
+
     type Hkey = *mut c_void;
 
     /// `HKEY_LOCAL_MACHINE`, `(HKEY)(ULONG_PTR)((LONG)0x80000002)`.

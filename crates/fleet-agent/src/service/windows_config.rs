@@ -271,6 +271,29 @@ pub fn activity(service_name: &str) -> Result<super::manager::Activity, String> 
     }
 }
 
+/// The process the SCM runs as the service `service_name` (`QueryServiceStatusEx`,
+/// `SERVICE_STATUS_PROCESS.dwProcessId`): `None` where it runs none, or knows no such service
+/// (ADR-0061).
+///
+/// # Errors
+/// Returns every other refusal of the SCM.
+#[cfg(windows)]
+pub fn service_process(service_name: &str) -> Result<Option<u32>, String> {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let status = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .and_then(|manager| manager.open_service(service_name, ServiceAccess::QUERY_STATUS))
+        .and_then(|service| service.query_status());
+    match status {
+        Ok(status) => Ok(status.process_id.filter(|pid| *pid != 0)),
+        Err(e) if no_such_service(&e) => Ok(None),
+        Err(e) => Err(format!(
+            "cannot ask the SCM for the process of {service_name}: {e}"
+        )),
+    }
+}
+
 /// What a look at a service tells a stop: whether it has stopped, and the process the SCM names.
 #[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

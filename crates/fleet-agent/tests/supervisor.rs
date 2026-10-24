@@ -377,12 +377,14 @@ fn sigterm_stops_the_managed_process_and_the_client_cleanly() {
 /// --process-account` writes does — the shipped Client starts its Managed Process through it, not
 /// itself (ADR-0059 clause 3): the stub's parent is the second service. Run without a second
 /// account: the service runs in this test, under this test's uid, which the Client is told is the
-/// process account's.
-/// Verifies: ADR-0059
+/// process account's, and as this test's process, which a `systemctl` on the Client's `PATH`
+/// names as the one systemd runs as the second service (ADR-0061).
+/// Verifies: ADR-0059, ADR-0061
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_client_told_of_the_second_service_starts_its_program_through_it() {
     use fleet_agent::supervisor::channel::{bind, serve};
+    use std::os::unix::fs::PermissionsExt as _;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("marker");
@@ -392,8 +394,23 @@ async fn a_client_told_of_the_second_service_starts_its_program_through_it() {
     let uid = unsafe { libc::getuid() };
     let listener = bind(&socket).expect("bind the second service's socket");
     let service = tokio::spawn(serve(listener, uid, || false, std::future::pending()));
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).expect("bin/");
+    let systemctl = bin.join("systemctl");
+    std::fs::write(
+        &systemctl,
+        format!("#!/bin/sh\necho {}\n", std::process::id()),
+    )
+    .expect("write systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod systemctl");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
+            .expect("PATH");
 
     let mut client = tokio::process::Command::new(env!("CARGO_BIN_EXE_supervisor"))
+        .env("PATH", path)
         .arg("--config")
         .arg(&config)
         .args(["run", "--agents-socket"])

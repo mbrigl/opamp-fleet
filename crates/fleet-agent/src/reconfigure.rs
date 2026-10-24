@@ -1240,7 +1240,11 @@ mod tests {
         let mut engine = crate::supervisor::build_engine(
             &config,
             &shutdown,
-            crate::supervisor::process::Spawner::Channel(Channel::new(&socket, peer::own_uid())),
+            crate::supervisor::process::Spawner::Channel(Channel::new(
+                &socket,
+                peer::own_uid(),
+                peer::this_process(),
+            )),
         )
         .expect("build");
 
@@ -1819,6 +1823,7 @@ mod tests {
         let plugins = crate::supervisor::Registry::new(Spawner::Channel(Channel::new(
             &service.socket,
             peer::own_uid(),
+            peer::this_process(),
         )));
         let tombs = entomb(&config, &["gone".to_string()]);
         release_removed(Some(&plugins), &tombs).await;
@@ -1883,6 +1888,7 @@ mod tests {
         let plugins = crate::supervisor::Registry::new(Spawner::Channel(Channel::new(
             &dir.path().join("nobody.sock"),
             peer::own_uid(),
+            peer::this_process(),
         )));
         tokio::time::pause();
         let started = tokio::time::Instant::now();

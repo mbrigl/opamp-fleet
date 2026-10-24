@@ -102,6 +102,13 @@ impl Drop for AgentsService {
     }
 }
 
+/// The process this test runs as, named as the second service's: the in-process services run in
+/// it (ADR-0061).
+#[cfg(unix)]
+fn this_process() -> fleet_agent::supervisor::channel::ServiceProcess {
+    fleet_agent::supervisor::channel::ServiceProcess::named(|| Ok(Some(std::process::id())))
+}
+
 /// Starts `runner` with the spawner `via` names, the second service first where it is one.
 fn launch(
     via: Via,
@@ -121,7 +128,7 @@ fn launch(
             let service = tokio::spawn(serve(listener, uid, || false, std::future::pending()));
             let mut runner = runner;
             let task = tokio::spawn(async move {
-                let channel = Channel::connect(&socket, uid)
+                let channel = Channel::connect(&socket, uid, this_process())
                     .await
                     .expect("connect to the second service");
                 runner.spawner = Spawner::Channel(channel);
@@ -552,7 +559,7 @@ both!(a_swapped_binary_is_probed_again_for_its_version);
 #[cfg(unix)]
 #[tokio::test]
 async fn the_shipped_program_serves_as_the_second_service() {
-    use fleet_agent::supervisor::channel::Channel;
+    use fleet_agent::supervisor::channel::{Channel, ServiceProcess};
 
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("agents.sock");
@@ -581,9 +588,12 @@ async fn the_shipped_program_serves_as_the_second_service() {
         .kill_on_drop(true)
         .spawn()
         .expect("start the second service");
+    // The service is this test's child, which the test names as the second service's process.
+    let pid = service.id().expect("running");
+    let named = ServiceProcess::named(move || Ok(Some(pid)));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        match Channel::connect(&socket, uid).await {
+        match Channel::connect(&socket, uid, named.clone()).await {
             Ok(_) => panic!("a connection from another uid was served"),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => break,
             Err(e) => {
@@ -593,7 +603,7 @@ async fn the_shipped_program_serves_as_the_second_service() {
         }
     }
 
-    let pid = service.id().expect("running") as libc::pid_t;
+    let pid = pid as libc::pid_t;
     // SAFETY: plain kill(2) on the service's pid; no memory is touched.
     unsafe { libc::kill(pid, libc::SIGTERM) };
     let ended = tokio::time::timeout(Duration::from_secs(15), service.wait())
@@ -1862,7 +1872,7 @@ mod an_apply_while_the_second_service_is_away {
             version_probe: None,
             preflight,
             reload_signal: None,
-            spawner: Spawner::Channel(Channel::new(&socket, own_uid())),
+            spawner: Spawner::Channel(Channel::new(&socket, own_uid(), this_process())),
             process_account_group: None,
             supervisor_dir: std::env::temp_dir(),
             events: EventSender::new(0, event_tx),
@@ -2594,7 +2604,7 @@ mod an_apply_while_the_second_service_is_away {
             preflight: None,
             reload_signal: None,
             // The process account is another uid than the one that serves the socket.
-            spawner: Spawner::Channel(Channel::new(&socket, own_uid() + 1)),
+            spawner: Spawner::Channel(Channel::new(&socket, own_uid() + 1, this_process())),
             process_account_group: None,
             supervisor_dir: std::env::temp_dir(),
             events: EventSender::new(0, event_tx),
