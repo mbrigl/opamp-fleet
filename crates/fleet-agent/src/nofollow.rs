@@ -131,6 +131,16 @@ impl HeldDir {
         sys::write(self, name, &temporary, contents, mode)
     }
 
+    /// Makes what was created, renamed or removed in this directory durable. On Windows NTFS
+    /// journals the directory's entries itself, and a directory handle opened for reading cannot be
+    /// flushed, so nothing is done.
+    ///
+    /// # Errors
+    /// Returns an error when the sync fails.
+    pub fn sync(&self) -> io::Result<()> {
+        sys::sync(self)
+    }
+
     /// Renames `from` to `to` within this directory. A link is renamed as a link.
     ///
     /// # Errors
@@ -419,6 +429,14 @@ mod sys {
     pub(super) fn remove(held: &HeldDir, name: &str) -> io::Result<()> {
         unlinkat(held.fd.as_raw_fd(), &c_name(OsStr::new(name))?)
     }
+
+    pub(super) fn sync(held: &HeldDir) -> io::Result<()> {
+        // SAFETY: a valid descriptor.
+        if unsafe { libc::fsync(held.fd.as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
@@ -551,5 +569,10 @@ mod sys {
 
     pub(super) fn remove(held: &HeldDir, name: &str) -> io::Result<()> {
         std::fs::remove_file(held.path.join(name))
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) fn sync(_: &HeldDir) -> io::Result<()> {
+        Ok(())
     }
 }

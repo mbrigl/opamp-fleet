@@ -362,6 +362,8 @@ fn rewrite(dir: &HeldDir, changes: &[Change]) -> io::Result<(u64, usize)> {
         return Err(too_large());
     }
     dir.write(NAME, &bytes, 0o600)?;
+    // The rename is what a waiting report relies on.
+    dir.sync()?;
     Ok((bytes.len() as u64, changes.len()))
 }
 
