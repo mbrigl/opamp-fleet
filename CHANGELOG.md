@@ -118,6 +118,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `max_carried_agents` bindings. An Agent whose binding gave way may be placed on another upstream
   connection when it reports again.
 
+- **The audit record syncs what is queued together once**
+  ([ADR-0022](docs/adr/0022-an-append-only-audit-record-chained-by-hash.md)). The Server synced
+  the disk after every audit entry, so it recorded no more decisions a second than the disk
+  synced, and a burst of them, such as refusals from many addresses, could fill the 10 000-entry
+  channel and have every admission, CSR and operator act refused with `503` until it drained.
+  Entries queued together, up to 1 024, are now written in one append and synced once. Each still
+  counts as recorded only once it is synced, and a write that fails loses all of them, each counted
+  in the next entry's `unrecorded_before`.
+
 ## [0.6.2]
 
 ### Security
