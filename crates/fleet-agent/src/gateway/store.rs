@@ -229,16 +229,37 @@ pub fn load(dir: &HeldDir) -> Result<Vec<Change>, String> {
 /// The store, open for appending.
 pub struct Journal {
     dir: HeldDir,
-    file: File,
+    /// The store's file; `None` while a rewrite replaces it, or once it could not be opened again.
+    file: Option<File>,
     /// The bytes written and synced: where the next line goes.
     len: u64,
     /// How many changes it holds.
     lines: usize,
-    /// An append failed and what it wrote could not be cut off: nothing more is appended until the
-    /// store is rewritten whole.
+    /// What the file holds may not be what `len` says, or may not be the file at its name: nothing
+    /// more is appended until the store is rewritten whole.
     damaged: bool,
-    /// Every write fails, as on a full disk: set by tests alone.
-    refusing: bool,
+    /// The failures a test injects.
+    #[cfg(test)]
+    pub faults: Faults,
+}
+
+/// Where a test makes a write fail.
+#[cfg(test)]
+#[derive(Default)]
+pub struct Faults {
+    /// Every write fails, as on a full disk.
+    pub all: bool,
+    /// The next append fails once its bytes are written, before they are synced.
+    pub append: bool,
+    /// The next rewrite fails once its new file is renamed into place.
+    pub after_rename: bool,
+}
+
+/// Where a write may fail by a test's hand.
+enum Stage {
+    Any,
+    Appended,
+    Renamed,
 }
 
 impl Journal {
@@ -247,59 +268,87 @@ impl Journal {
     /// # Errors
     /// Returns an error when the store cannot be written, or would be larger than its bound.
     pub fn create(dir: HeldDir, changes: &[Change]) -> io::Result<Journal> {
-        let (len, lines) = rewrite(&dir, changes)?;
-        let file = dir.open_for_writing(NAME)?;
-        Ok(Journal {
+        let mut journal = Journal {
             dir,
-            file,
-            len,
-            lines,
-            damaged: false,
-            refusing: false,
-        })
+            file: None,
+            len: 0,
+            lines: 0,
+            damaged: true,
+            #[cfg(test)]
+            faults: Faults::default(),
+        };
+        journal.compact(changes)?;
+        Ok(journal)
     }
 
-    /// Rewrites the store whole as `changes`, a new file synced and renamed over the old. On an
-    /// error the old one stands.
+    /// Rewrites the store whole as `changes`, a new file synced and renamed over the old, the
+    /// directory synced after it. The file is closed while it is replaced. When the rename has
+    /// not happened the old store stands as it was; when anything fails after it, the journal
+    /// appends nothing until a rewrite succeeds.
     ///
     /// # Errors
-    /// As [`Journal::create`].
+    /// Returns an error when the store cannot be written, or would be larger than its bound.
     pub fn compact(&mut self, changes: &[Change]) -> io::Result<()> {
-        self.refused()?;
-        let (len, lines) = rewrite(&self.dir, changes)?;
-        self.file = self.dir.open_for_writing(NAME)?;
-        self.len = len;
-        self.lines = lines;
+        self.fault(&Stage::Any)?;
+        let mut bytes = format!("{}\n", header()).into_bytes();
+        bytes.extend(lines(changes)?);
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(too_large());
+        }
+        // A file is not replaced while this journal holds it open.
+        self.file = None;
+        if let Err(e) = self.dir.write(NAME, &bytes, 0o600) {
+            // Not renamed: the old store stands, and is opened again as it was.
+            self.reopen();
+            return Err(e);
+        }
+        self.len = bytes.len() as u64;
+        self.lines = changes.len();
+        self.damaged = true;
+        // The rename is what a waiting report relies on.
+        self.fault(&Stage::Renamed)?;
+        self.dir.sync()?;
+        self.file = Some(self.dir.open_for_writing(NAME)?);
         self.damaged = false;
         Ok(())
+    }
+
+    /// The store's file opened again after a rewrite that did not replace it; a journal that
+    /// cannot open it appends nothing more.
+    fn reopen(&mut self) {
+        match self.dir.open_for_writing(NAME) {
+            Ok(file) => self.file = Some(file),
+            Err(_) => self.damaged = true,
+        }
     }
 
     /// Appends `changes` and syncs them. On an error the store is cut back to what it held.
     ///
     /// # Errors
     /// Returns an error when a change is longer than a line may be, when the store would grow past
-    /// its bound, or when the write or the sync fails.
+    /// its bound, when the journal is damaged, or when the write or the sync fails.
     pub fn append(&mut self, changes: &[Change]) -> io::Result<()> {
-        self.refused()?;
-        if self.damaged {
+        self.fault(&Stage::Any)?;
+        let (false, Some(file)) = (self.damaged, self.file.as_mut()) else {
             return Err(io::Error::other(
-                "an earlier append could not be undone; the store is rewritten first",
+                "the store may not hold what was written to it; it is rewritten first",
             ));
-        }
+        };
         let bytes = lines(changes)?;
         if self.len + bytes.len() as u64 > MAX_BYTES {
             return Err(too_large());
         }
-        let written = self
-            .file
+        let written = file
             .seek(io::SeekFrom::Start(self.len))
-            .and_then(|_| self.file.write_all(&bytes))
-            .and_then(|()| self.file.sync_data());
-        if let Err(e) = written {
-            if self
-                .file
+            .and_then(|_| file.write_all(&bytes));
+        let written = written.and_then(|()| self.fault(&Stage::Appended));
+        let Some(file) = self.file.as_mut() else {
+            return Err(io::Error::other("the store is not open"));
+        };
+        if let Err(e) = written.and_then(|()| file.sync_data()) {
+            if file
                 .set_len(self.len)
-                .and_then(|()| self.file.sync_data())
+                .and_then(|()| file.sync_data())
                 .is_err()
             {
                 self.damaged = true;
@@ -311,16 +360,21 @@ impl Journal {
         Ok(())
     }
 
-    /// Makes every later write fail, as on a full disk.
     #[cfg(test)]
-    pub fn refuse_writes(&mut self) {
-        self.refusing = true;
+    fn fault(&mut self, stage: &Stage) -> io::Result<()> {
+        let fails = match stage {
+            Stage::Any => self.faults.all,
+            Stage::Appended => std::mem::take(&mut self.faults.append),
+            Stage::Renamed => std::mem::take(&mut self.faults.after_rename),
+        };
+        if fails {
+            return Err(io::Error::other("the test fails this write"));
+        }
+        Ok(())
     }
 
-    fn refused(&self) -> io::Result<()> {
-        if self.refusing {
-            return Err(io::Error::other("every write is refused"));
-        }
+    #[cfg(not(test))]
+    fn fault(&mut self, _: &Stage) -> io::Result<()> {
         Ok(())
     }
 
@@ -328,12 +382,6 @@ impl Journal {
     #[must_use]
     pub fn lines(&self) -> usize {
         self.lines
-    }
-
-    /// Whether `changes` still fit within the bound.
-    #[must_use]
-    pub fn fits(&self, changes: &[Change]) -> bool {
-        lines(changes).is_ok_and(|bytes| self.len + bytes.len() as u64 <= MAX_BYTES)
     }
 }
 
@@ -351,20 +399,6 @@ fn lines(changes: &[Change]) -> io::Result<Vec<u8>> {
         bytes.push(b'\n');
     }
     Ok(bytes)
-}
-
-/// Writes the store in `dir` whole: its header and `changes`. Returns its length and how many
-/// changes it holds.
-fn rewrite(dir: &HeldDir, changes: &[Change]) -> io::Result<(u64, usize)> {
-    let mut bytes = format!("{}\n", header()).into_bytes();
-    bytes.extend(lines(changes)?);
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err(too_large());
-    }
-    dir.write(NAME, &bytes, 0o600)?;
-    // The rename is what a waiting report relies on.
-    dir.sync()?;
-    Ok((bytes.len() as u64, changes.len()))
 }
 
 #[cfg(test)]
@@ -573,5 +607,54 @@ mod tests {
             .is_err());
         assert_eq!(load(&held(&dir)), Ok(Vec::new()));
         assert_eq!(journal.lines(), 0);
+    }
+
+    /// A rewrite that fails once its new file is in place leaves the journal appending nothing,
+    /// so no change lands in a file that is no longer the store; the next rewrite succeeds and the
+    /// journal appends again.
+    /// Verifies: ADR-0060
+    #[test]
+    fn a_rewrite_that_fails_after_its_rename_appends_nothing_until_rewritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let [a, b] = [(); 2].map(|()| InstanceUid::default());
+        let held_store = vec![
+            Change::Ends("h1".into(), end("1")),
+            Change::Bound(a, "h1".into()),
+        ];
+        let mut journal = Journal::create(held(&dir), &held_store).expect("create");
+        journal.faults.after_rename = true;
+        assert!(journal.compact(&held_store).is_err());
+        assert!(
+            journal.append(&[Change::Bound(b, "h1".into())]).is_err(),
+            "appended to a file that may not be the store"
+        );
+        journal.compact(&held_store).expect("compact");
+        journal
+            .append(&[Change::Bound(b, "h1".into())])
+            .expect("append");
+        let mut expected = held_store;
+        expected.push(Change::Bound(b, "h1".into()));
+        assert_eq!(load(&held(&dir)), Ok(expected));
+    }
+
+    /// An append that fails after its bytes are written is cut back: the store reads as before,
+    /// and the next append lands after what it held.
+    /// Verifies: ADR-0060
+    #[test]
+    fn a_failed_append_is_cut_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let [a, b] = [(); 2].map(|()| InstanceUid::default());
+        let first = vec![
+            Change::Ends("h1".into(), end("1")),
+            Change::Bound(a, "h1".into()),
+        ];
+        let mut journal = Journal::create(held(&dir), &first).expect("create");
+        journal.faults.append = true;
+        assert!(journal.append(&[Change::Bound(b, "h1".into())]).is_err());
+        assert_eq!(load(&held(&dir)), Ok(first.clone()));
+        journal.append(&[Change::Unbound(a)]).expect("append");
+        let mut expected = first;
+        expected.push(Change::Unbound(a));
+        assert_eq!(load(&held(&dir)), Ok(expected));
     }
 }

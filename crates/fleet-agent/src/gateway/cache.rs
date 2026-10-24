@@ -780,13 +780,19 @@ impl PackageCache {
     /// Makes every later write of the bindings' store fail.
     #[cfg(test)]
     pub(crate) fn refuse_writes(&self) {
+        self.inject(|faults| faults.all = true);
+    }
+
+    /// Sets where the bindings' store fails next.
+    #[cfg(test)]
+    fn inject(&self, set: impl FnOnce(&mut store::Faults)) {
         if let Some(journal) = self
             .journal
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()
         {
-            journal.refuse_writes();
+            set(&mut journal.faults);
         }
     }
 
@@ -2248,5 +2254,46 @@ mod tests {
             std::fs::read(&store).expect("read"),
             b"opamp-fleet-gateway-bindings 9\n"
         );
+    }
+
+    /// A store that fails an append is rewritten whole, and the binding is made: what the failed
+    /// append wrote is cut back, and the store reads back to the bindings held.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_failed_append_falls_back_to_a_rewrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_binding(dir.path(), 3).await;
+        assert!(cache.bind(InstanceUid::default(), "h1", |_| false).await.0);
+        cache.inject(|faults| faults.append = true);
+        let uid = InstanceUid::default();
+        assert!(
+            cache.bind(uid, "h1", |_| false).await.0,
+            "bound by the rewrite"
+        );
+        assert_eq!(stored(dir.path()), cache.inner().bindings.snapshot());
+        assert_eq!(store_lines(dir.path()), 3);
+    }
+
+    /// A rewrite that fails once its new file is in place makes nothing: the report is refused,
+    /// and nothing is appended afterwards to a file that may no longer be the store; the next
+    /// report's binding is written by a rewrite and outlasts a restart.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_rewrite_that_fails_after_its_rename_binds_nothing_and_appends_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_binding(dir.path(), 3).await;
+        assert!(cache.bind(InstanceUid::default(), "h1", |_| false).await.0);
+        cache.inject(|faults| {
+            faults.append = true;
+            faults.after_rename = true;
+        });
+        let refused = InstanceUid::default();
+        assert!(!cache.bind(refused, "h1", |_| false).await.0, "not written");
+        let next = InstanceUid::default();
+        assert!(cache.bind(next, "h1", |_| false).await.0);
+        drop(cache);
+        let cache = cache_binding(dir.path(), 3).await;
+        assert!(cache.is_bound(&next), "the binding outlasts a restart");
+        assert!(!cache.is_bound(&refused));
     }
 }
