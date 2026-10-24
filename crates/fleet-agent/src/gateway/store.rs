@@ -153,9 +153,7 @@ fn refuse(file: &File) -> Option<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        // SAFETY: geteuid(2) cannot fail and touches no memory.
-        let own = unsafe { libc::geteuid() };
-        if meta.uid() != own {
+        if meta.uid() != crate::storage::handle::own() {
             return Some(format!(
                 "it is owned by uid {}, not by the Client's account",
                 meta.uid()

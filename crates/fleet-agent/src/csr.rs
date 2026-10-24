@@ -77,8 +77,10 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
     }
     // Whole or not at all, through a temporary name and a rename in the held directory, so a link
     // the service's account put at either name is replaced rather than written through (ADR-0054).
+    // Owner-only, as every file of the Client's in a state directory the process account's group
+    // may pass through (ADR-0059 clause 6).
     held(state_dir)?
-        .write(PENDING_CERT_FILE, cert_pem, 0o644)
+        .write(PENDING_CERT_FILE, cert_pem, 0o600)
         .map_err(|e| format!("cannot store the issued certificate: {e}"))?;
     recover(state_dir)
 }
@@ -250,9 +252,16 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
 
     // Held without following a link at its name, and each file written whole over a link at its
     // own: an install enrols as root in a directory that belongs to the service's account
-    // (ADR-0054).
-    let dir = HeldDir::create(&config.state_dir, 0o700)
-        .map_err(|e| format!("cannot create {}: {e}", config.state_dir.display()))?;
+    // (ADR-0054). Passed through by the process group where one is registered (ADR-0059 clause 6).
+    crate::storage::create_shared_dir(
+        &config.state_dir,
+        &config.state_dir,
+        config.process_account_group,
+        crate::storage::Shared::Traversed,
+    )
+    .map_err(|e| format!("cannot create {}: {e}", config.state_dir.display()))?;
+    let dir = HeldDir::open(&config.state_dir)
+        .map_err(|e| format!("cannot open {}: {e}", config.state_dir.display()))?;
     // The key is written no wider than its owner, the mode set in the open call so it is never on
     // disk at the umask default even briefly; it replaces a key file a prior enrolment left at a
     // wider mode. On Windows the state directory's ACL under `%ProgramData%` protects it
@@ -263,7 +272,9 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
         0o600,
     )
     .map_err(|e| format!("cannot store the private key: {e}"))?;
-    dir.write(PENDING_CSR_FILE, csr.as_bytes(), 0o644)
+    // Owner-only, as every file of the Client's in a state directory the process account's group
+    // may pass through (ADR-0059 clause 6).
+    dir.write(PENDING_CSR_FILE, csr.as_bytes(), 0o600)
         .map_err(|e| format!("cannot store the certificate request: {e}"))?;
     // What the operator matches in the enrolment queue (ADR-0021 clause 22): the same SHA-256 the
     // Server lists as the request's key fingerprint.
@@ -401,6 +412,41 @@ mod tests {
             0o700,
             "the state directory must be owner-only"
         );
+    }
+
+    /// Where a process account is registered, its group passes through the state directory, and
+    /// the request and the certificate are the Client's alone: `0600`, beside the key.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn with_a_process_account_the_request_and_the_certificate_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        let mut config = config(&state_dir);
+        // SAFETY: getegid(2) cannot fail and touches no memory.
+        let group = unsafe { libc::getegid() };
+        config.process_account_group = Some(crate::supervisor::ports::ProcessAccountGroup(group));
+        let signed = sign(request(&config).expect("a request"));
+        let mode = |name: &str| {
+            state_dir
+                .join(name)
+                .metadata()
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        assert_eq!(
+            mode(""),
+            0o710,
+            "passed through by the process account's group"
+        );
+        assert_eq!(mode(PENDING_CSR_FILE), 0o600);
+        accept(&state_dir, signed.as_bytes()).expect("accept");
+        assert_eq!(mode(ISSUED_CERT_FILE), 0o600);
+        assert_eq!(mode(ISSUED_KEY_FILE), 0o600);
     }
 
     /// Signs `csr` the way a Server does.

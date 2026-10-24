@@ -150,7 +150,7 @@ mod unix {
             .expect("storage")
             .load_or_create_uid()
             .expect("an identity");
-        connection::store(state.path(), &ConnectionSettingsOffers::default())
+        connection::store(state.path(), None, &ConnectionSettingsOffers::default())
             .expect("settings stored");
 
         assert_untouched(&uid);
@@ -182,7 +182,7 @@ mod unix {
             "no request is made"
         );
         assert!(
-            connection::store(&state, &ConnectionSettingsOffers::default()).is_err(),
+            connection::store(&state, None, &ConnectionSettingsOffers::default()).is_err(),
             "no settings are stored"
         );
 
@@ -328,7 +328,7 @@ mod windows {
             "no request is made"
         );
         assert!(
-            connection::store(&state, &ConnectionSettingsOffers::default()).is_err(),
+            connection::store(&state, None, &ConnectionSettingsOffers::default()).is_err(),
             "no settings are stored"
         );
         assert_empty(outside.path());
@@ -378,7 +378,8 @@ mod windows {
         std::fs::write(&victim, UNTOUCHED).expect("victim");
         std::os::windows::fs::symlink_file(&victim, state.path().join(SETTINGS_FILE))
             .expect("plant a file symbolic link — this needs an elevated run or Developer Mode");
-        connection::store(state.path(), &ConnectionSettingsOffers::default()).expect("stored");
+        connection::store(state.path(), None, &ConnectionSettingsOffers::default())
+            .expect("stored");
         assert_eq!(std::fs::read(&victim).expect("read"), UNTOUCHED);
         assert!(!is_link(&state.path().join(SETTINGS_FILE)));
     }
