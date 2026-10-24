@@ -529,16 +529,16 @@ fn install(
     {
         use fleet_agent::service::withdrawal::{halt_recorded, HaltFailed};
         let running = manager::running()?;
-        let supervisors_root = config.supervisors_root();
-        let mut roots = vec![
-            layout_root.as_path(),
-            data_root.as_path(),
-            state_dir.as_path(),
-            supervisors_root.as_path(),
-            config_path.as_path(),
-        ];
-        roots.extend(written.copies.iter().map(PathBuf::as_path));
-        pending.add(formers, &roots);
+        pending.add(
+            formers,
+            &fleet_agent::service::withdrawal::roots(
+                &layout_root,
+                &data_root,
+                &state_dir,
+                &config_path,
+                &written.copies,
+            ),
+        );
         halt_recorded(
             &withdrawal,
             &mut pending,
