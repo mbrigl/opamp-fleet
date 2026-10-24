@@ -234,6 +234,14 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     ✅ a plain-HTTP Agent's place goes when its binding makes room for another, so a peer that
     polls under ever new `instance_uid`s holds no more places than its host's `max_carried_agents`
     bindings (ADR-0039, ADR-0058)
+  - ✅ an `instance_uid` stays bound to the host of its first report across the Gateway's
+    restarts, in `<state_dir>/gateway-packages/bindings`, written and synced before a report that
+    relies on it is forwarded · ✅ a binding gives way only to another of its own host's, at the
+    host's `max_carried_agents` and at the Gateway's total alike · ✅ a host's bindings end when
+    the latest certificate it reported under has expired or is revoked, and a report under an
+    expired certificate binds nothing · ✅ while the store cannot be read — a link, not `0600` or
+    not the Client's on Unix, past 512 MiB, an unknown version, a damaged line before the last —
+    or cannot be rewritten at start, every downstream Agent is refused `503` and the Gateway's own Supervisors go on (ADR-0060)
 - **Supervisor Endpoint** — loopback, one Managed Process (`supervisor/endpoint.rs`).
   - ✅ headers ≤ 30 s (HTTP/1), from the same listener · ✅ connections served concurrently ·
     ✅ message size in both directions
@@ -288,8 +296,9 @@ root; install anything unsigned, from another origin than its own Server, or wit
 out; serve a host from its download route an artifact that is not offered to an Agent the host
 speaks for, or serve a host behind a Gateway an artifact the Gateway did not relay to one of
 that host's Agents, or forward a report for an `instance_uid` bound to another host behind a
-Gateway — within the residual that the Gateway binds an `instance_uid` to the host of its first
-report since the Gateway started (ADR-0039); downgrade the Client or install a program that is not the Client as the Client; install a
+Gateway, before or after the Gateway restarts — within the residuals that the Gateway binds an
+`instance_uid` to the host of its first report there, and that a member reaching the Server
+directly may report one first, which the Gateway does not see (ADR-0060); downgrade the Client or install a program that is not the Client as the Client; install a
 Supervisor package below the highest version this Client installed for its type, or under a version
 that is not SemVer — not by purging the Supervisor and adding it back under any name (ADR-0043); switch to
 plaintext, on the loopback neither, or keep a persisted move to plaintext that `supervisor.toml` does not name; weaken TLS verification, set a proxy or plant a header; hand the Client a private

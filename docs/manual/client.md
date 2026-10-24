@@ -1510,19 +1510,30 @@ downstream, so a polling Client works as well as a WebSocket one.
 ![An Agent talking to the Server through a Gateway: the Gateway fetches the revocation list, checks each report's binding, forwards it unchanged under its own certificate, routes replies and pushes back by instance_uid, and serves packages from its cache](../images/communication-gateway.png)
 
 **Each Agent belongs to the host that first reported it.** An Agent's `instance_uid` is bound to
-the host of the certificate of the first report for it since the Gateway started — the host the
-certificate names (`urn:opamp-fleet:host:<id>`), or, for a certificate an operator made without
-one, the host the Server will give it at its first renewal, so its Agents stay bound across that
-renewal. A report for an `instance_uid` bound to another host is not forwarded: over WebSocket it is
-dropped, over plain HTTP it is answered `403`, and the log says so, the first five per host and
-minute one by one, the rest counted into one line. So one host behind a Gateway cannot take over
-another host's Agent, receive its configuration or its certificate, or speak in its name. A host
-binds at most `max_carried_agents` `instance_uid`s; past that a report for a new one takes the
-place of that host's own least recently reported Agent that has neither a connection nor an offer,
-and when it has none, the report is not forwarded. If a
-host locks another host's Agent out, restart the Gateway: the real host's next report then binds
-it. A certificate renewed through a Gateway is renewed with a renewal proof, which this Client
-always sends; the Server refuses a request without one there.
+the host of the certificate of the first report for it — the host the certificate names
+(`urn:opamp-fleet:host:<id>`), or, for a certificate an operator made without one, the host the
+Server will give it at its first renewal, so its Agents stay bound across that renewal. A report
+for an `instance_uid` bound to another host is not forwarded: over WebSocket it is dropped, over
+plain HTTP it is answered `403`, and the log says so, the first five per host and minute one by
+one, the rest counted into one line. So one host behind a Gateway cannot take over another host's
+Agent, receive its configuration or its certificate, or speak in its name. The binding outlasts a
+restart of the Gateway: it is written to the Gateway's directory before the report that made it is
+forwarded (see [What a Gateway keeps on disk](#what-a-gateway-keeps-on-disk)). A host binds at most
+`max_carried_agents` `instance_uid`s, and the Gateway at most 1 000 000; past either, a report for a
+new one takes the place of that host's own least recently reported Agent that has neither a
+connection nor an offer — never another host's — and when it has none, the report is not
+forwarded and the log says so.
+
+**A binding ends with its host's certificate.** The Gateway keeps, per host, the latest `notAfter`
+among the certificates the host reported under. Once that has passed by the Gateway's clock, or
+the revocation list the Gateway fetches names that certificate, every binding of the host ends,
+with its connection and its offer, and the log names the host and how many went; the Gateway
+checks at start, whenever it takes a new list, and once an hour. A report under an expired
+certificate binds nothing. A host that keeps renewing keeps its Agents. So an Agent moved to a new
+host behind the same Gateway is refused there until the old host's certificate expires; to free it
+at once, revoke the old host's certificate, which ends every binding that host holds. A
+certificate renewed through a Gateway is renewed with a renewal proof, which this Client always
+sends; the Server refuses a request without one there.
 
 ### Enrolment through a Gateway
 
@@ -1595,15 +1606,13 @@ crosses the Gateway's upstream link once instead of once per Agent:
   the same handshake and revocation list as its OpAMP endpoint. A downstream Client is served an
   artifact only when the Gateway relayed an offer of it to an Agent carried over a connection whose
   certificate names the same host (`urn:opamp-fleet:host:<id>`) as the requesting certificate. An
-  Agent's `instance_uid` belongs to the host of the first report for it since the Gateway
-  started, as above; an offer relayed for it over another host's connection is not recorded, and
-  the log says so. At the Gateway's cap of 1 000 000 a new one replaces the least recently reported binding that
-  has neither a connection nor an offer. An offer relayed over a certificate that names no host serves nobody and is not
-  fetched. Everything else is answered `404`, the same answer whatever the reason, and logged with
+  Agent's `instance_uid` belongs to the host of the first report for it, as above; an offer
+  relayed for it over another host's connection is not recorded, and the log says so. An offer
+  relayed over a certificate that names no host serves nobody and is not fetched. Everything else is answered `404`, the same answer whatever the reason, and logged with
   the host, the certificate's serial and the path — the first five per host and minute one by one,
   the rest counted into one line.
-- **Where, and how much.** `<state_dir>/gateway-packages`, owner-only, emptied when the Gateway
-  starts. `[gateway] package_cache_bytes` (default `10737418240`, 10 GiB; `0` fails startup) bounds
+- **Where, and how much.** `<state_dir>/gateway-packages`, owner-only, emptied of artifacts when
+  the Gateway starts. `[gateway] package_cache_bytes` (default `10737418240`, 10 GiB; `0` fails startup) bounds
   what it holds and what it is fetching: before a fetch writes a byte it reserves the artifact's
   size. To make room it deletes artifacts no current offer names first, then the least recently
   used. An offered artifact deleted this way is fetched again by the next request for it, once per
@@ -1616,6 +1625,31 @@ The offers the cache serves are kept in memory. After the Gateway restarts, an A
 is still under way re-draws its offer when it reconnects. One that already reported a failed
 install and retries is answered `404` until the Server offers it another version; rolling out the
 same version again does not re-send the offer.
+
+### What a Gateway keeps on disk
+
+Beside the artifacts of its package cache, a Gateway keeps the bindings of the Agents behind it in
+`<state_dir>/gateway-packages/bindings`: each `instance_uid` with its host, each host's certificate
+end, and the order in which the bindings were last reported. The file is a journal: a new binding
+is appended and synced before the report that made it is forwarded, a removal is appended, the order
+of reports at most once a minute and at shutdown, and the whole file is rewritten when the Gateway
+starts and whenever it has grown to twice the bindings and hosts it holds. It is at most 512 MiB,
+`0600` and owned by the Client's account on Linux and macOS, and lies under the state directory's
+restricted ACL on Windows. The offers are kept in memory only (see above).
+
+**When the file cannot be read, the Gateway carries no Agent.** At start the Gateway refuses a
+file that is a link, is no regular file, on Linux and macOS is not `0600` or not owned by the
+Client's account, is larger than 512 MiB, names a format or version this Client does not read, or
+holds a line it cannot parse before its last, and one it cannot rewrite at start, as on a full
+disk; a last line cut off without its newline, as a crash leaves it, is dropped. While it refuses the file, the Gateway answers every WebSocket upgrade, every
+plain-HTTP report and every download from the Clients behind it `503`, and still relays an enrolling
+peer's one request. It does not change a file it cannot read — one it could read but not rewrite
+may already have been replaced by a copy of the same bindings — and it logs why at start and once
+an hour. The
+Client's own connection and its Supervisors go on. To recover, look at why the file was refused, then
+remove it and restart the Client: the Gateway starts with no binding, and each Agent behind it is
+bound again by the next report for it — by whichever host sends that report first, which is what the
+file was protecting. A missing file is an empty one.
 
 ### What a Gateway does not do
 
@@ -2335,6 +2369,10 @@ The ones you are most likely to meet:
 | an endpoint refused as plaintext | `ws://` and `http://` are accepted only to `127.0.0.1` or `::1`. Use `wss://` or `https://`, and set `[tls] ca_file` for a private CA. |
 | `[gateway.tls] is required`, or its `client_ca_file` | A Gateway serves its Agents over mutual TLS only; give it `cert_file`, `key_file` and `client_ca_file`. |
 | `[packages] allowed_sources is removed` | The key no longer exists: a Client downloads only from its own Server's origin. Delete it. |
+
+**Every Client behind a Gateway is answered `503`.** Either the Gateway holds no current
+revocation list, or it cannot read the file of its bindings; its log says which, the second at
+start and once an hour. See [What a Gateway keeps on disk](#what-a-gateway-keeps-on-disk).
 
 **A Foreign Agent runs but never gets new configuration.** Its command line is pointing somewhere
 the Client does not write. Use `${config_dir}` (see [Path placeholders](#path-placeholders)) and

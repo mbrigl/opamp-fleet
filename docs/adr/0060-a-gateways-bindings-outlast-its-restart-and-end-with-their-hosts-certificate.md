@@ -1,6 +1,6 @@
 # ADR-0060: A Gateway's bindings outlast its restart, end with their host's certificate, and never give way to another host
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-24
 - **Deciders:** Markus Brigl
 - **Applies to:** the bindings of `instance_uid`s to hosts in `crates/fleet-agent/src/gateway/policy.rs` and `crates/fleet-agent/src/gateway/cache.rs`, their store under `<state_dir>/gateway-packages/bindings` and its loading and writing in `crates/fleet-agent/src/gateway/`, the downstream refusal while that store cannot be read in `crates/fleet-agent/src/gateway/mod.rs`, and every document that tells an operator what a Gateway keeps on disk or how an Agent behind one is bound to its host
