@@ -30,7 +30,11 @@ jobs:
         # Windows: `service-manager`'s `sc.exe` backend discards the restart policy, so the Client
         # registers the SCM's recovery actions itself and reports `ServiceSpecific(10)` on exit so
         # a self-update's exit reads as a failure rather than a clean stop. None of that is
-        # asserted anywhere else.
+        # asserted anywhere else. And the process account (ADR-0059): under the Client's and the
+        # second service's virtual accounts, a Managed Process runs through the second service's
+        # named pipe without SeImpersonatePrivilege, cannot read the Client's key or write its
+        # program, reads its config and writes its data, and runs again after the SCM restarts
+        # the second service.
         # Linux: the unit the Client writes itself (ADR-0042) — a re-registration keeps its
         # account, the service keeps the privileges `sudo` and setuid helpers need, and systemd
         # accepts the unit. And the process account (ADR-0059): with two real accounts, a Managed

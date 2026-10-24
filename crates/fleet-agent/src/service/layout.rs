@@ -161,6 +161,17 @@ impl Layout {
         Ok(true)
     }
 
+    /// Whether `current` resolves, and to a version directory other than `version_dir`: a
+    /// self-update switched it. A pointer or a directory that cannot be resolved — one the account
+    /// asking may not resolve among them — is no evidence of a switch.
+    #[must_use]
+    pub fn names_another(&self, version_dir: &Path) -> bool {
+        std::fs::canonicalize(self.current())
+            .ok()
+            .zip(std::fs::canonicalize(version_dir).ok())
+            .is_some_and(|(current, version)| current != version)
+    }
+
     /// Whether `current` resolves to `version_dir`. A pointer or a directory that cannot be
     /// resolved names nothing.
     #[must_use]
@@ -612,6 +623,27 @@ mod tests {
         layout.set_current(&a).expect("point at a");
         assert!(layout.names(&a));
         assert!(!layout.names(&b));
+    }
+
+    /// Only a `current` that resolves to another version is evidence of a switch: one that does
+    /// not resolve — missing, or dangling — is none, so the second service does not end on it
+    /// (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn a_pointer_that_does_not_resolve_names_no_other_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = Layout::new(dir.path().canonicalize().expect("canonical tempdir"));
+        let a = layout.version_dir("supervisor-1.0.0-aaaaaaa");
+        let b = layout.version_dir("supervisor-2.0.0-bbbbbbb");
+        std::fs::create_dir_all(&a).expect("create a");
+        std::fs::create_dir_all(&b).expect("create b");
+        assert!(!layout.names_another(&a), "no pointer");
+        layout.set_current(&b).expect("point at b");
+        assert!(layout.names_another(&a), "a switch to b");
+        assert!(!layout.names_another(&b), "its own");
+        std::fs::remove_dir(&b).expect("remove b");
+        assert!(!layout.names_another(&a), "a dangling pointer");
     }
 
     #[test]

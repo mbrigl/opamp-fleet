@@ -16,8 +16,7 @@ use std::path::PathBuf;
 
 use service_manager::{
     RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceLevel as SmLevel, ServiceManager,
-    ServiceManagerKind, ServiceStartCtx, ServiceStatus, ServiceStatusCtx, ServiceStopCtx,
-    ServiceUninstallCtx,
+    ServiceManagerKind, ServiceStartCtx, ServiceStatus, ServiceStatusCtx, ServiceUninstallCtx,
 };
 
 use super::{ServiceControl, ServiceLevel, ServiceState};
@@ -57,7 +56,9 @@ pub fn agents_service_name() -> String {
 }
 
 /// The second service's socket, in a directory named after it that only the process account
-/// writes and its group reaches (ADR-0059 clauses 4 and 6).
+/// writes and its group reaches (ADR-0059 clauses 4 and 6). On Windows its named pipe,
+/// `\\.\pipe\<PRODUCT_NAME>-agents`, whose own security descriptor admits the Client's account
+/// alone.
 ///
 /// Under systemd that is the runtime directory systemd creates for it at every start
 /// (`RuntimeDirectory=`) and removes when it stops. launchd has no such directory, and `/var/run`
@@ -65,9 +66,16 @@ pub fn agents_service_name() -> String {
 /// account beside the default data root, under `/Library/Application Support`, where it outlasts
 /// a reboot; a socket left there by a service that did not stop cleanly is replaced at its next
 /// start.
+#[cfg(unix)]
 #[must_use]
 pub fn agents_socket() -> PathBuf {
     agents_socket_dir().join("agents.sock")
+}
+
+#[cfg(windows)]
+#[must_use]
+pub fn agents_socket() -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\{}", agents_service_name()))
 }
 
 /// Refuses a root that is the directory of the second service's socket, or lies in it: that
@@ -122,7 +130,7 @@ fn agents_socket_dir() -> PathBuf {
     PathBuf::from("/Library/Application Support").join(agents_service_name())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn agents_socket_dir() -> PathBuf {
     PathBuf::from("/run").join(agents_service_name())
 }
@@ -161,6 +169,17 @@ pub fn display_name() -> &'static str {
 pub const WINDOWS_DESCRIPTION: &str =
     "Places this machine under OpAMP management: connects to a Server, supervises the Agents \
      configured for this host, and updates them and itself from packages the Server offers.";
+
+/// The second service's name in the Windows services list (ADR-0059 clause 2).
+#[must_use]
+pub fn agents_display_name() -> String {
+    format!("{PRODUCT_TITLE} Managed Processes")
+}
+
+/// What the Windows services list says the second service does (ADR-0059 clause 2).
+pub const AGENTS_WINDOWS_DESCRIPTION: &str =
+    "Starts, stops and watches the Agents' programs under their own account, on the request of \
+     the OpAMP Fleet Client, which reaches it on a named pipe of its own.";
 
 /// The service label, built so that **every backend renders it identically** (ADR-0019).
 ///
@@ -227,11 +246,20 @@ pub struct Agents {
     /// The process account it runs under.
     pub account: String,
     /// That account's uid, which the Client accepts as the socket's peer.
+    #[cfg(unix)]
     pub uid: u32,
     /// That account's primary group, through which the Client's account reaches the socket.
+    #[cfg(unix)]
     pub gid: u32,
     /// The uid of the Client's account, the one peer the second service serves.
+    #[cfg(unix)]
     pub client_uid: u32,
+    /// That account's SID, which the Client accepts as the owner of the pipe.
+    #[cfg(windows)]
+    pub sid: crate::win32::Sid,
+    /// The SID of the Client's account, the one client the second service serves.
+    #[cfg(windows)]
+    pub client_sid: crate::win32::Sid,
     /// Where it listens: [`agents_socket`].
     pub socket: PathBuf,
 }
@@ -257,25 +285,34 @@ fn service_args(spec: &InstallSpec) -> Vec<OsString> {
         spec.state_dir.clone().into_os_string(),
     ];
     if let Some(agents) = &spec.agents {
+        #[cfg(unix)]
+        let process = ("--process-uid", agents.uid.to_string());
+        #[cfg(windows)]
+        let process = ("--process-sid", agents.sid.to_string());
         args.extend([
             OsString::from("--agents-socket"),
             agents.socket.clone().into_os_string(),
-            OsString::from("--process-uid"),
-            OsString::from(agents.uid.to_string()),
+            OsString::from(process.0),
+            OsString::from(process.1),
         ]);
     }
     args
 }
 
 /// The second service's command line: `run --agents <socket> --client-uid <uid>` (ADR-0059
-/// clause 2). It reads neither the configuration nor the state directory.
+/// clause 2), on Windows `run --agents <pipe> --client-sid <SID>`. It reads neither the
+/// configuration nor the state directory.
 fn agents_args(agents: &Agents) -> Vec<OsString> {
+    #[cfg(unix)]
+    let client = ("--client-uid", agents.client_uid.to_string());
+    #[cfg(windows)]
+    let client = ("--client-sid", agents.client_sid.to_string());
     vec![
         OsString::from("run"),
         OsString::from("--agents"),
         agents.socket.clone().into_os_string(),
-        OsString::from("--client-uid"),
-        OsString::from(agents.client_uid.to_string()),
+        OsString::from(client.0),
+        OsString::from(client.1),
     ]
 }
 
@@ -312,8 +349,9 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
                 Ok(ServiceManagerKind::Systemd)
             ),
     )?;
-    manager(spec.level)?
-        .install(ServiceInstallCtx {
+    register(
+        spec.level,
+        ServiceInstallCtx {
             label: label(),
             program: spec.program.clone(),
             args: service_args(spec),
@@ -336,19 +374,61 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
             // (`KeepAlive{SuccessfulExit:false}`). The Windows backend of `service-manager`
             // *discards* this and only logs a warning, which is why `windows_config` exists.
             restart_policy: RESTART_POLICY,
+        },
+    )
+    .map_err(|e| format!("cannot install the service (system scope needs root/Administrator): {e}"))
+}
+
+/// Registers `ctx` with the service manager. On Windows a service the SCM holds already is
+/// reconfigured in place, as `sc create` refuses one that exists: its program, arguments and start
+/// type are rewritten and its logon account kept, and what `windows_config` sets follows as on a
+/// first registration. A re-registration — an upgrade among them — so keeps the second service
+/// and the process account it runs under (ADR-0059 clause 1).
+fn register(level: ServiceLevel, ctx: ServiceInstallCtx) -> Result<(), String> {
+    let manager = manager(level)?;
+    #[cfg(windows)]
+    if manager
+        .status(ServiceStatusCtx {
+            label: ctx.label.clone(),
         })
-        .map_err(|e| {
-            format!("cannot install the service (system scope needs root/Administrator): {e}")
-        })
+        .map_err(|e| e.to_string())?
+        != ServiceStatus::NotInstalled
+    {
+        return super::windows_config::reregister(
+            &ctx.label.to_qualified_name(),
+            &ctx.program,
+            &ctx.args,
+        );
+    }
+    manager.install(ctx).map_err(|e| e.to_string())
 }
 
 /// Registers the second service (ADR-0059 clause 2), which only a host where [`agents_supported`]
 /// holds gets, and on macOS then the directory of its socket. The registration first, so an
-/// install that may not register a system service is told so before anything else.
+/// install that may not register a system service is told so before anything else. On Windows
+/// what `service-manager` leaves undone follows, as for the Client: the recovery actions, the
+/// display name, the description and the logon account — and the required privileges, cut to
+/// `SeChangeNotifyPrivilege` ([`windows_config::configure_agents`](super::windows_config)).
+///
+/// The Client's service is not made to depend on it (`sc config depend=`): the SCM starts no
+/// service whose dependency failed to start, and stops none a running one depends on, so a second
+/// service that does not come up would hold the Client down with it (StartService,
+/// `ERROR_SERVICE_DEPENDENCY_FAIL`), where the Client runs without it (ADR-0059 clause 2). The
+/// start names the second service first instead ([`started`]).
 fn install_agents(spec: &InstallSpec, agents: &Agents) -> Result<(), String> {
-    manager(spec.level)?
-        .install(agents_install_ctx(spec, agents, cfg!(target_os = "linux"))?)
-        .map_err(|e| format!("cannot install the second service (system scope needs root): {e}"))?;
+    register(
+        spec.level,
+        agents_install_ctx(spec, agents, cfg!(target_os = "linux"))?,
+    )
+    .map_err(|e| {
+        format!("cannot install the second service (system scope needs root or Administrator): {e}")
+    })?;
+    super::windows_config::configure_agents(
+        &agents_service_name(),
+        &agents_display_name(),
+        AGENTS_WINDOWS_DESCRIPTION,
+        &agents.account,
+    )?;
     // The plist is registered `Disabled`: launchd starts nothing until `service start`, by when
     // the directory is in place.
     #[cfg(target_os = "macos")]
@@ -392,14 +472,15 @@ fn agents_install_ctx(
 }
 
 /// Whether this host can register the second service (ADR-0059): a system service under systemd
-/// on Linux, or under launchd on macOS, where a plist's `UserName` applies in the system domain
-/// alone (launchd.plist(5)).
+/// on Linux, under launchd on macOS, where a plist's `UserName` applies in the system domain
+/// alone (launchd.plist(5)), or under the SCM on Windows.
 #[must_use]
 pub fn agents_supported(level: ServiceLevel) -> bool {
     let native = ServiceManagerKind::native();
     level == ServiceLevel::System
         && ((cfg!(target_os = "linux") && matches!(native, Ok(ServiceManagerKind::Systemd)))
-            || (cfg!(target_os = "macos") && matches!(native, Ok(ServiceManagerKind::Launchd))))
+            || (cfg!(target_os = "macos") && matches!(native, Ok(ServiceManagerKind::Launchd)))
+            || (cfg!(windows) && matches!(native, Ok(ServiceManagerKind::Sc))))
 }
 
 /// Creates the directory of the second service's socket, or takes the one there, and gives it to
@@ -672,7 +753,7 @@ pub fn registration(level: ServiceLevel) -> Result<Option<Registration>, String>
         plist_account,
     );
     #[cfg(windows)]
-    Ok(None)
+    super::windows_config::logon_account(service_name())
 }
 
 #[cfg(unix)]
@@ -707,7 +788,7 @@ pub fn agents_registration(level: ServiceLevel) -> Result<Option<Registration>, 
     #[cfg(target_os = "macos")]
     return read_registration(&agents_file(), plist_account);
     #[cfg(windows)]
-    Ok(None)
+    super::windows_config::logon_account(&agents_service_name())
 }
 
 /// The file the second service's registration is: its unit, or its plist.
@@ -725,11 +806,17 @@ fn agents_file() -> PathBuf {
 fn agents_registered(level: ServiceLevel) -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     return level == ServiceLevel::System && agents_file().exists();
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = level;
-        false
-    }
+    #[cfg(windows)]
+    return level == ServiceLevel::System
+        && manager(level)
+            .and_then(|manager| {
+                manager
+                    .status(ServiceStatusCtx {
+                        label: agents_label(),
+                    })
+                    .map_err(|e| e.to_string())
+            })
+            .is_ok_and(|status| status != ServiceStatus::NotInstalled);
 }
 
 /// The last `User=` of a unit's `[Service]` section; an empty one resets it, as systemd reads it.
@@ -983,14 +1070,37 @@ fn command_line_arguments(line: &str) -> Vec<String> {
 /// deregistration leaves a running service running, and one that outlived its unit would go on
 /// running the Managed Processes with nothing left to stop it by.
 ///
+/// Each is tried whatever became of the other: a Client whose deregistration failed leaves no
+/// second service registered behind it.
+///
 /// # Errors
-/// Returns an error if the manager cannot uninstall the service, or stop or uninstall the second
+/// Returns every error: the manager cannot uninstall the service, or stop or uninstall the second
 /// service.
 pub fn uninstall(level: ServiceLevel) -> Result<(), String> {
-    manager(level)?
-        .uninstall(ServiceUninstallCtx { label: label() })
-        .map_err(|e| format!("cannot uninstall the service: {e}"))?;
-    remove_agents(level).map(|_| ())
+    let manager = manager(level);
+    uninstall_with(manager.as_deref(), &mut || remove_agents(level).map(|_| ()))
+}
+
+/// Deregisters the Client through `manager`, then the second service through `remove_agents`,
+/// the second whatever became of the first.
+///
+/// # Errors
+/// Returns every error, the Client's first.
+fn uninstall_with(
+    manager: Result<&dyn ServiceManager, &String>,
+    remove_agents: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let client = manager.map_err(Clone::clone).and_then(|manager| {
+        manager
+            .uninstall(ServiceUninstallCtx { label: label() })
+            .map_err(|e| format!("cannot uninstall the service: {e}"))
+    });
+    let agents = remove_agents();
+    match (client, agents) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+        (Err(client), Err(agents)) => Err(format!("{client}; {agents}")),
+    }
 }
 
 /// Stops and deregisters the second service, where one is registered (ADR-0059 clause 1,
@@ -1022,11 +1132,13 @@ pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        manager
-            .stop(ServiceStopCtx {
-                label: agents_label(),
-            })
-            .map_err(|e| format!("cannot stop the second service: {e}"))?;
+        // `sc stop` refuses a service that is not running, which systemd's stop does not, and
+        // returns before the service has stopped.
+        let native = NativeService::new(level);
+        if native.to_stop(&agents_label())? {
+            (native.halt)(&native, agents_label())
+                .map_err(|e| format!("cannot stop the second service: {e}"))?;
+        }
         manager
             .uninstall(ServiceUninstallCtx {
                 label: agents_label(),
@@ -1034,6 +1146,245 @@ pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
             .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
     }
     Ok(true)
+}
+
+/// Which of the two services ran before a stop for a change stopped them, and are to run again
+/// once the change has succeeded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Halted {
+    pub client: bool,
+    pub agents: bool,
+}
+
+/// How a stop for a change failed: why, and which services it found running and stopped before it
+/// failed — the Client, where it then could not be started again too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HaltError {
+    pub error: String,
+    pub stopped: Halted,
+}
+
+/// Stops the Client, then the second service, through `stop`, which answers whether the service
+/// ran. Where the second cannot be stopped, the Client is started again through `start` if this
+/// stopped it: a halt that fails leaves both as it found them, as far as it can.
+///
+/// # Errors
+/// Returns why a service could not be stopped, and why the Client could not be started again,
+/// with what this stopped.
+#[cfg(any(windows, test))]
+fn halt_with(
+    stop: &mut dyn FnMut(&ServiceLabel) -> Result<bool, String>,
+    start: &mut dyn FnMut(&ServiceLabel) -> Result<(), String>,
+) -> Result<Halted, HaltError> {
+    let client = stop(&label()).map_err(|error| HaltError {
+        error,
+        stopped: Halted::default(),
+    })?;
+    let stopped = Halted {
+        client,
+        agents: false,
+    };
+    match stop(&agents_label()) {
+        Ok(agents) => Ok(Halted { client, agents }),
+        Err(e) if client => match start(&label()) {
+            Ok(()) => Err(HaltError { error: e, stopped }),
+            Err(again) => Err(HaltError {
+                error: format!(
+                    "{e}; and the Client, stopped for it, cannot be started again: {again}"
+                ),
+                stopped,
+            }),
+        },
+        Err(error) => Err(HaltError { error, stopped }),
+    }
+}
+
+/// Stops the Client, then the second service, and waits until each has stopped and its process
+/// has ended — the second service's programs with it (ADR-0059 clause 4) — so that nothing runs
+/// under an account whose rights an install is about to change or take away, or a registration it
+/// is about to rewrite. Returns which ran.
+///
+/// # Errors
+/// Returns why one could not be stopped, or that one had not ended within the bound of a stop,
+/// with what this stopped; that is started again, and nothing is changed.
+#[cfg(windows)]
+pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, HaltError> {
+    halt_with(
+        &mut |label| super::windows_config::stop_and_wait(&label.to_qualified_name(), STOPPING),
+        &mut |label| {
+            manager(level)?
+                .start(ServiceStartCtx {
+                    label: label.clone(),
+                })
+                .map_err(|e| format!("cannot start {label}: {e}"))
+        },
+    )
+}
+
+/// Which of the two services run now — running, starting, or stopping, which a stop already under
+/// way found running — as the SCM reports it, before anything stops them: what a stop for a change
+/// will have to start again.
+///
+/// # Errors
+/// Returns why the SCM cannot be asked.
+#[cfg(windows)]
+pub fn running() -> Result<Halted, String> {
+    runs_as(|activity| activity != Activity::Stopped)
+}
+
+/// Which of the two services run on, settled — running or paused, not starting or stopping — as
+/// the SCM reports it after a stop for a change failed: one still stopping counts as stopped, and
+/// one still starting as not yet run again, both to be started again by a resume that waits them
+/// out.
+///
+/// # Errors
+/// Returns why the SCM cannot be asked.
+#[cfg(windows)]
+pub fn running_on() -> Result<Halted, String> {
+    runs_as(|activity| activity == Activity::Running)
+}
+
+#[cfg(windows)]
+fn runs_as(runs: fn(Activity) -> bool) -> Result<Halted, String> {
+    let asked =
+        |label: ServiceLabel| super::windows_config::activity(&label.to_qualified_name()).map(runs);
+    Ok(Halted {
+        client: asked(label())?,
+        agents: asked(agents_label())?,
+    })
+}
+
+/// Stops the Client and the second service for their deregistration, and waits for each as
+/// [`halt_for_change`] does — but starts nothing again where one cannot be stopped: they are going.
+///
+/// # Errors
+/// Returns why each that could not be stopped was not, after trying both.
+#[cfg(windows)]
+pub fn halt_for_removal() -> Result<(), String> {
+    halt_for_removal_with(&mut |label| {
+        super::windows_config::stop_and_wait(&label.to_qualified_name(), STOPPING)
+    })
+}
+
+/// Stops the Client, then the second service, through `stop`: each tried whatever became of the
+/// other, and nothing started again.
+///
+/// # Errors
+/// Returns why each that could not be stopped was not.
+#[cfg(any(windows, test))]
+fn halt_for_removal_with(
+    stop: &mut dyn FnMut(&ServiceLabel) -> Result<bool, String>,
+) -> Result<(), String> {
+    let failed: Vec<String> = [label(), agents_label()]
+        .iter()
+        .filter_map(|label| stop(label).err())
+        .collect();
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
+}
+
+/// How the two services stand now, for a message: each running or stopped, as far as the SCM can
+/// say.
+#[cfg(windows)]
+#[must_use]
+pub fn describe_activity() -> String {
+    let say = |label: ServiceLabel, which: &str| match super::windows_config::activity(
+        &label.to_qualified_name(),
+    ) {
+        Ok(Activity::Stopped) => format!("{which} is stopped"),
+        Ok(Activity::Stopping) => format!("{which} is stopping"),
+        Ok(Activity::Starting | Activity::Running) => format!("{which} runs"),
+        Err(e) => format!("what {which} does is not known ({e})"),
+    };
+    format!(
+        "{}, and {}",
+        say(label(), "the Client"),
+        say(agents_label(), "the second service")
+    )
+}
+
+/// What [`resume`] starts, in order: where the Client ran, what `start` starts — the second
+/// service first where one is registered now and nothing pulls it in — and where the second
+/// service alone ran and is registered still, that one. What did not run stays stopped.
+#[cfg(any(windows, test))]
+fn resumed(halted: Halted, agents_registered: bool, pulled_in: bool) -> Vec<ServiceLabel> {
+    if halted.client {
+        return started(agents_registered, pulled_in);
+    }
+    if halted.agents && agents_registered {
+        return vec![agents_label()];
+    }
+    Vec::new()
+}
+
+/// Starts again what a stop for a change stopped, once the change has succeeded ([`resumed`]).
+///
+/// # Errors
+/// Returns why a service could not be started, or that one still starting or stopping did not
+/// settle in time.
+#[cfg(windows)]
+pub fn resume(level: ServiceLevel, halted: Halted) -> Result<(), String> {
+    resume_with(
+        &resumed(halted, agents_registered(level), PULLED_IN),
+        &mut |label| super::windows_config::activity(&label.to_qualified_name()),
+        &mut |label| {
+            manager(level)?
+                .start(ServiceStartCtx {
+                    label: label.clone(),
+                })
+                .map_err(|e| e.to_string())
+        },
+        STOPPING,
+    )
+}
+
+/// Starts each of `labels` through `start`, asking `activity` first: one that runs — started by
+/// hand meanwhile — is not started twice, which the SCM would refuse; one still starting or
+/// stopping is asked again until it has settled, up to `within`; one stopped is started. One that
+/// has not settled by then is an error, and what is recorded to run again stays recorded.
+///
+/// # Errors
+/// Returns why a service could not be asked or started, or that it did not settle.
+#[cfg(any(windows, test))]
+fn resume_with(
+    labels: &[ServiceLabel],
+    activity: &mut dyn FnMut(&ServiceLabel) -> Result<Activity, String>,
+    start: &mut dyn FnMut(&ServiceLabel) -> Result<(), String>,
+    within: std::time::Duration,
+) -> Result<(), String> {
+    for label in labels {
+        let which = if *label == agents_label() {
+            "the second service"
+        } else {
+            "the service"
+        };
+        let until = std::time::Instant::now() + within;
+        loop {
+            match activity(label)? {
+                Activity::Running => break,
+                Activity::Stopped => {
+                    start(label).map_err(|e| format!("cannot start {which}: {e}"))?;
+                    break;
+                }
+                pending if std::time::Instant::now() >= until => {
+                    return Err(format!(
+                        "{which} is still {} after {}s, and is not started again",
+                        if pending == Activity::Starting {
+                            "starting"
+                        } else {
+                            "stopping"
+                        },
+                        within.as_secs()
+                    ));
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(250)),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Stops and deregisters a launchd job, and waits until launchd holds it no more (ADR-0059
@@ -1055,7 +1406,7 @@ fn remove_launchd_job(
     loaded: &mut dyn FnMut() -> Result<bool, String>,
     within: std::time::Duration,
 ) -> Result<(), String> {
-    if let Err(e) = manager.stop(ServiceStopCtx {
+    if let Err(e) = manager.stop(service_manager::ServiceStopCtx {
         label: label.clone(),
     }) {
         if loaded()? {
@@ -1150,6 +1501,43 @@ pub struct NativeService {
     manager: fn(ServiceLevel) -> Result<Box<dyn ServiceManager>, String>,
     /// Whether a second service is registered at a level.
     agents_registered: fn(ServiceLevel) -> bool,
+    /// What a service is doing, where a stop must ask first: under the SCM, whose `sc stop`
+    /// refuses a service that does not run (1062) and one still starting (1061), and whose
+    /// stopped and pending states `service-manager` reports alike. `None` where a stop of a
+    /// stopped service stops nothing — systemd and launchd.
+    activity: Option<Asked>,
+    /// How a service that is to be stopped is stopped: by the manager, and under the SCM, whose
+    /// stop returns before the service has, by a stop that waits until its process has ended.
+    halt: fn(&NativeService, ServiceLabel) -> Result<(), String>,
+}
+
+/// How a stop asks what a service is doing.
+type Asked = fn(&ServiceLabel) -> Result<Activity, String>;
+
+/// What a service is doing, as a stop needs to know it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    Running,
+    Starting,
+    Stopping,
+    Stopped,
+}
+
+/// How long a stop waits for a service that is still starting before it stops it anyway.
+const STARTING: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a stop under the SCM waits for a service, and its process, to end: longer than the
+/// second service takes to stop its programs, which [`AGENTS_STOP_TIMEOUT_SECS`] bounds on
+/// systemd.
+#[cfg(windows)]
+const STOPPING: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Stops `label` through the manager.
+#[cfg(any(not(windows), test))]
+fn halt_by_the_manager(service: &NativeService, label: ServiceLabel) -> Result<(), String> {
+    (service.manager)(service.level)?
+        .stop(service_manager::ServiceStopCtx { label })
+        .map_err(|e| e.to_string())
 }
 
 impl NativeService {
@@ -1160,7 +1548,36 @@ impl NativeService {
             level,
             manager,
             agents_registered,
+            #[cfg(windows)]
+            activity: Some(|label| super::windows_config::activity(&label.to_qualified_name())),
+            #[cfg(not(windows))]
+            activity: None,
+            #[cfg(windows)]
+            halt: |_, label| {
+                super::windows_config::stop_and_wait(&label.to_qualified_name(), STOPPING)
+                    .map(|_| ())
+            },
+            #[cfg(not(windows))]
+            halt: halt_by_the_manager,
         }
+    }
+
+    /// Whether `label` is to be stopped: not where it does not run or is stopping already, and
+    /// where it is still starting, once it has started — or once [`STARTING`] has passed.
+    ///
+    /// # Errors
+    /// Returns that the manager cannot say what it is doing.
+    fn to_stop(&self, label: &ServiceLabel) -> Result<bool, String> {
+        let Some(activity) = self.activity else {
+            return Ok(true);
+        };
+        let until = std::time::Instant::now() + STARTING;
+        let mut now = activity(label)?;
+        while now == Activity::Starting && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            now = activity(label)?;
+        }
+        Ok(!matches!(now, Activity::Stopped | Activity::Stopping))
     }
 }
 
@@ -1217,9 +1634,12 @@ impl ServiceControl for NativeService {
             } else {
                 "the service"
             };
-            let stopped = (self.manager)(self.level)?
-                .stop(ServiceStopCtx { label })
-                .map_err(|e| format!("cannot stop {which}: {e}"));
+            let stopped = match self.to_stop(&label) {
+                Ok(false) => continue,
+                Ok(true) => (self.halt)(self, label),
+                Err(e) => Err(e),
+            }
+            .map_err(|e| format!("cannot stop {which}: {e}"));
             if result.is_ok() {
                 result = stopped;
             }
@@ -1627,6 +2047,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn agents() -> Agents {
         Agents {
             account: "opamp-fleet-agents".to_string(),
@@ -1637,6 +2058,17 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    fn agents() -> Agents {
+        Agents {
+            account: r"NT SERVICE\opamp-fleet-agents".to_string(),
+            sid: crate::win32::Sid::parse("S-1-5-80-1-2-3-4-5").expect("sid"),
+            client_sid: crate::win32::Sid::parse("S-1-5-80-6-7-8-9-10").expect("sid"),
+            socket: agents_socket(),
+        }
+    }
+
+    #[cfg(unix)]
     fn with_agents() -> InstallSpec {
         InstallSpec {
             agents: Some(agents()),
@@ -1666,6 +2098,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn macos_agents() -> Agents {
         Agents {
             account: "_opamp-fleet-agents".to_string(),
@@ -1755,10 +2188,56 @@ mod tests {
         }
     }
 
+    /// On Windows the second service is the SCM's `<PRODUCT_NAME>-agents` on the pipe
+    /// `\\.\pipe\<PRODUCT_NAME>-agents`: its command line names the pipe and the SID of the
+    /// Client's account it serves, the Client's names the pipe and the process account's SID, and
+    /// both are registered through the same `service-manager` call as on the other platforms,
+    /// the logon account set afterwards (ADR-0059 clauses 2 and 8).
+    /// Verifies: ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_both_command_lines_name_the_pipe_and_a_sid() {
+        assert_eq!(
+            agents_socket(),
+            PathBuf::from(format!(r"\\.\pipe\{PRODUCT_NAME}-agents"))
+        );
+        let spec = InstallSpec {
+            agents: Some(agents()),
+            ..system_spec(r"C:\ProgramData\opamp-fleet")
+        };
+        let pipe = agents_socket().into_os_string();
+        let client = service_args(&spec);
+        assert_eq!(
+            client[client.len() - 4..],
+            [
+                OsString::from("--agents-socket"),
+                pipe.clone(),
+                OsString::from("--process-sid"),
+                OsString::from("S-1-5-80-1-2-3-4-5"),
+            ]
+        );
+        assert_eq!(
+            agents_args(&agents()),
+            [
+                OsString::from("run"),
+                OsString::from("--agents"),
+                pipe,
+                OsString::from("--client-sid"),
+                OsString::from("S-1-5-80-6-7-8-9-10"),
+            ]
+        );
+        let ctx = agents_install_ctx(&spec, &agents(), false).expect("ctx");
+        assert_eq!((ctx.label, ctx.contents), (agents_label(), None));
+        assert_eq!(ctx.restart_policy, RESTART_POLICY);
+        assert!(agents_display_name().starts_with(PRODUCT_TITLE));
+        assert_ne!(AGENTS_WINDOWS_DESCRIPTION, WINDOWS_DESCRIPTION);
+    }
+
     /// The Client's plist, which `service-manager` renders from the command line, names the
     /// socket and the process account's uid where a process account is registered, as its unit
     /// does under systemd (ADR-0059 clause 8).
     /// Verifies: ADR-0059
+    #[cfg(unix)]
     #[test]
     fn the_clients_command_line_names_the_second_service() {
         let spec = InstallSpec {
@@ -1881,6 +2360,7 @@ mod tests {
     /// A re-registration keeps the process account the second service's unit names: what the
     /// Client writes there, it reads back.
     /// Verifies: ADR-0059
+    #[cfg(unix)]
     #[test]
     fn the_second_services_account_is_read_back_from_its_unit() {
         let unit = agents_unit(&with_agents(), &agents()).expect("unit");
@@ -1941,7 +2421,7 @@ mod tests {
             Recording::note("start", &ctx.label);
             Ok(())
         }
-        fn stop(&self, ctx: ServiceStopCtx) -> std::io::Result<()> {
+        fn stop(&self, ctx: service_manager::ServiceStopCtx) -> std::io::Result<()> {
             Recording::note("stop", &ctx.label);
             if ctx.label == label() {
                 return Err(std::io::Error::other("refused"));
@@ -1968,7 +2448,285 @@ mod tests {
             level,
             manager: |_| Ok(Box::new(Recording)),
             agents_registered,
+            activity: None,
+            halt: halt_by_the_manager,
         }
+    }
+
+    /// Where a stop asks first — under the SCM — a service that does not run or is stopping
+    /// already is not stopped again, and one still starting is stopped once it has started
+    /// (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_stop_passes_over_a_service_that_does_not_run() {
+        let client = label().to_string();
+        let agents = agents_label().to_string();
+        let asking = |activity: Asked| NativeService {
+            activity: Some(activity),
+            ..recording(ServiceLevel::System, |_| true)
+        };
+        let _ = asking(|label| {
+            Ok(if *label == agents_label() {
+                Activity::Stopped
+            } else {
+                Activity::Running
+            })
+        })
+        .stop();
+        assert_eq!(Recording::asked(), vec![format!("stop {client}")]);
+        let _ = asking(|_| Ok(Activity::Stopping)).stop();
+        assert_eq!(Recording::asked(), Vec::<String>::new());
+        static STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let _ = asking(|_| {
+            Ok(
+                if STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                    Activity::Starting
+                } else {
+                    Activity::Running
+                },
+            )
+        })
+        .stop();
+        assert_eq!(
+            Recording::asked(),
+            vec![format!("stop {client}"), format!("stop {agents}")],
+            "stopped once started"
+        );
+    }
+
+    /// What a stop for a change stopped is started again in the order `start` starts it — the
+    /// second service first where nothing pulls it in — and where only the second service ran,
+    /// that one alone, while it is registered still; what did not run stays stopped (ADR-0059
+    /// clause 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_resume_starts_what_ran_in_the_order_start_starts_it() {
+        let both = Halted {
+            client: true,
+            agents: true,
+        };
+        assert_eq!(resumed(both, true, false), [agents_label(), label()]);
+        assert_eq!(resumed(both, true, true), [label()]);
+        assert_eq!(
+            resumed(both, false, false),
+            [label()],
+            "the second one dropped"
+        );
+        let agents_alone = Halted {
+            client: false,
+            agents: true,
+        };
+        assert_eq!(resumed(agents_alone, true, false), [agents_label()]);
+        assert!(resumed(agents_alone, false, false).is_empty(), "dropped");
+        assert!(resumed(Halted::default(), true, false).is_empty());
+    }
+
+    /// A stop for a change that cannot stop the second service starts the Client again where it
+    /// stopped it, and fails: it leaves both as it found them, and the install changes nothing
+    /// (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_halt_that_fails_changes_nothing() {
+        let mut started = Vec::new();
+        let failed = halt_with(
+            &mut |label| {
+                if *label == agents_label() {
+                    Err("did not stop in time".to_string())
+                } else {
+                    Ok(true)
+                }
+            },
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+        );
+        assert_eq!(
+            failed,
+            Err(HaltError {
+                error: "did not stop in time".to_string(),
+                stopped: Halted {
+                    client: true,
+                    agents: false
+                }
+            }),
+            "with what it stopped"
+        );
+        assert_eq!(started, [label()], "the Client runs again");
+
+        let mut started = Vec::new();
+        let failed = halt_with(
+            &mut |label| {
+                if *label == agents_label() {
+                    Err("did not stop in time".to_string())
+                } else {
+                    Ok(false)
+                }
+            },
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+        );
+        assert!(failed.is_err());
+        assert!(
+            started.is_empty(),
+            "a Client that did not run is not started"
+        );
+
+        let halted = halt_with(&mut |label| Ok(*label == agents_label()), &mut |_| {
+            panic!("nothing is started")
+        });
+        assert_eq!(
+            halted,
+            Ok(Halted {
+                client: false,
+                agents: true
+            })
+        );
+    }
+
+    /// A deregistration of the Client that fails still removes the second service, and both
+    /// errors are reported: no second service stays registered behind a Client that could not be
+    /// (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn an_uninstall_removes_the_second_service_when_the_clients_fails() {
+        struct Refusing;
+        impl ServiceManager for Refusing {
+            fn available(&self) -> std::io::Result<bool> {
+                Ok(true)
+            }
+            fn install(&self, _ctx: ServiceInstallCtx) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn uninstall(&self, _ctx: ServiceUninstallCtx) -> std::io::Result<()> {
+                Err(std::io::Error::other("marked for deletion"))
+            }
+            fn start(&self, _ctx: ServiceStartCtx) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn stop(&self, _ctx: service_manager::ServiceStopCtx) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn level(&self) -> SmLevel {
+                SmLevel::System
+            }
+            fn set_level(&mut self, _level: SmLevel) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn status(&self, _ctx: ServiceStatusCtx) -> std::io::Result<ServiceStatus> {
+                Ok(ServiceStatus::Running)
+            }
+        }
+        let mut removed = 0;
+        let both = uninstall_with(Ok(&Refusing), &mut || {
+            removed += 1;
+            Err("the second service did not stop".to_string())
+        });
+        assert_eq!(removed, 1, "the second service removed all the same");
+        let both = both.expect_err("both failed");
+        assert!(
+            both.contains("marked for deletion") && both.contains("did not stop"),
+            "{both}"
+        );
+
+        let mut removed = 0;
+        let client = uninstall_with(Ok(&Refusing), &mut || {
+            removed += 1;
+            Ok(())
+        });
+        assert_eq!(removed, 1);
+        assert!(client.is_err_and(|e| e.contains("marked for deletion")));
+
+        let unreachable = "no service manager".to_string();
+        let mut removed = 0;
+        let _ = uninstall_with(Err(&unreachable), &mut || {
+            removed += 1;
+            Ok(())
+        });
+        assert_eq!(removed, 1, "and where the manager cannot be reached");
+    }
+
+    /// A stop for a deregistration tries both services whatever became of the other, and starts
+    /// neither again: they are going (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_halt_for_removal_tries_both_and_restarts_none() {
+        let mut tried = Vec::new();
+        let failed = halt_for_removal_with(&mut |which| {
+            tried.push(which.clone());
+            if *which == label() {
+                Err("the Client did not stop in time".to_string())
+            } else {
+                Ok(true)
+            }
+        });
+        assert_eq!(tried, [label(), agents_label()], "both tried");
+        assert_eq!(failed, Err("the Client did not stop in time".to_string()));
+        assert_eq!(halt_for_removal_with(&mut |_| Ok(true)), Ok(()));
+    }
+
+    /// A resume passes over only a service that runs; it starts one that is stopped, and waits on
+    /// one still starting or stopping until it has settled — starting it once it has stopped — or,
+    /// where it does not settle in time, fails, so that what is to run again stays recorded
+    /// (ADR-0059 clauses 1 and 2).
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_resume_passes_over_only_what_runs_and_waits_on_what_is_pending() {
+        let both = [agents_label(), label()];
+        let mut started = Vec::new();
+        let mut asked = 0;
+        resume_with(
+            &both,
+            &mut |label| {
+                asked += 1;
+                Ok(if *label == agents_label() {
+                    Activity::Running
+                } else if asked < 4 {
+                    Activity::Stopping
+                } else {
+                    Activity::Stopped
+                })
+            },
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+            std::time::Duration::from_secs(5),
+        )
+        .expect("resumed");
+        assert_eq!(started, [label()], "the running one passed over");
+        assert!(asked >= 4, "the stopping one asked until it settled");
+
+        let mut started = Vec::new();
+        let pending = resume_with(
+            &both,
+            &mut |_| Ok(Activity::Starting),
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+            std::time::Duration::ZERO,
+        );
+        assert!(
+            pending.is_err_and(|e| e.contains("still starting")),
+            "one that does not settle fails"
+        );
+        assert!(started.is_empty());
+
+        let mut started = Vec::new();
+        resume_with(
+            &both,
+            &mut |_| Ok(Activity::Stopped),
+            &mut |label| {
+                started.push(label.clone());
+                Ok(())
+            },
+            std::time::Duration::ZERO,
+        )
+        .expect("resumed");
+        assert_eq!(started, both, "both stopped, both started, in order");
     }
 
     /// `start` starts the Client alone where its unit wants the second service, and the second
