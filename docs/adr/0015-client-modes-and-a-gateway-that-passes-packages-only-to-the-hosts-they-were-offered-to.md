@@ -1,6 +1,6 @@
 # ADR-0015: One Client binary with two composable modes, carrying n Agents over m connections, and a Gateway that admits by client certificate over mutual TLS 1.3, refuses what the Server revoked, and passes on a package only to the host it was offered to, and a Supervisor Endpoint that admits only the process its Supervisor started
 
-- **Status:** 🟢 accepted · clauses 11 and 13 superseded by [ADR-0039](0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)
+- **Status:** 🟢 accepted · clauses 11 and 13 superseded by [ADR-0039](0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md) · clause 7 superseded by [ADR-0058](0058-a-gateway-keeps-an-agent-on-its-connection-while-it-carries-it.md)
 - **Date:** 2026-10-06
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/gateway/, crates/fleet-agent/src/supervisor/endpoint.rs, the [gateway] configuration section, every place either end keeps per-Agent state, the token threaded through `SupervisorContext` and `Runner` in crates/fleet-agent/src/supervisor/, the environment every Managed Process is started with, and the `opampextension` configuration the documentation shows
