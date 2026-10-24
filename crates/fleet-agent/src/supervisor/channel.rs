@@ -153,15 +153,33 @@ fn this_build() -> &'static str {
 /// # Errors
 /// Returns `InvalidInput` for a message larger than [`MAX_FRAME`], which no peer would read.
 pub(crate) fn encode<T: Serialize>(message: &T) -> io::Result<Zeroizing<Vec<u8>>> {
-    // A start carries the Supervisor Endpoint's token, so every frame is wiped (ADR-0057).
-    let mut frame = Zeroizing::new(vec![0; 4]);
-    serde_json::to_writer(&mut *frame, message).map_err(io::Error::other)?;
-    let len = u32::try_from(frame.len() - 4)
+    // A start carries the Supervisor Endpoint's token, so every frame is wiped (ADR-0057). The
+    // frame is sized before it is written: a buffer that grew would leave copies behind unwiped.
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, message).map_err(io::Error::other)?;
+    let len = u32::try_from(count.0)
         .ok()
         .filter(|len| *len <= MAX_FRAME)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "message too large"))?;
-    frame[..4].copy_from_slice(&len.to_be_bytes());
+    let mut frame = Zeroizing::new(Vec::with_capacity(4 + count.0));
+    frame.extend_from_slice(&len.to_be_bytes());
+    serde_json::to_writer(&mut *frame, message).map_err(io::Error::other)?;
+    debug_assert_eq!(frame.capacity(), 4 + count.0, "the frame grew");
     Ok(frame)
+}
+
+/// Counts the bytes written to it and keeps none.
+struct Count(usize);
+
+impl io::Write for Count {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) async fn write_frame<W, T>(writer: &mut W, message: &T) -> io::Result<()>
@@ -1595,6 +1613,19 @@ mod tests {
             "the running program was reported ended"
         );
         running.kill().await.expect("kill");
+    }
+
+    /// A frame is written into a buffer of its final size, so no outgrown copy of a start's token
+    /// is left unwiped.
+    /// Verifies: ADR-0057
+    #[test]
+    fn a_frame_never_outgrows_its_buffer() {
+        for size in [0, 1, 100, 4_000, 70_000] {
+            let mut launch = sh("true");
+            launch.env = vec![("BULK".to_string(), "x".repeat(size))];
+            let frame = encode(&launch).expect("encode");
+            assert_eq!(frame.capacity(), frame.len(), "size {size}");
+        }
     }
 
     /// A start abandoned before the service answered leaves nothing behind: the program it may
