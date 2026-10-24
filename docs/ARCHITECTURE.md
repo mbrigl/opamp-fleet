@@ -169,7 +169,11 @@ core module names an adapter or a technology, and when a module has no role.
   Server-delivered block may bring is `supervisor::delivered`; the registry of Plugins stays in
   `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the
   Supervisors' root as an absolute path too. When a failed process is started again or held is
-  `supervisor::restart`'s decision; the runner reads the clock and starts it.
+  `supervisor::restart`'s decision; the runner reads the clock and starts it. Who starts the
+  program is the runner's `Spawner`: the Client itself, or on Unix the second service of
+  [ADR-0059](adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md),
+  `supervisor run --agents`, through `supervisor::channel`, which holds the private protocol, the
+  service and the Client's end of its socket.
   `supervisor::agent`, an Agent's decisions, names three more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, `HighWaterMarks`, which
   `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares

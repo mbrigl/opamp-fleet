@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::supervisor::ports::{parse_settings, Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{Preflight, ProcessSpec, Runner, VersionProbe};
+use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0010.
 ///
@@ -144,6 +144,9 @@ impl Plugin for CommandPlugin {
             // Not this kind's to know (ADR-0017): an agent nobody wrote a wrapper for applies a
             // configuration by restarting, which is ADR-0017's generic behaviour.
             reload_signal: None,
+            // The Client starts the program itself: nothing registers a process account yet
+            // (ADR-0059 clause 1).
+            spawner: Spawner::Local,
             events: ctx.events,
             commands: command_rx,
             // A Foreign Agent has its own configuration until told otherwise: it always runs.

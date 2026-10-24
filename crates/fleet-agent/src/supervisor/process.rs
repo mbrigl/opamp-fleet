@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use opamp::proto::{AgentDescription, ComponentHealth};
+use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::{info, instrument, warn, Instrument as _};
@@ -57,6 +58,191 @@ pub struct ProcessSpec {
     /// escalates to a kill, holding the very state directory and port the Supervisor manages.
     /// Off by default: a process with no children of its own gains nothing from it.
     pub own_process_group: bool,
+}
+
+/// One start of a Managed Process, resolved: the program made absolute, the environment with the
+/// Supervisor Endpoint's token last, the working directory decided. What a [`Spawner`] is handed,
+/// and what the channel to the second service carries (ADR-0059 clause 5).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Launch {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    /// In order; a later entry for the same key wins.
+    pub env: Vec<(String, String)>,
+    /// The Supervisor Endpoint's token, set as [`ENDPOINT_TOKEN_ENV`] after every entry of
+    /// [`Launch::env`], so none can replace it (ADR-0015). Held in a `Zeroizing` buffer; the
+    /// copies the spawn and the program keep are beyond this code's reach (ADR-0057 clause 4).
+    #[serde(with = "zeroizing_token")]
+    pub endpoint_token: Option<zeroize::Zeroizing<String>>,
+    pub working_dir: Option<PathBuf>,
+    /// [`ProcessSpec::own_process_group`].
+    pub own_process_group: bool,
+}
+
+impl Launch {
+    /// Sets [`Launch::env`] on `command`, and the token after it.
+    pub(crate) fn set_env(&self, command: &mut Command) {
+        command.envs(self.env.iter().cloned());
+        if let Some(token) = &self.endpoint_token {
+            command.env(ENDPOINT_TOKEN_ENV, token.as_str());
+        }
+    }
+}
+
+impl std::fmt::Debug for Launch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Launch")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("env", &self.env)
+            .field(
+                "endpoint_token",
+                &self.endpoint_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("working_dir", &self.working_dir)
+            .field("own_process_group", &self.own_process_group)
+            .finish()
+    }
+}
+
+/// The token of a [`Launch`] on the channel: written from its `Zeroizing` buffer, and read into
+/// one straight from the string the decoder made (ADR-0057 clause 3).
+mod zeroizing_token {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+
+    #[allow(clippy::ref_option)] // the signature `serde(with)` asks for
+    pub(super) fn serialize<S: Serializer>(
+        token: &Option<Zeroizing<String>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match token {
+            Some(token) => serializer.serialize_some(token.as_str()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Zeroizing<String>>, D::Error> {
+        Ok(Option::<String>::deserialize(deserializer)?.map(Zeroizing::new))
+    }
+}
+
+/// Who starts a Managed Process (ADR-0059): the Client itself, or the second service under the
+/// process account, through its channel. The Client starts its programs itself wherever no process
+/// account is registered.
+#[derive(Clone)]
+pub enum Spawner {
+    /// The Client starts the program as a child of its own.
+    Local,
+    /// The second service starts it, on the Client's request (ADR-0059 clause 3).
+    #[cfg(unix)]
+    Channel(crate::supervisor::channel::Channel),
+}
+
+impl Spawner {
+    /// Starts `launch` for the Supervisor named `supervisor`.
+    ///
+    /// # Errors
+    /// Returns why the program did not start, keeping the OS error either way, so a missing
+    /// program and one momentarily busy are still told apart.
+    pub async fn spawn(&self, supervisor: &str, launch: Launch) -> std::io::Result<ManagedChild> {
+        // The name is for the channel, which logs a program's output under it; a program the
+        // Client starts itself writes to the Client's own streams.
+        #[cfg(not(unix))]
+        let _ = supervisor;
+        match self {
+            Spawner::Local => spawn_local(&launch).map(ManagedChild::Local),
+            #[cfg(unix)]
+            Spawner::Channel(channel) => channel
+                .start(supervisor, launch)
+                .await
+                .map(ManagedChild::Remote),
+        }
+    }
+}
+
+fn spawn_local(launch: &Launch) -> std::io::Result<Child> {
+    let mut command = Command::new(&launch.program);
+    command.args(&launch.args);
+    launch.set_env(&mut command);
+    if let Some(dir) = &launch.working_dir {
+        command.current_dir(dir);
+    }
+    // If the runner is dropped without a graceful stop, take the process along.
+    command.kill_on_drop(true);
+    // Its own process group, so `stop` can signal the group and leave no worker behind
+    // (ADR-0017). Unix-only: what Windows offers instead is a job object, which the stop
+    // there does not use yet.
+    #[cfg(unix)]
+    if launch.own_process_group {
+        command.process_group(0);
+    }
+    command.spawn()
+}
+
+/// A running Managed Process, whichever [`Spawner`] started it.
+pub enum ManagedChild {
+    Local(Child),
+    #[cfg(unix)]
+    Remote(crate::supervisor::channel::RemoteChild),
+}
+
+impl ManagedChild {
+    /// The process id, until the process has been waited for.
+    #[must_use]
+    pub fn id(&self) -> Option<u32> {
+        match self {
+            ManagedChild::Local(child) => child.id(),
+            #[cfg(unix)]
+            ManagedChild::Remote(child) => child.id(),
+        }
+    }
+
+    /// Waits for the process to end. Cancel-safe.
+    ///
+    /// # Errors
+    /// Returns an error when waiting failed, or the channel to the second service closed first.
+    pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            ManagedChild::Local(child) => child.wait().await,
+            #[cfg(unix)]
+            ManagedChild::Remote(child) => child.wait().await,
+        }
+    }
+
+    async fn kill(&mut self) -> std::io::Result<()> {
+        match self {
+            ManagedChild::Local(child) => child.kill().await,
+            #[cfg(unix)]
+            ManagedChild::Remote(child) => child.kill().await,
+        }
+    }
+
+    /// Sends `signal` to the process — with `group`, to its whole process group where it leads
+    /// one (ADR-0017). Nothing to do once it has been waited for.
+    async fn signal(&self, signal: i32, group: bool) -> Result<(), String> {
+        match self {
+            ManagedChild::Local(child) => {
+                let Some(pid) = child.id() else {
+                    return Ok(());
+                };
+                #[cfg(unix)]
+                if group {
+                    signal_child(pid, signal);
+                    return Ok(());
+                }
+                #[cfg(not(unix))]
+                let _ = group;
+                send_reload_signal(pid, signal)
+            }
+            #[cfg(unix)]
+            ManagedChild::Remote(child) => {
+                child.signal(signal, group).await.map_err(|e| e.to_string())
+            }
+        }
+    }
 }
 
 impl InstallTarget {
@@ -297,6 +483,8 @@ pub struct Runner {
     /// `None` — the generic behaviour — applies a configuration by restarting. A reload that
     /// fails, or a process that dies on it, falls back to the restart (`reload-or-restart`).
     pub reload_signal: Option<i32>,
+    /// Who starts the Managed Process (ADR-0059).
+    pub spawner: Spawner,
     pub events: EventSender,
     pub commands: mpsc::Receiver<ProcessCommand>,
     pub build: Box<dyn Fn() -> Option<ProcessSpec> + Send + Sync>,
@@ -553,7 +741,7 @@ impl Runner {
         &self,
         staged: Staged,
         version: &str,
-        child: &mut Option<Child>,
+        child: &mut Option<ManagedChild>,
         shutdown: &mut Shutdown,
     ) -> GraceOutcome {
         let Some(target) = &self.install else {
@@ -662,7 +850,7 @@ impl Runner {
     /// and resets the streak. Returns `true` when shutdown was requested mid-wait.
     async fn respawn_or_hold(
         &self,
-        child: &mut Option<Child>,
+        child: &mut Option<ManagedChild>,
         policy: &mut RestartPolicy,
         backoff: &mut Backoff,
         shutdown: &mut Shutdown,
@@ -701,8 +889,8 @@ impl Runner {
     #[instrument(name = "gate", skip_all, fields(supervisor = %self.name))]
     async fn gate(
         &self,
-        started: Option<Child>,
-        child: &mut Option<Child>,
+        started: Option<ManagedChild>,
+        child: &mut Option<ManagedChild>,
         shutdown: &mut Shutdown,
     ) -> GraceOutcome {
         match started {
@@ -744,19 +932,32 @@ impl Runner {
     /// (`reload-or-restart`): no mechanism declared, nothing running to signal, a failed
     /// signal, or a death within the grace.
     #[instrument(name = "reload", skip_all, fields(supervisor = %self.name))]
-    async fn try_reload(&self, child: &mut Option<Child>, shutdown: &mut Shutdown) -> Reloaded {
+    async fn try_reload(
+        &self,
+        child: &mut Option<ManagedChild>,
+        shutdown: &mut Shutdown,
+    ) -> Reloaded {
         let Some(signal) = self.reload_signal else {
             return Reloaded::NotApplied;
         };
         let Some(mut proc) = child.take() else {
             return Reloaded::NotApplied;
         };
-        let Some(pid) = proc.id() else {
+        if proc.id().is_none() {
             // Already exited; the restart path is about to notice and respawn.
             *child = Some(proc);
             return Reloaded::NotApplied;
+        }
+        // The second service answers a signal at once, but not while it shuts down: a shutdown
+        // requested meanwhile does not wait for that answer.
+        let sent = tokio::select! {
+            sent = proc.signal(signal, false) => sent,
+            _ = shutdown.requested() => {
+                *child = Some(proc);
+                return Reloaded::ShuttingDown;
+            }
         };
-        if let Err(e) = send_reload_signal(pid, signal) {
+        if let Err(e) = sent {
             warn!(supervisor = %self.name, signal, error = %e, "cannot signal a reload; restarting instead");
             *child = Some(proc);
             return Reloaded::NotApplied;
@@ -799,7 +1000,7 @@ impl Runner {
     }
 
     /// Spawns when the plugin says something should run, reporting health either way.
-    async fn spawn_if_due(&self) -> Option<Child> {
+    async fn spawn_if_due(&self) -> Option<ManagedChild> {
         self.try_spawn().await.ok()
     }
 
@@ -809,7 +1010,7 @@ impl Runner {
     /// with `ETXTBSY`, which is transient and says nothing about the artifact
     /// ([`install::is_text_file_busy`] states why). So the swap retries briefly rather than rolling
     /// back a binary that is perfectly good.
-    async fn try_spawn(&self) -> Result<Child, String> {
+    async fn try_spawn(&self) -> Result<ManagedChild, String> {
         let mut attempt = 0;
         loop {
             match self.spawn_once().await {
@@ -826,7 +1027,7 @@ impl Runner {
         }
     }
 
-    async fn spawn_once(&self) -> Result<Child, std::io::Error> {
+    async fn spawn_once(&self) -> Result<ManagedChild, std::io::Error> {
         let Some(spec) = (self.build)() else {
             self.events
                 .send(ProcessEvent::Health(unhealthy(
@@ -866,26 +1067,18 @@ impl Runner {
             Some(_) => crate::config_file::absolute(&spec.program),
             None => spec.program.clone(),
         };
-        let mut command = Command::new(&program);
-        command.args(&spec.args).envs(spec.env.iter().cloned());
-        // Last, so no block's `env` can replace it (ADR-0015). The copy `Command` keeps, and the
-        // one the process receives, are beyond this code's reach (ADR-0057 clause 4).
-        if !self.endpoint_token.is_empty() {
-            command.env(ENDPOINT_TOKEN_ENV, self.endpoint_token.as_str());
-        }
-        if let Some(dir) = working_dir {
-            command.current_dir(dir);
-        }
-        // If the runner is dropped without a graceful stop, take the process along.
-        command.kill_on_drop(true);
-        // Its own process group, so `stop` can signal the group and leave no worker behind
-        // (ADR-0017). Unix-only: what Windows offers instead is a job object, which the stop
-        // there does not use yet.
-        #[cfg(unix)]
-        if spec.own_process_group {
-            command.process_group(0);
-        }
-        match command.spawn() {
+        // Set after every entry of `env`, so no block's `env` can replace it (ADR-0015); a
+        // `Zeroizing` copy until the spawn hands it on (ADR-0057).
+        let endpoint_token = (!self.endpoint_token.is_empty()).then(|| self.endpoint_token.clone());
+        let launch = Launch {
+            program,
+            args: spec.args.clone(),
+            env: spec.env.clone(),
+            endpoint_token,
+            working_dir: working_dir.map(std::path::Path::to_path_buf),
+            own_process_group: spec.own_process_group,
+        };
+        match self.spawner.spawn(&self.name, launch).await {
             Ok(child) => {
                 info!(supervisor = %self.name, program = %spec.program.display(), "process started");
                 // Before the health report, so a sampler that wakes on it already has the pid.
@@ -993,13 +1186,13 @@ fn find_semver(text: &str) -> Option<String> {
 }
 
 /// Graceful stop: SIGTERM and a bounded wait on Unix, then (or on Windows, directly) kill.
-async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
+async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
     let Some(mut c) = child.take() else {
         return;
     };
     #[cfg(unix)]
-    if let Some(pid) = c.id() {
-        signal_child(pid, libc::SIGTERM);
+    if c.id().is_some() {
+        let _ = c.signal(libc::SIGTERM, true).await;
         if tokio::time::timeout(timeout, c.wait()).await.is_ok() {
             info!(supervisor = %name, "process stopped");
             return;
@@ -1007,7 +1200,7 @@ async fn stop(child: &mut Option<Child>, timeout: Duration, name: &str) {
         warn!(supervisor = %name, "process ignored SIGTERM; killing it");
         // The group too, so a worker the child spawned does not survive the escalation and go on
         // holding what the Supervisor manages (ADR-0017 clause 56). `Child::kill` below only reaps the one.
-        signal_child(pid, libc::SIGKILL);
+        let _ = c.signal(libc::SIGKILL, true).await;
     }
     #[cfg(not(unix))]
     let _ = timeout; // Windows has no SIGTERM equivalent: kill is the stop.
@@ -1332,6 +1525,95 @@ mod tests {
             .expect("in time")
             .expect("run once the writer let go");
         assert!(output.status.success());
+    }
+
+    /// What the stand-in for the second service is asked to start; it runs nothing.
+    #[cfg(unix)]
+    fn shell(script: &str) -> Launch {
+        Launch {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), script.to_string()],
+            env: Vec::new(),
+            endpoint_token: None,
+            working_dir: None,
+            own_process_group: true,
+        }
+    }
+
+    /// The stop's bound holds for a program the second service runs even when the service does not
+    /// answer its signals — as while it stops its programs on shutting down: the stop does not wait
+    /// out the service's own grace before its timeout begins.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_is_not_held_up_by_a_signal_the_service_does_not_answer() {
+        use crate::supervisor::channel::{peer, SIGNAL_ANSWER};
+        let peer = peer::connect(peer::mute).await;
+        let child = peer
+            .channel
+            .start("test", shell("true"))
+            .await
+            .expect("start");
+        let timeout = Duration::from_millis(100);
+        let mut child = Some(ManagedChild::Remote(child));
+        tokio::time::timeout(
+            SIGNAL_ANSWER * 2 + timeout + Duration::from_secs(2),
+            stop(&mut child, timeout, "test"),
+        )
+        .await
+        .expect("the stop ends within its bound");
+        assert!(child.is_none());
+    }
+
+    /// A shutdown requested while a reload waits for its signal to be answered ends the reload at
+    /// once, without the restart a signal that failed would bring.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shutdown_ends_a_reload_waiting_on_its_signal() {
+        use crate::supervisor::channel::peer;
+        let peer = peer::connect(peer::mute).await;
+        let child = peer
+            .channel
+            .start("test", shell("true"))
+            .await
+            .expect("start");
+        let (event_tx, _events) = mpsc::channel(64);
+        let (_commands, command_rx) = mpsc::channel(16);
+        let runner = Runner {
+            endpoint_token: zeroize::Zeroizing::default(),
+            name: "test".to_string(),
+            stop_timeout: Duration::from_millis(100),
+            apply_grace: Duration::from_secs(60),
+            retain_previous: Duration::ZERO,
+            install: None,
+            archive_key: None,
+            version_probe: None,
+            preflight: None,
+            reload_signal: Some(libc::SIGHUP),
+            spawner: Spawner::Channel(peer.channel.clone()),
+            events: EventSender::new(0, event_tx),
+            commands: command_rx,
+            build: Box::new(|| None),
+        };
+        let (shutdown_tx, mut shutdown) = crate::shutdown::shutdown_channel();
+        let mut child = Some(ManagedChild::Remote(child));
+        let reloaded = {
+            let reload = runner.try_reload(&mut child, &mut shutdown);
+            tokio::pin!(reload);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), reload.as_mut())
+                    .await
+                    .is_err(),
+                "the reload waits for the signal's answer"
+            );
+            shutdown_tx.send(true).expect("request the shutdown");
+            tokio::time::timeout(Duration::from_millis(500), reload)
+                .await
+                .expect("the shutdown is seen at once")
+        };
+        assert!(matches!(reloaded, Reloaded::ShuttingDown));
+        assert!(child.is_some(), "the process is left for the stop");
     }
 
     // What remains here are the cases that reach *into* this module — a private helper and the
