@@ -9,6 +9,10 @@
 //! `ServiceSpecific(10)` on exit so the SCM reads a failure rather than a clean stop. Nothing has
 //! ever proved that this brings a Client back.
 //!
+//! It also installs as a script enrols a host after the package (ADR-0029 clause 11): from
+//! `--fleet-files` with a `bootstrap.p12`, against a Server in the test that the service it
+//! registers then reaches on the certificate the enrolment was issued.
+//!
 //! **Ignored by default, and not part of any ordinary run.** It registers a system service, starts
 //! it, and kills it — it needs root or an Administrator, and it changes the machine. The
 //! `service-smoke` workflow runs it with `--ignored` on an ephemeral runner; locally, run it only
@@ -22,6 +26,7 @@
 //! and hosts with SELinux or AppArmor in the way. The manual checklist in `README.md` keeps those.
 
 mod common;
+mod enrolling;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1186,175 +1191,29 @@ fn on_windows_a_managed_process_runs_under_the_process_account_and_reaches_only_
 /// The password of the `bootstrap.p12` the enrolment smoke test installs with.
 const P12_PASSWORD: &str = "a password of the operator";
 
-/// A throwaway CA as PEM: its certificate and its key.
-fn smoke_ca(name: &str) -> (String, String) {
-    let key = rcgen::KeyPair::generate().expect("ca key");
-    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("ca params");
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, name);
-    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    let cert = params.self_signed(&key).expect("ca");
-    (cert.pem(), key.serialize_pem())
-}
-
-/// A leaf certificate for `name` signed by `ca`, and its key. A bootstrap certificate names the
-/// customer and the site an approval requires (ADR-0036 clause 3).
-fn smoke_leaf(ca: &(String, String), name: &str, bootstrap: bool) -> (String, rcgen::KeyPair) {
-    let issuer =
-        rcgen::Issuer::from_ca_cert_pem(&ca.0, rcgen::KeyPair::from_pem(&ca.1).expect("ca key"))
-            .expect("issuer");
-    let key = rcgen::KeyPair::generate().expect("key");
-    let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).expect("params");
-    if bootstrap {
-        params
-            .distinguished_name
-            .push(rcgen::DnType::OrganizationName, "Kunde GmbH");
-        params
-            .distinguished_name
-            .push(rcgen::DnType::OrganizationalUnitName, "Werk Nord");
-    }
-    let cert = params.signed_by(&key, &issuer).expect("signed");
-    (cert.pem(), key)
-}
-
-/// A Server that enrols, as `main` builds it from `server.toml`: mutual TLS on loopback with a
-/// client CA that also signs the Server's own certificate, a bootstrap CA, the register, and an
-/// open enrolment window. Its runtime lives as long as it does.
-struct EnrollingServer {
-    _runtime: tokio::runtime::Runtime,
-    port: u16,
-    state: Arc<AppState>,
-    enrolment: Arc<fleet_server::enrolment::Enrolment>,
-    revocations: Arc<fleet_server::revocation::Revocations>,
-    /// The client CA, which is also the CA of the Server's certificate: the `server-ca.pem` of the
-    /// fleet's files.
-    client_ca_pem: String,
-    /// The bootstrap certificate as DER, and its key, for a `bootstrap.p12`.
-    bootstrap: (Vec<u8>, rcgen::KeyPair),
-}
-
-impl EnrollingServer {
-    fn start(pki: &Path) -> Self {
-        std::fs::create_dir_all(pki).expect("pki dir");
-        let client_ca = smoke_ca("client-ca");
-        let bootstrap_ca = smoke_ca("bootstrap-ca");
-        let (server_pem, server_key) = smoke_leaf(&client_ca, "localhost", false);
-        let (bootstrap_pem, bootstrap_key) = smoke_leaf(&bootstrap_ca, "bootstrap", true);
-        let file = |name: &str, content: &str| {
-            let path = pki.join(name);
-            std::fs::write(&path, content).expect("write the server's pki");
-            path.display().to_string()
-        };
-        let client_ca_file = file("client-ca.pem", &client_ca.0);
-        let client_ca_key_file = file("client-ca-key.pem", &client_ca.1);
-        let bootstrap_ca_file = file("bootstrap-ca.pem", &bootstrap_ca.0);
-        let cert_file = file("localhost.pem", &server_pem);
-        let key_file = file("localhost-key.pem", &server_key.serialize_pem());
-        let authority = |pem: &str, role: &str| {
-            let der = opamp::tls::certificates(pem.as_bytes()).expect("pem");
-            let facts = fleet_server::ca::facts(der[0].as_ref()).expect("facts");
-            fleet_server::revocation::Authority {
-                role: role.to_string(),
-                subject: facts.id.issuer,
-                name: facts.issuer_name,
-            }
-        };
-
-        let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
-        let enrolment = Arc::new(fleet_server::enrolment::Enrolment::new(clock.clone()));
-        let revocations = Arc::new(
-            fleet_server::revocation::Revocations::open(
-                Box::new(
-                    fleet_server::fs::FsLedgerStore::open(&pki.join("fleet-configs"))
-                        .expect("ledger"),
-                ),
-                clock,
-                vec![
-                    authority(&client_ca.0, "client"),
-                    authority(&bootstrap_ca.0, "bootstrap"),
-                ],
-            )
-            .expect("revocations"),
-        );
-        let signer = fleet_server::ca::ClientCa::from_config(
-            &toml::from_str::<fleet_server::config::ClientCaConfig>(&format!(
-                "cert_file = {client_ca_file:?}\nkey_file = {client_ca_key_file:?}\n"
-            ))
-            .expect("client_ca config"),
-        )
-        .expect("client ca");
-        let state = Arc::new(
-            AppState::new(pki.join("fleet-configs"))
-                .expect("state")
-                .with_client_ca(Some(signer))
-                .with_enrolment(Some(enrolment.clone()))
-                .with_revocations(Some(revocations.clone())),
-        );
-        let tls = toml::from_str::<fleet_server::config::TlsConfig>(&format!(
-            "cert_file = {cert_file:?}\nkey_file = {key_file:?}\nclient_ca_file = {client_ca_file:?}\n"
-        ))
-        .expect("tls config");
-        let planes = fleet_server::tls::server_tls(
-            &tls,
-            None,
-            Some(&fleet_server::config::EnrolmentConfig {
-                bootstrap_ca_file: bootstrap_ca_file.into(),
-                bootstrap_ca_key_file: None,
-                max_pending_per_bootstrap:
-                    fleet_server::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP,
-            }),
-        )
-        .expect("server material");
-        let admission = fleet_server::transport::Admission::new(true)
-            .with_enrolment(planes.issuers, Some(enrolment.clone()))
-            .with_revocations(Some(revocations.clone()));
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let served = state.clone();
-        runtime.spawn(async move {
-            fleet_server::listen::plane(
-                listener,
-                Some(planes.agent.rustls_config().expect("agent plane config")),
-                64,
-                opamp::server::listen::Handle::new(),
-            )
-            .serve(fleet_server::agent_app(served, admission))
-            .await
-        });
-        enrolment.open(600).expect("open the window");
-        let bootstrap_der =
-            opamp::tls::certificates(bootstrap_pem.as_bytes()).expect("pem")[0].to_vec();
-        EnrollingServer {
-            _runtime: runtime,
-            port,
-            state,
-            enrolment,
-            revocations,
-            client_ca_pem: client_ca.0,
-            bootstrap: (bootstrap_der, bootstrap_key),
-        }
-    }
-
-    /// The fleet's files a script puts in the directory `--fleet-files` names (ADR-0029 clause
-    /// 11): `bootstrap.p12` under [`P12_PASSWORD`] and `server-ca.pem`.
-    fn fleet_files(&self, dir: &Path) {
-        std::fs::create_dir_all(dir).expect("fleet files dir");
-        let p12 = fleet_core::pkcs12::file::seal(
-            &self.bootstrap.0,
-            &self.bootstrap.1.serialize_der(),
-            P12_PASSWORD,
-        )
-        .expect("seal");
-        std::fs::write(dir.join(fleet_agent::config_init::BOOTSTRAP_P12_FILE), p12)
-            .expect("write bootstrap.p12");
-        std::fs::write(
-            dir.join(fleet_agent::config_init::SERVER_CA_FILE),
-            &self.client_ca_pem,
-        )
-        .expect("write server-ca.pem");
-    }
+/// The fleet's files a script puts in the directory `--fleet-files` names (ADR-0029 clause 11),
+/// made from what `served` issued: its bootstrap certificate and key as `bootstrap.p12` under
+/// [`P12_PASSWORD`], and the CA of its certificate as `server-ca.pem`. Answers the bootstrap key.
+fn fleet_files(served: &enrolling::Served, dir: &Path) -> rcgen::KeyPair {
+    let pki = served.dir.path();
+    let key = rcgen::KeyPair::from_pem(
+        &std::fs::read_to_string(pki.join("bootstrap-key.pem")).expect("bootstrap key"),
+    )
+    .expect("a key");
+    let cert = std::fs::read(pki.join("bootstrap.pem")).expect("bootstrap certificate");
+    let cert = opamp::tls::certificates(&cert).expect("pem")[0].to_vec();
+    std::fs::create_dir_all(dir).expect("fleet files dir");
+    std::fs::write(
+        dir.join(fleet_agent::config_init::BOOTSTRAP_P12_FILE),
+        fleet_core::pkcs12::file::seal(&cert, &key.serialize_der(), P12_PASSWORD).expect("seal"),
+    )
+    .expect("write bootstrap.p12");
+    std::fs::copy(
+        pki.join("client-ca.pem"),
+        dir.join(fleet_agent::config_init::SERVER_CA_FILE),
+    )
+    .expect("write server-ca.pem");
+    key
 }
 
 /// `service install` running in the background while the test approves its enrolment. Killed
@@ -1388,22 +1247,30 @@ impl Installing {
     /// What the install said, once it has ended; `None` while it runs.
     fn ended(&mut self) -> Option<String> {
         let status = self.child.try_wait().expect("wait for the install")?;
-        Some(self.said(status))
+        Some(self.said(&status.to_string()))
     }
 
     /// Waits for the install to end: its stdout when it succeeded, everything it said when not.
     fn finish(mut self, timeout: Duration) -> Result<String, String> {
-        let status = wait_for("the install to end", timeout, || {
-            self.child.try_wait().expect("wait for the install")
-        });
-        if status.success() {
-            Ok(std::fs::read_to_string(&self.stdout).unwrap_or_default())
-        } else {
-            Err(self.said(status))
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("wait for the install") {
+                return if status.success() {
+                    Ok(std::fs::read_to_string(&self.stdout).unwrap_or_default())
+                } else {
+                    Err(self.said(&status.to_string()))
+                };
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {timeout:?} waiting for the install to end: {}",
+                self.said("nothing yet")
+            );
+            std::thread::sleep(Duration::from_millis(250));
         }
     }
 
-    fn said(&self, status: std::process::ExitStatus) -> String {
+    fn said(&self, status: &str) -> String {
         format!(
             "the install ended with {status}\n--- stdout ---\n{}\n--- stderr ---\n{}",
             std::fs::read_to_string(&self.stdout).unwrap_or_default(),
@@ -1419,9 +1286,9 @@ impl Drop for Installing {
     }
 }
 
-/// Every regular file beneath `dir` whose content `holds`, links not followed. A file that cannot
-/// be read fails the test: it could not be checked.
-fn files_where(dir: &Path, holds: &dyn Fn(&[u8]) -> bool) -> Vec<PathBuf> {
+/// Every regular file beneath `dir` for which `holds` answers yes, given its path and content;
+/// links not followed. A file that cannot be read fails the test: it could not be checked.
+fn files_where(dir: &Path, holds: &dyn Fn(&Path, &[u8]) -> bool) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("list {}: {e}", dir.display())) {
         let path = entry.expect("entry").path();
@@ -1432,6 +1299,7 @@ fn files_where(dir: &Path, holds: &dyn Fn(&[u8]) -> bool) -> Vec<PathBuf> {
             found.extend(files_where(&path, holds));
         } else if kind.is_file()
             && holds(
+                &path,
                 &std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())),
             )
         {
@@ -1441,17 +1309,36 @@ fn files_where(dir: &Path, holds: &dyn Fn(&[u8]) -> bool) -> Vec<PathBuf> {
     found
 }
 
+/// A plain scan, compared from each offset. The staged program is the largest file under a root,
+/// some tens of MiB, and a comparison stops at its first byte that differs: well under a second.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
 }
 
+/// The arguments of the install a script runs after the package (ADR-0029 clause 11).
+fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path) -> Vec<String> {
+    vec![
+        "service".into(),
+        "install".into(),
+        "--root".into(),
+        root.to_string_lossy().into_owned(),
+        "--endpoint".into(),
+        format!("wss://localhost:{port}/v1/opamp"),
+        "--fleet-files".into(),
+        fleet_files.to_string_lossy().into_owned(),
+        "--bootstrap-password-file".into(),
+        password_file.to_string_lossy().into_owned(),
+    ]
+}
+
 /// The install a script runs after the package (ADR-0029 clause 11): `service install --endpoint
 /// --fleet-files --bootstrap-password-file` opens the `bootstrap.p12` in that directory, waits for
 /// an operator's approval with nothing staged or registered, and only then stages and registers.
-/// The configuration it wrote names the copied CA and no bootstrap identity, the Client's identity
-/// is the certificate the approval issued, and the bootstrap key is in no file under the root. The
+/// The configuration it wrote names a copy of the CA and no bootstrap identity, the Client's
+/// identity is the certificate the approval issued, the fleet's files are left as they were, and
+/// neither the `bootstrap.p12`, its password nor its key is in any file under the root. The
 /// service started then reaches the Server on the issued certificate: the Server takes it into the
 /// fleet as the Host that certificate names, and has issued no other.
 /// Verifies: ADR-0029, ADR-0020, ADR-0021
@@ -1465,32 +1352,26 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
         service_name()
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let server = EnrollingServer::start(&dir.path().join("pki"));
-    let fleet_files = dir.path().join("fleet");
-    server.fleet_files(&fleet_files);
+    let server = enrolling::Served::start_on_its_own(600);
+    let fleet = dir.path().join("fleet");
+    let key = fleet_files(&server, &fleet);
     let password_file = dir.path().join("bootstrap.pass");
     std::fs::write(&password_file, format!("{P12_PASSWORD}\n")).expect("write the password");
+    let read = |path: &Path| std::fs::read(path).expect("read a fleet file");
+    let p12 = fleet.join(fleet_agent::config_init::BOOTSTRAP_P12_FILE);
+    let before = (read(&p12), read(&password_file));
     let root = dir.path().join("install");
     let config = root.join(fleet_agent::config_init::FILE_NAME);
     let state_dir = root.join(fleet_agent::service::layout::STATE_DIR_NAME);
 
+    // Before the install, so that on a failure the install is killed before the uninstall runs.
+    let _registered = Registered;
+    let args = install_args(&root, server.port, &fleet, &password_file);
     let mut installing = Installing::spawn(
-        &[
-            "service",
-            "install",
-            "--root",
-            &root.to_string_lossy(),
-            "--endpoint",
-            &format!("wss://localhost:{}/v1/opamp", server.port),
-            "--fleet-files",
-            &fleet_files.to_string_lossy(),
-            "--bootstrap-password-file",
-            &password_file.to_string_lossy(),
-        ],
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
         &config,
         dir.path(),
     );
-    let _registered = Registered;
     let id = wait_for(
         "the install's enrolment request",
         Duration::from_secs(120),
@@ -1520,7 +1401,13 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
     let installed = installing
         .finish(Duration::from_secs(120))
         .expect("install the service");
-    assert!(installed.contains("enrolling with"), "{installed}");
+    assert!(
+        installed.contains(&format!(
+            "enrolled: the issued certificate is in {}",
+            state_dir.display()
+        )),
+        "{installed}"
+    );
 
     let issued = server.revocations.issued();
     assert_eq!(issued.len(), 1, "the approval issued {}", issued.len());
@@ -1538,13 +1425,16 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
     let mut loaded =
         fleet_agent::config::ClientConfig::load(&config).expect("load the configuration");
     let tls = loaded.tls.clone().expect("a [tls] table");
+    let ca_copy = root.join(fleet_agent::config_init::SERVER_CA_FILE);
     assert_eq!(
         tls.ca_file.as_deref(),
-        Some(
-            root.join(fleet_agent::config_init::SERVER_CA_FILE)
-                .as_path()
-        ),
+        Some(ca_copy.as_path()),
         "the configuration names the CA copied from the fleet's files"
+    );
+    assert_eq!(
+        read(&ca_copy),
+        read(&server.dir.path().join("client-ca.pem")),
+        "the copy is not the Server's CA"
     );
     assert_eq!(
         (tls.cert_file, tls.key_file),
@@ -1560,7 +1450,7 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
         )),
         "the Client's identity is not the issued certificate"
     );
-    let held = std::fs::read(state_dir.join(fleet_agent::tls::ISSUED_CERT_FILE)).expect("held");
+    let held = read(&state_dir.join(fleet_agent::tls::ISSUED_CERT_FILE));
     let (_, block) = x509_parser::pem::parse_x509_pem(&held).expect("PEM");
     let held = block.parse_x509().expect("a certificate");
     assert_eq!(
@@ -1569,31 +1459,52 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
         "the state directory holds another certificate than the one issued"
     );
 
-    // The decrypted bootstrap key, in either encoding, is in no file the install wrote (ADR-0029
-    // clause 7).
-    let key_der = server.bootstrap.1.serialize_der();
-    let key_body: String = server
-        .bootstrap
-        .1
+    // The fleet's files are read, never copied, changed or removed (ADR-0029 clauses 9 and 10).
+    assert!(
+        (read(&p12), read(&password_file)) == before,
+        "the install changed bootstrap.p12 or the password file"
+    );
+    // The decrypted bootstrap key — as PKCS#8, in DER or in PEM however it is wrapped — the
+    // `bootstrap.p12` and its password are in no file under the root (ADR-0029 clause 7).
+    let key_der = key.serialize_der();
+    let key_body: String = key
         .serialize_pem()
         .lines()
         .filter(|line| !line.starts_with("-----"))
         .collect();
-    let holding = files_where(&root, &|bytes| {
+    let holding = files_where(&root, &|path, bytes| {
         let unwrapped: Vec<u8> = bytes
             .iter()
             .copied()
             .filter(|b| !matches!(b, b'\r' | b'\n'))
             .collect();
-        contains(bytes, &key_der) || contains(&unwrapped, key_body.as_bytes())
+        path.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("p12"))
+            || contains(bytes, &key_der)
+            || contains(&unwrapped, key_body.as_bytes())
+            || contains(bytes, P12_PASSWORD.as_bytes())
     });
-    assert!(holding.is_empty(), "the bootstrap key is in {holding:?}");
+    assert!(
+        holding.is_empty(),
+        "the bootstrap identity or its password is in {holding:?}"
+    );
 
+    // Nothing has connected as an Agent yet: the enrolment's connections were no member's, so the
+    // Agent below can only be the started service.
+    assert!(
+        server.state.snapshot().iter().all(|agent| !agent.connected),
+        "an Agent is connected before the service starts"
+    );
     client(&["service", "start"], &config).expect("start the service");
     wait_for(
         "the service to report running",
         Duration::from_secs(60),
         || (service().state().ok()? == ServiceState::Running).then_some(()),
+    );
+    wait_for(
+        "the service's process id",
+        Duration::from_secs(30),
+        service_pid,
     );
     // A member connection presents a certificate of the client CA, and the Host it arrives over is
     // the one that certificate names: the issued one, the only one there is.
@@ -1630,8 +1541,8 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
 }
 
 /// A `bootstrap.p12` that does not open under the password `--bootstrap-password-file` names fails
-/// the install before anything is written, staged or registered, naming the flag (ADR-0029 clause
-/// 10, ADR-0020 clause 5).
+/// the install before anything is written, staged or registered, saying so of the file and naming
+/// the flag (ADR-0029 clause 10, ADR-0020 clause 5).
 /// Verifies: ADR-0029, ADR-0020
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -1643,32 +1554,34 @@ fn a_wrong_bootstrap_password_fails_the_install_before_anything_is_written() {
         service_name()
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let server = EnrollingServer::start(&dir.path().join("pki"));
-    let fleet_files = dir.path().join("fleet");
-    server.fleet_files(&fleet_files);
+    let server = enrolling::Served::start_on_its_own(600);
+    let fleet = dir.path().join("fleet");
+    fleet_files(&server, &fleet);
     let password_file = dir.path().join("bootstrap.pass");
     std::fs::write(&password_file, "not the password of the file\n").expect("write the password");
     let root = dir.path().join("install");
     let config = root.join(fleet_agent::config_init::FILE_NAME);
 
-    let refused = client(
-        &[
-            "service",
-            "install",
-            "--root",
-            &root.to_string_lossy(),
-            "--endpoint",
-            &format!("wss://localhost:{}/v1/opamp", server.port),
-            "--fleet-files",
-            &fleet_files.to_string_lossy(),
-            "--bootstrap-password-file",
-            &password_file.to_string_lossy(),
-        ],
-        &config,
-    );
     let _registered = Registered;
-    let refused = refused.expect_err("an install with the wrong password");
-    assert!(refused.contains("--bootstrap-password-file"), "{refused}");
+    let args = install_args(&root, server.port, &fleet, &password_file);
+    let output = Command::new(env!("CARGO_BIN_EXE_supervisor"))
+        .arg("--config")
+        .arg(&config)
+        .args(&args)
+        .output()
+        .expect("run the client");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the install succeeded: {stderr}");
+    // The refusal of the file itself, not merely a failure: the other checks below hold for any
+    // install that stops early.
+    let p12 = fleet.join(fleet_agent::config_init::BOOTSTRAP_P12_FILE);
+    assert!(
+        stderr.contains(&format!(
+            "{}: the password does not open it (--bootstrap-password-file)",
+            p12.display()
+        )),
+        "{stderr}"
+    );
     assert!(!root.exists(), "the install wrote into {}", root.display());
     assert!(
         server.enrolment.pending().is_empty(),
