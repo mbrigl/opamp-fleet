@@ -638,9 +638,10 @@ installed opamp-fleet
 
 Either way the former account keeps nothing in the roots the install acts on — the layout root,
 the data root and the state directory, with a Supervisors' root that lies beneath them. A
-Supervisors' root outside them is yours: the install leaves it as it is, on Windows with a warning,
-and on Linux and macOS you re-own what the former account wrote there yourself (`chown -R`). The
-account itself is never removed; delete it once nothing else uses it.
+Supervisors' root outside them is yours: the install leaves it as it is and names it in a warning,
+and you grant or withdraw the process account's rights there yourself — on Linux and macOS by
+re-owning what the former account wrote (`chown -R`). The account itself is never removed; delete
+it once nothing else uses it.
 
 - **On Linux and macOS** the withdrawal is a change of owner: what the former account owns, and
   what is in its group, goes to the Client's account and group. An install that changes or drops
