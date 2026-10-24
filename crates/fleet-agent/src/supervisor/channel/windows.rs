@@ -188,6 +188,12 @@ pub(super) fn server_of(stream: &NamedPipeClient) -> io::Result<Sid> {
     win32::pipe_owner(stream.as_raw_handle())
 }
 
+/// The process that serves the pipe instance `stream` is connected to (ADR-0059 clause 4): the
+/// second service's, or that of whoever else of the process account made an instance of the pipe.
+pub(super) fn server_process(stream: &NamedPipeClient) -> io::Result<super::PeerProcess> {
+    win32::pipe_server_process(stream.as_raw_handle()).map(|pid| super::PeerProcess { pid })
+}
+
 /// A program's job: every process it starts is in it too, and ends with it.
 pub(super) struct Tree(Job);
 
@@ -472,11 +478,17 @@ fn remove_own(dir: &Path, me: &Sid) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{read_frame, write_frame, Channel, Request};
+    use super::super::{read_frame, write_frame, Channel, Request, ServiceProcess};
     use super::*;
 
     fn sid(text: &str) -> Sid {
         Sid::parse(text).expect("sid")
+    }
+
+    /// The process this test runs as, named as the second service's: it serves the in-process
+    /// services (ADR-0059 clause 4).
+    fn this_process() -> ServiceProcess {
+        ServiceProcess::named(|| Ok(Some(std::process::id())))
     }
 
     /// Only the Client's account is served, and the service runs as neither `LocalSystem` nor the
@@ -570,7 +582,9 @@ mod tests {
         tokio::spawn(super::super::serve(listener, me.clone(), || false, async {
             let _ = stopped.await;
         }));
-        let channel = Channel::connect(&pipe, me).await.expect("connect");
+        let channel = Channel::connect(&pipe, me, this_process())
+            .await
+            .expect("connect");
         (channel, stop, pipe)
     }
 
@@ -623,7 +637,7 @@ mod tests {
         drop(channel);
         let me = win32::own_sid().expect("own sid");
         let other = sid("S-1-5-80-1-2-3-4-5");
-        let refused = Channel::connect(&pipe, other)
+        let refused = Channel::connect(&pipe, other, this_process())
             .await
             .err()
             .expect("another account serves it");
@@ -633,6 +647,34 @@ mod tests {
         // tries again, as this does.
         let stream = connect_when_free(&pipe).await;
         assert_eq!(server_of(&stream).expect("owner"), me);
+    }
+
+    /// The pipe's server is the process the Client reads, and the Client takes no instance served
+    /// by a process other than the one the SCM names as the second service's (ADR-0059 clause 4).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn the_client_talks_only_to_the_process_the_scm_names() {
+        let (channel, _stop, pipe) = served().await;
+        drop(channel);
+        let me = win32::own_sid().expect("own sid");
+        let own = std::process::id();
+        let other = own.wrapping_add(1);
+        let refused = Channel::connect(&pipe, me, ServiceProcess::named(move || Ok(Some(other))))
+            .await
+            .err()
+            .expect("another process serves it");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
+        assert!(
+            refused
+                .to_string()
+                .contains(&format!("served by process {own}")),
+            "{refused}"
+        );
+        let stream = connect_when_free(&pipe).await;
+        assert_eq!(
+            server_process(&stream).expect("the server's process").pid,
+            own
+        );
     }
 
     /// Connects to `pipe` once an instance is free: `ERROR_PIPE_BUSY` while the service has none

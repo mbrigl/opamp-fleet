@@ -14,6 +14,13 @@ use fleet_agent::service::{
 use fleet_agent::update;
 
 fn main() {
+    // The second service marks itself not dumpable before it does anything else: before its command
+    // line is parsed or its log set up, no process of its account may reach into it for longer than
+    // it must (ADR-0059 clause 4). `run_service` does not listen where the mark is not set.
+    #[cfg(target_os = "linux")]
+    if fleet_agent::supervisor::channel::runs_the_second_service(std::env::args_os().skip(1)) {
+        fleet_agent::supervisor::channel::mark_not_dumpable();
+    }
     // stderr as always, plus two empty slots the OTLP exporters are dropped into once the Server
     // names a destination: the log bridge for events (ADR-0016) and the span layer for traces
     // (ADR-0016). Both have to exist from the start: `tracing` takes one subscriber for the

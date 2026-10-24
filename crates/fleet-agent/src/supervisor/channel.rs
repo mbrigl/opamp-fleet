@@ -47,7 +47,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tokio::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
 use crate::supervisor::process::Launch;
@@ -458,10 +458,12 @@ pub enum Served {
 /// its programs running.
 ///
 /// # Errors
-/// Returns an error when the service runs as root, `client_uid` is root's or the service's own,
-/// the runtime cannot be built, or the socket cannot be bound.
+/// Returns an error when the service is dumpable or traced (on Linux), runs as root, `client_uid`
+/// is root's or the service's own, the runtime cannot be built, or the socket cannot be bound.
 #[cfg(unix)]
 pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
+    #[cfg(target_os = "linux")]
+    check_closed()?;
     // SAFETY: geteuid(2) cannot fail and touches no memory.
     check_client_uid(client_uid, unsafe { libc::geteuid() })?;
     let runtime = tokio::runtime::Runtime::new()
@@ -471,6 +473,15 @@ pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
         crate::service::runtime::ignore_sighup();
         let listener =
             bind(socket).map_err(|e| format!("cannot listen on {}: {e}", socket.display()))?;
+        #[cfg(target_os = "linux")]
+        info!(
+            socket = %socket.display(),
+            client_uid,
+            // SAFETY: prctl(2) with no argument to read; no memory is touched.
+            dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE) },
+            "second service listening"
+        );
+        #[cfg(not(target_os = "linux"))]
         info!(socket = %socket.display(), client_uid, "second service listening");
         let served = serve(listener, client_uid, superseded, terminated()).await;
         let _ = std::fs::remove_file(socket);
@@ -482,6 +493,62 @@ pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
         }
         Ok(served)
     })
+}
+
+/// Whether the command line `args`, the program's name left out, runs the second service
+/// (`run --agents`): read before anything else, so that its program marks itself not dumpable
+/// first ([`mark_not_dumpable`]).
+pub fn runs_the_second_service(mut args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    args.any(|arg| {
+        arg == "--agents" || arg.to_str().is_some_and(|arg| arg.starts_with("--agents="))
+    })
+}
+
+/// Closes the second service's process to the Managed Processes (ADR-0059 clause 4): marked not
+/// dumpable, no process of its account without `CAP_SYS_PTRACE` attaches to it, reads or writes its
+/// memory, or takes its descriptors, whatever `kernel.yama.ptrace_scope` says. The first thing its
+/// program does, before it parses its command line or sets up its log; the programs it starts are
+/// dumpable as usual, since `execve(2)` resets the mark. [`run_service`] does not listen where the
+/// mark is not set.
+#[cfg(target_os = "linux")]
+pub fn mark_not_dumpable() {
+    // SAFETY: prctl(2) with an integer argument; no memory is touched.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, libc::c_ulong::from(0u8)) };
+}
+
+/// Whether the second service's process is closed (ADR-0059 clause 4): it is not dumpable, and no
+/// process traces it. A tracer attached before the mark stays attached, so a service that is traced
+/// does not listen, and the service manager starts it again.
+///
+/// # Errors
+/// Returns that the process is dumpable, or that a process traces it.
+#[cfg(target_os = "linux")]
+fn check_closed() -> Result<(), String> {
+    // SAFETY: prctl(2) with no argument to read; no memory is touched.
+    if unsafe { libc::prctl(libc::PR_GET_DUMPABLE) } != 0 {
+        return Err(
+            "the second service is dumpable: its program did not mark it otherwise at its start"
+                .to_string(),
+        );
+    }
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| format!("cannot read /proc/self/status for a tracer: {e}"))?;
+    match tracer(&status) {
+        Some(0) => Ok(()),
+        Some(tracer) => Err(format!(
+            "the second service is traced by process {tracer}, and does not listen while it is"
+        )),
+        None => Err("/proc/self/status names no TracerPid".to_string()),
+    }
+}
+
+/// The process `/proc/<pid>/status` names as the tracer: 0 for none.
+#[cfg(target_os = "linux")]
+fn tracer(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("TracerPid:"))
+        .and_then(|pid| pid.trim().parse().ok())
 }
 
 /// Whether `current` names a version other than the one this program runs from: a self-update
@@ -1327,6 +1394,9 @@ struct Shared {
     socket: PathBuf,
     /// The account the socket must be served by: the process account (ADR-0059 clause 4).
     service: Account,
+    /// Who names the process the socket must be served by: the second service's (ADR-0059 clause
+    /// 4).
+    process: ServiceProcess,
     state: tokio::sync::Mutex<State>,
     /// Whether `current` names a version other than the one this Client runs from.
     superseded: fn() -> bool,
@@ -1343,6 +1413,10 @@ struct State {
     gave_up: Option<Instant>,
     /// The refusals met so far, logged sparingly: a start meets one every [`RECONNECT_EVERY`].
     refusals: Refusals,
+    /// The peers refused as not the second service, logged sparingly too, apart from the
+    /// refusals: a warning about a build or an account never holds back the error that names an
+    /// impostor (ADR-0059 clause 4).
+    impostors: Refusals,
 }
 
 /// A wait for the service, holding the channel's state: dropped after it tried in vain — out of
@@ -1393,23 +1467,25 @@ struct Route {
 }
 
 impl Channel {
-    /// The channel to the second service at `socket`, served by the account `service`. Nothing is
-    /// connected until the first start.
+    /// The channel to the second service at `socket`, served by the account `service` and by the
+    /// process `process` names. Nothing is connected until the first start.
     #[must_use]
-    pub fn new(socket: &Path, service: Account) -> Channel {
-        Channel::with_superseded(socket, service, superseded)
+    pub fn new(socket: &Path, service: Account, process: ServiceProcess) -> Channel {
+        Channel::with_superseded(socket, service, process, superseded)
     }
 
     /// [`Channel::new`], told by `superseded` whether a self-update switched `current`.
     pub(crate) fn with_superseded(
         socket: &Path,
         service: Account,
+        process: ServiceProcess,
         superseded: fn() -> bool,
     ) -> Channel {
         Channel {
             shared: Arc::new(Shared {
                 socket: socket.to_path_buf(),
                 service,
+                process,
                 state: tokio::sync::Mutex::new(State::default()),
                 superseded,
                 left_behind: tokio::sync::watch::channel(false).0,
@@ -1429,11 +1505,15 @@ impl Channel {
     /// [`Channel::new`], connected now, once.
     ///
     /// # Errors
-    /// Returns an error when the socket cannot be reached, is not served by `service`, the
-    /// service refuses the connection, or it is another build.
-    pub async fn connect(socket: &Path, service: Account) -> io::Result<Channel> {
-        let connection = Connection::open(socket, &service).await?;
-        let channel = Channel::new(socket, service);
+    /// Returns an error when the socket cannot be reached, is not served by `service` or by the
+    /// process `process` names, the service refuses the connection, or it is another build.
+    pub async fn connect(
+        socket: &Path,
+        service: Account,
+        process: ServiceProcess,
+    ) -> io::Result<Channel> {
+        let connection = Connection::open(socket, &service, &process).await?;
+        let channel = Channel::new(socket, service, process);
         channel.shared.state.lock().await.connection = Some(connection);
         Ok(channel)
     }
@@ -1604,7 +1684,13 @@ impl Channel {
             in_vain: false,
         };
         loop {
-            match Connection::open(&self.shared.socket, &self.shared.service).await {
+            match Connection::open(
+                &self.shared.socket,
+                &self.shared.service,
+                &self.shared.process,
+            )
+            .await
+            {
                 Ok(connection) => {
                     waiting.state.gave_up = None;
                     waiting.state.connection = Some(Arc::clone(&connection));
@@ -1623,6 +1709,20 @@ impl Channel {
                 }
                 Err(e) => {
                     waiting.in_vain = true;
+                    // Whoever serves the socket is not the second service: it heard nothing, and
+                    // the service is waited for as one that is away (ADR-0059 clause 4).
+                    if let Some(peer) = other_process(&e) {
+                        if let Some(unlogged) =
+                            waiting.state.impostors.note(std::time::Instant::now())
+                        {
+                            error!(
+                                socket = %self.shared.socket.display(),
+                                peer_pid = %peer.map_or_else(|| "unread".to_string(), |pid| pid.to_string()),
+                                error = %e, unlogged,
+                                "refused a peer that is not the second service, before writing anything to it; no program starts until the service manager's second service serves the socket"
+                            );
+                        }
+                    }
                     // Not an outage that ends by itself: the operator is to hear of it.
                     if is_refusal(&e) {
                         if let Some(unlogged) =
@@ -1656,22 +1756,31 @@ impl Connection {
     ///
     /// The socket's peer is checked before anything is written: whoever serves it learns every
     /// program's command line and environment, the Supervisor Endpoint's token among them, so only
-    /// the process account is told (ADR-0059 clause 4).
-    async fn open(socket: &Path, service: &Account) -> io::Result<Arc<Connection>> {
+    /// the process account is told (ADR-0059 clause 4), and of its processes only the one `process`
+    /// names as the second service (ADR-0059 clause 4).
+    async fn open(
+        socket: &Path,
+        service: &Account,
+        process: &ServiceProcess,
+    ) -> io::Result<Arc<Connection>> {
         #[cfg(unix)]
-        let (stream, peer) = {
+        let (stream, peer, peer_process) = {
+            use std::os::fd::AsFd as _;
             let stream = UnixStream::connect(socket).await?;
             let peer = stream.peer_cred()?.uid();
-            (stream, peer)
+            let peer_process = peer_process(stream.as_fd());
+            (stream, peer, peer_process)
         };
         #[cfg(windows)]
-        let (stream, peer) = {
+        let (stream, peer, peer_process) = {
             let stream = windows::connect(socket)?;
             let peer = windows::server_of(&stream)?;
-            (stream, peer)
+            let peer_process = windows::server_process(&stream);
+            (stream, peer, peer_process)
         };
         check_service(&peer, service, socket)
             .map_err(|e| io::Error::new(e.kind(), Refusal(e.to_string())))?;
+        check_process(peer_process, process, socket).await?;
         #[cfg(unix)]
         let (mut read, mut write) = stream.into_split();
         #[cfg(windows)]
@@ -2147,6 +2256,254 @@ const ACCOUNT_IS: &str = "uid";
 #[cfg(windows)]
 const ACCOUNT_IS: &str = "SID";
 
+/// Names the process the service manager runs as the second service (ADR-0059 clause 4): systemd
+/// the unit's `MainPID`, launchd the job's `pid`, the SCM the service's process id — `None` where
+/// it runs none. Asked anew at every connection; a test names one in its place.
+#[derive(Clone)]
+pub struct ServiceProcess(Arc<dyn Fn() -> Result<Option<u32>, String> + Send + Sync>);
+
+impl ServiceProcess {
+    /// The one the native service manager names ([`crate::service::manager::agents_process`]).
+    #[must_use]
+    pub fn manager() -> ServiceProcess {
+        ServiceProcess::named(crate::service::manager::agents_process)
+    }
+
+    /// The one `named` names.
+    #[must_use]
+    pub fn named(
+        named: impl Fn() -> Result<Option<u32>, String> + Send + Sync + 'static,
+    ) -> ServiceProcess {
+        ServiceProcess(Arc::new(named))
+    }
+
+    /// Asks once, off the runtime's threads: the service manager is asked through a program it
+    /// ships, or the SCM.
+    async fn ask(&self) -> Result<Option<u32>, String> {
+        let named = Arc::clone(&self.0);
+        tokio::task::spawn_blocking(move || named())
+            .await
+            .unwrap_or_else(|e| Err(format!("the question was cut short: {e}")))
+    }
+}
+
+/// The process at the other end of a connection, as the platform reports it (ADR-0059 clause 4).
+pub(crate) struct PeerProcess {
+    pub(crate) pid: u32,
+    /// On Linux from 6.5, a pidfd for that process: it refers to that process alone, never to a
+    /// later holder of its id.
+    #[cfg(target_os = "linux")]
+    pidfd: Option<std::os::fd::OwnedFd>,
+}
+
+impl PeerProcess {
+    /// Whether the process still runs: where there is a pidfd, it has not ended (the pidfd polls
+    /// readable once it has, poll(2)); without one there is nothing to tell it by.
+    ///
+    /// # Errors
+    /// Returns why the pidfd could not be polled.
+    fn running(&self) -> io::Result<bool> {
+        #[cfg(target_os = "linux")]
+        if let Some(pidfd) = &self.pidfd {
+            use std::os::fd::AsRawFd as _;
+            let mut poll = libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd, valid for the call, and no wait.
+            if unsafe { libc::poll(&mut poll, 1, 0) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(poll.revents == 0);
+        }
+        Ok(true)
+    }
+}
+
+/// The process at the other end of the connected socket `socket`: its pidfd (`SO_PEERPIDFD`) and
+/// its id (`SO_PEERCRED`), both as they were when it called `listen(2)`. Without a pidfd only where
+/// the kernel does not know the option (`ENOPROTOOPT`, before Linux 6.5); any other error is a
+/// process that cannot be read, and nothing is fallen back to.
+///
+/// # Errors
+/// Returns why the process could not be read.
+#[cfg(target_os = "linux")]
+fn peer_process(socket: std::os::fd::BorrowedFd<'_>) -> io::Result<PeerProcess> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    /// `SO_PEERPIDFD`, as `asm-generic/socket.h` numbers it for the architectures the Client is
+    /// built for; the libc crate has no name for it.
+    const SO_PEERPIDFD: libc::c_int = 77;
+    let mut fd: libc::c_int = -1;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: an int and its length, both valid for the call.
+    let got = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            SO_PEERPIDFD,
+            std::ptr::from_mut(&mut fd).cast(),
+            &mut len,
+        )
+    };
+    let pidfd = if got == 0 {
+        // SAFETY: a descriptor the kernel just opened for this process, owned from here.
+        Some(unsafe { OwnedFd::from_raw_fd(fd) })
+    } else {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::ENOPROTOOPT) {
+            return Err(e);
+        }
+        None
+    };
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: a ucred and its length, both valid for the call.
+    if unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::from_mut(&mut cred).cast(),
+            &mut len,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(PeerProcess {
+        pid: process_id(cred.pid)?,
+        pidfd,
+    })
+}
+
+/// The process at the other end of the connected socket `socket` (`LOCAL_PEERPID`), as it was
+/// when it called `listen(2)`.
+///
+/// # Errors
+/// Returns why the process could not be read.
+#[cfg(target_os = "macos")]
+fn peer_process(socket: std::os::fd::BorrowedFd<'_>) -> io::Result<PeerProcess> {
+    use std::os::fd::AsRawFd as _;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: a pid_t and its length, both valid for the call.
+    if unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            std::ptr::from_mut(&mut pid).cast(),
+            &mut len,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(PeerProcess {
+        pid: process_id(pid)?,
+    })
+}
+
+/// `pid` as a process id: never 0 or below, which names no process.
+#[cfg(unix)]
+fn process_id(pid: libc::pid_t) -> io::Result<u32> {
+    u32::try_from(pid)
+        .ok()
+        .filter(|pid| *pid != 0)
+        .ok_or_else(|| io::Error::other(format!("the socket names process {pid}")))
+}
+
+/// Whether the socket is served by the process the service manager runs as the second service
+/// (ADR-0059 clause 4). The account alone cannot tell: the Managed Processes run under the process
+/// account too, and can put a socket of their own in its place, or an instance of the pipe beside
+/// its own. A peer whose process cannot be read, or for which the manager names no process, is
+/// refused as one whose process differs. With a pidfd its process must still run once the manager
+/// has answered, so that its id cannot have passed to the second service in between.
+///
+/// # Errors
+/// Returns a refusal [`other_process`] reads the peer's process id from.
+async fn check_process(
+    peer: io::Result<PeerProcess>,
+    process: &ServiceProcess,
+    socket: &Path,
+) -> io::Result<()> {
+    let refused = |pid: Option<u32>, reason: String| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            OtherProcess { pid, reason },
+        )
+    };
+    let socket = socket.display();
+    let peer = peer.map_err(|e| {
+        refused(
+            None,
+            format!("the process serving {socket} cannot be read: {e}"),
+        )
+    })?;
+    let pid = peer.pid;
+    match process.ask().await {
+        Err(e) => Err(refused(
+            Some(pid),
+            format!(
+                "{socket} is served by process {pid}, and the service manager cannot be asked which process is the second service: {e}"
+            ),
+        )),
+        Ok(None) => Err(refused(
+            Some(pid),
+            format!(
+                "{socket} is served by process {pid}, and the service manager runs no process as the second service"
+            ),
+        )),
+        Ok(Some(named)) if named != pid => Err(refused(
+            Some(pid),
+            format!("{socket} is served by process {pid}, not by the second service (process {named})"),
+        )),
+        Ok(Some(_)) => match peer.running() {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(refused(
+                Some(pid),
+                format!(
+                    "{socket} was served by process {pid}, which has ended: its id names another process now"
+                ),
+            )),
+            Err(e) => Err(refused(
+                Some(pid),
+                format!("whether process {pid}, which serves {socket}, still runs cannot be read: {e}"),
+            )),
+        },
+    }
+}
+
+/// The socket is served by a process other than the second service's, or by one that cannot be
+/// read (ADR-0059 clause 4).
+#[derive(Debug)]
+struct OtherProcess {
+    pid: Option<u32>,
+    reason: String,
+}
+
+impl std::fmt::Display for OtherProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for OtherProcess {}
+
+/// Where `error` is the refusal of a peer that is not the second service: `Some` with its process
+/// id, where it could be read.
+fn other_process(error: &io::Error) -> Option<Option<u32>> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<OtherProcess>())
+        .map(|other| other.pid)
+}
+
 /// A start sent and not yet answered. Dropped — the start abandoned — it stops the program the
 /// service may already run and forgets its route; an answered start forgets the guard instead.
 struct Pending<'a> {
@@ -2318,7 +2675,9 @@ pub(crate) mod peer {
                 }
             }
         });
-        let channel = Channel::connect(&socket, own_uid()).await.expect("connect");
+        let channel = Channel::connect(&socket, own_uid(), this_process())
+            .await
+            .expect("connect");
         Peer { channel, _dir: dir }
     }
 
@@ -2351,6 +2710,12 @@ pub(crate) mod peer {
         Reply::Hello {
             version: this_build().to_string(),
         }
+    }
+
+    /// The process this test runs as, named as the second service's: it serves the stand-ins and
+    /// the in-process services (ADR-0059 clause 4).
+    pub(crate) fn this_process() -> ServiceProcess {
+        ServiceProcess::named(|| Ok(Some(std::process::id())))
     }
 
     /// The uid this test runs as, which serves its stand-ins and its in-process services.
@@ -2442,7 +2807,7 @@ mod pump_tests {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::peer::own_uid;
+    use super::peer::{own_uid, this_process};
     use super::*;
 
     fn sh(script: &str) -> Launch {
@@ -2520,7 +2885,7 @@ mod tests {
             .expect("look up this test's account")
             .expect("this test's account has an entry");
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket, own_uid())
+        let channel = Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("connect");
         let mut launch = sh("echo \"$HOME|$USER|$LOGNAME|$KEPT|$OPAMP_SUPERVISOR_TOKEN\"");
@@ -2557,7 +2922,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().expect("tempdir");
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket, own_uid())
+        let channel = Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("connect");
         let made = dir.path().join("made");
@@ -2605,7 +2970,7 @@ mod tests {
             .join(crate::reconfigure::tombstone_name("agent"));
         written_by_an_agent(&supervisor, &outside);
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket, own_uid())
+        let channel = Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("connect");
 
@@ -2754,7 +3119,7 @@ mod tests {
 
         purge(own_uid(), "agent", &gone, &[PathBuf::from("data")]).expect("gone already");
         purge(own_uid(), "agent", &tomb, &[PathBuf::from("data")]).expect("its data gone");
-        let channel = Channel::new(&dir.path().join("nobody.sock"), own_uid());
+        let channel = Channel::new(&dir.path().join("nobody.sock"), own_uid(), this_process());
         let answers = channel.purge(&[("agent".to_string(), gone)]).await;
         assert!(answers.iter().all(Result::is_ok), "{answers:?}");
     }
@@ -2843,7 +3208,9 @@ mod tests {
                     }
                 }
             });
-            let channel = Channel::connect(&socket, own_uid()).await.expect("connect");
+            let channel = Channel::connect(&socket, own_uid(), this_process())
+                .await
+                .expect("connect");
             let started = tokio::time::Instant::now();
             let mut purged = channel
                 .purge(&[("agent".to_string(), supervisor.clone())])
@@ -2945,7 +3312,7 @@ mod tests {
             let _ = stream.read_to_end(&mut heard).await;
             heard
         });
-        let refused = Channel::connect(&socket, own_uid().wrapping_add(1))
+        let refused = Channel::connect(&socket, own_uid().wrapping_add(1), this_process())
             .await
             .err()
             .expect("refused");
@@ -2967,7 +3334,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("agents.sock");
         let (stop, task) = listen(&socket, own_uid(), || false);
-        let channel = Channel::new(&socket, own_uid());
+        let channel = Channel::new(&socket, own_uid(), this_process());
         let mut first = channel.start("test", sh("sleep 300")).await.expect("start");
         let _ = stop.send(());
         assert_eq!(task.await.expect("the service ended"), Served::Stopped);
@@ -3079,7 +3446,7 @@ mod tests {
                 }
             }
         });
-        let channel = Channel::new(&socket, own_uid());
+        let channel = Channel::new(&socket, own_uid(), this_process());
         let child =
             tokio::time::timeout(Duration::from_secs(10), channel.start("test", sh("true")))
                 .await
@@ -3098,7 +3465,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_start_in_an_outage_that_was_waited_out_tries_once() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let channel = Channel::new(&dir.path().join("agents.sock"), own_uid());
+        let channel = Channel::new(&dir.path().join("agents.sock"), own_uid(), this_process());
         let timed = || async {
             let started = Instant::now();
             let failed = channel
@@ -3169,7 +3536,7 @@ mod tests {
         let service = another_build(&socket);
 
         // Refused, and trying again for as long as a start waits for the service.
-        let current = Channel::with_superseded(&socket, own_uid(), || false);
+        let current = Channel::with_superseded(&socket, own_uid(), this_process(), || false);
         let trying = current.clone();
         let start = tokio::spawn(async move { trying.start("test", sh("true")).await.err() });
         assert!(
@@ -3181,7 +3548,7 @@ mod tests {
         assert!(!start.is_finished(), "the start waits for the service");
         start.abort();
 
-        let behind = Channel::with_superseded(&socket, own_uid(), || true);
+        let behind = Channel::with_superseded(&socket, own_uid(), this_process(), || true);
         let refused =
             tokio::time::timeout(Duration::from_secs(5), behind.start("test", sh("true")))
                 .await
@@ -3261,6 +3628,289 @@ mod tests {
         );
     }
 
+    /// A listener on `socket` that keeps what each peer wrote before it closed the connection.
+    fn heard_on(socket: &Path) -> JoinHandle<Vec<u8>> {
+        heard_by(UnixListener::bind(socket).expect("bind"))
+    }
+
+    /// What the first peer `listener` accepts wrote before it closed the connection.
+    fn heard_by(listener: UnixListener) -> JoinHandle<Vec<u8>> {
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut heard = Vec::new();
+            let _ = stream.read_to_end(&mut heard).await;
+            heard
+        })
+    }
+
+    /// Whether `refused` is the refusal of a peer that is not the second service, whose process
+    /// is `pid`, and the listener heard nothing from the Client.
+    async fn refused_unheard(refused: &io::Error, pid: Option<u32>, heard: JoinHandle<Vec<u8>>) {
+        assert_eq!(other_process(refused), Some(pid), "{refused}");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
+        let heard = tokio::time::timeout(Duration::from_secs(5), heard)
+            .await
+            .expect("the Client closed the connection")
+            .expect("the listener");
+        assert!(heard.is_empty(), "the Client wrote {} bytes", heard.len());
+    }
+
+    /// The Client accepts a socket served by the process account only where its process is the
+    /// one the service manager names as the second service's. One whose process differs, one the
+    /// manager names no process for, one the manager cannot be asked about and one whose process
+    /// cannot be read are refused before anything is written to them.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn the_client_speaks_only_to_the_process_the_manager_names() {
+        let service = service(own_uid());
+        Channel::connect(&service.socket, own_uid(), this_process())
+            .await
+            .expect("the process the manager names is spoken to");
+
+        let me = std::process::id();
+        let differing = ServiceProcess::named(move || Ok(Some(me.wrapping_add(1))));
+        let none = ServiceProcess::named(|| Ok(None));
+        let unasked = ServiceProcess::named(|| Err("systemd is not there".to_string()));
+        for (named, says) in [
+            (differing, "not by the second service"),
+            (none, "runs no process as the second service"),
+            (unasked, "systemd is not there"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let socket = dir.path().join("agents.sock");
+            let heard = heard_on(&socket);
+            let refused = Channel::connect(&socket, own_uid(), named)
+                .await
+                .err()
+                .expect("refused");
+            assert!(refused.to_string().contains(says), "{refused}");
+            assert!(
+                refused.to_string().contains(&format!("process {me}")),
+                "{refused}"
+            );
+            refused_unheard(&refused, Some(me), heard).await;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let unread = check_process(
+            Err(io::Error::other("no such option")),
+            &this_process(),
+            &dir.path().join("agents.sock"),
+        )
+        .await
+        .expect_err("refused");
+        assert_eq!(other_process(&unread), Some(None), "{unread}");
+        assert!(unread.to_string().contains("cannot be read"), "{unread}");
+    }
+
+    /// A peer that is not the second service is no refusal of the service's, which no restart
+    /// mends: the service is away, and is tried again on a new connection, checked anew, until the
+    /// process the manager names serves the socket.
+    /// Verifies: ADR-0059
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_is_not_the_second_service_is_away_and_tried_anew() {
+        let service = service(own_uid());
+        let me = std::process::id();
+        let asked = Arc::new(AtomicU64::new(0));
+        let impostor = {
+            let asked = Arc::clone(&asked);
+            ServiceProcess::named(move || {
+                asked.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(me.wrapping_add(1)))
+            })
+        };
+        let away = Channel::new(&service.socket, own_uid(), impostor)
+            .start("test", sh("exit 3"))
+            .await
+            .err()
+            .expect("refused");
+        assert!(is_unreachable(&away), "{away}");
+        assert!(!is_refused(&away), "{away}");
+        assert!(
+            asked.load(Ordering::SeqCst) > 1,
+            "asked once: the peer was not tried again"
+        );
+
+        let asked = Arc::new(AtomicU64::new(0));
+        let restarted = {
+            let asked = Arc::clone(&asked);
+            ServiceProcess::named(move || {
+                let at = asked.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(if at < 2 { me.wrapping_add(1) } else { me }))
+            })
+        };
+        Channel::new(&service.socket, own_uid(), restarted)
+            .start("test", sh("exit 3"))
+            .await
+            .expect("the second service is reached once the manager names it");
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            3,
+            "each connection is checked anew"
+        );
+    }
+
+    /// A socket whose listening process ends, while another process holds it, before the manager
+    /// has answered is refused although the manager names a process of that id: the pidfd
+    /// (`SO_PEERPIDFD`) refers to the process that listened, never to a later holder of its id, and
+    /// is looked at once the manager has answered. The kernel must know the option, or this fails
+    /// rather than passes on the id alone.
+    /// Verifies: ADR-0059
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_listener_that_ended_is_refused_though_its_id_is_named() {
+        use std::os::fd::{AsFd as _, FromRawFd as _};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let service = service(own_uid());
+        let live = UnixStream::connect(&service.socket).await.expect("connect");
+        let read = peer_process(live.as_fd()).expect("the peer's process");
+        assert_eq!(read.pid, std::process::id());
+        assert!(
+            read.pidfd.is_some(),
+            "the kernel has no SO_PEERPIDFD (Linux 6.5): this cannot be decided"
+        );
+        drop(live);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        // SAFETY: socket(2) with constant arguments; the descriptor is owned below.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0, "socket: {}", io::Error::last_os_error());
+        // SAFETY: a descriptor just opened, owned from here.
+        let held = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        // SAFETY: a zeroed sockaddr_un is a valid one; its path is filled in below.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (to, from) in address
+            .sun_path
+            .iter_mut()
+            .zip(socket.as_os_str().as_bytes())
+        {
+            *to = *from as libc::c_char;
+        }
+        // SAFETY: the address above, its size, and the descriptor held.
+        let bound = unsafe {
+            libc::bind(
+                fd,
+                std::ptr::from_ref(&address).cast(),
+                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(bound, 0, "bind: {}", io::Error::last_os_error());
+        // A child listens on the socket, says so, and waits; this process holds the socket on.
+        let mut ready = [0 as libc::c_int; 2];
+        // SAFETY: pipe(2) fills the two descriptors; both are closed below.
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0, "pipe");
+        // SAFETY: the child calls listen(2), write(2) and pause(2) alone, all async-signal-safe.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            // SAFETY: as above.
+            unsafe {
+                libc::listen(fd, 8);
+                libc::write(ready[1], [1u8].as_ptr().cast(), 1);
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        assert!(child > 0, "fork: {}", io::Error::last_os_error());
+        let mut byte = 0u8;
+        // SAFETY: reads one byte into `byte`, then closes the pipe this process holds.
+        unsafe {
+            assert_eq!(
+                libc::read(ready[0], std::ptr::from_mut(&mut byte).cast(), 1),
+                1
+            );
+            libc::close(ready[0]);
+            libc::close(ready[1]);
+        }
+        let listener = std::os::unix::net::UnixListener::from(held);
+        listener.set_nonblocking(true).expect("nonblocking");
+        let heard = heard_by(UnixListener::from_std(listener).expect("listener"));
+
+        // The manager is asked once the Client has read the peer, which still runs then: the
+        // process ends, and is reaped, before the manager names its id.
+        let listened = child.cast_unsigned();
+        let named = ServiceProcess::named(move || {
+            // SAFETY: kill(2) and waitpid(2) on this test's own child.
+            unsafe {
+                libc::kill(child, libc::SIGKILL);
+                let mut status = 0;
+                libc::waitpid(child, &mut status, 0);
+            }
+            Ok(Some(listened))
+        });
+        let refused = Channel::connect(&socket, own_uid(), named)
+            .await
+            .err()
+            .expect("the process that listened has ended");
+        assert!(refused.to_string().contains("has ended"), "{refused}");
+        refused_unheard(&refused, Some(listened), heard).await;
+    }
+
+    /// A second service whose program did not mark it not dumpable does not listen: this test's
+    /// process, which nothing marked, is refused as dumpable (ADR-0059 clause 4).
+    /// Verifies: ADR-0059
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_second_service_that_is_dumpable_does_not_listen() {
+        let refused = check_closed().expect_err("a dumpable process passed");
+        assert!(refused.contains("is dumpable"), "{refused}");
+    }
+
+    /// The second service's command line is told by `--agents` alone, before it is parsed, so
+    /// that its program marks itself not dumpable first; the Client's `--agents-socket` is not it
+    /// (ADR-0059 clause 4).
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_second_services_command_line_is_known_before_it_is_parsed() {
+        let args = |line: &[&str]| {
+            line.iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        assert!(runs_the_second_service(args(&[
+            "run",
+            "--agents",
+            "/run/x/agents.sock",
+            "--client-uid",
+            "998"
+        ])));
+        assert!(runs_the_second_service(args(&[
+            "run",
+            "--agents=/run/x/agents.sock"
+        ])));
+        assert!(!runs_the_second_service(args(&[
+            "run",
+            "--agents-socket",
+            "/run/x/agents.sock",
+            "--process-uid",
+            "999"
+        ])));
+        assert!(!runs_the_second_service(args(&["run"])));
+    }
+
+    /// An error of `SO_PEERPIDFD` other than `ENOPROTOOPT` is the error the peer is refused with:
+    /// nothing is fallen back to, and no process id read another way.
+    /// Verifies: ADR-0059
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_error_of_so_peerpidfd_falls_back_to_nothing() {
+        use std::os::fd::{AsFd as _, FromRawFd as _};
+        // A socket connected to nothing has no peer: `ENODATA`.
+        // SAFETY: socket(2) with constant arguments; the descriptor is owned below.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0, "socket: {}", io::Error::last_os_error());
+        // SAFETY: a descriptor just opened, owned from here.
+        let unconnected = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let unread = peer_process(unconnected.as_fd())
+            .err()
+            .expect("no peer to read");
+        assert_eq!(unread.raw_os_error(), Some(libc::ENODATA), "{unread}");
+    }
+
     /// A peer whose uid is not the Client's is refused at the socket, before any request. Run
     /// without a second account by naming another uid as the Client's: this process is then the
     /// stranger.
@@ -3275,7 +3925,7 @@ mod tests {
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
-        let refused = Channel::connect(&service.socket, own_uid()).await;
+        let refused = Channel::connect(&service.socket, own_uid(), this_process()).await;
         assert_eq!(
             refused.err().map(|e| e.kind()),
             Some(io::ErrorKind::PermissionDenied)
@@ -3378,7 +4028,7 @@ mod tests {
             other => panic!("expected a refusal, got {other:?}"),
         }
         // And the service still serves the right build afterwards.
-        Channel::connect(&service.socket, own_uid())
+        Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("the Client's own build");
     }
@@ -3403,7 +4053,7 @@ mod tests {
                 let _ = write_frame(&mut stream, &refused).await;
             }
         });
-        let refused = Channel::new(&socket, own_uid())
+        let refused = Channel::new(&socket, own_uid(), this_process())
             .start("test", sh("true"))
             .await
             .err()
@@ -3471,7 +4121,7 @@ mod tests {
             );
             assert!(text.contains("forged log line\\n"), "{text}");
         };
-        let channel = Channel::new(&socket, own_uid());
+        let channel = Channel::new(&socket, own_uid(), this_process());
 
         let not_started = channel
             .start("test", sh("true"))
@@ -3534,10 +4184,10 @@ mod tests {
     #[tokio::test]
     async fn a_second_connection_is_refused_while_one_is_served() {
         let service = service(own_uid());
-        let _first = Channel::connect(&service.socket, own_uid())
+        let _first = Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("first");
-        let second = Channel::connect(&service.socket, own_uid()).await;
+        let second = Channel::connect(&service.socket, own_uid(), this_process()).await;
         assert!(second.is_err(), "the second connection was served");
     }
 
@@ -3637,7 +4287,7 @@ mod tests {
                 .expect("runtime")
                 .block_on(async {
                     let service = service(own_uid());
-                    let channel = Channel::connect(&service.socket, own_uid())
+                    let channel = Channel::connect(&service.socket, own_uid(), this_process())
                         .await
                         .expect("connect");
                     let forged =
@@ -3672,7 +4322,7 @@ mod tests {
     #[tokio::test]
     async fn a_signal_that_cannot_be_sent_is_an_error() {
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket, own_uid())
+        let channel = Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("connect");
         let mut child = channel.start("test", sh("sleep 300")).await.expect("start");
@@ -3730,7 +4380,7 @@ mod tests {
     #[tokio::test]
     async fn a_program_that_cannot_start_keeps_its_os_error() {
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket, own_uid())
+        let channel = Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("connect");
         let mut launch = sh("");
@@ -3749,7 +4399,7 @@ mod tests {
     #[tokio::test]
     async fn a_start_too_large_for_a_message_fails_alone() {
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket, own_uid())
+        let channel = Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("connect");
         let mut running = channel.start("test", sh("sleep 300")).await.expect("start");
@@ -3795,7 +4445,7 @@ mod tests {
     #[tokio::test]
     async fn an_abandoned_start_stops_its_program() {
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket, own_uid())
+        let channel = Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("connect");
         // A duration no other process on the host sleeps for, to find this one by.
@@ -3984,7 +4634,7 @@ mod tests {
     #[tokio::test]
     async fn the_service_stops_its_programs_when_it_shuts_down() {
         let mut service = service(own_uid());
-        let channel = Channel::connect(&service.socket, own_uid())
+        let channel = Channel::connect(&service.socket, own_uid(), this_process())
             .await
             .expect("connect");
         let mut child = channel.start("test", sh("sleep 300")).await.expect("start");

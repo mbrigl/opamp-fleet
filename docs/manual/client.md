@@ -448,11 +448,28 @@ What the separation gives and what it does not:
   package state, logs or environment, nor write the program it runs. A command a Configuration
   makes it run — a Telegraf `inputs.exec`, an Icinga `CheckCommand` — runs as the process account.
 - All Managed Processes share the one process account, so they still read one another's `config/`
-  and environment. For the same reason one of them can take the second service's place: replace
-  the socket in the directory the process account owns, or on Windows create an instance of the
-  pipe, and answer the Client's next connection. It gains no account it does not already run
-  under, but the programs it starts then outlive the Client's connection, and what it reports of
-  them is its own word.
+  and environment.
+- None of them can take the second service's place through its socket or pipe, as far as the
+  platform tells processes apart: a process id that comes round again is told apart on Linux 6.5
+  and later alone, and on Windows a Managed Process can still open the second service's process
+  with the rights its account holds on it. A Managed Process can replace the socket in the
+  directory the process account owns, or on Windows create an instance of the pipe, but before
+  the Client writes anything on a connection it reads the process at the other end and asks the
+  service manager which process it runs as the second service — systemd's `MainPID`, launchd's
+  `pid`, the SCM's process id — and speaks only to that one. Any other is told nothing: the Client
+  closes the connection, its Supervisors report that the second service cannot be reached, and it
+  tries again, on a new connection checked anew, as for a second service that is down; it asks
+  the service manager again at each of those tries, every 200 ms. The log names the socket or
+  pipe and the process that served it:
+
+  ```text
+  ERROR fleet_agent::supervisor::channel: refused a peer that is not the second service, before writing anything to it; no program starts until the service manager's second service serves the socket socket=/run/opamp-fleet-agents/agents.sock peer_pid=4711 error=/run/opamp-fleet-agents/agents.sock is served by process 4711, not by the second service (process 812) unlogged=0
+  ```
+
+  Find the process with `ps -p <peer_pid>`, or on Windows `tasklist /FI "PID eq <peer_pid>"`, end
+  it, and restart the second service, which binds its socket or pipe again. The same refusal, with
+  the reason in `error`, follows where the service manager cannot be asked: on Linux that needs
+  systemd's system bus, on macOS `launchctl print`.
 - A grant an agent needs names the process account, not the Client's: a `sudoers` rule for
   Telegraf's `use_sudo`, the rights Icinga 2 needs on its directories, a supplementary group such
   as `adm`. On Linux, what a Managed Process needs from
@@ -531,6 +548,16 @@ only a peer whose uid is the Client's, serves one connection at a time, and when
 closes stops every program it started, by its process group. Its programs get its own
 environment, with `HOME`, `USER` and `LOGNAME` of the process account, then the block's `env`, then
 the Supervisor Endpoint's token; they keep its umask.
+
+The second service's program marks itself not dumpable (`PR_SET_DUMPABLE`) before it parses its
+command line or sets up its log, so from then on no process of the process account can attach a
+debugger to it, read its memory or take its file descriptors, whatever `kernel.yama.ptrace_scope`
+says. It therefore writes no core dump, and the files under `/proc/<pid>/` belong to root. The
+programs it starts are dumpable as usual. Where Yama is absent or `ptrace_scope` is 0, the moment
+between its start and the mark remains open to a Managed Process that ends it and waits for
+systemd to start it again. A second service that
+is traced at its start does not listen: it exits with `the second service is traced by process
+<pid>`, and systemd starts it again.
 
 At its next start the Client lays out what it keeps for the process account's group; everything
 else under `state_dir`, its logs among them, stays its own:

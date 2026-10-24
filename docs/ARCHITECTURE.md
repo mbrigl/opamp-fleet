@@ -321,9 +321,12 @@ each start, signal, stop and purge is a request to the second service, `supervis
 the same program from the same `current` under the process account, which streams the program's
 output and exit back. The second service admits one connection at a time, from the Client's account
 alone by the peer's credentials or the pipe client's token, and stops every program it started — by
-process group on Unix, by job object on Windows — when that connection closes. Both ends refuse a
-peer of another build, and the one that `current` no longer names exits so its service manager
-starts it from the new version. While the second service is away, a delivered package is staged and
+process group on Unix, by job object on Windows — when that connection closes. Before it writes
+anything, the Client accepts the connection only from the process the service manager runs as the
+second service, which `service::manager::agents_process` asks of systemd, launchd or the SCM
+([ADR-0059](adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md) clause 4).
+Both ends refuse a peer of another build, and the one that `current` no longer names exits so its
+service manager starts it from the new version. While the second service is away, a delivered package is staged and
 waits, and the Supervisor retries with backoff
 ([ADR-0059](adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)).
 
