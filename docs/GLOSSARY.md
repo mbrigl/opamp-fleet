@@ -47,10 +47,11 @@ ones it uses without defining.
 - **Rollout** — the explicit act that releases a Deployment to Agents and pins what each receives.
   _Avoid:_ publish, push, deploy.
 - **Process account** — the account the operator names at a Client's registration for every
-  program its Supervisors start; never root and never the Client's own account. Its primary
-  group, the *process account's group*, is its own: the Client's account is its one member, and
-  no other account's primary group it is. What the Client shares with the Managed Processes
-  belongs to that group, and nothing else does.
+  program its Supervisors start; never root or `LocalSystem`, and never the Client's own account.
+  On Linux and macOS its primary group, the *process account's group*, is its own: the Client's
+  account is its one member, and no other account's primary group it is. What the Client shares
+  with the Managed Processes belongs to that group, and nothing else does; on Windows the same
+  share is made by grants to the account's SID.
   _Avoid:_ agent user, run-as account (that is the Client's), process group (that is a Unix
   process group, which a Managed Process may lead).
 - **Second service** — the service `<PRODUCT_NAME>-agents`, registered beside the Client where a
@@ -61,6 +62,15 @@ ones it uses without defining.
   only elevated Administrators and `LocalSystem` can create, held for the whole of a `service
   install`, `uninstall`, `start` or `stop` so that one runs at a time.
   _Avoid:_ install mutex, global mutex.
+- **Withdrawal** — what an install takes from a former account, a process account dropped or
+  replaced or a Client's account replaced: on Linux and macOS by giving what it owns, and what is
+  in its group, to the Client; on Windows by removing every entry that allows it anything and
+  giving what it owns to the Administrators.
+  _Avoid:_ revocation (that is a certificate's), cleanup.
+- **Record of what an install left to finish** (*the record*) — on Windows, the value `Pending` of
+  `HKLM\SOFTWARE\<PRODUCT_NAME>\WithdrawalPending`: what an install left to finish, the former
+  accounts with the roots to withdraw them from and the services to start again.
+  _Avoid:_ pending file, state file.
 - **Tombstone** — the name, `.purge-<name>-<nonce>`, beneath the Supervisors' root that a removed
   Supervisor's directory is moved to before its purge deletes it, a name no Supervisor can carry;
   one the purge could not delete is removed again at the next start and with the next purge.
