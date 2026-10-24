@@ -237,6 +237,8 @@ pub struct Journal {
     /// An append failed and what it wrote could not be cut off: nothing more is appended until the
     /// store is rewritten whole.
     damaged: bool,
+    /// Every write fails, as on a full disk: set by tests alone.
+    refusing: bool,
 }
 
 impl Journal {
@@ -253,6 +255,7 @@ impl Journal {
             len,
             lines,
             damaged: false,
+            refusing: false,
         })
     }
 
@@ -262,6 +265,7 @@ impl Journal {
     /// # Errors
     /// As [`Journal::create`].
     pub fn compact(&mut self, changes: &[Change]) -> io::Result<()> {
+        self.refused()?;
         let (len, lines) = rewrite(&self.dir, changes)?;
         self.file = self.dir.open_for_writing(NAME)?;
         self.len = len;
@@ -276,6 +280,7 @@ impl Journal {
     /// Returns an error when a change is longer than a line may be, when the store would grow past
     /// its bound, or when the write or the sync fails.
     pub fn append(&mut self, changes: &[Change]) -> io::Result<()> {
+        self.refused()?;
         if self.damaged {
             return Err(io::Error::other(
                 "an earlier append could not be undone; the store is rewritten first",
@@ -303,6 +308,19 @@ impl Journal {
         }
         self.len += bytes.len() as u64;
         self.lines += changes.len();
+        Ok(())
+    }
+
+    /// Makes every later write fail, as on a full disk.
+    #[cfg(test)]
+    pub fn refuse_writes(&mut self) {
+        self.refusing = true;
+    }
+
+    fn refused(&self) -> io::Result<()> {
+        if self.refusing {
+            return Err(io::Error::other("every write is refused"));
+        }
         Ok(())
     }
 

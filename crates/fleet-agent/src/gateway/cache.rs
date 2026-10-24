@@ -3,11 +3,14 @@
 //! passed on only to a downstream host whose Agent it relayed that offer to.
 //!
 //! What is kept here:
-//! - the **bindings**: each `instance_uid` to the host of the first report for it since the
-//!   Gateway started, as the Server binds on first report (ADR-0021 clause 7);
+//! - the **bindings**: each `instance_uid` to the host of the first report for it, as the Server
+//!   binds on first report (ADR-0021 clause 7), kept across restarts in the store beside the held
+//!   artifacts ([`store`](crate::gateway::store), ADR-0060 clause 2) and relied on only once the
+//!   store holds them;
 //! - the **offers**: per `instance_uid`, the Server-hosted artifacts its last recorded
 //!   `packages_available` named, indexed by host;
-//! - the **held** artifacts, one file per stored copy under `<state_dir>/gateway-packages`, verified
+//! - the **held** artifacts, one file per stored copy under `<state_dir>/gateway-packages` beside the
+//!   store, which is none of them, verified
 //!   against the offered hash before it is renamed into place, and the room reserved for the
 //!   fetches in flight and counted for the files being deleted;
 //! - what each artifact's fetch came to: in flight, failed (not repeated until the artifact newly
@@ -21,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -35,8 +38,10 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::config::ClientConfig;
-use crate::gateway::policy::{Bindings, Bound, Limits};
+use crate::gateway::policy::{Bindings, Bound, Change, End, Limits};
 use crate::gateway::revocations::{RevocationList, Verdict};
+use crate::gateway::store::{self, Journal};
+use crate::nofollow::HeldDir;
 use crate::packages::{Patience, Waits};
 use crate::shutdown::Shutdown;
 
@@ -131,6 +136,19 @@ pub fn speaker_of(der: &[u8]) -> Option<String> {
     })
 }
 
+/// Where a downstream certificate ends, as the Gateway keeps it for its host (ADR-0060 clause 2):
+/// its `notAfter`, and the certificate as the revocation list names it.
+#[must_use]
+pub fn end_of(der: &[u8]) -> Option<End> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+    let (issuer, serial) = crate::gateway::revocations::certificate_id(der)?;
+    Some(End {
+        not_after: cert.validity().not_after.timestamp(),
+        issuer,
+        serial,
+    })
+}
+
 /// A certificate's serial in hex, for a log line.
 fn serial_of(der: &[u8]) -> Option<String> {
     let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
@@ -206,10 +224,27 @@ impl RefusalLog {
     }
 }
 
+/// Set once the changes it waits for are written and synced, to whether they were.
+pub type Ticket = Arc<OnceLock<bool>>;
+
+/// What a report's binding came to before the store is asked (ADR-0060 clause 2).
+pub enum Begun {
+    /// Bound to the reporting host, with nothing new to write.
+    Bound,
+    /// Not bound to the reporting host; logged.
+    Refused,
+    /// Bound once the store holds what the ticket waits for.
+    Writing(Ticket),
+}
+
 #[derive(Default)]
 struct Inner {
     /// Each `instance_uid` to the host of its first report (ADR-0026 clause 45).
     bindings: Bindings,
+    /// The changes to the bindings not yet handed to the store, in the order they were made.
+    queue: Vec<Change>,
+    /// Who waits for them.
+    waiting: Vec<Ticket>,
     offers: HashMap<InstanceUid, Vec<Artifact>>,
     /// The `instance_uid`s with a current offer, by the host they are bound to.
     by_host: HashMap<String, HashSet<InstanceUid>>,
@@ -350,6 +385,8 @@ pub struct PackageCache {
     /// Ends every fetch, waiting or not.
     shutdown: Shutdown,
     knobs: Knobs,
+    /// The bindings' store, written by one at a time and never while `inner` is locked.
+    journal: Mutex<Journal>,
     inner: Mutex<Inner>,
 }
 
@@ -372,12 +409,41 @@ impl Drop for Landing {
     }
 }
 
+/// Opens the Gateway's directory `dir` without following a link, empties it of every artifact an
+/// earlier run left (ADR-0026 clause 47) and keeps the store, reads the bindings from it and
+/// rewrites it whole from what they are (ADR-0060 clause 2).
+fn open_dir(dir: &Path) -> Result<(Bindings, Journal), String> {
+    let held =
+        HeldDir::create(dir, 0o700).map_err(|e| format!("cannot open {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot empty {}: {e}", dir.display()));
+    for entry in entries? {
+        let entry = entry.map_err(|e| format!("cannot empty {}: {e}", dir.display()))?;
+        if entry.file_name() == store::NAME {
+            continue;
+        }
+        let path = entry.path();
+        let removed = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        removed.map_err(|e| format!("cannot empty {}: {e}", dir.display()))?;
+    }
+    let path = dir.join(store::NAME);
+    let changes = store::load(&held).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bindings = Bindings::replay(changes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let journal = Journal::create(held, &bindings.snapshot())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok((bindings, journal))
+}
+
 impl PackageCache {
-    /// The cache of the Gateway `config` arms, its directory emptied (ADR-0026 clause 47). The
-    /// directory itself is created by the first fetch.
+    /// The cache of the Gateway `config` arms, its directory emptied of artifacts (ADR-0026
+    /// clause 47) and its bindings read from the store (ADR-0060 clause 2).
     ///
     /// # Errors
-    /// Returns an error when a directory left by an earlier run cannot be emptied.
+    /// Returns an error when a directory left by an earlier run cannot be emptied, or the store
+    /// cannot be read or written.
     pub async fn open(config: Arc<ClientConfig>, shutdown: Shutdown) -> Result<Arc<Self>, String> {
         Self::open_with(config, shutdown, Knobs::default()).await
     }
@@ -396,11 +462,14 @@ impl PackageCache {
             .as_ref()
             .map_or(1, |gateway| gateway.max_carried_agents);
         let dir = config.state_dir.join(DIR);
-        match tokio::fs::remove_dir_all(&dir).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("cannot empty {}: {e}", dir.display())),
-        }
+        let opened = dir.clone();
+        let (bindings, journal) = tokio::task::spawn_blocking(move || open_dir(&opened))
+            .await
+            .map_err(|e| e.to_string())??;
+        info!(
+            bindings = bindings.len(),
+            "read the bindings of the Agents behind this Gateway"
+        );
         Ok(Arc::new(PackageCache {
             limit: capacity.min(config.max_artifact_size_bytes),
             capacity,
@@ -410,7 +479,11 @@ impl PackageCache {
             per_host_bindings,
             shutdown,
             knobs,
-            inner: Mutex::new(Inner::default()),
+            journal: Mutex::new(journal),
+            inner: Mutex::new(Inner {
+                bindings,
+                ..Inner::default()
+            }),
         }))
     }
 
@@ -427,20 +500,22 @@ impl PackageCache {
 
     /// Binds `uid` to `host` unless it is bound already: the first report wins, and every report
     /// refreshes when it was last reported (ADR-0039 clause 6). `host` is the one a downstream
-    /// certificate speaks as ([`speaker_of`]). A host binds at most `max_carried_agents`; at the
-    /// global cap the least recently reported binding whose `instance_uid` has neither a route
-    /// (`routed`) nor a current offer makes room, and without one nothing is bound.
+    /// certificate speaks as ([`speaker_of`]), `end` where that certificate ends ([`end_of`]). A host
+    /// binds at most `max_carried_agents`; at the global cap the least recently reported binding
+    /// whose `instance_uid` has neither a route (`routed`) nor a current offer makes room, and
+    /// without one nothing is bound.
     ///
-    /// Whether `uid` is now bound to `host`: only then is its report forwarded and its reply
-    /// routed back (ADR-0039 clause 5). A report for an `instance_uid` bound to another host, or
-    /// one that could not be bound, is logged and answered `false`. Beside it, the `instance_uid`s
-    /// whose bindings made room, whichever the answer.
-    pub fn bind(
+    /// The first half of a bind: [`PackageCache::written`] waits for the ticket of a
+    /// [`Begun::Writing`], and [`PackageCache::finish_bind`] decides. A report for an `instance_uid`
+    /// bound to another host, or one that could not be bound, is logged and [`Begun::Refused`].
+    /// Beside it, the `instance_uid`s whose bindings made room, whichever the answer.
+    pub fn begin_bind(
         &self,
         uid: InstanceUid,
         host: &str,
+        end: &End,
         routed: impl Fn(&InstanceUid) -> bool,
-    ) -> (bool, Vec<InstanceUid>) {
+    ) -> (Begun, Vec<InstanceUid>) {
         let limits = Limits {
             per_host: self.per_host_bindings,
             total: self.knobs.max_bindings,
@@ -448,29 +523,185 @@ impl PackageCache {
         let mut guard = self.inner();
         let inner = &mut *guard;
         let offers = &inner.offers;
-        let (bound, evicted) = inner.bindings.bind(uid, host, limits, |uid| {
+        let outcome = inner.bindings.bind(uid, host, end, limits, |uid| {
             !routed(uid) && !offers.contains_key(uid)
         });
-        if let Bound::Refused(why) = bound {
+        let evicted = outcome.evicted;
+        if let Bound::Refused(why) = outcome.bound {
             if inner.refusals.note(host, Instant::now()) != Note::Count {
                 warn!(agent = %uid, %host, "not forwarding a report: not binding its instance_uid: {why}");
             }
-            return (false, evicted);
+            return (Begun::Refused, evicted);
         }
-        let bound = match inner.bindings.host_of(&uid) {
-            Some(bound) if bound == host => true,
-            bound => {
-                let bound = bound.unwrap_or("none").to_string();
-                if inner.refusals.note(host, Instant::now()) != Note::Count {
-                    warn!(
-                        agent = %uid, %host, %bound,
-                        "not forwarding a report for an instance_uid bound to another host"
-                    );
-                }
+        if outcome.bound == Bound::Kept && inner.bindings.host_of(&uid) != Some(host) {
+            let bound = inner.bindings.host_of(&uid).unwrap_or("none").to_string();
+            if inner.refusals.note(host, Instant::now()) != Note::Count {
+                warn!(
+                    agent = %uid, %host, %bound,
+                    "not forwarding a report for an instance_uid bound to another host"
+                );
+            }
+            return (Begun::Refused, evicted);
+        }
+        if outcome.changes.is_empty() {
+            return (Begun::Bound, evicted);
+        }
+        if outcome
+            .changes
+            .iter()
+            .any(|change| store::line(change).is_none())
+        {
+            let removals = outcome
+                .changes
+                .into_iter()
+                .filter(|change| matches!(change, Change::Unbound(_)));
+            inner.queue.extend(removals);
+            let changes = inner.bindings.abort(&uid);
+            inner.queue.extend(changes);
+            warn!(
+                agent = %uid, %host,
+                "not forwarding a report: its binding is too long to be stored"
+            );
+            return (Begun::Refused, evicted);
+        }
+        let ticket = Ticket::default();
+        inner.queue.extend(outcome.changes);
+        inner.waiting.push(ticket.clone());
+        (Begun::Writing(ticket), evicted)
+    }
+
+    /// Whether the changes `ticket` waits for are written and synced (ADR-0060 clause 2). They are
+    /// written off the async workers, with whatever else is queued by then.
+    pub async fn written(self: &Arc<Self>, ticket: Ticket) -> bool {
+        let cache = self.clone();
+        tokio::task::spawn_blocking(move || cache.flush(&ticket))
+            .await
+            .unwrap_or(false)
+    }
+
+    /// The second half of a bind: whether `uid` is now bound to `host` and its report may be
+    /// forwarded and its reply routed back (ADR-0039 clause 5). A new binding the store could not
+    /// take, `written` false, is not made, and that is logged. Called under the same lock as the
+    /// route it decides on, so no binding gives way between the two.
+    pub fn finish_bind(&self, uid: InstanceUid, host: &str, written: bool) -> bool {
+        let mut inner = self.inner();
+        if written {
+            inner.bindings.commit(&uid);
+            return inner.bindings.holds(&uid, host);
+        }
+        let changes = inner.bindings.abort(&uid);
+        inner.queue.extend(changes);
+        if inner.refusals.note(host, Instant::now()) != Note::Count {
+            warn!(agent = %uid, %host, "not forwarding a report: the bindings' store cannot be written");
+        }
+        false
+    }
+
+    /// Writes the queued changes and wakes who waits for them, unless an earlier call already did
+    /// for `ticket`. A store that cannot take an append is rewritten whole from the bindings, which
+    /// hold the queued changes too; so is one that has grown to twice the lines it holds live
+    /// (ADR-0060 clause 2).
+    fn flush(&self, ticket: &Ticket) -> bool {
+        let mut journal = self
+            .journal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(written) = ticket.get() {
+            return *written;
+        }
+        let (changes, waiting) = {
+            let mut inner = self.inner();
+            (
+                std::mem::take(&mut inner.queue),
+                std::mem::take(&mut inner.waiting),
+            )
+        };
+        let appended = journal.append(&changes);
+        if let Err(e) = &appended {
+            debug!(error = %e, "cannot append to the bindings' store; rewriting it whole");
+        }
+        let written = appended.is_ok() || self.compact(&mut journal);
+        for waiter in waiting {
+            let _ = waiter.set(written);
+        }
+        let live = self.inner().bindings.live();
+        if written && journal.lines() > 0 && journal.lines() >= 2 * live {
+            self.compact(&mut journal);
+        }
+        ticket.get().copied().unwrap_or(false)
+    }
+
+    /// Rewrites the store whole from the bindings, the queued changes taken in with them.
+    fn compact(&self, journal: &mut Journal) -> bool {
+        let (snapshot, waiting) = {
+            let mut inner = self.inner();
+            inner.queue.clear();
+            (
+                inner.bindings.snapshot(),
+                std::mem::take(&mut inner.waiting),
+            )
+        };
+        let written = match journal.compact(&snapshot) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(error = %e, "cannot write the bindings' store");
                 false
             }
         };
-        (bound, evicted)
+        for waiter in waiting {
+            let _ = waiter.set(written);
+        }
+        written
+    }
+
+    /// Writes the order in which the bindings were reported since the last call (ADR-0060
+    /// clause 2): once a minute and at shutdown.
+    pub async fn write_reports(self: &Arc<Self>) {
+        let ticket = {
+            let mut inner = self.inner();
+            let reports = inner.bindings.reports();
+            if reports.is_empty() {
+                return;
+            }
+            inner.queue.extend(reports);
+            let ticket = Ticket::default();
+            inner.waiting.push(ticket.clone());
+            ticket
+        };
+        if !self.written(ticket).await {
+            warn!("cannot write the order of the bindings' reports");
+        }
+    }
+
+    /// Makes every later write of the bindings' store fail.
+    #[cfg(test)]
+    pub(crate) fn refuse_writes(&self) {
+        self.journal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refuse_writes();
+    }
+
+    /// A bind start to end, outside any route: what the tests of this module bind with.
+    #[cfg(test)]
+    async fn bind(
+        self: &Arc<Self>,
+        uid: InstanceUid,
+        host: &str,
+        routed: impl Fn(&InstanceUid) -> bool,
+    ) -> (bool, Vec<InstanceUid>) {
+        let end = End {
+            not_after: i64::MAX,
+            issuer: "ab".repeat(32),
+            serial: "1".to_string(),
+        };
+        let (begun, evicted) = self.begin_bind(uid, host, &end, routed);
+        let written = match begun {
+            Begun::Refused => return (false, evicted),
+            Begun::Bound => true,
+            Begun::Writing(ticket) => self.written(ticket).await,
+        };
+        (self.finish_bind(uid, host, written), evicted)
     }
 
     /// Records what a `ServerToAgent` relayed to `uid` offers, over a downstream connection whose
@@ -1228,9 +1459,9 @@ mod tests {
     }
 
     /// Relays an offer of `artifacts` to a new `instance_uid` bound to `h1`.
-    fn offer_to_new_agent(cache: &Arc<PackageCache>, artifacts: &[&Artifact]) -> InstanceUid {
+    async fn offer_to_new_agent(cache: &Arc<PackageCache>, artifacts: &[&Artifact]) -> InstanceUid {
         let uid = InstanceUid::default();
-        assert!(cache.bind(uid, "h1", |_| false).0);
+        assert!(cache.bind(uid, "h1", |_| false).await.0);
         cache.observe(uid, Some("h1".to_string()), &offer(uid, artifacts));
         uid
     }
@@ -1266,7 +1497,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = open_cache(config(server, dir.path(), 1 << 20)).await;
         let one = artifact("1", &bytes);
-        offer_to_new_agent(&cache, &[&one]);
+        offer_to_new_agent(&cache, &[&one]).await;
         tokio::time::timeout(DEADLINE, async {
             while fetches(&count, "1") < 1 {
                 tokio::task::yield_now().await;
@@ -1289,9 +1520,10 @@ mod tests {
         assert_eq!(fetches(&count, "1"), 1);
     }
 
-    /// What an earlier run left in the cache directory is gone once the Gateway opens it, and the
-    /// directory the first fetch creates is the owner's alone.
-    /// Verifies: ADR-0026
+    /// What an earlier run left in the cache directory is gone once the Gateway opens it, the
+    /// bindings' store aside, which is none of the cache's artifacts; and the directory is the
+    /// owner's alone.
+    /// Verifies: ADR-0026, ADR-0060
     #[tokio::test]
     async fn the_cache_is_emptied_at_start_and_owner_only() {
         let bytes = b"the-binary".to_vec();
@@ -1302,26 +1534,35 @@ mod tests {
         .await;
         let dir = tempfile::tempdir().expect("tempdir");
         let left = dir.path().join(DIR);
-        std::fs::create_dir_all(&left).expect("dir");
+        std::fs::create_dir_all(left.join("staged-tree")).expect("dir");
         std::fs::write(left.join("left-over"), b"stale").expect("write");
+        let names = || {
+            let mut names: Vec<String> = std::fs::read_dir(&left)
+                .expect("dir")
+                .map(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            names
+        };
         let cache = open_cache(config(server, dir.path(), 1 << 20)).await;
-        assert!(!left.exists(), "emptied at start");
+        assert_eq!(names(), vec![store::NAME], "emptied at start");
 
         let one = artifact("1", &bytes);
-        offer_to_new_agent(&cache, &[&one]);
+        let uid = offer_to_new_agent(&cache, &[&one]).await;
         until(&cache, "held", |inner| inner.held.contains_key(&one.hash)).await;
-        let names: Vec<String> = std::fs::read_dir(&left)
-            .expect("dir")
-            .map(|entry| {
-                entry
-                    .expect("entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        assert_eq!(names.len(), 1);
+        let names = names();
+        assert_eq!(names.len(), 2);
         assert!(names[0].starts_with(&hex::encode(&one.hash)), "{names:?}");
+        assert_eq!(names[1], store::NAME);
+        drop(cache);
+        let cache = open_cache(config(server, dir.path(), 1 << 20)).await;
+        assert!(cache.is_bound(&uid), "the store outlives the emptying");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -1348,9 +1589,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = open_cache(config(server, dir.path(), 16)).await;
         let (a, b) = (artifact("1", &a_bytes), artifact("2", &b_bytes));
-        let first = offer_to_new_agent(&cache, &[&a]);
+        let first = offer_to_new_agent(&cache, &[&a]).await;
         until(&cache, "a held", |inner| inner.held.contains_key(&a.hash)).await;
-        offer_to_new_agent(&cache, &[&b]);
+        offer_to_new_agent(&cache, &[&b]).await;
         until(&cache, "b held, a evicted", |inner| {
             inner.held.contains_key(&b.hash) && !inner.held.contains_key(&a.hash)
         })
@@ -1413,12 +1654,12 @@ mod tests {
         .await
         .expect("cache");
         let (a, b) = (artifact("1", &a_bytes), artifact("2", &b_bytes));
-        offer_to_new_agent(&cache, &[&a]);
+        offer_to_new_agent(&cache, &[&a]).await;
         until(&cache, "a held", |inner| inner.held.contains_key(&a.hash)).await;
         let a_file = cache.file(&a.hash, cache.inner().held[&a.hash].copy);
 
         // b needs a's room; a's deletion fails, so a stays counted and b gets no room.
-        offer_to_new_agent(&cache, &[&b]);
+        offer_to_new_agent(&cache, &[&b]).await;
         until(&cache, "b settled", |inner| inner.fetching.is_empty()).await;
         {
             let inner = cache.inner();
@@ -1429,7 +1670,7 @@ mod tests {
         }
 
         // A newer copy of a is stored; the next deletion removes the old copy only.
-        offer_to_new_agent(&cache, &[&a]);
+        offer_to_new_agent(&cache, &[&a]).await;
         until(&cache, "a held again", |inner| {
             inner.held.contains_key(&a.hash)
         })
@@ -1458,7 +1699,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = open_cache(config(server, dir.path(), 1 << 20)).await;
         let one = artifact("1", &bytes);
-        offer_to_new_agent(&cache, &[&one]);
+        offer_to_new_agent(&cache, &[&one]).await;
         until(&cache, "held", |inner| inner.held.contains_key(&one.hash)).await;
         let file = cache.file(&one.hash, cache.inner().held[&one.hash].copy);
         std::fs::remove_file(file).expect("remove");
@@ -1481,7 +1722,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = open_cache(config(server, dir.path(), 1 << 20)).await;
         let one = artifact("1", &bytes);
-        offer_to_new_agent(&cache, &[&one]);
+        offer_to_new_agent(&cache, &[&one]).await;
         until(&cache, "held", |inner| inner.held.contains_key(&one.hash)).await;
         let file = cache.file(&one.hash, cache.inner().held[&one.hash].copy);
         std::fs::remove_file(file).expect("remove");
@@ -1520,7 +1761,7 @@ mod tests {
         .expect("cache");
         let flood: Vec<InstanceUid> = (0..5).map(|_| InstanceUid::default()).collect();
         for uid in &flood {
-            cache.bind(*uid, "flood", |_| false);
+            cache.bind(*uid, "flood", |_| false).await;
         }
         assert_eq!(
             cache.inner().bindings.count_of("flood"),
@@ -1528,11 +1769,11 @@ mod tests {
             "its share and no more"
         );
         let other = InstanceUid::default();
-        cache.bind(other, "other", |_| false);
+        cache.bind(other, "other", |_| false).await;
         assert_eq!(cache.inner().bindings.len(), 4, "the global cap");
 
         let real = InstanceUid::default();
-        cache.bind(real, "real", |uid| *uid == other);
+        cache.bind(real, "real", |uid| *uid == other).await;
         {
             let inner = cache.inner();
             assert_eq!(
@@ -1612,7 +1853,7 @@ mod tests {
         .await
         .expect("cache");
         let one = artifact("1", &bytes);
-        offer_to_new_agent(&cache, &[&one]);
+        offer_to_new_agent(&cache, &[&one]).await;
         tokio::time::timeout(DEADLINE, async {
             loop {
                 let waiting = count.load(Ordering::SeqCst) == 1
@@ -1661,7 +1902,7 @@ mod tests {
             .await
             .expect("cache");
         let one = artifact("1", b"x");
-        offer_to_new_agent(&cache, &[&one]);
+        offer_to_new_agent(&cache, &[&one]).await;
         tokio::time::timeout(DEADLINE, async {
             while count.load(Ordering::SeqCst) < 1 {
                 tokio::task::yield_now().await;
@@ -1706,7 +1947,7 @@ mod tests {
             .iter()
             .map(|version| artifact(version, version.as_bytes()))
             .collect();
-        offer_to_new_agent(&cache, &offered.iter().collect::<Vec<_>>());
+        offer_to_new_agent(&cache, &offered.iter().collect::<Vec<_>>()).await;
         let total = || count.lock().expect("count").values().sum::<usize>();
         tokio::time::timeout(DEADLINE, async {
             while total() < 4 || cache.slots.available_permits() > 0 {
@@ -1733,7 +1974,7 @@ mod tests {
         let cache = open_cache(config("127.0.0.1:9".parse().expect("addr"), dir.path(), 16)).await;
         let uid = InstanceUid::default();
         let one = artifact("1", b"x");
-        assert!(cache.bind(uid, "derived-host", |_| false).0);
+        assert!(cache.bind(uid, "derived-host", |_| false).await.0);
         cache.observe(uid, None, &offer(uid, &[&one]));
         let inner = cache.inner();
         assert_eq!(inner.bindings.host_of(&uid), Some("derived-host"));
@@ -1758,5 +1999,86 @@ mod tests {
         });
         let inner = cache.inner();
         assert!(inner.fetching.is_empty() && inner.reserved.is_empty());
+    }
+
+    /// A cache in `dir` whose hosts bind at most `per_host` `instance_uid`s.
+    async fn cache_binding(dir: &Path, per_host: usize) -> Arc<PackageCache> {
+        let config: Arc<ClientConfig> = Arc::new(
+            toml::from_str(&format!(
+                "endpoint = \"ws://127.0.0.1:9/v1/opamp\"\nstate_dir = {:?}\n\
+                 [gateway]\nlisten = \"127.0.0.1:9\"\nmax_carried_agents = {per_host}\n",
+                dir.display().to_string()
+            ))
+            .expect("config"),
+        );
+        open_cache(config).await
+    }
+
+    /// What the store under `dir` reads back to.
+    fn stored(dir: &Path) -> Vec<Change> {
+        let held = HeldDir::open(&dir.join(DIR)).expect("held");
+        Bindings::replay(store::load(&held).expect("load"))
+            .expect("replay")
+            .snapshot()
+    }
+
+    /// How many lines the store under `dir` holds, its first line not counted.
+    fn store_lines(dir: &Path) -> usize {
+        std::fs::read_to_string(dir.join(DIR).join(store::NAME))
+            .expect("read")
+            .lines()
+            .count()
+            - 1
+    }
+
+    /// The store is rewritten whole at start, to one line per binding and per host, and again once
+    /// it has grown to twice that; either way it reads back to the bindings the Gateway holds.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn the_store_is_compacted_at_start_and_at_twice_its_live_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_binding(dir.path(), 3).await;
+        for _ in 0..3 {
+            assert!(cache.bind(InstanceUid::default(), "h1", |_| false).await.0);
+        }
+        assert_eq!(store_lines(dir.path()), 4, "one end, three bindings");
+        // Each new binding past the host's share gives up its oldest: a removal and a binding.
+        assert!(cache.bind(InstanceUid::default(), "h1", |_| false).await.0);
+        assert_eq!(store_lines(dir.path()), 6);
+        assert!(cache.bind(InstanceUid::default(), "h1", |_| false).await.0);
+        assert_eq!(store_lines(dir.path()), 4, "eight lines for four live ones");
+        assert_eq!(stored(dir.path()), cache.inner().bindings.snapshot());
+
+        assert!(cache.bind(InstanceUid::default(), "h1", |_| false).await.0);
+        let held = cache.inner().bindings.snapshot();
+        drop(cache);
+        let cache = cache_binding(dir.path(), 3).await;
+        assert_eq!(store_lines(dir.path()), 4, "rewritten at start");
+        assert_eq!(stored(dir.path()), held);
+        assert_eq!(cache.inner().bindings.snapshot(), held);
+    }
+
+    /// The order in which bindings were reported is written, and outlasts a restart: past its
+    /// share a host still gives up its least recently reported binding.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn the_order_of_reports_outlasts_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_binding(dir.path(), 2).await;
+        let [first, second] = [(); 2].map(|()| InstanceUid::default());
+        cache.bind(first, "h1", |_| false).await;
+        cache.bind(second, "h1", |_| false).await;
+        cache.bind(first, "h1", |_| false).await;
+        cache.write_reports().await;
+        drop(cache);
+
+        let cache = cache_binding(dir.path(), 2).await;
+        let (bound, evicted) = cache.bind(InstanceUid::default(), "h1", |_| false).await;
+        assert!(bound);
+        assert_eq!(
+            evicted,
+            vec![second],
+            "the least recently reported gave way"
+        );
     }
 }

@@ -259,6 +259,12 @@ pub async fn run_on_timed(
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("cannot prepare the gateway endpoint {listen}: {e}"))?;
+    // Mutual TLS 1.3 and nothing less (ADR-0015); the load refused a Gateway without it.
+    let tls = gateway
+        .tls
+        .as_ref()
+        .ok_or("[gateway.tls] is required — a Gateway admits Agents over mutual TLS only")?;
+    let (server_tls, members) = server_tls(tls)?;
     let cache = cache::PackageCache::open(config.clone(), shutdown.clone()).await?;
     let registry = Arc::new(Registry::new(cache.clone()));
     let revocations = RevocationList::new(timings.revocation_max_age);
@@ -275,12 +281,8 @@ pub async fn run_on_timed(
         shutdown.clone(),
         timings.revocation_refresh,
     ));
-    // Mutual TLS 1.3 and nothing less (ADR-0015); the load refused a Gateway without it.
-    let tls = gateway
-        .tls
-        .as_ref()
-        .ok_or("[gateway.tls] is required — a Gateway admits Agents over mutual TLS only")?;
-    let (server_tls, members) = server_tls(tls)?;
+    tokio::spawn(write_reports(cache.clone(), shutdown.clone()));
+    let bindings = cache.clone();
     let downloads = Arc::new(cache::Downloads {
         cache,
         revocations: revocations.clone(),
@@ -315,10 +317,25 @@ pub async fn run_on_timed(
         shutdown.requested().await;
         handle.graceful_shutdown(Some(DRAIN_GRACE));
     });
-    downstream
+    let served = downstream
         .serve(app)
         .await
-        .map_err(|e| format!("the gateway endpoint stopped: {e}"))
+        .map_err(|e| format!("the gateway endpoint stopped: {e}"));
+    bindings.write_reports().await;
+    served
+}
+
+/// Writes the order of the bindings' reports once a minute until `shutdown` fires (ADR-0060
+/// clause 2); the Gateway writes it once more when its endpoint has drained.
+async fn write_reports(cache: Arc<cache::PackageCache>, mut shutdown: Shutdown) {
+    let every = std::time::Duration::from_secs(60);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => cache.write_reports().await,
+            () = shutdown.requested() => return,
+        }
+    }
 }
 
 /// The material the downstream endpoint serves with (ADR-0039 clause 4), and what tells its members
@@ -404,6 +421,9 @@ struct Downstream {
     /// The host that certificate speaks as, which the `instance_uid`s it reports for are bound to
     /// (ADR-0039 clause 6): the one it names, else the one the Server derives for it.
     speaker: String,
+    /// Where that certificate ends, which its reports move the host's kept end to (ADR-0060
+    /// clause 2).
+    end: policy::End,
     /// The certificate chains to the bootstrap CA alone (ADR-0039 clause 4): this peer may relay
     /// one enrolment request and nothing else, and binds nothing.
     enrolling: bool,
@@ -500,7 +520,9 @@ impl Handler for Forwarding {
         }
         // A certificate the revocation list could judge can be read, so this refuses nothing the
         // handshake and the list admitted; it only gives the binding its host (ADR-0039 clause 6).
-        let Some(speaker) = cache::speaker_of(&certificate) else {
+        let (Some(speaker), Some(end)) =
+            (cache::speaker_of(&certificate), cache::end_of(&certificate))
+        else {
             return Err(Rejection {
                 status: StatusCode::UNAUTHORIZED,
                 headers: Vec::new(),
@@ -554,6 +576,7 @@ impl Handler for Forwarding {
                 // An enrolling peer is offered nothing, so nothing is recorded for its host.
                 host: (!enrolling).then(|| cache::host_of(&certificate)).flatten(),
                 speaker,
+                end,
                 certificate,
                 enrolling,
             },
@@ -634,12 +657,16 @@ impl Forwarding {
         let Some(replies) = &downstream.replies else {
             return Reply::Nothing;
         };
-        let (attached, evicted) = self.registry.attach(
-            uid,
-            replies.clone(),
-            downstream.host.clone(),
-            &downstream.speaker,
-        );
+        let (attached, evicted) = self
+            .registry
+            .attach(
+                uid,
+                replies.clone(),
+                downstream.host.clone(),
+                &downstream.speaker,
+                &downstream.end,
+            )
+            .await;
         // A binding that made room for this one takes its Agent's place upstream along.
         self.pool.release(evicted);
         if !attached {
@@ -720,9 +747,16 @@ impl Forwarding {
         // Forwarded only for an `instance_uid` bound to the host that sent it; the binding logs
         // a refusal (ADR-0039 clause 5). A binding that made room for it takes its Agent's place
         // upstream along: no socket going releases a plain-HTTP Agent's.
-        let (exchange, evicted) =
-            self.registry
-                .expect_once(uid, reply_tx, downstream.host.clone(), &downstream.speaker);
+        let (exchange, evicted) = self
+            .registry
+            .expect_once(
+                uid,
+                reply_tx,
+                downstream.host.clone(),
+                &downstream.speaker,
+                &downstream.end,
+            )
+            .await;
         self.pool.release(evicted);
         let Some(exchange) = exchange else {
             return Reply::Refuse(
@@ -802,8 +836,13 @@ mod tests {
 
     /// A Gateway's handler in front of a silent upstream, with a fresh, empty revocation list.
     async fn forwarding(state: &std::path::Path) -> Forwarding {
+        forwarding_to(state, silent_upstream().await).await
+    }
+
+    /// A Gateway's handler in front of the upstream at `server`, with a fresh, empty revocation
+    /// list.
+    async fn forwarding_to(state: &std::path::Path, server: std::net::SocketAddr) -> Forwarding {
         opamp::tls::install_ring_provider();
-        let server = silent_upstream().await;
         let config: Arc<ClientConfig> = Arc::new(
             toml::from_str(&format!(
                 "endpoint = \"ws://{server}/v1/opamp\"\nstate_dir = {:?}\n\
@@ -842,6 +881,7 @@ mod tests {
             ended: Arc::default(),
             host: cache::host_of(&certificate),
             speaker: cache::speaker_of(&certificate).expect("a readable certificate"),
+            end: cache::end_of(&certificate).expect("a readable certificate"),
             certificate,
             enrolling: false,
         }
@@ -1367,5 +1407,135 @@ mod tests {
             error.contains("client_ca_file") && error.contains("bootstrap_ca_file"),
             "{error}"
         );
+    }
+
+    /// A Server that answers nothing and, as each report arrives, records whether the bindings'
+    /// store under `state` names `uid`.
+    async fn store_watching_upstream(
+        state: std::path::PathBuf,
+        uid: InstanceUid,
+    ) -> (std::net::SocketAddr, Arc<Mutex<Vec<bool>>>) {
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let recorded = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (state, seen) = (state.clone(), recorded.clone());
+                tokio::spawn(async move {
+                    use futures_util::StreamExt;
+                    if let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await {
+                        while socket.next().await.is_some() {
+                            let store =
+                                std::fs::read_to_string(state.join(cache::DIR).join(store::NAME))
+                                    .unwrap_or_default();
+                            seen.lock()
+                                .expect("seen")
+                                .push(store.contains(&format!("b {uid} ")));
+                        }
+                    }
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    /// A binding made before a Gateway restarts holds after it: another host's report for the
+    /// `instance_uid` is dropped over WebSocket and answered `403` over plain HTTP, and the host
+    /// it is bound to is carried again. A binding read at start holds no place upstream until its
+    /// Agent reports.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_binding_outlasts_a_gateway_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let uid = InstanceUid::default();
+        let owner = certificate();
+        {
+            let forwarding = forwarding(dir.path()).await;
+            let (tx, _rx) = mpsc::channel(64);
+            let mut socket = downstream(Transport::WebSocket, Some(tx), owner.clone());
+            forwarding
+                .forward_from_socket(&mut socket, report(uid))
+                .await;
+            assert!(socket.carried.contains(&uid));
+        }
+
+        let forwarding = forwarding(dir.path()).await;
+        assert!(
+            forwarding.pool.assignments().0.is_empty(),
+            "no place upstream before the Agent reports"
+        );
+        let (thief_tx, _thief_rx) = mpsc::channel(64);
+        let mut thief = downstream(Transport::WebSocket, Some(thief_tx), certificate());
+        forwarding
+            .forward_from_socket(&mut thief, report(uid))
+            .await;
+        assert!(!thief.carried.contains(&uid), "another host took it");
+        match forwarding
+            .forward_exchange(
+                &downstream(Transport::Http, None, certificate()),
+                report(uid),
+            )
+            .await
+        {
+            Reply::Refuse(status, _) => assert_eq!(status, StatusCode::FORBIDDEN),
+            _ => panic!("a plain-HTTP report for another host's Agent was not refused"),
+        }
+        let (owner_tx, _owner_rx) = mpsc::channel(64);
+        let mut socket = downstream(Transport::WebSocket, Some(owner_tx), owner);
+        forwarding
+            .forward_from_socket(&mut socket, report(uid))
+            .await;
+        assert!(socket.carried.contains(&uid), "its own host is carried");
+        assert!(forwarding.registry.routes(&uid));
+    }
+
+    /// A report that makes a new binding reaches the Server only once the store holds the binding;
+    /// when the store cannot be written it binds nothing, is not forwarded, and takes no route.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_new_binding_is_stored_before_its_report_is_forwarded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let uid = InstanceUid::default();
+        let (server, seen) = store_watching_upstream(dir.path().to_path_buf(), uid).await;
+        let forwarding = forwarding_to(dir.path(), server).await;
+        let (tx, _rx) = mpsc::channel(64);
+        let mut socket = downstream(Transport::WebSocket, Some(tx), certificate());
+        forwarding
+            .forward_from_socket(&mut socket, report(uid))
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while seen.lock().expect("seen").is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the report reached the Server");
+        assert_eq!(*seen.lock().expect("seen"), vec![true]);
+
+        forwarding.registry.cache().refuse_writes();
+        let refused = InstanceUid::default();
+        forwarding
+            .forward_from_socket(&mut socket, report(refused))
+            .await;
+        assert!(!socket.carried.contains(&refused), "not carried");
+        assert!(!forwarding.registry.cache().is_bound(&refused), "not bound");
+        assert!(!forwarding.registry.routes(&refused), "no route");
+        assert!(
+            !forwarding.pool.assignments().0.contains(&refused),
+            "not forwarded"
+        );
+        match forwarding
+            .forward_exchange(
+                &downstream(Transport::Http, None, certificate()),
+                report(refused),
+            )
+            .await
+        {
+            Reply::Refuse(status, _) => assert_eq!(status, StatusCode::FORBIDDEN),
+            _ => panic!("a report whose binding cannot be stored was forwarded"),
+        }
     }
 }
