@@ -20,7 +20,7 @@ use std::future::Future;
 use std::io;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,8 +35,9 @@ use tokio::io::{
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinSet;
-use tracing::{info, warn};
+use tokio::task::{AbortHandle, JoinHandle, JoinSet};
+use tokio::time::Instant;
+use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 use crate::supervisor::process::Launch;
@@ -60,21 +61,36 @@ const MAX_HANDSHAKE: u32 = 4 * 1024;
 const REFUSAL_LOG_EVERY: Duration = Duration::from_secs(60);
 
 /// How long a program has to end on `SIGTERM` when the Client's connection closes, before its
-/// group is killed.
-const CLOSE_GRACE: Duration = Duration::from_secs(10);
+/// group is killed. The service manager's stop timeout for the second service is longer, so a stop
+/// of the service ends its programs itself rather than having the manager kill it first.
+pub(crate) const CLOSE_GRACE: Duration = Duration::from_secs(10);
 
 /// How long the Client waits for the service to answer a signal. The service sends one at once;
 /// it answers late only while it stops its programs, on shutting down, and a stop or a reload that
 /// waited for that would wait out [`CLOSE_GRACE`] before its own bound began.
 pub(crate) const SIGNAL_ANSWER: Duration = Duration::from_secs(2);
 
+/// How long the Client waits for the end of a program it asked the service to kill: an answer's
+/// time and the [`OUTPUT_DRAIN`] the exit report waits for the program's last output.
+pub(crate) const KILL_ANSWER: Duration = SIGNAL_ANSWER.saturating_add(OUTPUT_DRAIN);
+
 /// How many lines of output may wait to be written to the Client. A program that writes faster
 /// than they go out waits on its pipe, as it would on a slow terminal; nothing else waits on it.
 const OUTPUT_QUEUE: usize = 256;
 
 /// How long the exit report waits for the rest of a program's output. A process the program left
-/// behind may hold its pipes open; its output is still relayed, after the exit.
-const OUTPUT_DRAIN: Duration = Duration::from_secs(1);
+/// behind may hold its pipes open; its output is still relayed, after the exit, until the
+/// connection ends.
+pub(crate) const OUTPUT_DRAIN: Duration = Duration::from_secs(1);
+
+/// How long a start waits for the second service to come back when it finds the connection gone:
+/// twice the delay after which the service manager restarts a service that failed, so a start
+/// outlasts one restart of the second service.
+const RECONNECT: Duration =
+    Duration::from_secs(2 * crate::service::manager::RESTART_DELAY_SECS as u64);
+
+/// How often a start tries to reach the second service again while it waits for it.
+const RECONNECT_EVERY: Duration = Duration::from_millis(200);
 
 /// What the Client asks of the second service.
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,8 +114,14 @@ pub(crate) enum Request {
 pub(crate) enum Reply {
     /// The answer to [`Request::Hello`]: the service's build, the same as the Client's.
     Hello { version: String },
-    /// The connection is not served, and why. The service closes it after this.
-    Refused { reason: String },
+    /// The connection is not served, and why. The service closes it after this. `version` is the
+    /// service's build where the Client is refused for being another; one of the few messages a
+    /// peer of another build reads, so it may be absent.
+    Refused {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
     /// The program runs, as `pid`.
     Started { id: u64, pid: u32 },
     /// The program did not start. `os_error` keeps the kind of failure — a missing file, a program
@@ -119,10 +141,14 @@ pub(crate) enum Reply {
         stream: Stream,
         line: String,
     },
-    /// The program ended: its raw wait status, or why waiting for it failed.
+    /// The program ended: its raw wait status, or why waiting for it failed. `closing` says that
+    /// the service stopped it because the connection or the service itself ends: the program went
+    /// with the service and did not exit on its own (ADR-0059 clause 2).
     Exited {
         id: u64,
         status: Result<i32, String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        closing: bool,
     },
 }
 
@@ -249,12 +275,19 @@ pub fn admit(peer_uid: u32, client_uid: u32) -> Result<(), String> {
 }
 
 /// Whether the service, running as `own_uid`, may serve `client_uid` as the Client's account
-/// (ADR-0059 clause 1): the Client's account is never root, and never the process account the
-/// service runs as — a service that served its own account would separate nothing.
+/// (ADR-0059 clause 1): the service itself never runs as root, the Client's account is never root,
+/// and never the process account the service runs as — a service that served its own account
+/// would separate nothing.
 ///
 /// # Errors
 /// Returns why the service does not start.
 pub fn check_client_uid(client_uid: u32, own_uid: u32) -> Result<(), String> {
+    if own_uid == 0 {
+        return Err(
+            "the second service runs as root: it runs under the process account, never as root"
+                .to_string(),
+        );
+    }
     if client_uid == 0 {
         return Err("--client-uid 0: the Client's account is never root".to_string());
     }
@@ -292,14 +325,27 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// How the second service ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Served {
+    /// `SIGTERM` or `SIGINT`: a clean exit, and the service manager leaves it stopped.
+    Stopped,
+    /// The Client's connection ended — it is another build, or the self-update restarts it — and
+    /// `current` no longer names the version this service runs: the self-update switched it. The
+    /// process exits non-zero so the service manager starts the version `current` names, as it does
+    /// for the Client (ADR-0059 clause 2).
+    Superseded,
+}
+
 /// `supervisor run --agents <socket> --client-uid <uid>`: the second service (ADR-0059), until
-/// `SIGTERM` or `SIGINT`. `SIGHUP` is ignored, as the Client ignores it (ADR-0019 clause 12): its
-/// default disposition would end the service and leave its programs running.
+/// `SIGTERM` or `SIGINT`, or until a self-update leaves it behind. `SIGHUP` is ignored, as the
+/// Client ignores it (ADR-0019 clause 12): its default disposition would end the service and leave
+/// its programs running.
 ///
 /// # Errors
-/// Returns an error when `client_uid` is root's or the service's own, the runtime cannot be built,
-/// or the socket cannot be bound.
-pub fn run_service(socket: &Path, client_uid: u32) -> Result<(), String> {
+/// Returns an error when the service runs as root, `client_uid` is root's or the service's own,
+/// the runtime cannot be built, or the socket cannot be bound.
+pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
     // SAFETY: geteuid(2) cannot fail and touches no memory.
     check_client_uid(client_uid, unsafe { libc::geteuid() })?;
     let runtime = tokio::runtime::Runtime::new()
@@ -309,11 +355,27 @@ pub fn run_service(socket: &Path, client_uid: u32) -> Result<(), String> {
         crate::service::runtime::ignore_sighup();
         let listener =
             bind(socket).map_err(|e| format!("cannot listen on {}: {e}", socket.display()))?;
-        info!(socket = %socket.display(), client_uid, "agents service listening");
-        serve(listener, client_uid, terminated()).await;
+        info!(socket = %socket.display(), client_uid, "second service listening");
+        let served = serve(listener, client_uid, superseded, terminated()).await;
         let _ = std::fs::remove_file(socket);
-        Ok(())
+        if served == Served::Superseded {
+            info!(
+                "the Client is another build and current names another version; exiting so the \
+                 service manager starts that one"
+            );
+        }
+        Ok(served)
     })
+}
+
+/// Whether `current` names a version other than the one this program runs from: a self-update
+/// switched it. `false` outside a layout, where there is nothing to switch to.
+fn superseded() -> bool {
+    use crate::service::layout::{running_exe, Layout};
+    running_exe()
+        .ok()
+        .and_then(|exe| Layout::enclosing(&exe))
+        .is_some_and(|(layout, running_dir)| !layout.names(&running_dir))
 }
 
 /// `SIGTERM` (what a service manager stops with) or `SIGINT`.
@@ -331,7 +393,18 @@ async fn terminated() {
 
 /// Serves the Client on `listener` until `shutdown` resolves, one connection at a time. When a
 /// connection closes, or at the shutdown, every program it started is stopped.
-pub async fn serve(listener: UnixListener, client_uid: u32, shutdown: impl Future<Output = ()>) {
+///
+/// A Client of another build is refused. When a connection of the Client's account has ended —
+/// refused for another build, or closed because the self-update restarts the Client — and
+/// `superseded` says that this service is the one a self-update left behind, it ends with
+/// [`Served::Superseded`], so the version `current` names takes its place. A peer of another
+/// account is refused before it is served, and ends nothing.
+pub async fn serve(
+    listener: UnixListener,
+    client_uid: u32,
+    superseded: impl Fn() -> bool,
+    shutdown: impl Future<Output = ()>,
+) -> Served {
     let mut shutdown = std::pin::pin!(shutdown);
     let mut refusals = Refusals::default();
     loop {
@@ -345,7 +418,7 @@ pub async fn serve(listener: UnixListener, client_uid: u32, shutdown: impl Futur
                     continue;
                 }
             },
-            () = shutdown.as_mut() => return,
+            () = shutdown.as_mut() => return Served::Stopped,
         };
         let peer = stream
             .peer_cred()
@@ -355,10 +428,13 @@ pub async fn serve(listener: UnixListener, client_uid: u32, shutdown: impl Futur
             refuse(stream, reason, &mut refusals);
             continue;
         }
-        if serve_connection(stream, &listener, shutdown.as_mut(), &mut refusals).await
-            == Ended::Shutdown
-        {
-            return;
+        match serve_connection(stream, &listener, shutdown.as_mut(), &mut refusals).await {
+            Ended::Shutdown => return Served::Stopped,
+            // The Client's connection closed — the self-update restarts it — or it is another
+            // build: either way a service that `current` no longer names makes way for the one it
+            // does, beside the Client rather than after it.
+            Ended::Closed | Ended::OtherBuild if superseded() => return Served::Superseded,
+            Ended::Closed | Ended::OtherBuild => {}
         }
     }
 }
@@ -372,7 +448,13 @@ fn refuse(stream: UnixStream, reason: String, refusals: &mut Refusals) {
     }
     // Written straight to the socket: a stream just accepted has no readiness yet, so tokio's own
     // `try_write` would only ever answer that it would block.
-    if let (Ok(frame), Ok(stream)) = (encode(&Reply::Refused { reason }), stream.into_std()) {
+    if let (Ok(frame), Ok(stream)) = (
+        encode(&Reply::Refused {
+            reason,
+            version: None,
+        }),
+        stream.into_std(),
+    ) {
         use std::io::Write as _;
         let _ = (&stream).write(&frame);
     }
@@ -404,6 +486,8 @@ impl Refusals {
 #[derive(Debug, PartialEq, Eq)]
 enum Ended {
     Closed,
+    /// The Client is another build, and was refused.
+    OtherBuild,
     Shutdown,
 }
 
@@ -432,19 +516,26 @@ async fn serve_connection<F: Future<Output = ()>>(
     .await;
     let refusal = match hello {
         Ok(Ok(Some(Request::Hello { version }))) if version == this_build() => None,
-        Ok(Ok(Some(Request::Hello { version }))) => Some(format!(
-            "the Client is build {version}, this service is build {}",
-            this_build()
+        Ok(Ok(Some(Request::Hello { version }))) => Some((
+            format!(
+                "the Client is build {version}, this service is build {}",
+                this_build()
+            ),
+            Ended::OtherBuild,
         )),
-        Ok(Ok(Some(_))) => Some("the first message must be the handshake".to_string()),
+        Ok(Ok(Some(_))) => Some((
+            "the first message must be the handshake".to_string(),
+            Ended::Closed,
+        )),
         Ok(Ok(None)) => return Ended::Closed,
-        Ok(Err(e)) => Some(format!("unreadable handshake: {e}")),
-        Err(_) => Some("no handshake in time".to_string()),
+        Ok(Err(e)) => Some((format!("unreadable handshake: {e}"), Ended::Closed)),
+        Err(_) => Some(("no handshake in time".to_string(), Ended::Closed)),
     };
-    if let Some(reason) = refusal {
+    if let Some((reason, ended)) = refusal {
         warn!(reason = %reason, "refused a connection");
-        let _ = write_frame(&mut write, &Reply::Refused { reason }).await;
-        return Ended::Closed;
+        let version = (ended == Ended::OtherBuild).then(|| this_build().to_string());
+        let _ = write_frame(&mut write, &Reply::Refused { reason, version }).await;
+        return ended;
     }
     let welcome = Reply::Hello {
         version: this_build().to_string(),
@@ -481,7 +572,10 @@ async fn serve_connection<F: Future<Output = ()>>(
     });
 
     let mut programs: HashMap<u64, mpsc::UnboundedSender<Control>> = HashMap::new();
-    let mut running: JoinSet<(u64, mpsc::UnboundedReceiver<Control>)> = JoinSet::new();
+    let mut running: JoinSet<Supervised> = JoinSet::new();
+    // The output of processes the programs left behind, still relayed after their exit until the
+    // connection ends.
+    let mut left_behind: Vec<JoinHandle<()>> = Vec::new();
     let ended = loop {
         tokio::select! {
             request = requests.recv() => match request {
@@ -536,8 +630,10 @@ async fn serve_connection<F: Future<Output = ()>>(
                 None => break Ended::Closed,
             },
             Some(done) = running.join_next() => {
-                if let Ok((id, mut unanswered)) = done {
+                if let Ok(Supervised { id, mut unanswered, relays }) = done {
                     programs.remove(&id);
+                    left_behind.retain(|relay| !relay.is_finished());
+                    left_behind.extend(relays);
                     // Signals that came after the program ended still get their answer, here, in
                     // the order they were asked.
                     unanswered.close();
@@ -560,7 +656,17 @@ async fn serve_connection<F: Future<Output = ()>>(
     for control in programs.values() {
         let _ = control.send(Control::Close);
     }
-    while running.join_next().await.is_some() {}
+    while let Some(done) = running.join_next().await {
+        if let Ok(Supervised { relays, .. }) = done {
+            left_behind.extend(relays);
+        }
+    }
+    // A process that left its program's group — through `setsid` — outlives the stop, and its pipe
+    // would hold a relay and a descriptor of the service's for as long as it keeps the pipe open.
+    // Its output ends with the connection it was relayed to.
+    for relay in &left_behind {
+        relay.abort();
+    }
     reader.abort();
     // The exits go out before the connection does — bounded, since output a left-behind process
     // still relays holds a sender too.
@@ -640,16 +746,25 @@ fn start(launch: &Launch) -> io::Result<Child> {
     command.spawn()
 }
 
+/// A program that has ended, as its supervision hands it back to the connection.
+struct Supervised {
+    id: u64,
+    /// What was asked of the program that it did not get to.
+    unanswered: mpsc::UnboundedReceiver<Control>,
+    /// The relays of its output that did not finish within [`OUTPUT_DRAIN`]: a process it left
+    /// behind holds the pipe.
+    relays: Vec<JoinHandle<()>>,
+}
+
 /// Watches one program: relays its output, carries out what the connection asks, and reports its
-/// exit. Returns the program's id once it has ended, with what was asked of it that it did not
-/// get to.
+/// exit. Returns once the program has ended.
 async fn supervise(
     id: u64,
     mut child: Child,
     own_process_group: bool,
     mut control: mpsc::UnboundedReceiver<Control>,
     replies: Replies,
-) -> (u64, mpsc::UnboundedReceiver<Control>) {
+) -> Supervised {
     let group = child.id();
     let stdout = child
         .stdout
@@ -659,9 +774,9 @@ async fn supervise(
         .stderr
         .take()
         .map(|pipe| tokio::spawn(relay(id, Stream::Stderr, pipe, replies.clone())));
-    let status = loop {
+    let (status, closing) = loop {
         tokio::select! {
-            status = child.wait() => break status,
+            status = child.wait() => break (status, false),
             Some(request) = control.recv() => match request {
                 Control::Signal { signal, group } => {
                     let sent = match child.id() {
@@ -682,16 +797,34 @@ async fn supervise(
                     }
                     let _ = child.start_kill();
                 }
-                Control::Close => break close(&mut child, group).await,
+                // A program that has already ended exited on its own, whichever of the two the
+                // select saw first: the stop at the connection's end never passes a crash off as
+                // one it caused.
+                Control::Close => match child.try_wait() {
+                    Ok(Some(status)) => break (Ok(status), false),
+                    _ => break (close(&mut child, group).await, true),
+                },
             },
         }
     };
-    for relay in [stdout, stderr].into_iter().flatten() {
-        let _ = tokio::time::timeout(OUTPUT_DRAIN, relay).await;
+    let mut relays = Vec::new();
+    let drained = tokio::time::Instant::now() + OUTPUT_DRAIN;
+    for mut relay in [stdout, stderr].into_iter().flatten() {
+        if tokio::time::timeout_at(drained, &mut relay).await.is_err() {
+            relays.push(relay);
+        }
     }
     let status = status.map(ExitStatus::into_raw).map_err(|e| e.to_string());
-    replies.send(Reply::Exited { id, status });
-    (id, control)
+    replies.send(Reply::Exited {
+        id,
+        status,
+        closing,
+    });
+    Supervised {
+        id,
+        unanswered: control,
+        relays,
+    }
 }
 
 /// The stop at the connection's end: `SIGTERM` to the program's group, a bounded wait, then
@@ -775,19 +908,49 @@ async fn read_line_bounded<R: AsyncBufRead + Unpin>(
 // The Client's end
 // ---------------------------------------------------------------------------------------------
 
-const CLOSED: &str = "the agents service closed the channel";
+const CLOSED: &str = "the second service closed the channel";
 
-/// The Client's connection to the second service. Cloning shares the one connection; when the last
-/// clone and the last program started through it are dropped, the connection closes and the
-/// service stops whatever still runs.
+/// The Client's channel to the second service, one connection at a time. Cloning shares it. A
+/// start that finds the connection gone — the service restarted — connects again, waiting up to
+/// [`RECONNECT`] for the service to come back; the programs started through the old connection
+/// have ended with it.
+///
+/// The connection closes, and the service stops whatever still runs, when the service goes or
+/// when the last clone and the last program started through it are dropped.
 #[derive(Clone)]
 pub struct Channel {
-    inner: Arc<Inner>,
+    shared: Arc<Shared>,
 }
 
-struct Inner {
+struct Shared {
+    socket: PathBuf,
+    /// The uid the socket must be served by: the process account's (ADR-0059 clause 4).
+    service_uid: u32,
+    state: tokio::sync::Mutex<State>,
+    /// Whether `current` names a version other than the one this Client runs from.
+    superseded: fn() -> bool,
+    /// Set once the second service is another build and `current` no longer names this Client's
+    /// version: the self-update left this Client behind (ADR-0059 clause 2).
+    left_behind: tokio::sync::watch::Sender<bool>,
+}
+
+#[derive(Default)]
+struct State {
+    connection: Option<Arc<Connection>>,
+    /// When the last wait for the service ended without reaching it: a start in the same outage
+    /// tries once rather than waiting out [`RECONNECT`] again behind every Supervisor before it.
+    gave_up: Option<Instant>,
+    /// The refusals met so far, logged sparingly: a start meets one every [`RECONNECT_EVERY`].
+    refusals: Refusals,
+}
+
+/// One connection to the second service.
+struct Connection {
     /// Requests, encoded: one too large for a message is refused before it is queued.
     requests: mpsc::UnboundedSender<Zeroizing<Vec<u8>>>,
+    /// The task that writes them; ended once the service is gone, which closes the connection on
+    /// the Client's side too.
+    writer: AbortHandle,
     next_id: AtomicU64,
     routes: Mutex<Routes>,
 }
@@ -810,13 +973,162 @@ struct Route {
 }
 
 impl Channel {
-    /// Connects to the second service at `socket` and exchanges the handshake.
+    /// The channel to the second service at `socket`, served by `service_uid`. Nothing is
+    /// connected until the first start.
+    #[must_use]
+    pub fn new(socket: &Path, service_uid: u32) -> Channel {
+        Channel::with_superseded(socket, service_uid, superseded)
+    }
+
+    /// [`Channel::new`], told by `superseded` whether a self-update switched `current`.
+    pub(crate) fn with_superseded(
+        socket: &Path,
+        service_uid: u32,
+        superseded: fn() -> bool,
+    ) -> Channel {
+        Channel {
+            shared: Arc::new(Shared {
+                socket: socket.to_path_buf(),
+                service_uid,
+                state: tokio::sync::Mutex::new(State::default()),
+                superseded,
+                left_behind: tokio::sync::watch::channel(false).0,
+            }),
+        }
+    }
+
+    /// Resolves once the second service turned out to be another build while `current` no longer
+    /// names the version this Client runs: the self-update left the Client behind, and it ends for
+    /// the restart that starts the version `current` names, as the service does in its place
+    /// (ADR-0059 clause 2). Only the process account's socket can tell it so (clause 4).
+    pub async fn left_behind(&self) {
+        let mut left_behind = self.shared.left_behind.subscribe();
+        let _ = left_behind.wait_for(|left| *left).await;
+    }
+
+    /// [`Channel::new`], connected now, once.
     ///
     /// # Errors
-    /// Returns an error when the socket cannot be reached, the service refuses the connection, or
-    /// it is another build.
-    pub async fn connect(socket: &Path) -> io::Result<Channel> {
+    /// Returns an error when the socket cannot be reached, is not served by `service_uid`, the
+    /// service refuses the connection, or it is another build.
+    pub async fn connect(socket: &Path, service_uid: u32) -> io::Result<Channel> {
+        let channel = Channel::new(socket, service_uid);
+        let connection = Connection::open(socket, service_uid).await?;
+        channel.shared.state.lock().await.connection = Some(connection);
+        Ok(channel)
+    }
+
+    /// Asks the service to start `launch` for the Supervisor named `supervisor`, and waits until it
+    /// runs or did not start.
+    ///
+    /// Cancel-safe: a start dropped before the answer asks the service to stop the program it may
+    /// have started, as dropping its [`RemoteChild`] would.
+    ///
+    /// # Errors
+    /// Returns the service's reason the program did not start, keeping its OS error, or why the
+    /// service could not be reached.
+    ///
+    /// A start that does not reach the service — it cannot be connected to, refuses the Client, or
+    /// goes during the start as well as before it — fails with an error [`is_unreachable`] tells
+    /// apart from a program that did not start.
+    pub(crate) async fn start(&self, supervisor: &str, launch: Launch) -> io::Result<RemoteChild> {
+        let connection = self.connection().await.map_err(unreachable)?;
+        match Arc::clone(&connection)
+            .start(supervisor, launch.clone())
+            .await
+        {
+            // The service went while the start was on its way, and what it started went with it:
+            // the start goes to the service that comes back.
+            Err(e) if connection.is_closed() => {
+                debug!(error = %e, "the second service went during a start; connecting again");
+                let connection = self.connection().await.map_err(unreachable)?;
+                match Arc::clone(&connection).start(supervisor, launch).await {
+                    Err(e) if connection.is_closed() => Err(unreachable(e)),
+                    started => started,
+                }
+            }
+            started => started,
+        }
+    }
+
+    /// Reaches the service: the open connection, or a new one once the last is gone.
+    ///
+    /// # Errors
+    /// Returns why the service was not reached, an error [`is_unreachable`] holds for.
+    pub(crate) async fn reach(&self) -> io::Result<()> {
+        self.connection().await.map(|_| ()).map_err(unreachable)
+    }
+
+    /// The open connection, or a new one once the last is gone.
+    async fn connection(&self) -> io::Result<Arc<Connection>> {
+        let mut state = self.shared.state.lock().await;
+        if let Some(connection) = state.connection.as_ref().filter(|c| !c.is_closed()) {
+            return Ok(Arc::clone(connection));
+        }
+        state.connection = None;
+        let waited_in_vain = state.gave_up.is_some_and(|at| at.elapsed() < RECONNECT);
+        let deadline = Instant::now()
+            + if waited_in_vain {
+                Duration::ZERO
+            } else {
+                RECONNECT
+            };
+        loop {
+            match Connection::open(&self.shared.socket, self.shared.service_uid).await {
+                Ok(connection) => {
+                    state.gave_up = None;
+                    state.connection = Some(Arc::clone(&connection));
+                    return Ok(connection);
+                }
+                Err(e) if is_other_build(&e) && (self.shared.superseded)() => {
+                    info!(
+                        error = %e,
+                        "the second service is another build and current names another version; \
+                         this Client is the one left behind"
+                    );
+                    self.shared.left_behind.send_replace(true);
+                    state.gave_up = Some(Instant::now());
+                    return Err(e);
+                }
+                Err(e) => {
+                    // Not an outage that ends by itself: the operator is to hear of it.
+                    if is_refusal(&e) {
+                        if let Some(unlogged) = state.refusals.note(std::time::Instant::now()) {
+                            warn!(
+                                socket = %self.shared.socket.display(), error = %e, unlogged,
+                                "the second service is refused; no program starts until the process account serves this build on its socket"
+                            );
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        state.gave_up = Some(Instant::now());
+                        return Err(e);
+                    }
+                    debug!(socket = %self.shared.socket.display(), error = %e, "the second service cannot be reached yet");
+                    tokio::time::sleep(RECONNECT_EVERY).await;
+                }
+            }
+        }
+    }
+
+    /// The connection open now, for a test to look into.
+    #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    async fn open_connection(&self) -> Option<Arc<Connection>> {
+        self.shared.state.lock().await.connection.clone()
+    }
+}
+
+impl Connection {
+    /// Connects to the second service at `socket` and exchanges the handshake.
+    ///
+    /// The socket's peer is checked before anything is written: whoever serves it learns every
+    /// program's command line and environment, the Supervisor Endpoint's token among them, so only
+    /// the process account is told (ADR-0059 clause 4).
+    async fn open(socket: &Path, service_uid: u32) -> io::Result<Arc<Connection>> {
         let stream = UnixStream::connect(socket).await?;
+        check_service(stream.peer_cred()?.uid(), service_uid, socket)
+            .map_err(|e| io::Error::new(e.kind(), Refusal(e.to_string())))?;
         let (mut read, mut write) = stream.into_split();
         let hello = Request::Hello {
             version: this_build().to_string(),
@@ -837,63 +1149,85 @@ impl Channel {
         };
         match answer {
             Some(Reply::Hello { version }) if version == this_build() => {}
+            // What the peer says is quoted, bounded and escaped: whoever serves the socket says it,
+            // a Managed Process of the process account among them, and it reaches the Server in
+            // the Supervisor's health.
             Some(Reply::Hello { version }) => {
-                return Err(io::Error::other(format!(
-                    "the agents service is build {version}, this Client is build {}",
+                return Err(io::Error::other(OtherBuild(format!(
+                    "the second service is build {}, this Client is build {}",
+                    peer_text(&version),
                     this_build()
-                )))
+                ))))
             }
-            Some(Reply::Refused { reason }) => {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason))
+            Some(Reply::Refused {
+                reason,
+                version: Some(version),
+            }) if version != this_build() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    OtherBuild(format!(
+                        "the second service refused this Client: {}",
+                        peer_text(&reason)
+                    )),
+                ))
             }
-            Some(_) => return Err(io::Error::other("the agents service skipped the handshake")),
+            Some(Reply::Refused { reason, .. }) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    Refusal(format!(
+                        "the second service refused this Client: {}",
+                        peer_text(&reason)
+                    )),
+                ))
+            }
+            Some(_) => return Err(io::Error::other("the second service skipped the handshake")),
             None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, CLOSED)),
         }
 
         let (requests, mut outgoing) = mpsc::unbounded_channel::<Zeroizing<Vec<u8>>>();
-        let inner = Arc::new(Inner {
-            requests,
-            next_id: AtomicU64::new(1),
-            routes: Mutex::new(Routes::default()),
-        });
-        // Ends when every sender is gone — the last `Channel` and `RemoteChild` dropped — and
-        // dropping the write half then tells the service the Client is gone.
-        tokio::spawn(async move {
+        // Ends when every sender is gone — the last `Channel` and `RemoteChild` dropped — or when
+        // the service is; dropping the write half then tells the service the Client is gone.
+        let writer = tokio::spawn(async move {
             while let Some(frame) = outgoing.recv().await {
                 if write.write_all(&frame).await.is_err() {
                     break;
                 }
             }
+        })
+        .abort_handle();
+        let connection = Arc::new(Connection {
+            requests,
+            writer,
+            next_id: AtomicU64::new(1),
+            routes: Mutex::new(Routes::default()),
         });
         // Holds the connection weakly, so it does not keep the senders above alive.
-        let weak = Arc::downgrade(&inner);
+        let weak = Arc::downgrade(&connection);
         tokio::spawn(async move {
             while let Ok(Some(reply)) = read_frame::<_, Reply>(&mut read).await {
-                let Some(inner) = weak.upgrade() else { return };
-                inner.dispatch(reply);
+                let Some(connection) = weak.upgrade() else {
+                    return;
+                };
+                connection.dispatch(reply);
             }
-            if let Some(inner) = Weak::upgrade(&weak) {
-                inner.fail_all();
+            if let Some(connection) = Weak::upgrade(&weak) {
+                connection.fail_all();
             }
         });
-        Ok(Channel { inner })
+        Ok(connection)
     }
 
-    /// Asks the service to start `launch` for the Supervisor named `supervisor`, and waits until it
-    /// runs or did not start.
-    ///
-    /// Cancel-safe: a start dropped before the answer asks the service to stop the program it may
-    /// have started, as dropping its [`RemoteChild`] would.
-    ///
-    /// # Errors
-    /// Returns the service's reason the program did not start, keeping its OS error, or that the
-    /// channel is closed.
-    pub(crate) async fn start(&self, supervisor: &str, launch: Launch) -> io::Result<RemoteChild> {
-        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+    /// Whether the service is gone: its replies have ended, or a request could not be written.
+    fn is_closed(&self) -> bool {
+        self.routes().closed || self.requests.is_closed()
+    }
+
+    async fn start(self: Arc<Self>, supervisor: &str, launch: Launch) -> io::Result<RemoteChild> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (started_tx, started) = oneshot::channel();
         let (exited_tx, exited) = oneshot::channel();
         {
-            let mut routes = self.inner.routes();
+            let mut routes = self.routes();
             if routes.closed {
                 return Err(closed());
             }
@@ -908,15 +1242,18 @@ impl Channel {
             );
         }
         if let Err(e) = self.send(&Request::Start { id, launch }) {
-            self.inner.routes().by_id.remove(&id);
+            self.routes().by_id.remove(&id);
             return Err(e);
         }
-        let pending = Pending { channel: self, id };
+        let pending = Pending {
+            connection: &self,
+            id,
+        };
         let answer = started.await;
         std::mem::forget(pending);
         let pid = answer.map_err(|_| closed())??;
         Ok(RemoteChild {
-            channel: self.clone(),
+            connection: self,
             id,
             pid,
             exited: Some(exited),
@@ -928,25 +1265,9 @@ impl Channel {
     /// the connection carries on.
     fn send(&self, request: &Request) -> io::Result<()> {
         let frame = encode(request)?;
-        self.inner.requests.send(frame).map_err(|_| closed())
+        self.requests.send(frame).map_err(|_| closed())
     }
-}
 
-/// A start sent and not yet answered. Dropped — the start abandoned — it stops the program the
-/// service may already run and forgets its route; an answered start forgets the guard instead.
-struct Pending<'a> {
-    channel: &'a Channel,
-    id: u64,
-}
-
-impl Drop for Pending<'_> {
-    fn drop(&mut self) {
-        self.channel.inner.routes().by_id.remove(&self.id);
-        let _ = self.channel.send(&Request::Stop { id: self.id });
-    }
-}
-
-impl Inner {
     fn routes(&self) -> std::sync::MutexGuard<'_, Routes> {
         self.routes
             .lock()
@@ -984,9 +1305,11 @@ impl Inner {
                     started
                 };
                 if let Some(started) = started {
+                    // Quoted as a refusal is: whoever serves the socket says it (ADR-0059
+                    // clauses 4 and 5), and from here it reaches the log and the Server.
                     let error = match os_error {
                         Some(code) => io::Error::from_raw_os_error(code),
-                        None => io::Error::other(error),
+                        None => io::Error::other(peer_text(&error)),
                     };
                     let _ = started.send(Err(error));
                 }
@@ -1010,19 +1333,29 @@ impl Inner {
                 }
             }
             Reply::Signalled { id } => self.answer_signal(id, Ok(())),
-            Reply::SignalFailed { id, error } => self.answer_signal(id, Err(error)),
-            Reply::Exited { id, status } => {
+            Reply::SignalFailed { id, error } => self.answer_signal(id, Err(peer_text(&error))),
+            Reply::Exited {
+                id,
+                status,
+                closing,
+            } => {
                 if let Some(exited) = self
                     .routes()
                     .by_id
                     .get_mut(&id)
                     .and_then(|route| route.exited.take())
                 {
-                    let _ = exited.send(status);
+                    // Stopped because the service goes: no exit of the program's, but the same
+                    // as the channel closing under it, which a Supervisor waits out.
+                    let _ = exited.send(if closing {
+                        Err(CLOSED.to_string())
+                    } else {
+                        status.map_err(|e| peer_text(&e))
+                    });
                 }
             }
             Reply::Hello { .. } | Reply::Refused { .. } => {
-                warn!("the agents service repeated the handshake; ignored");
+                warn!("the second service repeated the handshake; ignored");
             }
         }
     }
@@ -1038,11 +1371,160 @@ impl Inner {
         }
     }
 
-    /// The service is gone: every program started through it is reported ended.
+    /// The service is gone: every program started through it is reported ended, and the
+    /// connection is closed on this side too, so the service — should it still read — stops what
+    /// it started for it.
     fn fail_all(&self) {
         let mut routes = self.routes();
         routes.closed = true;
         routes.by_id.clear();
+        self.writer.abort();
+    }
+}
+
+/// Why the second service was not reached, wrapped so that a program that did not start — whose
+/// error may carry the same kind, `NotFound` for one — is told apart from it. `refused` where it
+/// was reached and one end refused the other: a socket of another account, a service of another
+/// build, or a refusal of the Client — a cause of its own, which no restart of the service mends.
+#[derive(Debug)]
+struct Unreachable {
+    error: io::Error,
+    refused: bool,
+}
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.refused {
+            write!(f, "the second service is refused: {}", self.error)
+        } else {
+            write!(f, "the second service cannot be reached: {}", self.error)
+        }
+    }
+}
+
+impl std::error::Error for Unreachable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// The socket is served by another account than the process account's, or the service refused
+/// the Client.
+#[derive(Debug)]
+struct Refusal(String);
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// Whether `error` is a refusal by either end of the handshake: the peer is another account or
+/// another build, or it refused the Client.
+fn is_refusal(error: &io::Error) -> bool {
+    is_other_build(error) || error.get_ref().is_some_and(|inner| inner.is::<Refusal>())
+}
+
+/// At most this many characters of what a peer says go into an error.
+const PEER_TEXT: usize = 120;
+
+/// What a peer said, quoted for an error: at most [`PEER_TEXT`] characters, and everything but
+/// printable ASCII escaped, so that it can neither pass off a line of its own in the Client's log
+/// nor carry a long text of its own choosing to the Server.
+fn peer_text(text: &str) -> String {
+    let mut quoted: String = text
+        .chars()
+        .take(PEER_TEXT)
+        .flat_map(char::escape_default)
+        .collect();
+    if text.chars().nth(PEER_TEXT).is_some() {
+        quoted.push_str("...");
+    }
+    format!("\"{quoted}\"")
+}
+
+/// The second service is another build: it said so, or named another in its handshake.
+#[derive(Debug)]
+struct OtherBuild(String);
+
+impl std::fmt::Display for OtherBuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OtherBuild {}
+
+/// Whether `error` is the handshake's refusal of another build.
+fn is_other_build(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<OtherBuild>())
+}
+
+/// `error`, marked as the second service not reached; its kind is kept.
+fn unreachable(error: io::Error) -> io::Error {
+    if is_unreachable(&error) {
+        return error;
+    }
+    let refused = is_refusal(&error);
+    io::Error::new(error.kind(), Unreachable { error, refused })
+}
+
+/// Whether `error` says that the second service was not reached, rather than that a program did
+/// not start or failed: a start or a wait that ended so is no failure of the program's, and a
+/// Supervisor tries again once the service is back (ADR-0059 clause 2).
+#[must_use]
+pub fn is_unreachable(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<Unreachable>())
+}
+
+/// Whether `error` says that the second service was reached and one end refused the other — a
+/// socket of another account, another build, or a refusal of the Client — rather than that it
+/// is down. [`is_unreachable`] holds for it too: it is no failure of the program's either.
+#[must_use]
+pub fn is_refused(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Unreachable>())
+        .is_some_and(|unreachable| unreachable.refused)
+}
+
+/// Whether the socket is served by the process account (ADR-0059 clause 4). Its directory belongs
+/// to that account, so any process the account runs could put a socket of its own in its place;
+/// only one of another account is told apart here — the Managed Processes share the account, and
+/// read one another's environment already (ADR-0059, Consequences).
+///
+/// # Errors
+/// Returns `PermissionDenied` naming both uids.
+fn check_service(peer_uid: u32, service_uid: u32, socket: &Path) -> io::Result<()> {
+    if peer_uid == service_uid {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "{} is served by uid {peer_uid}, not by the process account (uid {service_uid})",
+            socket.display()
+        ),
+    ))
+}
+
+/// A start sent and not yet answered. Dropped — the start abandoned — it stops the program the
+/// service may already run and forgets its route; an answered start forgets the guard instead.
+struct Pending<'a> {
+    connection: &'a Connection,
+    id: u64,
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        self.connection.routes().by_id.remove(&self.id);
+        let _ = self.connection.send(&Request::Stop { id: self.id });
     }
 }
 
@@ -1053,7 +1535,8 @@ fn closed() -> io::Error {
 /// A program the second service started for the Client: what [`tokio::process::Child`] is to a
 /// program the Client started itself.
 pub struct RemoteChild {
-    channel: Channel,
+    /// The connection it was started on, which its replies come back on.
+    connection: Arc<Connection>,
     id: u64,
     pid: u32,
     exited: Option<oneshot::Receiver<Result<i32, String>>>,
@@ -1070,7 +1553,9 @@ impl RemoteChild {
     /// Waits for the program to end. Cancel-safe; once it has ended, answers at once.
     ///
     /// # Errors
-    /// Returns an error when the service could not wait for it, or the channel closed first.
+    /// Returns an error when the service could not wait for it, or the channel closed first or
+    /// the service stopped the program on going — the service went, and the program with it,
+    /// which [`is_unreachable`] says.
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
         if self.outcome.is_none() {
             let reported = match self.exited.as_mut() {
@@ -1082,8 +1567,9 @@ impl RemoteChild {
         }
         match &self.outcome {
             Some(Ok(status)) => Ok(*status),
+            Some(Err(e)) if e == CLOSED => Err(unreachable(closed())),
             Some(Err(e)) => Err(io::Error::other(e.clone())),
-            None => Err(closed()),
+            None => Err(unreachable(closed())),
         }
     }
 
@@ -1100,11 +1586,11 @@ impl RemoteChild {
         }
         let (signalled, answer) = oneshot::channel();
         {
-            let mut routes = self.channel.inner.routes();
+            let mut routes = self.connection.routes();
             let Some(route) = routes.by_id.get_mut(&self.id) else {
                 return Err(closed());
             };
-            self.channel.send(&Request::Signal {
+            self.connection.send(&Request::Signal {
                 id: self.id,
                 signal,
                 group,
@@ -1118,29 +1604,38 @@ impl RemoteChild {
             Ok(Err(_)) => Err(closed()),
             Err(_) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "the agents service did not answer the signal in time",
+                "the second service did not answer the signal in time",
             )),
         }
     }
 
-    /// Kills the program and waits for it to end.
+    /// Kills the program and waits for its end to be reported, up to [`KILL_ANSWER`]: the
+    /// service kills at once, except while it stops its programs on shutting down, and then it
+    /// ends this one itself.
     ///
     /// # Errors
-    /// Returns an error when the channel closed before the exit was reported.
+    /// Returns an error when the channel closed before the exit was reported, or the report did
+    /// not come in time.
     pub async fn kill(&mut self) -> io::Result<()> {
         if self.outcome.is_none() {
-            self.channel.send(&Request::Stop { id: self.id })?;
+            self.connection.send(&Request::Stop { id: self.id })?;
         }
-        self.wait().await.map(|_| ())
+        match tokio::time::timeout(KILL_ANSWER, self.wait()).await {
+            Ok(waited) => waited.map(|_| ()),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the second service did not report the program's end in time",
+            )),
+        }
     }
 }
 
 impl Drop for RemoteChild {
     /// Takes the program along, as `kill_on_drop` does for a program the Client started itself.
     fn drop(&mut self) {
-        self.channel.inner.routes().by_id.remove(&self.id);
+        self.connection.routes().by_id.remove(&self.id);
         if self.outcome.is_none() {
-            let _ = self.channel.send(&Request::Stop { id: self.id });
+            let _ = self.connection.send(&Request::Stop { id: self.id });
         }
     }
 }
@@ -1168,9 +1663,7 @@ pub(crate) mod peer {
             let (mut stream, _) = listener.accept().await.expect("accept");
             while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
                 let replies = match request {
-                    Request::Hello { .. } => vec![Reply::Hello {
-                        version: this_build().to_string(),
-                    }],
+                    Request::Hello { .. } => vec![hello()],
                     request => answer(request),
                 };
                 for reply in replies {
@@ -1180,8 +1673,21 @@ pub(crate) mod peer {
                 }
             }
         });
-        let channel = Channel::connect(&socket).await.expect("connect");
+        let channel = Channel::connect(&socket, own_uid()).await.expect("connect");
         Peer { channel, _dir: dir }
+    }
+
+    /// The stand-in's answer to the Client's handshake.
+    pub(crate) fn hello() -> Reply {
+        Reply::Hello {
+            version: this_build().to_string(),
+        }
+    }
+
+    /// The uid this test runs as, which serves its stand-ins and its in-process services.
+    pub(crate) fn own_uid() -> u32 {
+        // SAFETY: getuid(2) cannot fail and touches no memory.
+        unsafe { libc::getuid() }
     }
 
     /// Starts every program as a pid nobody has, kills it on a stop, and never answers a signal —
@@ -1192,7 +1698,17 @@ pub(crate) mod peer {
             Request::Stop { id } => vec![Reply::Exited {
                 id,
                 status: Ok(libc::SIGKILL),
+                closing: false,
             }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Starts every program as a pid nobody has, and answers nothing else: not a signal and not a
+    /// stop.
+    pub(crate) fn deaf(request: Request) -> Vec<Reply> {
+        match request {
+            Request::Start { id, .. } => vec![Reply::Started { id, pid: u32::MAX }],
             _ => Vec::new(),
         }
     }
@@ -1200,13 +1716,8 @@ pub(crate) mod peer {
 
 #[cfg(test)]
 mod tests {
+    use super::peer::own_uid;
     use super::*;
-    use std::path::PathBuf;
-
-    fn own_uid() -> u32 {
-        // SAFETY: getuid(2) cannot fail and touches no memory.
-        unsafe { libc::getuid() }
-    }
 
     fn sh(script: &str) -> Launch {
         Launch {
@@ -1223,23 +1734,33 @@ mod tests {
         _dir: tempfile::TempDir,
         socket: PathBuf,
         stop: Option<oneshot::Sender<()>>,
-        task: tokio::task::JoinHandle<()>,
+        task: JoinHandle<Served>,
     }
 
     fn service(client_uid: u32) -> Service {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("agents.sock");
-        let listener = bind(&socket).expect("bind");
-        let (stop, stopped) = oneshot::channel::<()>();
-        let task = tokio::spawn(serve(listener, client_uid, async {
-            let _ = stopped.await;
-        }));
+        let (stop, task) = listen(&socket, client_uid, || false);
         Service {
             _dir: dir,
             socket,
             stop: Some(stop),
             task,
         }
+    }
+
+    /// The service on `socket`, until the sender is used or dropped.
+    fn listen(
+        socket: &Path,
+        client_uid: u32,
+        superseded: fn() -> bool,
+    ) -> (oneshot::Sender<()>, JoinHandle<Served>) {
+        let listener = bind(socket).expect("bind");
+        let (stop, stopped) = oneshot::channel::<()>();
+        let task = tokio::spawn(serve(listener, client_uid, superseded, async {
+            let _ = stopped.await;
+        }));
+        (stop, task)
     }
 
     async fn connect_raw(socket: &Path, version: &str) -> UnixStream {
@@ -1280,6 +1801,345 @@ mod tests {
         assert!(check_client_uid(997, 997).is_err());
     }
 
+    /// The second service never runs as root, whichever account it is told to serve.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_service_refuses_to_run_as_root() {
+        let refused = check_client_uid(998, 0).expect_err("it ran as root");
+        assert!(refused.contains("root"), "{refused}");
+    }
+
+    /// The Client tells a Managed Process's environment and the Supervisor Endpoint's token to the
+    /// process account alone: a socket served by another uid is refused before anything is written
+    /// to it. Run without a second account by naming another uid as the process account's.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn the_client_talks_only_to_the_process_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let heard = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut heard = Vec::new();
+            let _ = stream.read_to_end(&mut heard).await;
+            heard
+        });
+        let refused = Channel::connect(&socket, own_uid().wrapping_add(1))
+            .await
+            .err()
+            .expect("refused");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert!(refused.to_string().contains("process account"), "{refused}");
+        let heard = tokio::time::timeout(Duration::from_secs(5), heard)
+            .await
+            .expect("the Client closed the connection")
+            .expect("the listener");
+        assert!(heard.is_empty(), "the Client wrote {} bytes", heard.len());
+        assert!(check_service(7, 7, &socket).is_ok());
+    }
+
+    /// The second service restarted — its programs ended with it — and the next start reaches the
+    /// service that came back instead of failing on the channel that went.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_start_reaches_the_service_after_it_restarted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let (stop, task) = listen(&socket, own_uid(), || false);
+        let channel = Channel::new(&socket, own_uid());
+        let mut first = channel.start("test", sh("sleep 300")).await.expect("start");
+        let _ = stop.send(());
+        assert_eq!(task.await.expect("the service ended"), Served::Stopped);
+        let _ = tokio::time::timeout(Duration::from_secs(15), first.wait())
+            .await
+            .expect("the program ended with the service");
+
+        // The service manager brings it back a moment later.
+        let again = socket.clone();
+        let back = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            listen(&again, own_uid(), || false)
+        });
+        let mut second = channel
+            .start("test", sh("exit 7"))
+            .await
+            .expect("the start reached the restarted service");
+        let status = tokio::time::timeout(Duration::from_secs(10), second.wait())
+            .await
+            .expect("in time")
+            .expect("a status");
+        assert_eq!(status.code(), Some(7));
+        drop(back.await.expect("the service came back"));
+    }
+
+    /// A kill the service does not report — it is shutting down, or gone quiet — gives up after
+    /// [`KILL_ANSWER`] instead of holding up the stop that sent it for ever.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_kill_the_service_does_not_report_gives_up_in_time() {
+        let peer = peer::connect(peer::deaf).await;
+        let mut child = peer.channel.start("test", sh("true")).await.expect("start");
+        let killed = tokio::time::timeout(KILL_ANSWER * 2, child.kill())
+            .await
+            .expect("the kill gives up in time");
+        assert_eq!(
+            killed.err().map(|e| e.kind()),
+            Some(io::ErrorKind::TimedOut)
+        );
+    }
+
+    /// A Client of another build ends a service that a self-update left behind, so the version
+    /// `current` names takes its place; a service that is current itself only refuses it.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn another_build_ends_only_a_superseded_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let (_stop, task) = listen(&socket, own_uid(), || true);
+        let mut stream = connect_raw(&socket, "0.0.0-another-build").await;
+        assert!(matches!(
+            next(&mut stream).await,
+            Some(Reply::Refused { .. })
+        ));
+        let served = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the service ended")
+            .expect("cleanly");
+        assert_eq!(served, Served::Superseded);
+    }
+
+    /// Only a peer of the Client's account can make a superseded service end: one of another
+    /// account that names another build is refused before it is served, and the service goes on
+    /// (ADR-0059 clauses 2 and 4).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_peer_of_another_account_ends_no_superseded_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let (stop, task) = listen(&socket, own_uid().wrapping_add(1), || true);
+        let mut stream = connect_raw(&socket, "0.0.0-another-build").await;
+        assert!(matches!(
+            next(&mut stream).await,
+            Some(Reply::Refused { version: None, .. })
+        ));
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!task.is_finished(), "a foreign peer ended the service");
+        let _ = stop.send(());
+        let served = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the service ended")
+            .expect("cleanly");
+        assert_eq!(served, Served::Stopped);
+    }
+
+    /// The service goes while a start is on its way: the start goes to the service that comes back
+    /// rather than failing on the connection that went (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_start_the_service_cut_short_goes_to_the_service_that_comes_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        // The first connection goes on the start; the second runs it.
+        let service = tokio::spawn(async move {
+            for served in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
+                    let reply = match request {
+                        Request::Hello { .. } => peer::hello(),
+                        Request::Start { .. } if served == 0 => break,
+                        Request::Start { id, .. } => Reply::Started { id, pid: 4242 },
+                        _ => continue,
+                    };
+                    if write_frame(&mut stream, &reply).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let channel = Channel::new(&socket, own_uid());
+        let child =
+            tokio::time::timeout(Duration::from_secs(10), channel.start("test", sh("true")))
+                .await
+                .expect("in time")
+                .expect("the start reached the service that came back");
+        assert_eq!(child.id(), Some(4242));
+        drop(child);
+        drop(channel);
+        service.abort();
+    }
+
+    /// A start that waited for the service in vain makes the next ones in the same outage try
+    /// once, rather than each waiting out the reconnect again; once that has passed, a start waits
+    /// again. Every one fails as not reaching the service.
+    /// Verifies: ADR-0059
+    #[tokio::test(start_paused = true)]
+    async fn a_start_in_an_outage_that_was_waited_out_tries_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let channel = Channel::new(&dir.path().join("agents.sock"), own_uid());
+        let timed = || async {
+            let started = Instant::now();
+            let failed = channel
+                .start("test", sh("true"))
+                .await
+                .err()
+                .expect("no service");
+            assert!(is_unreachable(&failed), "{failed}");
+            started.elapsed()
+        };
+        assert!(
+            timed().await >= RECONNECT,
+            "the first start waits for the service"
+        );
+        assert!(
+            timed().await < RECONNECT_EVERY,
+            "the next one in the same outage tries once"
+        );
+        tokio::time::advance(RECONNECT).await;
+        assert!(
+            timed().await >= RECONNECT,
+            "a later outage is waited out again"
+        );
+    }
+
+    /// The self-update restarts the Client, whose connection closes: a service that `current` no
+    /// longer names ends then, beside the Client, rather than only once the new Client has met it.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_superseded_service_ends_when_the_clients_connection_closes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let (_stop, task) = listen(&socket, own_uid(), || true);
+        let mut stream = connect_raw(&socket, this_build()).await;
+        assert!(matches!(next(&mut stream).await, Some(Reply::Hello { .. })));
+        drop(stream);
+        let served = tokio::time::timeout(Duration::from_secs(15), task)
+            .await
+            .expect("the service ended")
+            .expect("cleanly");
+        assert_eq!(served, Served::Superseded);
+    }
+
+    /// A stand-in for a second service of another build: it answers every handshake with the
+    /// refusal the real one sends.
+    fn another_build(socket: &Path) -> JoinHandle<()> {
+        let listener = UnixListener::bind(socket).expect("bind");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let _ = read_frame::<_, Request>(&mut stream).await;
+                let refused = Reply::Refused {
+                    reason: "the Client is build a, this service is build b".to_string(),
+                    version: Some("0.0.0-another-build".to_string()),
+                };
+                let _ = write_frame(&mut stream, &refused).await;
+            }
+        })
+    }
+
+    /// A Client that meets a second service of another build while `current` no longer names its
+    /// own version is the one a self-update left behind, and is told so; one that `current` still
+    /// names is only refused (ADR-0059 clause 2).
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_client_left_behind_by_a_self_update_is_told_so() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let service = another_build(&socket);
+
+        // Refused, and trying again for as long as a start waits for the service.
+        let current = Channel::with_superseded(&socket, own_uid(), || false);
+        let trying = current.clone();
+        let start = tokio::spawn(async move { trying.start("test", sh("true")).await.err() });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), current.left_behind())
+                .await
+                .is_err(),
+            "a Client current still names is not left behind"
+        );
+        assert!(!start.is_finished(), "the start waits for the service");
+        start.abort();
+
+        let behind = Channel::with_superseded(&socket, own_uid(), || true);
+        let refused =
+            tokio::time::timeout(Duration::from_secs(5), behind.start("test", sh("true")))
+                .await
+                .expect("a Client left behind gives up at once")
+                .err()
+                .expect("refused");
+        assert!(refused.to_string().contains("build"), "{refused}");
+        tokio::time::timeout(Duration::from_secs(1), behind.left_behind())
+            .await
+            .expect("the Client left behind is told so");
+        service.abort();
+    }
+
+    /// A process that left its program's group — through `setsid` — and holds its pipe open
+    /// keeps no relay and no descriptor of the service's once the connection has ended.
+    /// Verifies: ADR-0059
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_output_of_a_process_left_behind_ends_with_the_connection() {
+        let service = service(own_uid());
+        let mut stream = connect_raw(&service.socket, this_build()).await;
+        assert!(matches!(next(&mut stream).await, Some(Reply::Hello { .. })));
+        write_frame(
+            &mut stream,
+            &Request::Start {
+                id: 1,
+                launch: sh("setsid sleep 300 & echo $!"),
+            },
+        )
+        .await
+        .expect("start");
+        let left = loop {
+            match next(&mut stream).await.expect("open") {
+                Reply::Output { line, .. } => break line.trim().parse::<u32>().expect("a pid"),
+                Reply::Started { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        // Whatever happens below, the process left behind does not outlive the test.
+        struct Reap(u32);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                // SAFETY: plain kill(2); no memory is touched.
+                unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+            }
+        }
+        let _reap = Reap(left);
+        let pipe = std::fs::read_link(format!("/proc/{left}/fd/1")).expect("its stdout");
+        let held = || {
+            std::fs::read_dir("/proc/self/fd").is_ok_and(|fds| {
+                fds.flatten()
+                    .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|to| to == pipe))
+            })
+        };
+        // The program's exit is reported while the process it left still holds the pipe.
+        loop {
+            match next(&mut stream).await.expect("open") {
+                Reply::Exited { .. } => break,
+                Reply::Output { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(held(), "the relay is gone before the connection ended");
+
+        drop(stream);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while held() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the service still holds the pipe of a process left behind"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            alive(left),
+            "the process left behind is not the service's to stop"
+        );
+    }
+
     /// A peer whose uid is not the Client's is refused at the socket, before any request. Run
     /// without a second account by naming another uid as the Client's: this process is then the
     /// stranger.
@@ -1289,12 +2149,12 @@ mod tests {
         let service = service(own_uid().wrapping_add(1));
         let mut stream = connect_raw(&service.socket, this_build()).await;
         match next(&mut stream).await {
-            Some(Reply::Refused { reason }) => {
+            Some(Reply::Refused { reason, .. }) => {
                 assert!(reason.contains("not the Client"), "{reason}")
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
-        let refused = Channel::connect(&service.socket).await;
+        let refused = Channel::connect(&service.socket, own_uid()).await;
         assert_eq!(
             refused.err().map(|e| e.kind()),
             Some(io::ErrorKind::PermissionDenied)
@@ -1370,13 +2230,160 @@ mod tests {
         let service = service(own_uid());
         let mut stream = connect_raw(&service.socket, "0.0.0-another-build").await;
         match next(&mut stream).await {
-            Some(Reply::Refused { reason }) => assert!(reason.contains("build"), "{reason}"),
+            Some(Reply::Refused { reason, version }) => {
+                assert!(reason.contains("build"), "{reason}");
+                assert_eq!(version.as_deref(), Some(this_build()), "it names its own");
+            }
             other => panic!("expected a refusal, got {other:?}"),
         }
         // And the service still serves the right build afterwards.
-        Channel::connect(&service.socket)
+        Channel::connect(&service.socket, own_uid())
             .await
             .expect("the Client's own build");
+    }
+
+    /// A refusal is told apart from an outage, and what the refusing peer says reaches the error —
+    /// and through it the Supervisor's health on the Server — bounded and escaped: a Managed
+    /// Process of the process account can put a socket of its own in the service's place, and
+    /// say up to a handshake's worth of anything.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_refusal_is_no_outage_and_quotes_the_peer_bounded_and_escaped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let _ = read_frame::<_, Request>(&mut stream).await;
+                let refused = Reply::Refused {
+                    reason: "\u{1b}[2Jforged log line\n".repeat(150),
+                    version: None,
+                };
+                let _ = write_frame(&mut stream, &refused).await;
+            }
+        });
+        let refused = Channel::new(&socket, own_uid())
+            .start("test", sh("true"))
+            .await
+            .err()
+            .expect("refused");
+        assert!(is_unreachable(&refused), "{refused}");
+        assert!(is_refused(&refused), "{refused}");
+        let text = refused.to_string();
+        assert!(
+            !text.contains('\n') && !text.contains('\u{1b}'),
+            "unescaped: {text}"
+        );
+        assert!(text.len() < 2 * PEER_TEXT + 200, "{} bytes", text.len());
+        assert!(text.contains("forged log line\\n"), "{text}");
+    }
+
+    /// What a peer says of a program — why it did not start, why waiting for it failed, why a
+    /// signal was not sent — reaches the Client's errors bounded and escaped: whoever serves the
+    /// socket says it, a program of the process account among them.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn what_a_peer_says_of_a_program_is_quoted_bounded_and_escaped() {
+        const FORGED: &str = "\u{1b}[2Jforged log line\nsecond line";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let _ = read_frame::<_, Request>(&mut stream).await;
+            let hello = Reply::Hello {
+                version: this_build().to_string(),
+            };
+            write_frame(&mut stream, &hello).await.expect("hello");
+            while let Ok(Some(request)) = read_frame::<_, Request>(&mut stream).await {
+                let replies = match request {
+                    Request::Start { id: 1, .. } => vec![Reply::StartFailed {
+                        id: 1,
+                        error: FORGED.to_string(),
+                        os_error: None,
+                    }],
+                    Request::Start { id, .. } => vec![Reply::Started { id, pid: 4242 }],
+                    Request::Signal { id, .. } => vec![
+                        Reply::SignalFailed {
+                            id,
+                            error: FORGED.to_string(),
+                        },
+                        Reply::Exited {
+                            id,
+                            status: Err(FORGED.to_string()),
+                            closing: false,
+                        },
+                    ],
+                    Request::Hello { .. } | Request::Stop { .. } => Vec::new(),
+                };
+                for reply in replies {
+                    write_frame(&mut stream, &reply).await.expect("reply");
+                }
+            }
+        });
+        let quoted = |text: String| {
+            assert!(
+                !text.contains('\n') && !text.contains('\u{1b}'),
+                "unescaped: {text}"
+            );
+            assert!(text.contains("forged log line\\n"), "{text}");
+        };
+        let channel = Channel::new(&socket, own_uid());
+
+        let not_started = channel
+            .start("test", sh("true"))
+            .await
+            .err()
+            .expect("the start fails");
+        assert!(!is_unreachable(&not_started), "{not_started}");
+        quoted(not_started.to_string());
+
+        let mut child = channel.start("test", sh("true")).await.expect("started");
+        let not_signalled = child
+            .signal(libc::SIGHUP, false)
+            .await
+            .expect_err("the signal fails");
+        quoted(not_signalled.to_string());
+        let not_waited = child.wait().await.expect_err("waiting fails");
+        assert!(!is_unreachable(&not_waited), "{not_waited}");
+        quoted(not_waited.to_string());
+    }
+
+    /// A program that has ended by the time the connection closes is reported as the exit it is,
+    /// never as one the close caused: the close cannot pass a crash off as a stop.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn an_exit_that_meets_the_close_is_the_programs_own() {
+        for _ in 0..32 {
+            let child = start(&sh("exit 3")).expect("start");
+            let pid = child.id().expect("a pid");
+            // Until it has ended, without reaping it.
+            // SAFETY: waitid(2) on our own child with WNOWAIT writes only into `info`.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let waited =
+                unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
+            assert_eq!(waited, 0, "{}", io::Error::last_os_error());
+            let (control, unanswered) = mpsc::unbounded_channel();
+            assert!(control.send(Control::Close).is_ok(), "queued");
+            let (replies, mut queued) = Replies::new();
+            supervise(1, child, false, unanswered, replies).await;
+            loop {
+                match queued.recv().await.expect("a reply").reply {
+                    Reply::Exited {
+                        status, closing, ..
+                    } => {
+                        assert!(!closing, "the close was taken for the exit");
+                        assert_eq!(
+                            ExitStatus::from_raw(status.expect("a status")).code(),
+                            Some(3)
+                        );
+                        break;
+                    }
+                    Reply::Output { .. } => {}
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        }
     }
 
     /// One connection is served at a time; a second is refused while the first is open.
@@ -1384,8 +2391,10 @@ mod tests {
     #[tokio::test]
     async fn a_second_connection_is_refused_while_one_is_served() {
         let service = service(own_uid());
-        let _first = Channel::connect(&service.socket).await.expect("first");
-        let second = Channel::connect(&service.socket).await;
+        let _first = Channel::connect(&service.socket, own_uid())
+            .await
+            .expect("first");
+        let second = Channel::connect(&service.socket, own_uid()).await;
         assert!(second.is_err(), "the second connection was served");
     }
 
@@ -1411,7 +2420,7 @@ mod tests {
                     assert_eq!(id, 7);
                     output.push((stream, line));
                 }
-                Reply::Exited { id, status } => {
+                Reply::Exited { id, status, .. } => {
                     assert_eq!(id, 7);
                     break ExitStatus::from_raw(status.expect("a status"));
                 }
@@ -1462,7 +2471,7 @@ mod tests {
             .await
             .expect("stop");
         match next(&mut stream).await {
-            Some(Reply::Exited { id: 1, status }) => assert_eq!(
+            Some(Reply::Exited { id: 1, status, .. }) => assert_eq!(
                 ExitStatus::from_raw(status.expect("a status")).signal(),
                 Some(libc::SIGKILL),
                 "the stop reached another program"
@@ -1485,7 +2494,9 @@ mod tests {
                 .expect("runtime")
                 .block_on(async {
                     let service = service(own_uid());
-                    let channel = Channel::connect(&service.socket).await.expect("connect");
+                    let channel = Channel::connect(&service.socket, own_uid())
+                        .await
+                        .expect("connect");
                     let forged =
                         r#"printf 'plain\n'; printf 'ERROR fleet_agent: forged\033[0m\r\n' >&2"#;
                     let mut child = channel
@@ -1518,7 +2529,9 @@ mod tests {
     #[tokio::test]
     async fn a_signal_that_cannot_be_sent_is_an_error() {
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket).await.expect("connect");
+        let channel = Channel::connect(&service.socket, own_uid())
+            .await
+            .expect("connect");
         let mut child = channel.start("test", sh("sleep 300")).await.expect("start");
         child.signal(0, false).await.expect("signal 0 is sent");
         // No such signal: kill(2) fails with EINVAL.
@@ -1574,7 +2587,9 @@ mod tests {
     #[tokio::test]
     async fn a_program_that_cannot_start_keeps_its_os_error() {
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket).await.expect("connect");
+        let channel = Channel::connect(&service.socket, own_uid())
+            .await
+            .expect("connect");
         let mut launch = sh("");
         launch.program = PathBuf::from("/nonexistent/program");
         let error = channel
@@ -1591,7 +2606,9 @@ mod tests {
     #[tokio::test]
     async fn a_start_too_large_for_a_message_fails_alone() {
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket).await.expect("connect");
+        let channel = Channel::connect(&service.socket, own_uid())
+            .await
+            .expect("connect");
         let mut running = channel.start("test", sh("sleep 300")).await.expect("start");
 
         let mut huge = sh("true");
@@ -1635,7 +2652,9 @@ mod tests {
     #[tokio::test]
     async fn an_abandoned_start_stops_its_program() {
         let service = service(own_uid());
-        let channel = Channel::connect(&service.socket).await.expect("connect");
+        let channel = Channel::connect(&service.socket, own_uid())
+            .await
+            .expect("connect");
         // A duration no other process on the host sleeps for, to find this one by.
         let marker = unique_marker();
         let launch = Launch {
@@ -1653,7 +2672,13 @@ mod tests {
             .await;
         }
         assert!(
-            channel.inner.routes().by_id.is_empty(),
+            channel
+                .open_connection()
+                .await
+                .expect("connected")
+                .routes()
+                .by_id
+                .is_empty(),
             "the abandoned start kept its route"
         );
         // The service answers in order: once a later start is answered, the abandoned one has run
@@ -1810,19 +2835,22 @@ mod tests {
         })
     }
 
-    /// The shutdown of the service is a close too: what it started does not outlive it.
+    /// The shutdown of the service is a close too: what it started does not outlive it, and its
+    /// end is the service's going, not an exit of the program's own (ADR-0059 clause 2).
     /// Verifies: ADR-0059
     #[tokio::test]
     async fn the_service_stops_its_programs_when_it_shuts_down() {
         let mut service = service(own_uid());
-        let channel = Channel::connect(&service.socket).await.expect("connect");
+        let channel = Channel::connect(&service.socket, own_uid())
+            .await
+            .expect("connect");
         let mut child = channel.start("test", sh("sleep 300")).await.expect("start");
         let _ = service.stop.take().expect("stop").send(());
-        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        let gone = tokio::time::timeout(Duration::from_secs(15), child.wait())
             .await
             .expect("the program ended in time")
-            .expect("a status");
-        assert_eq!(status.signal(), Some(libc::SIGTERM));
+            .expect_err("no exit of the program's own");
+        assert!(is_unreachable(&gone), "{gone}");
         tokio::time::timeout(Duration::from_secs(5), &mut service.task)
             .await
             .expect("the service ended")

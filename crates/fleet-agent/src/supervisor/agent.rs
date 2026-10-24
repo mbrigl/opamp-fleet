@@ -184,7 +184,8 @@ struct Local {
     /// `server_offered_version`/`server_offered_hash` (the Baseline requires them while
     /// installing or after a failure).
     server_offered: Option<(String, Vec<u8>)>,
-    /// The last install failure for this Agent's package, reported alongside the status.
+    /// The last install failure for this Agent's package, reported alongside the status — or,
+    /// while it is `Installing`, why it waits for the second service (ADR-0059 clause 2).
     package_error: String,
     /// A failure in processing the *offer itself* rather than one package — the Baseline's
     /// `PackageStatuses.error_message`, "set if the Agent encountered an error when processing the
@@ -372,6 +373,22 @@ impl AgentState {
     pub fn set_process_health(&mut self, health: ComponentHealth) {
         self.local.process_health = Some(health);
         self.protocol.health_changed();
+        self.name_the_wait();
+    }
+
+    /// What waits for the second service says so (ADR-0059 clause 2): while the Supervisor's
+    /// health says that the service is not reached, a configuration that is `APPLYING` and a
+    /// package that is `Installing` name that as the reason, and nothing once it is reached.
+    fn name_the_wait(&mut self) {
+        let reason = self
+            .local
+            .process_health
+            .as_ref()
+            .and_then(crate::supervisor::ports::waiting_reason)
+            .unwrap_or_default()
+            .to_string();
+        self.config_waits(&reason);
+        self.package_waits(&reason);
     }
 
     /// The Managed Process reported its own effective configuration; report that instead of
@@ -2379,6 +2396,120 @@ mod tests {
             download.headers,
             vec![("X-Api-Key".to_string(), "operator-secret".to_string())]
         );
+    }
+
+    /// The health a Supervisor reports while the second service is not reached, for the reason
+    /// `status` names.
+    fn waiting_for(status: &str) -> ComponentHealth {
+        ComponentHealth {
+            healthy: false,
+            status: status.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// A configuration that waits for the second service stays `APPLYING` and names why, as the
+    /// Supervisor's health says it — down or refused; once a start reaches the service the reason
+    /// goes, and the acknowledgement closes it. A health that comes after it changes nothing.
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_configuration_that_waits_for_the_second_service_stays_applying_and_says_why() {
+        use crate::supervisor::ports::{REFUSED, UNREACHABLE};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        let _ = agent.next_report();
+        agent.set_process_health(waiting_for(UNREACHABLE));
+        let _ = agent.next_report();
+        agent.handle(&ServerToAgent {
+            remote_config: Some(remote_config(b"x: 1\n", b"hash-1")),
+            ..Default::default()
+        });
+        let status = agent.next_report().remote_config_status.expect("a status");
+        assert_eq!(status.status, RemoteConfigStatuses::Applying as i32);
+        assert_eq!(
+            status.error_message, UNREACHABLE,
+            "it waits from its receipt"
+        );
+
+        agent.set_process_health(waiting_for(REFUSED));
+        let status = agent.next_report().remote_config_status.expect("a status");
+        assert_eq!(status.status, RemoteConfigStatuses::Applying as i32);
+        assert_eq!(status.last_remote_config_hash, b"hash-1");
+        assert_eq!(status.error_message, REFUSED);
+
+        agent.set_process_health(ComponentHealth {
+            healthy: true,
+            status: "running".to_string(),
+            ..Default::default()
+        });
+        let status = agent.next_report().remote_config_status.expect("a status");
+        assert_eq!(status.status, RemoteConfigStatuses::Applying as i32);
+        assert!(status.error_message.is_empty(), "{status:?}");
+
+        agent.config_applied(b"hash-1".to_vec(), Ok(()));
+        let status = agent.next_report().remote_config_status.expect("a status");
+        assert_eq!(status.status, RemoteConfigStatuses::Applied as i32);
+        assert!(status.error_message.is_empty(), "{status:?}");
+
+        agent.set_process_health(waiting_for(UNREACHABLE));
+        assert!(
+            agent.next_report().remote_config_status.is_none(),
+            "an applied configuration waits for nothing"
+        );
+    }
+
+    /// A package that waits for the second service stays `Installing` and names why, as the
+    /// Supervisor's health says it; a package still downloading does not, and the outcome
+    /// replaces the reason.
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_package_that_waits_for_the_second_service_stays_installing_and_says_why() {
+        use crate::supervisor::ports::UNREACHABLE;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut agent = supervised_agent(dir.path());
+        agent.accept_packages();
+        agent.local.installing = Some(PackageDownload {
+            name: "otelcol".to_string(),
+            version: "2.0.0".to_string(),
+            hash: b"new".to_vec(),
+            download_url: String::new(),
+            content_hash: Vec::new(),
+            signature: Vec::new(),
+            headers: Vec::new(),
+        });
+        agent.package_downloading(PackageDownloadDetails::default());
+        let status = |agent: &mut AgentState| {
+            agent
+                .next_report()
+                .package_statuses
+                .expect("statuses")
+                .packages["otelcol"]
+                .clone()
+        };
+
+        agent.set_process_health(waiting_for(UNREACHABLE));
+        let downloading = status(&mut agent);
+        assert_eq!(
+            downloading.status,
+            opamp::proto::PackageStatusEnum::Downloading as i32
+        );
+        assert!(downloading.error_message.is_empty(), "{downloading:?}");
+
+        agent.package_downloaded();
+        let waiting = status(&mut agent);
+        assert_eq!(
+            waiting.status,
+            opamp::proto::PackageStatusEnum::Installing as i32
+        );
+        assert_eq!(waiting.error_message, UNREACHABLE);
+
+        agent.package_applied(b"new".to_vec(), Ok("2.0.0".to_string()));
+        let installed = status(&mut agent);
+        assert_eq!(
+            installed.status,
+            opamp::proto::PackageStatusEnum::Installed as i32
+        );
+        assert!(installed.error_message.is_empty(), "{installed:?}");
     }
 
     /// Verifies: ADR-0026

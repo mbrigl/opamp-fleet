@@ -18,13 +18,34 @@ use tokio::sync::mpsc;
 
 use crate::shutdown::Shutdown;
 
+/// The health status a Supervisor reports while the second service cannot be reached (ADR-0059
+/// clause 2).
+pub const UNREACHABLE: &str = "the second service cannot be reached";
+
+/// What a Supervisor reports while the second service is reached and refused: another account
+/// serves its socket, it is another build, or it refuses the Client (ADR-0059 clauses 4 and 5).
+/// Not an outage that ends by itself, so it is told apart from [`UNREACHABLE`].
+pub const REFUSED: &str =
+    "the second service is refused: another account, another build, or it refuses this Client";
+
+/// Why `health` says that the second service is not reached — [`UNREACHABLE`] or [`REFUSED`] —
+/// or `None` where it says nothing of the kind. While it says so, a configuration that is
+/// `APPLYING` and a package that is `Installing` wait for the service, and the Agent names it as the
+/// reason (ADR-0059 clause 2).
+#[must_use]
+pub fn waiting_reason(health: &ComponentHealth) -> Option<&str> {
+    let waits = !health.healthy && (health.status == UNREACHABLE || health.status == REFUSED);
+    waits.then_some(health.status.as_str())
+}
+
 /// What the supervision core asks of a Managed Process.
 #[derive(Debug)]
 pub enum ProcessCommand {
     /// A remote configuration was received and persisted — the entry files are already written
     /// to the adapter's [`config_dir`](SupervisorContext::config_dir). Apply it, which for a
     /// process means restarting on the new files, and answer with
-    /// [`ProcessEvent::ConfigApplied`].
+    /// [`ProcessEvent::ConfigApplied`] — where the start does not reach the second service, once
+    /// a start does (ADR-0059 clause 2).
     ApplyConfig {
         config: AgentRemoteConfig,
         /// The span of the apply this command is one half of (ADR-0016). The core opens it when the
@@ -37,7 +58,10 @@ pub enum ProcessCommand {
     /// does — a binary that will not stay up is rolled back to the previous one. Answered with
     /// [`ProcessEvent::PackageApplied`]. `staged` is the path of the verified artifact — a file,
     /// not its bytes, since a program is too big to carry through the core; `hash` is the package
-    /// hash the status refers to; `version` is what the Agent then reports it has.
+    /// hash the status refers to; `version` is what the Agent then reports it has. While the
+    /// second service cannot be reached, the package is staged and kept, never swapped in, and
+    /// the answer follows its swap once a start reaches the service; a newer package replaces it
+    /// unanswered (ADR-0059 clause 2).
     ApplyPackage {
         staged: PathBuf,
         version: String,
@@ -375,6 +399,15 @@ impl KindDefaults {
             endpoint_port: false,
         }
     }
+}
+
+/// The plugins a run starts its Supervisors with (ADR-0017 clause 2), as the composition root
+/// made them: every one starts its Managed Process the way the run does (ADR-0059 clause 3). The
+/// Engine keeps it, so a Supervisor that a Supervisor-set apply starts later is started the same
+/// way as those started with the Client.
+pub trait PluginRegistry: Send + Sync {
+    /// Every compiled-in plugin.
+    fn plugins(&self) -> Vec<Box<dyn Plugin>>;
 }
 
 /// A compiled-in Supervisor Plugin (ADR-0017): the adapter factory on the Managed-Process side.
