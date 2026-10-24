@@ -94,6 +94,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Security
 
+- **The Client speaks only to the process its service manager runs as the second service**
+  ([ADR-0061](docs/adr/0061-the-client-speaks-only-to-the-process-its-service-manager-runs-as-the-second-service.md)).
+  Where a process account is registered, any Managed Process under it could replace the second
+  service's socket, or on Windows create an instance of its pipe, and be told every program, its
+  environment and the Supervisor Endpoint's token at the Client's next connection. Before it writes
+  anything, the Client now reads the process at the other end and asks systemd, launchd or the SCM
+  which process runs as the second service; any other is refused before the handshake, logged as
+  an error naming the socket or pipe and its process id, and waited out as a second service that is
+  down. On Linux the second service marks itself not dumpable, so no process of the process account
+  attaches to it, reads its memory or takes its descriptors, and it does not listen while it is
+  traced; it writes no core dump. **What to do:** nothing on upgrade. On Linux the Client asks
+  systemd over its system bus, and on macOS reads `launchctl print`: where that fails, no Managed
+  Process starts and the log says why. Should the log name a process that is not the second
+  service, end that process and restart the second service, as
+  [the manual](docs/manual/client.md#managed-processes-under-a-process-account) says.
+
 - **A Gateway's bindings outlast its restart and end with their host's certificate**
   ([ADR-0060](docs/adr/0060-a-gateways-bindings-outlast-its-restart-and-end-with-their-hosts-certificate.md)).
   A Gateway bound each `instance_uid` to the host of the first report for it only since it

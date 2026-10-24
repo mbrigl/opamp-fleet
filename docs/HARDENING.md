@@ -129,13 +129,27 @@ has:
   a job that ends with the Client's connection. An install that drops or changes the account
   withdraws what the former one was granted. Residual: the separation is opt-in, and a host
   without a process account runs every Managed Process as the Client; all Managed Processes share
-  the one account, so they read one another's `config/`, and one of them can take the second
-  service's place: on Linux and macOS by replacing the socket in the directory the process account
-  owns, on Windows by creating an instance of the pipe. It then answers the Client's next
-  connection — after a restart of the Client or of the second service — and sees the requests the
-  Client sends: each program, its arguments and environment, and the Supervisor Endpoint's token.
-  It gains no account it does not already run under, but what it starts no longer ends with the
-  Client's connection, and what it reports of a program's start and exit is its own word.
+  the one account, so they read one another's `config/`.
+- **A Managed Process cannot take the second service's place by its socket or pipe, nor, on
+  Linux, reach into it once it has marked itself** (ADR-0061): before the Client writes anything
+  on a new connection it reads the process at the other end — `SO_PEERPIDFD` on Linux,
+  `LOCAL_PEERPID` on macOS, `GetNamedPipeServerProcessId` on Windows — and accepts it only where
+  systemd, launchd or the SCM runs that process as the second service. A Managed Process that
+  replaces the socket or creates an instance of the pipe hears nothing: the Client closes the
+  connection, logs an error naming the socket or pipe and the process, and waits for the second
+  service as for one that is away. On Linux the second service's program marks itself not
+  dumpable before it parses its command line or sets up its log, so from then on no process of
+  the process account without `CAP_SYS_PTRACE` attaches to it, reads or writes its memory or takes
+  its descriptors, whatever `kernel.yama.ptrace_scope` says, and it does not listen while it is
+  traced. Residual: on Windows a Managed Process can open the second service's process with the
+  rights its account holds on it, duplicate its pipe handle or run code in it; on Linux where Yama
+  is absent or `ptrace_scope` is 0, a Managed Process can kill the second service and attach to
+  the one its service manager starts again between its `execve` and the mark, and as its tracer
+  make it read a `TracerPid` of 0; on Linux before 6.5, on macOS and on Windows a process that
+  listened and ended can leave its id to the second service, which the Client does not tell apart;
+  a Managed Process can remove or replace the socket, and the Client then finds the second service
+  away; where the service manager cannot be asked — no system bus, a `launchctl print` that fails —
+  no Managed Process starts until it answers again.
 - **An install acts only on directories an administrator named or its roots hold** (ADR-0053,
   ADR-0042 clause 2): `supervisor.toml` belongs to the service's account, and `service install`
   and `service config` run as root or an Administrator. The state directory comes from
