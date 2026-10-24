@@ -221,7 +221,11 @@ core module names an adapter or a technology, and when a module has no role.
   the Server's route once into the state directory, and serves it on the downstream download route
   to the hosts it was offered to ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
   Which host the Gateway takes to speak for an `instance_uid` is decided in the core module
-  `gateway::policy`; the cache holds the bindings. With a bootstrap CA the Gateway tells an
+  `gateway::policy`; the cache holds the bindings and keeps them across restarts in the journal
+  `gateway::store` reads and writes beside the artifacts; while that journal cannot be read the
+  Gateway carries no downstream Agent
+  ([ADR-0060](adr/0060-a-gateways-bindings-outlast-its-restart-and-end-with-their-hosts-certificate.md)).
+  With a bootstrap CA the Gateway tells an
   enrolling peer from a member and relays its one plain-HTTP enrolment request without a binding
   ([ADR-0039](adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection

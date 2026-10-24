@@ -94,6 +94,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ### Security
 
+- **A Gateway's bindings outlast its restart and end with their host's certificate**
+  ([ADR-0060](docs/adr/0060-a-gateways-bindings-outlast-its-restart-and-end-with-their-hosts-certificate.md)).
+  A Gateway bound each `instance_uid` to the host of the first report for it only since it
+  started, so after an update, a reboot or a crash any member host could report another host's
+  Agent first and take it over; at its total of 1 000 000 bindings another host's idle binding
+  gave way too. The bindings are now kept in `<state_dir>/gateway-packages/bindings`, written
+  before the report that made one is forwarded, and give way only to another of the same host's.
+  A host's bindings end once the latest certificate it reported under has expired or is revoked; a
+  report under an expired certificate binds nothing. While that file cannot be read — a link, not
+  `0600` or not the Client's on Linux and macOS, larger than 512 MiB, of an unknown version, or
+  damaged before its last line — the Gateway answers every Client behind it `503` and logs why,
+  while its own Supervisors go on. **What to do:** nothing on upgrade; the first start writes the
+  file. An Agent that moves to another host behind the same Gateway is refused there until the old
+  host's certificate expires: revoke that certificate to free it at once. Should the Gateway
+  refuse the file, follow [the manual](docs/manual/client.md#what-a-gateway-keeps-on-disk): remove
+  it and restart the Client.
+
 - **A repack carries nothing from outside its tree**
   ([ADR-0056](docs/adr/0056-a-repack-follows-no-link-out-of-its-tree.md)). `opamp-fleetctl package
   fetch` resolves links inside the upstream tree alone: a link with an absolute target, or one that
