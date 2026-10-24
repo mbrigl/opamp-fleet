@@ -1636,8 +1636,8 @@ restricted ACL on Windows. The offers are kept in memory only (see above).
 **When the file cannot be read, the Gateway carries no Agent.** At start the Gateway refuses a
 file that is a link, is no regular file, on Linux and macOS is not `0600` or not owned by the
 Client's account, is larger than 512 MiB, names a format or version this Client does not read, or
-holds a line it cannot parse before its last; a last line cut off without its newline, as a crash
-leaves it, is dropped. While it refuses the file, the Gateway answers every WebSocket upgrade, every
+holds a line it cannot parse before its last, and one it cannot rewrite at start, as on a full
+disk; a last line cut off without its newline, as a crash leaves it, is dropped. While it refuses the file, the Gateway answers every WebSocket upgrade, every
 plain-HTTP report and every download from the Clients behind it `503`, and still relays an enrolling
 peer's one request. It does not touch the file, and it logs why at start and once an hour. The
 Client's own connection and its Supervisors go on. To recover, look at why the file was refused, then

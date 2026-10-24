@@ -359,6 +359,8 @@ struct Knobs {
     /// How long a fetch waits out the Server's `Retry-After`.
     patience: Patience,
     max_bindings: usize,
+    /// How the bindings' store is rewritten at start.
+    create_journal: fn(HeldDir, &[Change]) -> std::io::Result<Journal>,
 }
 
 impl Default for Knobs {
@@ -367,6 +369,7 @@ impl Default for Knobs {
             remove: remove_file,
             patience: Patience::default(),
             max_bindings: MAX_BINDINGS,
+            create_journal: Journal::create,
         }
     }
 }
@@ -417,14 +420,18 @@ impl Drop for Landing {
 enum Opened {
     /// The bindings the store holds, and the store rewritten whole from them.
     Store(Bindings, Box<Journal>),
-    /// Why the store cannot be read.
+    /// Why the store cannot be read, or cannot be rewritten.
     Unreadable(String),
 }
 
 /// Opens the Gateway's directory `dir` without following a link, empties it of every artifact an
 /// earlier run left (ADR-0026 clause 47) and keeps the store, reads the bindings from it and
-/// rewrites it whole from what they are (ADR-0060 clause 2).
-fn open_dir(dir: &Path) -> Result<Opened, String> {
+/// rewrites it whole from what they are with `create` (ADR-0060 clause 2). A store that cannot
+/// be read or rewritten is [`Opened::Unreadable`]: the Gateway does not rely on it.
+fn open_dir(
+    dir: &Path,
+    create: fn(HeldDir, &[Change]) -> std::io::Result<Journal>,
+) -> Result<Opened, String> {
     let held = match HeldDir::create(dir, 0o700) {
         Ok(held) => held,
         Err(e) => return Ok(Opened::Unreadable(format!("{}: {e}", dir.display()))),
@@ -448,14 +455,18 @@ fn open_dir(dir: &Path) -> Result<Opened, String> {
         Ok(bindings) => bindings,
         Err(e) => return Ok(Opened::Unreadable(format!("{}: {e}", path.display()))),
     };
-    // What ended while the Gateway was down is not written back (ADR-0060 clause 3); the
-    // revocation list is asked once the Gateway holds one.
+    // What ended while the Gateway was down ends now, and the rewrite below leaves it out
+    // (ADR-0060 clause 3); the revocation list is asked once the Gateway holds one.
     for (host, uids) in bindings.end(now(), |_| false) {
         log_ended(&host, uids.len());
     }
-    let journal = Journal::create(held, &bindings.snapshot())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    Ok(Opened::Store(bindings, Box::new(journal)))
+    match create(held, &bindings.snapshot()) {
+        Ok(journal) => Ok(Opened::Store(bindings, Box::new(journal))),
+        Err(e) => Ok(Opened::Unreadable(format!(
+            "cannot rewrite {}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 /// The Gateway's clock, which its handshake checks validity by, in seconds since the Unix epoch.
@@ -480,8 +491,8 @@ fn log_ended(host: &str, count: usize) {
 pub fn log_unreadable(why: &str, store: &Path) {
     error!(
         reason = %why,
-        "the Gateway cannot read the store of its bindings and carries no Agent behind it; remove \
-         {} and restart the Client to start with no binding",
+        "the Gateway cannot read or rewrite the store of its bindings and carries no Agent behind \
+         it; remove {} and restart the Client to start with no binding",
         store.display()
     );
 }
@@ -491,9 +502,9 @@ impl PackageCache {
     /// clause 47) and its bindings read from the store (ADR-0060 clause 2).
     ///
     /// # Errors
-    /// Returns an error when a directory left by an earlier run cannot be emptied, or the store
-    /// cannot be rewritten. A store that cannot be read is no error: the cache then carries no
-    /// downstream Agent ([`PackageCache::unreadable`]).
+    /// Returns an error when a directory left by an earlier run cannot be emptied. A store that
+    /// cannot be read or rewritten is no error: the cache then carries no downstream Agent
+    /// ([`PackageCache::unreadable`]).
     pub async fn open(config: Arc<ClientConfig>, shutdown: Shutdown) -> Result<Arc<Self>, String> {
         Self::open_with(config, shutdown, Knobs::default()).await
     }
@@ -513,7 +524,8 @@ impl PackageCache {
             .map_or(1, |gateway| gateway.max_carried_agents);
         let dir = config.state_dir.join(DIR);
         let opened = dir.clone();
-        let opened = tokio::task::spawn_blocking(move || open_dir(&opened))
+        let create = knobs.create_journal;
+        let opened = tokio::task::spawn_blocking(move || open_dir(&opened, create))
             .await
             .map_err(|e| e.to_string())??;
         let (bindings, journal, unreadable) = match opened {
@@ -2295,5 +2307,29 @@ mod tests {
         let cache = cache_binding(dir.path(), 3).await;
         assert!(cache.is_bound(&next), "the binding outlasts a restart");
         assert!(!cache.is_bound(&refused));
+    }
+
+    /// A store that cannot be rewritten at start is not relied on: the Gateway carries no
+    /// downstream Agent, as for one it cannot read.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_store_that_cannot_be_rewritten_at_start_carries_no_agent() {
+        fn full(_: HeldDir, _: &[Change]) -> std::io::Result<Journal> {
+            Err(std::io::Error::other("no space left"))
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = PackageCache::open_with(
+            config("127.0.0.1:9".parse().expect("addr"), dir.path(), 16),
+            shutdown(),
+            Knobs {
+                create_journal: full,
+                ..Knobs::default()
+            },
+        )
+        .await
+        .expect("the Gateway starts");
+        assert!(cache
+            .unreadable()
+            .is_some_and(|why| why.contains("cannot rewrite")));
     }
 }

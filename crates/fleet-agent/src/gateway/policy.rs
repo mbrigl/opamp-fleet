@@ -162,7 +162,13 @@ impl Bindings {
             else {
                 return refused(why, evicted);
             };
+            // The host keeps its end through giving up its last binding for this one, so an
+            // earlier certificate does not move it back.
+            let kept = self.ends.get(host).cloned();
             self.unbind(&victim);
+            if let Some(kept) = kept {
+                self.ends.entry(host.to_string()).or_insert(kept);
+            }
             evicted.push(victim);
         }
         self.bound.insert(
@@ -622,5 +628,34 @@ mod tests {
         assert_eq!(bindings.host_of(&first), Some("c"), "bound anew");
         let revoked = bindings.end(200, |end| end.serial == "1");
         assert_eq!(revoked, vec![("c".to_string(), vec![first])]);
+    }
+
+    /// A host of one binding that gives it up for another keeps its certificate end: a report
+    /// under an earlier certificate does not move it back.
+    /// Verifies: ADR-0060
+    #[test]
+    fn giving_up_its_last_binding_keeps_the_hosts_end() {
+        let limits = Limits {
+            per_host: 1,
+            total: 10,
+        };
+        let mut bindings = Bindings::default();
+        let [first, second] = [(); 2].map(|()| InstanceUid::default());
+        bindings.bind(first, "a", &end(100), 0, limits, |_| true);
+        bindings.commit(&first);
+        let outcome = bindings.bind(second, "a", &end(50), 0, limits, |_| true);
+        assert_eq!(outcome.evicted, vec![first]);
+        assert_eq!(
+            outcome.changes,
+            vec![Change::Unbound(first), Change::Bound(second, "a".into())]
+        );
+        bindings.commit(&second);
+        assert_eq!(
+            bindings.snapshot(),
+            vec![
+                Change::Ends("a".into(), end(100)),
+                Change::Bound(second, "a".into())
+            ]
+        );
     }
 }
