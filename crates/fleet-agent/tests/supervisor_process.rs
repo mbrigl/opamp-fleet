@@ -880,10 +880,12 @@ async fn ack_and_spawned_pids(
 /// A pid says the process exists, not that it has got anywhere: between `spawn` and the stub's
 /// first statement lie process creation and dynamic loading. Two tests need the distinction for
 /// different reasons — a reload must not race the signal disposition the stub installs (Unix), and
-/// a test that compares the marker across a package apply must have one to compare.
+/// a test that compares the marker across a package apply must have one to compare. The marker
+/// counts once it holds something: the stub creates it empty and writes it after, so a marker that
+/// merely exists may still read as nothing.
 async fn wait_until_started(marker: &Path) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !marker.exists() {
+    while std::fs::metadata(marker).map_or(true, |meta| meta.len() == 0) {
         assert!(
             std::time::Instant::now() < deadline,
             "timed out waiting for the stub to start"
