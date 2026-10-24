@@ -35,7 +35,7 @@ use opamp::proto::{DownloadableFile, ServerToAgent};
 use opamp::server::listen::PeerCertificate;
 use opamp::uid::InstanceUid;
 use sha2::{Digest, Sha256};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::ClientConfig;
 use crate::gateway::policy::{Bindings, Bound, Change, End, Limits};
@@ -385,8 +385,12 @@ pub struct PackageCache {
     /// Ends every fetch, waiting or not.
     shutdown: Shutdown,
     knobs: Knobs,
-    /// The bindings' store, written by one at a time and never while `inner` is locked.
-    journal: Mutex<Journal>,
+    /// The bindings' store, written by one at a time and never while `inner` is locked; `None`
+    /// while it cannot be read.
+    journal: Mutex<Option<Journal>>,
+    /// Why the store could not be read at start, while it cannot: the Gateway then carries no
+    /// downstream Agent (ADR-0060 clause 2).
+    unreadable: Option<String>,
     inner: Mutex<Inner>,
 }
 
@@ -409,12 +413,22 @@ impl Drop for Landing {
     }
 }
 
+/// The Gateway's directory as it was found at start.
+enum Opened {
+    /// The bindings the store holds, and the store rewritten whole from them.
+    Store(Bindings, Box<Journal>),
+    /// Why the store cannot be read.
+    Unreadable(String),
+}
+
 /// Opens the Gateway's directory `dir` without following a link, empties it of every artifact an
 /// earlier run left (ADR-0026 clause 47) and keeps the store, reads the bindings from it and
 /// rewrites it whole from what they are (ADR-0060 clause 2).
-fn open_dir(dir: &Path) -> Result<(Bindings, Journal), String> {
-    let held =
-        HeldDir::create(dir, 0o700).map_err(|e| format!("cannot open {}: {e}", dir.display()))?;
+fn open_dir(dir: &Path) -> Result<Opened, String> {
+    let held = match HeldDir::create(dir, 0o700) {
+        Ok(held) => held,
+        Err(e) => return Ok(Opened::Unreadable(format!("{}: {e}", dir.display()))),
+    };
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("cannot empty {}: {e}", dir.display()));
     for entry in entries? {
@@ -430,11 +444,24 @@ fn open_dir(dir: &Path) -> Result<(Bindings, Journal), String> {
         removed.map_err(|e| format!("cannot empty {}: {e}", dir.display()))?;
     }
     let path = dir.join(store::NAME);
-    let changes = store::load(&held).map_err(|e| format!("{}: {e}", path.display()))?;
-    let bindings = Bindings::replay(changes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bindings = match store::load(&held).and_then(Bindings::replay) {
+        Ok(bindings) => bindings,
+        Err(e) => return Ok(Opened::Unreadable(format!("{}: {e}", path.display()))),
+    };
     let journal = Journal::create(held, &bindings.snapshot())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    Ok((bindings, journal))
+    Ok(Opened::Store(bindings, Box::new(journal)))
+}
+
+/// Logs that the Gateway carries no downstream Agent while its store cannot be read, and what
+/// lets it start again: at start, and once an hour (ADR-0060 clause 2).
+pub fn log_unreadable(why: &str, store: &Path) {
+    error!(
+        reason = %why,
+        "the Gateway cannot read the store of its bindings and carries no Agent behind it; remove \
+         {} and restart the Client to start with no binding",
+        store.display()
+    );
 }
 
 impl PackageCache {
@@ -443,7 +470,8 @@ impl PackageCache {
     ///
     /// # Errors
     /// Returns an error when a directory left by an earlier run cannot be emptied, or the store
-    /// cannot be read or written.
+    /// cannot be rewritten. A store that cannot be read is no error: the cache then carries no
+    /// downstream Agent ([`PackageCache::unreadable`]).
     pub async fn open(config: Arc<ClientConfig>, shutdown: Shutdown) -> Result<Arc<Self>, String> {
         Self::open_with(config, shutdown, Knobs::default()).await
     }
@@ -463,13 +491,22 @@ impl PackageCache {
             .map_or(1, |gateway| gateway.max_carried_agents);
         let dir = config.state_dir.join(DIR);
         let opened = dir.clone();
-        let (bindings, journal) = tokio::task::spawn_blocking(move || open_dir(&opened))
+        let opened = tokio::task::spawn_blocking(move || open_dir(&opened))
             .await
             .map_err(|e| e.to_string())??;
-        info!(
-            bindings = bindings.len(),
-            "read the bindings of the Agents behind this Gateway"
-        );
+        let (bindings, journal, unreadable) = match opened {
+            Opened::Store(bindings, journal) => {
+                info!(
+                    bindings = bindings.len(),
+                    "read the bindings of the Agents behind this Gateway"
+                );
+                (bindings, Some(*journal), None)
+            }
+            Opened::Unreadable(why) => {
+                log_unreadable(&why, &dir.join(store::NAME));
+                (Bindings::default(), None, Some(why))
+            }
+        };
         Ok(Arc::new(PackageCache {
             limit: capacity.min(config.max_artifact_size_bytes),
             capacity,
@@ -480,6 +517,7 @@ impl PackageCache {
             shutdown,
             knobs,
             journal: Mutex::new(journal),
+            unreadable,
             inner: Mutex::new(Inner {
                 bindings,
                 ..Inner::default()
@@ -602,7 +640,7 @@ impl PackageCache {
     /// hold the queued changes too; so is one that has grown to twice the lines it holds live
     /// (ADR-0060 clause 2).
     fn flush(&self, ticket: &Ticket) -> bool {
-        let mut journal = self
+        let mut guard = self
             .journal
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -616,17 +654,23 @@ impl PackageCache {
                 std::mem::take(&mut inner.waiting),
             )
         };
+        let Some(journal) = guard.as_mut() else {
+            for waiter in waiting {
+                let _ = waiter.set(false);
+            }
+            return false;
+        };
         let appended = journal.append(&changes);
         if let Err(e) = &appended {
             debug!(error = %e, "cannot append to the bindings' store; rewriting it whole");
         }
-        let written = appended.is_ok() || self.compact(&mut journal);
+        let written = appended.is_ok() || self.compact(journal);
         for waiter in waiting {
             let _ = waiter.set(written);
         }
         let live = self.inner().bindings.live();
         if written && journal.lines() > 0 && journal.lines() >= 2 * live {
-            self.compact(&mut journal);
+            self.compact(journal);
         }
         ticket.get().copied().unwrap_or(false)
     }
@@ -676,10 +720,14 @@ impl PackageCache {
     /// Makes every later write of the bindings' store fail.
     #[cfg(test)]
     pub(crate) fn refuse_writes(&self) {
-        self.journal
+        if let Some(journal) = self
+            .journal
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .refuse_writes();
+            .as_mut()
+        {
+            journal.refuse_writes();
+        }
     }
 
     /// A bind start to end, outside any route: what the tests of this module bind with.
@@ -1112,6 +1160,19 @@ impl PackageCache {
         Ok(len)
     }
 
+    /// Why the bindings' store could not be read at start, while the Gateway carries no downstream
+    /// Agent for it (ADR-0060 clause 2).
+    #[must_use]
+    pub fn unreadable(&self) -> Option<&str> {
+        self.unreadable.as_deref()
+    }
+
+    /// The store's path, for the log.
+    #[must_use]
+    pub fn store_path(&self) -> PathBuf {
+        self.dir.join(store::NAME)
+    }
+
     /// Whether `uid` is bound to a host (ADR-0039 clause 6).
     pub fn is_bound(&self, uid: &InstanceUid) -> bool {
         self.inner().bindings.host_of(uid).is_some()
@@ -1185,10 +1246,22 @@ fn busy() -> Response {
         .into_response()
 }
 
+/// What every downstream request but an enrolling peer's is answered while the bindings' store
+/// cannot be read (ADR-0060 clause 2).
+pub const STORE_UNREADABLE: &str = "the Gateway cannot read the store of its bindings";
+
+fn store_unreadable() -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, STORE_UNREADABLE).into_response()
+}
+
 async fn serve(
     axum::extract::State(downloads): axum::extract::State<Arc<Downloads>>,
     request: Request,
 ) -> Response {
+    // No Agent is carried while the bindings' store cannot be read (ADR-0060 clause 2).
+    if downloads.cache.unreadable().is_some() {
+        return store_unreadable();
+    }
     let certificate = request
         .extensions()
         .get::<PeerCertificate>()
@@ -2079,6 +2152,39 @@ mod tests {
             evicted,
             vec![second],
             "the least recently reported gave way"
+        );
+    }
+
+    /// While the store cannot be read, every download is answered `503`, an offered one too, and
+    /// the store is not rewritten.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn an_unreadable_store_answers_every_download_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path().join(DIR).join(store::NAME);
+        std::fs::create_dir_all(store.parent().expect("dir")).expect("dir");
+        HeldDir::open(&dir.path().join(DIR))
+            .expect("held")
+            .write(store::NAME, b"opamp-fleet-gateway-bindings 9\n", 0o600)
+            .expect("write");
+        let cache = open_cache(config("127.0.0.1:9".parse().expect("addr"), dir.path(), 16)).await;
+        assert!(cache
+            .unreadable()
+            .is_some_and(|why| why.contains("version 9")));
+        let revocations = RevocationList::new(Duration::from_secs(300));
+        revocations.replace(HashSet::new(), None);
+        let downloads = Arc::new(Downloads {
+            cache,
+            revocations,
+            members: crate::gateway::Members::default(),
+        });
+        let mut request = Request::new(Body::empty());
+        *request.uri_mut() = path("1").parse().expect("uri");
+        let response = serve(axum::extract::State(downloads), request).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            std::fs::read(&store).expect("read"),
+            b"opamp-fleet-gateway-bindings 9\n"
         );
     }
 }

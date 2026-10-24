@@ -282,6 +282,7 @@ pub async fn run_on_timed(
         timings.revocation_refresh,
     ));
     tokio::spawn(write_reports(cache.clone(), shutdown.clone()));
+    tokio::spawn(hourly(cache.clone(), shutdown.clone()));
     let bindings = cache.clone();
     let downloads = Arc::new(cache::Downloads {
         cache,
@@ -323,6 +324,22 @@ pub async fn run_on_timed(
         .map_err(|e| format!("the gateway endpoint stopped: {e}"));
     bindings.write_reports().await;
     served
+}
+
+/// Once an hour until `shutdown` fires: while the bindings' store cannot be read, says so again
+/// (ADR-0060 clause 2).
+async fn hourly(cache: Arc<cache::PackageCache>, mut shutdown: Shutdown) {
+    let every = std::time::Duration::from_secs(3600);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            () = shutdown.requested() => return,
+        }
+        if let Some(why) = cache.unreadable() {
+            cache::log_unreadable(why, &cache.store_path());
+        }
+    }
 }
 
 /// Writes the order of the bindings' reports once a minute until `shutdown` fires (ADR-0060
@@ -494,6 +511,17 @@ impl Handler for Forwarding {
         &self,
         request: &RequestInfo<'_>,
     ) -> Result<(Downstream, Option<Replies>), Rejection> {
+        // No Agent is carried while the bindings' store cannot be read; an enrolling peer's one
+        // plain-HTTP request binds nothing, so the exchange is let through to be judged
+        // (ADR-0060 clause 2).
+        if request.transport == Transport::WebSocket && self.registry.cache().unreadable().is_some()
+        {
+            return Err(Rejection {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                headers: Vec::new(),
+                message: cache::STORE_UNREADABLE.to_string(),
+            });
+        }
         // The one admission refusal beyond the handshake, and it is the Server's (ADR-0015 clause 14).
         let certificate = request
             .extensions
@@ -594,6 +622,10 @@ impl Handler for Forwarding {
             Transport::Http if downstream.enrolling => {
                 self.forward_enrolment(downstream, report).await
             }
+            Transport::Http if self.registry.cache().unreadable().is_some() => Reply::Refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                cache::STORE_UNREADABLE.to_string(),
+            ),
             Transport::Http => self.forward_exchange(downstream, report).await,
         }
     }
@@ -1536,6 +1568,186 @@ mod tests {
         {
             Reply::Refuse(status, _) => assert_eq!(status, StatusCode::FORBIDDEN),
             _ => panic!("a report whose binding cannot be stored was forwarded"),
+        }
+    }
+
+    /// A request's view as the endpoint hands it to the handler: `certificate` presented, over
+    /// `transport`.
+    fn connecting(
+        forwarding: &Forwarding,
+        transport: Transport,
+        certificate: &[u8],
+    ) -> Result<(Downstream, Option<Replies>), Rejection> {
+        let headers = axum::http::HeaderMap::new();
+        let mut extensions = axum::http::Extensions::new();
+        extensions.insert(PeerCertificate(Some(
+            rustls::pki_types::CertificateDer::from(certificate.to_vec()),
+        )));
+        forwarding.on_connecting(&RequestInfo {
+            transport,
+            headers: &headers,
+            extensions: &extensions,
+            peer: None,
+        })
+    }
+
+    /// Damages the store under `state` in one of the ways that make it unreadable.
+    fn damage(state: &std::path::Path, how: &str) {
+        let dir = state.join(cache::DIR);
+        let path = dir.join(store::NAME);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let header = "opamp-fleet-gateway-bindings 1\n";
+        let write = |contents: &str| {
+            crate::nofollow::HeldDir::open(&dir)
+                .expect("held")
+                .write(store::NAME, contents.as_bytes(), 0o600)
+                .expect("write");
+        };
+        match how {
+            "an unparsable line before its last" => {
+                write(&format!("{header}garbage\nu {}\n", InstanceUid::default()));
+            }
+            "an unknown version" => write("opamp-fleet-gateway-bindings 2\n"),
+            "past its bound" => {
+                write(header);
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .expect("open")
+                    .set_len(store::MAX_BYTES + 1)
+                    .expect("grow");
+            }
+            "a directory" => std::fs::create_dir(&path).expect("dir"),
+            #[cfg(unix)]
+            "a link" => {
+                let target = state.join("elsewhere");
+                std::fs::write(&target, header).expect("write");
+                std::os::unix::fs::symlink(&target, &path).expect("link");
+            }
+            #[cfg(unix)]
+            "not 0600" => {
+                use std::os::unix::fs::PermissionsExt as _;
+                write(header);
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                    .expect("chmod");
+            }
+            _ => unreachable!("{how}"),
+        }
+    }
+
+    /// While the store cannot be read the Gateway carries no downstream Agent: a WebSocket upgrade
+    /// and a member's plain-HTTP report are answered `503`, whatever damaged the store, and the
+    /// store is left as it was found. An enrolling peer's one request is still relayed upstream,
+    /// since it binds nothing.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn an_unreadable_store_refuses_every_downstream_agent() {
+        let mut ways = vec![
+            "an unparsable line before its last",
+            "an unknown version",
+            "past its bound",
+            "a directory",
+        ];
+        if cfg!(unix) {
+            ways.extend(["a link", "not 0600"]);
+        }
+        for how in ways {
+            let dir = tempfile::tempdir().expect("tempdir");
+            damage(dir.path(), how);
+            let store = dir.path().join(cache::DIR).join(store::NAME);
+            let before = std::fs::symlink_metadata(&store).expect("metadata");
+            let forwarding = forwarding(dir.path()).await;
+            assert!(
+                forwarding.registry.cache().unreadable().is_some(),
+                "{how} was read"
+            );
+            let member = certificate();
+            match connecting(&forwarding, Transport::WebSocket, &member) {
+                Err(rejection) => {
+                    assert_eq!(rejection.status, StatusCode::SERVICE_UNAVAILABLE, "{how}");
+                }
+                Ok(_) => panic!("{how}: a WebSocket upgrade was taken"),
+            }
+            let Ok((mut exchange, _)) = connecting(&forwarding, Transport::Http, &member) else {
+                panic!("{how}: a plain-HTTP exchange was not let through to be judged");
+            };
+            match forwarding
+                .on_message(&mut exchange, report(InstanceUid::default()))
+                .await
+            {
+                Reply::Refuse(status, _) => {
+                    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{how}");
+                }
+                _ => panic!("{how}: a report was forwarded"),
+            }
+
+            let presented = certificate();
+            let mut enrolling = Downstream {
+                enrolling: true,
+                host: None,
+                ..downstream(Transport::Http, None, presented.clone())
+            };
+            let uid = InstanceUid::default();
+            let request = enrolment(uid, proof_of(&presented));
+            let mut relayed = Box::pin(forwarding.on_message(&mut enrolling, request));
+            tokio::select! {
+                _ = &mut relayed => panic!("{how}: the enrolment was answered at the Gateway"),
+                () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+            }
+            assert!(
+                forwarding.pool.assignments().0.contains(&uid),
+                "{how}: the enrolment went upstream"
+            );
+            drop(relayed);
+
+            let after = std::fs::symlink_metadata(&store).expect("metadata");
+            assert_eq!(
+                (after.len(), after.modified().ok()),
+                (before.len(), before.modified().ok()),
+                "{how}: the store was rewritten"
+            );
+        }
+    }
+
+    /// A last line without its newline is dropped as a write a crash cut off, and the bindings
+    /// before it hold: another host's report for one of them is refused.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_store_cut_off_mid_line_keeps_the_bindings_before_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = certificate();
+        let (uid, other) = (InstanceUid::default(), InstanceUid::default());
+        let end = cache::end_of(&owner).expect("end");
+        let host = cache::speaker_of(&owner).expect("host");
+        let held =
+            crate::nofollow::HeldDir::create(&dir.path().join(cache::DIR), 0o700).expect("dir");
+        let lines: Vec<String> = [
+            policy::Change::Ends(host.clone(), end),
+            policy::Change::Bound(uid, host),
+        ]
+        .iter()
+        .map(|change| store::line(change).expect("line"))
+        .collect();
+        let contents = format!(
+            "opamp-fleet-gateway-bindings 1\n{}\n{}\nb {other} cut-of",
+            lines[0], lines[1]
+        );
+        held.write(store::NAME, contents.as_bytes(), 0o600)
+            .expect("write");
+
+        let forwarding = forwarding(dir.path()).await;
+        assert!(forwarding.registry.cache().unreadable().is_none());
+        assert!(forwarding.registry.cache().is_bound(&uid));
+        assert!(!forwarding.registry.cache().is_bound(&other), "dropped");
+        match forwarding
+            .forward_exchange(
+                &downstream(Transport::Http, None, certificate()),
+                report(uid),
+            )
+            .await
+        {
+            Reply::Refuse(status, _) => assert_eq!(status, StatusCode::FORBIDDEN),
+            _ => panic!("another host's report was forwarded"),
         }
     }
 }
