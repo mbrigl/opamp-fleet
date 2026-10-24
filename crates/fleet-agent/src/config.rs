@@ -127,12 +127,12 @@ pub struct ClientConfig {
     pub supervisors: Vec<SupervisorBlock>,
 }
 
-/// A bootstrap certificate and its key as PEM, held in memory (ADR-0029 clause 7). Its `Debug`
-/// names neither.
+/// A bootstrap certificate and its key as PEM, held in memory (ADR-0029 clause 7), the key in a
+/// buffer wiped when it is dropped (ADR-0057). Its `Debug` names neither.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BootstrapIdentity {
     pub cert_pem: Vec<u8>,
-    pub key_pem: Vec<u8>,
+    pub key_pem: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl std::fmt::Debug for BootstrapIdentity {
@@ -529,8 +529,18 @@ pub struct PackagesConfig {
     /// The key that opens an encrypted `.7z` package artifact (ADR-0026). Unset means artifacts are
     /// expected unencrypted; an encrypted one then fails to install, naming this key.
     ///
-    /// One secret for the fleet — a single archive serves every Agent.
-    pub archive_key: Option<String>,
+    /// One secret for the fleet — a single archive serves every Agent. Wiped when it is dropped
+    /// (ADR-0057).
+    #[serde(default, deserialize_with = "secret")]
+    pub archive_key: Option<zeroize::Zeroizing<String>>,
+}
+
+/// A secret of the file, moved into a buffer wiped when it is dropped as it is read (ADR-0057);
+/// what `toml` holds while it parses is its own.
+fn secret<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<zeroize::Zeroizing<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|value| value.map(zeroize::Zeroizing::new))
 }
 
 impl Default for PackagesConfig {

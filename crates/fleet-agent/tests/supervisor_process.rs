@@ -107,7 +107,7 @@ fn runner_full(
     let (commands, command_rx) = mpsc::channel(16);
     let (shutdown_tx, shutdown) = shutdown_channel();
     let runner = Runner {
-        endpoint_token: String::new(),
+        endpoint_token: zeroize::Zeroizing::default(),
         name: "test".to_string(),
         stop_timeout: Duration::from_secs(5),
         apply_grace,
@@ -503,7 +503,7 @@ async fn the_managed_process_is_handed_the_endpoint_token() {
     let (_commands, command_rx) = mpsc::channel(16);
     let (_shutdown_tx, shutdown) = shutdown_channel();
     let runner = Runner {
-        endpoint_token: "the-token".to_string(),
+        endpoint_token: zeroize::Zeroizing::new("the-token".to_string()),
         name: "test".to_string(),
         stop_timeout: Duration::from_secs(5),
         apply_grace: Duration::ZERO,

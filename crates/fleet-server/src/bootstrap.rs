@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::fleet::Clock;
 use crate::revocation::{CertId, SubjectValues};
@@ -243,10 +244,17 @@ pub struct IssueRequest {
     pub password: Option<Password>,
 }
 
-/// A password, which no `Debug` and no log line shows (ADR-0029 clause 2).
-#[derive(Clone, Deserialize)]
-#[serde(transparent)]
-pub struct Password(pub String);
+/// A password, which no `Debug` and no log line shows (ADR-0029 clause 2), held in a buffer wiped
+/// when it is dropped (ADR-0057).
+#[derive(Clone)]
+pub struct Password(pub Zeroizing<String>);
+
+/// The string the request carries moves into the buffer; nothing is copied.
+impl<'de> Deserialize<'de> for Password {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(|password| Password(Zeroizing::new(password)))
+    }
+}
 
 impl std::fmt::Debug for Password {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1048,6 +1056,19 @@ mod tests {
         let (record, _, _) = fixture(u64::MAX);
         let pair = record.issue(&valid()).expect("issued");
         assert!(!format!("{pair:?}").contains("twelve chars"));
+    }
+
+    /// The password of an issuing request is held in a buffer wiped when it is dropped, read into it
+    /// from the request: were it a plain `String` again, this would not compile.
+    /// Verifies: ADR-0057
+    #[test]
+    fn a_bootstrap_password_is_held_in_a_zeroizing_buffer() {
+        fn held(password: Password) -> Zeroizing<String> {
+            password.0
+        }
+        let request = request(serde_json::json!({"password": "twelve chars"}));
+        let password = request.password.expect("a password");
+        assert_eq!(held(password).as_str(), "twelve chars");
     }
 
     /// An entry that cannot be written leaves no PKCS#12 file behind, which nothing would end.

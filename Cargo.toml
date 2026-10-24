@@ -67,6 +67,14 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # which is what ADR-0011 and ADR-0013 keep this build free of; the Client extracts one member and
 # never writes a path the archive chose.
 tar = "0.4"
+# The secrets the application crates hold in memory — private keys, passwords, a `bootstrap.p12`
+# being read, the Supervisor Endpoint token — are wiped when they are dropped (ADR-0057): `Zeroizing`
+# overwrites a buffer with volatile writes behind a compiler fence, which a hand-written overwrite
+# of memory about to be freed cannot promise. The default `alloc` feature and no derive. At least
+# 1.9.1, the first whose `Zeroizing` `Debug` shows no content. Already in the tree through
+# `dialoguer`, `der`, `pkcs8`, `pkcs12`, `rustls` and `rustls-pki-types`; it pulls no TLS or crypto
+# backend, so ADR-0013 holds. `opamp` does not name it (ADR-0010 clause 3).
+zeroize = "1.9.1"
 # Encoding Basic credentials into their Authorization header value (ADR-0021).
 base64 = "0.23"
 # Constant-time credential comparison on the Server (ADR-0021).

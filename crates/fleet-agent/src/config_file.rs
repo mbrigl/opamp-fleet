@@ -20,7 +20,10 @@ impl ClientConfig {
                 ..default
             });
         }
+        // The file may hold `[packages] archive_key`: its text is wiped when it is dropped
+        // (ADR-0057).
         let text = std::fs::read_to_string(path)
+            .map(zeroize::Zeroizing::new)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let mut config: ClientConfig =
             toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;

@@ -555,12 +555,15 @@ impl PostgresConfig {
 /// its owner may write: the key `key` names it in every refusal (ADR-0049 clause 6, ADR-0050
 /// clause 7). Group read is allowed — `0640`, or `0440` with a group of the orchestrator's choice,
 /// as Kubernetes mounts a secret with `fsGroup` — and nothing for others, nor group write.
-/// Surrounding whitespace is dropped, and an empty secret is refused.
+/// Surrounding whitespace is dropped, and an empty secret is refused. The file's bytes and the
+/// secret are held in buffers wiped when they are dropped, on every path (ADR-0057); a caller
+/// whose library takes an owned copy makes it at that call.
 ///
 /// # Errors
-/// Returns an error naming the key and the file when it cannot be read, may be read by others or
-/// written by its group, or is empty.
-pub fn read_secret_file(key: &str, file: &Path) -> Result<String, String> {
+/// Returns an error naming the key and the file when it cannot be read, is not UTF-8 text, may be
+/// read by others or written by its group, or is empty.
+pub fn read_secret_file(key: &str, file: &Path) -> Result<zeroize::Zeroizing<String>, String> {
+    use std::io::Read as _;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -577,13 +580,21 @@ pub fn read_secret_file(key: &str, file: &Path) -> Result<String, String> {
             ));
         }
     }
-    let secret =
-        std::fs::read_to_string(file).map_err(|e| format!("{key} {}: {e}", file.display()))?;
-    let secret = secret.trim();
+    let failed = |e: std::io::Error| format!("{key} {}: {e}", file.display());
+    let mut handle = std::fs::File::open(file).map_err(failed)?;
+    // Sized to the file, so the buffer is read at its final size and not grown and left behind.
+    let size = handle.metadata().map_err(failed)?.len();
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(
+        usize::try_from(size).unwrap_or_default(),
+    ));
+    handle.read_to_end(&mut bytes).map_err(failed)?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| format!("{key} {}: not UTF-8 text", file.display()))?;
+    let secret = text.trim();
     if secret.is_empty() {
         return Err(format!("{key} {} is empty", file.display()));
     }
-    Ok(secret.to_string())
+    Ok(zeroize::Zeroizing::new(secret.to_string()))
 }
 
 /// The Ed25519 adapter behind [`SignatureVerifier`](crate::packages::SignatureVerifier): the
@@ -1722,6 +1733,39 @@ mod tests {
         std::fs::write(&path, "max_message_size_bytes = 0\n").expect("write");
         let err = ServerConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("max_message_size_bytes"), "{err}");
+    }
+
+    /// The secret of a `password_file` or `secret_access_key_file` is held in a buffer wiped when
+    /// it is dropped, its surrounding whitespace trimmed inside it: were `read_secret_file` to
+    /// return a plain `String` again, this would not compile. A file that is not UTF-8 text is
+    /// refused naming the key, without its bytes.
+    /// Verifies: ADR-0057
+    #[test]
+    fn a_secret_file_is_read_into_a_zeroizing_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secret");
+        let restrict = |path: &Path| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .expect("chmod");
+            }
+            #[cfg(not(unix))]
+            let _ = path;
+        };
+        std::fs::write(&path, " s3cret\n").expect("write");
+        restrict(&path);
+        let held: zeroize::Zeroizing<String> =
+            read_secret_file("[blobs.s3] secret_access_key_file", &path).expect("read");
+        assert_eq!(held.as_str(), "s3cret");
+
+        std::fs::write(&path, [0xff, 0xfe, b'x']).expect("write");
+        restrict(&path);
+        let err =
+            read_secret_file("[database.postgres] password_file", &path).expect_err("not UTF-8");
+        assert!(err.contains("[database.postgres] password_file"), "{err}");
+        assert!(err.contains("not UTF-8 text"), "{err}");
     }
 
     /// `[packages] verification_key` is the operator's public key, hex, as the Client's key of the

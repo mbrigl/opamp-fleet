@@ -265,7 +265,10 @@ fn hash_credential(scheme: Option<String>) -> ! {
             std::process::exit(1);
         }
     };
-    match hash(&secret) {
+    let hashed = hash(&secret);
+    // `exit` runs no destructor: the secret is wiped before it (ADR-0057).
+    drop(secret);
+    match hashed {
         Ok(entry) => {
             println!("{entry}");
             std::process::exit(0);
@@ -278,8 +281,11 @@ fn hash_credential(scheme: Option<String>) -> ! {
 }
 
 /// One line from standard input, the trailing newline dropped. On a Unix terminal echo is off while
-/// it is typed, so the secret does not stand on the screen.
-fn read_secret() -> std::io::Result<String> {
+/// it is typed, so the secret does not stand on the screen. It is held in a buffer wiped when it is
+/// dropped, sized for any password a person types so it is not grown and left behind (ADR-0057).
+/// The copy in the buffer of the process-wide standard input, which the standard library keeps,
+/// is not wiped.
+fn read_secret() -> std::io::Result<zeroize::Zeroizing<String>> {
     use std::io::{BufRead as _, IsTerminal as _};
     let stdin = std::io::stdin();
     let terminal = stdin.is_terminal();
@@ -287,12 +293,14 @@ fn read_secret() -> std::io::Result<String> {
         eprint!("secret: ");
     }
     let _echo = terminal.then(EchoOff::new).flatten();
-    let mut line = String::new();
+    let mut line = zeroize::Zeroizing::new(String::with_capacity(4096));
     stdin.lock().read_line(&mut line)?;
     if terminal {
         eprintln!();
     }
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    let kept = line.trim_end_matches(['\r', '\n']).len();
+    line.truncate(kept);
+    Ok(line)
 }
 
 /// Terminal echo switched off for as long as it lives.
