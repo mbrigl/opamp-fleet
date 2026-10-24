@@ -48,6 +48,10 @@ jobs:
         # with the process account in `UserName`, and two role accounts made with `dseditgroup`
         # and `sysadminctl -roleAccount` as the refusal of a missing process account says. The
         # runner's `sudo` asks no password, as on Linux.
+        # Every platform: the install a script runs after the package (ADR-0029 clause 11) enrols
+        # with a `bootstrap.p12` and its password file from `--fleet-files`, against a Server in
+        # the test, and the service it registers reaches that Server on the issued certificate; a
+        # wrong password fails the install before anything is written.
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7

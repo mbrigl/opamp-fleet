@@ -348,9 +348,10 @@ $ supervisor service uninstall                                   # never deletes
 
 The **`Service smoke` workflow** exercises the real thing on an ephemeral runner — install, start,
 the Agent appearing in the fleet, its process killed and brought back by the manager, an explicit
-stop that stays stopped, uninstall. It runs nightly and on demand rather than per push (it installs
-a system service and waits on timers), currently on Windows, where the restart is the Client's own
-doing and nothing else asserts it. The test is `crates/fleet-agent/tests/service_smoke.rs`; it is
+stop that stays stopped, uninstall — and an install that enrols with a `bootstrap.p12` from
+`--fleet-files`, whose service then reaches the Server on the certificate it was issued. It runs
+weekly and on demand rather than per push (it installs a system service and waits on timers), on
+Linux, macOS and Windows. The test is `crates/fleet-agent/tests/service_smoke.rs`; it is
 `#[ignore]`d, so an ordinary `cargo test` never installs anything.
 
 What still needs a human, per platform: starting at **boot** (a runner never reboots), the logs
