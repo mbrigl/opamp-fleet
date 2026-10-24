@@ -3,7 +3,7 @@
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-24
 - **Deciders:** Markus Brigl
-- **Applies to:** the bindings of `instance_uid`s to hosts in `crates/fleet-agent/src/gateway/policy.rs` and `crates/fleet-agent/src/gateway/cache.rs`, their store under `<state_dir>/gateway-bindings` and its loading and writing in `crates/fleet-agent/src/gateway/`, the downstream refusal while that store cannot be read in `crates/fleet-agent/src/gateway/mod.rs`, and every document that tells an operator what a Gateway keeps on disk or how an Agent behind one is bound to its host
+- **Applies to:** the bindings of `instance_uid`s to hosts in `crates/fleet-agent/src/gateway/policy.rs` and `crates/fleet-agent/src/gateway/cache.rs`, their store under `<state_dir>/gateway-packages/bindings` and its loading and writing in `crates/fleet-agent/src/gateway/`, the downstream refusal while that store cannot be read in `crates/fleet-agent/src/gateway/mod.rs`, and every document that tells an operator what a Gateway keeps on disk or how an Agent behind one is bound to its host
 - **Supersedes:** [ADR-0039](0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md) clause 6
 
 ## Context
@@ -16,25 +16,23 @@ clause 6 binds an `instance_uid` to the host of the first downstream report for 
 forwards a report only for an `instance_uid` bound to the host that sent it. Through that binding
 a host receives an Agent's configurations and package offers and speaks for it to the Server.
 
-The binding lasts only "since the Gateway started". The bindings are held in memory
-(`crates/fleet-agent/src/gateway/policy.rs:1`), so after every restart of the Gateway — an update,
-a reboot, a crash — whichever host reports an `instance_uid` first binds it. A host with a valid
+The binding lasts only "since the Gateway started". The bindings are held in memory (`Bindings` in
+`crates/fleet-agent/src/gateway/policy.rs`), so after every restart of the Gateway — an update, a
+reboot, a crash — whichever host reports an `instance_uid` first binds it. A host with a valid
 member certificate that knows another host's `instance_uid` can report for it first and take over
 that Agent: its configurations, its offers, its reports to the Server. The Server cannot see it,
 because the Gateway's certificate speaks for any Agent, and the re-keying that protects an
-`instance_uid` on a direct connection (ADR-0036 clause 2) does not reach behind a Gateway. The
-same opening exists without a restart: past the Gateway's total of 1 000 000 bindings, a new
-binding takes the place of the least recently reported idle binding of any host (`policy.rs:87`),
-so a host that fills the table can free another host's binding and claim it. Both are named as
-residuals in `docs/HARDENING.md` and ADR-0039 (*Out of scope*, *Consequences*).
+`instance_uid` on a direct connection (ADR-0036 clause 2) does not reach behind a Gateway. The same
+opening exists without a restart: past the Gateway's total of 1 000 000 bindings, a new binding
+takes the place of the least recently reported idle binding of any host (`Bindings::bind`), so hosts
+that fill the table can free another host's binding and claim it. The first is named as a residual
+in `docs/HARDENING.md` and ADR-0039 (*Out of scope*, *Consequences*).
 
-ADR-0039 rejected persisting the bindings "for now", because the Gateway would keep state on disk
-that it must defend. Since then the state directory has come to be defended as a whole: no
-privileged step follows a link in it ([ADR-0054](0054-no-privileged-install-step-follows-a-link-the-account-placed.md)),
-files are written through the no-follow writer, and where a process account is registered the
-Client's own files are out of its reach ([ADR-0059](0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)
-clause 6). The state directory already holds the Client's private key; a binding table is less
-to defend than that.
+ADR-0039 rejected persisting the bindings because the Gateway would keep state on disk that it
+must defend. The state directory is defended as a whole: no privileged step follows a link in it,
+and the Client writes its files there without following one
+([ADR-0054](0054-no-privileged-install-step-follows-a-link-the-account-placed.md)). It already holds
+the Client's private key; a binding table is less to defend than that.
 
 The specification's quality goal Q-1 asks that the Fleet be secure by default, G-15 that a
 Gateway scales connections and not identities, and G-17 that an Agent is identified. A binding
@@ -83,8 +81,7 @@ place of another host's.
      that names no Server-hosted file removes it, a message without `packages_available` leaves
      it standing (ADR-0026 clause 36), and a downstream disconnect does not end it. The offers
      held are bounded by the offers the Server makes through the Gateway. The offers are kept in
-     memory only, indexed by host; a restart ends them, and the Server's next offer records them
-     again.
+     memory only, indexed by host; a restart ends them.
    - **Requests.** A request is served only when the Gateway holds the artifact and a current
      offer of it (the same path and query, byte for byte) to an `instance_uid` bound to the host
      the request's certificate names. A certificate that names no host receives nothing. While an
@@ -103,45 +100,62 @@ place of another host's.
    `503` while a fetch runs are the Gateway's own. Together they are the download refusal of
    ADR-0039 clause 4.
 
-2. **The bindings are kept in `<state_dir>/gateway-bindings`, written before they are relied on.**
-   - **What is kept.** Each binding's `instance_uid` and host, and per host the end of the
-     certificate it last presented — its `notAfter`, and its issuer and serial as the revocation
-     list names a certificate (the SHA-256 of the issuer's DER name and the serial in lowercase
-     hex). When a binding was last reported is kept too, but written in batches, at most once a
-     minute and at shutdown: a restart may lose the order of the last minute's reports, never a
-     binding.
-   - **A new binding is durable before its report is forwarded.** The Gateway appends it to the
-     store and syncs it before it forwards the report that made it, and before that report's
-     connection or exchange becomes the Agent's route (ADR-0039 clause 5). A binding that cannot be
-     written is not made: the report binds nothing, is treated as ADR-0039 clause 5 treats such a
-     report, and the failure is logged. A binding given up for another of the same host's, and a
-     binding that ends (clause 3), is appended as its removal.
-   - **The store is a journal, compacted.** Entries are appended, one line each, and the Gateway
-     rewrites the store whole from what it holds when it starts and when the journal has grown to
-     twice the lines it holds, as a new file synced and renamed over the old. It is written through
-     the no-follow writer (ADR-0054) and readable and writable by the Client's account alone
-     (`0600`); a process account gets nothing of it (ADR-0059 clause 6).
+2. **The bindings are kept in `<state_dir>/gateway-packages/bindings`, written before they are
+   relied on.** The file lies in the Gateway's own directory, whose name no Supervisor may take,
+   and the package cache holds nothing under that name.
+   - **What is kept.** Each binding's `instance_uid` and host, and per host the end of its
+     certificate: the latest `notAfter` among the valid certificates it has reported under, and
+     that certificate's issuer and serial as the revocation list names a certificate — the SHA-256
+     of the issuer's DER name and the serial in lowercase hex without leading zeros. When a binding
+     was last reported is kept too, but written in batches, at most once a minute and at shutdown:
+     a restart may lose the order of the last minute's reports, never a binding.
+   - **What a binding relies on is durable before its report is forwarded.** A new binding, and a
+     host's certificate end where the report moves it forward, are appended to the store and
+     synced before the Gateway forwards the report, and before that report's connection or
+     exchange becomes the Agent's route (ADR-0039 clause 5). A binding that cannot be written is
+     not made: the report binds nothing, is treated as ADR-0039 clause 5 treats such a report, and
+     the failure is logged. A binding given up for another of the same host's, and a binding that
+     ends (clause 3), is appended as its removal; a removal lost to a crash only brings back a
+     binding that its own host could give up again.
+   - **The store is a journal, compacted and bounded.** It begins with a line naming its format
+     and version, and holds one entry per line, of at most 512 bytes. The Gateway appends to it,
+     and rewrites it whole from what it holds when it starts and when it has grown to twice as many
+     lines as it holds live bindings and hosts, as a new file synced and renamed over the old. A
+     store is at most 512 MiB. It is written as the Client writes into its state directory,
+     without following a link (ADR-0054 clause 6), readable and writable by the Client's account
+     alone: `0600` on Unix, under the restricted ACL the install gives the state directory on
+     Windows.
    - **An unreadable store refuses every downstream Agent.** At start the Gateway reads the store
-     without following a link. Where it exists and is not a regular file the Client's account
-     owns, is not `0600`, or holds a line it cannot parse beyond a last line cut short — which it
-     drops, as a write cut off by a crash — the Gateway carries no downstream Agent: it answers
-     every downstream report and download `503`, logs at every start and once an hour why and
-     that removing the file lets it start empty, and its own Supervisors and its upstream
-     connection go on. A store that does not exist is an empty one.
+     without following a link. Where it is not a regular file — on Unix one the Client's account
+     owns with mode `0600`, on Windows one that is not a reparse point — is larger than its bound,
+     names a format or version this build does not read, or holds a line it cannot parse other
+     than a last line without its terminating newline, which it drops as a write cut off by a
+     crash, the Gateway carries no downstream Agent. It refuses every downstream WebSocket upgrade
+     and answers every plain-HTTP report and every download `503`; an enrolling peer's one request
+     is relayed still, since it binds nothing (ADR-0039 clause 11). It logs, at its start and once
+     an hour, why, and that removing the file and restarting the Client lets it start empty. Its
+     own Supervisors and its upstream connection go on. A store that does not exist is an empty
+     one.
 
-3. **A host's bindings end with the certificate it last presented.** Each report records, for its
-   host, the certificate the downstream connection presented. When that certificate's `notAfter`
-   has passed, or the revocation list the Gateway holds (ADR-0039 clause 4) lists its issuer and
-   serial, every binding of the host ends and is removed from the store, and that is logged with
-   the host and how many bindings went. The Gateway checks at start, at every revocation list it
-   takes, and once an hour. A host whose certificate is renewed presents the new one at its next
-   report, which moves the end forward; a host that can no longer report — its certificate expired
-   or revoked — keeps no `instance_uid` bound, and the `instance_uid`'s next report binds it anew.
+3. **A host's bindings end with its certificate.** A report under a certificate whose `notAfter`
+   has passed, by the Gateway's clock — the clock its handshake checks validity by — binds nothing
+   and moves no certificate end. When the end the Gateway keeps for a host has passed, or the
+   revocation list the Gateway holds (ADR-0039 clause 4) lists that certificate, every binding of
+   the host ends: its route, its current offer and its place upstream go with it, as with a
+   binding that makes room (ADR-0058 clause 1), and it is removed from the store; that is logged
+   with the host and how many bindings went. The Gateway checks at start, whenever its revocation
+   list changes, and once an hour. A host whose certificate is renewed reports under the new one,
+   which moves the end forward; a host that can no longer report keeps no `instance_uid` bound,
+   and the `instance_uid`'s next report binds it anew. A binding loaded at start holds no place
+   upstream until its Agent reports.
 
 **Out of scope:** binding at the Server the `instance_uid`s a Gateway carries, so that a member
-connecting directly cannot claim one first; a command to end a binding by hand; keeping the offers
-across a restart; a rate per downstream member certificate at the Gateway; a Gateway's bindings
-moved to another Gateway.
+connecting directly cannot claim one first; a command to end a binding by hand; moving a binding to
+the identity the Server gives an Agent through `AgentIdentification`, whose old `instance_uid`
+stays bound to its host until that host gives it up or its certificate ends; keeping the offers
+across a restart, which the Server does not offer again while the Agent's `all_packages_hash`
+stands (ADR-0026 clause 36); a rate per downstream member certificate at the Gateway; bindings
+shared between Gateways, so a host that reports through two keeps an end at each.
 
 ## Alternatives considered
 
@@ -196,14 +210,17 @@ moved to another Gateway.
   neither does a host that fills the binding table. A host that leaves the fleet frees its
   `instance_uid`s when its certificate ends, at the latest after one certificate life (30 days by
   default, ADR-0021 clause 9), at once when it is revoked.
-- Negative / trade-offs: the Gateway keeps a file it must defend, writes and syncs one line per new
-  binding, and refuses every downstream Agent while that file is damaged, until an administrator
-  removes it. An Agent that moves to a new host behind the same Gateway is refused there until the
-  old host's certificate ends or is revoked; revoking the old host's certificate frees it at the
-  Gateway's next revocation list. A Gateway at its total binds nothing new for a host that has no
-  binding of its own to give. Offers still end with a restart.
-- Follow-ups: binding at the Server what a Gateway carries; a command to end a binding by hand; a
-  rate per downstream member certificate.
+- Negative / trade-offs: the Gateway keeps a file of up to 512 MiB it must defend, writes and syncs
+  one line per new binding, and refuses every downstream Agent while that file is damaged, until an
+  administrator removes it and restarts the Client. An Agent that moves to a new host behind the
+  same Gateway is refused there until the old host's certificate ends or is revoked; while the old
+  host keeps renewing, revoking its certificate, which ends all of its Agents, is the only way.
+  Hosts that together fill the total keep every new host out, across restarts, until their
+  certificates end. Offers end with a restart, and an Agent behind the Gateway gets `404` for a
+  download until the Server offers it something new.
+- Follow-ups: binding at the Server what a Gateway carries; a command to end a binding by hand;
+  moving a binding with a re-keyed `instance_uid`; offers that outlast a restart; a rate per
+  downstream member certificate.
 
 ## Enforcement
 
@@ -215,12 +232,16 @@ Tests that will carry `Verifies: ADR-0060`:
 - A report that makes a new binding is forwarded only after the binding is in the store; when the
   store cannot be written, the report binds nothing and is not forwarded.
 - At the Gateway's total, a report from a host without an idle binding of its own binds nothing,
-  and no other host's idle binding is removed.
-- A host whose last certificate has passed `notAfter`, or is on a revocation list the Gateway
-  takes, loses every binding, in memory and in the store, and another host's report then binds
-  the `instance_uid`.
-- A store that is a link, not `0600`, owned by another account, or holds an unparsable line before
-  its last makes the Gateway answer downstream reports and downloads `503` while its upstream
-  connection and its own Supervisors go on; a last line cut short is dropped and the rest loaded.
+  and no other host's idle binding is removed. The tests of ADR-0039 that let a binding at the
+  total take another host's place are rewritten to this rule.
+- A host whose kept certificate end has passed, or whose certificate is on a revocation list the
+  Gateway takes — a serial with a leading zero among them — loses every binding, with its route,
+  offer and upstream place, in memory and in the store, and another host's report then binds the
+  `instance_uid`. A host that reports under a renewed certificate keeps its bindings past the old
+  certificate's `notAfter`, and a report under an expired certificate binds nothing.
+- A store that is a link, holds an unparsable line before its last, names an unknown version or
+  exceeds its bound makes the Gateway refuse downstream upgrades and answer reports and downloads
+  `503` while its upstream connection and its own Supervisors go on; on Unix so does one not
+  `0600`; a last line without its newline is dropped and the rest loaded.
 - The journal is compacted at start and at twice its live lines, and the compacted store loads to
   the same bindings.
