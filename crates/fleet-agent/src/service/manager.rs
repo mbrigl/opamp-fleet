@@ -407,26 +407,28 @@ pub fn agents_supported(level: ServiceLevel) -> bool {
 /// Client's account, a member of that group (ADR-0059 clause 6), reaches the socket. On macOS
 /// `service install` does this, as root, for what systemd's `RuntimeDirectory=` does for the unit.
 ///
-/// The directory is opened without following a link and changed through that handle, so nothing
-/// placed at its name is followed. Its mode is set after its owner, whose change may clear it.
+/// The directory is made and opened through its held parent, without following a link, and changed
+/// through its own handle, so nothing placed at its name is followed. Its mode is set after its
+/// owner, whose change may clear it.
 ///
 /// # Errors
-/// Returns an error naming the directory when it cannot be created, opened as a directory, or
-/// given to the process account.
+/// Returns an error naming the directory when its parent is not held as [`socket_parent`] holds
+/// it, or when the directory cannot be created, opened as a directory, or given to the process
+/// account.
 #[cfg(all(unix, any(target_os = "macos", test)))]
 fn socket_dir(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
     use std::os::fd::AsRawFd as _;
-    use std::os::unix::ffi::OsStrExt as _;
     let failed = |e: std::io::Error| format!("cannot prepare {}: {e}", dir.display());
-    match std::fs::create_dir(dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(failed(e)),
+    let (parent, name) = socket_parent(dir).map_err(failed)?;
+    // SAFETY: a valid descriptor and a NUL-terminated name.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(failed(e));
+        }
     }
-    let name = std::ffi::CString::new(dir.as_os_str().as_bytes())
-        .map_err(|e| failed(std::io::Error::other(e)))?;
     let handle =
-        crate::storage::handle::open(libc::AT_FDCWD, &name, crate::storage::handle::DIRECTORY)
+        crate::storage::handle::open(parent.as_raw_fd(), &name, crate::storage::handle::DIRECTORY)
             .map_err(failed)?;
     // SAFETY: a valid descriptor, held across both calls.
     if unsafe { libc::fchown(handle.as_raw_fd(), uid, gid) } != 0 {
@@ -437,6 +439,40 @@ fn socket_dir(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
         return Err(failed(std::io::Error::last_os_error()));
     }
     Ok(())
+}
+
+/// The parent of the socket's directory, held, and the directory's name in it. The parent must be
+/// root's or the running account's and writable by neither its group nor others: the rule a link
+/// on the way to a root is trusted by (`trusted_link`), so the process account, which owns the
+/// directory, can neither move it nor put anything else at its name.
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn socket_parent(dir: &Path) -> std::io::Result<(std::os::fd::OwnedFd, std::ffi::CString)> {
+    use crate::storage::handle;
+    use std::os::unix::ffi::OsStrExt as _;
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "names no directory in a parent",
+        ));
+    };
+    let c = |bytes: &[u8]| std::ffi::CString::new(bytes).map_err(std::io::Error::other);
+    let held = handle::open(
+        libc::AT_FDCWD,
+        &c(parent.as_os_str().as_bytes())?,
+        handle::DIRECTORY,
+    )?;
+    let st = handle::fstat(&held)?;
+    let own = handle::own();
+    if !(st.st_uid == 0 || st.st_uid == own) || handle::mode(&st) & 0o022 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is not root's alone: another account could replace what is in it",
+                parent.display()
+            ),
+        ));
+    }
+    Ok((held, c(name.as_bytes())?))
 }
 
 /// What `service-manager` is handed as the unit's text: the Client's own systemd **system** unit
@@ -1064,23 +1100,47 @@ fn launchd_loaded(label: &str) -> Result<bool, String> {
 }
 
 /// Removes the second service's socket — a link at its name as a link — and then its directory,
-/// which `service install` made for it on macOS. A directory the process account left anything
-/// else in stays, and is named.
+/// which `service install` made for it on macOS. Both go by their names in held directories, the
+/// directory's parent held as [`socket_parent`] holds it, so no link is followed to them. A
+/// directory the process account left anything else in stays, and is named.
 ///
 /// # Errors
 /// Returns what was left in place, and why.
 #[cfg(all(unix, any(target_os = "macos", test)))]
 fn remove_socket_dir(socket: &Path) -> Result<(), String> {
-    let gone = |result: std::io::Result<()>| match result {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
-    };
-    gone(std::fs::remove_file(socket))
-        .map_err(|e| format!("{} was left in place: {e}", socket.display()))?;
+    use crate::storage::handle;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
     let Some(dir) = socket.parent() else {
         return Ok(());
     };
-    gone(std::fs::remove_dir(dir)).map_err(|e| format!("{} was left in place: {e}", dir.display()))
+    let left =
+        |path: &Path, e: std::io::Error| format!("{} was left in place: {e}", path.display());
+    let gone = |result: libc::c_int| match result {
+        0 => Ok(()),
+        _ => match std::io::Error::last_os_error() {
+            e if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            e => Err(e),
+        },
+    };
+    let (parent, name) = socket_parent(dir).map_err(|e| left(socket, e))?;
+    let held = match handle::open(parent.as_raw_fd(), &name, handle::DIRECTORY) {
+        Ok(held) => held,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(left(socket, e)),
+    };
+    let file = socket
+        .file_name()
+        .map(|file| std::ffi::CString::new(file.as_bytes()))
+        .transpose()
+        .map_err(|e| left(socket, std::io::Error::other(e)))?
+        .ok_or_else(|| left(socket, std::io::Error::other("names no file")))?;
+    // SAFETY: a valid descriptor and a NUL-terminated name; unlinkat(2) follows no link at it.
+    gone(unsafe { libc::unlinkat(held.as_raw_fd(), file.as_ptr(), 0) })
+        .map_err(|e| left(socket, e))?;
+    // SAFETY: as above; only an empty directory is removed.
+    gone(unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) })
+        .map_err(|e| left(dir, e))
 }
 
 /// The installed service, implementing the [`ServiceControl`] seam.
@@ -2082,6 +2142,30 @@ mod tests {
             !socket.exists() && elsewhere.exists(),
             "the link alone is gone"
         );
+    }
+
+    /// The socket's directory is made and removed only in a parent no other account can write: in
+    /// one writable by others, where another account could swap the directory or put a link at
+    /// its name, neither is done.
+    /// Verifies: ADR-0054, ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_sockets_directory_is_touched_only_in_a_parent_no_other_account_writes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let open = dir.path().join("open");
+        std::fs::create_dir(&open).expect("mkdir");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        let socket_dir_path = open.join("opamp-fleet-agents");
+        // SAFETY: geteuid(2) and getegid(2) cannot fail and touch no memory.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        assert!(socket_dir(&socket_dir_path, uid, gid).is_err());
+        assert!(!socket_dir_path.exists(), "nothing made");
+
+        std::fs::create_dir(&socket_dir_path).expect("mkdir");
+        let left = remove_socket_dir(&socket_dir_path.join("agents.sock")).expect_err("refused");
+        assert!(left.contains("agents.sock"), "{left}");
+        assert!(socket_dir_path.exists(), "nothing removed");
     }
 
     /// Where a process account is registered, the Client's unit wants the second service and starts
