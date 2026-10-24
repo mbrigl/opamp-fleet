@@ -217,8 +217,8 @@ pub struct Timing {
     pub retain_previous: Duration,
 }
 
-/// The Agent type this Supervisor presents until — and unless — its Managed Process reports one of
-/// its own (ADR-0016): the block's, the kind's, else the program's file name.
+/// The Agent type this Supervisor presents, whatever its Managed Process reports (ADR-0055): the
+/// kind's, the block's, else the program's file name.
 ///
 /// The file-name fallback is what the operator already wrote in this very block; it is read from
 /// configuration and never parsed out of a program's output, where a name has no grammar to

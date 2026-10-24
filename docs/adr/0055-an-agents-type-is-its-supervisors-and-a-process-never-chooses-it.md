@@ -1,7 +1,7 @@
 # ADR-0055: An Agent's type is its Supervisor's, and a Managed Process never chooses it
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-20
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-24
 - **Deciders:** Markus Brigl
 - **Applies to:** the fold of a Managed Process's description and the type it reads in `crates/fleet-agent/src/supervisor/agent/description.rs` and `crates/fleet-agent/src/supervisor/agent.rs`, the Agent type resolution in `crates/fleet-agent/src/supervisor/block.rs` and `crates/fleet-agent/src/supervisor/mod.rs`, the `service_name` key of a `[[supervisor]]` block, and every document that tells an operator where an Agent's type comes from
 - **Supersedes:** [ADR-0016](0016-what-an-agent-reports-about-itself.md) clause 1, [ADR-0041](0041-a-managed-process-states-only-its-own-service-attributes.md) clause 1

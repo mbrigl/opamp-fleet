@@ -35,6 +35,8 @@ pub mod span;
 pub mod storage;
 pub mod supervisor;
 pub mod telemetry;
+#[cfg(test)]
+mod test_support;
 pub mod tls;
 pub mod transport;
 pub mod update;
