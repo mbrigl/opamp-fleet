@@ -433,13 +433,14 @@ impl PackageCache {
     ///
     /// Whether `uid` is now bound to `host`: only then is its report forwarded and its reply
     /// routed back (ADR-0039 clause 5). A report for an `instance_uid` bound to another host, or
-    /// one that could not be bound, is logged and answered `false`.
+    /// one that could not be bound, is logged and answered `false`. Beside it, the `instance_uid`s
+    /// whose bindings made room, whichever the answer.
     pub fn bind(
         &self,
         uid: InstanceUid,
         host: &str,
         routed: impl Fn(&InstanceUid) -> bool,
-    ) -> bool {
+    ) -> (bool, Vec<InstanceUid>) {
         let limits = Limits {
             per_host: self.per_host_bindings,
             total: self.knobs.max_bindings,
@@ -447,16 +448,16 @@ impl PackageCache {
         let mut guard = self.inner();
         let inner = &mut *guard;
         let offers = &inner.offers;
-        let bound = inner.bindings.bind(uid, host, limits, |uid| {
+        let (bound, evicted) = inner.bindings.bind(uid, host, limits, |uid| {
             !routed(uid) && !offers.contains_key(uid)
         });
         if let Bound::Refused(why) = bound {
             if inner.refusals.note(host, Instant::now()) != Note::Count {
                 warn!(agent = %uid, %host, "not forwarding a report: not binding its instance_uid: {why}");
             }
-            return false;
+            return (false, evicted);
         }
-        match inner.bindings.host_of(&uid) {
+        let bound = match inner.bindings.host_of(&uid) {
             Some(bound) if bound == host => true,
             bound => {
                 let bound = bound.unwrap_or("none").to_string();
@@ -468,7 +469,8 @@ impl PackageCache {
                 }
                 false
             }
-        }
+        };
+        (bound, evicted)
     }
 
     /// Records what a `ServerToAgent` relayed to `uid` offers, over a downstream connection whose
@@ -1228,7 +1230,7 @@ mod tests {
     /// Relays an offer of `artifacts` to a new `instance_uid` bound to `h1`.
     fn offer_to_new_agent(cache: &Arc<PackageCache>, artifacts: &[&Artifact]) -> InstanceUid {
         let uid = InstanceUid::default();
-        assert!(cache.bind(uid, "h1", |_| false));
+        assert!(cache.bind(uid, "h1", |_| false).0);
         cache.observe(uid, Some("h1".to_string()), &offer(uid, artifacts));
         uid
     }
@@ -1731,7 +1733,7 @@ mod tests {
         let cache = open_cache(config("127.0.0.1:9".parse().expect("addr"), dir.path(), 16)).await;
         let uid = InstanceUid::default();
         let one = artifact("1", b"x");
-        assert!(cache.bind(uid, "derived-host", |_| false));
+        assert!(cache.bind(uid, "derived-host", |_| false).0);
         cache.observe(uid, None, &offer(uid, &[&one]));
         let inner = cache.inner();
         assert_eq!(inner.bindings.host_of(&uid), Some("derived-host"));

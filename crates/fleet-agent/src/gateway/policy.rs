@@ -49,19 +49,23 @@ impl Bindings {
     /// binding whose `instance_uid` is `idle` makes room, so a host whose Agents come and go is not
     /// shut out by its own past (ADR-0039 clause 6). At `limits.total` the least recently reported
     /// idle binding of any host makes room. Without one nothing is bound.
+    ///
+    /// Also returns the `instance_uid`s whose bindings made room, at most two, so what else the
+    /// Gateway holds for them can go too.
     pub fn bind(
         &mut self,
         uid: InstanceUid,
         host: &str,
         limits: Limits,
         idle: impl Fn(&InstanceUid) -> bool,
-    ) -> Bound {
+    ) -> (Bound, Vec<InstanceUid>) {
         self.tick += 1;
         let tick = self.tick;
         if let Some(binding) = self.bound.get_mut(&uid) {
             binding.reported = tick;
-            return Bound::Kept;
+            return (Bound::Kept, Vec::new());
         }
+        let mut evictions = Vec::new();
         if self.per_host.get(host).copied().unwrap_or(0) >= limits.per_host {
             let evicted = self
                 .bound
@@ -70,11 +74,15 @@ impl Bindings {
                 .min_by_key(|(_, binding)| binding.reported)
                 .map(|(uid, _)| *uid);
             let Some(evicted) = evicted else {
-                return Bound::Refused(
-                    "the host holds as many bindings as max_carried_agents allows, none of them idle",
+                return (
+                    Bound::Refused(
+                        "the host holds as many bindings as max_carried_agents allows, none of them idle",
+                    ),
+                    evictions,
                 );
             };
             self.unbind(&evicted);
+            evictions.push(evicted);
         }
         if self.bound.len() >= limits.total {
             let evicted = self
@@ -84,11 +92,15 @@ impl Bindings {
                 .min_by_key(|(_, binding)| binding.reported)
                 .map(|(uid, _)| *uid);
             let Some(evicted) = evicted else {
-                return Bound::Refused(
-                    "the Gateway holds as many bindings as it may, none of them idle",
+                return (
+                    Bound::Refused(
+                        "the Gateway holds as many bindings as it may, none of them idle",
+                    ),
+                    evictions,
                 );
             };
             self.unbind(&evicted);
+            evictions.push(evicted);
         }
         self.bound.insert(
             uid,
@@ -98,7 +110,7 @@ impl Bindings {
             },
         );
         *self.per_host.entry(host.to_string()).or_default() += 1;
-        Bound::New
+        (Bound::New, evictions)
     }
 
     fn unbind(&mut self, uid: &InstanceUid) {
@@ -152,8 +164,8 @@ mod tests {
     fn the_first_reporting_host_keeps_the_binding() {
         let mut bindings = Bindings::default();
         let uid = InstanceUid::default();
-        assert_eq!(bindings.bind(uid, "a", LIMITS, |_| true), Bound::New);
-        assert_eq!(bindings.bind(uid, "b", LIMITS, |_| true), Bound::Kept);
+        assert_eq!(bindings.bind(uid, "a", LIMITS, |_| true).0, Bound::New);
+        assert_eq!(bindings.bind(uid, "b", LIMITS, |_| true).0, Bound::Kept);
         assert_eq!(bindings.host_of(&uid), Some("a"));
         assert_eq!(bindings.count_of("b"), 0);
     }
@@ -171,7 +183,8 @@ mod tests {
         let third = InstanceUid::default();
         assert_eq!(
             bindings.bind(third, "a", LIMITS, |uid| *uid != second),
-            Bound::New
+            (Bound::New, vec![first]),
+            "its own idle one made room, and is named"
         );
         assert!(
             bindings.host_of(&first).is_none(),
@@ -181,7 +194,7 @@ mod tests {
         assert_eq!(bindings.count_of("a"), 2);
         assert!(matches!(
             bindings.bind(InstanceUid::default(), "a", LIMITS, |_| false),
-            Bound::Refused(_)
+            (Bound::Refused(_), evicted) if evicted.is_empty()
         ));
     }
 
@@ -195,10 +208,10 @@ mod tests {
         bindings.bind(first, "a", LIMITS, |_| true);
         bindings.bind(second, "b", LIMITS, |_| true);
         bindings.bind(third, "c", LIMITS, |_| true);
-        assert_eq!(bindings.bind(first, "a", LIMITS, |_| true), Bound::Kept);
+        assert_eq!(bindings.bind(first, "a", LIMITS, |_| true).0, Bound::Kept);
         assert_eq!(
             bindings.bind(InstanceUid::default(), "d", LIMITS, |_| true),
-            Bound::New
+            (Bound::New, vec![second])
         );
         assert!(
             bindings.host_of(&first).is_some(),
@@ -210,7 +223,9 @@ mod tests {
         );
         assert_eq!(bindings.len(), 3);
         assert!(matches!(
-            bindings.bind(InstanceUid::default(), "e", LIMITS, |_| false),
+            bindings
+                .bind(InstanceUid::default(), "e", LIMITS, |_| false)
+                .0,
             Bound::Refused(_)
         ));
     }

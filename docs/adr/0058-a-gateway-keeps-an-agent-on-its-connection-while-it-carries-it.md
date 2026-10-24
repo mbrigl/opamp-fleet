@@ -1,7 +1,7 @@
 # ADR-0058: A Gateway keeps an Agent on its upstream connection while it carries the Agent, and releases its place when it stops
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-20
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-24
 - **Deciders:** Markus Brigl
 - **Applies to:** the assignment of Agents to upstream connections and its release in `crates/fleet-agent/src/gateway/pool.rs`, the callers that release a place in `crates/fleet-agent/src/gateway/mod.rs`, and the bindings that end one in `crates/fleet-agent/src/gateway/policy.rs` and `crates/fleet-agent/src/gateway/cache.rs`
 - **Supersedes:** [ADR-0015](0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md) clause 7
