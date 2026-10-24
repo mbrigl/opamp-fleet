@@ -7,7 +7,7 @@ resolver = "2"
 members = ["crates/opamp", "crates/fleet-core", "crates/fleet-server", "crates/fleet-agent", "crates/fleet-tools"]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 rust-version = "1.99"
 license = "Apache-2.0"
