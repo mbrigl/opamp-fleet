@@ -56,19 +56,92 @@ pub fn agents_service_name() -> String {
     format!("{PRODUCT_NAME}-agents")
 }
 
-/// The second service's socket, in the runtime directory systemd creates for it, named after it
-/// (`RuntimeDirectory=`), and removes when it stops.
+/// The second service's socket, in a directory named after it that only the process account
+/// writes and its group reaches (ADR-0059 clauses 4 and 6).
+///
+/// Under systemd that is the runtime directory systemd creates for it at every start
+/// (`RuntimeDirectory=`) and removes when it stops. launchd has no such directory, and `/var/run`
+/// is emptied at boot, so on macOS it is a directory `service install` creates for the process
+/// account beside the default data root, under `/Library/Application Support`, where it outlasts
+/// a reboot; a socket left there by a service that did not stop cleanly is replaced at its next
+/// start.
 #[must_use]
 pub fn agents_socket() -> PathBuf {
-    PathBuf::from("/run")
-        .join(agents_service_name())
-        .join("agents.sock")
+    agents_socket_dir().join("agents.sock")
 }
 
-/// How long systemd waits for the second service to stop before it kills it: longer than the
-/// service's own grace for its programs and the drain of their output after it, so a stop ends
-/// them through the service rather than through the manager.
+/// Refuses a root that is the directory of the second service's socket, or lies in it: that
+/// directory is the process account's (ADR-0059 clause 9), and a root there would be handed to
+/// it, or to the Client beneath what the process account may replace. Named the same, by
+/// another case of its letters on macOS, whose file system ignores it by default, or by another
+/// path to the same directory.
+///
+/// # Errors
+/// Returns the refusal, naming the root.
+#[cfg(unix)]
+pub fn check_roots_apart(roots: &[&Path], socket: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(dir) = socket.parent() else {
+        return Ok(());
+    };
+    let key = |path: &Path| {
+        path.components()
+            .map(|c| {
+                let part = c.as_os_str().to_string_lossy();
+                if cfg!(target_os = "macos") {
+                    part.to_lowercase()
+                } else {
+                    part.into_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let named = key(dir);
+    let found = std::fs::metadata(dir).ok().map(|m| (m.dev(), m.ino()));
+    for root in roots {
+        let within = root.ancestors().any(|above| {
+            key(above) == named
+                || found.is_some_and(|found| {
+                    std::fs::metadata(above).is_ok_and(|m| (m.dev(), m.ino()) == found)
+                })
+        });
+        if within {
+            return Err(format!(
+                "{} is, or lies in, {}, the directory of the second service's socket, which is the \
+                 process account's: name another root. Nothing has been installed or written.",
+                root.display(),
+                dir.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn agents_socket_dir() -> PathBuf {
+    PathBuf::from("/Library/Application Support").join(agents_service_name())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn agents_socket_dir() -> PathBuf {
+    PathBuf::from("/run").join(agents_service_name())
+}
+
+/// How long systemd waits for the second service to stop before it kills it (`TimeoutStopSec=`):
+/// longer than the service's own grace for its programs and the drain of their output after it,
+/// so a stop ends them through the service rather than through the manager.
 pub const AGENTS_STOP_TIMEOUT_SECS: u32 = 30;
+
+/// How long launchd waits for a job to exit after `SIGTERM` before it kills it, where its plist
+/// names no `ExitTimeOut` — as the second service's, which `service-manager` renders, does not:
+/// launchd's default, which exceeds the time the second service takes to stop what it started
+/// (ADR-0059 clause 9).
+#[cfg(any(target_os = "macos", all(test, unix)))]
+const LAUNCHD_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How often the removal of the second service asks launchd whether it still holds the job.
+#[cfg(any(target_os = "macos", test))]
+const LAUNCHD_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The name a human reads where the platform has somewhere to put one (ADR-0019): the Windows
 /// services list. systemd shows the unit name as its `Description`, and a launchd job *is* its
@@ -155,8 +228,12 @@ pub struct Agents {
     pub account: String,
     /// That account's uid, which the Client accepts as the socket's peer.
     pub uid: u32,
+    /// That account's primary group, through which the Client's account reaches the socket.
+    pub gid: u32,
     /// The uid of the Client's account, the one peer the second service serves.
     pub client_uid: u32,
+    /// Where it listens: [`agents_socket`].
+    pub socket: PathBuf,
 }
 
 /// The installed command line: `run --service --config … --state-dir …`. The hidden `--service`
@@ -182,7 +259,7 @@ fn service_args(spec: &InstallSpec) -> Vec<OsString> {
     if let Some(agents) = &spec.agents {
         args.extend([
             OsString::from("--agents-socket"),
-            agents_socket().into_os_string(),
+            agents.socket.clone().into_os_string(),
             OsString::from("--process-uid"),
             OsString::from(agents.uid.to_string()),
         ]);
@@ -196,7 +273,7 @@ fn agents_args(agents: &Agents) -> Vec<OsString> {
     vec![
         OsString::from("run"),
         OsString::from("--agents"),
-        agents_socket().into_os_string(),
+        agents.socket.clone().into_os_string(),
         OsString::from("--client-uid"),
         OsString::from(agents.client_uid.to_string()),
     ]
@@ -265,34 +342,137 @@ fn install_service(spec: &InstallSpec) -> Result<(), String> {
         })
 }
 
-/// Registers the second service (ADR-0059 clause 2): a systemd system unit of the Client's own text,
-/// which only a host where [`agents_supported`] holds gets.
+/// Registers the second service (ADR-0059 clause 2), which only a host where [`agents_supported`]
+/// holds gets, and on macOS then the directory of its socket. The registration first, so an
+/// install that may not register a system service is told so before anything else.
 fn install_agents(spec: &InstallSpec, agents: &Agents) -> Result<(), String> {
     manager(spec.level)?
-        .install(ServiceInstallCtx {
-            label: agents_label(),
-            program: spec.program.clone(),
-            args: agents_args(agents),
-            contents: Some(agents_unit(spec, agents)?),
-            username: Some(agents.account.clone()),
-            working_directory: None,
-            environment: None,
-            autostart: true,
-            restart_policy: RESTART_POLICY,
-        })
-        .map_err(|e| format!("cannot install the second service: {e}"))
+        .install(agents_install_ctx(spec, agents, cfg!(target_os = "linux"))?)
+        .map_err(|e| format!("cannot install the second service (system scope needs root): {e}"))?;
+    // The plist is registered `Disabled`: launchd starts nothing until `service start`, by when
+    // the directory is in place.
+    #[cfg(target_os = "macos")]
+    socket_dir(
+        agents
+            .socket
+            .parent()
+            .ok_or_else(|| format!("{} names no directory", agents.socket.display()))?,
+        agents.uid,
+        agents.gid,
+    )?;
+    Ok(())
 }
 
-/// Whether this host can register the second service: a system service under systemd on Linux,
-/// so far (ADR-0059).
+/// What `service-manager` is asked to register for the second service. Under systemd
+/// (`own_unit`) a system unit of the Client's own text (ADR-0059 clause 9); under launchd the plist
+/// the crate renders, as it renders the Client's: `UserName` naming the process account,
+/// `KeepAlive` with `SuccessfulExit` false for the restart policy of ADR-0019 clause 11,
+/// `RunAtLoad`, and `Disabled`, which keeps the install from starting it until `service start`.
+/// It names no `ExitTimeOut`: launchd's default outlasts the service's own stop of its programs.
+fn agents_install_ctx(
+    spec: &InstallSpec,
+    agents: &Agents,
+    own_unit: bool,
+) -> Result<ServiceInstallCtx, String> {
+    Ok(ServiceInstallCtx {
+        label: agents_label(),
+        program: spec.program.clone(),
+        args: agents_args(agents),
+        contents: if own_unit {
+            Some(agents_unit(spec, agents)?)
+        } else {
+            None
+        },
+        username: Some(agents.account.clone()),
+        working_directory: None,
+        environment: None,
+        autostart: true,
+        restart_policy: RESTART_POLICY,
+    })
+}
+
+/// Whether this host can register the second service (ADR-0059): a system service under systemd
+/// on Linux, or under launchd on macOS, where a plist's `UserName` applies in the system domain
+/// alone (launchd.plist(5)).
 #[must_use]
 pub fn agents_supported(level: ServiceLevel) -> bool {
+    let native = ServiceManagerKind::native();
     level == ServiceLevel::System
-        && cfg!(target_os = "linux")
-        && matches!(
-            ServiceManagerKind::native(),
-            Ok(ServiceManagerKind::Systemd)
-        )
+        && ((cfg!(target_os = "linux") && matches!(native, Ok(ServiceManagerKind::Systemd)))
+            || (cfg!(target_os = "macos") && matches!(native, Ok(ServiceManagerKind::Launchd))))
+}
+
+/// Creates the directory of the second service's socket, or takes the one there, and gives it to
+/// the process account and its group, `0750`: only the process account writes it, and the
+/// Client's account, a member of that group (ADR-0059 clause 6), reaches the socket. On macOS
+/// `service install` does this, as root, for what systemd's `RuntimeDirectory=` does for the unit.
+///
+/// The directory is made and opened through its held parent, without following a link, and changed
+/// through its own handle, so nothing placed at its name is followed. Its mode is set after its
+/// owner, whose change may clear it.
+///
+/// # Errors
+/// Returns an error naming the directory when its parent is not held as [`socket_parent`] holds
+/// it, or when the directory cannot be created, opened as a directory, or given to the process
+/// account.
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn socket_dir(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    use std::os::fd::AsRawFd as _;
+    let failed = |e: std::io::Error| format!("cannot prepare {}: {e}", dir.display());
+    let (parent, name) = socket_parent(dir).map_err(failed)?;
+    // SAFETY: a valid descriptor and a NUL-terminated name.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(failed(e));
+        }
+    }
+    let handle =
+        crate::storage::handle::open(parent.as_raw_fd(), &name, crate::storage::handle::DIRECTORY)
+            .map_err(failed)?;
+    // SAFETY: a valid descriptor, held across both calls.
+    if unsafe { libc::fchown(handle.as_raw_fd(), uid, gid) } != 0 {
+        return Err(failed(std::io::Error::last_os_error()));
+    }
+    // SAFETY: as above.
+    if unsafe { libc::fchmod(handle.as_raw_fd(), 0o750) } != 0 {
+        return Err(failed(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// The parent of the socket's directory, held, and the directory's name in it. The parent must be
+/// root's or the running account's and writable by neither its group nor others: the rule a link
+/// on the way to a root is trusted by (`trusted_link`), so the process account, which owns the
+/// directory, can neither move it nor put anything else at its name.
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn socket_parent(dir: &Path) -> std::io::Result<(std::os::fd::OwnedFd, std::ffi::CString)> {
+    use crate::storage::handle;
+    use std::os::unix::ffi::OsStrExt as _;
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "names no directory in a parent",
+        ));
+    };
+    let c = |bytes: &[u8]| std::ffi::CString::new(bytes).map_err(std::io::Error::other);
+    let held = handle::open(
+        libc::AT_FDCWD,
+        &c(parent.as_os_str().as_bytes())?,
+        handle::DIRECTORY,
+    )?;
+    let st = handle::fstat(&held)?;
+    let own = handle::own();
+    if !(st.st_uid == 0 || st.st_uid == own) || handle::mode(&st) & 0o022 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is not root's alone: another account could replace what is in it",
+                parent.display()
+            ),
+        ));
+    }
+    Ok((held, c(name.as_bytes())?))
 }
 
 /// What `service-manager` is handed as the unit's text: the Client's own systemd **system** unit
@@ -414,7 +594,7 @@ pub fn check_unit_account(account: &str) -> Result<(), String> {
             .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '%' | '\\' | '"'))
     {
         return Err(format!(
-            "the account {account:?} cannot be written into a systemd unit"
+            "the account {account:?} cannot be written into a systemd unit or a launchd plist"
         ));
     }
     Ok(())
@@ -511,9 +691,10 @@ fn read_registration(
 }
 
 /// The second service's registration as the Client wrote it (ADR-0059 clause 1):
-/// `/etc/systemd/system/<PRODUCT_NAME>-agents.service` and the account its `User=` names, read
-/// as [`registration`] reads the Client's. `None` wherever no second service can be registered,
-/// and where no file exists.
+/// `/etc/systemd/system/<PRODUCT_NAME>-agents.service` and the account its `User=` names, or
+/// `/Library/LaunchDaemons/<PRODUCT_NAME>-agents.plist` and its `UserName`, read as
+/// [`registration`] reads the Client's. `None` wherever no second service can be registered, and
+/// where no file exists.
 ///
 /// # Errors
 /// Returns an error if the file exists and cannot be read.
@@ -522,21 +703,29 @@ pub fn agents_registration(level: ServiceLevel) -> Result<Option<Registration>, 
         return Ok(None);
     }
     #[cfg(target_os = "linux")]
-    return read_registration(&agents_unit_path(), unit_account);
-    #[cfg(not(target_os = "linux"))]
+    return read_registration(&agents_file(), unit_account);
+    #[cfg(target_os = "macos")]
+    return read_registration(&agents_file(), plist_account);
+    #[cfg(windows)]
     Ok(None)
 }
 
+/// The file the second service's registration is: its unit, or its plist.
 #[cfg(target_os = "linux")]
-fn agents_unit_path() -> PathBuf {
+fn agents_file() -> PathBuf {
     service_manager::systemd_global_dir_path().join(format!("{}.service", agents_service_name()))
+}
+
+#[cfg(target_os = "macos")]
+fn agents_file() -> PathBuf {
+    Path::new("/Library/LaunchDaemons").join(format!("{}.plist", agents_service_name()))
 }
 
 /// Whether a second service is registered at `level`.
 fn agents_registered(level: ServiceLevel) -> bool {
-    #[cfg(target_os = "linux")]
-    return level == ServiceLevel::System && agents_unit_path().exists();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    return level == ServiceLevel::System && agents_file().exists();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = level;
         false
@@ -805,25 +994,153 @@ pub fn uninstall(level: ServiceLevel) -> Result<(), String> {
 }
 
 /// Stops and deregisters the second service, where one is registered (ADR-0059 clause 1,
-/// `--no-process-account`). Returns whether there was one.
+/// `--no-process-account`), and on macOS removes the directory of its socket once launchd holds
+/// it no more, warning where that directory stays. Returns whether there was one.
 ///
 /// # Errors
-/// Returns an error if the manager cannot stop or uninstall it.
+/// Returns an error if the manager cannot stop or uninstall it, or, on macOS, if launchd still
+/// holds it afterwards.
 pub fn remove_agents(level: ServiceLevel) -> Result<bool, String> {
     if !agents_registered(level) {
         return Ok(false);
     }
-    manager(level)?
-        .stop(ServiceStopCtx {
-            label: agents_label(),
-        })
-        .map_err(|e| format!("cannot stop the second service: {e}"))?;
-    manager(level)?
-        .uninstall(ServiceUninstallCtx {
-            label: agents_label(),
-        })
-        .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
+    let manager = manager(level)?;
+    #[cfg(target_os = "macos")]
+    {
+        let name = agents_service_name();
+        // As long as launchd gives the job to exit, and a little more for launchd itself.
+        remove_launchd_job(
+            &*manager,
+            agents_label(),
+            &mut || launchd_loaded(&name),
+            LAUNCHD_EXIT_TIMEOUT + std::time::Duration::from_secs(5),
+        )?;
+        // What systemd removes with the runtime directory, removed here once the job is gone.
+        if let Err(e) = remove_socket_dir(&agents_socket()) {
+            println!("warning: {e}");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        manager
+            .stop(ServiceStopCtx {
+                label: agents_label(),
+            })
+            .map_err(|e| format!("cannot stop the second service: {e}"))?;
+        manager
+            .uninstall(ServiceUninstallCtx {
+                label: agents_label(),
+            })
+            .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
+    }
     Ok(true)
+}
+
+/// Stops and deregisters a launchd job, and waits until launchd holds it no more (ADR-0059
+/// clause 1).
+///
+/// A failed stop is passed over only where launchd holds no such job — one registered `Disabled`
+/// and never started is not loaded, and `launchctl stop` does not know it; a loaded job that
+/// could not be stopped is reported. `service-manager` passes over what `launchctl remove`
+/// answers, and the job ends asynchronously, so its absence afterwards is what says it was
+/// removed: it is waited for `within`, and a job launchd still holds then is reported.
+///
+/// # Errors
+/// Returns an error if a loaded job cannot be stopped, the manager cannot uninstall it, launchd
+/// cannot be asked, or launchd still holds it after `within`.
+#[cfg(any(target_os = "macos", test))]
+fn remove_launchd_job(
+    manager: &dyn ServiceManager,
+    label: ServiceLabel,
+    loaded: &mut dyn FnMut() -> Result<bool, String>,
+    within: std::time::Duration,
+) -> Result<(), String> {
+    if let Err(e) = manager.stop(ServiceStopCtx {
+        label: label.clone(),
+    }) {
+        if loaded()? {
+            return Err(format!("cannot stop the second service: {e}"));
+        }
+    }
+    let name = label.to_qualified_name();
+    manager
+        .uninstall(ServiceUninstallCtx { label })
+        .map_err(|e| format!("cannot uninstall the second service: {e}"))?;
+    let until = std::time::Instant::now() + within;
+    while loaded()? {
+        if std::time::Instant::now() >= until {
+            return Err(format!(
+                "launchd still holds {name} {}s after its removal (`launchctl print \
+                 system/{name}`)",
+                within.as_secs()
+            ));
+        }
+        std::thread::sleep(LAUNCHD_POLL);
+    }
+    Ok(())
+}
+
+/// Whether launchd holds the job `label` in the system domain: `launchctl print system/<label>`
+/// succeeds for a loaded job, running or not, and fails for one it does not know.
+///
+/// # Errors
+/// Returns an error if `launchctl` cannot be run.
+#[cfg(target_os = "macos")]
+fn launchd_loaded(label: &str) -> Result<bool, String> {
+    use std::process::Stdio;
+    std::process::Command::new("launchctl")
+        .arg("print")
+        .arg(format!("system/{label}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .map_err(|e| format!("cannot run launchctl: {e}"))
+}
+
+/// Removes the second service's socket — a link at its name as a link — and then its directory,
+/// which `service install` made for it on macOS. Both go by their names in held directories, the
+/// directory's parent held as [`socket_parent`] holds it, so no link is followed to them. A
+/// directory the process account left anything else in stays, and is named.
+///
+/// # Errors
+/// Returns what was left in place, and why.
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn remove_socket_dir(socket: &Path) -> Result<(), String> {
+    use crate::storage::handle;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    let Some(dir) = socket.parent() else {
+        return Ok(());
+    };
+    let left =
+        |path: &Path, e: std::io::Error| format!("{} was left in place: {e}", path.display());
+    let gone = |result: libc::c_int| match result {
+        0 => Ok(()),
+        _ => match std::io::Error::last_os_error() {
+            e if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            e => Err(e),
+        },
+    };
+    let (parent, name) = socket_parent(dir).map_err(|e| left(socket, e))?;
+    let held = match handle::open(parent.as_raw_fd(), &name, handle::DIRECTORY) {
+        Ok(held) => held,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(left(socket, e)),
+    };
+    let file = socket
+        .file_name()
+        .map(|file| std::ffi::CString::new(file.as_bytes()))
+        .transpose()
+        .map_err(|e| left(socket, std::io::Error::other(e)))?
+        .ok_or_else(|| left(socket, std::io::Error::other("names no file")))?;
+    // SAFETY: a valid descriptor and a NUL-terminated name; unlinkat(2) follows no link at it.
+    gone(unsafe { libc::unlinkat(held.as_raw_fd(), file.as_ptr(), 0) })
+        .map_err(|e| left(socket, e))?;
+    // SAFETY: as above; only an empty directory is removed.
+    gone(unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) })
+        .map_err(|e| left(dir, e))
 }
 
 /// The installed service, implementing the [`ServiceControl`] seam.
@@ -847,11 +1164,22 @@ impl NativeService {
     }
 }
 
-/// What `start` starts: the Client alone. Where a second service is registered, the Client's unit
-/// wants it (`Wants=`), so the manager starts it with the Client, and neither waits for the other
-/// (ADR-0059 clause 2).
-fn started() -> Vec<ServiceLabel> {
-    vec![label()]
+/// Whether the Client's registration starts the second service with it: systemd's `Wants=` in the
+/// Client's unit does (ADR-0059 clause 9); a launchd plist names no other job.
+const PULLED_IN: bool = cfg!(target_os = "linux");
+
+/// What `start` starts, in order. Where a second service is registered and the Client's unit wants
+/// it (`Wants=`, `pulled_in`), the Client alone: the manager starts the second service with it.
+/// Where nothing pulls it in — launchd — the second service first, then the Client (ADR-0059
+/// clause 2). Neither waits for the other: a Client that starts first reaches the second service
+/// once it is up.
+fn started(agents: bool, pulled_in: bool) -> Vec<ServiceLabel> {
+    let mut labels = Vec::new();
+    if agents && !pulled_in {
+        labels.push(agents_label());
+    }
+    labels.push(label());
+    labels
 }
 
 /// What `stop` stops, in order: the Client, then the second service where one is registered —
@@ -867,10 +1195,15 @@ fn stopped(agents: bool) -> Vec<ServiceLabel> {
 /// The state is the Client's.
 impl ServiceControl for NativeService {
     fn start(&self) -> Result<(), String> {
-        for label in started() {
+        for label in started((self.agents_registered)(self.level), PULLED_IN) {
+            let which = if label == agents_label() {
+                "the second service"
+            } else {
+                "the service"
+            };
             (self.manager)(self.level)?
                 .start(ServiceStartCtx { label })
-                .map_err(|e| format!("cannot start the service: {e}"))?;
+                .map_err(|e| format!("cannot start {which}: {e}"))?;
         }
         Ok(())
     }
@@ -1298,7 +1631,9 @@ mod tests {
         Agents {
             account: "opamp-fleet-agents".to_string(),
             uid: 997,
+            gid: 997,
             client_uid: 998,
+            socket: PathBuf::from("/run/opamp-fleet-agents/agents.sock"),
         }
     }
 
@@ -1310,7 +1645,8 @@ mod tests {
     }
 
     /// The second service is the product's name with `-agents`, one token that every backend
-    /// renders alike, and its socket lives in the runtime directory named after it.
+    /// renders alike, and its socket lives in a directory named after it: the runtime directory
+    /// under systemd, one that outlasts a reboot on macOS, where `/var/run` is emptied at boot.
     /// Verifies: ADR-0059
     #[test]
     fn the_second_service_is_named_after_the_product() {
@@ -1318,9 +1654,177 @@ mod tests {
         let label = agents_label();
         assert_eq!(label.to_qualified_name(), agents_service_name());
         assert_eq!(label.to_script_name(), agents_service_name());
+        #[cfg(target_os = "linux")]
         assert_eq!(
             agents_socket(),
             PathBuf::from("/run/opamp-fleet-agents/agents.sock")
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            agents_socket(),
+            PathBuf::from("/Library/Application Support/opamp-fleet-agents/agents.sock")
+        );
+    }
+
+    fn macos_agents() -> Agents {
+        Agents {
+            account: "_opamp-fleet-agents".to_string(),
+            socket: PathBuf::from("/Library/Application Support/opamp-fleet-agents/agents.sock"),
+            ..agents()
+        }
+    }
+
+    /// Under launchd the second service's plist is the one `service-manager` renders, as it
+    /// renders the Client's: the same program as `run --agents` serving the Client's uid, the
+    /// process account in `UserName`, the Client's restart policy, and started by `service start`,
+    /// not by the install. Under systemd it is the unit the Client writes.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_second_services_plist_is_the_one_service_manager_renders() {
+        let ctx = agents_install_ctx(&with_agents(), &macos_agents(), false).expect("ctx");
+        assert!(ctx.contents.is_none(), "{:?}", ctx.contents);
+        assert_eq!(ctx.label, agents_label());
+        assert_eq!(
+            ctx.program,
+            PathBuf::from("/opt/opamp-fleet/current/supervisor")
+        );
+        assert_eq!(ctx.args, agents_args(&macos_agents()));
+        assert_eq!(ctx.username.as_deref(), Some("_opamp-fleet-agents"));
+        assert!(
+            ctx.autostart,
+            "RunAtLoad, held back by Disabled until service start"
+        );
+        assert_eq!(ctx.restart_policy, RESTART_POLICY);
+        assert_eq!(
+            (ctx.working_directory, ctx.environment),
+            (None, None),
+            "nothing the Client's plist does not carry either"
+        );
+
+        let ctx = agents_install_ctx(&with_agents(), &agents(), true).expect("ctx");
+        assert_eq!(
+            ctx.contents,
+            Some(agents_unit(&with_agents(), &agents()).expect("unit"))
+        );
+    }
+
+    /// launchd's default exit timeout, which the second service's plist keeps, outlasts the time
+    /// the service takes to stop what it started: the grace its programs have to end, and the
+    /// drain of their output after it. A stop ends them through the service, not through launchd.
+    /// Not on Windows, which has no second service's channel to read the grace from.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn launchds_default_exit_timeout_outlasts_the_second_services_stop() {
+        use crate::supervisor::channel::{CLOSE_GRACE, OUTPUT_DRAIN};
+        assert_eq!(LAUNCHD_EXIT_TIMEOUT, std::time::Duration::from_secs(20));
+        assert!(CLOSE_GRACE + OUTPUT_DRAIN < LAUNCHD_EXIT_TIMEOUT);
+    }
+
+    /// A re-registration reads the process account back from the plist as `service-manager`
+    /// writes it — through the `plist` crate, which escapes what XML must — and as its `start`
+    /// rewrites it without `Disabled`: a name with markup in it comes back as it was given.
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_process_account_is_read_back_from_the_plist_service_manager_writes() {
+        use plist::{Dictionary, Value};
+        for account in ["_opamp-fleet-agents", "_a&b<c>'d"] {
+            let mut keep_alive = Dictionary::new();
+            keep_alive.insert("SuccessfulExit".to_string(), Value::Boolean(false));
+            let mut dict = Dictionary::new();
+            dict.insert("Label".to_string(), Value::String(agents_service_name()));
+            dict.insert(
+                "ProgramArguments".to_string(),
+                Value::Array(vec![Value::String("/opt/a&b/supervisor".to_string())]),
+            );
+            dict.insert("KeepAlive".to_string(), Value::Dictionary(keep_alive));
+            dict.insert("UserName".to_string(), Value::String(account.to_string()));
+            dict.insert("RunAtLoad".to_string(), Value::Boolean(true));
+            dict.insert("Disabled".to_string(), Value::Boolean(true));
+            let mut plist = Value::Dictionary(dict);
+            for _ in ["installed", "started"] {
+                let mut xml = Vec::new();
+                plist.to_writer_xml(&mut xml).expect("xml");
+                let xml = String::from_utf8(xml).expect("utf-8");
+                assert_eq!(plist_account(&xml).as_deref(), Some(account), "{xml}");
+                if let Value::Dictionary(dict) = &mut plist {
+                    dict.remove("Disabled");
+                }
+            }
+        }
+    }
+
+    /// The Client's plist, which `service-manager` renders from the command line, names the
+    /// socket and the process account's uid where a process account is registered, as its unit
+    /// does under systemd (ADR-0059 clause 8).
+    /// Verifies: ADR-0059
+    #[test]
+    fn the_clients_command_line_names_the_second_service() {
+        let spec = InstallSpec {
+            agents: Some(macos_agents()),
+            ..system_spec("/Library/Application Support/opamp-fleet")
+        };
+        let args = service_args(&spec);
+        let tail: Vec<&std::ffi::OsStr> = args[args.len() - 4..]
+            .iter()
+            .map(OsString::as_os_str)
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                "--agents-socket",
+                "/Library/Application Support/opamp-fleet-agents/agents.sock",
+                "--process-uid",
+                "997"
+            ]
+            .map(std::ffi::OsStr::new)
+        );
+        assert!(!service_args(&system_spec("/opt/opamp-fleet"))
+            .iter()
+            .any(|a| a.to_string_lossy().contains("agents")));
+    }
+
+    /// The directory of the socket is the process account's, `0750`: it alone writes there, and
+    /// the Client's account reaches the socket through its group. One already there is taken and
+    /// given the same; a link at its name is not followed. Run unprivileged, the test's own
+    /// account and group stand in for the process account's.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_sockets_directory_is_the_process_accounts() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_dir_path = dir.path().join("opamp-fleet-agents");
+        // SAFETY: geteuid(2) and getegid(2) cannot fail and touch no memory.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        socket_dir(&socket_dir_path, uid, gid).expect("created");
+        let meta = std::fs::metadata(&socket_dir_path).expect("metadata");
+        assert_eq!(
+            (meta.mode() & 0o7777, meta.uid(), meta.gid()),
+            (0o750, uid, gid)
+        );
+        std::fs::set_permissions(&socket_dir_path, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod");
+        socket_dir(&socket_dir_path, uid, gid).expect("taken");
+        assert_eq!(
+            std::fs::metadata(&socket_dir_path)
+                .expect("metadata")
+                .mode()
+                & 0o7777,
+            0o750
+        );
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("mkdir");
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&elsewhere, &linked).expect("a link");
+        assert!(socket_dir(&linked, uid, gid).is_err());
+        assert_eq!(
+            std::fs::metadata(&elsewhere).expect("metadata").mode() & 0o7777,
+            0o755,
+            "the link's target is left as it was"
         );
     }
 
@@ -1467,17 +1971,29 @@ mod tests {
         }
     }
 
-    /// `start` starts the Client alone, whose unit wants the second service, and `stop` stops the
-    /// Client and then the second service where one is registered — the second even when the
-    /// Client's stop failed, which `stop` still reports (ADR-0059 clause 2).
+    /// `start` starts the Client alone where its unit wants the second service, and the second
+    /// service first where nothing does — launchd — and `stop` stops the Client and then the
+    /// second service where one is registered — the second even when the Client's stop failed,
+    /// which `stop` still reports (ADR-0059 clause 2).
     /// Verifies: ADR-0059
     #[test]
     fn start_starts_the_client_and_stop_stops_both() {
         let client = label().to_string();
         let agents = agents_label().to_string();
+        assert_eq!(started(true, true), vec![label()], "systemd's Wants=");
+        assert_eq!(
+            started(true, false),
+            vec![agents_label(), label()],
+            "launchd"
+        );
+        assert_eq!(started(false, false), vec![label()]);
         let with_agents = recording(ServiceLevel::System, |_| true);
         with_agents.start().expect("start");
-        assert_eq!(Recording::asked(), vec![format!("start {client}")]);
+        let mut start = vec![format!("start {client}")];
+        if !PULLED_IN {
+            start.insert(0, format!("start {agents}"));
+        }
+        assert_eq!(Recording::asked(), start);
         let refused = with_agents.stop().expect_err("the Client's stop failed");
         assert!(refused.contains("cannot stop the service"), "{refused}");
         assert_eq!(
@@ -1492,6 +2008,164 @@ mod tests {
             Recording::asked(),
             vec![format!("start {client}"), format!("stop {client}")]
         );
+    }
+
+    /// The removal of a launchd job passes over a failed stop only where launchd holds no such
+    /// job, and holds the removal done only once launchd holds it no more, waiting for that a
+    /// while. `Recording` refuses to stop the Client's label, which stands for a job that cannot
+    /// be stopped; the second service's it stops.
+    /// Verifies: ADR-0059
+    #[test]
+    fn a_launchd_job_is_removed_only_once_launchd_holds_it_no_more() {
+        let within = std::time::Duration::from_secs(5);
+        let answers = |answers: Vec<bool>| {
+            let mut answers = answers.into_iter();
+            move || Ok(answers.next().expect("asked once more than expected"))
+        };
+        let client = label().to_string();
+        let agents = agents_label().to_string();
+
+        remove_launchd_job(
+            &Recording,
+            label(),
+            &mut answers(vec![false, false]),
+            within,
+        )
+        .expect("never loaded: nothing to stop");
+        assert_eq!(
+            Recording::asked(),
+            vec![format!("stop {client}"), format!("uninstall {client}")]
+        );
+
+        let refused = remove_launchd_job(&Recording, label(), &mut answers(vec![true]), within)
+            .expect_err("loaded, and not stopped");
+        assert!(
+            refused.contains("cannot stop the second service"),
+            "{refused}"
+        );
+        assert_eq!(Recording::asked(), vec![format!("stop {client}")]);
+
+        remove_launchd_job(
+            &Recording,
+            agents_label(),
+            &mut answers(vec![true, false]),
+            within,
+        )
+        .expect("gone after a while");
+        assert_eq!(
+            Recording::asked(),
+            vec![format!("stop {agents}"), format!("uninstall {agents}")]
+        );
+
+        let held = remove_launchd_job(
+            &Recording,
+            agents_label(),
+            &mut || Ok(true),
+            std::time::Duration::ZERO,
+        )
+        .expect_err("launchd holds it still");
+        assert!(
+            held.contains("launchd still holds opamp-fleet-agents"),
+            "{held}"
+        );
+        let _ = Recording::asked();
+
+        let unasked = remove_launchd_job(
+            &Recording,
+            label(),
+            &mut || Err("cannot run launchctl".to_string()),
+            within,
+        )
+        .expect_err("launchd cannot be asked");
+        assert_eq!(unasked, "cannot run launchctl");
+        let _ = Recording::asked();
+    }
+
+    /// No root is the socket's directory or lies in it: named as it is, by a path through a link,
+    /// or beneath it. A root beside it, or one it lies in, is the operator's choice.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn no_root_is_the_sockets_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_dir = dir.path().join("opamp-fleet-agents");
+        let socket = socket_dir.join("agents.sock");
+        let beside = dir.path().join("opamp-fleet");
+        let inside = socket_dir.join("data");
+        for root in [
+            &socket_dir,
+            &inside,
+            &dir.path().join("opamp-fleet-agents/"),
+        ] {
+            let refused =
+                check_roots_apart(&[&beside, root], &socket).expect_err("not yet there, by name");
+            assert!(refused.contains("the second service's socket"), "{refused}");
+        }
+        check_roots_apart(&[&beside, dir.path()], &socket).expect("beside it, or above it");
+
+        std::fs::create_dir(&socket_dir).expect("mkdir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&socket_dir, &link).expect("a link");
+        check_roots_apart(&[&link], &socket).expect_err("the same directory by another path");
+        check_roots_apart(&[&link.join("data")], &socket).expect_err("in it by another path");
+        check_roots_apart(&[&beside], &socket).expect("beside it");
+        #[cfg(target_os = "macos")]
+        check_roots_apart(&[&dir.path().join("OPAMP-fleet-agents")], &socket)
+            .expect_err("another case of its letters");
+    }
+
+    /// The socket's directory goes with the second service: the socket first — a link at its
+    /// name as a link — then the directory; one the process account left anything else in stays,
+    /// and is named.
+    /// Verifies: ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_sockets_directory_goes_with_the_second_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_dir = dir.path().join("opamp-fleet-agents");
+        let socket = socket_dir.join("agents.sock");
+        std::fs::create_dir(&socket_dir).expect("mkdir");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        remove_socket_dir(&socket).expect("removed");
+        assert!(!socket_dir.exists());
+        drop(listener);
+        remove_socket_dir(&socket).expect("nothing left to remove");
+
+        std::fs::create_dir(&socket_dir).expect("mkdir");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"x").expect("write");
+        std::os::unix::fs::symlink(&elsewhere, &socket).expect("a link");
+        std::fs::write(socket_dir.join("left"), b"x").expect("write");
+        let left = remove_socket_dir(&socket).expect_err("something else is there");
+        assert!(left.contains(&socket_dir.display().to_string()), "{left}");
+        assert!(
+            !socket.exists() && elsewhere.exists(),
+            "the link alone is gone"
+        );
+    }
+
+    /// The socket's directory is made and removed only in a parent no other account can write: in
+    /// one writable by others, where another account could swap the directory or put a link at
+    /// its name, neither is done.
+    /// Verifies: ADR-0054, ADR-0059
+    #[cfg(unix)]
+    #[test]
+    fn the_sockets_directory_is_touched_only_in_a_parent_no_other_account_writes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let open = dir.path().join("open");
+        std::fs::create_dir(&open).expect("mkdir");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        let socket_dir_path = open.join("opamp-fleet-agents");
+        // SAFETY: geteuid(2) and getegid(2) cannot fail and touch no memory.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        assert!(socket_dir(&socket_dir_path, uid, gid).is_err());
+        assert!(!socket_dir_path.exists(), "nothing made");
+
+        std::fs::create_dir(&socket_dir_path).expect("mkdir");
+        let left = remove_socket_dir(&socket_dir_path.join("agents.sock")).expect_err("refused");
+        assert!(left.contains("agents.sock"), "{left}");
+        assert!(socket_dir_path.exists(), "nothing removed");
     }
 
     /// Where a process account is registered, the Client's unit wants the second service and starts
@@ -1536,14 +2210,14 @@ mod tests {
         let Some(crate::cli::Command::Run(run)) = client.cli.command else {
             panic!("run");
         };
-        assert_eq!(run.agents_socket, Some(agents_socket()));
+        assert_eq!(run.agents_socket, Some(agents().socket));
         assert_eq!(run.process_uid, Some(997));
         let second = crate::cli::parse_from(words(agents_args(&agents())))
             .expect("the second service's line parses");
         let Some(crate::cli::Command::Run(run)) = second.cli.command else {
             panic!("run");
         };
-        assert_eq!(run.agents, Some(agents_socket()));
+        assert_eq!(run.agents, Some(agents().socket));
         assert_eq!(run.client_uid, Some(998));
     }
 

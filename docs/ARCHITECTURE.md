@@ -177,8 +177,8 @@ core module names an adapter or a technology, and when a module has no role.
   `supervisor run --agents`, through `supervisor::channel`, which holds the private protocol, the
   service and the Client's end of its socket. The registry hands every plugin the one `Spawner`
   of the run, which `service::runtime` chooses once from the Client's command line — the unit
-  `service install --process-account` writes names the second service's socket there — and
-  hands `build_engine`. The Engine keeps that registry behind the port `PluginRegistry` of
+  or plist `service install --process-account` writes names the second service's socket there —
+  and hands `build_engine`. The Engine keeps that registry behind the port `PluginRegistry` of
   `supervisor::ports`, so a Supervisor a Supervisor-set apply starts later starts its program
   the same way, and a Supervisor it purges has the same `Spawner` remove first what its
   programs wrote under their own account, in the directory the purge first moved aside to a name
