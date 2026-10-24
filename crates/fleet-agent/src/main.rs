@@ -724,8 +724,8 @@ fn install(
     #[cfg(unix)]
     let finished = finished.map_err(|e| match halted.map(manager::describe_halted) {
         Some(Some(stopped)) => format!(
-            "{e}\nThis install stopped {stopped} before it changed an account; nothing starts \
-             what it stopped until `supervisor service start` does."
+            "{e}\nThis install stopped {stopped} before it changed an account, and no later \
+             install starts it again: `supervisor service start` does."
         ),
         _ => e,
     });

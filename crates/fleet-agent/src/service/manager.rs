@@ -1225,23 +1225,47 @@ pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, HaltError> {
 /// Stops the Client, then the second service, and waits until each has stopped and its process
 /// has ended, up to [`STOPPING`] each, so that nothing runs under an account whose files an
 /// install is about to re-own (ADR-0059 clause 16). Returns which ran: what systemd reports
-/// active or activating, what launchd holds with a process.
+/// active or activating, what launchd holds with a process. A job launchd holds without one —
+/// waiting to be started again — is removed too, or launchd could start it under the former
+/// account meanwhile.
 ///
 /// # Errors
 /// Returns why one could not be stopped, or that one had not ended within [`STOPPING`], with what
-/// this stopped; that is started again, and nothing is changed.
+/// this stopped; what ran is started again — the one whose stop failed among them, whose stop may
+/// have taken it down later — and nothing is changed.
 #[cfg(unix)]
 pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, HaltError> {
     halt_with(
         &mut |label| {
             let now = activity(label)?;
-            if now != Activity::Stopped {
-                stop_for_change(label)?;
+            let ran = matches!(now, Activity::Running | Activity::Starting);
+            if now == Activity::Stopped && !held(label)? {
+                return Ok(false);
             }
-            Ok(matches!(now, Activity::Running | Activity::Starting))
+            match stop_for_change(label) {
+                Ok(()) => Ok(ran),
+                Err(e) if ran => Err(match start_for_change(level, label) {
+                    Ok(()) => format!("{e}; it was started again"),
+                    Err(again) => format!("{e}; and it cannot be started again: {again}"),
+                }),
+                Err(e) => Err(e),
+            }
         },
         &mut |label| start_for_change(level, label),
     )
+}
+
+/// Whether the manager holds `label` though it runs no process for it: a launchd job loaded and
+/// waiting. systemd's stop of a stopped unit has nothing to end.
+#[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_wraps)]
+fn held(_: &ServiceLabel) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn held(label: &ServiceLabel) -> Result<bool, String> {
+    launchd_loaded(&label.to_qualified_name())
 }
 
 /// Starts again what [`halt_for_change`] stopped, once the change has succeeded ([`resumed`]): the
