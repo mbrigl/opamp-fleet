@@ -62,15 +62,21 @@ impl Registry {
         &self.cache
     }
 
-    /// Removes the routes of `uids` whose bindings ended, unless one is bound again by now
-    /// (ADR-0060 clause 3): the Server's replies for them reach no downstream connection.
-    pub fn forget(&self, uids: &[InstanceUid]) {
+    /// Ends the bindings of every host whose kept certificate end has passed by `now`, or whose
+    /// certificate `revoked` says the revocation list names, and removes their routes under the
+    /// same lock a bind takes, so no report binds an ended `instance_uid` anew before its old route
+    /// is gone (ADR-0060 clause 3). Returns what [`PackageCache::end_certificates`] does.
+    pub fn end_certificates(
+        &self,
+        now: i64,
+        revoked: impl Fn(&End) -> bool,
+    ) -> (Vec<InstanceUid>, Option<crate::gateway::cache::Ticket>) {
         let mut routes = self.routes.lock().expect("registry lock");
-        for uid in uids {
-            if !self.cache.is_bound(uid) {
-                routes.remove(uid);
-            }
+        let (ended, ticket) = self.cache.end_certificates(now, revoked);
+        for uid in &ended {
+            routes.remove(uid);
         }
+        (ended, ticket)
     }
 
     /// Binds `uid` to `speaker` on its first report and, once the store holds what the binding

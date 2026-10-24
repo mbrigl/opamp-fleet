@@ -344,6 +344,17 @@ enum Answer {
     Nothing,
 }
 
+/// Removes `uid`'s current offer, recorded for `host`, whose binding went.
+fn drop_offer(inner: &mut Inner, uid: InstanceUid, host: &str) {
+    inner.offers.remove(&uid);
+    if let Some(offered) = inner.by_host.get_mut(host) {
+        offered.remove(&uid);
+        if offered.is_empty() {
+            inner.by_host.remove(host);
+        }
+    }
+}
+
 /// Deletes a file; `true` once it is gone.
 fn remove_file(path: &Path) -> bool {
     match std::fs::remove_file(path) {
@@ -663,6 +674,9 @@ impl PackageCache {
             return inner.bindings.holds(&uid, host);
         }
         let changes = inner.bindings.abort(&uid);
+        if !changes.is_empty() {
+            drop_offer(&mut inner, uid, host);
+        }
         inner.queue.extend(changes);
         if inner.refusals.note(host, Instant::now()) != Note::Count {
             warn!(agent = %uid, %host, "not forwarding a report: the bindings' store cannot be written");
@@ -770,16 +784,8 @@ impl PackageCache {
         let mut uids = Vec::new();
         for (host, held) in ended {
             log_ended(&host, held.len());
-            if let Some(offered) = inner.by_host.get_mut(&host) {
-                for uid in &held {
-                    offered.remove(uid);
-                }
-                if offered.is_empty() {
-                    inner.by_host.remove(&host);
-                }
-            }
             for uid in &held {
-                inner.offers.remove(uid);
+                drop_offer(&mut inner, *uid, &host);
                 inner.queue.push(Change::Unbound(*uid));
             }
             uids.extend(held);
@@ -856,8 +862,9 @@ impl PackageCache {
             .collect();
         let start = {
             let mut inner = self.inner();
-            let bound = inner.bindings.host_of(&uid).map(str::to_string);
-            if bound.as_deref() != Some(host.as_str()) {
+            // Recorded only for a binding the store holds: never for one still being written.
+            if !inner.bindings.holds(&uid, &host) {
+                let bound = inner.bindings.host_of(&uid).map(str::to_string);
                 if inner.refusals.note(&host, Instant::now()) != Note::Count {
                     warn!(
                         agent = %uid, bound = bound.as_deref().unwrap_or("none"), relayed_for = %host,
@@ -2331,5 +2338,38 @@ mod tests {
         assert!(cache
             .unreadable()
             .is_some_and(|why| why.contains("cannot rewrite")));
+    }
+
+    /// An offer relayed while an `instance_uid`'s binding is still being written is not recorded,
+    /// and a binding the store could not take leaves no offer behind; once the store holds the
+    /// binding, its offers are recorded.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn an_offer_is_recorded_only_for_a_binding_the_store_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_binding(dir.path(), 3).await;
+        let one = artifact("1", b"x");
+        cache.inner().refused.insert(one.hash.clone());
+        let uid = InstanceUid::default();
+        let end = End {
+            not_after: i64::MAX,
+            issuer: "ab".repeat(32),
+            serial: "1".to_string(),
+        };
+        let (begun, _) = cache.begin_bind(uid, "h1", &end, |_| false);
+        assert!(matches!(begun, Begun::Writing(_)));
+        cache.observe(uid, Some("h1".to_string()), &offer(uid, &[&one]));
+        assert_eq!(
+            cache.offered_to("h1", &one.path),
+            None,
+            "still being written"
+        );
+        assert!(!cache.finish_bind(uid, "h1", false));
+        assert_eq!(cache.offered_to("h1", &one.path), None);
+        assert!(cache.inner().offers.is_empty());
+
+        assert!(cache.bind(uid, "h1", |_| false).await.0);
+        cache.observe(uid, Some("h1".to_string()), &offer(uid, &[&one]));
+        assert_eq!(cache.offered_to("h1", &one.path), Some(one));
     }
 }

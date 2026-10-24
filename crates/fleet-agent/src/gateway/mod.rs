@@ -682,9 +682,10 @@ impl Forwarding {
     /// writes their removals.
     async fn end_certificates(&self, now: i64) {
         let cache = self.registry.cache();
-        let (ended, ticket) =
-            cache.end_certificates(now, |end| self.revocations.lists(&end.issuer, &end.serial));
-        self.registry.forget(&ended);
+        let (ended, ticket) = self
+            .registry
+            .end_certificates(now, |end| self.revocations.lists(&end.issuer, &end.serial));
+        // An `instance_uid` bound anew since keeps the place its new route stands on.
         self.pool.release(ended);
         if let Some(ticket) = ticket {
             if !cache.written(ticket).await {
@@ -2000,5 +2001,51 @@ mod tests {
             "ended at start"
         );
         assert_eq!(stored(dir.path()).host_of(&soon), None);
+    }
+
+    /// Ending a host's bindings takes their routes with them under the lock a bind takes: once
+    /// another host begins to bind the `instance_uid`, the ended host's socket receives none of
+    /// the Server's replies, even when that binding cannot be written. The new host's place
+    /// upstream is its own.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn an_ended_hosts_route_is_gone_before_another_host_binds_its_instance_uid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let in_a_year = time::OffsetDateTime::now_utc() + time::Duration::days(365);
+        let owner = certificate_until("ended-host", in_a_year, &[5]);
+        let uid = InstanceUid::default();
+        let (owner_tx, mut owner_rx) = mpsc::channel(64);
+        let mut socket = downstream(Transport::WebSocket, Some(owner_tx), owner.clone());
+        forwarding
+            .forward_from_socket(&mut socket, report(uid))
+            .await;
+        assert!(forwarding.registry.routes(&uid));
+
+        let id = revocations::certificate_id(&owner).expect("id");
+        forwarding.revocations.replace(HashSet::from([id]), None);
+        let (ended, _) = forwarding.registry.end_certificates(cache::now(), |end| {
+            forwarding.revocations.lists(&end.issuer, &end.serial)
+        });
+        assert_eq!(ended, vec![uid]);
+        assert!(!forwarding.registry.routes(&uid), "its route went with it");
+
+        let next = certificate_naming("next-host");
+        let (begun, _) = forwarding.registry.cache().begin_bind(
+            uid,
+            &cache::speaker_of(&next).expect("host"),
+            &cache::end_of(&next).expect("end"),
+            |_| false,
+        );
+        assert!(
+            matches!(begun, cache::Begun::Writing(_)),
+            "bound anew, pending"
+        );
+        assert!(!forwarding
+            .registry
+            .cache()
+            .finish_bind(uid, "next-host", false));
+        forwarding.registry.deliver(uid, reply_for(uid)).await;
+        assert!(owner_rx.try_recv().is_err(), "the ended host hears nothing");
     }
 }
