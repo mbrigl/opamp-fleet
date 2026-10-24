@@ -780,9 +780,10 @@ mod tests {
         }
         drop(held);
         assert!(audit.drain(Duration::from_secs(10)));
-        assert_eq!(
-            counting.1.load(Ordering::SeqCst),
-            1,
+        // The writer may already be in an append of the first entry when the rest queue; the
+        // rest go together. A sync per line would be a hundred.
+        assert!(
+            counting.1.load(Ordering::SeqCst) <= 2,
             "a hundred queued entries took a sync each"
         );
         let lines = counting.0.lines();
@@ -798,6 +799,40 @@ mod tests {
             .collect();
         assert_eq!(order, (1..=100).zip(0..100).collect::<Vec<_>>());
         assert_eq!(chain_of(&counting.0), Ok(100));
+    }
+
+    /// A batch is counted against the file it goes into: a file full before the batch ends is
+    /// closed there, never filled past its limit by more than the line that reached it.
+    /// Verifies: ADR-0022, ADR-0037
+    #[test]
+    fn a_batch_rotates_where_a_single_line_would() {
+        const MAX: u64 = 1_000;
+        let memory = Memory::default();
+        let limits = Limits {
+            max_file_bytes: MAX,
+            keep_files: 100,
+        };
+        let audit = AuditLog::start(Box::new(memory.clone()), limits, clock()).expect("start");
+        let held = memory.0.lock().expect("lock");
+        for n in 0..50 {
+            audit
+                .record(Entry::new("issuance.signed", "issued").with("n", n))
+                .expect("record");
+        }
+        drop(held);
+        assert!(audit.drain(Duration::from_secs(10)));
+        let files = memory.0.lock().expect("lock").clone();
+        let longest = files
+            .iter()
+            .flat_map(|(_, lines)| lines.iter().map(|l| l.len() as u64 + 1))
+            .max()
+            .expect("a line");
+        assert!(files.len() > 1, "the record never rotated");
+        for (name, lines) in &files {
+            let bytes: u64 = lines.iter().map(|l| l.len() as u64 + 1).sum();
+            assert!(bytes <= MAX + longest, "{name} holds {bytes} bytes");
+        }
+        assert_eq!(chain_of(&memory), Ok(50));
     }
 
     /// An append that fails loses every line of its batch, as it loses a single one: none of them
