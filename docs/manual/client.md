@@ -1524,7 +1524,7 @@ forwarded and the log says so.
 among the certificates the host reported under. Once that has passed by the Gateway's clock, or
 the revocation list the Gateway fetches names that certificate, every binding of the host ends,
 with its connection and its offer, and the log names the host and how many went; the Gateway
-checks at start, whenever it fetches the list, and once an hour. A report under an expired
+checks at start, whenever it takes a new list, and once an hour. A report under an expired
 certificate binds nothing. A host that keeps renewing keeps its Agents. So an Agent moved to a new
 host behind the same Gateway is refused there until the old host's certificate expires; to free it
 at once, revoke the old host's certificate, which ends every binding that host holds. A
