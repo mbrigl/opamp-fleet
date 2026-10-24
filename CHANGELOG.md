@@ -23,7 +23,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `<PRODUCT_NAME>-agents`, that runs under that account and starts every Managed Process, its
   version probe and a package's preflight on the Client's request, over a Unix socket on Linux and
   macOS and a named pipe on Windows that admit the Client's account alone. A Managed Process then
-  reads neither the Client's key nor its state, logs or environment, and cannot rewrite its own
+  reads neither the Client's key nor its own state, logs or environment, and cannot rewrite its own
   program. It is opt-in, for system services under systemd, launchd (macOS 13 or later) and the
   SCM; a re-registration keeps the account, and `--no-process-account` drops it, withdrawing what
   it was granted. The operator creates the account, never root and never the Client's, and on
@@ -75,6 +75,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 - **A package's `.tar.gz` members never land writable by group or others**
   ([ADR-0059](docs/adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)
   clause 11), on every host: a member written `0777` or `0666` lands `0755` or `0644`.
+  **What to do:** nothing, unless an agent relies on a group-writable file from its package; it
+  then creates that file at run time.
+
+- **On Linux and macOS a `service install` that changes an account stops both services first**
+  ([ADR-0059](docs/adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)
+  clause 16): another `--run-as`, or a process account changed or dropped. It waits up to 60
+  seconds for each, starts again what ran once it has succeeded, and leaves the services stopped
+  if it fails, naming them. An install that changes no account stops nothing beyond what it did.
+  **What to do:** after a failed install, `service start`.
 
 ### Fixed
 

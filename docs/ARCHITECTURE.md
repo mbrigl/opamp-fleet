@@ -26,8 +26,8 @@ than anywhere else, and none beats one that has stopped being true.
    │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients        register, audit record,
    │                                                                 artifacts by SHA-256
    ├── Supervisor Endpoint (loopback) ◀── a Collector's opampextension
-   ├── Managed Processes: Collector, any command — under a process account, started by the
-   │     second service over a Unix socket or named pipe
+   ├── Managed Processes: Collector, any command — where a process account is registered, under
+   │     it, started by the second service over a Unix socket or named pipe
    ├── package downloads: the Server's own origin, and no other
    ├── own-telemetry destinations: OTLP/HTTP, as the Server offers them
    └── service manager: systemd, launchd or the Windows SCM
@@ -312,15 +312,16 @@ concerns at once and follows every renewal.
 Process, its version probe and a package's preflight as the Client. Where `service install
 --process-account` registered one, the Client's command line carries `--agents-socket` and the
 process account's uid (on Windows its SID), and `service::runtime` hands every Supervisor the
-`Spawner` of `supervisor::channel` instead: each start, signal, stop and purge is a request to the
-second service, `supervisor run --agents`, the same program from the same `current` under the
-process account, which streams the program's output and exit back. The second service admits one
-connection at a time, from the Client's account alone by the peer's credentials or the pipe
-client's token, and stops every program it started — by process group on Unix, by job object on
-Windows — when that connection closes. Both ends refuse a peer of another build, and the one that
-`current` no longer names exits so its service manager starts it from the new version. While the
-second service is away, a delivered package is staged and waits, and the Supervisor retries with
-backoff ([ADR-0059](adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)).
+`Spawner::Channel` of `supervisor::process`, over the `Channel` of `supervisor::channel`, instead:
+each start, signal, stop and purge is a request to the second service, `supervisor run --agents`,
+the same program from the same `current` under the process account, which streams the program's
+output and exit back. The second service admits one connection at a time, from the Client's account
+alone by the peer's credentials or the pipe client's token, and stops every program it started — by
+process group on Unix, by job object on Windows — when that connection closes. Both ends refuse a
+peer of another build, and the one that `current` no longer names exits so its service manager
+starts it from the new version. While the second service is away, a delivered package is staged and
+waits, and the Supervisor retries with backoff
+([ADR-0059](adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)).
 
 **Where state lives.** The Server keeps all of its state under one `data_dir`, one directory per
 domain and owner-only: `configurations/`, `deployments/`, `packages/` (metadata) and `blobs/` (the
