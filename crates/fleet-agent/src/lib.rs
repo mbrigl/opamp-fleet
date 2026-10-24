@@ -40,6 +40,8 @@ mod test_support;
 pub mod tls;
 pub mod transport;
 pub mod update;
+#[cfg(any(windows, test))]
+pub mod win32;
 
 /// Skips the test `test`, which needs what this host lacks — `needs` — and says so; on CI, whose
 /// runners have it, fails the test instead: a test that passes without running decides nothing.

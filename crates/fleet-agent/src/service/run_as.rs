@@ -22,6 +22,10 @@
 //! Administrators and the account is *granted* Modify with inheritance instead — the platform's
 //! idiom for "these directories are yours to use", and what lets the service create tomorrow's
 //! files (a staged version, a rewritten `supervisor.toml`) in directories it did not create today.
+//! The grant is set through each entry's own handle, never through a link, as the Unix walk goes;
+//! and what a former account was granted — a process account dropped or replaced, a Client's
+//! account replaced — is withdrawn from it (`withdraw`), as a change of owner withdraws it on
+//! Unix.
 
 use std::path::{Path, PathBuf};
 
@@ -101,11 +105,10 @@ pub fn decide(
     }
     #[cfg(not(unix))]
     {
-        let _ = registration;
-        match flag {
-            Some(account) => Ok(Decision {
-                run_as: Some(RunAs::resolve(account, service, &Source::Flag, data_root)?),
-                source: Source::Flag,
+        match choose_on_windows(flag, registration) {
+            Some((account, source)) => Ok(Decision {
+                run_as: Some(RunAs::resolve(&account, service, &source, data_root)?),
+                source,
             }),
             None => Ok(Decision {
                 run_as: None,
@@ -113,6 +116,30 @@ pub fn decide(
             }),
         }
     }
+}
+
+/// The order on Windows: `--run-as`, else the logon account the SCM holds for the service, where
+/// it holds one other than `LocalSystem`, which a registration that names none runs as. A
+/// re-registration — an upgrade of the MSI among them — keeps the account, and with it what the
+/// process account needs of it (ADR-0059 clause 1).
+#[cfg(any(not(unix), test))]
+fn choose_on_windows(
+    flag: Option<&str>,
+    registration: Option<&Registration>,
+) -> Option<(String, Source)> {
+    if let Some(account) = flag {
+        return Some((account.to_string(), Source::Flag));
+    }
+    let registration = registration?;
+    let account = registration.account.as_ref()?;
+    let system = crate::win32::known_account_sid(account)
+        .is_some_and(|sid| sid.as_str() == crate::win32::LOCAL_SYSTEM);
+    (!system).then(|| {
+        (
+            account.clone(),
+            Source::Registered(registration.file.clone()),
+        )
+    })
 }
 
 /// The order of ADR-0042 clause 2, on what was found. `owner` names the data root's owner when it
@@ -328,6 +355,8 @@ pub struct RunAs {
     uid: u32,
     #[cfg(unix)]
     gid: u32,
+    #[cfg(windows)]
+    sid: crate::win32::Sid,
 }
 
 impl RunAs {
@@ -363,8 +392,17 @@ impl RunAs {
             windows_account_form(account, service)?;
             Ok(Self {
                 account: account.to_string(),
+                #[cfg(windows)]
+                sid: windows_sid(account)?,
             })
         }
+    }
+
+    /// The account's SID, resolved once, before the install has written anything.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn sid(&self) -> &crate::win32::Sid {
+        &self.sid
     }
 
     /// The account as the service manager must be told it.
@@ -436,50 +474,66 @@ impl RunAs {
         walk::chown_tree(path, self.uid, self.gid, kept, skipped)
     }
 
-    /// No process account is registered on Windows yet (ADR-0059), so there is nothing to keep.
-    #[cfg(not(unix))]
+    /// On Windows a grant on every entry, each set through its own handle: it never enters a link
+    /// or a junction, which is granted as itself, and leaves what the process account owns, with
+    /// everything beneath it, as it is (ADR-0059 clause 10).
+    #[cfg(windows)]
     fn own(
         &self,
         path: &Path,
-        _process: Option<&ProcessAccount>,
-        _skipped: &mut Vec<Skipped>,
+        process: Option<&ProcessAccount>,
+        skipped: &mut Vec<Skipped>,
     ) -> Result<(), String> {
-        // Asked of the entry itself: a link or junction is never a directory to walk.
-        let is_dir = std::fs::symlink_metadata(path)
-            .map(|m| m.is_dir())
-            .unwrap_or(false);
-        let output = std::process::Command::new("icacls.exe")
-            .args(grant_args(path, &self.account, is_dir))
-            .output()
-            .map_err(|e| format!("cannot run icacls.exe: {e}"))?;
-        if output.status.success() {
+        use crate::win32::files::{grant_tree, Access, Entry, Passed};
+        let sid = &self.sid;
+        let [on_dir, on_file] = handover_aces(sid.as_str(), process.is_some());
+        let skip = process.map(ProcessAccount::sid);
+        // For as short as the hand-over takes: what a Managed Process protected from the
+        // Administrators is opened all the same, to be told apart.
+        let _privileges = crate::win32::BackupPrivileges::enable()
+            .map_err(|e| format!("cannot enable the backup and restore privileges: {e}"))?;
+        let top = Entry::open(path, Access::Dacl, true).map_err(|e| e.to_string())?;
+        if top.link {
+            return Err(format!(
+                "{} is a link or a junction, and a root is handed over as no link",
+                path.display()
+            ));
+        }
+        if skip.is_some_and(|skip| top.owner().ok().as_ref() == Some(skip)) {
+            skipped.push(Skipped::ProcessAccounts(path.to_path_buf()));
             return Ok(());
         }
-        Err(format!(
-            "icacls.exe exited with {} ({})",
-            output.status,
-            String::from_utf8_lossy(&output.stdout).trim()
-        ))
+        let on_top = if top.dir { &on_dir } else { &on_file };
+        let passed = grant_tree(
+            &top,
+            sid.as_str(),
+            [on_top.as_slice(), on_dir.as_slice(), on_file.as_slice()],
+            skip,
+            true,
+        )
+        .map_err(|e| e.to_string())?;
+        skipped.extend(passed.into_iter().map(|passed| match passed {
+            Passed::Owned(path) => Skipped::ProcessAccounts(path),
+            Passed::HardLinked(path) => Skipped::HardLinked(path),
+            Passed::Unreadable(path) | Passed::Held(path) => Skipped::Unreadable(path),
+        }));
+        Ok(())
     }
 }
 
-/// The `icacls.exe` arguments that grant `account` Modify on `path` (ADR-0042 clause 2).
-///
-/// `(OI)(CI)` — inherit to files and subdirectories created later — is a directory-only grant
-/// spec; a file takes the bare right. `/T` re-grants across what already exists, and `/L` acts on a
-/// symbolic link or junction itself, never on what it names: the account holds Modify on the tree
-/// already and could have planted a junction to any directory in it.
+/// The ACEs the hand-over grants the Client's account `sid` on Windows, for a directory and for a
+/// file: modify, inherited by what a directory holds, and where a process account is registered
+/// `WRITE_DAC` beside it — the Client grants that account its share of what the install laid out
+/// (ADR-0059 clause 6), on directories the install, not the Client, made — and never `WRITE_OWNER`.
 #[cfg(any(windows, test))]
-fn grant_args(path: &Path, account: &str, is_dir: bool) -> Vec<std::ffi::OsString> {
-    let mut args = vec![path.as_os_str().to_owned(), "/grant".into()];
-    if is_dir {
-        args.push(format!("{account}:(OI)(CI)M").into());
-        args.push("/T".into());
+fn handover_aces(sid: &str, process_account: bool) -> [Vec<String>; 2] {
+    use crate::win32::acl::{allow, MODIFY, WRITE_DAC};
+    let mask = if process_account {
+        MODIFY | WRITE_DAC
     } else {
-        args.push(format!("{account}:M").into());
-    }
-    args.push("/L".into());
-    args
+        MODIFY
+    };
+    [vec![allow(sid, mask, "OICI")], vec![allow(sid, mask, "")]]
 }
 
 /// Resolve an account name to its uid and primary gid through `id(1)`. `Err(None)` means the
@@ -553,6 +607,8 @@ pub enum Skipped {
     /// One of the paths handed over, which the process account owns: left to it with everything
     /// beneath it (ADR-0059 clause 10).
     ProcessAccounts(PathBuf),
+    /// An entry that could not be opened to be handed over (Windows).
+    Unreadable(PathBuf),
 }
 
 impl Skipped {
@@ -569,6 +625,10 @@ impl Skipped {
                  anything beneath it; if the Client is to own it, hand it over with chown",
                 path.display()
             ),
+            Skipped::Unreadable(path) => format!(
+                "{} could not be opened and was not handed over to {account}",
+                path.display()
+            ),
         }
     }
 }
@@ -578,11 +638,19 @@ impl Skipped {
 #[derive(Debug, Clone)]
 pub struct ProcessAccount {
     account: String,
+    #[cfg(unix)]
     uid: u32,
     /// The primary group: what the Client shares with the Managed Processes belongs to it
     /// (ADR-0059 clause 6).
     #[cfg(unix)]
     gid: u32,
+    /// Its SID, which the Client accepts as the owner of the second service's pipe, and which the
+    /// Client's shares are granted to (ADR-0059 clauses 4 and 6).
+    #[cfg(windows)]
+    sid: crate::win32::Sid,
+    /// The SID of the Client's account, the one client the second service serves.
+    #[cfg(windows)]
+    client_sid: crate::win32::Sid,
     /// The second service's unit it was kept from; `None` where `--process-account` named it.
     kept_from: Option<PathBuf>,
 }
@@ -595,9 +663,49 @@ impl ProcessAccount {
     }
 
     /// The account's uid, the one the Client accepts as the second service.
+    #[cfg(unix)]
     #[must_use]
     pub fn uid(&self) -> u32 {
         self.uid
+    }
+
+    /// The account's SID, the one the Client accepts as the second service.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn sid(&self) -> &crate::win32::Sid {
+        &self.sid
+    }
+
+    /// The SID of the Client's account, which the second service serves.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn client_sid(&self) -> &crate::win32::Sid {
+        &self.client_sid
+    }
+
+    /// Grants the account read and execute on the layout's `versions` directory and what it
+    /// holds, and on nothing else of the layout: the second service runs
+    /// `current\supervisor.exe` from it, and a root the install took over or cut off grants it
+    /// nothing (ADR-0059 clause 2). A version the self-update stages there later inherits the
+    /// grant. On Unix the layout is world-readable, as a program's directory is.
+    ///
+    /// # Errors
+    /// Returns why the grant could not be made.
+    #[cfg(windows)]
+    pub fn share_layout(&self, versions: &Path) -> Result<(), String> {
+        use crate::win32::acl::{allow, READ_EXECUTE};
+        use crate::win32::files::{grant_tree, Access, Entry};
+        let failed = |e: std::io::Error| format!("cannot share {}: {e}", versions.display());
+        let _privileges = crate::win32::BackupPrivileges::enable().map_err(failed)?;
+        let top = Entry::open(versions, Access::Dacl, true).map_err(failed)?;
+        if !top.dir {
+            return Err(format!("{} is a link or no directory", versions.display()));
+        }
+        let sid = self.sid.as_str();
+        let on_dir = [allow(sid, READ_EXECUTE, "OICI")];
+        let on_file = [allow(sid, READ_EXECUTE, "")];
+        grant_tree(&top, sid, [&on_dir, &on_dir, &on_file], None, true).map_err(failed)?;
+        Ok(())
     }
 
     /// The account's primary group, which the directory of the second service's socket is given.
@@ -660,22 +768,26 @@ pub fn decide_process_account(
     let Some((account, kept_from)) = choose_process_account(flag, registration)? else {
         return Ok(None);
     };
-    let client = match client {
-        Some(client) if supported => client,
-        _ => {
-            return Err(format!(
-                "a process account needs the second service, which only a system service under \
-                 systemd on Linux or launchd on macOS registers so far; {account} cannot be named \
-                 here. Nothing has been installed or written."
-            ))
-        }
+    let unsupported = || {
+        format!(
+            "a process account needs the second service, which only a system service under \
+             systemd on Linux, launchd on macOS or the SCM on Windows registers; {account} cannot \
+             be named here. Nothing has been installed or written."
+        )
     };
-    // The account goes into the second service's unit: one that cannot be written there is
-    // refused here, before the install writes anything, not when the unit is rendered.
-    super::manager::check_unit_account(&account)
-        .map_err(|e| format!("{e}. Nothing has been installed or written."))?;
+    if !supported {
+        return Err(unsupported());
+    }
     #[cfg(unix)]
     {
+        // A system service on Unix always names its account; a user service names none.
+        let Some(client) = client else {
+            return Err(unsupported());
+        };
+        // The account goes into the second service's unit: one that cannot be written there is
+        // refused here, before the install writes anything, not when the unit is rendered.
+        super::manager::check_unit_account(&account)
+            .map_err(|e| format!("{e}. Nothing has been installed or written."))?;
         let found = account_ids(&account, true)?;
         let client_ids = account_ids(client.account(), false)?.ok_or_else(|| {
             format!(
@@ -699,14 +811,182 @@ pub fn decide_process_account(
             kept_from,
         }))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = (client, kept_from);
-        Err(format!(
-            "a process account cannot be named on this platform yet; {account} is refused. \
-             Nothing has been installed or written."
-        ))
+        let named = |e: String| refuse_on_windows(&account, kept_from.as_deref(), &e);
+        // No account: `--run-as` named none, and the SCM holds none but LocalSystem — a first
+        // registration runs as LocalSystem — so a process account has nothing to be apart from.
+        let Some(client) = client else {
+            return Err(named(format!(
+                "the Client runs as LocalSystem unless --run-as names its account, and a process \
+                 account separates the Managed Processes from a Client that runs under an account \
+                 of its own. Name the Client's account with --run-as NT SERVICE\\{}",
+                super::manager::service_name()
+            )));
+        };
+        let agents = super::manager::agents_service_name();
+        let sid = windows_sid(&account).map_err(named)?;
+        let client_sid = client.sid().clone();
+        check_windows_process_account(&account, &sid, &agents, client.account(), &client_sid)
+            .map_err(named)?;
+        Ok(Some(ProcessAccount {
+            account,
+            sid,
+            client_sid,
+            kept_from,
+        }))
     }
+}
+
+/// The SID of an account in one of the passwordless forms: known from its name where it can be,
+/// else — a group-managed service account — looked up.
+///
+/// # Errors
+/// Returns that the account does not exist.
+#[cfg(windows)]
+fn windows_sid(account: &str) -> Result<crate::win32::Sid, String> {
+    match crate::win32::known_account_sid(account) {
+        Some(sid) => Ok(sid),
+        None => crate::win32::lookup_account(account)
+            .map_err(|e| format!("{account} cannot be found on this host or its domain ({e})")),
+    }
+}
+
+/// The SID of the account `former` a registration names, where what it was granted is to be
+/// withdrawn (ADR-0059 clauses 1 and 6): none where there is no former account, where it is named
+/// as one of `current` — the accounts the registration names now, each with its SID — or resolves
+/// to one of their SIDs, or where it is `LocalSystem`, which keeps full control of every root
+/// anyway. An account named as before is not looked up again.
+///
+/// # Errors
+/// Returns that `former` cannot be resolved — a group-managed service account whose domain cannot
+/// be reached among them — before the install has changed anything: what it was granted would
+/// otherwise stay granted.
+#[cfg(windows)]
+pub fn former_sid(
+    former: Option<&str>,
+    current: &[(&str, &crate::win32::Sid)],
+) -> Result<Option<crate::win32::Sid>, String> {
+    let Some(former) = former else {
+        return Ok(None);
+    };
+    if current
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(former))
+    {
+        return Ok(None);
+    }
+    let sid = windows_sid(former).map_err(|e| {
+        format!(
+            "what the former account {former} was granted cannot be withdrawn: {e}. Nothing was \
+             changed; run the install again once it can be found"
+        )
+    })?;
+    if sid.as_str() == crate::win32::LOCAL_SYSTEM || current.iter().any(|(_, kept)| **kept == sid) {
+        return Ok(None);
+    }
+    Ok(Some(sid))
+}
+
+/// Withdraws from the account of SID `former` — a process account dropped or replaced, or a
+/// Client's account replaced — what it was granted in `roots` and what it owns there, on Windows
+/// (ADR-0059 clauses 1, 6 and 10): every ACE that allows it, explicit or inherited, on every entry,
+/// and what it owns given to the Administrators, as Unix withdraws it by a change of owner. Nothing
+/// where `former` is `LocalSystem`, which keeps full control of every root anyway. A root, or a
+/// root within one walked already, is walked once, never through a link and never into one.
+///
+/// # Errors
+/// Returns an error naming the first entry whose owner or DACL could not be changed.
+#[cfg(windows)]
+pub fn withdraw(former: &crate::win32::Sid, roots: &[&Path]) -> Result<Vec<Skipped>, String> {
+    use crate::win32::files::{withdraw_tree, Access, Entry, Passed};
+    if former.as_str() == crate::win32::LOCAL_SYSTEM {
+        return Ok(Vec::new());
+    }
+    let failed = |root: &Path, e: std::io::Error| {
+        format!("cannot withdraw {} from {former}: {e}", root.display())
+    };
+    let _privileges = crate::win32::BackupPrivileges::enable()
+        .map_err(|e| format!("cannot enable the backup and restore privileges: {e}"))?;
+    let mut skipped = Vec::new();
+    let mut walked: Vec<&Path> = Vec::new();
+    for root in roots {
+        if walked.iter().any(|done| root.starts_with(done))
+            || std::fs::symlink_metadata(root).is_err()
+        {
+            continue;
+        }
+        let top = Entry::open(root, Access::Owner, true).map_err(|e| failed(root, e))?;
+        if top.link {
+            return Err(format!("{} is a link or a junction", root.display()));
+        }
+        let passed = withdraw_tree(&top, former, "BA").map_err(|e| failed(root, e))?;
+        skipped.extend(passed.into_iter().map(|passed| match passed {
+            Passed::Owned(path) | Passed::Unreadable(path) | Passed::Held(path) => {
+                Skipped::Unreadable(path)
+            }
+            Passed::HardLinked(path) => Skipped::HardLinked(path),
+        }));
+        walked.push(root);
+    }
+    Ok(skipped)
+}
+
+/// The refusal of the process account `account`, kept from `kept_from` or named, for `reason`.
+#[cfg(windows)]
+fn refuse_on_windows(account: &str, kept_from: Option<&Path>, reason: &str) -> String {
+    let named = match kept_from {
+        Some(from) => format!(
+            "the process account {account}, which {} names,",
+            from.display()
+        ),
+        None => format!("the process account {account}"),
+    };
+    let drop = if kept_from.is_some() {
+        format!(" Or drop it with {DROP}")
+    } else {
+        String::new()
+    };
+    format!("{named} is refused: {reason}.{drop} {NOTHING}")
+}
+
+/// The checks of ADR-0059 clause 1 on Windows: the process account `account`, of SID `sid`, is one
+/// of the passwordless forms — the second service `agents`'s own virtual account, a gMSA,
+/// `LocalService` or `NetworkService` — never `LocalSystem`, and never the Client's account
+/// `client`, of SID `client_sid`, which itself is not `LocalSystem`.
+///
+/// # Errors
+/// Returns the reason, with the way out.
+#[cfg(any(windows, test))]
+pub(crate) fn check_windows_process_account(
+    account: &str,
+    sid: &crate::win32::Sid,
+    agents: &str,
+    client: &str,
+    client_sid: &crate::win32::Sid,
+) -> Result<(), String> {
+    if sid.as_str() == crate::win32::LOCAL_SYSTEM {
+        return Err(
+            "it is LocalSystem, and a process account never is. A host whose agents need \
+             LocalSystem runs as LocalSystem as a whole: no --process-account"
+                .to_string(),
+        );
+    }
+    if client_sid.as_str() == crate::win32::LOCAL_SYSTEM {
+        return Err(format!(
+            "the Client runs as LocalSystem ({client}), and a process account separates the \
+             Managed Processes from a Client that runs under an account of its own. Name the \
+             Client's account with --run-as <account>, or run everything as LocalSystem without \
+             --process-account"
+        ));
+    }
+    if sid == client_sid {
+        return Err(format!(
+            "it is the account the Client runs as ({client}); the process account is another \
+             account, which the Client's does not share"
+        ));
+    }
+    windows_account_form(account, agents)
 }
 
 /// The order of ADR-0059 clause 1, on what was found: the flag, else the account the second
@@ -1276,7 +1556,7 @@ pub fn match_owner(like: &Path, data_root: &Path, paths: &[&Path]) -> Result<Vec
 ///
 /// Compiled wherever it is used — the Windows install, and the tests of any platform: the rule is
 /// pure string logic, and testing it must not need a Windows host.
-#[cfg(any(not(unix), test))]
+#[cfg(any(windows, test))]
 fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
     const NT_SERVICE: &str = r"NT SERVICE\";
     const BUILT_IN: [&str; 2] = [r"NT AUTHORITY\LocalService", r"NT AUTHORITY\NetworkService"];
@@ -1284,10 +1564,11 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
     if BUILT_IN.iter().any(|b| account.eq_ignore_ascii_case(b)) {
         return Ok(());
     }
-    if account.len() >= NT_SERVICE.len()
-        && account[..NT_SERVICE.len()].eq_ignore_ascii_case(NT_SERVICE)
+    if let Some(name) = account
+        .get(..NT_SERVICE.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(NT_SERVICE))
+        .and_then(|_| account.get(NT_SERVICE.len()..))
     {
-        let name = &account[NT_SERVICE.len()..];
         if name.eq_ignore_ascii_case(service) {
             return Ok(());
         }
@@ -1313,25 +1594,344 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// The Windows hand-over never follows a link (ADR-0042 clause 2): every grant acts on a link
-    /// or junction itself, so one the account planted under a root it already holds cannot carry
-    /// Modify to the directory it names.
-    /// Verifies: ADR-0042
+    /// On Windows a re-registration keeps the logon account the SCM holds, as a unit's is kept,
+    /// unless `--run-as` names another; `LocalSystem`, the account a registration that names none
+    /// runs as, is no account kept (ADR-0059 clause 1).
+    /// Verifies: ADR-0059
     #[test]
-    fn the_windows_handover_grants_on_a_link_itself() {
-        let strings = |args: Vec<std::ffi::OsString>| -> Vec<String> {
-            args.iter()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect()
+    fn on_windows_a_reregistration_keeps_the_scms_logon_account() {
+        let key = PathBuf::from(r"HKLM\SYSTEM\CurrentControlSet\Services\opamp-fleet");
+        let held = |account: &str| Registration {
+            file: key.clone(),
+            account: Some(account.to_string()),
         };
         assert_eq!(
-            strings(grant_args(Path::new(r"C:\data"), r"NT SERVICE\x", true)),
-            [r"C:\data", "/grant", r"NT SERVICE\x:(OI)(CI)M", "/T", "/L"]
+            choose_on_windows(None, Some(&held(r"NT Service\opamp-fleet"))),
+            Some((
+                r"NT Service\opamp-fleet".to_string(),
+                Source::Registered(key.clone())
+            ))
         );
         assert_eq!(
-            strings(grant_args(Path::new(r"C:\data\f"), r"NT SERVICE\x", false)),
-            [r"C:\data\f", "/grant", r"NT SERVICE\x:M", "/L"]
+            choose_on_windows(Some(r"NT AUTHORITY\LocalService"), Some(&held("x"))),
+            Some((r"NT AUTHORITY\LocalService".to_string(), Source::Flag))
         );
+        assert_eq!(choose_on_windows(None, Some(&held("LocalSystem"))), None);
+        assert_eq!(choose_on_windows(None, None), None);
+    }
+
+    /// On Windows the hand-over enters no junction or symlink a Managed Process placed in its data
+    /// directory, with a process account or without, and leaves what the process account owns as
+    /// it is, with everything beneath it (ADR-0059 clause 10). This test's own account stands in
+    /// for the process account, `LocalService` for the Client's.
+    /// Verifies: ADR-0042, ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_handover_enters_no_junction_and_leaves_the_process_accounts_own() {
+        use crate::win32::files::{Access, Entry};
+        let me = crate::win32::own_sid().expect("own sid");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let data = root.join("data");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&data).expect("data");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(outside.join("secret"), b"x").expect("secret");
+        let linked = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(data.join("link"))
+            .arg(&outside)
+            .status()
+            .expect("run mklink");
+        assert!(linked.success(), "cannot make the junction");
+        let hard = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/H"])
+            .arg(data.join("hard"))
+            .arg(outside.join("secret"))
+            .status()
+            .expect("run mklink");
+        assert!(hard.success(), "cannot make the hard link");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        let symlinked = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/D"])
+            .arg(data.join("symlink"))
+            .arg(&elsewhere)
+            .status()
+            .expect("run mklink");
+        assert!(symlinked.success(), "cannot make the directory symlink");
+        let owned = data.join("owned");
+        std::fs::create_dir(&owned).expect("owned");
+        std::fs::write(owned.join("state"), b"x").expect("state");
+        Entry::open(&owned, Access::Owner, false)
+            .and_then(|entry| entry.set_owner(me.as_str()))
+            .expect("owned by the stand-in");
+        let dacl = |path: &Path| {
+            Entry::open(path, Access::Read, false)
+                .and_then(|entry| entry.dacl())
+                .expect("dacl")
+                .text()
+        };
+        let before = (dacl(&outside), dacl(&outside.join("secret")), dacl(&owned));
+        let elsewhere_before = dacl(&elsewhere);
+
+        let client = RunAs::resolve(
+            r"NT AUTHORITY\LocalService",
+            "opamp-fleet",
+            &Source::Flag,
+            &root,
+        )
+        .expect("a passwordless form");
+        let process = ProcessAccount {
+            account: "stand-in".to_string(),
+            sid: me.clone(),
+            client_sid: crate::win32::Sid::parse(crate::win32::LOCAL_SERVICE).expect("sid"),
+            kept_from: None,
+        };
+        // A Managed Process holding a directory open for deleting — its own, or one of the
+        // Client's in its data directory, whose entries it may delete — holds up no hand-over.
+        let hold = |path: &Path| {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .access_mode(0x0001_0000 | 0x0080)
+                .share_mode(0x7)
+                .custom_flags(0x0200_0000)
+                .open(path)
+                .expect("held for deleting")
+        };
+        let theirs = data.join("theirs");
+        std::fs::create_dir(&theirs).expect("theirs");
+        let _held = (hold(&owned), hold(&theirs));
+        let mut skipped = client
+            .hand_over(&[&root], Some(&process))
+            .expect("hand-over");
+        skipped.sort_by_key(|skipped| format!("{skipped:?}"));
+        assert_eq!(
+            skipped,
+            [
+                Skipped::HardLinked(data.join("hard")),
+                Skipped::ProcessAccounts(owned.clone()),
+                Skipped::Unreadable(theirs.clone())
+            ]
+        );
+        assert_eq!(
+            (dacl(&outside), dacl(&outside.join("secret")), dacl(&owned)),
+            before,
+            "nothing through the junction or the hard link, nothing of the process account's; \
+             {} became {}; data is {}",
+            before.2,
+            dacl(&owned),
+            dacl(&data)
+        );
+        // Without a process account the hand-over walks the same tree, and enters no link either.
+        client.hand_over(&[&root], None).expect("hand-over");
+        assert_eq!(
+            (
+                dacl(&outside),
+                dacl(&outside.join("secret")),
+                dacl(&elsewhere)
+            ),
+            (before.0.clone(), before.1.clone(), elsewhere_before),
+            "nothing through the junction, the hard link or the directory symlink"
+        );
+        for link in [data.join("link"), data.join("symlink")] {
+            assert!(
+                client.hand_over(&[&link], None).is_err(),
+                "a root that is a link is refused: {}",
+                link.display()
+            );
+        }
+        assert!(
+            dacl(&data).contains(";;;LS)"),
+            "the Client's own is granted"
+        );
+    }
+
+    /// On Windows what a former account was granted is withdrawn from it, and what it owns given
+    /// to the Administrators: no ACE allows it anything anywhere in the tree — not on what was
+    /// created after the grant, which holds a copy — and it owns nothing (ADR-0059 clauses 1 and
+    /// 6). `LocalService` stands in for the former process account; the test runs elevated, as an
+    /// install does.
+    /// Verifies: ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_former_accounts_grants_are_withdrawn() {
+        use crate::win32::acl::{allow, READ_EXECUTE};
+        use crate::win32::files::{grant_tree, Access, Entry};
+        const FORMER: &str = r"NT AUTHORITY\LocalService";
+        let local_service = crate::win32::LOCAL_SERVICE;
+        let former = former_sid(Some(FORMER), &[])
+            .expect("resolved")
+            .expect("to withdraw");
+        assert_eq!(former.as_str(), local_service);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).expect("config");
+        std::fs::write(config.join("before"), b"x").expect("before");
+        {
+            let _privileges = crate::win32::BackupPrivileges::enable().expect("privileges");
+            let top = Entry::open(&root, Access::Dacl, true).expect("root");
+            let on_dir = [allow(local_service, READ_EXECUTE, "OICI")];
+            let on_file = [allow(local_service, READ_EXECUTE, "")];
+            grant_tree(
+                &top,
+                local_service,
+                [&on_dir, &on_dir, &on_file],
+                None,
+                true,
+            )
+            .expect("granted");
+            std::fs::write(config.join("after"), b"x").expect("after the grant");
+            Entry::open(&config.join("after"), Access::Owner, false)
+                .and_then(|entry| entry.set_owner(local_service))
+                .expect("owned by the former account");
+        }
+        let skipped = withdraw(&former, &[&root]).expect("withdrawn");
+        assert!(skipped.is_empty(), "{skipped:?}");
+        for path in [
+            root.clone(),
+            config.clone(),
+            config.join("before"),
+            config.join("after"),
+        ] {
+            let entry = Entry::open(&path, Access::Read, false).expect("entry");
+            let dacl = entry.dacl().expect("dacl");
+            assert_eq!(
+                dacl.without(local_service),
+                dacl,
+                "{}: {}",
+                path.display(),
+                dacl.text()
+            );
+            assert_ne!(
+                entry.owner().expect("owner").as_str(),
+                local_service,
+                "{}",
+                path.display()
+            );
+        }
+        // An account kept — named as before, or resolving to an account named now — is no former
+        // account, and neither is LocalSystem.
+        assert_eq!(former_sid(Some(FORMER), &[(FORMER, &former)]), Ok(None));
+        assert_eq!(
+            former_sid(Some(r"NT AUTHORITY\LOCAL SERVICE"), &[("other", &former)]),
+            Ok(None)
+        );
+        assert_eq!(former_sid(Some("LocalSystem"), &[]), Ok(None));
+        assert_eq!(former_sid(None, &[]), Ok(None));
+
+        // A directory beneath, held open for deleting — as another service of the former account
+        // could hold one — is no directory to pass over: the withdrawal fails and names it.
+        let held = config.join("held");
+        std::fs::create_dir(&held).expect("held");
+        let _held = {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .access_mode(0x0001_0000 | 0x0080)
+                .share_mode(0x7)
+                .custom_flags(0x0200_0000)
+                .open(&held)
+                .expect("held for deleting")
+        };
+        let refused = withdraw(&former, &[&root]).expect_err("fails closed");
+        assert!(refused.contains("held open for deleting"), "{refused}");
+    }
+
+    /// On Windows a former account that cannot be resolved fails the install before it has changed
+    /// anything, rather than leaving what it was granted granted (ADR-0059 clause 1).
+    /// Verifies: ADR-0059
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_former_account_that_cannot_be_found_fails_before_any_change() {
+        let refused =
+            former_sid(Some(r"NO-SUCH-DOMAIN\no-such-gmsa$"), &[]).expect_err("fails closed");
+        assert!(refused.contains("Nothing was changed"), "{refused}");
+    }
+
+    /// On Windows the hand-over grants the Client modify, and where a process account is
+    /// registered `WRITE_DAC` beside it, so that the Client can grant that account its share
+    /// (ADR-0059 clause 6) of directories the install made — never the owner's right.
+    /// Verifies: ADR-0059
+    #[test]
+    fn on_windows_the_handover_lets_the_client_share_with_the_process_account() {
+        let sid = "S-1-5-80-1-2-3-4-5";
+        assert_eq!(
+            handover_aces(sid, false),
+            [
+                vec![format!("(A;OICI;0x1301bf;;;{sid})")],
+                vec![format!("(A;;0x1301bf;;;{sid})")]
+            ]
+        );
+        assert_eq!(
+            handover_aces(sid, true),
+            [
+                vec![format!("(A;OICI;0x1701bf;;;{sid})")],
+                vec![format!("(A;;0x1701bf;;;{sid})")]
+            ]
+        );
+        assert_eq!(
+            0x1701bf & 0x0008_0000,
+            0,
+            "no WRITE_OWNER, which full control would bring"
+        );
+    }
+
+    /// On Windows the process account is one of the passwordless forms — the second service's own
+    /// virtual account, a gMSA, `LocalService` or `NetworkService` — never `LocalSystem` and never
+    /// the Client's account, and the Client does not run as `LocalSystem` (ADR-0059 clause 1).
+    /// Verifies: ADR-0059
+    #[test]
+    fn on_windows_the_process_account_is_a_passwordless_account_of_its_own() {
+        use crate::win32::{known_account_sid, Sid};
+        let agents = "opamp-fleet-agents";
+        let client = r"NT SERVICE\opamp-fleet";
+        let client_sid = known_account_sid(client).expect("virtual");
+        let check = |account: &str, sid: Sid| {
+            check_windows_process_account(account, &sid, agents, client, &client_sid)
+        };
+        let virtual_account = r"NT SERVICE\opamp-fleet-agents";
+        assert!(check(
+            virtual_account,
+            known_account_sid(virtual_account).expect("sid")
+        )
+        .is_ok());
+        let local_service = r"NT AUTHORITY\LocalService";
+        assert!(check(
+            local_service,
+            known_account_sid(local_service).expect("sid")
+        )
+        .is_ok());
+        let gmsa = Sid::parse("S-1-5-21-1-2-3-1104").expect("sid");
+        assert!(check(r"CORP\fleet-agents$", gmsa).is_ok());
+
+        let system = check(
+            "LocalSystem",
+            known_account_sid("LocalSystem").expect("sid"),
+        )
+        .expect_err("LocalSystem");
+        assert!(system.contains("LocalSystem as a whole"), "{system}");
+        let own = check(client, client_sid.clone()).expect_err("the Client's");
+        assert!(own.contains("the account the Client runs as"), "{own}");
+        let other = r"NT SERVICE\mssqlserver";
+        let foreign = check(other, known_account_sid(other).expect("sid")).expect_err("another's");
+        assert!(foreign.contains(agents), "{foreign}");
+        assert!(
+            check("bob", Sid::parse("S-1-5-21-1-2-3-1001").expect("sid"))
+                .expect_err("a password")
+                .contains("password")
+        );
+
+        let system_sid = known_account_sid("LocalSystem").expect("sid");
+        let client_is_system = check_windows_process_account(
+            virtual_account,
+            &known_account_sid(virtual_account).expect("sid"),
+            agents,
+            "LocalSystem",
+            &system_sid,
+        )
+        .expect_err("a Client under LocalSystem");
+        assert!(client_is_system.contains("--run-as"), "{client_is_system}");
     }
 
     /// ADR-0019: the accepted Windows forms are exactly the passwordless ones, and the refusal
@@ -1352,6 +1952,10 @@ mod tests {
             "gMSA"
         );
 
+        assert!(
+            windows_account_form("Dienst-äöü", svc).is_err(),
+            "no slice panics"
+        );
         let other = windows_account_form(r"NT SERVICE\mssqlserver", svc).expect_err("not ours");
         assert!(other.contains(r"NT SERVICE\supervisor"), "{other}");
 
@@ -1629,9 +2233,14 @@ mod tests {
 
         let kept = ProcessAccount {
             account: "opamp-fleet-agents".to_string(),
+            #[cfg(unix)]
             uid: 997,
             #[cfg(unix)]
             gid: 997,
+            #[cfg(windows)]
+            sid: crate::win32::virtual_account_sid("opamp-fleet-agents").expect("ascii"),
+            #[cfg(windows)]
+            client_sid: crate::win32::virtual_account_sid("opamp-fleet").expect("ascii"),
             kept_from: Some(PathBuf::from(AGENTS_UNIT)),
         };
         assert!(kept.describe().contains(AGENTS_UNIT), "{}", kept.describe());
