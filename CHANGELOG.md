@@ -15,6 +15,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ## [Unreleased]
 
+### Added
+
+- **Managed Processes can run under a process account of their own**
+  ([ADR-0059](docs/adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)).
+  `service install --process-account <account>` registers a second service,
+  `<PRODUCT_NAME>-agents`, that runs under that account and starts every Managed Process, its
+  version probe and a package's preflight on the Client's request, over a Unix socket on Linux and
+  macOS and a named pipe on Windows that admit the Client's account alone. A Managed Process then
+  reads neither the Client's key nor its state, logs or environment, and cannot rewrite its own
+  program. It is opt-in, for system services under systemd, launchd (macOS 13 or later) and the
+  SCM; a re-registration keeps the account, and `--no-process-account` drops it, withdrawing what
+  it was granted. The operator creates the account, never root and never the Client's, and on
+  Linux and macOS gives it a primary group of its own whose one member is the Client's account; the
+  Client runs under an account of its own, on Windows named with `--run-as`. **What to do:** to use
+  it, follow [the manual](docs/manual/client.md#managed-processes-under-a-process-account). A grant
+  an agent needs — a `sudoers` rule for Telegraf's `use_sudo`, the rights Icinga 2 needs on its
+  directories, a systemd drop-in — then names the process account instead of the Client's. Before
+  going back to a release without the second service, run `service install --no-process-account`.
+
 ### Changed
 
 - **An Agent's type is always its Supervisor's**
@@ -43,6 +62,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   `supervisor_dir`. Otherwise the Client does not start, or the set is reported `FAILED`. A
   renamed Supervisor registers as a new Agent. The default `supervisor_dir`,
   `<state_dir>/supervisors`, is not affected.
+
+- **On Windows every `service install` stops both services first, and starts again what ran**
+  ([ADR-0059](docs/adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)
+  clause 14), with a process account or without one, every MSI upgrade among them: the Client and
+  its Managed Processes are stopped for as long as the install runs. What ran is recorded under
+  `HKLM\SOFTWARE\<PRODUCT_NAME>\WithdrawalPending` before the stop, so an install that fails or an
+  MSI that rolls back leaves both stopped until the next `service install` succeeds or
+  `service start` starts them. `service install`, `uninstall`, `start` and `stop` run one at a time.
+  **What to do:** schedule MSI upgrades as the short outage they are.
+
+- **A package's `.tar.gz` members never land writable by group or others**
+  ([ADR-0059](docs/adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)
+  clause 11), on every host: a member written `0777` or `0666` lands `0755` or `0644`.
+
+### Fixed
+
+- **An MSI upgrade no longer unregisters the services halfway**
+  ([ADR-0059](docs/adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)
+  clause 15). The MSI stops and unregisters only on a real removal, never while a major upgrade
+  removes the product it replaces.
 
 ### Security
 
