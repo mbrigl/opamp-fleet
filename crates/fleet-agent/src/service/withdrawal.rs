@@ -491,18 +491,23 @@ impl Store for Registry {
 }
 
 /// The roots a withdrawal walks (ADR-0059 clause 16): the layout root, the data root, the state
-/// directory, the configuration file and the fleet files copied beside it. A Supervisors' root
-/// beneath one of them is walked with it; one outside them all stays the operator's, and is not
-/// among them.
+/// directory, the configuration file and the fleet files copied beside it, and the Supervisors'
+/// root where it lies beneath the first three. One outside them all stays the operator's, and is
+/// not among them.
 #[must_use]
 pub fn roots<'a>(
     layout: &'a Path,
     data: &'a Path,
     state: &'a Path,
+    supervisors: &'a Path,
     config: &'a Path,
     copies: &'a [PathBuf],
 ) -> Vec<&'a Path> {
-    let mut roots = vec![layout, data, state, config];
+    let mut roots = vec![layout, data, state];
+    if super::layout::beneath(supervisors, &roots).is_ok() {
+        roots.push(supervisors);
+    }
+    roots.push(config);
     roots.extend(copies.iter().map(PathBuf::as_path));
     roots
 }
@@ -512,28 +517,22 @@ mod tests {
     use super::*;
 
     /// A Supervisors' root the configuration places outside every root the install acts on is not
-    /// walked by a withdrawal: it stays the operator's.
+    /// walked by a withdrawal: it stays the operator's. One beneath them is.
     /// Verifies: ADR-0059
     #[test]
     fn a_withdrawal_walks_no_supervisors_root_outside_the_installs_roots() {
-        let config = crate::config::ClientConfig {
-            supervisor_dir: Some(PathBuf::from("/srv/elsewhere/supervisors")),
-            ..Default::default()
-        };
-        let outside = config.supervisors_root();
-        let copies = [PathBuf::from("/etc/fleet/ca.pem")];
-        let walked = roots(
-            Path::new("/opt/fleet"),
-            Path::new("/var/lib/fleet"),
-            Path::new("/var/lib/fleet/state"),
-            Path::new("/etc/fleet/supervisor.toml"),
-            &copies,
-        );
-        assert!(
-            walked.iter().all(|root| !outside.starts_with(root)),
-            "{walked:?}"
-        );
-        assert!(walked.contains(&Path::new("/etc/fleet/ca.pem")));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (layout, data) = (dir.path().join("layout"), dir.path().join("data"));
+        let state = data.join("state");
+        let outside = dir.path().join("elsewhere").join("supervisors");
+        let inside = state.join("supervisors");
+        let config = data.join("supervisor.toml");
+        let copies = [data.join("ca.pem")];
+        let walked = roots(&layout, &data, &state, &outside, &config, &copies);
+        assert!(!walked.contains(&outside.as_path()), "{walked:?}");
+        assert!(walked.contains(&copies[0].as_path()), "{walked:?}");
+        let walked = roots(&layout, &data, &state, &inside, &config, &copies);
+        assert!(walked.contains(&inside.as_path()), "{walked:?}");
     }
 
     /// A record kept in memory, as a test keeps it; one whose removal fails where `stuck`.
