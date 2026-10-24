@@ -40,6 +40,9 @@ enum Downstream {
     Exchange(oneshot::Sender<ServerToAgent>, u64),
 }
 
+/// How often a report asks again while its host's moved end is being written.
+const ASKS: u32 = 3;
+
 pub struct Registry {
     routes: Mutex<HashMap<InstanceUid, Route>>,
     /// The number the next plain-HTTP exchange is registered under.
@@ -90,16 +93,31 @@ impl Registry {
         route: impl FnOnce() -> Route,
     ) -> (bool, Vec<InstanceUid>) {
         // A report binds its `instance_uid` to its host, the first one only (ADR-0039 clause 6);
-        // an `instance_uid` with a route here is never the binding that makes room.
-        let (begun, evicted) = {
-            let routes = self.routes.lock().expect("registry lock");
-            self.cache
-                .begin_bind(uid, speaker, end, |uid| routes.contains_key(uid))
-        };
-        let written = match begun {
-            Begun::Refused => return (false, evicted),
-            Begun::Bound => true,
-            Begun::Writing(ticket) => self.cache.written(ticket).await,
+        // an `instance_uid` with a route here is never the binding that makes room. A report that
+        // relies on its host's end while another report's move of it is written asks again once
+        // that write is settled, a few times at most.
+        let mut asked = 0;
+        let (written, evicted) = loop {
+            let (begun, evicted) = {
+                let routes = self.routes.lock().expect("registry lock");
+                self.cache
+                    .begin_bind(uid, speaker, end, |uid| routes.contains_key(uid))
+            };
+            match begun {
+                Begun::Refused => return (false, evicted),
+                Begun::Bound => break (true, evicted),
+                Begun::Writing(ticket) => break (self.cache.written(ticket).await, evicted),
+                Begun::Waiting(mut writes) if asked < ASKS => {
+                    asked += 1;
+                    if writes.changed().await.is_err() {
+                        return (false, evicted);
+                    }
+                }
+                Begun::Waiting(_) => {
+                    debug!(agent = %uid, host = %speaker, "not forwarding a report: its host's end is still being written");
+                    return (false, evicted);
+                }
+            }
         };
         let mut routes = self.routes.lock().expect("registry lock");
         if !self.cache.finish_bind(uid, speaker, written) {

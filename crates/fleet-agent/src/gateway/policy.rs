@@ -26,6 +26,9 @@ pub enum Bound {
     New,
     /// Not bound, for this reason.
     Refused(&'static str),
+    /// Not decided: the report relies on its host's certificate end, which another report is
+    /// moving and the store does not hold yet. Ask again once it is written.
+    Waiting,
 }
 
 /// Where a host's certificate ends, as the Gateway keeps it (ADR-0060 clause 2): the latest
@@ -70,6 +73,9 @@ pub struct Bindings {
     per_host: HashMap<String, usize>,
     /// Where the certificate of each host with a binding ends.
     ends: HashMap<String, End>,
+    /// The hosts whose end a report moved and the store does not hold yet, each with the end it
+    /// holds, if any: restored should the write fail.
+    moving: HashMap<String, Option<End>>,
     /// Orders the reports, so the least recently reported binding is known.
     tick: u64,
     /// The bindings reported since their order was last written.
@@ -90,6 +96,14 @@ pub struct Outcome {
     pub changes: Vec<Change>,
 }
 
+fn refused_waiting() -> Outcome {
+    Outcome {
+        bound: Bound::Waiting,
+        evicted: Vec::new(),
+        changes: Vec::new(),
+    }
+}
+
 impl Bindings {
     /// Binds `uid` to `host` on its first report, and on every report marks it the most recently
     /// reported. A host binds at most `limits.per_host`, and the Gateway at most `limits.total`:
@@ -100,8 +114,9 @@ impl Bindings {
     /// A report under a certificate whose `notAfter` has passed by `now` binds nothing and moves
     /// no end (ADR-0060 clause 3); one under a certificate that ends later than the one the host's
     /// end was kept from moves it to `end` (clause 2). A new binding is pending until
-    /// [`Bindings::commit`]: a pending binding makes no room, and a report for it binds nothing, so
-    /// nothing is relied on before the store holds it.
+    /// [`Bindings::commit`], and a moved end until the write settles it: a pending binding makes
+    /// no room, a report for it binds nothing, and a report of its host that relies on a moved end
+    /// is [`Bound::Waiting`], so nothing is relied on before the store holds it.
     pub fn bind(
         &mut self,
         uid: InstanceUid,
@@ -124,10 +139,17 @@ impl Bindings {
         }
         self.tick += 1;
         let tick = self.tick;
-        if let Some(binding) = self.bound.get_mut(&uid) {
+        if let Some(binding) = self.bound.get(&uid) {
             if binding.pending {
                 return refused("its binding is still being written", Vec::new());
             }
+            if binding.host == host && self.waits_for_end(host, end) {
+                return refused_waiting();
+            }
+        } else if self.waits_for_end(host, end) {
+            return refused_waiting();
+        }
+        if let Some(binding) = self.bound.get_mut(&uid) {
             binding.reported = tick;
             let own = binding.host == host;
             self.reported.insert(uid);
@@ -165,9 +187,13 @@ impl Bindings {
             // The host keeps its end through giving up its last binding for this one, so an
             // earlier certificate does not move it back.
             let kept = self.ends.get(host).cloned();
+            let moving = self.moving.get(host).cloned();
             self.unbind(&victim);
             if let Some(kept) = kept {
                 self.ends.entry(host.to_string()).or_insert(kept);
+            }
+            if let Some(moving) = moving {
+                self.moving.entry(host.to_string()).or_insert(moving);
             }
             evicted.push(victim);
         }
@@ -190,17 +216,65 @@ impl Bindings {
         }
     }
 
-    /// Moves `host`'s certificate end to `end` when it ends later, or when the host has none yet.
+    /// Whether a report of `host` under a certificate ending at `end` relies on a move of the
+    /// host's end the store does not hold yet: it would move the end past what the store holds.
+    fn waits_for_end(&self, host: &str, end: &End) -> bool {
+        self.moving.get(host).is_some_and(|held| {
+            held.as_ref()
+                .is_none_or(|held| held.not_after < end.not_after)
+        })
+    }
+
+    /// Moves `host`'s certificate end to `end` when it ends later, or when the host has none yet;
+    /// the move is pending until [`Bindings::ends_written`] or [`Bindings::compacted`] settles it.
     fn move_end(&mut self, host: &str, end: &End) -> Option<Change> {
-        if self
-            .ends
-            .get(host)
-            .is_some_and(|kept| kept.not_after >= end.not_after)
-        {
+        let kept = self.ends.get(host);
+        if kept.is_some_and(|kept| kept.not_after >= end.not_after) {
             return None;
         }
+        self.moving.insert(host.to_string(), kept.cloned());
         self.ends.insert(host.to_string(), end.clone());
         Some(Change::Ends(host.to_string(), end.clone()))
+    }
+
+    /// The store took `changes`, or failed to: the moves of the ends among them are settled, kept
+    /// or undone.
+    pub fn ends_written(&mut self, changes: &[Change], written: bool) {
+        for change in changes {
+            if let Change::Ends(host, _) = change {
+                self.settle_end(host, written);
+            }
+        }
+    }
+
+    /// The hosts whose end moves a store rewritten whole from [`Bindings::snapshot`] settles.
+    #[must_use]
+    pub fn moving(&self) -> Vec<String> {
+        self.moving.keys().cloned().collect()
+    }
+
+    /// A rewrite of the store that held the ends of `hosts` succeeded, or failed.
+    pub fn compacted(&mut self, hosts: &[String], written: bool) {
+        for host in hosts {
+            self.settle_end(host, written);
+        }
+    }
+
+    fn settle_end(&mut self, host: &str, written: bool) {
+        let Some(held) = self.moving.remove(host) else {
+            return;
+        };
+        if written {
+            return;
+        }
+        match held {
+            Some(held) => {
+                self.ends.insert(host.to_string(), held);
+            }
+            None => {
+                self.ends.remove(host);
+            }
+        }
     }
 
     /// The store holds `uid`'s new binding: it is relied on from now.
@@ -281,6 +355,7 @@ impl Bindings {
             if *count == 0 {
                 self.per_host.remove(&binding.host);
                 self.ends.remove(&binding.host);
+                self.moving.remove(&binding.host);
             }
         }
     }
@@ -395,6 +470,12 @@ mod tests {
         }
     }
 
+    /// The store took everything: `uid`'s binding and every moved end.
+    fn commit(bindings: &mut Bindings, uid: &InstanceUid) {
+        bindings.commit(uid);
+        bindings.moving.clear();
+    }
+
     /// A report of `uid` from `host`, its binding written at once.
     fn bind(
         bindings: &mut Bindings,
@@ -403,7 +484,7 @@ mod tests {
         idle: impl Fn(&InstanceUid) -> bool,
     ) -> (Bound, Vec<InstanceUid>) {
         let outcome = bindings.bind(uid, host, &end(i64::MAX), 0, LIMITS, idle);
-        bindings.commit(&uid);
+        commit(bindings, &uid);
         (outcome.bound, outcome.evicted)
     }
 
@@ -470,7 +551,7 @@ mod tests {
             (Bound::New, vec![second]),
             "its own least recently reported"
         );
-        bindings.commit(&new);
+        commit(&mut bindings, &new);
         assert_eq!(
             bindings.host_of(&first),
             Some("a"),
@@ -563,7 +644,7 @@ mod tests {
             bindings.bind(uid, "a", &end(10), 0, LIMITS, |_| true).bound,
             Bound::Refused(_)
         ));
-        bindings.commit(&uid);
+        commit(&mut bindings, &uid);
         assert!(bindings.holds(&uid, "a"));
         assert_eq!(
             bindings
@@ -596,7 +677,7 @@ mod tests {
         let [first, second, other] = [(); 3].map(|()| InstanceUid::default());
         for (uid, host) in [(first, "a"), (second, "a"), (other, "b")] {
             bindings.bind(uid, host, &end(100), 50, LIMITS, |_| true);
-            bindings.commit(&uid);
+            commit(&mut bindings, &uid);
         }
         // Later than the end kept for "a", and expired by the time of the report.
         let outcome = bindings.bind(first, "a", &end(120), 150, LIMITS, |_| true);
@@ -624,7 +705,7 @@ mod tests {
         assert!(bindings.is_empty() && bindings.live() == 0);
 
         bindings.bind(first, "c", &end(500), 200, LIMITS, |_| true);
-        bindings.commit(&first);
+        commit(&mut bindings, &first);
         assert_eq!(bindings.host_of(&first), Some("c"), "bound anew");
         let revoked = bindings.end(200, |end| end.serial == "1");
         assert_eq!(revoked, vec![("c".to_string(), vec![first])]);
@@ -642,20 +723,65 @@ mod tests {
         let mut bindings = Bindings::default();
         let [first, second] = [(); 2].map(|()| InstanceUid::default());
         bindings.bind(first, "a", &end(100), 0, limits, |_| true);
-        bindings.commit(&first);
+        commit(&mut bindings, &first);
         let outcome = bindings.bind(second, "a", &end(50), 0, limits, |_| true);
         assert_eq!(outcome.evicted, vec![first]);
         assert_eq!(
             outcome.changes,
             vec![Change::Unbound(first), Change::Bound(second, "a".into())]
         );
-        bindings.commit(&second);
+        commit(&mut bindings, &second);
         assert_eq!(
             bindings.snapshot(),
             vec![
                 Change::Ends("a".into(), end(100)),
                 Change::Bound(second, "a".into())
             ]
+        );
+    }
+
+    /// A moved end is pending until the store settles it: a report of the host that relies on it
+    /// waits, one under a certificate the store's end covers does not, and a failed write puts the
+    /// end the store holds back. A host's first end is pending the same way.
+    /// Verifies: ADR-0060
+    #[test]
+    fn a_moved_end_is_pending_until_written() {
+        let mut bindings = Bindings::default();
+        let [first, second, third] = [(); 3].map(|()| InstanceUid::default());
+        let outcome = bindings.bind(first, "a", &end(100), 0, LIMITS, |_| true);
+        assert!(
+            matches!(
+                bindings
+                    .bind(second, "a", &end(100), 0, LIMITS, |_| true)
+                    .bound,
+                Bound::Waiting
+            ),
+            "the host's first end is not written yet"
+        );
+        bindings.ends_written(&outcome.changes, true);
+        commit(&mut bindings, &first);
+
+        let moved = bindings.bind(first, "a", &end(200), 0, LIMITS, |_| true);
+        assert_eq!(moved.changes, vec![Change::Ends("a".into(), end(200))]);
+        assert_eq!(
+            bindings
+                .bind(second, "a", &end(200), 0, LIMITS, |_| true)
+                .bound,
+            Bound::Waiting
+        );
+        assert_eq!(
+            bindings
+                .bind(third, "a", &end(100), 0, LIMITS, |_| true)
+                .bound,
+            Bound::New,
+            "covered by the end the store holds"
+        );
+        bindings.ends_written(&moved.changes, false);
+        commit(&mut bindings, &third);
+        assert_eq!(
+            bindings.snapshot()[0],
+            Change::Ends("a".into(), end(100)),
+            "put back"
         );
     }
 }

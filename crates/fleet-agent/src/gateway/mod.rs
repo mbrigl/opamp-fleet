@@ -2048,4 +2048,33 @@ mod tests {
         forwarding.registry.deliver(uid, reply_for(uid)).await;
         assert!(owner_rx.try_recv().is_err(), "the ended host hears nothing");
     }
+
+    /// Two Agents of a host that reports for the first time arrive together: the second waits
+    /// for the store to hold the host's end the first moved, and both are carried.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_report_waits_for_its_hosts_end_another_report_is_writing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let host = certificate();
+        let [first, second] = [(); 2].map(|()| InstanceUid::default());
+        let (tx, _rx) = mpsc::channel(64);
+        let mut one = downstream(Transport::WebSocket, Some(tx), host.clone());
+        let (tx, _rx) = mpsc::channel(64);
+        let mut other = downstream(Transport::WebSocket, Some(tx), host);
+        tokio::join!(
+            forwarding.forward_from_socket(&mut one, report(first)),
+            forwarding.forward_from_socket(&mut other, report(second)),
+        );
+        assert!(one.carried.contains(&first));
+        assert!(
+            other.carried.contains(&second),
+            "the second waited, then was bound"
+        );
+        assert_eq!(
+            stored(dir.path()).len(),
+            2,
+            "both bindings are in the store"
+        );
+    }
 }

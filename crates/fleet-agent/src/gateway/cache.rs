@@ -235,6 +235,8 @@ pub enum Begun {
     Refused,
     /// Bound once the store holds what the ticket waits for.
     Writing(Ticket),
+    /// Undecided until the store's next write settles the host's moved end: ask again then.
+    Waiting(tokio::sync::watch::Receiver<u64>),
 }
 
 #[derive(Default)]
@@ -402,6 +404,8 @@ pub struct PackageCache {
     /// The bindings' store, written by one at a time and never while `inner` is locked; `None`
     /// while it cannot be read.
     journal: Mutex<Option<Journal>>,
+    /// Counts the store's writes, each announced once what it wrote is settled.
+    writes: tokio::sync::watch::Sender<u64>,
     /// Why the store could not be read at start, while it cannot: the Gateway then carries no
     /// downstream Agent (ADR-0060 clause 2).
     unreadable: Option<String>,
@@ -430,7 +434,7 @@ impl Drop for Landing {
 /// The Gateway's directory as it was found at start.
 enum Opened {
     /// The bindings the store holds, and the store rewritten whole from them.
-    Store(Bindings, Box<Journal>),
+    Store(Box<(Bindings, Journal)>),
     /// Why the store cannot be read, or cannot be rewritten.
     Unreadable(String),
 }
@@ -472,7 +476,7 @@ fn open_dir(
         log_ended(&host, uids.len());
     }
     match create(held, &bindings.snapshot()) {
-        Ok(journal) => Ok(Opened::Store(bindings, Box::new(journal))),
+        Ok(journal) => Ok(Opened::Store(Box::new((bindings, journal)))),
         Err(e) => Ok(Opened::Unreadable(format!(
             "cannot rewrite {}: {e}",
             path.display()
@@ -540,12 +544,13 @@ impl PackageCache {
             .await
             .map_err(|e| e.to_string())??;
         let (bindings, journal, unreadable) = match opened {
-            Opened::Store(bindings, journal) => {
+            Opened::Store(opened) => {
+                let (bindings, journal) = *opened;
                 info!(
                     bindings = bindings.len(),
                     "read the bindings of the Agents behind this Gateway"
                 );
-                (bindings, Some(*journal), None)
+                (bindings, Some(journal), None)
             }
             Opened::Unreadable(why) => {
                 log_unreadable(&why, &dir.join(store::NAME));
@@ -562,6 +567,7 @@ impl PackageCache {
             shutdown,
             knobs,
             journal: Mutex::new(journal),
+            writes: tokio::sync::watch::Sender::new(0),
             unreadable,
             inner: Mutex::new(Inner {
                 bindings,
@@ -611,6 +617,9 @@ impl PackageCache {
             !routed(uid) && !offers.contains_key(uid)
         });
         let evicted = outcome.evicted;
+        if outcome.bound == Bound::Waiting {
+            return (Begun::Waiting(self.writes.subscribe()), evicted);
+        }
         if let Bound::Refused(why) = outcome.bound {
             if inner.refusals.note(host, Instant::now()) != Note::Count {
                 warn!(agent = %uid, %host, "not forwarding a report: not binding its instance_uid: {why}");
@@ -635,6 +644,7 @@ impl PackageCache {
             .iter()
             .any(|change| store::line(change).is_none())
         {
+            inner.bindings.ends_written(&outcome.changes, false);
             let removals = outcome
                 .changes
                 .into_iter()
@@ -704,16 +714,23 @@ impl PackageCache {
             )
         };
         let Some(journal) = guard.as_mut() else {
+            self.inner().bindings.ends_written(&changes, false);
             for waiter in waiting {
                 let _ = waiter.set(false);
             }
+            self.writes.send_modify(|n| *n = n.wrapping_add(1));
             return false;
         };
         let appended = journal.append(&changes);
         if let Err(e) = &appended {
             debug!(error = %e, "cannot append to the bindings' store; rewriting it whole");
         }
-        let written = appended.is_ok() || self.compact(journal);
+        let written = if appended.is_ok() {
+            self.inner().bindings.ends_written(&changes, true);
+            true
+        } else {
+            self.compact(journal)
+        };
         for waiter in waiting {
             let _ = waiter.set(written);
         }
@@ -721,16 +738,18 @@ impl PackageCache {
         if written && journal.lines() > 0 && journal.lines() >= 2 * live {
             self.compact(journal);
         }
+        self.writes.send_modify(|n| *n = n.wrapping_add(1));
         ticket.get().copied().unwrap_or(false)
     }
 
     /// Rewrites the store whole from the bindings, the queued changes taken in with them.
     fn compact(&self, journal: &mut Journal) -> bool {
-        let (snapshot, waiting) = {
+        let (snapshot, moving, waiting) = {
             let mut inner = self.inner();
             inner.queue.clear();
             (
                 inner.bindings.snapshot(),
+                inner.bindings.moving(),
                 std::mem::take(&mut inner.waiting),
             )
         };
@@ -741,6 +760,7 @@ impl PackageCache {
                 false
             }
         };
+        self.inner().bindings.compacted(&moving, written);
         for waiter in waiting {
             let _ = waiter.set(written);
         }
@@ -822,14 +842,26 @@ impl PackageCache {
         host: &str,
         routed: impl Fn(&InstanceUid) -> bool,
     ) -> (bool, Vec<InstanceUid>) {
+        self.bind_until(uid, host, i64::MAX, routed).await
+    }
+
+    /// [`PackageCache::bind`] under a certificate whose `notAfter` is `not_after`.
+    #[cfg(test)]
+    async fn bind_until(
+        self: &Arc<Self>,
+        uid: InstanceUid,
+        host: &str,
+        not_after: i64,
+        routed: impl Fn(&InstanceUid) -> bool,
+    ) -> (bool, Vec<InstanceUid>) {
         let end = End {
-            not_after: i64::MAX,
+            not_after,
             issuer: "ab".repeat(32),
             serial: "1".to_string(),
         };
         let (begun, evicted) = self.begin_bind(uid, host, &end, routed);
         let written = match begun {
-            Begun::Refused => return (false, evicted),
+            Begun::Refused | Begun::Waiting(_) => return (false, evicted),
             Begun::Bound => true,
             Begun::Writing(ticket) => self.written(ticket).await,
         };
@@ -2371,5 +2403,38 @@ mod tests {
         assert!(cache.bind(uid, "h1", |_| false).await.0);
         cache.observe(uid, Some("h1".to_string()), &offer(uid, &[&one]));
         assert_eq!(cache.offered_to("h1", &one.path), Some(one));
+    }
+
+    /// A report under a renewed certificate is forwarded only once the store holds the host's
+    /// moved end; when the store cannot take it the report is refused and the end the store holds
+    /// stands, also in memory.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_moved_end_the_store_cannot_take_is_undone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_binding(dir.path(), 3).await;
+        let later = now() + 3600;
+        let uid = InstanceUid::default();
+        assert!(cache.bind_until(uid, "h1", later, |_| false).await.0);
+        cache.refuse_writes();
+        assert!(
+            !cache.bind_until(uid, "h1", later + 3600, |_| false).await.0,
+            "forwarded before its end was written"
+        );
+        let ends = |changes: Vec<Change>| -> Vec<i64> {
+            changes
+                .into_iter()
+                .filter_map(|change| match change {
+                    Change::Ends(_, end) => Some(end.not_after),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            ends(cache.inner().bindings.snapshot()),
+            vec![later],
+            "undone"
+        );
+        assert_eq!(ends(stored(dir.path())), vec![later]);
     }
 }
