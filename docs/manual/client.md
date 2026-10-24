@@ -444,14 +444,14 @@ service manager ─┬─ opamp-fleet         Client, its own account   (supervi
 
 What the separation gives and what it does not:
 
-- A Managed Process, and anything it starts, can no longer read the Client's key, certificates,
+- A Managed Process, and anything it starts, cannot read the Client's key, certificates,
   package state, logs or environment, nor write the program it runs. A command a Configuration
   makes it run — a Telegraf `inputs.exec`, an Icinga `CheckCommand` — runs as the process account.
 - All Managed Processes share the one process account, so they still read one another's `config/`
   and environment.
-- What used to be granted to the Client's account for an agent must name the process account
-  instead: a `sudoers` rule for Telegraf's `use_sudo`, the rights Icinga 2 needs on its
-  directories, a supplementary group such as `adm`. On Linux, what a Managed Process needs from
+- A grant an agent needs names the process account, not the Client's: a `sudoers` rule for
+  Telegraf's `use_sudo`, the rights Icinga 2 needs on its directories, a supplementary group such
+  as `adm`. On Linux, what a Managed Process needs from
   systemd — a capability for a port below 1024, a supplementary group — goes into a drop-in for
   the second service, `/etc/systemd/system/opamp-fleet-agents.service.d/`, which `service install`
   never touches either.
