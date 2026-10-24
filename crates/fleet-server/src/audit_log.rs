@@ -245,6 +245,7 @@ impl AuditLog {
             unrecorded: unrecorded.clone(),
             batch: Vec::new(),
             batch_bytes: 0,
+            batch_start_prev: String::new(),
         };
         if torn {
             writer.write(Entry::new("audit.chain_broken", "recorded"));
@@ -358,13 +359,13 @@ struct Writer {
     batch: Vec<Line>,
     /// Their size in the file, newlines included.
     batch_bytes: u64,
+    /// The hash of the line before the batch, which the chain goes back to when the batch fails.
+    batch_start_prev: String,
 }
 
 /// One line of the batch.
 struct Line {
     seq: u64,
-    /// The hash of the line before it, which the chain goes back to when the batch fails.
-    prev: String,
     text: String,
     event: String,
     outcome: String,
@@ -509,11 +510,13 @@ impl Writer {
         line.insert("prev".into(), self.prev.clone().into());
         let text = Value::Object(line).to_string();
         let prev = std::mem::replace(&mut self.prev, line_hash(&text));
+        if self.batch.is_empty() {
+            self.batch_start_prev = prev;
+        }
         self.seq = seq;
         self.batch_bytes += text.len() as u64 + 1;
         self.batch.push(Line {
             seq,
-            prev,
             text,
             // A retry that fails was no decision; the entries it carried the count of were.
             lost: u64::from(entry.event != "audit.resumed") + unrecorded,
@@ -544,7 +547,7 @@ impl Writer {
             }
             Err(e) => {
                 self.seq = first.seq - 1;
-                self.prev.clone_from(&first.prev);
+                self.prev = std::mem::take(&mut self.batch_start_prev);
                 let lost: u64 = batch.iter().map(|line| line.lost).sum();
                 self.unrecorded.fetch_add(lost, Ordering::SeqCst);
                 if !self.failing.swap(true, Ordering::SeqCst) {
