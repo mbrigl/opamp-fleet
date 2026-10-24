@@ -108,7 +108,8 @@ has:
   Gateway too. An operator marks a Gateway, whose certificate then speaks for any Agent.
 - **Key material and configuration readable by their owner alone** (ADR-0021 clause 8, ADR-0019
   clause 18): on Unix the private key, the stored connection settings and `supervisor.toml` are
-  written `0600` in `0700` directories. On Windows a system-scope install gives the default data
+  written `0600` in `0700` directories, a state directory `0710` that the process account's group
+  only passes through where one is registered (ADR-0059). On Windows a system-scope install gives the default data
   root under `%ProgramData%` to the Administrators, whoever created it, drops every right in it
   that the install does not grant, cuts it off from the read right every local user inherits
   there, and leaves it to LocalSystem, the Administrators and the service account. A data root
@@ -118,6 +119,18 @@ has:
   lies outside the data root, the layout root and the state directory, is left as it is, with a
   warning, and protecting it is the operator's. A local user acting while the install runs is not
   covered.
+- **A Managed Process can be kept from the Client's key and program** (ADR-0059): where the
+  operator registers a process account, every program a Supervisor starts — the Managed Process,
+  its version probe, a package's preflight — runs under it, started by a second service over a Unix
+  socket or named pipe that admits the Client's account alone. It reads its own `program/` and
+  `config/` and writes its data directories, and nothing else of the Client's: not the private
+  key, the certificates, `supervisor.toml`, the logs or the environment, and no program it runs.
+  On Windows it holds `SeChangeNotifyPrivilege` alone, so no `SeImpersonatePrivilege`, and runs in
+  a job that ends with the Client's connection. An install that drops or changes the account
+  withdraws what the former one was granted. Residual: the separation is opt-in, and a host
+  without a process account runs every Managed Process as the Client; all Managed Processes share
+  the one account, so they read one another's `config/`, and on Windows one of them can create an
+  instance of the pipe and answer the Client in the second service's place.
 - **An install acts only on directories an administrator named or its roots hold** (ADR-0053,
   ADR-0042 clause 2): `supervisor.toml` belongs to the service's account, and `service install`
   and `service config` run as root or an Administrator. The state directory comes from
@@ -255,7 +268,8 @@ can neither remove the listed Supervisor nor add another (ADR-0017). Both keys h
 Server only while every Supervisor whose configuration language can run commands as the Client's
 account — a Telegraf `inputs.exec`, an Icinga `CheckCommand`, the configuration a `command`
 kind's program reads — is in `remote_config_disabled`; otherwise the Server can configure such a
-Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. A signed Client
+Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. Where a process account
+is registered (ADR-0059), such a command runs under it, and it cannot write `supervisor.toml`. A signed Client
 build can still replace the program that reads them where `[packages] self_update` consents
 (ADR-0018).
 
