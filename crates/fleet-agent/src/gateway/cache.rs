@@ -368,7 +368,9 @@ fn owners() -> MutexGuard<'static, Vec<(PathBuf, Weak<PackageCache>)>> {
 }
 
 /// Stops the cache that wrote the store in `dir` until now from writing it again: it waits for
-/// a write in progress and then holds no store, so its later reports bind nothing.
+/// a write in progress and then holds no store, so its later reports bind nothing. Paths are
+/// compared as given, unresolved: a Gateway restarted in the same process opens its store under
+/// the same `state_dir` from the same configuration, and that is the case this guards.
 fn retire(dir: &Path) {
     let retired: Vec<Arc<PackageCache>> = {
         let mut owners = owners();
@@ -393,7 +395,8 @@ fn retire(dir: &Path) {
 const REPORT_LINES_PER_LIVE: usize = 8;
 
 /// The one task that writes a cache's store: whoever queues changes wakes it, and each wake
-/// writes everything queued by then in one append and one sync. It ends with the cache.
+/// writes everything queued by then in one append and one sync. It ends with the cache, whose
+/// drop wakes it a last time.
 async fn write_store(cache: Weak<PackageCache>, wake: Arc<tokio::sync::Notify>) {
     loop {
         wake.notified().await;
@@ -467,6 +470,12 @@ struct Landing {
     cache: Arc<PackageCache>,
     hash: Vec<u8>,
     settled: bool,
+}
+
+impl Drop for PackageCache {
+    fn drop(&mut self) {
+        self.wake.notify_one();
+    }
 }
 
 impl Drop for Landing {
@@ -2524,9 +2533,17 @@ mod tests {
         assert!(old.bind(first, "h1", |_| false).await.0);
         let new = cache_binding(dir.path(), 3).await;
         assert!(new.is_bound(&first));
+        let before = std::fs::read(dir.path().join(DIR).join(store::NAME)).expect("read");
+        let refused = InstanceUid::default();
         assert!(
-            !old.bind(InstanceUid::default(), "h1", |_| false).await.0,
+            !old.bind(refused, "h1", |_| false).await.0,
             "the replaced cache binds nothing"
+        );
+        settled(&old);
+        assert_eq!(
+            std::fs::read(dir.path().join(DIR).join(store::NAME)).expect("read"),
+            before,
+            "and writes nothing to the store"
         );
         let second = InstanceUid::default();
         assert!(new.bind(second, "h1", |_| false).await.0);
@@ -2577,5 +2594,24 @@ mod tests {
         cache.write_reports().await;
         settled(&cache);
         assert_eq!(store_lines(dir.path()), live, "rewritten past their bound");
+    }
+
+    /// The task that writes a cache's store ends once the cache is gone, so a Gateway restarted
+    /// in the same process leaves none behind.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn the_stores_writer_ends_with_its_cache() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_binding(dir.path(), 3).await;
+        assert!(cache.bind(InstanceUid::default(), "h1", |_| false).await.0);
+        let wake = Arc::downgrade(&cache.wake);
+        drop(cache);
+        tokio::time::timeout(DEADLINE, async {
+            while wake.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the writer ended");
     }
 }

@@ -2071,7 +2071,10 @@ mod tests {
     }
 
     /// Two Agents of a host that reports for the first time arrive together: the second waits
-    /// for the store to hold the host's end the first moved, and both are carried.
+    /// for the store to hold the host's end the first moved, and both are carried. A liveness
+    /// test: it holds too where the second report is forwarded at once, without waiting. That
+    /// nothing relies on an end the store does not hold is what
+    /// `policy::tests::a_moved_end_is_pending_until_written` tests.
     /// Verifies: ADR-0060
     #[tokio::test]
     async fn a_report_waits_for_its_hosts_end_another_report_is_writing() {
