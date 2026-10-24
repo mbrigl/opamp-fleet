@@ -16,16 +16,19 @@ admits the Client's account alone, and the Client accepts a socket whose peer, o
 owner, is the process account.
 
 Every Managed Process runs under that same account. On Linux and macOS the socket lies in a
-directory the process account owns (ADR-0059 clause 9), so a Managed Process can remove the
-second service's socket and bind its own at the name; on Windows it can create an instance of the
-pipe, which the pipe's security descriptor grants the process account. At the Client's next
-connection — after a restart of the Client or of the second service — the Client finds a peer of
-the right account and accepts it (`Channel::open` checks the peer's uid, or the pipe's owner).
-The impostor then receives what the Client sends: each program to start, its arguments and
-environment, and the Supervisor Endpoint's token. It gains no account it does not already run
-under, but what it starts no longer ends with the Client's connection, which clause 4 promises,
-and what it reports of a program's start and exit to the Client — and through the Client's health
-to the Server — is its own word. ADR-0059 and `docs/HARDENING.md` name this for Windows alone.
+directory the process account owns (ADR-0059 clause 9), so a Managed Process can remove the second
+service's socket and bind its own at the name; on Windows it can create an instance of the pipe,
+which the pipe's security descriptor grants the process account. To be there when the Client
+connects again it must outlive the Client's last connection, which ends every program the second
+service started: on Unix by leaving its process group, on Windows through a broker outside its job —
+both of which ADR-0059 names. At the Client's next connection — after a restart of the Client or of
+the second service — the Client finds a peer of the right account and accepts it (`Channel::open`
+checks the peer's uid, or the pipe's owner). The impostor then receives what the Client sends: each
+program to start, its arguments and environment, and the Supervisor Endpoint's token. It gains no
+account it does not already run under, but what it starts no longer ends with the Client's
+connection, which clause 4 promises, and what it reports of a program's start and exit to the Client
+— and through the Client's health to the Server — is its own word. ADR-0059 and `docs/HARDENING.md`
+name this for Windows alone.
 
 The account cannot tell the two apart; the process can. Each service manager knows the process
 it runs as the second service — systemd its `MainPID`, launchd the job's `pid`, the SCM the
@@ -33,17 +36,16 @@ service's process id — and each platform reports the process at the other end 
 connection: `SO_PEERCRED` and, from Linux 6.5, `SO_PEERPIDFD` on Linux, `LOCAL_PEERPID` on macOS,
 `GetNamedPipeServerProcessId` on Windows.
 
-A process id alone has two limits. It can be reused: a process that listened and then ended
-leaves its id behind, and a later process — the restarted second service among them — can be
-given it; polkit's check of a caller by process id failed this way (CVE-2013-4288) and moved to
-the process's start time and to pidfds. And a Managed Process under the same account can reach
-into the real second service itself instead of replacing its socket: on Linux by `ptrace`,
-`/proc/<pid>/mem` or `pidfd_getfd`, where the Yama module permits it for a process that is not a
-descendant (`kernel.yama.ptrace_scope` 0); on Windows by `OpenProcess` with the rights the
-process's default security grants its own account. A process that marks itself not dumpable
-(`PR_SET_DUMPABLE` 0) is closed to all three on Linux for any caller without `CAP_SYS_PTRACE`,
-whatever Yama says. On macOS `task_for_pid` refuses a caller of the same user without the
-debugging entitlement.
+A process id alone has two limits. It can be reused: a process that listened and then ended leaves
+its id behind, and a later process — the restarted second service among them — can be given it;
+polkit's check of a caller by process id failed this way (CVE-2013-4288) and moved to the process's
+start time and to pidfds. And a Managed Process under the same account can reach into the real
+second service itself instead of replacing its socket: on Linux by `ptrace`, `/proc/<pid>/mem` or
+`pidfd_getfd`, where Yama is absent or `kernel.yama.ptrace_scope` is 0, which permit it for a
+process that is not a descendant; on Windows by `OpenProcess` with the rights the process's default
+security grants its own account. A process that marks itself not dumpable (`PR_SET_DUMPABLE` 0) is
+closed to all three on Linux for any caller without `CAP_SYS_PTRACE`, whatever Yama says. On macOS
+`task_for_pid` refuses a caller of the same user without the debugging entitlement.
 
 The specification's quality goal Q-1 asks that the Fleet be secure by default.
 
@@ -78,8 +80,9 @@ allows, the Managed Processes cannot reach into.
      impersonating it at that level, and refuses a client that is not the Client's account. It
      refuses to run as `LocalSystem`, to serve `LocalSystem`, or to serve its own account.
    - **The Client checks the process too.** Before it writes anything on a new connection, the
-     Client reads the process at the other end — on Linux `SO_PEERPIDFD` where the kernel has it
-     and `SO_PEERCRED` otherwise, on macOS `LOCAL_PEERPID`, on Windows
+     Client reads the process at the other end — on Linux `SO_PEERPIDFD`, and `SO_PEERCRED` only
+     where the kernel does not know that option (`ENOPROTOOPT`), any other error being a process
+     that cannot be read; on macOS `LOCAL_PEERPID`, on Windows
      `GetNamedPipeServerProcessId` — and then asks the service manager for the process it runs as
      the second service: systemd the unit's `MainPID`, launchd the job's `pid`, the SCM the
      service's process id from `QueryServiceStatusEx`. It accepts the connection only where both
@@ -94,7 +97,8 @@ allows, the Managed Processes cannot reach into.
      for a second service that is not running, each time on a new connection checked anew, and the
      Supervisors report the second service unreachable as they do then (ADR-0059 clause 3).
    - **The second service closes its process to the Managed Processes where it can.** On Linux it
-     marks itself not dumpable (`PR_SET_DUMPABLE` 0) before it listens, so no process of its own
+     marks itself not dumpable (`PR_SET_DUMPABLE` 0) first thing at its start, and does not listen
+     while `/proc/self/status` names a tracer (`TracerPid` other than 0), so no process of its own
      account without `CAP_SYS_PTRACE` can attach to it, read or write its memory, or take its file
      descriptors, whatever `kernel.yama.ptrace_scope` says; the programs it starts are dumpable as
      usual, since `execve` resets the mark. On macOS the platform already refuses `task_for_pid`
@@ -132,7 +136,8 @@ clause 5).
   a follow-up.
 - **The second service checks that its socket is still its own** and binds it again where it was
   replaced. It narrows the window but does not close it — the impostor can replace the socket
-  again between two checks — and does nothing on Windows. Rejected; the Client's check closes it.
+  again between two checks — and does nothing on Windows. Rejected; the Client's check closes the
+replacement.
 - **A secret only the Client and the second service share** — a token the second service proves
   at the handshake. The second service would have to keep it where its own Managed Processes,
   running under its account, cannot read it. On Linux a process that is not dumpable would keep it
@@ -141,9 +146,9 @@ clause 5).
 - **Report a refused peer to the Server too.** The Server would see it in the fleet view. The
   Client's health already shows the second service unreachable, and the log names the impostor;
   a new health detail is a protocol matter of its own. Not taken now.
-- **Keep it as a residual.** The separation holds everywhere else; leaving this case means a
-  Managed Process can lie about what runs and keep what it starts alive past the Client's
-  connection. Rejected.
+- **Keep the replacement as a residual.** The separation holds everywhere else; leaving this case
+  means a Managed Process can lie about what runs and keep what it starts alive past the Client's
+  connection. Rejected; what remains is named under *Out of scope*.
 
 ## Sources / Prior art
 
@@ -197,11 +202,16 @@ Tests that will carry `Verifies: ADR-0061`:
   process differs, one whose process cannot be read, and one the service manager names no process
   for — each before it writes anything, each treated as a second service that is away, and each
   retried on a new connection.
-- On Linux, where the kernel has `SO_PEERPIDFD`: a peer whose listening process has ended, while
-  another process holds the listening socket, is refused although the service manager names a
-  process of the same id.
-- On Linux the second service, once listening, is not dumpable, and a process of its account
-  cannot attach to it or open its `/proc/<pid>/mem`; a program it starts is dumpable.
-- The service smoke test, on Linux, macOS and Windows: a Managed Process the second service started
-  replaces the socket, or creates an instance of the pipe, and the Client, restarted, refuses it,
-  writes it nothing, logs it, and starts no Managed Process until the second service is restarted.
+- On Linux, which CI runs with a kernel that has `SO_PEERPIDFD` and where the test fails rather
+  than passes without it: a peer whose listening process has ended, while another process holds
+  the listening socket, is refused although the service manager names a process of the same id;
+  an error of `SO_PEERPIDFD` other than `ENOPROTOOPT` refuses the peer and falls back to nothing.
+- On Linux the second service, once listening, reports itself not dumpable
+  (`PR_GET_DUMPABLE`), and the test, as its parent and without `CAP_SYS_PTRACE`, so that Yama
+  permits it, is refused `PTRACE_ATTACH`, `/proc/<pid>/mem` and `pidfd_getfd`; a program it starts
+  is dumpable. The second service does not listen while it is traced.
+- The service smoke test: on Linux and macOS a Managed Process the second service started leaves
+  its process group and replaces the socket; on Windows, with `NT AUTHORITY\LocalService` as the
+  process account, a task scheduled under that account creates an instance of the pipe. The
+  Client, restarted, refuses it, writes it nothing, logs it, and starts no Managed Process until
+  the second service is restarted.
