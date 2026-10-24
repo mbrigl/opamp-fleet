@@ -448,7 +448,11 @@ What the separation gives and what it does not:
   package state, logs or environment, nor write the program it runs. A command a Configuration
   makes it run — a Telegraf `inputs.exec`, an Icinga `CheckCommand` — runs as the process account.
 - All Managed Processes share the one process account, so they still read one another's `config/`
-  and environment.
+  and environment. For the same reason one of them can take the second service's place: replace
+  the socket in the directory the process account owns, or on Windows create an instance of the
+  pipe, and answer the Client's next connection. It gains no account it does not already run
+  under, but the programs it starts then outlive the Client's connection, and what it reports of
+  them is its own word.
 - A grant an agent needs names the process account, not the Client's: a `sudoers` rule for
   Telegraf's `use_sudo`, the rights Icinga 2 needs on its directories, a supplementary group such
   as `adm`. On Linux, what a Managed Process needs from
