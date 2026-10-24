@@ -383,10 +383,13 @@ pub struct InstallArgs {
     /// Run every Managed Process under this account, through a second service,
     /// `<PRODUCT_NAME>-agents`, that runs under it and starts them on the Client's request.
     ///
-    /// The account must exist, must be neither root nor the account the Client runs as, and its
-    /// primary group must be its own and a supplementary group of the Client's account, with no
-    /// other member; the Client must not run as root. A re-registration without the flag keeps the account the second service's
-    /// unit or plist names. System scope under systemd on Linux or launchd on macOS, for now.
+    /// System scope only: under systemd on Linux, launchd on macOS and the SCM on Windows. On Linux
+    /// and macOS the account must exist, must be neither root nor the account the Client runs as,
+    /// and its primary group must be its own and a supplementary group of the Client's account,
+    /// with no other member; the Client must not run as root. On Windows it is a passwordless
+    /// form — `NT SERVICE\<PRODUCT_NAME>-agents`, a gMSA, or `LocalService` / `NetworkService` —
+    /// and the Client runs under an account of its own. A re-registration without the flag keeps
+    /// the account the second service's registration names.
     #[arg(long, value_name = "ACCOUNT", conflicts_with = "user")]
     pub process_account: Option<String>,
     // ADR-0059.
