@@ -1,6 +1,6 @@
 # ADR-0061: The Client speaks only to the process its service manager runs as the second service
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-24
 - **Deciders:** Markus Brigl
 - **Applies to:** the Client's check of the second service's end of the channel in `crates/fleet-agent/src/supervisor/channel.rs` and `crates/fleet-agent/src/supervisor/channel/windows.rs`, the second service's own process attributes in `crates/fleet-agent/src/supervisor/channel.rs`, the query of the second service's process from systemd, launchd and the SCM in `crates/fleet-agent/src/service/manager.rs` and `crates/fleet-agent/src/service/windows_config.rs`, and every document that says what the separation by a process account holds against a Managed Process
