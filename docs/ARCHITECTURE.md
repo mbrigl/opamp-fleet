@@ -26,7 +26,8 @@ than anywhere else, and none beats one that has stopped being true.
    │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients        register, audit record,
    │                                                                 artifacts by SHA-256
    ├── Supervisor Endpoint (loopback) ◀── a Collector's opampextension
-   ├── Managed Processes: Collector, any command
+   ├── Managed Processes: Collector, any command — where a process account is registered, under
+   │     it, started by the second service over a Unix socket or named pipe
    ├── package downloads: the Server's own origin, and no other
    ├── own-telemetry destinations: OTLP/HTTP, as the Server offers them
    └── service manager: systemd, launchd or the Windows SCM
@@ -226,6 +227,18 @@ core module names an adapter or a technology, and when a module has no role.
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.
+- **Client service** — `service::manager` registers, starts, stops and deregisters the Client's
+  service and, where a process account is named, the second service `<PRODUCT_NAME>-agents` beside
+  it, and writes both systemd units itself
+  ([ADR-0059](adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)). `service::run_as`
+  decides and checks the Client's account and the process account, and hands the roots over,
+  leaving what the process account owns. On Windows `service::windows_config` sets the SCM's
+  accounts, recovery actions and required privileges, `service::windows_rights` restricts the data
+  root, `service::run_as` also grants the process account its share of the layout and withdraws a
+  former account's grants, and `service::withdrawal` keeps the record
+  of what an install left to finish — the former accounts to withdraw and the services to start
+  again — under `HKLM\SOFTWARE\<PRODUCT_NAME>\WithdrawalPending`; the install lock that serialises
+  `service install`, `uninstall`, `start` and `stop` is in `win32`.
 - **Client self-update** — `update` is the Client updating itself
   ([ADR-0018](adr/0018-the-client-updates-itself-under-its-own-agent-type.md)). It owns the port `SelfUpdater` and
   `SelfUpdate`, the state the Engine keeps about it: armed or not, probation committed, restart
@@ -294,6 +307,21 @@ ordinary `transport` with the bootstrap pair until the issued certificate is in 
 directory ([ADR-0019](adr/0019-the-client-supervisor-installed-service-releases-and-installers.md)). From then on the Client renews at two thirds of the certificate's life,
 proving with the old key which certificate it renews. A revocation closes the sessions it
 concerns at once and follows every renewal.
+
+**A Supervisor starts its program.** Without a process account the runner starts the Managed
+Process, its version probe and a package's preflight as the Client. Where `service install
+--process-account` registered one, the Client's command line carries `--agents-socket` and the
+process account's uid (on Windows its SID), and `service::runtime` hands every Supervisor the
+`Spawner::Channel` of `supervisor::process`, over the `Channel` of `supervisor::channel`, instead:
+each start, signal, stop and purge is a request to the second service, `supervisor run --agents`,
+the same program from the same `current` under the process account, which streams the program's
+output and exit back. The second service admits one connection at a time, from the Client's account
+alone by the peer's credentials or the pipe client's token, and stops every program it started — by
+process group on Unix, by job object on Windows — when that connection closes. Both ends refuse a
+peer of another build, and the one that `current` no longer names exits so its service manager
+starts it from the new version. While the second service is away, a delivered package is staged and
+waits, and the Supervisor retries with backoff
+([ADR-0059](adr/0059-managed-processes-run-under-a-process-account-started-by-a-second-service.md)).
 
 **Where state lives.** The Server keeps all of its state under one `data_dir`, one directory per
 domain and owner-only: `configurations/`, `deployments/`, `packages/` (metadata) and `blobs/` (the
