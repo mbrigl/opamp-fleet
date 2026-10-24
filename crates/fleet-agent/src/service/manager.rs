@@ -1171,7 +1171,6 @@ pub struct HaltError {
 /// # Errors
 /// Returns why a service could not be stopped, and why the Client could not be started again,
 /// with what this stopped.
-#[cfg(any(windows, test))]
 fn halt_with(
     stop: &mut dyn FnMut(&ServiceLabel) -> Result<bool, String>,
     start: &mut dyn FnMut(&ServiceLabel) -> Result<(), String>,
@@ -1219,6 +1218,261 @@ pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, HaltError> {
                 .map_err(|e| format!("cannot start {label}: {e}"))
         },
     )
+}
+
+/// Stops the Client, then the second service, and waits until each has stopped and its process
+/// has ended, up to [`STOPPING`] each, so that nothing runs under an account whose files an
+/// install is about to re-own (ADR-0059 clause 16). Returns which ran: what systemd reports
+/// active or activating, what launchd holds with a process.
+///
+/// # Errors
+/// Returns why one could not be stopped, or that one had not ended within [`STOPPING`], with what
+/// this stopped; that is started again, and nothing is changed.
+#[cfg(unix)]
+pub fn halt_for_change(level: ServiceLevel) -> Result<Halted, HaltError> {
+    halt_with(
+        &mut |label| {
+            let now = activity(label)?;
+            if now != Activity::Stopped {
+                stop_for_change(label)?;
+            }
+            Ok(matches!(now, Activity::Running | Activity::Starting))
+        },
+        &mut |label| start_for_change(level, label),
+    )
+}
+
+/// Starts again what [`halt_for_change`] stopped, once the change has succeeded ([`resumed`]): the
+/// second service first where nothing pulls it in.
+///
+/// # Errors
+/// Returns why a service could not be started, or that one still starting or stopping did not
+/// settle in time.
+#[cfg(unix)]
+pub fn resume(level: ServiceLevel, halted: Halted) -> Result<(), String> {
+    resume_with(
+        &resumed(halted, agents_registered(level), PULLED_IN),
+        &mut |label| activity(label),
+        &mut |label| start_for_change(level, label),
+        STOPPING,
+    )
+}
+
+/// What a stop for a change stopped, for a message: `the Client`, `the second service`, or both;
+/// `None` where it stopped nothing.
+#[must_use]
+pub fn describe_halted(halted: Halted) -> Option<&'static str> {
+    match (halted.client, halted.agents) {
+        (true, true) => Some("the Client and the second service"),
+        (true, false) => Some("the Client"),
+        (false, true) => Some("the second service"),
+        (false, false) => None,
+    }
+}
+
+/// Whether an install changes an account a service runs under (ADR-0059 clause 16): the
+/// registration names a process account and the install names another or none, or the Client's
+/// registration names another account than the install — root where it names none. A first
+/// registration changes nothing, and neither does a process account added where none was.
+#[must_use]
+pub fn account_changes(
+    client: Option<&Registration>,
+    run_as: Option<&str>,
+    agents: Option<&Registration>,
+    process: Option<&str>,
+) -> bool {
+    let process_changes = agents
+        .and_then(|agents| agents.account.as_deref())
+        .is_some_and(|former| process != Some(former));
+    let client_changes = client
+        .is_some_and(|client| client.account.as_deref().unwrap_or(ROOT) != run_as.unwrap_or(ROOT));
+    process_changes || client_changes
+}
+
+/// What a service is doing, as systemd reports it: `active` and `reloading` run, `activating`
+/// starts, `deactivating` stops, and anything else — `inactive`, `failed`, a unit it does not
+/// know — is stopped.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_activity(state: &str) -> Activity {
+    match state {
+        "active" | "reloading" | "refreshing" => Activity::Running,
+        "activating" => Activity::Starting,
+        "deactivating" => Activity::Stopping,
+        _ => Activity::Stopped,
+    }
+}
+
+/// Whether `launchctl print` shows the job with a process: its own `pid = ` line, one tab deep.
+#[cfg(any(target_os = "macos", test))]
+fn launchd_has_process(print: &str) -> bool {
+    print.lines().any(|line| {
+        line.strip_prefix("\tpid = ")
+            .is_some_and(|pid| pid.trim().parse::<u32>().is_ok())
+    })
+}
+
+/// Whether a plist is registered `Disabled`.
+#[cfg(any(target_os = "macos", test))]
+fn plist_disabled(plist: &str) -> bool {
+    plist
+        .split_once("<key>Disabled</key>")
+        .is_some_and(|(_, after)| after.trim_start().starts_with("<true/>"))
+}
+
+/// What `label` is doing, as systemd reports it.
+///
+/// # Errors
+/// Returns an error if `systemctl` cannot be run.
+#[cfg(target_os = "linux")]
+fn activity(label: &ServiceLabel) -> Result<Activity, String> {
+    use std::process::Stdio;
+    let output = std::process::Command::new("systemctl")
+        .arg("is-active")
+        .arg(format!("{}.service", label.to_qualified_name()))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run systemctl: {e}"))?;
+    Ok(systemd_activity(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
+/// What `label` is doing, as launchd reports it: running where it holds the job with a process,
+/// stopped where it holds it without one or not at all.
+///
+/// # Errors
+/// Returns an error if `launchctl` cannot be run.
+#[cfg(target_os = "macos")]
+fn activity(label: &ServiceLabel) -> Result<Activity, String> {
+    use std::process::Stdio;
+    let output = std::process::Command::new("launchctl")
+        .arg("print")
+        .arg(format!("system/{}", label.to_qualified_name()))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run launchctl: {e}"))?;
+    Ok(
+        if output.status.success() && launchd_has_process(&String::from_utf8_lossy(&output.stdout))
+        {
+            Activity::Running
+        } else {
+            Activity::Stopped
+        },
+    )
+}
+
+/// Stops `label` for a change and waits until it has stopped, up to [`STOPPING`]. systemd's stop
+/// is queued and waited out. A launchd job is removed from launchd — `launchctl stop` alone sees
+/// a `KeepAlive` job started again — and waited for until launchd holds it no more; its plist
+/// stays, and [`start_for_change`] or `service start` loads it again.
+///
+/// # Errors
+/// Returns why the stop could not be asked for, or that the service had not stopped in time.
+#[cfg(unix)]
+fn stop_for_change(label: &ServiceLabel) -> Result<(), String> {
+    use std::process::Stdio;
+    let name = label.to_qualified_name();
+    #[cfg(target_os = "linux")]
+    let (program, args, mut stopped): (_, _, Box<dyn FnMut() -> Result<bool, String>>) = (
+        "systemctl",
+        vec![
+            "stop".to_string(),
+            "--no-block".to_string(),
+            format!("{name}.service"),
+        ],
+        Box::new(|| activity(label).map(|now| now == Activity::Stopped)),
+    );
+    #[cfg(target_os = "macos")]
+    let (program, args, mut stopped): (_, _, Box<dyn FnMut() -> Result<bool, String>>) = (
+        "launchctl",
+        vec!["remove".to_string(), name.clone()],
+        Box::new(|| launchd_loaded(&name).map(|loaded| !loaded)),
+    );
+    let status = std::process::Command::new(program)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
+    if !status.success() && !stopped()? {
+        return Err(format!(
+            "cannot stop {name}: `{program} {}` failed",
+            args.join(" ")
+        ));
+    }
+    let until = std::time::Instant::now() + STOPPING;
+    while !stopped()? {
+        if std::time::Instant::now() >= until {
+            return Err(format!(
+                "{name} has not stopped {}s after its stop",
+                STOPPING.as_secs()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+/// Starts `label` again after a stop for a change, through the manager — on macOS from its plist
+/// first, where the stop removed the job from launchd ([`load_removed_job`]).
+///
+/// # Errors
+/// Returns why it could not be started.
+#[cfg(unix)]
+fn start_for_change(level: ServiceLevel, label: &ServiceLabel) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if load_removed_job(level, label)? {
+        return Ok(());
+    }
+    manager(level)?
+        .start(ServiceStartCtx {
+            label: label.clone(),
+        })
+        .map_err(|e| format!("cannot start {label}: {e}"))
+}
+
+/// Loads a job launchd holds no more from its plist, where that plist is not registered
+/// `Disabled`: `RunAtLoad` starts it, and `launchctl start` knows only a job launchd holds. Returns
+/// whether it did; a plist registered `Disabled` is left to `service-manager`'s start, which
+/// clears the key and loads it.
+///
+/// # Errors
+/// Returns why launchd could not be asked, the plist read, or the job loaded.
+#[cfg(target_os = "macos")]
+fn load_removed_job(level: ServiceLevel, label: &ServiceLabel) -> Result<bool, String> {
+    use std::process::Stdio;
+    let name = label.to_qualified_name();
+    if level != ServiceLevel::System || launchd_loaded(&name)? {
+        return Ok(false);
+    }
+    let plist = Path::new("/Library/LaunchDaemons").join(format!("{name}.plist"));
+    let text = match std::fs::read_to_string(&plist) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("cannot read {}: {e}", plist.display())),
+    };
+    if plist_disabled(&text) {
+        return Ok(false);
+    }
+    let status = std::process::Command::new("launchctl")
+        .arg("load")
+        .arg(&plist)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("cannot run launchctl: {e}"))?;
+    if status.success() {
+        Ok(true)
+    } else {
+        Err(format!(
+            "cannot load {}: `launchctl load` failed",
+            plist.display()
+        ))
+    }
 }
 
 /// Which of the two services run now — running, starting, or stopping, which a stop already under
@@ -1309,7 +1563,6 @@ pub fn describe_activity() -> String {
 /// What [`resume`] starts, in order: where the Client ran, what `start` starts — the second
 /// service first where one is registered now and nothing pulls it in — and where the second
 /// service alone ran and is registered still, that one. What did not run stays stopped.
-#[cfg(any(windows, test))]
 fn resumed(halted: Halted, agents_registered: bool, pulled_in: bool) -> Vec<ServiceLabel> {
     if halted.client {
         return started(agents_registered, pulled_in);
@@ -1348,7 +1601,6 @@ pub fn resume(level: ServiceLevel, halted: Halted) -> Result<(), String> {
 ///
 /// # Errors
 /// Returns why a service could not be asked or started, or that it did not settle.
-#[cfg(any(windows, test))]
 fn resume_with(
     labels: &[ServiceLabel],
     activity: &mut dyn FnMut(&ServiceLabel) -> Result<Activity, String>,
@@ -1526,10 +1778,9 @@ pub enum Activity {
 /// How long a stop waits for a service that is still starting before it stops it anyway.
 const STARTING: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How long a stop under the SCM waits for a service, and its process, to end: longer than the
-/// second service takes to stop its programs, which [`AGENTS_STOP_TIMEOUT_SECS`] bounds on
-/// systemd.
-#[cfg(windows)]
+/// How long a stop for a change, and under the SCM every stop, waits for a service and its
+/// process to end: longer than the second service takes to stop its programs, which
+/// [`AGENTS_STOP_TIMEOUT_SECS`] bounds on systemd.
 const STOPPING: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Stops `label` through the manager.
@@ -1618,6 +1869,13 @@ impl ServiceControl for NativeService {
             } else {
                 "the service"
             };
+            // A job a stop for a change removed from launchd is loaded again from its plist.
+            #[cfg(target_os = "macos")]
+            if load_removed_job(self.level, &label)
+                .map_err(|e| format!("cannot start {which}: {e}"))?
+            {
+                continue;
+            }
             (self.manager)(self.level)?
                 .start(ServiceStartCtx { label })
                 .map_err(|e| format!("cannot start {which}: {e}"))?;
@@ -2519,6 +2777,95 @@ mod tests {
         assert_eq!(resumed(agents_alone, true, false), [agents_label()]);
         assert!(resumed(agents_alone, false, false).is_empty(), "dropped");
         assert!(resumed(Halted::default(), true, false).is_empty());
+    }
+
+    /// An install changes an account where the registration names a process account and the install
+    /// names another or none, or where the Client's registration names another account than the
+    /// install, root standing in where it names none; a first registration and a process account
+    /// added where none was change nothing (ADR-0059 clause 16).
+    /// Verifies: ADR-0059
+    #[test]
+    fn an_account_change_is_a_former_account_named_no_more() {
+        let named = |account: Option<&str>| Registration {
+            file: PathBuf::from("/etc/systemd/system/unit.service"),
+            account: account.map(str::to_string),
+        };
+        let fleet = named(Some("opamp-fleet"));
+        let root = named(None);
+        let agents = named(Some("opamp-fleet-agents"));
+        let other = named(Some("other-agents"));
+        // A first registration.
+        assert!(!account_changes(
+            None,
+            Some("opamp-fleet"),
+            None,
+            Some("opamp-fleet-agents")
+        ));
+        // An upgrade that keeps both.
+        assert!(!account_changes(
+            Some(&fleet),
+            Some("opamp-fleet"),
+            Some(&agents),
+            Some("opamp-fleet-agents")
+        ));
+        // A process account added where none was.
+        assert!(!account_changes(
+            Some(&fleet),
+            Some("opamp-fleet"),
+            None,
+            Some("opamp-fleet-agents")
+        ));
+        // Root, named or left unnamed, is root.
+        assert!(!account_changes(Some(&root), Some("root"), None, None));
+        assert!(!account_changes(Some(&root), None, None, None));
+        // The process account dropped, or another named.
+        assert!(account_changes(
+            Some(&fleet),
+            Some("opamp-fleet"),
+            Some(&agents),
+            None
+        ));
+        assert!(account_changes(
+            Some(&fleet),
+            Some("opamp-fleet"),
+            Some(&other),
+            Some("opamp-fleet-agents")
+        ));
+        // Another account for the Client.
+        assert!(account_changes(
+            Some(&root),
+            Some("opamp-fleet"),
+            None,
+            None
+        ));
+        assert!(account_changes(Some(&fleet), None, None, None));
+    }
+
+    /// What ran, for a stop for a change, is what systemd reports active or activating, and what
+    /// launchd holds with a process (ADR-0059 clause 16); a job registered `Disabled` is loaded
+    /// by `service-manager`'s start, any other one a stop removed by the Client's.
+    /// Verifies: ADR-0059
+    #[test]
+    fn what_ran_is_what_the_manager_reports_running() {
+        assert_eq!(systemd_activity("active"), Activity::Running);
+        assert_eq!(systemd_activity("reloading"), Activity::Running);
+        assert_eq!(systemd_activity("activating"), Activity::Starting);
+        assert_eq!(systemd_activity("deactivating"), Activity::Stopping);
+        for stopped in ["inactive", "failed", "unknown", ""] {
+            assert_eq!(systemd_activity(stopped), Activity::Stopped, "{stopped}");
+        }
+        let print = "system/opamp-fleet = {\n\tactive count = 1\n\tpath = /Library/LaunchDaemons/opamp-fleet.plist\n\tstate = running\n\n\tpid = 4242\n\tendpoints = {\n\t\tpid = 7\n\t}\n}\n";
+        assert!(launchd_has_process(print));
+        assert!(!launchd_has_process(&print.replace("\tpid = 4242\n", "")));
+        assert!(plist_disabled(
+            "<dict>\n\t<key>Disabled</key>\n\t<true/>\n</dict>"
+        ));
+        assert!(!plist_disabled(
+            "<dict>\n\t<key>Disabled</key>\n\t<false/>\n</dict>"
+        ));
+        assert!(!plist_disabled(
+            "<dict>\n\t<key>RunAtLoad</key>\n\t<true/>\n</dict>"
+        ));
     }
 
     /// A stop for a change that cannot stop the second service starts the Client again where it
