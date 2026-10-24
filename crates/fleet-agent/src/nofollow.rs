@@ -94,8 +94,28 @@ impl HeldDir {
     /// # Errors
     /// Returns an error when the file cannot be read, or is no regular file.
     pub fn read(&self, name: &str) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut self.open_file(name)?, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// The regular file `name`, opened for reading, refusing a link: what its metadata says is
+    /// what is read.
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be opened, or is no regular file.
+    pub fn open_file(&self, name: &str) -> io::Result<std::fs::File> {
         check_name(name)?;
-        sys::read(self, name)
+        sys::open_file(self, name)
+    }
+
+    /// The existing regular file `name`, opened for writing in place, refusing a link.
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be opened, or is no regular file.
+    pub fn open_for_writing(&self, name: &str) -> io::Result<std::fs::File> {
+        check_name(name)?;
+        sys::open_for_writing(self, name)
     }
 
     /// Writes `contents` as the file `name`, with `mode` on Unix: whole, to a new temporary name
@@ -109,6 +129,16 @@ impl HeldDir {
         // the temporary name never collides with a file this directory is meant to hold.
         let temporary = format!("{name}~");
         sys::write(self, name, &temporary, contents, mode)
+    }
+
+    /// Makes what was created, renamed or removed in this directory durable. On Windows NTFS
+    /// journals the directory's entries itself, and a directory handle opened for reading cannot be
+    /// flushed, so nothing is done.
+    ///
+    /// # Errors
+    /// Returns an error when the sync fails.
+    pub fn sync(&self) -> io::Result<()> {
+        sys::sync(self)
     }
 
     /// Renames `from` to `to` within this directory. A link is renamed as a link.
@@ -208,7 +238,7 @@ fn refused_link(path: &Path) -> io::Error {
 mod sys {
     use std::ffi::{CString, OsStr};
     use std::fs::File;
-    use std::io::{self, Read as _, Write as _};
+    use std::io::{self, Write as _};
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
     use std::os::unix::ffi::OsStrExt as _;
     use std::path::Path;
@@ -309,26 +339,32 @@ mod sys {
         Ok(HeldDir { path, fd })
     }
 
-    pub(super) fn read(held: &HeldDir, name: &str) -> io::Result<Vec<u8>> {
+    pub(super) fn open_file(held: &HeldDir, name: &str) -> io::Result<File> {
+        open_regular(held, name, libc::O_RDONLY)
+    }
+
+    pub(super) fn open_for_writing(held: &HeldDir, name: &str) -> io::Result<File> {
+        open_regular(held, name, libc::O_WRONLY)
+    }
+
+    fn open_regular(held: &HeldDir, name: &str, access: libc::c_int) -> io::Result<File> {
         let path = held.path.join(name);
         // `O_NONBLOCK`: a FIFO at the name must not stall a privileged run; a regular file ignores it.
         let fd = openat(
             held.fd.as_raw_fd(),
             &c_name(OsStr::new(name))?,
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            access | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
             0,
         )
         .map_err(|e| named(e, &path))?;
-        let mut file = File::from(fd);
+        let file = File::from(fd);
         if !file.metadata()?.is_file() {
             return Err(io::Error::other(format!(
                 "{} is not a regular file",
                 path.display()
             )));
         }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        Ok(file)
     }
 
     pub(super) fn write(
@@ -393,13 +429,21 @@ mod sys {
     pub(super) fn remove(held: &HeldDir, name: &str) -> io::Result<()> {
         unlinkat(held.fd.as_raw_fd(), &c_name(OsStr::new(name))?)
     }
+
+    pub(super) fn sync(held: &HeldDir) -> io::Result<()> {
+        // SAFETY: a valid descriptor.
+        if unsafe { libc::fsync(held.fd.as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
 mod sys {
     use std::ffi::OsStr;
     use std::fs::{File, OpenOptions};
-    use std::io::{self, Read as _, Write as _};
+    use std::io::{self, Write as _};
     use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
     use std::path::Path;
 
@@ -465,10 +509,17 @@ mod sys {
         hold(&path)
     }
 
-    pub(super) fn read(held: &HeldDir, name: &str) -> io::Result<Vec<u8>> {
+    pub(super) fn open_file(held: &HeldDir, name: &str) -> io::Result<File> {
+        open_regular(held, name, OpenOptions::new().read(true))
+    }
+
+    pub(super) fn open_for_writing(held: &HeldDir, name: &str) -> io::Result<File> {
+        open_regular(held, name, OpenOptions::new().write(true))
+    }
+
+    fn open_regular(held: &HeldDir, name: &str, options: &mut OpenOptions) -> io::Result<File> {
         let path = held.path.join(name);
-        let mut file = OpenOptions::new()
-            .read(true)
+        let file = options
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&path)?;
         let meta = file.metadata()?;
@@ -481,9 +532,7 @@ mod sys {
                 path.display()
             )));
         }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        Ok(file)
     }
 
     pub(super) fn write(
@@ -520,5 +569,10 @@ mod sys {
 
     pub(super) fn remove(held: &HeldDir, name: &str) -> io::Result<()> {
         std::fs::remove_file(held.path.join(name))
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) fn sync(_: &HeldDir) -> io::Result<()> {
+        Ok(())
     }
 }

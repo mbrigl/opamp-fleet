@@ -156,6 +156,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("gateway::pool", Adapter),
             ("gateway::registry", Adapter),
             ("gateway::revocations", Adapter),
+            ("gateway::store", Adapter),
             ("host", Adapter),
             ("install", Adapter),
             ("logging", Adapter),
