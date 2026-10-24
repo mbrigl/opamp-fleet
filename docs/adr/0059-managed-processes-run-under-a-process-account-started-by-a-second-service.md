@@ -1,6 +1,6 @@
 # ADR-0059: Managed Processes run under a process account of their own, started by a second service that runs under it
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clause 4 superseded by [ADR-0061](0061-the-client-speaks-only-to-the-process-its-service-manager-runs-as-the-second-service.md)
 - **Date:** 2026-10-24
 - **Deciders:** Markus Brigl
 - **Applies to:** the `--process-account` flag of `service install` and the second service it registers in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/windows_config.rs` and `crates/fleet-agent/src/service/windows_rights.rs`, what a former account is withdrawn and the record of what an install left to finish in `crates/fleet-agent/src/service/withdrawal.rs`, the install lock, the pipe, the job objects and the handle-based walks in `crates/fleet-agent/src/win32.rs` and `crates/fleet-agent/src/win32/`, `service start`, `service stop` and `service uninstall` on Windows, the stop and unregister actions of `packaging/windows/supervisor.wxs`, the steps `packaging/linux/postinst` prints, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel between the Client and the second service, the modes, ownership and ACLs of the Supervisors' directories in `crates/fleet-agent/src/storage.rs`, and every document that tells an operator which account a Managed Process runs as
