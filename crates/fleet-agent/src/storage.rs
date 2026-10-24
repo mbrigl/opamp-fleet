@@ -572,13 +572,24 @@ pub(crate) mod handle {
     pub(crate) const DIRECTORY: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
-    /// A directory passed through on the way to another, never through a link: on Linux a
-    /// path-only handle, which needs no right to read the directory, only to search it.
+    /// A directory passed through on the way to another, never through a link, opened with no
+    /// right to read it, only to search it. Every walk opens each directory it passes this way:
+    /// [`open_beneath`] each component before the last, and [`step_trusting`] each on the way to
+    /// a root, from `/` on. So the Client passes through what it may only search, and the second
+    /// service, as the process account, through a Supervisor's directory (`0710`, ADR-0059
+    /// clause 6) to what it purges. On Linux a path-only handle.
     #[cfg(target_os = "linux")]
     pub(crate) const SEARCH: libc::c_int =
         libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    /// On macOS `O_SEARCH` (`O_EXEC | O_DIRECTORY`), which XNU authorizes as a search of the
+    /// directory and not as a read (`vn_authorize_open_existing`). macOS has it from macOS 13 on,
+    /// the oldest macOS a Client runs on (ADR-0059 clause 9); an older kernel would open for
+    /// reading (`FFLAGS`), and a walk through a directory it may only search would fail there
+    /// rather than reach further.
+    #[cfg(target_os = "macos")]
+    pub(crate) const SEARCH: libc::c_int = libc::O_SEARCH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     /// Elsewhere a directory read, as [`DIRECTORY`].
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(crate) const SEARCH: libc::c_int = DIRECTORY;
 
     /// A regular file, opened to change its owner and mode: never through a link, and never

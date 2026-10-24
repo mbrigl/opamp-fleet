@@ -2443,6 +2443,35 @@ mod tests {
         assert!(live.join("state").exists());
     }
 
+    /// The second service passes through the Supervisors' root and the tombstone, which the
+    /// process account may search and not read (`0710`, ADR-0059 clause 6), to the data its
+    /// programs wrote: on Linux through a path-only handle, on macOS through `O_SEARCH`. Run
+    /// unprivileged, the test's own account holds the search right alone on both.
+    /// Verifies: ADR-0059
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_purge_passes_through_directories_it_may_only_search() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("supervisors");
+        let tomb = root.join(crate::reconfigure::tombstone_name("agent"));
+        let data = tomb.join("data");
+        std::fs::create_dir_all(&data).expect("mkdir");
+        std::fs::write(data.join("state"), b"x").expect("write");
+        let chmod = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        };
+        chmod(&tomb, 0o100);
+        chmod(&root, 0o100);
+        let unreadable = own_uid() == 0 || std::fs::read_dir(&root).is_err();
+        let purged = purge(own_uid(), "agent", &tomb, &[PathBuf::from("data")]);
+        chmod(&root, 0o700);
+        chmod(&tomb, 0o700);
+        assert!(unreadable, "the root is searched, never read");
+        purged.expect("passed through");
+        assert!(!data.join("state").exists());
+    }
+
     /// A tombstone a start and a purge both set out to remove is gone for whichever comes second:
     /// neither the service nor the Client asking it takes that for what the process account
     /// wrote and could not be removed (ADR-0059 clause 12).
@@ -2984,6 +3013,26 @@ mod tests {
             refused.err().map(|e| e.kind()),
             Some(io::ErrorKind::PermissionDenied)
         );
+    }
+
+    /// Both ends read the other's account on Linux and on macOS alike: `peer_cred` is
+    /// `SO_PEERCRED` on Linux and `getpeereid` on macOS, and either end finds the other's uid there
+    /// for the checks of ADR-0059 clause 4. Run as one account, the test cannot tell an effective
+    /// uid from a real one: that both calls give the effective uid is their documentation's.
+    /// Verifies: ADR-0059
+    #[tokio::test]
+    async fn a_peer_is_known_by_its_uid_at_either_end() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("peer.sock");
+        let listener = bind(&socket).expect("bind");
+        let client = UnixStream::connect(&socket).await.expect("connect");
+        let (served, _) = listener.accept().await.expect("accept");
+        // SAFETY: geteuid(2) cannot fail and touches no memory.
+        let me = unsafe { libc::geteuid() };
+        assert_eq!(served.peer_cred().expect("the Client's").uid(), me);
+        assert_eq!(client.peer_cred().expect("the service's").uid(), me);
+        assert!(admit(me, me).is_ok());
+        assert!(admit(me, me.wrapping_add(1)).is_err());
     }
 
     /// Nothing is read from a refused peer and nothing waits on it: a stranger that says nothing
