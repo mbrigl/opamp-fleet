@@ -58,8 +58,19 @@ impl Registry {
     }
 
     /// The package cache, which holds the bindings and logs the Gateway's refusals.
-    pub fn cache(&self) -> &PackageCache {
+    pub fn cache(&self) -> &Arc<PackageCache> {
         &self.cache
+    }
+
+    /// Removes the routes of `uids` whose bindings ended, unless one is bound again by now
+    /// (ADR-0060 clause 3): the Server's replies for them reach no downstream connection.
+    pub fn forget(&self, uids: &[InstanceUid]) {
+        let mut routes = self.routes.lock().expect("registry lock");
+        for uid in uids {
+            if !self.cache.is_bound(uid) {
+                routes.remove(uid);
+            }
+        }
     }
 
     /// Binds `uid` to `speaker` on its first report and, once the store holds what the binding

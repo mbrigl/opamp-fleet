@@ -282,7 +282,6 @@ pub async fn run_on_timed(
         timings.revocation_refresh,
     ));
     tokio::spawn(write_reports(cache.clone(), shutdown.clone()));
-    tokio::spawn(hourly(cache.clone(), shutdown.clone()));
     let bindings = cache.clone();
     let downloads = Arc::new(cache::Downloads {
         cache,
@@ -296,6 +295,12 @@ pub async fn run_on_timed(
         revocations,
         members,
     });
+    // What the first list names ends now; what a later one names, when it comes (ADR-0060
+    // clause 3).
+    let mut changes = handler.revocations.subscribe();
+    changes.mark_unchanged();
+    handler.end_certificates(cache::now()).await;
+    tokio::spawn(keep_bindings(handler.clone(), changes, shutdown.clone()));
     // The receive and send limits the Baseline requires, enforced per hop; beside the OpAMP
     // endpoint, the download route the Agents behind this Gateway resolve their offers against
     // (ADR-0026 clause 45).
@@ -326,19 +331,32 @@ pub async fn run_on_timed(
     served
 }
 
-/// Once an hour until `shutdown` fires: while the bindings' store cannot be read, says so again
-/// (ADR-0060 clause 2).
-async fn hourly(cache: Arc<cache::PackageCache>, mut shutdown: Shutdown) {
+/// Until `shutdown` fires: ends the bindings of hosts whose certificates ended whenever the
+/// revocation list changes and once an hour (ADR-0060 clause 3), and once an hour, while the
+/// bindings' store cannot be read, says so again (clause 2).
+async fn keep_bindings(
+    forwarding: Arc<Forwarding>,
+    mut changes: tokio::sync::watch::Receiver<u64>,
+    mut shutdown: Shutdown,
+) {
     let every = std::time::Duration::from_secs(3600);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     loop {
         tokio::select! {
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                let cache = forwarding.registry.cache();
+                if let Some(why) = cache.unreadable() {
+                    cache::log_unreadable(why, &cache.store_path());
+                }
+            }
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
             () = shutdown.requested() => return,
         }
-        if let Some(why) = cache.unreadable() {
-            cache::log_unreadable(why, &cache.store_path());
-        }
+        forwarding.end_certificates(cache::now()).await;
     }
 }
 
@@ -658,6 +676,25 @@ impl Handler for Forwarding {
 }
 
 impl Forwarding {
+    /// Ends the bindings of every host whose kept certificate end has passed by `now`, or whose
+    /// certificate the revocation list held names, with their routes, current offers and places
+    /// upstream, as a binding that makes room goes (ADR-0060 clause 3, ADR-0058 clause 1), and
+    /// writes their removals.
+    async fn end_certificates(&self, now: i64) {
+        let cache = self.registry.cache();
+        let (ended, ticket) =
+            cache.end_certificates(now, |end| self.revocations.lists(&end.issuer, &end.serial));
+        self.registry.forget(&ended);
+        self.pool.release(ended);
+        if let Some(ticket) = ticket {
+            if !cache.written(ticket).await {
+                warn!(
+                    "cannot write the removal of ended bindings; they end again at the next start"
+                );
+            }
+        }
+    }
+
     /// A socket's report goes upstream; whatever the Server answers comes back through the
     /// registry, so nothing is replied here.
     async fn forward_from_socket(
@@ -1749,5 +1786,219 @@ mod tests {
             Reply::Refuse(status, _) => assert_eq!(status, StatusCode::FORBIDDEN),
             _ => panic!("another host's report was forwarded"),
         }
+    }
+
+    /// A certificate naming `host`, valid until `not_after`, with `serial`.
+    fn certificate_until(host: &str, not_after: time::OffsetDateTime, serial: &[u8]) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.subject_alt_names.push(rcgen::SanType::URI(
+            format!("urn:opamp-fleet:host:{host}")
+                .try_into()
+                .expect("uri"),
+        ));
+        params.not_before = not_after - time::Duration::days(60);
+        params.not_after = not_after;
+        params.serial_number = Some(rcgen::SerialNumber::from_slice(serial));
+        params.self_signed(&key).expect("cert").der().to_vec()
+    }
+
+    /// What the store under `state` reads back to.
+    fn stored(state: &std::path::Path) -> policy::Bindings {
+        let held = crate::nofollow::HeldDir::open(&state.join(cache::DIR)).expect("held");
+        policy::Bindings::replay(store::load(&held).expect("load")).expect("replay")
+    }
+
+    /// A Server's offer of one artifact to `uid`.
+    fn offer_for(uid: InstanceUid, path: &str) -> ServerToAgent {
+        ServerToAgent {
+            packages_available: Some(opamp::proto::PackagesAvailable {
+                packages: std::iter::once((
+                    "p".to_string(),
+                    opamp::proto::PackageAvailable {
+                        file: Some(opamp::proto::DownloadableFile {
+                            download_url: path.to_string(),
+                            content_hash: vec![7; 32],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ))
+                .collect(),
+                all_packages_hash: vec![1; 32],
+            }),
+            ..reply_for(uid)
+        }
+    }
+
+    /// A host whose certificate the revocation list names loses every binding — a serial with a
+    /// leading zero among them, which the list names without it — with its route, its current offer
+    /// and its place upstream, in memory and in the store; another host's report then binds the
+    /// `instance_uid`. Another host's bindings stay.
+    /// Verifies: ADR-0060, ADR-0058
+    #[tokio::test]
+    async fn a_revoked_hosts_bindings_end_with_their_route_offer_and_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let in_a_year = time::OffsetDateTime::now_utc() + time::Duration::days(365);
+        let owner = certificate_until("revoked-host", in_a_year, &[0x0a, 0x01]);
+        let (issuer, serial) = revocations::certificate_id(&owner).expect("id");
+        assert_eq!(
+            serial, "a01",
+            "the list names a serial without its leading zero"
+        );
+
+        let (socketed, polled, kept) = (
+            InstanceUid::default(),
+            InstanceUid::default(),
+            InstanceUid::default(),
+        );
+        let (tx, _rx) = mpsc::channel(64);
+        let mut socket = downstream(Transport::WebSocket, Some(tx), owner.clone());
+        forwarding
+            .forward_from_socket(&mut socket, report(socketed))
+            .await;
+        poll(
+            &forwarding,
+            &downstream(Transport::Http, None, owner.clone()),
+            polled,
+        )
+        .await;
+        let (other_tx, _other_rx) = mpsc::channel(64);
+        let mut other = downstream(
+            Transport::WebSocket,
+            Some(other_tx),
+            certificate_naming("other-host"),
+        );
+        forwarding
+            .forward_from_socket(&mut other, report(kept))
+            .await;
+        let path = "/api/v1/packages/otelcol/1.0.0/file";
+        forwarding
+            .registry
+            .deliver(socketed, offer_for(socketed, path))
+            .await;
+        let cache = forwarding.registry.cache();
+        assert!(cache.offered_to("revoked-host", path).is_some());
+        assert!(forwarding.pool.assignments().0.contains(&polled));
+
+        forwarding
+            .revocations
+            .replace(HashSet::from([(issuer, serial)]), None);
+        forwarding.end_certificates(cache::now()).await;
+
+        for uid in [socketed, polled] {
+            assert!(!cache.is_bound(&uid), "the binding ended");
+            assert!(!forwarding.registry.routes(&uid), "its route went");
+            assert!(
+                !forwarding.pool.assignments().0.contains(&uid),
+                "its place upstream went"
+            );
+            assert_eq!(stored(dir.path()).host_of(&uid), None, "and the store's");
+        }
+        assert!(
+            cache.offered_to("revoked-host", path).is_none(),
+            "its offer went"
+        );
+        assert!(cache.is_bound(&kept), "another host's binding stayed");
+        assert!(forwarding.registry.routes(&kept));
+
+        let (next_tx, _next_rx) = mpsc::channel(64);
+        let mut next = downstream(
+            Transport::WebSocket,
+            Some(next_tx),
+            certificate_naming("next-host"),
+        );
+        forwarding
+            .forward_from_socket(&mut next, report(socketed))
+            .await;
+        assert!(next.carried.contains(&socketed), "bound anew");
+    }
+
+    /// A host's bindings end once the latest `notAfter` it reported under has passed by the
+    /// Gateway's clock, at start too, and not before: a host that reports under a renewed
+    /// certificate keeps them past the old one's `notAfter`. A report under a certificate that has
+    /// expired binds nothing.
+    /// Verifies: ADR-0060
+    #[tokio::test]
+    async fn a_hosts_bindings_end_with_the_last_certificate_it_reported_under() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = forwarding(dir.path()).await;
+        let today = time::OffsetDateTime::now_utc();
+        let first = certificate_until("renewing-host", today + time::Duration::days(1), &[1]);
+        let renewed = certificate_until("renewing-host", today + time::Duration::days(30), &[2]);
+        let first_end = cache::end_of(&first).expect("end").not_after;
+        let renewed_end = cache::end_of(&renewed).expect("end").not_after;
+        let uid = InstanceUid::default();
+        let (tx, _rx) = mpsc::channel(64);
+        let mut socket = downstream(Transport::WebSocket, Some(tx), first);
+        forwarding
+            .forward_from_socket(&mut socket, report(uid))
+            .await;
+        let (tx, _rx) = mpsc::channel(64);
+        let mut socket = downstream(Transport::WebSocket, Some(tx), renewed);
+        forwarding
+            .forward_from_socket(&mut socket, report(uid))
+            .await;
+        assert!(socket.carried.contains(&uid));
+
+        forwarding.end_certificates(first_end + 1).await;
+        let cache = forwarding.registry.cache();
+        assert!(
+            cache.is_bound(&uid),
+            "renewed, so kept past the first notAfter"
+        );
+        forwarding.end_certificates(renewed_end + 1).await;
+        assert!(!cache.is_bound(&uid), "ended with the renewed one");
+        assert_eq!(stored(dir.path()).host_of(&uid), None);
+
+        let expired = certificate_until("late-host", today - time::Duration::days(1), &[3]);
+        let fresh = InstanceUid::default();
+        let (tx, _rx) = mpsc::channel(64);
+        let mut socket = downstream(Transport::WebSocket, Some(tx), expired.clone());
+        forwarding
+            .forward_from_socket(&mut socket, report(fresh))
+            .await;
+        assert!(!socket.carried.contains(&fresh) && !cache.is_bound(&fresh));
+        match forwarding
+            .forward_exchange(
+                &downstream(Transport::Http, None, expired.clone()),
+                report(fresh),
+            )
+            .await
+        {
+            Reply::Refuse(status, _) => assert_eq!(status, StatusCode::FORBIDDEN),
+            _ => panic!("a report under an expired certificate was forwarded"),
+        }
+
+        // A binding whose host's end passed while the Gateway was down ends at start.
+        drop(forwarding);
+        let soon = InstanceUid::default();
+        let passed = policy::End {
+            not_after: cache::now() - 1,
+            ..cache::end_of(&expired).expect("end")
+        };
+        let lines: String = [
+            policy::Change::Ends("gone-host".into(), passed),
+            policy::Change::Bound(soon, "gone-host".into()),
+        ]
+        .iter()
+        .map(|change| format!("{}\n", store::line(change).expect("line")))
+        .collect();
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.path().join(cache::DIR).join(store::NAME))
+                .expect("open"),
+            lines.as_bytes(),
+        )
+        .expect("append");
+        assert_eq!(stored(dir.path()).host_of(&soon), Some("gone-host"));
+        let restarted = forwarding_to(dir.path(), silent_upstream().await).await;
+        assert!(
+            !restarted.registry.cache().is_bound(&soon),
+            "ended at start"
+        );
+        assert_eq!(stored(dir.path()).host_of(&soon), None);
     }
 }

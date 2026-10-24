@@ -97,25 +97,33 @@ impl Bindings {
     /// makes room, so a host whose Agents come and go is not shut out by its own past, and never
     /// another host's (ADR-0060 clause 1). Without one nothing is bound.
     ///
-    /// A report under a certificate that ends later than the one the host's end was kept from moves
-    /// it to `end` (ADR-0060 clause 2). A new binding is pending until [`Bindings::commit`]: a
-    /// pending binding makes no room, and a report for it binds nothing, so nothing is relied on
-    /// before the store holds it.
+    /// A report under a certificate whose `notAfter` has passed by `now` binds nothing and moves
+    /// no end (ADR-0060 clause 3); one under a certificate that ends later than the one the host's
+    /// end was kept from moves it to `end` (clause 2). A new binding is pending until
+    /// [`Bindings::commit`]: a pending binding makes no room, and a report for it binds nothing, so
+    /// nothing is relied on before the store holds it.
     pub fn bind(
         &mut self,
         uid: InstanceUid,
         host: &str,
         end: &End,
+        now: i64,
         limits: Limits,
         idle: impl Fn(&InstanceUid) -> bool,
     ) -> Outcome {
-        self.tick += 1;
-        let tick = self.tick;
         let refused = |why, evicted| Outcome {
             bound: Bound::Refused(why),
             evicted,
             changes: Vec::new(),
         };
+        if end.not_after < now {
+            return refused(
+                "the certificate it was reported under has expired",
+                Vec::new(),
+            );
+        }
+        self.tick += 1;
+        let tick = self.tick;
         if let Some(binding) = self.bound.get_mut(&uid) {
             if binding.pending {
                 return refused("its binding is still being written", Vec::new());
@@ -226,6 +234,35 @@ impl Bindings {
             .into_iter()
             .map(|(_, uid)| Change::Reported(uid))
             .collect()
+    }
+
+    /// Ends every binding of each host whose kept certificate end has passed by `now`, or whose
+    /// certificate `revoked` says the revocation list names (ADR-0060 clause 3). Returns each such
+    /// host, and the `instance_uid`s it held.
+    pub fn end(
+        &mut self,
+        now: i64,
+        revoked: impl Fn(&End) -> bool,
+    ) -> Vec<(String, Vec<InstanceUid>)> {
+        let ended: HashSet<&String> = self
+            .ends
+            .iter()
+            .filter(|(_, end)| end.not_after < now || revoked(end))
+            .map(|(host, _)| host)
+            .collect();
+        if ended.is_empty() {
+            return Vec::new();
+        }
+        let mut by_host: HashMap<String, Vec<InstanceUid>> = HashMap::new();
+        for (uid, binding) in &self.bound {
+            if ended.contains(&binding.host) {
+                by_host.entry(binding.host.clone()).or_default().push(*uid);
+            }
+        }
+        for uid in by_host.values().flatten() {
+            self.unbind(uid);
+        }
+        by_host.into_iter().collect()
     }
 
     /// Removes `uid`'s binding; a host left with none keeps no certificate end.
@@ -359,7 +396,7 @@ mod tests {
         host: &str,
         idle: impl Fn(&InstanceUid) -> bool,
     ) -> (Bound, Vec<InstanceUid>) {
-        let outcome = bindings.bind(uid, host, &end(i64::MAX), LIMITS, idle);
+        let outcome = bindings.bind(uid, host, &end(i64::MAX), 0, LIMITS, idle);
         bindings.commit(&uid);
         (outcome.bound, outcome.evicted)
     }
@@ -421,7 +458,7 @@ mod tests {
             total: 3,
         };
         let new = InstanceUid::default();
-        let outcome = bindings.bind(new, "a", &end(i64::MAX), limits, |_| true);
+        let outcome = bindings.bind(new, "a", &end(i64::MAX), 0, limits, |_| true);
         assert_eq!(
             (outcome.bound, outcome.evicted),
             (Bound::New, vec![second]),
@@ -436,16 +473,26 @@ mod tests {
         assert_eq!(bindings.host_of(&other), Some("b"), "another host's stayed");
         assert_eq!(bindings.len(), 3);
 
-        let outcome = bindings.bind(InstanceUid::default(), "c", &end(i64::MAX), limits, |_| {
-            true
-        });
+        let outcome = bindings.bind(
+            InstanceUid::default(),
+            "c",
+            &end(i64::MAX),
+            0,
+            limits,
+            |_| true,
+        );
         assert!(
             matches!(outcome.bound, Bound::Refused(_)) && outcome.evicted.is_empty(),
             "a host with no binding of its own binds nothing"
         );
-        let outcome = bindings.bind(InstanceUid::default(), "b", &end(i64::MAX), limits, |_| {
-            false
-        });
+        let outcome = bindings.bind(
+            InstanceUid::default(),
+            "b",
+            &end(i64::MAX),
+            0,
+            limits,
+            |_| false,
+        );
         assert!(
             matches!(outcome.bound, Bound::Refused(_)) && outcome.evicted.is_empty(),
             "nor one whose own are not idle"
@@ -493,7 +540,7 @@ mod tests {
     fn a_new_binding_waits_for_the_store() {
         let mut bindings = Bindings::default();
         let uid = InstanceUid::default();
-        let outcome = bindings.bind(uid, "a", &end(10), LIMITS, |_| true);
+        let outcome = bindings.bind(uid, "a", &end(10), 0, LIMITS, |_| true);
         assert_eq!(
             outcome,
             Outcome {
@@ -507,26 +554,73 @@ mod tests {
         );
         assert!(!bindings.holds(&uid, "a"), "pending");
         assert!(matches!(
-            bindings.bind(uid, "a", &end(10), LIMITS, |_| true).bound,
+            bindings.bind(uid, "a", &end(10), 0, LIMITS, |_| true).bound,
             Bound::Refused(_)
         ));
         bindings.commit(&uid);
         assert!(bindings.holds(&uid, "a"));
         assert_eq!(
-            bindings.bind(uid, "a", &end(20), LIMITS, |_| true).changes,
+            bindings
+                .bind(uid, "a", &end(20), 0, LIMITS, |_| true)
+                .changes,
             vec![Change::Ends("a".into(), end(20))],
             "a renewed certificate moves the end"
         );
         assert!(bindings
-            .bind(uid, "a", &end(15), LIMITS, |_| true)
+            .bind(uid, "a", &end(15), 0, LIMITS, |_| true)
             .changes
             .is_empty());
 
         let other = InstanceUid::default();
-        bindings.bind(other, "b", &end(10), LIMITS, |_| true);
+        bindings.bind(other, "b", &end(10), 0, LIMITS, |_| true);
         assert_eq!(bindings.abort(&other), vec![Change::Unbound(other)]);
         assert_eq!(bindings.host_of(&other), None);
         assert_eq!(bindings.live(), 2, "b keeps no end without a binding");
         assert!(bindings.abort(&uid).is_empty(), "a written binding stays");
+    }
+
+    /// A report under a certificate whose `notAfter` has passed binds nothing and moves no end. A
+    /// host's bindings end once its kept end has passed, or once the revocation list names the
+    /// certificate it was kept from; another host's are left, and the `instance_uid` is free to
+    /// bind anew.
+    /// Verifies: ADR-0060
+    #[test]
+    fn a_hosts_bindings_end_with_its_certificate() {
+        let mut bindings = Bindings::default();
+        let [first, second, other] = [(); 3].map(|()| InstanceUid::default());
+        for (uid, host) in [(first, "a"), (second, "a"), (other, "b")] {
+            bindings.bind(uid, host, &end(100), 50, LIMITS, |_| true);
+            bindings.commit(&uid);
+        }
+        // Later than the end kept for "a", and expired by the time of the report.
+        let outcome = bindings.bind(first, "a", &end(120), 150, LIMITS, |_| true);
+        assert!(matches!(outcome.bound, Bound::Refused(_)), "expired at 150");
+        assert!(outcome.changes.is_empty(), "and moves no end");
+        assert!(bindings
+            .bind(InstanceUid::default(), "c", &end(100), 150, LIMITS, |_| {
+                true
+            })
+            .changes
+            .is_empty());
+
+        assert!(bindings.end(100, |_| false).is_empty(), "not yet passed");
+        let mut ended = bindings.end(101, |end| end.serial == "none");
+        for (_, uids) in &mut ended {
+            uids.sort_by_key(InstanceUid::to_string);
+        }
+        ended.sort_by(|x, y| x.0.cmp(&y.0));
+        let mut a = vec![first, second];
+        a.sort_by_key(InstanceUid::to_string);
+        assert_eq!(
+            ended,
+            vec![("a".to_string(), a), ("b".to_string(), vec![other])]
+        );
+        assert!(bindings.is_empty() && bindings.live() == 0);
+
+        bindings.bind(first, "c", &end(500), 200, LIMITS, |_| true);
+        bindings.commit(&first);
+        assert_eq!(bindings.host_of(&first), Some("c"), "bound anew");
+        let revoked = bindings.end(200, |end| end.serial == "1");
+        assert_eq!(revoked, vec![("c".to_string(), vec![first])]);
     }
 }

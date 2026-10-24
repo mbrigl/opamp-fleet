@@ -444,13 +444,35 @@ fn open_dir(dir: &Path) -> Result<Opened, String> {
         removed.map_err(|e| format!("cannot empty {}: {e}", dir.display()))?;
     }
     let path = dir.join(store::NAME);
-    let bindings = match store::load(&held).and_then(Bindings::replay) {
+    let mut bindings = match store::load(&held).and_then(Bindings::replay) {
         Ok(bindings) => bindings,
         Err(e) => return Ok(Opened::Unreadable(format!("{}: {e}", path.display()))),
     };
+    // What ended while the Gateway was down is not written back (ADR-0060 clause 3); the
+    // revocation list is asked once the Gateway holds one.
+    for (host, uids) in bindings.end(now(), |_| false) {
+        log_ended(&host, uids.len());
+    }
     let journal = Journal::create(held, &bindings.snapshot())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(Opened::Store(bindings, Box::new(journal)))
+}
+
+/// The Gateway's clock, which its handshake checks validity by, in seconds since the Unix epoch.
+pub(crate) fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+/// Logs that a host's bindings ended with its certificate (ADR-0060 clause 3).
+fn log_ended(host: &str, count: usize) {
+    info!(
+        %host, bindings = count,
+        "ended the bindings of a host whose certificate has expired or is revoked"
+    );
 }
 
 /// Logs that the Gateway carries no downstream Agent while its store cannot be read, and what
@@ -562,7 +584,7 @@ impl PackageCache {
         let mut guard = self.inner();
         let inner = &mut *guard;
         let offers = &inner.offers;
-        let outcome = inner.bindings.bind(uid, host, end, limits, |uid| {
+        let outcome = inner.bindings.bind(uid, host, end, now(), limits, |uid| {
             !routed(uid) && !offers.contains_key(uid)
         });
         let evicted = outcome.evicted;
@@ -718,6 +740,43 @@ impl PackageCache {
         }
     }
 
+    /// Ends every binding of each host whose kept certificate end has passed by `now`, or whose
+    /// certificate `revoked` says the revocation list names (ADR-0060 clause 3), each host logged
+    /// with how many went. Their current offers go with them, and their removals are queued for the
+    /// store. Returns the `instance_uid`s whose bindings ended, whose routes and places upstream the
+    /// caller releases, and the ticket their removals are written under.
+    pub fn end_certificates(
+        &self,
+        now: i64,
+        revoked: impl Fn(&End) -> bool,
+    ) -> (Vec<InstanceUid>, Option<Ticket>) {
+        let mut inner = self.inner();
+        let ended = inner.bindings.end(now, revoked);
+        if ended.is_empty() {
+            return (Vec::new(), None);
+        }
+        let mut uids = Vec::new();
+        for (host, held) in ended {
+            log_ended(&host, held.len());
+            if let Some(offered) = inner.by_host.get_mut(&host) {
+                for uid in &held {
+                    offered.remove(uid);
+                }
+                if offered.is_empty() {
+                    inner.by_host.remove(&host);
+                }
+            }
+            for uid in &held {
+                inner.offers.remove(uid);
+                inner.queue.push(Change::Unbound(*uid));
+            }
+            uids.extend(held);
+        }
+        let ticket = Ticket::default();
+        inner.waiting.push(ticket.clone());
+        (uids, Some(ticket))
+    }
+
     /// Makes every later write of the bindings' store fail.
     #[cfg(test)]
     pub(crate) fn refuse_writes(&self) {
@@ -820,7 +879,7 @@ impl PackageCache {
     }
 
     /// The artifact at `path` in a current offer to an Agent bound to `host`.
-    fn offered_to(&self, host: &str, path: &str) -> Option<Artifact> {
+    pub(crate) fn offered_to(&self, host: &str, path: &str) -> Option<Artifact> {
         let inner = self.inner();
         inner
             .by_host

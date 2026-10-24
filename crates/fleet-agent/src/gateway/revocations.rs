@@ -106,6 +106,17 @@ impl RevocationList {
         }
     }
 
+    /// Whether the list held, however old, names the certificate of `issuer` and `serial`, as the
+    /// Server's register names one (ADR-0060 clause 3).
+    #[must_use]
+    pub fn lists(&self, issuer: &str, serial: &str) -> bool {
+        self.held
+            .read()
+            .expect("revocation list lock")
+            .revoked
+            .contains(&(issuer.to_string(), serial.to_string()))
+    }
+
     /// Fires whenever a session should judge itself again: after every fetch, successful or not,
     /// so that a list going stale ends the sessions too.
     #[must_use]
