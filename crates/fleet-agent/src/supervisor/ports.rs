@@ -208,6 +208,20 @@ pub trait HighWaterMarks: Send + Sync {
     fn raise(&self, agent_type: &str, version: &str);
 }
 
+/// The floor of each Agent type this Client keeps (ADR-0061 clause 4): the highest version below
+/// which the operator signed that nothing of the type is taken. Shared by every Agent of the
+/// Client and kept where no purge reaches it. The filesystem adapter, which also fetches them, is
+/// [`FloorFile`](crate::floors::FloorFile).
+pub trait PackageFloors: Send + Sync {
+    /// The floor of `agent_type`: `Ok(None)` when none is kept, and `Err` with a reason naming the
+    /// file when the floors cannot be read — which refuses every package offer, the Client's own
+    /// included (clause 4).
+    ///
+    /// # Errors
+    /// Returns the reason the floors cannot be read.
+    fn floor(&self, agent_type: &str) -> Result<Option<String>, String>;
+}
+
 /// What an Agent persists across restarts (ADR-0006): its identity, the remote configuration it
 /// last applied, and the package its Managed Process runs (ADR-0026). The filesystem adapter is
 /// [`Storage`](crate::storage::Storage).

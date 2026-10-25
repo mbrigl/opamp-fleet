@@ -22,7 +22,9 @@ use opamp::proto::{
 use opamp::uid::InstanceUid;
 use tracing::{info, warn};
 
-use crate::supervisor::ports::{AgentStorage, HighWaterMarks, HostFacts, InstalledPackage};
+use crate::supervisor::ports::{
+    AgentStorage, HighWaterMarks, HostFacts, InstalledPackage, PackageFloors,
+};
 
 use connection_settings::{carries_settings, settings_status};
 use opamp::client::protocol::{AgentProtocol, ReportContent};
@@ -204,6 +206,13 @@ struct Local {
     /// below its Agent type's mark is refused, and an `Installed` raises it. `None` for the
     /// Client's own Agent, which keeps no mark (clause 13).
     high_water: Option<std::sync::Arc<dyn HighWaterMarks>>,
+    /// The floor of each Agent type this Client keeps (ADR-0061 clause 4): a Supervisor refuses
+    /// an offer below its type's floor, and its health says when what it runs lies below it.
+    /// The Client's own Agent is held to its floor by the self-update (clause 8).
+    floors: Option<std::sync::Arc<dyn PackageFloors>>,
+    /// What the health last said about the floor (ADR-0061 clause 6): empty while the installed
+    /// version is at or above it.
+    below_floor: String,
 }
 
 impl AgentState {
@@ -286,6 +295,8 @@ impl AgentState {
                 namespace: None,
                 package_status_owed: false,
                 high_water: None,
+                floors: None,
+                below_floor: String::new(),
             },
             storage: Box::new(storage),
             pending_apply: None,
@@ -416,7 +427,19 @@ impl AgentState {
     /// The next `AgentToServer`: which fields it carries is the protocol's to decide, what they
     /// hold is this Agent's (ADR-0010).
     pub fn next_report(&mut self) -> AgentToServer {
+        self.note_floor();
         self.protocol.next_report(&self.local)
+    }
+
+    /// Says in the health whether what this Supervisor runs lies below its type's floor
+    /// (ADR-0061 clause 6) — asked before every report, since a fetch raises a floor without
+    /// telling the Agent.
+    fn note_floor(&mut self) {
+        let note = self.local.floor_note();
+        if note != self.local.below_floor {
+            self.local.below_floor = note;
+            self.protocol.health_changed();
+        }
     }
 
     /// A report carrying `csr` alone, as an enrolling host sends it (ADR-0039 clause 11).
@@ -606,7 +629,21 @@ impl ReportContent for Local {
 }
 
 impl Local {
+    /// The process's health, with what the floor says about it (ADR-0061 clause 6) in its
+    /// `last_error`, which the fleet view shows.
     fn health(&self) -> ComponentHealth {
+        let mut health = self.process_health();
+        if !self.below_floor.is_empty() {
+            health.last_error = if health.last_error.is_empty() {
+                self.below_floor.clone()
+            } else {
+                format!("{}; {}", health.last_error, self.below_floor)
+            };
+        }
+        health
+    }
+
+    fn process_health(&self) -> ComponentHealth {
         match &self.process_health {
             Some(health) => health.clone(),
             None if self.managed => ComponentHealth {
@@ -3062,6 +3099,227 @@ mod tests {
             offer(&mut agent, super::IGNORED_CONFIGS_CAP),
             1,
             "the hash past the bound starts over"
+        );
+    }
+
+    use opamp::proto::PackageStatusEnum;
+
+    /// Floors held in memory, set by the test: a floor per type, or a reason they cannot be read.
+    pub(crate) struct SetFloors(pub(crate) std::sync::Mutex<Result<Option<String>, String>>);
+
+    impl PackageFloors for SetFloors {
+        fn floor(&self, _agent_type: &str) -> Result<Option<String>, String> {
+            self.0.lock().expect("floors lock").clone()
+        }
+    }
+
+    /// A Supervisor of type `otelcol` over `dir`, running `installed` when one is named, held to a
+    /// floor of `floor`.
+    fn supervisor_with_floor(
+        dir: &std::path::Path,
+        installed: Option<&str>,
+        floor: Result<Option<String>, String>,
+    ) -> (AgentState, std::sync::Arc<SetFloors>) {
+        let storage = Storage::new(dir.to_path_buf()).expect("storage");
+        if let Some(version) = installed {
+            storage
+                .store_package(&InstalledPackage {
+                    name: "otelcol".to_string(),
+                    version: version.to_string(),
+                    hash_hex: hex::encode(version),
+                })
+                .expect("store");
+        }
+        let floors = std::sync::Arc::new(SetFloors(std::sync::Mutex::new(floor)));
+        let mut agent = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            storage,
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        agent.set_floors(floors.clone());
+        agent.accept_packages();
+        let _ = agent.next_report();
+        (agent, floors)
+    }
+
+    /// A Supervisor refuses an offer below its type's floor before anything is downloaded, and
+    /// reports the package `InstallFailed` with a reason naming the version and the floor; an
+    /// offer at the floor is taken.
+    /// Verifies: ADR-0061
+    #[test]
+    fn a_supervisor_refuses_an_offer_below_its_floor_and_reports_install_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut agent, _) = supervisor_with_floor(dir.path(), None, Ok(Some("2.0.0".to_string())));
+        for version in ["1.9.4", "2.0.0-rc.1"] {
+            let handled = agent.handle(&ServerToAgent {
+                packages_available: Some(package_offer("otelcol", version, version.as_bytes())),
+                ..Default::default()
+            });
+            assert!(
+                handled.package_download.is_none(),
+                "{version}: nothing is fetched"
+            );
+            let statuses = agent.next_report().package_statuses.expect("statuses");
+            let status = &statuses.packages["otelcol"];
+            assert_eq!(
+                status.status,
+                PackageStatusEnum::InstallFailed as i32,
+                "{version}"
+            );
+            assert_eq!(status.server_offered_version, version);
+            assert!(
+                status.error_message.contains(version) && status.error_message.contains("2.0.0"),
+                "{version}: {}",
+                status.error_message
+            );
+            assert_eq!(
+                statuses.server_provided_all_packages_hash, b"agg-1",
+                "the offer is answered, not left to loop"
+            );
+        }
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "2.0.0", b"at")),
+            ..Default::default()
+        });
+        assert!(
+            handled.package_download.is_some(),
+            "the floor itself is taken"
+        );
+    }
+
+    /// An offer of the package a Supervisor below its floor already runs is answered as installed,
+    /// not refused: it is no install, and what runs stays. Other bytes under the same version are
+    /// an install, and refused below the floor.
+    /// Verifies: ADR-0061
+    #[test]
+    fn an_offer_of_what_runs_below_the_floor_is_answered_as_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut agent, _) =
+            supervisor_with_floor(dir.path(), Some("1.0.0"), Ok(Some("2.0.0".to_string())));
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "1.0.0", b"1.0.0")),
+            ..Default::default()
+        });
+        assert!(handled.package_download.is_none(), "nothing is fetched");
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        assert_eq!(
+            statuses.server_provided_all_packages_hash, b"agg-1",
+            "the offer is answered"
+        );
+        let status = &statuses.packages["otelcol"];
+        assert_eq!(
+            status.status,
+            PackageStatusEnum::Installed as i32,
+            "{}",
+            status.error_message
+        );
+        assert_eq!(status.agent_has_version, "1.0.0");
+
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "1.0.0", b"other bytes")),
+            ..Default::default()
+        });
+        assert!(handled.package_download.is_none(), "nothing is fetched");
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        assert_eq!(
+            statuses.packages["otelcol"].status,
+            PackageStatusEnum::InstallFailed as i32,
+            "other bytes below the floor are refused"
+        );
+    }
+
+    /// Floors that cannot be read refuse every Supervisor offer, with a reason naming the file.
+    /// Verifies: ADR-0061
+    #[test]
+    fn unreadable_floors_refuse_every_supervisor_offer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(crate::floors::FILE), "{").expect("write");
+        let floors = std::sync::Arc::new(crate::floors::FloorFile::open(dir.path(), None));
+        let mut agent = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            Storage::new(dir.path().join("otelcol")).expect("storage"),
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        agent.set_floors(floors);
+        agent.accept_packages();
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "99.0.0", b"any")),
+            ..Default::default()
+        });
+        assert!(handled.package_download.is_none());
+        let statuses = agent.next_report().package_statuses.expect("statuses");
+        let status = &statuses.packages["otelcol"];
+        assert_eq!(status.status, PackageStatusEnum::InstallFailed as i32);
+        assert!(
+            status.error_message.contains(crate::floors::FILE),
+            "{}",
+            status.error_message
+        );
+    }
+
+    /// A Managed Process whose installed version lies below its type's floor keeps running —
+    /// nothing is commanded of it — and its health says so, naming both versions, once the floor
+    /// is raised; at the floor, the health says nothing of it.
+    /// Verifies: ADR-0061
+    #[test]
+    fn a_managed_process_below_its_floor_keeps_running_and_its_health_says_so() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut agent, floors) = supervisor_with_floor(dir.path(), Some("1.0.0"), Ok(None));
+        agent.set_process_health(ComponentHealth {
+            healthy: true,
+            status: "running".to_string(),
+            ..Default::default()
+        });
+        let health = agent.next_report().health.expect("health");
+        assert!(health.last_error.is_empty(), "{}", health.last_error);
+
+        *floors.0.lock().expect("lock") = Ok(Some("2.0.0".to_string()));
+        let health = agent
+            .next_report()
+            .health
+            .expect("the raised floor is reported");
+        assert!(health.healthy, "it keeps running");
+        assert!(
+            health.last_error.contains("1.0.0") && health.last_error.contains("2.0.0"),
+            "{}",
+            health.last_error
+        );
+        assert!(!agent.take_pending_restart(), "nothing is commanded of it");
+
+        *floors.0.lock().expect("lock") = Ok(Some("1.0.0".to_string()));
+        let health = agent.next_report().health.expect("health");
+        assert!(health.last_error.is_empty(), "{}", health.last_error);
+    }
+
+    /// An offer at or above the floor is taken by a Supervisor that runs below it; when the new
+    /// program does not stay up, the rollback puts the predecessor below the floor back all the
+    /// same, and the health then says it runs below the floor.
+    /// Verifies: ADR-0061
+    #[test]
+    fn a_rollback_to_a_predecessor_below_the_floor_still_happens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut agent, _) =
+            supervisor_with_floor(dir.path(), Some("1.0.0"), Ok(Some("2.0.0".to_string())));
+        let handled = agent.handle(&ServerToAgent {
+            packages_available: Some(package_offer("otelcol", "2.1.0", b"v210")),
+            ..Default::default()
+        });
+        assert!(handled.package_download.is_some(), "above the floor: taken");
+        agent.package_applied(b"v210".to_vec(), Err("would not stay up".to_string()));
+        let report = agent.next_report();
+        let status = &report.package_statuses.expect("statuses").packages["otelcol"];
+        assert_eq!(status.agent_has_version, "1.0.0", "the predecessor runs");
+        assert_eq!(status.status, PackageStatusEnum::InstallFailed as i32);
+        // Reported since the first report, and still what the health says.
+        let health = agent.local.health();
+        assert!(
+            health.last_error.contains("1.0.0") && health.last_error.contains("2.0.0"),
+            "{}",
+            health.last_error
         );
     }
 }

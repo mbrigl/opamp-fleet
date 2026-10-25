@@ -269,7 +269,10 @@ async fn fetch_within(
 
 /// Reads a response body, abandoning it the moment it grows past `limit`, so a list too large to
 /// be the Server's is never held whole.
-async fn read_within(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+pub(crate) async fn read_within(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)

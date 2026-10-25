@@ -14,11 +14,13 @@
 //! picks its transport by URL scheme, so serving only one would silently exclude half of them),
 //! [`pool`] holds the upstream connections, [`registry`] routes replies back by `instance_uid`, and
 //! [`cache`] holds the uploaded artifacts the Gateway relays offers of and serves them on the
-//! download route to the hosts they were offered to (ADR-0026).
+//! download route to the hosts they were offered to (ADR-0026), and [`floors`] hands those hosts
+//! the floors it fetched (ADR-0061).
 //! The endpoint's communication is `opamp::server`'s, the one the Server sits on too (ADR-0010);
 //! what is the Gateway's is the [`Forwarding`] handler behind it.
 
 pub mod cache;
+pub mod floors;
 pub mod policy;
 pub mod pool;
 pub mod registry;
@@ -176,6 +178,7 @@ pub struct Timings {
     pub header_read_timeout: std::time::Duration,
     pub revocation_refresh: std::time::Duration,
     pub revocation_max_age: std::time::Duration,
+    pub floors_refresh: std::time::Duration,
 }
 
 impl Default for Timings {
@@ -184,6 +187,7 @@ impl Default for Timings {
             header_read_timeout: HEADER_READ_TIMEOUT,
             revocation_refresh: REVOCATION_REFRESH,
             revocation_max_age: REVOCATION_MAX_AGE,
+            floors_refresh: crate::floors::REFRESH,
         }
     }
 }
@@ -285,6 +289,20 @@ pub async fn run_on_timed(
         timings.revocation_refresh,
     ));
     tokio::spawn(write_reports(cache.clone(), shutdown.clone()));
+    // The floors, fetched when the Gateway starts and once an hour, and handed down as last
+    // fetched (ADR-0061 clause 3).
+    let relayed = floors::Relayed::default();
+    tokio::spawn(floors::refresh(
+        relayed.clone(),
+        config.clone(),
+        shutdown.clone(),
+        timings.floors_refresh,
+    ));
+    let floors = Arc::new(floors::Downstream {
+        relayed,
+        revocations: revocations.clone(),
+        members: members.clone(),
+    });
     let bindings = cache.clone();
     let downloads = Arc::new(cache::Downloads {
         cache,
@@ -307,9 +325,10 @@ pub async fn run_on_timed(
     tokio::spawn(keep_bindings(handler.clone(), changes, shutdown.clone()));
     // The receive and send limits the Baseline requires, enforced per hop; beside the OpAMP
     // endpoint, the download route the Agents behind this Gateway resolve their offers against
-    // (ADR-0026 clause 45).
+    // (ADR-0026 clause 45), and the floors they hold them to (ADR-0061 clause 3).
     let app = opamp::server::router(handler, Settings::new(config.max_message_size_bytes))
-        .merge(cache::router(downloads));
+        .merge(cache::router(downloads))
+        .merge(floors::router(floors));
 
     let upstream_cap = gateway.upstream_connections;
     let config = server_tls

@@ -35,6 +35,8 @@ pub(crate) struct Upstream<'a> {
     /// until an exchange fails, since the certificate it presents may be one an operator
     /// provisioned rather than a bootstrap certificate.
     pub enrolment_refused: bool,
+    /// The floors this Client keeps and fetches (ADR-0061 clause 4); `None` while it enrols.
+    pub floors: Option<&'a crate::floors::FloorFile>,
 }
 
 /// Whether this Client enrols over plain HTTP (ADR-0039 clause 11): it holds no certificate the
@@ -113,6 +115,7 @@ impl Session for Upstream<'_> {
             self.telemetry,
             sink,
             enrolling,
+            self.floors,
         )
         .await
     }
@@ -152,7 +155,9 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 ///    connection; an offer applied in place owes its acknowledgement now.
 /// 2. Ask for a certificate, now that the Server's capabilities are known and an offered
 ///    certificate is in force (ADR-0021).
-/// 3. Offered packages are downloaded and verified (ADR-0026).
+/// 3. The floors are fetched when they are due — at the first reply, once an hour, and within the
+///    minute before an offer is decided — and a queued download below its floor is refused
+///    (ADR-0061 clause 4). Offered packages are downloaded and verified (ADR-0026).
 /// 4. **The self-update restart, before anything is applied after it.** The `Installing` the
 ///    package step just owed is the last thing this version says (ADR-0018). It ends the run, so
 ///    `AfterReply::End` means exactly this.
@@ -166,6 +171,7 @@ pub async fn after_reply<S: ReportSink>(
     telemetry: &crate::telemetry::Telemetry,
     sink: &mut S,
     enrolling: bool,
+    floors: Option<&crate::floors::FloorFile>,
 ) -> AfterReply {
     match process_connection_offer(engine, config, telemetry).await {
         OfferOutcome::Reconnect => return AfterReply::Reconnect,
@@ -185,6 +191,15 @@ pub async fn after_reply<S: ReportSink>(
     }
     if flush_owed(engine, sink).await.is_err() {
         return AfterReply::ConnectionLost;
+    }
+    if let Some(floors) = floors {
+        let due = if engine.has_package_downloads() {
+            crate::floors::FRESH
+        } else {
+            crate::floors::REFRESH
+        };
+        floors.update_older_than(config, due).await;
+        engine.hold_downloads_to_floors();
     }
     if process_package_downloads(engine, config, shutdown, sink).await
         && flush_owed(engine, sink).await.is_err()
@@ -474,6 +489,7 @@ pub async fn run(
     config: &mut ClientConfig,
     shutdown: &mut Shutdown,
     telemetry: &crate::telemetry::Telemetry,
+    floors: Option<&crate::floors::FloorFile>,
 ) -> Result<RunOutcome, String> {
     let connection = connection(config)?;
     let mut session = Upstream {
@@ -482,6 +498,7 @@ pub async fn run(
         shutdown: shutdown.clone(),
         telemetry,
         enrolment_refused: false,
+        floors,
     };
     Ok(
         match opamp::client::connection::run(&connection, &mut session, shutdown).await? {

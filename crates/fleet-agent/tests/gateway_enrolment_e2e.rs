@@ -457,6 +457,30 @@ async fn a_gateway_admits_a_bootstrap_certificate_for_one_enrolment_request() {
     assert_eq!(fleet.upgrade(&member_cert, &member_key).await, None);
 }
 
+/// An enrolling peer is no member yet: the Gateway refuses it the floors `403`, as it refuses it
+/// everything but its one enrolment request.
+/// Verifies: ADR-0061
+#[tokio::test]
+async fn a_gateway_refuses_the_floors_to_an_enrolling_peer() {
+    let fleet = Fleet::start(true).await;
+    let (cert, key) = fleet
+        .bootstrap_ca
+        .issue_bootstrap(fleet.dir.path(), "bootstrap");
+    let enrolling = fleet.http(&cert, &key);
+    let url = format!("https://{}/v1/package-floors", fleet.gateway);
+    let mut status = None;
+    // The verdict waits for the Gateway's first revocation list; the refusal follows it.
+    for _ in 0..100 {
+        let got = enrolling.get(&url).send().await.expect("send").status();
+        if got != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            status = Some(got);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(status, Some(reqwest::StatusCode::FORBIDDEN));
+}
+
 /// A Gateway without `bootstrap_ca_file` refuses a bootstrap certificate in the handshake.
 /// Verifies: ADR-0039
 #[tokio::test]
