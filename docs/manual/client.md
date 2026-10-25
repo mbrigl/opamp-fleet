@@ -1653,6 +1653,40 @@ is still under way re-draws its offer when it reconnects. One that already repor
 install and retries is answered `404` until the Server offers it another version; rolling out the
 same version again does not re-send the offer.
 
+### How often a host behind it may be heard
+
+The Server counts everything a Gateway forwards in one aggregate for all the hosts behind it. So
+that one host cannot drain it for the others, the Gateway counts what each host sends in a bucket
+of its own, sized as the Server sizes a host's:
+
+```toml
+[gateway.rate_limit]
+messages_per_sec = 10  # tokens a host's bucket gains per second; 0 fails startup
+burst = 300            # the bucket's capacity, a new one starts full; 0 fails startup
+```
+
+- **What is counted.** Every report on the downstream `/v1/opamp`, over a WebSocket and over plain
+  HTTP, one it cannot decode, every download request and an enrolling peer's request take one
+  token, as the Server counts them, before the Gateway
+  reads a signing request, binds an `instance_uid`, looks at its package cache or forwards
+  anything. The Gateway's own Supervisors and its upstream connection are not counted.
+- **Whose bucket.** The host the downstream certificate names, or for a certificate that names
+  none, the host the Server derives from its issuer and serial. Every connection, every
+  `instance_uid` and a renewed certificate of one host take from the same bucket. An enrolling
+  peer is counted by its address, an IPv6 one by its /64, since a bootstrap certificate may be one
+  for the whole fleet.
+- **Past the limit.** A report or an enrolment request is not forwarded and binds nothing. It is
+  answered `Unavailable`, for the `instance_uid` it names, with a retry after 30 seconds, as the
+  Server answers it; a WebSocket stays open. A download is answered `429` with `Retry-After: 30`,
+  and the artifact is not read. The log says it once per host and minute, with the host and how
+  many were refused.
+- **How much memory.** The buckets live in memory, at most 1 000 000 of them; when the table is
+  full a new host takes the place of the one heard from least recently.
+
+The section is optional, and no value turns the limit off; any other key in it fails startup. A
+host whose Agents legitimately send more needs it raised at each Gateway it reports through, and a
+host that reports through two Gateways has a bucket at each.
+
 ### What a Gateway keeps on disk
 
 Beside the artifacts of its package cache, a Gateway keeps the bindings of the Agents behind it in
