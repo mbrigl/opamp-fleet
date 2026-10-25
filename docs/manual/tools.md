@@ -11,7 +11,7 @@ the keys it makes are the ones to keep off that host.
 | Command | Use it to |
 |---|---|
 | **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
-| **[`package pack`, `sha256`, `keygen`, `sign`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, and make the package signing key |
+| **[`package pack`, `sha256`, `keygen`, `sign`, `floor`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, sign the floor below which no package of a type is taken, and make the package signing key |
 | **[`pki init`, `server-cert`, `bootstrap-ca`, `status`, `p12-extract`](#pki)** | make the fleet's certificate authorities and the Server's or a Gateway's certificate, replace the bootstrap CA, say when the server CA ends, and turn a `bootstrap.p12` into its PEM pair |
 
 Reach for `package fetch` first: for the agents it knows, it replaces every step of building an
@@ -270,13 +270,14 @@ $ sig=$(opamp-fleetctl package sign --key fleet-signing.pk8 --agent-type promtai
 | `keygen --out <file>` | the **public** key (hex) | the value for every Client's `[packages] verification_key`, and optionally the Server's; the private key goes in the file, ideally not on the Server host |
 | `pack <program> --out <file>` | the artifact's SHA-256 (hex) | building a one-file artifact; `--format tar.gz\|7z`, `--program-name <name>`, `--archive-key <key>` |
 | `sign --key <file> --agent-type <type> --version <version> <artifact>` | the signature (hex) | the body of the entry's signature route, `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature`. It covers the type, the version and the artifact's SHA-256 together, so it holds for that Package alone |
+| `floor --key <file> --agent-type <type> --version <version>` | the signature (hex) | the body of `PUT /api/v1/package-floors/{agent_type}`, with the version: no Client takes a package of the type below it any more, its own update included — see [Keeping old builds off the fleet](#keeping-old-builds-off-the-fleet) |
 | `public-key --key <file>` | the public key (hex) | recovering it from an existing private key |
 | `sign --key <file> --signing-info <file> [--out <file>]` | the signing file, with every entry signed | a Package's **Signing info** from the Packages tab, signed whole and imported there — see [Signing a whole Package at once](#signing-a-whole-package-at-once) |
 | `sha256 <artifact>` | the SHA-256 (hex) | comparing a file you hold with the `content_hash` the Server shows for its entry, before you sign |
 
-Both forms of `sign` sign only a SemVer 2.0.0 version. A `--version`, or a signing file, whose
-version is not SemVer (`1.19`, `24.04.1`) is refused before the key is read, naming the version:
-a Client refuses such a package, so the key never signs one.
+Both forms of `sign`, and `floor`, sign only a SemVer 2.0.0 version. A `--version`, or a signing
+file, whose version is not SemVer (`1.19`, `24.04.1`) is refused before the key is read, naming
+the version: a Client refuses such a package, so the key never signs one.
 
 The options of `pack`, and why a `.tar.gz` packed twice gives the same bytes, are in
 [step 2 of the rollout walkthrough](rollout.md#2-build-the-artifact), which runs the whole path
@@ -289,6 +290,27 @@ with an unsigned entry. Give every Client the same public key, and sign every en
 Package you release. Give the Server the same public key too (`[packages] verification_key` in
 `server.toml`) and it reports each signature `valid` or `invalid` before any Client sees it — as
 feedback only: an `invalid` one is stored and offered, and each Client decides.
+
+### Keeping old builds off the fleet
+
+A signature never expires: every build you ever signed stays installable on a host that has not
+run a higher version of its type. To withdraw every build of a type below a version at once, sign
+a **floor** and store it on the Server:
+
+```console
+$ sig=$(opamp-fleetctl package floor --key fleet-signing.pk8 --agent-type promtail --version 3.0.0)
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
+       -d "{\"version\": \"3.0.0\", \"signature\": \"$sig\"}" \
+       https://<server>:4321/api/v1/package-floors/promtail
+```
+
+The floor covers the type and the version, under its own statement, so a package signature is no
+floor and a floor no package signature. Every Client — through its Gateway too — fetches the
+floors, keeps the highest that verifies against its `[packages] verification_key`, and refuses
+any offer below it, its own update included; what a host already runs keeps running. A floor is
+raised, or removed and set anew: a `PUT` below the stored one is answered `409`. Removing it on
+the Server does not lower what a Client kept — only its host does
+([A signed floor](client.md#a-signed-floor)).
 
 ### Signing a whole Package at once
 

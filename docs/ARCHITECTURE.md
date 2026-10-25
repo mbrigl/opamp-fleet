@@ -77,7 +77,9 @@ Five crates in one workspace ([ADR-0010](adr/0010-five-crates-the-whole-opamp-co
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
-  version, the platform aliases, the statement a package signature covers, the renewal proof and
+  version, the platform aliases, the statements a package signature and a floor cover
+  ([ADR-0061](adr/0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)), the
+  renewal proof and
   the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
   certificate that names none is taken for, when a certificate counts as ending, and what a
   certificate is called — and the
@@ -110,11 +112,13 @@ core module names an adapter or a technology, and when a module has no role.
   bridges the synchronous port onto a runtime of its own (`bridge`)
   ([ADR-0049](adr/0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md)); `BootstrapStore` under the
   `BootstrapCertificates` in `bootstrap`; `EnrolmentStore` under the `Enrolment` in `enrolment`;
+  `FloorStore` under the `PackageFloors` in `floors`, the floor the operator signed per Agent type
+  ([ADR-0061](adr/0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md));
   `LedgerStore` in `revocation`; `AuditStore` in `audit_log`. The filesystem adapters are in `fs`,
   which also opens the data directory and refuses anything its layout does not name. With
   `[database] store = "postgres"` every port but the blob and the audit port has its PostgreSQL
   adapter in `postgres` instead (`postgres::agents`, `configs`, `deployments`, `packages`,
-  `ledger`, `bootstrap`, `enrolment`), each call one transaction; `postgres` holds the connection
+  `ledger`, `bootstrap`, `enrolment`, `floors`), each call one transaction; `postgres` holds the connection
   they share — TLS 1.3 on *ring*, a pool on a `bridge` runtime of its own, the advisory lock that
   keeps one Server per database — and applies the schema embedded in `postgres::schema` as
   numbered migrations; `postgres::import` is `server migrate-to-postgres`, which copies a
@@ -137,7 +141,10 @@ core module names an adapter or a technology, and when a module has no role.
   ([ADR-0013](adr/0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
 - **Server admission** — `transport::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
-  enrolment window is open, and guards the package download with the same certificate. Two core
+  enrolment window is open, and guards the package download with the same certificate. Behind
+  the same admission it serves a Gateway its revocation list on `/v1/gateway/revocations` and
+  every member the floors on `/v1/package-floors`
+  ([ADR-0061](adr/0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)). Two core
   modules hold the state behind it: `enrolment`, the operator-opened window and the queue of
   requests an operator approves through `api`, and `throttle`, the per-address back-off after
   repeated failures, which both planes use
@@ -197,6 +204,9 @@ core module names an adapter or a technology, and when a module has no role.
   `storage::Storage` implements on the state directory, `HighWaterMarks`, which
   `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares
   ([ADR-0043](adr/0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md)),
+  `PackageFloors`, which `floors::FloorFile` implements on `<state_dir>/package-floors.json` and
+  fetches from the endpoint, every Agent of the Client holding to it, the self-update included
+  ([ADR-0061](adr/0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)),
   and `HostFacts`, which `host::SystemHost` implements from the platform. It answers each Server message in `handle` and leaves three
   channels and its description each to a submodule: `packages`, `remote_config`,
   `connection_settings`, and `description`, what the Agent reports about itself.
@@ -216,7 +226,10 @@ core module names an adapter or a technology, and when a module has no role.
   and the Supervisor Endpoint use the same `opamp` building blocks
   ([ADR-0010](adr/0010-five-crates-the-whole-opamp-communication-layer-in-the-opamp-crate-and-toml-configuration.md)). The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
-  ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)).
+  ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)),
+  and its `floors` fetches the floors and hands the hosts behind it the ones it last fetched,
+  behind the same verdict
+  ([ADR-0061](adr/0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)).
   The Gateway's `cache` sees every offer `registry` hands down, fetches each artifact offered on
   the Server's route once into the state directory, and serves it on the downstream download route
   to the hosts it was offered to ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-verified-delivery.md)).
@@ -289,7 +302,10 @@ offer ([ADR-0026](adr/0026-packages-signed-deployments-offered-downloads-and-ver
 Client downloads it from the Gateway's cache, which `gateway` fetched once from the Server. The
 Client checks hash and signature in `packages`, and the
 Supervisor swaps the program, keeps the previous one for its grace period and rolls back if the
-new one does not stay up. The Client's own package goes through `update` instead: a version
+new one does not stay up. Before anything is downloaded, an offer below the floor the operator
+signed for its Agent type is refused: the Client fetches the floors from its endpoint as they fall
+due and keeps the highest that verifies
+([ADR-0061](adr/0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)). The Client's own package goes through `update` instead: a version
 directory beside the running one, a self-check, the `current` pointer moved, and a restart on
 probation that commits or rolls back.
 
@@ -334,7 +350,7 @@ waits, and the Supervisor retries with backoff
 domain and owner-only: `configurations/`, `deployments/`, `packages/` (metadata) and `blobs/` (the
 artifacts, named by SHA-256, unless a bucket keeps them), `agents/` (each Agent's record, its labels inside), `hosts/`,
 `certificates/` (the register), `revocations.json`, `bootstrap/`, `enrolment.json` (the window and
-its queue) and `audit/`
+its queue), `package-floors.json` (the floor of each Agent type) and `audit/`
 ([ADR-0037](adr/0037-the-servers-state-lives-under-one-data-directory-one-store-per-domain.md)).
 With `[database] store = "postgres"` the records are rows of one PostgreSQL database instead, and
 `data_dir` keeps `audit/` and, with the filesystem blob store, `blobs/`

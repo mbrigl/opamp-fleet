@@ -15,6 +15,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 
 ## [Unreleased]
 
+### Added
+
+- **A signed floor per Agent type keeps every older build off the fleet**
+  ([ADR-0061](docs/adr/0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)).
+  `opamp-fleetctl package floor --agent-type <type> --version <version>` signs the version below
+  which no package of the type is taken any more, and `PUT /api/v1/package-floors/{agent_type}`
+  stores it on the Server, which serves it on the Agent plane at `/v1/package-floors`, through
+  Gateways too. Each Client keeps the highest floor that verifies against its `[packages]
+  verification_key` in `<state_dir>/package-floors.json`, refuses an offer below it — a
+  Supervisor's before downloading, as `InstallFailed`, its own update before it is staged — and
+  says in a Supervisor's health when what it already runs lies below it. A `PUT` below the stored
+  floor is answered `409`, and removing a floor on the Server lowers none a Client has kept. With
+  PostgreSQL the Server adds the table `package_floors` at its first start; the release before
+  runs on that schema. With the filesystem store the Server keeps them in
+  `<data_dir>/package-floors.json`, which a Server of an earlier release refuses at startup as a
+  file its layout does not name: move it away before going back to one. The Client's own update
+  now also refuses a version that is not SemVer.
+  **What to do:** nothing to upgrade. To withdraw old builds of a type, sign a floor above them
+  and store it, as [the manual](docs/manual/tools.md#keeping-old-builds-off-the-fleet) shows. To
+  take a host below a floor, stop its Client, remove that type's entry from
+  `package-floors.json`, and start it.
+
 ### Fixed
 
 - **A stop right after the Client starts ends it cleanly.** Its `SIGTERM` and `SIGINT` handlers
