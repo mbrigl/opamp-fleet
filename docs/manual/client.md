@@ -622,7 +622,17 @@ What the install registers and sets:
 - The named pipe `\\.\pipe\opamp-fleet-agents`, owned by the process account. Only the Client's
   account may read and write data on it, and nobody may create an instance of it but the process
   account; it rejects remote clients, and a pipe of that name made by anyone first fails the second
-  service's start. Each end checks the other's account.
+  service's start. Each end checks the other's account. The Client also checks that the process
+  serving the pipe is the one the SCM runs as the second service, and holds that process open
+  while it asks, so a process that ends in between is refused.
+- A protected DACL on the second service's process and on every one of its threads, set before
+  its program reads its command line: the process account, and for the process the Client's
+  account, may only ask about it and wait for it (`SYNCHRONIZE` and the limited query right), and
+  only `LocalSystem` and the Administrators may do more. A Managed Process can therefore neither
+  read the second service's memory, run code in it or take its handles, nor suspend or end it. The
+  second service does not start to listen while its process or a thread reads back otherwise; it
+  exits with an error naming which, and the SCM starts it again. A debugger or a process explorer
+  that opens the second service has to run elevated.
 - A job object per program. Every program, and everything it starts, ends with its job when the
   Client's connection closes; a program that has a broker start a process for it — a WMI process
   creation, a scheduled task — outlives that. Windows has no signals: a kind that reloads by a
