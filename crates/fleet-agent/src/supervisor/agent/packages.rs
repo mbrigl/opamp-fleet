@@ -8,7 +8,7 @@ use opamp::proto::{
 use tracing::{error, info, warn};
 
 use super::{AgentState, Handled, Local};
-use crate::supervisor::ports::{HighWaterMarks, InstalledPackage};
+use crate::supervisor::ports::{HighWaterMarks, InstalledPackage, PackageFloors};
 
 impl AgentState {
     /// Opts this Agent into package delivery (ADR-0026): declares `AcceptsPackages` and
@@ -38,6 +38,18 @@ impl AgentState {
     pub fn with_high_water(mut self, marks: std::sync::Arc<dyn HighWaterMarks>) -> Self {
         self.local.high_water = Some(marks);
         self
+    }
+
+    /// Hands this Agent the floors every Agent of the Client shares (ADR-0060 clause 4).
+    pub fn set_floors(&mut self, floors: std::sync::Arc<dyn PackageFloors>) {
+        self.local.floors = Some(floors);
+    }
+
+    /// Why an offer of `version` is refused by this Supervisor's floor (ADR-0060 clause 5): it
+    /// orders below the floor kept for its Agent type, or the floors cannot be read. `None` for
+    /// the Client's own Agent, whose self-update holds it to its floor (clause 8).
+    pub fn floor_refusal(&self, version: &str) -> Option<String> {
+        self.local.floor_refusal(version)
     }
 
     /// A Supervisor's restored record, held to the SemVer rule and entered into the mark.
@@ -425,6 +437,17 @@ impl Local {
                 self.refuse_offer(offer, error, handled);
                 return;
             }
+            // The operator's floor stands beside the mark; the stricter one decides (ADR-0060
+            // clause 5). Refused before anything is downloaded, and reported as the package's
+            // own failure.
+            if let Some(reason) = self.floor_refusal(&available.version) {
+                error!(
+                    offered = %available.version, reason = %reason,
+                    "refusing a package below its floor"
+                );
+                self.refuse_below_floor(offer, &name, available, reason, handled);
+                return;
+            }
         }
         // A usable offer clears whatever the last unusable one complained about.
         self.offer_error.clear();
@@ -490,6 +513,73 @@ impl Local {
         self.echoed_all_packages_hash = offer.all_packages_hash.clone();
         self.package_status_owed = true;
         handled.send_report = true;
+    }
+
+    /// Refuses an offer below the floor (ADR-0060 clause 5) as a failure of the package it names:
+    /// `InstallFailed`, with `reason` naming the version and the floor, the offered version and
+    /// hash reported beside it, and the aggregate echoed at once so the Server stops re-offering.
+    fn refuse_below_floor(
+        &mut self,
+        offer: &opamp::proto::PackagesAvailable,
+        name: &str,
+        available: &PackageAvailable,
+        reason: String,
+        handled: &mut Handled,
+    ) {
+        self.installing = None;
+        self.downloading = None;
+        self.offer_error.clear();
+        self.offered_name = Some(name.to_string());
+        self.server_offered = Some((available.version.clone(), available.hash.clone()));
+        self.package_error = reason;
+        self.echoed_all_packages_hash = offer.all_packages_hash.clone();
+        self.package_status_owed = true;
+        handled.send_report = true;
+    }
+
+    /// See [`AgentState::floor_refusal`].
+    fn floor_refusal(&self, version: &str) -> Option<String> {
+        if self.expected_package.is_some() {
+            return None;
+        }
+        let floors = self.floors.as_ref()?;
+        match floors.floor(&self.service_name) {
+            Err(reason) => Some(reason),
+            Ok(Some(floor))
+                if fleet_core::version::precedence(version, &floor)
+                    == Some(std::cmp::Ordering::Less) =>
+            {
+                Some(format!(
+                    "the Server offered {name} {version}, below {floor}, the floor the operator \
+                     signed for {name:?} — no package below it is taken",
+                    name = self.service_name
+                ))
+            }
+            Ok(_) => None,
+        }
+    }
+
+    /// What the health says while the installed version lies below its type's floor (ADR-0060
+    /// clause 6), naming both; empty otherwise, and for the Client's own Agent.
+    pub(super) fn floor_note(&self) -> String {
+        let (Some(installed), Some(floors), true) =
+            (&self.installed_package, &self.floors, self.managed)
+        else {
+            return String::new();
+        };
+        match floors.floor(&self.service_name) {
+            Ok(Some(floor))
+                if fleet_core::version::precedence(&installed.version, &floor)
+                    == Some(std::cmp::Ordering::Less) =>
+            {
+                format!(
+                    "runs {} {}, below {floor}, the floor the operator signed for it — it keeps \
+                     running, and the next offer at or above the floor is taken",
+                    self.service_name, installed.version
+                )
+            }
+            _ => String::new(),
+        }
     }
 
     /// Whether this offer is what the Agent already has, so the offer ends with an echo rather

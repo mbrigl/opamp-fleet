@@ -133,7 +133,8 @@ pub async fn enrol(
         ),
     }
     loop {
-        let outcome = transport::run(&mut engine, &mut config, &mut shutdown, &telemetry).await;
+        let outcome =
+            transport::run(&mut engine, &mut config, &mut shutdown, &telemetry, None).await;
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(e) => {
