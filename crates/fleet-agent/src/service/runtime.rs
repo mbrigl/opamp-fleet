@@ -118,8 +118,9 @@ pub fn run_foreground(spec: RunSpec) -> Result<(), String> {
     let runtime = daemon_runtime()?;
     let exit = runtime.block_on(async {
         let (tx, shutdown) = shutdown_channel();
+        let stop = shutdown_signal();
         tokio::spawn(async move {
-            shutdown_signal().await;
+            stop.await;
             let _ = tx.send(true);
         });
         #[cfg(unix)]
@@ -626,21 +627,28 @@ fn or_left_behind(
 
 /// Resolve to the platform shutdown signal: `SIGTERM` or `SIGINT` on Unix (what systemd and
 /// launchd send on stop), Ctrl-C on Windows (a console run; the SCM path never comes through
-/// here).
-async fn shutdown_signal() {
+/// here). On Unix both handlers are in place when this returns, not when the future is first
+/// polled: a stop that came in between would end the Client by its default disposition. It must
+/// be called inside the runtime.
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
         let mut terminate =
             signal(SignalKind::terminate()).expect("installing the SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
+        let mut interrupt = signal(SignalKind::interrupt()).expect("installing the SIGINT handler");
+        async move {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 
@@ -663,6 +671,21 @@ pub(crate) fn ignore_sighup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shutdown signal's handlers are in place once `shutdown_signal` returns: a `SIGTERM`
+    /// raised before its future is first polled is caught, and resolves it, instead of ending
+    /// the process by its default disposition (ADR-0019 clause 12).
+    /// Verifies: ADR-0019
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sigterm_before_the_first_poll_is_caught() {
+        let stop = shutdown_signal();
+        // SAFETY: raise(3) sends a signal to this process; no memory is touched.
+        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+        tokio::time::timeout(std::time::Duration::from_secs(5), stop)
+            .await
+            .expect("the SIGTERM resolved the shutdown signal");
+    }
 
     /// A Client whose start meets a second service of another build, while `current` no longer
     /// names its own version, ends its run as for its own update; one the operator stops ends as
