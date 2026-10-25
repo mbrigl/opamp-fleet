@@ -256,6 +256,10 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     carries the Gateway's own certificate alone (ADR-0015)
   - ✅ a downstream peer that never finishes its headers after the handshake is hung up on
     ([`gateway_tls.rs`](../crates/fleet-agent/tests/gateway_tls.rs))
+  - ✅ every downstream report, enrolment request and package download rate-limited per host
+    before anything else is done with it, an enrolling peer per address and an IPv6 one per /64,
+    `[gateway.rate_limit]`, in at most 1 000 000 buckets, so one host cannot drain the aggregate
+    the Server gives the Gateway (ADR-0063)
   - ✅ an enrolling peer — a bootstrap certificate, with `bootstrap_ca_file` — is refused a
     WebSocket and anything but one enrolment request `403`, binds nothing, and its place upstream
     goes with its exchange (ADR-0039)

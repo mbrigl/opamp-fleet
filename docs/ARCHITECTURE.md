@@ -243,6 +243,10 @@ core module names an adapter or a technology, and when a module has no role.
   With a bootstrap CA the Gateway tells an
   enrolling peer from a member and relays its one plain-HTTP enrolment request without a binding
   ([ADR-0039](adr/0039-through-a-gateway-a-csr-proves-the-certificate-it-rests-on.md)).
+  `gateway::rate` holds a token bucket per downstream host, or per enrolling peer's address, in a
+  table of `fleet_core::rate`; the downstream endpoint and the download route take a token before
+  they do anything else
+  ([ADR-0063](adr/0063-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([ADR-0015](adr/0015-client-modes-and-a-gateway-that-passes-packages-only-to-the-hosts-they-were-offered-to.md)). The transports, the Gateway, telemetry
   and the service runtime are adapters around it.

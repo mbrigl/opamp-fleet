@@ -108,6 +108,13 @@ state_dir = "client-state"
 # bootstrap_ca_file = "bootstrap-ca.pem"  # optional: the public certificate of the Server's
 #                                         # [enrolment] bootstrap_ca_file, never its key; relays a
 #                                         # plain-HTTP enrolment request of a host behind it
+#
+# Every report, enrolment request and download a host behind the Gateway sends takes one token
+# from that host's own bucket, an enrolling peer's by its address; past it the Gateway answers
+# "retry later" and forwards nothing. No value turns the limit off.
+# [gateway.rate_limit]
+# messages_per_sec = 10   # tokens a host's bucket gains per second, the default; 0 fails startup
+# burst = 300             # the bucket's capacity, the default; 0 fails startup
 
 # TLS toward the Server. ca_file trusts a private CA; cert_file and key_file are this Client's
 # identity, and the Client refuses to start without one — the Server asks for it in the
