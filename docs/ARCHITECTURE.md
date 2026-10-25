@@ -81,8 +81,9 @@ Five crates in one workspace ([ADR-0010](adr/0010-five-crates-the-whole-opamp-co
   ([ADR-0060](adr/0060-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)), the
   renewal proof and
   the bootstrap proof a CSR carries — read from a CSR by the adapter `csr` — the host a
-  certificate that names none is taken for, when a certificate counts as ending, and what a
-  certificate is called — and the
+  certificate that names none is taken for, when a certificate counts as ending, what a
+  certificate is called, the token buckets the Server and a Gateway count a sender in (`rate`) —
+  and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0029).
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels, packages
@@ -154,7 +155,8 @@ core module names an adapter or a technology, and when a module has no role.
   `LedgerStore` port ([ADR-0021](adr/0021-admission-by-a-client-certificate-alone-and-a-revocation-list-that-follows-renewal.md),
   [ADR-0035](adr/0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
-  marked Gateway, and the Gateway as a whole are heard; `transport` takes a token for each
+  marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
+  `fleet_core::rate`; `transport` takes a token for each
   message before the handler does anything else and for each download in the guard
   ([ADR-0013](adr/0013-tls-1-3-plaintext-on-the-loopback-alone-and-bounded-planes-bodies-and-messages.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;

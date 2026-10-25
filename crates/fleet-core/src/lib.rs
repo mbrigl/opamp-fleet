@@ -3,8 +3,8 @@
 //! when a certificate counts as ending and what a certificate is called (ADR-0028), and the
 //! bootstrap certificate's PKCS#12 file (ADR-0029), and the host a certificate that names none is
 //! taken for (ADR-0039), and the proofs a renewal and an enrolment request carry in their CSR
-//! (ADR-0021 clause 27, ADR-0039), and what a package signature and a floor signature cover
-//! (ADR-0026, ADR-0060).
+//! (ADR-0021 clause 27, ADR-0039), what a package signature and a floor signature cover
+//! (ADR-0026, ADR-0060), and the token buckets a sender is counted in (ADR-0013, ADR-0061).
 //! The protocol and its transport, TLS included, are in the `opamp` crate (ADR-0010).
 
 #![forbid(unsafe_code)]
@@ -17,5 +17,6 @@ pub mod naming;
 pub mod package;
 pub mod pkcs12;
 pub mod platform;
+pub mod rate;
 pub mod renewal;
 pub mod version;
