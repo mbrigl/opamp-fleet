@@ -1087,13 +1087,13 @@ mod tests {
     }
 
     /// A peer whose process the Client cannot open is refused as one that cannot be read, before
-    /// the SCM's answer counts (ADR-0062).
+    /// the SCM's answer counts (ADR-0062). The process is one that does not exist: a DACL closed
+    /// to everyone does not stop a caller holding `SeDebugPrivilege`, as CI's elevated runner may.
     /// Verifies: ADR-0062
     #[tokio::test]
     async fn the_client_refuses_a_peer_whose_process_it_cannot_open() {
-        let mut child = a_process();
-        let pid = child.id();
-        win32::set_kernel_dacl(child.as_raw_handle(), "D:P").expect("closed to everyone");
+        // Process ids are multiples of four; this one is never handed out.
+        let pid = u32::MAX - 3;
         let peer = peer_process(pid);
         let refused = super::super::check_process(
             peer,
@@ -1110,8 +1110,6 @@ mod tests {
                 .contains(&format!("process {pid} cannot be opened")),
             "{refused}"
         );
-        let _ = child.kill();
-        let _ = child.wait();
     }
 
     /// The Client holds the peer's process while the SCM is asked: one that has ended once the SCM
