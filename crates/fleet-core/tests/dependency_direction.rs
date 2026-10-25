@@ -160,6 +160,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("gateway::floors", Adapter),
             ("gateway::policy", Core),
             ("gateway::pool", Adapter),
+            // The downstream hosts' buckets, read against the Gateway's clock (ADR-0061).
+            ("gateway::rate", Adapter),
             ("gateway::registry", Adapter),
             ("gateway::revocations", Adapter),
             ("gateway::store", Adapter),

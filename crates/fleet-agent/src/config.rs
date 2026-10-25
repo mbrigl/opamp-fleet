@@ -761,10 +761,51 @@ pub struct GatewayConfig {
     /// refused at load.
     #[serde(default = "default_package_cache_bytes")]
     pub package_cache_bytes: u64,
+    /// The bucket each downstream host is counted in (ADR-0061).
+    #[serde(default)]
+    pub rate_limit: GatewayRateLimitConfig,
     /// TLS for the downstream hop, required (ADR-0015). Mutual TLS is per hop: what this verifies
     /// is the Agents connecting *here*, and the identity presented *upstream* is the Client's own.
     /// An `Option` only so its absence can be named at load.
     pub tls: Option<GatewayTlsConfig>,
+}
+
+/// The `[gateway.rate_limit]` section (ADR-0061 clause 3): the bucket of each downstream host,
+/// sized as the Server sizes a host's (ADR-0013 clause 19). Both keys have a default, and neither
+/// is `0`: no value switches the limit off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GatewayRateLimitConfig {
+    /// Tokens a downstream host's bucket gains per second, continuously.
+    pub messages_per_sec: u32,
+    /// That bucket's capacity; a new bucket starts full.
+    pub burst: u32,
+}
+
+impl Default for GatewayRateLimitConfig {
+    fn default() -> Self {
+        GatewayRateLimitConfig {
+            messages_per_sec: 10,
+            burst: 300,
+        }
+    }
+}
+
+impl GatewayRateLimitConfig {
+    fn check(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("messages_per_sec", self.messages_per_sec),
+            ("burst", self.burst),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "[gateway.rate_limit] {key} must be greater than zero — the limit is never \
+                     switched off; raise it instead"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The downstream hop's TLS material (ADR-0015). Separate from the top-level `[tls]`, which is
@@ -807,6 +848,7 @@ impl GatewayConfig {
                     .to_string(),
             );
         }
+        self.rate_limit.check()?;
         if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
             return Err(format!(
                 "[gateway] needs a WebSocket endpoint upstream, and this Client's is {endpoint} — \
@@ -1559,6 +1601,56 @@ mod tests {
         .expect("write");
         let err = ClientConfig::load(&path).expect_err("zero must fail startup");
         assert!(err.contains("package_cache_bytes"), "{err}");
+    }
+
+    /// Each downstream host's bucket gains ten tokens a second and holds 300 by default; `0` for
+    /// either key fails startup naming it, as does any other key of the section.
+    /// Verifies: ADR-0061
+    #[test]
+    fn the_gateway_rate_limit_defaults_and_refuses_zero_and_unknown_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.toml");
+        let gateway = "endpoint = \"wss://s/v1/opamp\"\n[gateway]\nlisten = \"127.0.0.1:9\"\n\
+                       [gateway.tls]\ncert_file = \"g.pem\"\nkey_file = \"g-key.pem\"\n\
+                       client_ca_file = \"ca.pem\"\n";
+        std::fs::write(&path, gateway).expect("write");
+        let config = ClientConfig::load(&path).expect("loads with the defaults");
+        assert_eq!(
+            config.gateway.expect("gateway").rate_limit,
+            GatewayRateLimitConfig {
+                messages_per_sec: 10,
+                burst: 300,
+            }
+        );
+
+        for key in ["messages_per_sec", "burst"] {
+            std::fs::write(&path, format!("{gateway}[gateway.rate_limit]\n{key} = 0\n"))
+                .expect("write");
+            let err = ClientConfig::load(&path).expect_err("zero must fail startup");
+            assert!(
+                err.contains(&format!("[gateway.rate_limit] {key}")),
+                "{err}"
+            );
+        }
+        std::fs::write(
+            &path,
+            format!("{gateway}[gateway.rate_limit]\nmessages_per_second = 5\n"),
+        )
+        .expect("write");
+        let err = ClientConfig::load(&path).expect_err("an unknown key");
+        assert!(err.contains("messages_per_second"), "{err}");
+
+        std::fs::write(
+            &path,
+            format!("{gateway}[gateway.rate_limit]\nburst = 50\n"),
+        )
+        .expect("write");
+        let limits = ClientConfig::load(&path)
+            .expect("loads")
+            .gateway
+            .expect("gateway")
+            .rate_limit;
+        assert_eq!((limits.messages_per_sec, limits.burst), (10, 50));
     }
 
     /// A Gateway admits Agents, so it never serves without TLS, nor without a client CA to verify

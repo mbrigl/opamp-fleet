@@ -6,16 +6,18 @@
 //! own — the one admission refusal beyond its handshake is a certificate its Server revoked
 //! ([`revocations`]); beyond admission it refuses a report for another host's Agent
 //! ([`registry`]), anything but one plain-HTTP enrolment request from an enrolling peer
-//! ([`Members`]), and a download the Server did not offer to the requesting host through this
-//! Gateway ([`cache`]) — forwards no `Authorization`, and
+//! ([`Members`]), a download the Server did not offer to the requesting host through this
+//! Gateway ([`cache`]), and what a host sends past its rate limit, answered as the Server would
+//! answer it ([`rate`]) — forwards no `Authorization`, and
 //! never speaks in an Agent's name, not even to say the goodbye a vanished Agent did not send.
 //!
 //! The pieces: this module serves the downstream endpoint on both transports (a downstream Client
 //! picks its transport by URL scheme, so serving only one would silently exclude half of them),
 //! [`pool`] holds the upstream connections, [`registry`] routes replies back by `instance_uid`, and
 //! [`cache`] holds the uploaded artifacts the Gateway relays offers of and serves them on the
-//! download route to the hosts they were offered to (ADR-0026), and [`floors`] hands those hosts
-//! the floors it fetched (ADR-0060).
+//! download route to the hosts they were offered to (ADR-0026), [`floors`] hands those hosts the
+//! floors it fetched (ADR-0060), and [`rate`] counts what each downstream host sends against a
+//! bucket of its own (ADR-0061).
 //! The endpoint's communication is `opamp::server`'s, the one the Server sits on too (ADR-0010);
 //! what is the Gateway's is the [`Forwarding`] handler behind it.
 
@@ -23,6 +25,7 @@ pub mod cache;
 pub mod floors;
 pub mod policy;
 pub mod pool;
+pub mod rate;
 pub mod registry;
 pub mod revocations;
 pub mod store;
@@ -75,6 +78,8 @@ struct Forwarding {
     /// The version of the revocation list the bindings were last held against (ADR-0058
     /// clause 4), so an unchanged list is not asked about every host again.
     list_checked: std::sync::atomic::AtomicU64,
+    /// The downstream hosts' buckets, which the download route counts in too (ADR-0061).
+    rate: Arc<rate::HostRate>,
 }
 
 /// What tells a downstream member from an **enrolling peer** (ADR-0039 clause 4). Without
@@ -304,10 +309,12 @@ pub async fn run_on_timed(
         members: members.clone(),
     });
     let bindings = cache.clone();
+    let rate = Arc::new(rate::HostRate::new(gateway.rate_limit));
     let downloads = Arc::new(cache::Downloads {
         cache,
         revocations: revocations.clone(),
         members: members.clone(),
+        rate: rate.clone(),
     });
     let handler = Arc::new(Forwarding {
         pool: Pool::new(config.clone(), registry.clone()),
@@ -316,6 +323,7 @@ pub async fn run_on_timed(
         revocations,
         members,
         list_checked: std::sync::atomic::AtomicU64::new(u64::MAX),
+        rate,
     });
     // What the first list names ends now; what a later one names, when it comes (ADR-0058
     // clause 4).
@@ -487,6 +495,9 @@ struct Downstream {
     /// The certificate chains to the bootstrap CA alone (ADR-0039 clause 4): this peer may relay
     /// one enrolment request and nothing else, and binds nothing.
     enrolling: bool,
+    /// The bucket every message of this connection takes its token from (ADR-0061 clause 1): the
+    /// host it speaks as, or an enrolling peer's address.
+    bucket: rate::Key,
 }
 
 /// Releases a plain-HTTP exchange's route when the exchange ends, unless its reply took it.
@@ -606,6 +617,7 @@ impl Handler for Forwarding {
             .peer
             .map_or_else(|| "unknown".to_string(), |peer| peer.to_string());
         let enrolling = self.members.enrolling(&certificate);
+        let bucket = rate::Key::of(enrolling, &speaker, request.peer);
         if enrolling && request.transport == Transport::WebSocket {
             let why = "an enrolment through a Gateway is a plain-HTTP exchange";
             self.registry
@@ -650,6 +662,7 @@ impl Handler for Forwarding {
                 end,
                 certificate,
                 enrolling,
+                bucket,
             },
             outbound,
         ))
@@ -660,6 +673,12 @@ impl Handler for Forwarding {
     }
 
     async fn on_message(&self, downstream: &mut Downstream, report: AgentToServer) -> Reply {
+        // Before anything else — before a CSR is read, an `instance_uid` bound, the package cache
+        // touched or anything forwarded — the host's token (ADR-0061 clause 2). Past the limit it
+        // is answered as the Server answers, and a WebSocket stays open (clause 4).
+        if !self.rate.admit(&downstream.bucket) {
+            return Reply::Send(rate::unavailable(&report.instance_uid));
+        }
         match downstream.transport {
             Transport::WebSocket => self.forward_from_socket(downstream, report).await,
             Transport::Http if downstream.enrolling => {
@@ -678,8 +697,13 @@ impl Handler for Forwarding {
     }
 
     /// An unreadable report is dropped, never answered: the Gateway invents nothing (ADR-0015). A
-    /// plain-HTTP exchange still needs a response, and it says why.
+    /// plain-HTTP exchange still needs a response, and it says why. It takes the host's token as
+    /// the Server counts one (ADR-0013 clause 21); past the limit it is answered as the Server
+    /// answers it, naming no Agent, and not logged one by one (ADR-0061 clause 4).
     fn on_unreadable(&self, downstream: &mut Downstream, error: &Unreadable) -> Reply {
+        if !self.rate.admit(&downstream.bucket) {
+            return Reply::Send(rate::unavailable(&[]));
+        }
         warn!(peer = %downstream.peer, %error, "dropping an unreadable downstream report");
         match downstream.transport {
             Transport::WebSocket => Reply::Nothing,
@@ -974,6 +998,7 @@ mod tests {
             revocations,
             members: Members::default(),
             list_checked: std::sync::atomic::AtomicU64::new(u64::MAX),
+            rate: Arc::new(rate::HostRate::new(Default::default())),
         }
     }
 
@@ -991,6 +1016,7 @@ mod tests {
             host: cache::host_of(&certificate),
             speaker: cache::speaker_of(&certificate).expect("a readable certificate"),
             end: cache::end_of(&certificate).expect("a readable certificate"),
+            bucket: rate::Key::Host(cache::speaker_of(&certificate).expect("readable")),
             certificate,
             enrolling: false,
         }
@@ -2121,6 +2147,190 @@ mod tests {
             stored(dir.path()).len(),
             2,
             "both bindings are in the store"
+        );
+    }
+
+    /// A Gateway's handler whose downstream hosts' buckets hold `burst` tokens and gain none while
+    /// the test runs.
+    async fn limited(state: &std::path::Path, burst: u32) -> Forwarding {
+        let mut forwarding = forwarding(state).await;
+        forwarding.rate = Arc::new(rate::HostRate::frozen(
+            crate::config::GatewayRateLimitConfig {
+                messages_per_sec: 1,
+                burst,
+            },
+        ));
+        forwarding
+    }
+
+    /// The `instance_uid` a refusal past the rate limit answers, or `None` when the report was not
+    /// refused so.
+    fn throttled(reply: &Reply) -> Option<Vec<u8>> {
+        match reply {
+            Reply::Send(reply) => reply
+                .error_response
+                .as_ref()
+                .filter(|error| {
+                    error.r#type == opamp::proto::ServerErrorResponseType::Unavailable as i32
+                        && error.error_message.contains("too many messages")
+                        && matches!(
+                            error.details,
+                            Some(opamp::proto::server_error_response::Details::RetryInfo(_))
+                        )
+                })
+                .map(|_| reply.instance_uid.clone()),
+            _ => None,
+        }
+    }
+
+    /// A host past its burst is answered `Unavailable` with `RetryInfo` and its own
+    /// `instance_uid`, over a WebSocket and over plain HTTP; its report is not forwarded and binds
+    /// nothing, and the WebSocket stays open. Another host behind the same Gateway is forwarded
+    /// meanwhile.
+    /// Verifies: ADR-0061
+    #[tokio::test]
+    async fn a_host_past_its_burst_is_answered_unavailable_and_another_is_forwarded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = limited(dir.path(), 2).await;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let mut socket = downstream(Transport::WebSocket, Some(tx), certificate());
+        let [first, second, third] = [(); 3].map(|()| InstanceUid::default());
+        for uid in [first, second] {
+            let reply = forwarding.on_message(&mut socket, report(uid)).await;
+            assert!(matches!(reply, Reply::Nothing), "within the burst");
+        }
+        for uid in [third, first] {
+            let reply = forwarding.on_message(&mut socket, report(uid)).await;
+            assert_eq!(throttled(&reply), Some(uid.as_bytes().to_vec()));
+        }
+        assert!(!socket.carried.contains(&third));
+        assert!(!forwarding.registry.routes(&third), "not forwarded");
+        assert!(
+            !forwarding.registry.cache().is_bound(&third),
+            "binds nothing"
+        );
+        assert!(
+            !forwarding.pool.assignments().0.contains(&third),
+            "no place upstream"
+        );
+        assert!(
+            forwarding.closing(&socket).is_none(),
+            "the socket stays open"
+        );
+        // An undecodable frame is counted too, as the Server counts it, and names no Agent.
+        let unreadable = Unreadable::Body(
+            <AgentToServer as prost::Message>::decode(&[0xff][..]).expect_err("garbage"),
+        );
+        let reply = forwarding.on_unreadable(&mut socket, &unreadable);
+        assert_eq!(throttled(&reply), Some(Vec::new()));
+
+        // Over plain HTTP: the same answer, as the body of the exchange.
+        let polling = certificate();
+        let exchange = || downstream(Transport::Http, None, polling.clone());
+        let polled = InstanceUid::default();
+        for _ in 0..2 {
+            let answer = async {
+                while !forwarding.registry.routes(&polled) {
+                    tokio::task::yield_now().await;
+                }
+                forwarding.registry.deliver(polled, reply_for(polled)).await;
+            };
+            let mut peer = exchange();
+            let (reply, ()) =
+                tokio::join!(forwarding.on_message(&mut peer, report(polled)), answer);
+            assert!(throttled(&reply).is_none(), "within the burst");
+        }
+        let fresh = InstanceUid::default();
+        let reply = forwarding.on_message(&mut exchange(), report(fresh)).await;
+        assert_eq!(throttled(&reply), Some(fresh.as_bytes().to_vec()));
+        assert!(!forwarding.registry.routes(&fresh));
+        assert!(!forwarding.registry.cache().is_bound(&fresh));
+
+        // Another host has a bucket of its own.
+        let (tx, _rx) = mpsc::channel(64);
+        let mut other = downstream(Transport::WebSocket, Some(tx), certificate());
+        let theirs = InstanceUid::default();
+        let reply = forwarding.on_message(&mut other, report(theirs)).await;
+        assert!(matches!(reply, Reply::Nothing));
+        assert!(other.carried.contains(&theirs), "forwarded meanwhile");
+        assert!(forwarding.pool.assignments().0.contains(&theirs));
+    }
+
+    /// New `instance_uid`s, new connections and a renewed certificate of one host take from the
+    /// one bucket of that host.
+    /// Verifies: ADR-0061
+    #[tokio::test]
+    async fn every_connection_uid_and_renewed_certificate_of_a_host_takes_from_one_bucket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = limited(dir.path(), 3).await;
+        let provisioned = certificate();
+        let (issuer, serial) = revocations::certificate_id(&provisioned).expect("an id");
+        let renewed = certificate_naming(&fleet_core::host::derived(&issuer, &serial));
+        // Each connection keyed as the endpoint keys it when it opens.
+        let mut held = Vec::new();
+        let mut sockets: Vec<Downstream> = [&provisioned, &provisioned, &renewed, &renewed]
+            .into_iter()
+            .map(|certificate| {
+                let (socket, replies) = connecting(&forwarding, Transport::WebSocket, certificate)
+                    .unwrap_or_else(|_| panic!("admitted"));
+                held.push(replies);
+                socket
+            })
+            .collect();
+        let mut replies = Vec::new();
+        for socket in &mut sockets {
+            let uid = InstanceUid::default();
+            replies.push(throttled(&forwarding.on_message(socket, report(uid)).await));
+        }
+        assert_eq!(
+            replies.iter().filter(|reply| reply.is_none()).count(),
+            3,
+            "the host's burst, across connections, uids and its renewal"
+        );
+        assert!(replies[3].is_some(), "the fourth found the bucket empty");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut other = downstream(Transport::WebSocket, Some(tx), certificate());
+        let reply = forwarding
+            .on_message(&mut other, report(InstanceUid::default()))
+            .await;
+        assert!(throttled(&reply).is_none(), "another host");
+    }
+
+    /// An enrolling peer is counted by its address, an IPv6 one by its /64, whatever its bootstrap
+    /// certificate is; its request past the limit is answered `Unavailable` before its CSR is read,
+    /// and is not forwarded.
+    /// Verifies: ADR-0061
+    #[tokio::test]
+    async fn an_enrolling_peer_is_counted_by_its_address_before_its_request_is_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let forwarding = limited(dir.path(), 1).await;
+        let enrolling = |at: &str| {
+            let presented = certificate();
+            Downstream {
+                enrolling: true,
+                host: None,
+                bucket: rate::Key::of(true, "", Some(at.parse().expect("addr"))),
+                ..downstream(Transport::Http, None, presented)
+            }
+        };
+        let mut first = enrolling("[2001:db8::1]:4000");
+        let uid = InstanceUid::default();
+        // Not an enrolment, so refused — but its token is taken first.
+        let reply = forwarding.on_message(&mut first, report(uid)).await;
+        assert!(matches!(reply, Reply::Refuse(StatusCode::FORBIDDEN, _)));
+
+        let mut same_block = enrolling("[2001:db8::ffff:2]:4001");
+        let request = enrolment(uid, proof_of(&same_block.certificate));
+        let reply = forwarding.on_message(&mut same_block, request).await;
+        assert_eq!(throttled(&reply), Some(uid.as_bytes().to_vec()));
+        assert!(!forwarding.registry.routes(&uid), "not forwarded");
+
+        let mut elsewhere = enrolling("192.0.2.7:4000");
+        let reply = forwarding.on_message(&mut elsewhere, report(uid)).await;
+        assert!(
+            matches!(reply, Reply::Refuse(StatusCode::FORBIDDEN, _)),
+            "another address has its own bucket"
         );
     }
 }
