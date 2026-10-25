@@ -22,8 +22,7 @@ clause 2). Each of them has its own per-Agent bucket at the Server, so together 
 aggregate. From then on every other host behind that Gateway is answered `Unavailable` until the
 aggregate refills. The same host can do the same with downloads, which the Server counts in the
 aggregate alone, and an enrolling peer with its one request. ADR-0058 names a rate per downstream
-member certificate at the Gateway as out of scope and a follow-up. `docs/HARDENING.md` lists it
-among the next steps.
+member certificate at the Gateway as out of scope and a follow-up.
 
 The Gateway knows each downstream host. It binds every `instance_uid` to the host of the
 certificate that reported it (ADR-0058 clause 2). So it is the one place where a host behind it can
@@ -46,10 +45,12 @@ as the Server does, without forwarding it.
    certificate of the same host takes from the same bucket.
 
 2. **What is counted.** Every `AgentToServer` message on the downstream `/v1/opamp`, over a
-   WebSocket and over plain HTTP, every request on the downstream package download route, and an
-   enrolling peer's request. Each takes one token before the Gateway does anything else with it:
-   before it reads a CSR, binds an `instance_uid`, touches the package cache or forwards anything
-   upstream. The Gateway's own Supervisors and its upstream connection are not counted.
+   WebSocket and over plain HTTP, a message there that cannot be decoded, every request on the
+   downstream package download route, and an enrolling peer's request, as the Server counts them
+   (ADR-0013 clause 21). Each takes one token once the downstream handshake and the revocation
+   verdict have admitted it, and before the Gateway does anything else with it: before it reads a
+   CSR, binds an `instance_uid`, touches the package cache or forwards anything upstream. The
+   Gateway's own Supervisors and its upstream connection are not counted.
 
 3. **The bucket is set in `[gateway.rate_limit]`.** `messages_per_sec` (default `10`) is the
    tokens added per second, continuously, and `burst` (default `300`) the bucket's capacity, the
@@ -60,8 +61,10 @@ as the Server does, without forwarding it.
 4. **What a message past the limit gets is what the Server would answer.** A report or an
    enrolment request that finds no whole token is not forwarded and binds nothing. It is answered
    with a `ServerToAgent` that carries the message's own `instance_uid`, `error_response` of type
-   `Unavailable` with an `error_message` saying that too many messages arrive, and `RetryInfo` for
-   when the next token is due (ADR-0013 clauses 23 and 25). The WebSocket stays open. A download
+   `Unavailable` with an `error_message` saying that too many messages arrive, and `RetryInfo` of
+   30 seconds, the Server's own (ADR-0013 clauses 23 and 25); a message that cannot be decoded is
+   answered so without an `instance_uid`. The reply names no capabilities, since the Gateway does
+   not speak for the Server, and a Client reads none from it. The WebSocket stays open. A download
    past the limit is answered `429` with `Retry-After: 30`, and the artifact is not read (ADR-0013
    clause 24). What is refused is logged once per host per minute, with the host and how many were
    refused.
