@@ -28,7 +28,10 @@ ones it uses without defining.
   _Avoid:_ file, asset, build.
 - **High-water mark** — the highest Package version a Client has installed for one Agent type; a
   Supervisor of that type refuses any offer below it.
-  _Avoid:_ floor, minimum version.
+  _Avoid:_ floor (that is the operator's signed one), minimum version.
+- **Floor** — the version the operator signed for one Agent type below which no Client takes a
+  package of that type, its own update included; each Client keeps the highest floor it has seen.
+  _Avoid:_ minimum version, revocation, high-water mark (that is what the host installed).
 - **Blob** — the bytes of an Entry's artifact as the Server stores them, named by their SHA-256;
   identical bytes are one blob, whichever Entries name it.
   _Avoid:_ artifact file, binary.

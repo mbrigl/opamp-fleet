@@ -196,10 +196,16 @@ has:
   one its installed-package record names, or below the **high-water mark** of its Agent type — the
   highest version this Client has installed for the type, kept in
   `<state_dir>/package-high-water.json`, which no purge of a Supervisor's directory reaches; a file
-  that cannot be read refuses every Supervisor package. Residual: an old build the operator signed
-  under a version above the current mark, such as a long-ago pre-release of a later version, is
-  still taken; only a signed floor would close that. The Client's own self-update refuses an
-  offered version that is not SemVer, and one SemVer orders below the running build.
+  that cannot be read refuses every Supervisor package. **The operator signs a floor per Agent
+  type** (ADR-0060), `opamp-fleetctl package floor`, below which no package of the type is taken:
+  an old build signed under a version above the current mark, such as a long-ago pre-release of a
+  later version, is kept off the fleet by one floor above it. Every Client fetches the floors from
+  its Server or Gateway, keeps the highest that verifies against `[packages] verification_key` in
+  `<state_dir>/package-floors.json`, and refuses an offer below it before downloading; a Server
+  that cannot sign can neither forge nor lower one, and only the host lowers the file. The Client's
+  own self-update refuses an offered version that is not SemVer, one SemVer orders below the
+  running build, and one below the floor of its own Agent type. Residual: a Server or Gateway can
+  withhold a floor, so it takes effect on a host only once one that serves it has been reached.
 - `TLSConnectionSettings`, `ProxyConnectionSettings` and offered `headers` refused on merit, so a
   Server cannot command a Client to weaken its own verification or plant a header on every
   connection of the fleet (ADR-0014 clause 8,
