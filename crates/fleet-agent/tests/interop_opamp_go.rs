@@ -437,7 +437,7 @@ async fn opamp_go_client_against_our_server_over_plain_http() {
     go_client_takes_an_assigned_identity("http").await;
 }
 
-/// Our Client binary, killed on drop so a failing assertion never leaks it.
+/// Our Client binary, stopped on drop so a failing assertion never leaks it or its programs.
 struct OurClient(Child);
 
 impl OurClient {
@@ -458,8 +458,7 @@ impl OurClient {
 
 impl Drop for OurClient {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        common::stop_client(&mut self.0);
     }
 }
 

@@ -58,8 +58,7 @@ fn ring_holding_signed(
 struct ClientUnderTest(Child);
 impl Drop for ClientUnderTest {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        common::stop_client(&mut self.0);
     }
 }
 
@@ -121,7 +120,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
 /// process restarted on the written file. No Server push is involved: the offer rides the reply to
 /// the Client's own next poll, which is the whole of how this transport learns anything.
 /// Verifies: ADR-0013, G-1
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_configuration_rollout_reaches_a_polling_client() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(common::fleet_state(dir.path()));
@@ -186,7 +185,7 @@ async fn a_configuration_rollout_reaches_a_polling_client() {
 /// interim `Downloading` reports go out through this transport's `PollSink`, which POSTs each one
 /// as an exchange of its own and discards the reply — so this also proves those discarded replies
 /// cost the install nothing.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_package_rollout_reaches_a_polling_client() {
     let artifact = std::fs::read(env!("CARGO_BIN_EXE_stub_agent")).expect("read stub");
     let rng = ring::rand::SystemRandom::new();

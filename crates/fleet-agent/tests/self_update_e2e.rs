@@ -445,8 +445,7 @@ impl Supervised {
 
 impl Drop for Supervised {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        common::stop_client(&mut self.child);
     }
 }
 

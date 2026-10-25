@@ -2,6 +2,8 @@
 //! register, the real Gateway in front of it trusting the bootstrap CA, and an enrolling host
 //! behind it — a raw plain-HTTP peer, and the real Client binary.
 
+mod common;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -90,8 +92,7 @@ struct ClientUnderTest(Child);
 
 impl Drop for ClientUnderTest {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        common::stop_client(&mut self.0);
     }
 }
 
@@ -476,7 +477,7 @@ async fn a_gateway_without_a_bootstrap_ca_refuses_a_bootstrap_certificate() {
 /// host, an approval mints a new host, the Client collects its certificate in a later reply, and
 /// then reports through the Gateway as a member under its own `instance_uid`.
 /// Verifies: ADR-0039
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_client_enrols_through_a_gateway_and_then_reports_through_it() {
     let fleet = Fleet::start(true).await;
     let pki = fleet.dir.path();

@@ -23,13 +23,12 @@ use opamp::proto::{
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
-/// Kills the client on drop so a failing assertion never leaks the process.
+/// Stops the client on drop so a failing assertion never leaks it or its programs.
 struct ClientUnderTest(Child);
 
 impl Drop for ClientUnderTest {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        common::stop_client(&mut self.0);
     }
 }
 

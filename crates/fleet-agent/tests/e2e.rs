@@ -16,13 +16,12 @@ use std::time::{Duration, Instant};
 
 use fleet_server::fleet::{AgentView, AppState};
 
-/// Kills the client on drop so a failing assertion never leaks the process.
+/// Stops the client on drop so a failing assertion never leaks it or its programs.
 struct ClientUnderTest(Child);
 
 impl Drop for ClientUnderTest {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        common::stop_client(&mut self.0);
     }
 }
 
@@ -821,4 +820,59 @@ async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {
         rewritten.contains("server_manages_set = true"),
         "{rewritten}"
     );
+}
+
+/// Whether `pid` names a process that still runs. A program the Client left behind is reparented
+/// and reaped once it ends, so it does not linger as a zombie.
+#[cfg(unix)]
+fn running(pid: u32) -> bool {
+    let pid = libc::pid_t::try_from(pid).expect("a pid");
+    // SAFETY: signal 0 only checks that the process exists; nothing is delivered.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Dropping the Client under test stops it as its service manager would, so the programs it
+/// started itself end with it: a kill alone left them running after every test.
+/// Verifies: ADR-0017
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_client_leaves_none_of_its_programs_running() {
+    let (addr, _state, dir) = spawn_server().await;
+    let state_dir: PathBuf = dir.path().join("client-state");
+    let marker = dir.path().join("stub-marker");
+    let program = stub_program_name();
+    let config_path = dir.path().join("supervisor.toml");
+    let toml = format!(
+        concat!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\n",
+            "state_dir = {state:?}\n\n",
+            "[[supervisor]]\n",
+            "type = \"command\"\n",
+            "name = \"stub\"\n",
+            "command = {program:?}\n",
+            "args = [\"--touch\", {marker:?}]\n",
+        ),
+        addr = addr,
+        state = state_dir.to_string_lossy(),
+        program = program,
+        marker = marker.to_string_lossy(),
+    );
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
+        .expect("write supervisor.toml");
+    stage_owned_program(&state_dir, "stub", &program);
+    let client = spawn_client(&config_path);
+    let pid = wait_until("the stub to run", || stub_pid(&marker)).await;
+    assert!(running(pid), "the stub runs when the Client is dropped");
+
+    drop(client);
+    assert_eq!(
+        stub_pid(&marker),
+        Some(pid),
+        "no other stub was started, so this one's ending is the Client's doing"
+    );
+
+    wait_until("the stub to end with the Client", || {
+        (!running(pid)).then_some(())
+    })
+    .await;
 }
