@@ -21,6 +21,16 @@ fn main() {
     if fleet_agent::supervisor::channel::runs_the_second_service(std::env::args_os().skip(1)) {
         fleet_agent::supervisor::channel::mark_not_dumpable();
     }
+    // On Windows it closes its process and its threads to the process account first, as Linux
+    // marks it: a protected DACL that leaves its account only to ask about it and wait for it
+    // (ADR-0062). `run` does not listen where one differs.
+    #[cfg(windows)]
+    if fleet_agent::supervisor::channel::runs_the_second_service(std::env::args_os().skip(1)) {
+        fleet_agent::supervisor::channel::windows::close_this_process(
+            fleet_agent::supervisor::channel::named_client_sid(std::env::args_os().skip(1))
+                .as_deref(),
+        );
+    }
     // stderr as always, plus two empty slots the OTLP exporters are dropped into once the Server
     // names a destination: the log bridge for events (ADR-0016) and the span layer for traces
     // (ADR-0016). Both have to exist from the start: `tracing` takes one subscriber for the

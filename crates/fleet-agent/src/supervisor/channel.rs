@@ -505,6 +505,23 @@ pub fn runs_the_second_service(mut args: impl Iterator<Item = std::ffi::OsString
     })
 }
 
+/// The value of `--client-sid` on the command line `args`, the program's name left out: read
+/// before anything else, so that the second service closes its process on Windows to every account
+/// but the Client's first (ADR-0062). `None` where it is not named; a value named twice is the
+/// first.
+pub fn named_client_sid(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<String> {
+    while let Some(arg) = args.next() {
+        let Some(arg) = arg.to_str() else { continue };
+        if arg == "--client-sid" {
+            return args.next()?.into_string().ok();
+        }
+        if let Some(sid) = arg.strip_prefix("--client-sid=") {
+            return Some(sid.to_string());
+        }
+    }
+    None
+}
+
 /// Closes the second service's process to the Managed Processes (ADR-0059 clause 4): marked not
 /// dumpable, no process of its account without `CAP_SYS_PTRACE` attaches to it, reads or writes its
 /// memory, or takes its descriptors, whatever `kernel.yama.ptrace_scope` says. The first thing its
@@ -2302,15 +2319,24 @@ pub(crate) struct PeerProcess {
     /// later holder of its id.
     #[cfg(target_os = "linux")]
     pidfd: Option<std::os::fd::OwnedFd>,
+    /// On Windows, the process opened by its id before the SCM is asked (ADR-0062): while it is
+    /// open, the id names that process alone.
+    #[cfg(windows)]
+    handle: std::os::windows::io::OwnedHandle,
 }
 
 impl PeerProcess {
     /// Whether the process still runs: where there is a pidfd, it has not ended (the pidfd polls
-    /// readable once it has, poll(2)); without one there is nothing to tell it by.
+    /// readable once it has, poll(2)); on Windows its handle is not signalled
+    /// (`WaitForSingleObject` times out at once); elsewhere there is nothing to tell it by.
     ///
     /// # Errors
-    /// Returns why the pidfd could not be polled.
+    /// Returns why the pidfd or the handle could not be polled.
     fn running(&self) -> io::Result<bool> {
+        #[cfg(windows)]
+        let running = crate::win32::ended_within(&self.handle, Duration::ZERO).map(|ended| !ended);
+        #[cfg(not(windows))]
+        let running = Ok(true);
         #[cfg(target_os = "linux")]
         if let Some(pidfd) = &self.pidfd {
             use std::os::fd::AsRawFd as _;
@@ -2325,7 +2351,7 @@ impl PeerProcess {
             }
             return Ok(poll.revents == 0);
         }
-        Ok(true)
+        running
     }
 }
 
@@ -2430,8 +2456,9 @@ fn process_id(pid: libc::pid_t) -> io::Result<u32> {
 /// (ADR-0059 clause 4). The account alone cannot tell: the Managed Processes run under the process
 /// account too, and can put a socket of their own in its place, or an instance of the pipe beside
 /// its own. A peer whose process cannot be read, or for which the manager names no process, is
-/// refused as one whose process differs. With a pidfd its process must still run once the manager
-/// has answered, so that its id cannot have passed to the second service in between.
+/// refused as one whose process differs. With a pidfd, and on Windows with the handle the peer's
+/// process is held by (ADR-0062), its process must still run once the manager has answered, so
+/// that its id cannot have passed to the second service in between.
 ///
 /// # Errors
 /// Returns a refusal [`other_process`] reads the peer's process id from.
@@ -2448,8 +2475,16 @@ async fn check_process(
     };
     let socket = socket.display();
     let peer = peer.map_err(|e| {
+        // A process named by its id that could not be opened (Windows) is logged by that id.
+        #[cfg(windows)]
+        let pid = e
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<windows::Unopened>())
+            .map(|unopened| unopened.pid);
+        #[cfg(not(windows))]
+        let pid = None;
         refused(
-            None,
+            pid,
             format!("the process serving {socket} cannot be read: {e}"),
         )
     })?;
@@ -3898,6 +3933,38 @@ mod tests {
             "999"
         ])));
         assert!(!runs_the_second_service(args(&["run"])));
+    }
+
+    /// The Client's SID the second service closes its process to on Windows is read from its
+    /// command line before that is parsed, in both spellings (ADR-0062).
+    /// Verifies: ADR-0062
+    #[test]
+    fn the_clients_sid_is_known_before_the_command_line_is_parsed() {
+        let args = |line: &[&str]| {
+            line.iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        let pipe = r"\\.\pipe\opamp-fleet-agents";
+        assert_eq!(
+            named_client_sid(args(&[
+                "run",
+                "--agents",
+                pipe,
+                "--client-sid",
+                "S-1-5-80-1"
+            ]))
+            .as_deref(),
+            Some("S-1-5-80-1")
+        );
+        assert_eq!(
+            named_client_sid(args(&["run", "--client-sid=S-1-5-80-2", "--agents", pipe]))
+                .as_deref(),
+            Some("S-1-5-80-2")
+        );
+        assert_eq!(named_client_sid(args(&["run", "--agents", pipe])), None);
+        assert_eq!(named_client_sid(args(&["run", "--client-sid"])), None);
     }
 
     /// An error of `SO_PEERPIDFD` other than `ENOPROTOOPT` is the error the peer is refused with:
