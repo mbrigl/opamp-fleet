@@ -88,9 +88,26 @@ pub const DAEMON_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// # Errors
 /// Returns an error if the runtime cannot be built.
 pub fn daemon_runtime() -> Result<tokio::runtime::Runtime, String> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(DAEMON_STACK_SIZE)
+    daemon_builder()
+        .build()
+        .map_err(|e| format!("cannot build the tokio runtime: {e}"))
+}
+
+fn daemon_builder() -> tokio::runtime::Builder {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().thread_stack_size(DAEMON_STACK_SIZE);
+    builder
+}
+
+/// The runtime the second service runs on under the SCM: [`daemon_runtime`]'s, each of whose
+/// threads closes itself to the process account as its first act (ADR-0062).
+///
+/// # Errors
+/// Returns an error if the runtime cannot be built.
+#[cfg(windows)]
+pub fn agents_runtime() -> Result<tokio::runtime::Runtime, String> {
+    daemon_builder()
+        .on_thread_start(crate::supervisor::channel::windows::close_this_thread)
         .build()
         .map_err(|e| format!("cannot build the tokio runtime: {e}"))
 }
