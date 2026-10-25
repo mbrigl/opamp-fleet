@@ -3028,3 +3028,165 @@ async fn a_stored_package_whose_version_is_not_semver_takes_no_write_and_can_be_
     assert_eq!(deleted.status(), 204, "nothing pins it, so it is deleted");
     assert!(store.summary(&legacy).is_none());
 }
+
+// ---- The floor of each Agent type (ADR-0060) ----
+
+/// The Server on `dir` with the floors armed over its data directory, checked against `public`.
+async fn spawn_with_floors(dir: &std::path::Path, public: &[u8]) -> TestServer {
+    opamp::tls::install_ring_provider();
+    let floors = fleet_server::floors::PackageFloors::open(Box::new(
+        fleet_server::fs::FsFloorStore::open(&dir.join("fleet-configs")),
+    ))
+    .expect("floors")
+    .with_verifier(Some(Box::new(fleet_server::config::Ed25519Verifier::new(
+        public.to_vec(),
+    ))));
+    let state = Arc::new(
+        AppState::new(dir.join("fleet-configs"))
+            .expect("configs")
+            .with_floors(Some(Arc::new(floors))),
+    );
+    let (addr, rest_addr) =
+        support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
+    TestServer {
+        addr,
+        rest_addr,
+        state,
+        _dir: tempfile::tempdir().expect("tempdir"),
+    }
+}
+
+/// `PUT /api/v1/package-floors/{agent_type}` with the version and the hex signature.
+async fn put_floor(
+    server: &TestServer,
+    agent_type: &str,
+    version: &str,
+    signature: &[u8],
+) -> reqwest::Response {
+    reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/v1/package-floors/{agent_type}",
+            server.rest_addr
+        ))
+        .json(&serde_json::json!({ "version": version, "signature": hex::encode(signature) }))
+        .send()
+        .await
+        .expect("put floor")
+}
+
+/// `GET /api/v1/package-floors`.
+async fn list_floors(server: &TestServer) -> serde_json::Value {
+    reqwest::Client::new()
+        .get(format!("http://{}/api/v1/package-floors", server.rest_addr))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json")
+}
+
+/// A floor is stored by `PUT`, listed by `GET` and removed by `DELETE`, and outlives a restart; a
+/// `PUT` below the stored floor is `409` and changes nothing; with `[packages] verification_key`
+/// a floor is reported `valid` or `invalid` and stored either way; the Agent plane hands every
+/// floor to a member, as the Client reads it.
+/// Verifies: ADR-0060
+#[tokio::test]
+async fn a_floor_is_put_listed_raised_never_lowered_and_deleted() {
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+    let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
+    let public = ring::signature::KeyPair::public_key(&keypair)
+        .as_ref()
+        .to_vec();
+    let sign = |agent_type: &str, version: &str| {
+        keypair
+            .sign(&fleet_core::package::floor_statement(agent_type, version))
+            .as_ref()
+            .to_vec()
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = spawn_with_floors(dir.path(), &public).await;
+
+    let stored = put_floor(&server, "otelcol", "2.0.0", &sign("otelcol", "2.0.0")).await;
+    assert_eq!(stored.status(), 200);
+    let view: serde_json::Value = stored.json().await.expect("json");
+    assert_eq!(view["version"], "2.0.0");
+    assert_eq!(view["signature_state"], "valid");
+
+    let lower = put_floor(&server, "otelcol", "1.9.4", &sign("otelcol", "1.9.4")).await;
+    assert_eq!(lower.status(), 409);
+    let why = lower.text().await.expect("body");
+    assert!(why.contains("2.0.0") && why.contains("1.9.4"), "{why}");
+
+    // A package signature over the same type and version is no floor: reported, not refused.
+    let package = keypair
+        .sign(&fleet_core::package::statement(
+            "promtail", "3.0.0", &[0; 32],
+        ))
+        .as_ref()
+        .to_vec();
+    let invalid = put_floor(&server, "promtail", "3.0.0", &package).await;
+    assert_eq!(invalid.status(), 200);
+    let view: serde_json::Value = invalid.json().await.expect("json");
+    assert_eq!(view["signature_state"], "invalid");
+    for (version, signature) in [("3.0", vec![0u8; 64]), ("3.0.0", vec![0u8; 12])] {
+        assert_eq!(
+            put_floor(&server, "promtail", version, &signature)
+                .await
+                .status(),
+            400,
+            "{version}"
+        );
+    }
+
+    let listed = list_floors(&server).await;
+    assert_eq!(listed[0]["agent_type"], "otelcol");
+    assert_eq!(listed[0]["version"], "2.0.0");
+    assert_eq!(listed[1]["agent_type"], "promtail");
+    assert_eq!(listed[1]["signature_state"], "invalid");
+
+    let served: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{}/v1/package-floors", server.addr))
+        .send()
+        .await
+        .expect("fetch")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(
+        served["otelcol"],
+        serde_json::json!({
+            "version": "2.0.0",
+            "signature": hex::encode(sign("otelcol", "2.0.0")),
+        })
+    );
+    assert_eq!(
+        served["promtail"]["signature"],
+        hex::encode(&package),
+        "served whatever the Server's own check found"
+    );
+
+    let delete = |agent_type: &'static str| {
+        reqwest::Client::new()
+            .delete(format!(
+                "http://{}/api/v1/package-floors/{agent_type}",
+                server.rest_addr
+            ))
+            .send()
+    };
+    assert_eq!(delete("promtail").await.expect("delete").status(), 204);
+    assert_eq!(delete("promtail").await.expect("delete").status(), 404);
+
+    let restarted = spawn_with_floors(dir.path(), &public).await;
+    let listed = list_floors(&restarted).await;
+    assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
+    assert_eq!(listed[0]["agent_type"], "otelcol");
+    assert_eq!(
+        put_floor(&restarted, "otelcol", "1.0.0", &sign("otelcol", "1.0.0"))
+            .await
+            .status(),
+        409,
+        "the stored floor outlives the restart"
+    );
+}

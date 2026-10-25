@@ -562,6 +562,22 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // The floor of each Agent type (ADR-0060), checked against the same key as the package
+    // signatures, and served to every member.
+    let floors = match config.packages.verification_key().and_then(|key| {
+        fleet_server::floors::PackageFloors::open(records.floors()).map(|floors| {
+            floors.with_verifier(key.map(|key| {
+                Box::new(fleet_server::config::Ed25519Verifier::new(key))
+                    as Box<dyn fleet_server::packages::SignatureVerifier>
+            }))
+        })
+    }) {
+        Ok(floors) => Arc::new(floors),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     // The audit record (ADR-0022), opened before anything is decided.
     let audit_log = match fleet_server::fs::FsAuditStore::open(&config.data_dir).and_then(|store| {
         fleet_server::audit_log::AuditLog::start(
@@ -620,6 +636,7 @@ async fn main() {
                 .with_enrolment(enrolment.clone())
                 .with_bootstrap(bootstrap)
                 .with_revocations(Some(revocations.clone()))
+                .with_floors(Some(floors))
                 .with_audit(Some(audit.clone()))
                 .with_telemetry_offer(telemetry_offer)
                 .with_packages(packages)
