@@ -13,7 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [Unreleased]
+## [0.7.0]
 
 ### Added
 
@@ -168,7 +168,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   counts as recorded only once it is synced, and a write that fails loses all of them, each counted
   in the next entry's `unrecorded_before`.
 
-## [0.6.2]
+## [0.6.2] - 2026-10-24
 
 ### Security
 
