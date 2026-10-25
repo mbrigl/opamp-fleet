@@ -104,19 +104,24 @@ the peer's process by a handle while it checks it.
      set through `SetSecurityInfo` on the process's and each thread's own handle: the main thread
      sets the process's and its own and, from a snapshot, those of the threads that exist by then;
      the thread the SCM starts for the service and every thread of the runtime set their own as
-     their first act. Before it listens, the second service reads back the DACL of its process and
-     of every thread it has, compared by what they say as ADR-0059 clause 6 compares an ACL, and does not
-     listen, ending with an error, while one differs. The token's default DACL is left as it is,
-     so the programs it starts, which are created with the security their own account gives them,
-     are not touched.
+     their first act. Threads the system starts in the process, such as those of its thread pool,
+     are set from a snapshot of every thread, taken again once a second while the second service
+     serves. Before it listens, the second service sets them so once more, then reads back the DACL
+     of its process and of every thread it has, compared by what they say as ADR-0059 clause 6
+     compares an ACL, and does not listen, ending with an error, while one differs. `GA` stands for
+     the access it maps to on a process and on a thread, `0x1fffff`, which is what is written, so
+     that what is read back compares equal. The token's default DACL is left as it is, so the
+     programs it starts, which are created with the security their own account gives them, are not
+     touched.
    - **Each program runs in a job of its own.** On Windows the second service starts every program
      suspended, assigns it to a new job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and only
      then lets it run, so everything it starts is in that job too. At the end of each connection,
      and so before it reports itself stopped, the second service ends every job it holds and
      waits, up to five seconds, until none holds a process.
 
-**Out of scope:** a thread the runtime creates, in the instant between its creation and its own
-first act; a broker outside the job, a WMI process creation or a scheduled task, through which a
+**Out of scope:** the process itself from its creation until its program's first act; a thread
+the runtime creates, in the instant between its creation and its own first act; a thread the system
+starts in the process, until the next snapshot, at most a second later; a broker outside the job, a WMI process creation or a scheduled task, through which a
 Managed Process outlives the job (ADR-0059 clause 4); a process id reused on macOS; what the Managed
 Processes can do to one another under the one account.
 
