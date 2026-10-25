@@ -1007,6 +1007,7 @@ dependencies = [
  "pkcs12",
  "pkcs5",
  "rcgen",
+ "ring",
  "sha2",
  "x509-parser",
  "zeroize",
