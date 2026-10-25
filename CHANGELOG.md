@@ -13,6 +13,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
+## [Unreleased]
+
+### Fixed
+
+- **A stop right after the Client starts ends it cleanly.** Its `SIGTERM` and `SIGINT` handlers
+  were installed only once the task waiting for them first ran; a stop before that ended the Client
+  by the signal itself. The handlers are now in place before the Client starts anything.
+
 ## [0.7.0]
 
 ### Added
