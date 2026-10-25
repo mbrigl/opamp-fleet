@@ -1784,6 +1784,214 @@ while ($true) {
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
 
+/// On Windows the second service's process and threads are closed to its own account (ADR-0062):
+/// with `NT AUTHORITY\LocalService` as the process account, a task scheduled under that account —
+/// as a Managed Process would be — is refused `ERROR_ACCESS_DENIED` when it opens the second
+/// service's process with `PROCESS_VM_READ`, `PROCESS_DUP_HANDLE` or `PROCESS_CREATE_THREAD`, and
+/// any of its threads with `THREAD_SET_CONTEXT`, while it may still open the process to ask about
+/// it (`PROCESS_QUERY_LIMITED_INFORMATION`), and the Managed Process the second service started
+/// still runs.
+/// Verifies: ADR-0062
+#[cfg(windows)]
+#[test]
+#[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
+fn on_windows_the_second_services_process_and_threads_are_closed_to_the_process_account() {
+    use fleet_agent::service::manager::agents_service_name;
+    assert_eq!(
+        service().state().expect("query the service"),
+        ServiceState::NotInstalled,
+        "a leftover {} service from an earlier run — remove it before running this",
+        service_name()
+    );
+    let client_account = format!(r"NT SERVICE\{}", service_name());
+    let process_account = r"NT AUTHORITY\LocalService";
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("install");
+    let state = root.join("state");
+    let program = state.join("supervisors").join("probe").join("program");
+    std::fs::create_dir_all(&program).expect("program/");
+    // Where the Managed Process and the task say what they did: writable by everyone.
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).expect("out/");
+    grant_modify(&out, "*S-1-1-0");
+    let starts = out.join("starts");
+    let started = || {
+        std::fs::read_to_string(&starts)
+            .map(|text| text.lines().filter(|line| line.trim() == "started").count())
+            .unwrap_or(0)
+    };
+
+    common::client_identity(dir.path());
+    let key = state.join("client-key.pem");
+    let cert = state.join("client.pem");
+    std::fs::rename(dir.path().join("test-client-key.pem"), &key).expect("place the key");
+    std::fs::rename(dir.path().join("test-client.pem"), &cert).expect("place the certificate");
+    std::fs::write(
+        program.join("probe.cmd"),
+        format!(
+            "@echo off\r\n\
+             echo started>> \"{starts}\"\r\n\
+             ping -n 3600 127.0.0.1 >nul\r\n",
+            starts = starts.display(),
+        ),
+    )
+    .expect("write the program");
+
+    let (addr, state_view, _server) = spawn_server();
+    let config = dir.path().join("supervisor.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\nname = \"{AGENT_NAME}\"\nheartbeat_interval_secs = 1\n\
+             [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\n\n\
+             [[supervisor]]\ntype = \"command\"\nname = \"probe\"\ncommand = \"probe.cmd\"\n",
+            cert = cert.display().to_string(),
+            key = key.display().to_string(),
+        ),
+    )
+    .expect("write supervisor.toml");
+
+    let root_arg = root.to_string_lossy().into_owned();
+    client(
+        &[
+            "service",
+            "install",
+            "--root",
+            &root_arg,
+            "--run-as",
+            &client_account,
+            "--process-account",
+            process_account,
+        ],
+        &config,
+    )
+    .expect("install the service with LocalService as the process account");
+    let _registered = Registered;
+    service_on_windows("start", &config, &root);
+    wait_for(
+        "the Agent to appear in the fleet",
+        Duration::from_secs(60),
+        || agent(&state_view).filter(|a| a.connected).map(|_| ()),
+    );
+    wait_for(
+        "the Managed Process to start",
+        Duration::from_secs(90),
+        || (started() == 1).then_some(()),
+    );
+    let agents = agents_service_name();
+    let agents_pid = || {
+        let queried = Command::new("sc")
+            .args(["queryex", &agents])
+            .output()
+            .expect("run sc queryex");
+        parse_after(&String::from_utf8_lossy(&queried.stdout), "PID")
+            .expect("the second service's process id")
+    };
+    let pid = agents_pid();
+
+    // The task opens the second service's process and each of its threads for what a Managed
+    // Process would read, steer or take it by, and notes the error of each.
+    let result = out.join("opened");
+    let probe = out.join("open.ps1");
+    std::fs::write(
+        &probe,
+        r#"$ErrorActionPreference = 'Stop'
+$out = '@OUT@'
+$target = [uint32]@PID@
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class Opener {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, uint id);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenThread(uint access, bool inherit, uint id);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+    public static int Process(uint access, uint id) {
+        IntPtr handle = OpenProcess(access, false, id);
+        if (handle == IntPtr.Zero) { return Marshal.GetLastWin32Error(); }
+        CloseHandle(handle);
+        return 0;
+    }
+    public static int Thread(uint access, uint id) {
+        IntPtr handle = OpenThread(access, false, id);
+        if (handle == IntPtr.Zero) { return Marshal.GetLastWin32Error(); }
+        CloseHandle(handle);
+        return 0;
+    }
+}
+"@
+$lines = @()
+$lines += "user=" + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$lines += "vm_read=" + [Opener]::Process(0x0010, $target)
+$lines += "dup_handle=" + [Opener]::Process(0x0040, $target)
+$lines += "create_thread=" + [Opener]::Process(0x0002, $target)
+$lines += "query_limited=" + [Opener]::Process(0x1000, $target)
+foreach ($thread in (Get-Process -Id $target).Threads) {
+    $lines += "set_context_" + $thread.Id + "=" + [Opener]::Thread(0x0010, [uint32]$thread.Id)
+}
+$lines += "done=yes"
+Set-Content -Path "$out.tmp" -Value $lines
+Move-Item -Force -Path "$out.tmp" -Destination $out
+"#
+        .replace("@OUT@", &result.display().to_string())
+        .replace("@PID@", &pid.to_string()),
+    )
+    .expect("write the task's script");
+    let _task = ScheduledTask::start("opamp-fleet-smoke-opener", &probe);
+    let opened = reported_on_windows(&result);
+    assert_eq!(
+        opened["user"], "S-1-5-19",
+        "run as LocalService: {opened:?}"
+    );
+    for right in ["vm_read", "dup_handle", "create_thread"] {
+        assert_eq!(opened[right], "5", "{right} is not refused: {opened:?}");
+    }
+    assert_eq!(
+        opened["query_limited"], "0",
+        "the process account may ask about the second service: {opened:?}"
+    );
+    let threads: Vec<(&String, &String)> = opened
+        .iter()
+        .filter(|(key, _)| key.starts_with("set_context_"))
+        .collect();
+    assert!(!threads.is_empty(), "no thread was opened: {opened:?}");
+    for (thread, error) in threads {
+        assert_eq!(error, "5", "{thread} is not refused: {opened:?}");
+    }
+
+    // The Managed Process still runs, under the second service it was started by.
+    assert_eq!(scm_state(&agents), "RUNNING");
+    assert_eq!(agents_pid(), pid, "the second service was restarted");
+    assert_eq!(started(), 1, "the Managed Process was started again");
+    let children = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "@(Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}' | \
+                 Where-Object {{ $_.Name -eq 'cmd.exe' }}).Count"
+            ),
+        ])
+        .output()
+        .expect("run powershell");
+    let children = String::from_utf8_lossy(&children.stdout);
+    assert!(
+        children.trim().parse::<u32>().is_ok_and(|count| count >= 1),
+        "the Managed Process no longer runs under the second service: {children}"
+    );
+    assert!(
+        agent(&state_view).is_some_and(|a| a.connected),
+        "the Agent is no longer connected"
+    );
+
+    service_on_windows("stop", &config, &root);
+    client(&["service", "uninstall"], &config).expect("uninstall the service");
+}
+
 /// The password of the `bootstrap.p12` the enrolment smoke test installs with.
 const P12_PASSWORD: &str = "a password of the operator";
 
