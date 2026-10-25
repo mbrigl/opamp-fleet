@@ -27,6 +27,14 @@
 //!      -H 'content-type: application/json' --data "{\"signature\": \"$sig\"}"
 //! ```
 //!
+//! Keeping every build below a version off the fleet — a signed floor (ADR-0060):
+//!
+//! ```text
+//! sig=$(opamp-fleetctl package floor --key fleet-signing.pk8 --agent-type promtail --version 3.0.0)
+//! curl -X PUT "https://<server>:4321/api/v1/package-floors/promtail" \
+//!      -H 'content-type: application/json' --data "{\"version\": \"3.0.0\", \"signature\": \"$sig\"}"
+//! ```
+//!
 //! Script-friendly: the hex output (public key, signature, or SHA-256) goes to stdout alone;
 //! status messages go to stderr.
 
@@ -76,6 +84,21 @@ pub enum Command {
         /// Where to write the signed file. Default: over the --signing-info file.
         #[arg(long, value_name = "FILE", conflicts_with_all = ["agent_type", "version", "artifact"])]
         out: Option<PathBuf>,
+    },
+    /// Sign a floor and print the signature (hex): below `--version`, no Client takes a package of
+    /// `--agent-type` any more, its own update included (ADR-0060). Store it on the Server with
+    /// `PUT /api/v1/package-floors/{agent_type}`.
+    Floor {
+        /// The PKCS#8 private key from `keygen`.
+        #[arg(long)]
+        key: PathBuf,
+        /// The Agent type the floor holds for. The signature holds for this type alone.
+        #[arg(long)]
+        agent_type: String,
+        /// The lowest version still taken, a SemVer 2.0.0 version. The signature holds for this
+        /// version alone.
+        #[arg(long)]
+        version: String,
     },
     /// Print the public key (hex) of an existing private key.
     PublicKey {
@@ -207,6 +230,14 @@ pub fn run(command: Command) -> Result<(), String> {
             let statement =
                 fleet_core::package::statement(&agent_type, &version, &Sha256::digest(&bytes));
             println!("{}", hex::encode(keypair.sign(&statement).as_ref()));
+            Ok(())
+        }
+        Command::Floor {
+            key,
+            agent_type,
+            version,
+        } => {
+            println!("{}", floor_signature(&key, &agent_type, &version)?);
             Ok(())
         }
         Command::PublicKey { key } => {
@@ -421,6 +452,22 @@ pub(crate) fn require_semver(version: &str) -> Result<(), String> {
              nothing was signed"
         ))
     }
+}
+
+/// The signature, hex, over the floor statement of `agent_type` at `version`
+/// (`fleet_core::package::floor_statement`, ADR-0060 clause 1). A version that is not SemVer is
+/// refused before the key is read, as `sign` refuses it (ADR-0043 clause 4).
+fn floor_signature(key: &PathBuf, agent_type: &str, version: &str) -> Result<String, String> {
+    if !fleet_core::version::is_semver(version) {
+        return Err(format!(
+            "the version {version:?} is not SemVer — a floor is a SemVer 2.0.0 version (for \
+             example 1.19.0 for upstream's 1.19), and a Client refuses any other; nothing was \
+             signed"
+        ));
+    }
+    let keypair = load_key(key)?;
+    let statement = fleet_core::package::floor_statement(agent_type, version);
+    Ok(hex::encode(keypair.sign(&statement).as_ref()))
 }
 
 fn load_key(path: &PathBuf) -> Result<Ed25519KeyPair, String> {
@@ -755,5 +802,46 @@ mod tests {
                 .verify(b"tampered", &signature)
                 .is_err()
         );
+    }
+
+    /// `package floor` signs the floor statement of the type and the version, which verifies
+    /// against the public key `keygen` printed and as no package; a version that is not SemVer is
+    /// refused before the key is read.
+    /// Verifies: ADR-0060
+    #[test]
+    fn floor_signs_the_floor_statement_and_refuses_a_version_that_is_not_semver() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let keyfile = dir.path().join("k.pk8");
+        run(Command::Keygen {
+            out: keyfile.clone(),
+        })
+        .expect("keygen");
+        let public = load_key(&keyfile)
+            .expect("load")
+            .public_key()
+            .as_ref()
+            .to_vec();
+        let signature = hex::decode(floor_signature(&keyfile, "otelcol", "2.0.0").expect("signed"))
+            .expect("hex");
+        let key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public);
+        key.verify(
+            &fleet_core::package::floor_statement("otelcol", "2.0.0"),
+            &signature,
+        )
+        .expect("the floor verifies");
+        assert!(key
+            .verify(
+                &fleet_core::package::floor_statement("otelcol", "2.0.1"),
+                &signature
+            )
+            .is_err());
+
+        let refused = floor_signature(&dir.path().join("no-such.key"), "otelcol", "2.0")
+            .expect_err("2.0 is not SemVer");
+        assert!(
+            refused.contains("\"2.0\"") && refused.contains("SemVer"),
+            "{refused}"
+        );
+        assert!(!refused.contains("no-such.key"), "{refused}");
     }
 }
