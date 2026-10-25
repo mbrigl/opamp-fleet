@@ -40,6 +40,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   were installed only once the task waiting for them first ran; a stop before that ended the Client
   by the signal itself. The handlers are now in place before the Client starts anything.
 
+### Security
+
+- **A Gateway rate-limits each host behind it as the Server limits a host**
+  ([ADR-0061](docs/adr/0061-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
+  The Server counts what a Gateway forwards in one aggregate for all the hosts behind it, so a
+  single host speaking for many `instance_uid`s, or looping downloads or enrolment requests, could
+  drain it and leave every other host behind that Gateway answered `Unavailable`. A Gateway now
+  counts every downstream report, enrolment request and package download in a bucket of the host
+  that sent it, an enrolling peer by its address and an IPv6 one by its /64, before it does
+  anything else with it. Past the limit a report or an enrolment request is not forwarded and is
+  answered `Unavailable` with a retry after 30 seconds, over a WebSocket that stays open, and a
+  download is answered `429` with `Retry-After: 30`; the Gateway logs it once per host and minute
+  with the count. The new `[gateway.rate_limit]` section of `supervisor.toml` sets
+  `messages_per_sec` (default `10`) and `burst` (default `300`), the values the Server gives a
+  host; `0` fails startup. **What to do:** nothing on upgrade. A host whose Agents legitimately
+  send more through a Gateway than the defaults allow needs the section raised on each Gateway it
+  reports through.
+
 ## [0.7.0]
 
 ### Added
