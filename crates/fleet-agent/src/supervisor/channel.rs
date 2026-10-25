@@ -471,6 +471,7 @@ pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
     runtime.block_on(async {
         // Before the socket is bound: whoever sees it may already signal the service.
         crate::service::runtime::ignore_sighup();
+        let terminated = terminated();
         let listener =
             bind(socket).map_err(|e| format!("cannot listen on {}: {e}", socket.display()))?;
         #[cfg(target_os = "linux")]
@@ -483,7 +484,7 @@ pub fn run_service(socket: &Path, client_uid: u32) -> Result<Served, String> {
         );
         #[cfg(not(target_os = "linux"))]
         info!(socket = %socket.display(), client_uid, "second service listening");
-        let served = serve(listener, client_uid, superseded, terminated()).await;
+        let served = serve(listener, client_uid, superseded, terminated).await;
         let _ = std::fs::remove_file(socket);
         if served == Served::Superseded {
             info!(
@@ -563,17 +564,24 @@ pub(crate) fn superseded() -> bool {
         .is_some_and(|(layout, running_dir)| layout.names_another(&running_dir))
 }
 
-/// `SIGTERM` (what a service manager stops with) or `SIGINT`.
+/// `SIGTERM` (what a service manager stops with) or `SIGINT`. Both handlers are in place when this
+/// returns, not when the future is first polled: a signal that comes in between would otherwise
+/// end the service by its default disposition, its socket left behind. It must be called inside
+/// the runtime.
 #[cfg(unix)]
-async fn terminated() {
+fn terminated() -> impl Future<Output = ()> {
     use tokio::signal::unix::{signal, SignalKind};
-    let Ok(mut terminate) = signal(SignalKind::terminate()) else {
-        let _ = tokio::signal::ctrl_c().await;
-        return;
-    };
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = terminate.recv() => {}
+    let terminate = signal(SignalKind::terminate());
+    let interrupt = signal(SignalKind::interrupt());
+    async move {
+        let (Ok(mut terminate), Ok(mut interrupt)) = (terminate, interrupt) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        };
+        tokio::select! {
+            _ = interrupt.recv() => {}
+            _ = terminate.recv() => {}
+        }
     }
 }
 
