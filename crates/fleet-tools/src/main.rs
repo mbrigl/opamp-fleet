@@ -80,7 +80,15 @@ mod tests {
         let tree = |name| cli.find_subcommand(name).expect(name);
         assert_eq!(
             subcommands(tree("package")),
-            ["fetch", "keygen", "sign", "floor", "public-key", "pack", "sha256"]
+            [
+                "fetch",
+                "keygen",
+                "sign",
+                "floor",
+                "public-key",
+                "pack",
+                "sha256"
+            ]
         );
         assert_eq!(
             subcommands(tree("pki")),
