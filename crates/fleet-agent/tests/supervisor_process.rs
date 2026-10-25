@@ -614,6 +614,44 @@ async fn the_shipped_program_serves_as_the_second_service() {
     assert!(!socket.exists(), "the service removes its socket");
 }
 
+/// A `SIGTERM` that comes the moment the second service's socket exists ends it cleanly: its
+/// handler is in place before the socket is bound, so the signal never meets the default
+/// disposition, and the socket is removed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sigterm_as_soon_as_the_socket_exists_ends_the_second_service_cleanly() {
+    // SAFETY: getuid(2) cannot fail and touches no memory.
+    let uid = unsafe { libc::getuid() };
+    for _ in 0..5 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("agents.sock");
+        let mut service = tokio::process::Command::new(env!("CARGO_BIN_EXE_supervisor"))
+            .args(["run", "--agents"])
+            .arg(&socket)
+            .args(["--client-uid", &uid.wrapping_add(1).max(1).to_string()])
+            .kill_on_drop(true)
+            .spawn()
+            .expect("start the second service");
+        let pid = libc::pid_t::try_from(service.id().expect("running")).expect("a pid");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !socket.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never bound its socket"
+            );
+            std::thread::yield_now();
+        }
+        // SAFETY: plain kill(2) on the service's pid; no memory is touched.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        let ended = tokio::time::timeout(Duration::from_secs(15), service.wait())
+            .await
+            .expect("the service ended in time")
+            .expect("a status");
+        assert!(ended.success(), "{ended}");
+        assert!(!socket.exists(), "the service removes its socket");
+    }
+}
+
 /// Whether this process holds `CAP_SYS_PTRACE` (capability 19) in its effective set.
 #[cfg(target_os = "linux")]
 fn holds_cap_sys_ptrace() -> bool {

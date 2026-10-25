@@ -92,6 +92,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A v
   clause 15). The MSI stops and unregisters only on a real removal, never while a major upgrade
   removes the product it replaces.
 
+- **A stop right after the second service starts ends it cleanly.** Its `SIGTERM` handler was
+  installed only once it began to serve, after its socket was bound; a stop in between ended it by
+  the signal itself and left the socket behind. The handler is now in place before the socket is
+  bound.
+
 ### Security
 
 - **The Client speaks only to the process its service manager runs as the second service**
