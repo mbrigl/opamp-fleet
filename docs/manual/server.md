@@ -291,7 +291,7 @@ verification_key = "<hex-encoded Ed25519 public key>"
 
 | Key | Default | Meaning |
 |---|---|---|
-| `verification_key` | unset | The hex-encoded Ed25519 public key — the same value as the Clients' `[packages] verification_key`, as `opamp-fleetctl package keygen` prints it. With it, each entry's signature is checked when it is written and when the store is loaded, and reported `valid` or `invalid`; without it, `unchecked`. An `invalid` signature is stored and offered all the same: each Client's own check decides what is installed. A key that is not hex, or not 32 bytes, fails startup naming it. |
+| `verification_key` | unset | The hex-encoded Ed25519 public key — the same value as the Clients' `[packages] verification_key`, as `opamp-fleetctl package keygen` prints it. With it, each entry's signature, and each floor's, is checked when it is written and when the store is loaded, and reported `valid` or `invalid`; without it, `unchecked`. An `invalid` signature is stored and offered all the same: each Client's own check decides what is installed. A key that is not hex, or not 32 bytes, fails startup naming it. |
 
 ### `[blobs]`
 
@@ -544,6 +544,7 @@ or, with [`[database]`](#database) `store = "postgres"`, in the database, with o
 | `revocations.json` | — | The revocation list |
 | `bootstrap/<issuer>-<serial>.json`, `.p12` | bootstrap certificate | Its record, and its PKCS#12 file when one was made |
 | `enrolment.json` | — | The enrolment window and its pending requests |
+| `package-floors.json` | — | The floor the operator signed for each Agent type, with its signature |
 | `audit/audit-<first seq>.jsonl` | audit file | The audit record |
 
 `<issuer>` is the first 16 hex characters of the SHA-256 of the issuer's DER-encoded name, and
@@ -556,8 +557,8 @@ letters, digits, `.`, `_` and `-` has it written as `%XX` in its file name.
   `data_dir` one that admits only the Server's account and the administrators.
 - **One step per write.** Every record is written to a temporary file beside it and renamed into
   place, so a crash leaves the old document or the new one. The register, the revocation list,
-  the Hosts, the bootstrap records, the enrolment window and the audit reach the disk before the
-  decision they answer is. A temporary file a crash left behind is removed at the next start.
+  the Hosts, the bootstrap records, the enrolment window, the floors and the audit reach the disk
+  before the decision they answer is. A temporary file a crash left behind is removed at the next start.
 - **Nothing else is read.** A file or directory the layout does not name, a file that does not
   parse, or one whose name disagrees with what it holds stops the start, naming the path — a store
   that merely looked empty would be worse. Every artifact is hashed again at startup — in a bucket,
@@ -1338,6 +1339,39 @@ A Package that no Deployment holds reaches nobody, and the package list says so 
 deployment` in the UI, an empty `deployments` array in the API. That is the state a Selector
 matching no one used to be.
 
+### A floor keeps every older build off the fleet
+
+A signature never expires, so every build you once signed stays installable on a host that has not
+run a higher version of its type — a long-ago `2.0.0-rc.1` while the fleet runs `1.9.4`. To keep
+every build of a type below a version off the fleet, sign a **floor** with
+`opamp-fleetctl package floor` ([the tools](tools.md#keeping-old-builds-off-the-fleet)) and store
+it:
+
+```console
+$ curl --cacert ca.pem -X PUT -H 'Content-Type: application/json' \
+       -d "{\"version\": \"3.0.0\", \"signature\": \"$sig\"}" \
+       https://127.0.0.1:4321/api/v1/package-floors/otelcol-contrib
+$ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/package-floors
+$ curl --cacert ca.pem -X DELETE https://127.0.0.1:4321/api/v1/package-floors/otelcol-contrib
+```
+
+The Server keeps one floor per Agent type — in `data_dir/package-floors.json`, or in the database
+— and serves all of them on the Agent plane at `GET /v1/package-floors` to every member, behind the
+admission of `/v1/opamp`; a Gateway hands them on to the hosts behind it. Each Client verifies them
+against its own `[packages] verification_key`, keeps the highest per type, and refuses any offer
+below it, its own update included ([the Client](client.md#a-signed-floor)).
+
+- **A floor is raised, or removed and set anew.** A `PUT` whose version orders below the stored
+  floor of its type is `409`; a version that is not SemVer, or a signature that is not 64 bytes of
+  hex, is `400`.
+- **The Server only reports.** With `[packages] verification_key` set, a floor is answered `valid`
+  or `invalid` in its `signature_state`, and stored either way; each Client's check decides.
+- **`DELETE` only stops serving it.** A Client that has kept a floor keeps it; only its host lowers
+  it. A floor set too high is therefore lowered host by host — or, needing no host access, by
+  publishing the old content as a new, greater version.
+- Every `PUT` and `DELETE` is recorded in the audit record, as `package_floor.set` or
+  `package_floor.removed` beside the operator's act.
+
 ### Put it in a channel, roll it out
 
 ```console
@@ -1585,6 +1619,8 @@ when [`[rest.auth]`](#the-operator-plane-restauth) is configured, needs Basic cr
 | `DELETE /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}` | Remove one entry. `409` while the Package is rolled out to an Agent. |
 | `DELETE /api/v1/packages/{agent_type}/{version}` | Remove the Package, and take it out of every Deployment that holds it. `409` while an Agent's assignment pins it, saying how many. Uninstalls nothing. |
 | `GET /api/v1/packages/{agent_type}/{version}/file?os=…&arch=…` | The artifact bytes — where an offered `download_url` points. **The one route on the Agent plane** (`:4320`), and never guarded by `[rest.auth]`: it is not in the OpenAPI document for the same reason. It requires a client certificate from the client CA in the handshake; a bootstrap certificate is answered `401`. It serves only an artifact offered to an Agent the host speaks for, and answers every other request `404`, as for an artifact that does not exist. |
+| `GET /api/v1/package-floors` | Every floor the operator signed, one per Agent type, each with its version, signature and `signature_state` — see [A floor keeps every older build off the fleet](#a-floor-keeps-every-older-build-off-the-fleet). |
+| `PUT` / `DELETE /api/v1/package-floors/{agent_type}` | Store or remove the floor of that Agent type. `PUT` body: `{"version": "…", "signature": "<hex>"}`, as `opamp-fleetctl package floor` prints it; `409` for a version below the stored floor, `400` for one that is not SemVer or a signature that is not 64 bytes of hex. `DELETE` is `404` for a type without a floor, and lowers no floor a Client has kept. Every member fetches them all at `GET /v1/package-floors` on the Agent plane. |
 | `GET /api/v1/deployments` | Every Deployment, with its channel, its Packages, its Configurations, and the three reach counts. |
 | `PUT /api/v1/deployments/{name}` | Create one or re-aim it. Body: `{"selector": {…}}` — **never empty** (`400`). **Distributes nothing**. |
 | `GET` / `DELETE /api/v1/deployments/{name}` | One Deployment; `DELETE` is `409` while an Agent's assignment names it, saying how many, and uninstalls nothing. |
