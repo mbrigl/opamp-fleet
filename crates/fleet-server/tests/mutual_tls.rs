@@ -184,6 +184,8 @@ struct Setup<'a> {
     operator_pki: Option<&'a Pki>,
     /// `[enrolment] max_pending_per_bootstrap` (ADR-0046); its default when `None`.
     max_pending_per_bootstrap: Option<usize>,
+    /// The floor of each Agent type (ADR-0060), kept in the data directory.
+    floors: bool,
 }
 
 /// The CAs a revocation can name, as `main` takes them from `[tls]` and `[enrolment]`.
@@ -283,6 +285,14 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
             .with_connection_offer(setup.offer)
             .with_enrolment(enrolment.clone())
             .with_revocations(revocations.clone())
+            .with_floors(setup.floors.then(|| {
+                Arc::new(
+                    fleet_server::floors::PackageFloors::open(Box::new(
+                        fleet_server::fs::FsFloorStore::open(&dir.path().join("fleet-configs")),
+                    ))
+                    .expect("floors"),
+                )
+            }))
             .with_audit(setup.audit.clone())
             .with_packages(setup.packages.then(|| {
                 fleet_server::fleet::PackageOffering::new(
@@ -1318,6 +1328,56 @@ async fn a_revoked_certificate_is_refused_on_both_transports_and_the_download() 
         .await
         .status()
         .is_success());
+}
+
+/// A member is handed every floor on the Agent plane, admitted by its certificate as `/v1/opamp`
+/// admits it; once the certificate is revoked, the floors are refused to it as `/v1/opamp` is.
+/// Verifies: ADR-0060
+#[tokio::test]
+async fn the_floors_are_handed_to_a_member_and_refused_to_a_revoked_certificate() {
+    let pki = Pki::new();
+    let served = serve(
+        &pki,
+        Setup {
+            floors: true,
+            ..revocations_setup(&pki)
+        },
+    )
+    .await;
+    served
+        .state
+        .floors()
+        .expect("armed")
+        .put("otelcol", "2.0.0", vec![7; 64])
+        .expect("put");
+    let (cert, key) = pki.issue("edge-01");
+    let http = client(&served.ca_pem, Some((&cert, &key)));
+    let floors = served.endpoint.replace("/v1/opamp", "/v1/package-floors");
+    let response = http.get(&floors).send().await.expect("send");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("json");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "otelcol": { "version": "2.0.0", "signature": hex::encode([7u8; 64]) }
+        })
+    );
+
+    served
+        .revocations
+        .as_ref()
+        .expect("armed")
+        .revoke_certificate("client", &cert_id(&cert).serial)
+        .expect("revoke");
+    let refused = http.get(&floors).send().await.expect("send");
+    assert_eq!(refused.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        post(&http, &served.endpoint, report(&InstanceUid::default()))
+            .await
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "as /v1/opamp refuses it"
+    );
 }
 
 /// There is no credential to revoke: naming one is answered `400`, naming the field, and the list

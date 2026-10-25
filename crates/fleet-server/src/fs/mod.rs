@@ -13,6 +13,7 @@ mod bootstrap;
 mod configs;
 mod deployments;
 mod enrolment;
+mod floors;
 mod packages;
 mod revocation;
 
@@ -23,6 +24,7 @@ pub use bootstrap::FsBootstrapStore;
 pub use configs::FsConfigBackend;
 pub use deployments::FsDeploymentBackend;
 pub use enrolment::FsEnrolmentStore;
+pub use floors::FsFloorStore;
 pub use packages::FsPackageBackend;
 pub use revocation::FsLedgerStore;
 
@@ -51,6 +53,11 @@ pub const AUDIT: &str = "audit";
 pub const REVOCATIONS: &str = "revocations.json";
 /// The enrolment window and its pending requests.
 pub const ENROLMENT: &str = "enrolment.json";
+/// The floor of each Agent type (ADR-0060 clause 2).
+pub const PACKAGE_FLOORS: &str = "package-floors.json";
+
+/// Every file the layout names.
+const FILES: [&str; 3] = [REVOCATIONS, ENROLMENT, PACKAGE_FLOORS];
 
 /// Every directory the layout names, in the order the table of ADR-0037 clause 2 lists them.
 pub const DIRECTORIES: [&str; 9] = [
@@ -95,7 +102,7 @@ pub fn check_layout(root: &Path) -> Result<(), String> {
         let known = if DIRECTORIES.contains(&name.as_str()) {
             path.is_dir()
         } else {
-            (name == REVOCATIONS || name == ENROLMENT) && path.is_file()
+            FILES.contains(&name.as_str()) && path.is_file()
         };
         if !known {
             return Err(unknown(&path));
@@ -119,7 +126,7 @@ pub fn open_data_dir_beside_database(root: &Path, filesystem_blobs: bool) -> Res
         if (name == AUDIT || name == BLOBS) && path.is_dir() {
             continue;
         }
-        if DIRECTORIES.contains(&name.as_str()) || name == REVOCATIONS || name == ENROLMENT {
+        if DIRECTORIES.contains(&name.as_str()) || FILES.contains(&name.as_str()) {
             return Err(format!(
                 "{} is a record of the filesystem store, and [database] store = \"postgres\" — \
                  copy the records into the database with `server migrate-to-postgres --from \
