@@ -1209,8 +1209,21 @@ fn windows_host(root: &Path) -> String {
 /// timeout, what the host says of the services installed under `root` ([`windows_host`]).
 #[cfg(windows)]
 fn reported_on_windows(result: &Path, root: &Path) -> std::collections::BTreeMap<String, String> {
+    report_on_windows("the Managed Process to report", result, || {
+        windows_host(root)
+    })
+}
+
+/// The `key=value` lines `result` holds once it holds `done`, waited for as `what`; on a timeout,
+/// what `tell` says besides.
+#[cfg(windows)]
+fn report_on_windows(
+    what: &str,
+    result: &Path,
+    tell: impl FnOnce() -> String,
+) -> std::collections::BTreeMap<String, String> {
     wait_telling(
-        "the Managed Process to report",
+        what,
         Duration::from_secs(90),
         || {
             let text = std::fs::read_to_string(result).ok()?;
@@ -1221,7 +1234,7 @@ fn reported_on_windows(result: &Path, root: &Path) -> std::collections::BTreeMap
                 .collect();
             report.contains_key("done").then_some(report)
         },
-        || windows_host(root),
+        tell,
     )
 }
 
@@ -1579,16 +1592,43 @@ struct ScheduledTask(&'static str);
 impl ScheduledTask {
     /// Registers `script` as a task under `NT AUTHORITY\LocalService` and starts it.
     fn start(name: &'static str, script: &Path) -> Self {
+        Self::run(
+            name,
+            "powershell.exe",
+            &format!(
+                "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+                script.display()
+            ),
+        )
+    }
+
+    /// Registers `script` as a task under `NT AUTHORITY\LocalService` and starts it, everything
+    /// PowerShell writes — a script it cannot parse or read among it — going to `log`.
+    fn start_logged(name: &'static str, script: &Path, log: &Path) -> Self {
+        Self::run(
+            name,
+            "cmd.exe",
+            &format!(
+                "/c powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \
+                 \"{}\" > \"{}\" 2>&1",
+                script.display(),
+                log.display()
+            ),
+        )
+    }
+
+    /// Registers `execute` with `argument` as a task under `NT AUTHORITY\LocalService` and starts
+    /// it.
+    fn run(name: &'static str, execute: &str, argument: &str) -> Self {
         let task = Self(name);
         powershell(&format!(
-            "$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \
-             '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{script}\"'; \
+            "$action = New-ScheduledTaskAction -Execute '{execute}' -Argument '{argument}'; \
              $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\\LOCALSERVICE' \
              -LogonType ServiceAccount; \
              Register-ScheduledTask -TaskName '{name}' -Action $action -Principal $principal \
              -Force | Out-Null; \
              Start-ScheduledTask -TaskName '{name}'",
-            script = script.display(),
+            argument = argument.replace('\'', "''"),
         ));
         task
     }
@@ -1996,8 +2036,29 @@ Move-Item -Force -Path "$out.tmp" -Destination $out
         .replace("@PID@", &pid.to_string()),
     )
     .expect("write the task's script");
-    let _task = ScheduledTask::start("opamp-fleet-smoke-opener", &probe);
-    let opened = reported_on_windows(&result, &root);
+    // LocalService reads the script and writes beside it by its own grant too, not only as
+    // Everyone; what PowerShell itself says, a script it cannot read or parse among it, goes to
+    // the log.
+    grant_modify(&out, "*S-1-5-19");
+    let opener_log = out.join("opener.log");
+    let _task = ScheduledTask::start_logged("opamp-fleet-smoke-opener", &probe, &opener_log);
+    let opened = report_on_windows(
+        "the task under LocalService to write what it could open",
+        &result,
+        || {
+            let granted = Command::new("icacls.exe")
+                .arg(&probe)
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                .unwrap_or_else(|e| e.to_string());
+            format!(
+                "\n--- what PowerShell wrote under LocalService ---\n{}\n--- icacls {} ---\n{granted}{}",
+                std::fs::read_to_string(&opener_log).unwrap_or_else(|e| e.to_string()),
+                probe.display(),
+                windows_host(&root)
+            )
+        },
+    );
     assert!(
         !opened.contains_key("error"),
         "the task could not try: {opened:?}"
