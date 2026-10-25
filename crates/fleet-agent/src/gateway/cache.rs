@@ -887,6 +887,17 @@ impl PackageCache {
         (uids, Some(ticket))
     }
 
+    /// Waits until the write under way, if any, has ended: a flush holds the journal's lock from
+    /// its append through the rewrite that may follow it, after it has answered who waited.
+    #[cfg(test)]
+    pub(crate) fn settled(&self) {
+        drop(
+            self.journal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+    }
+
     /// Makes every later write of the bindings' store fail.
     #[cfg(test)]
     pub(crate) fn refuse_writes(&self) {

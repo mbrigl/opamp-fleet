@@ -1992,7 +1992,10 @@ mod tests {
             _ => panic!("a report under an expired certificate was forwarded"),
         }
 
-        // A binding whose host's end passed while the Gateway was down ends at start.
+        // A binding whose host's end passed while the Gateway was down ends at start. The removals
+        // above may still be compacted after they were answered: the lines appended here would
+        // land in the file the rewrite replaces.
+        forwarding.registry.cache().settled();
         drop(forwarding);
         let soon = InstanceUid::default();
         let passed = policy::End {
