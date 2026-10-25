@@ -61,6 +61,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("pkcs12", Core),
             ("pkcs12::file", Adapter),
             ("platform", Core),
+            ("rate", Core),
             ("renewal", Core),
             ("version", Core),
         ],
