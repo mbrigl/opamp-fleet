@@ -345,12 +345,22 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         None => supervisor::process::Spawner::Local,
     };
     let mut engine = supervisor::build_engine(&config, &shutdown, spawner)?;
-    if config.self_update_package().is_some() {
-        engine.arm_self_update(crate::update::installer::Installer::new(
-            config.state_dir.clone(),
-            config.packages.as_ref().and_then(|p| p.archive_key.clone()),
-            probation,
-        ));
+    // The floor of each Agent type (ADR-0060 clause 4): read from `state_dir` once, fetched from
+    // the endpoint as it falls due, and held to by every Agent of this Client.
+    let floors = Arc::new(crate::floors::FloorFile::open(
+        &config.state_dir,
+        config.package_key().map(<[u8]>::to_vec),
+    ));
+    engine.set_floors(floors.clone());
+    if let Some(agent_type) = config.self_update_package() {
+        engine.arm_self_update(
+            crate::update::installer::Installer::new(
+                config.state_dir.clone(),
+                config.packages.as_ref().and_then(|p| p.archive_key.clone()),
+                probation,
+            )
+            .with_floors(agent_type, floors.clone()),
+        );
     }
     // There is no unsigned posture (ADR-0026, ADR-0018): without `[packages] verification_key` no
     // Agent of this Client takes packages, its own self-update included. Said once at startup, since
@@ -409,7 +419,13 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         // The sampler runs beside the transport, not inside it: process metrics are about the host,
         // and a Client that has lost its connection is exactly when they are worth having.
         let outcome = sample_beside(
-            transport::run(&mut engine, &mut config, &mut shutdown, &telemetry),
+            transport::run(
+                &mut engine,
+                &mut config,
+                &mut shutdown,
+                &telemetry,
+                Some(&floors),
+            ),
             telemetry.sample_interval(),
             || telemetry.reporting(),
             || {
