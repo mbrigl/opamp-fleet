@@ -21,6 +21,7 @@ pub mod credentials;
 pub mod deployments;
 pub mod enrolment;
 pub mod fleet;
+pub mod floors;
 pub mod fs;
 pub mod labels;
 pub mod listen;
@@ -141,6 +142,15 @@ impl Records {
             Records::Postgres(db) => {
                 Box::new(postgres::enrolment::PgEnrolmentStore::new(db.clone()))
             }
+        }
+    }
+
+    /// The floor of each Agent type (ADR-0061 clause 2).
+    #[must_use]
+    pub fn floors(&self) -> Box<dyn floors::FloorStore> {
+        match self {
+            Records::Files(dir) => Box::new(fs::FsFloorStore::open(dir)),
+            Records::Postgres(db) => Box::new(postgres::floors::PgFloorStore::new(db.clone())),
         }
     }
 
