@@ -2029,8 +2029,9 @@ foreach ($thread in $threads) {
     $lines += "error=" + (($_ | Out-String) -replace "[`r`n]+", ' ')
 }
 $lines += "done=yes"
-Set-Content -Path "$out.tmp" -Value $lines
-Move-Item -Force -Path "$out.tmp" -Destination $out
+# Written in place, `done` last: the test reads the file only once it holds `done`, and a rename
+# over it is a right LocalService is not granted.
+Set-Content -Path $out -Value $lines
 "#
         .replace("@OUT@", &result.display().to_string())
         .replace("@PID@", &pid.to_string()),
