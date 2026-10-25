@@ -71,7 +71,7 @@ mod tests {
             .collect()
     }
 
-    // Verifies: ADR-0028, ADR-0031
+    // Verifies: ADR-0028, ADR-0031, ADR-0061
     #[test]
     fn the_program_has_two_trees_holding_the_operator_commands() {
         let cli = Cli::command();
@@ -80,7 +80,15 @@ mod tests {
         let tree = |name| cli.find_subcommand(name).expect(name);
         assert_eq!(
             subcommands(tree("package")),
-            ["fetch", "keygen", "sign", "public-key", "pack", "sha256"]
+            [
+                "fetch",
+                "keygen",
+                "sign",
+                "floor",
+                "public-key",
+                "pack",
+                "sha256"
+            ]
         );
         assert_eq!(
             subcommands(tree("pki")),
