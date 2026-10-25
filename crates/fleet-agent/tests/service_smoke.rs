@@ -2003,27 +2003,27 @@ public static class Opener {
     static extern IntPtr OpenThread(uint access, bool inherit, uint id);
     [DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr handle);
-    public static int Process(uint access, uint id) {
+    public static string TryProcess(uint access, uint id) {
         IntPtr handle = OpenProcess(access, false, id);
-        if (handle == IntPtr.Zero) { return Marshal.GetLastWin32Error(); }
+        if (handle == IntPtr.Zero) { return Marshal.GetLastWin32Error().ToString(); }
         CloseHandle(handle);
-        return 0;
+        return "0";
     }
-    public static int Thread(uint access, uint id) {
+    public static string TryThread(uint access, uint id) {
         IntPtr handle = OpenThread(access, false, id);
-        if (handle == IntPtr.Zero) { return Marshal.GetLastWin32Error(); }
+        if (handle == IntPtr.Zero) { return Marshal.GetLastWin32Error().ToString(); }
         CloseHandle(handle);
-        return 0;
+        return "0";
     }
 }
 "@
-$lines += "vm_read=" + [Opener]::Process(0x0010, $target)
-$lines += "dup_handle=" + [Opener]::Process(0x0040, $target)
-$lines += "create_thread=" + [Opener]::Process(0x0002, $target)
-$lines += "query_limited=" + [Opener]::Process(0x1000, $target)
+$lines += "vm_read=$([Opener]::TryProcess([uint32]0x0010, [uint32]$target))"
+$lines += "dup_handle=$([Opener]::TryProcess([uint32]0x0040, [uint32]$target))"
+$lines += "create_thread=$([Opener]::TryProcess([uint32]0x0002, [uint32]$target))"
+$lines += "query_limited=$([Opener]::TryProcess([uint32]0x1000, [uint32]$target))"
 $threads = @(Get-CimInstance Win32_Thread -Filter "ProcessHandle='$target'" | ForEach-Object { [uint32]$_.Handle })
 foreach ($thread in $threads) {
-    $lines += "set_context_" + $thread + "=" + [Opener]::Thread(0x0010, $thread)
+    $lines += "set_context_$($thread)=$([Opener]::TryThread([uint32]0x0010, [uint32]$thread))"
 }
 } catch {
     $lines += "error=" + (($_ | Out-String) -replace "[`r`n]+", ' ')
