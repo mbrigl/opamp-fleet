@@ -156,6 +156,43 @@ pub fn pipe_sddl(own: &Sid, client: &Sid) -> String {
     format!("O:{own}D:P(A;;FA;;;{own})(A;;0x{PIPE_CLIENT_ACCESS:x};;;{client})")
 }
 
+/// What the process account and the Client's account may do with the second service's process:
+/// `SYNCHRONIZE` and `PROCESS_QUERY_LIMITED_INFORMATION`, to wait for it and ask about it, and
+/// nothing else (ADR-0064).
+pub const PROCESS_ASK_AND_WAIT: u32 = 0x0010_0000 | 0x0000_1000;
+
+/// What the process account may do with a thread of the second service: `SYNCHRONIZE` and
+/// `THREAD_QUERY_LIMITED_INFORMATION` (ADR-0064).
+pub const THREAD_ASK_AND_WAIT: u32 = 0x0010_0000 | 0x0000_0800;
+
+/// `PROCESS_ALL_ACCESS` and `THREAD_ALL_ACCESS`, which are the same mask: what `GA` maps to on a
+/// process and on a thread. Written as the mask, not as `GA`, so that the DACL read back from the
+/// object says what was set, however the system stores a generic right.
+const ALL_ACCESS: u32 = 0x001f_ffff;
+
+/// The protected DACL of the second service's process, in SDDL (ADR-0064): the process account
+/// `own` and the Client's account `client` may ask about it and wait for it, its owner may read its
+/// security descriptor and nothing more (`OWNER RIGHTS`, which takes the owner's implicit
+/// `WRITE_DAC`), and `LocalSystem` and the Administrators hold full access.
+#[must_use]
+pub fn process_sddl(own: &Sid, client: &Sid) -> String {
+    format!(
+        "D:P(A;;0x{PROCESS_ASK_AND_WAIT:x};;;{own})(A;;0x{PROCESS_ASK_AND_WAIT:x};;;{client})\
+         (A;;RC;;;OW)(A;;0x{ALL_ACCESS:x};;;SY)(A;;0x{ALL_ACCESS:x};;;BA)"
+    )
+}
+
+/// The protected DACL of each thread of the second service, in SDDL (ADR-0064): the process
+/// account `own` may ask about it and wait for it, its owner may read its security descriptor, and
+/// `LocalSystem` and the Administrators hold full access.
+#[must_use]
+pub fn thread_sddl(own: &Sid) -> String {
+    format!(
+        "D:P(A;;0x{THREAD_ASK_AND_WAIT:x};;;{own})(A;;RC;;;OW)(A;;0x{ALL_ACCESS:x};;;SY)\
+         (A;;0x{ALL_ACCESS:x};;;BA)"
+    )
+}
+
 pub mod acl;
 #[cfg(windows)]
 pub mod files;
@@ -1729,6 +1766,173 @@ mod system {
             ))
         }
     }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn SetSecurityInfo(
+            handle: Handle,
+            object_type: i32,
+            info: u32,
+            owner: Psid,
+            group: Psid,
+            dacl: *const c_void,
+            sacl: *const c_void,
+        ) -> u32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+
+    const DACL_SECURITY_INFORMATION: u32 = 0x4;
+    const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+    const READ_CONTROL: u32 = 0x0002_0000;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    /// `ERROR_INVALID_PARAMETER`: what `OpenThread` and `OpenProcess` answer for an id that names
+    /// nothing any more.
+    const GONE: i32 = 87;
+
+    /// Sets the DACL of the kernel object `handle` names to the one `sddl` describes, protected,
+    /// on the object's own handle (SetSecurityInfo, ADR-0064).
+    ///
+    /// # Errors
+    /// Returns why `sddl` carries no DACL, or why it could not be set.
+    pub fn set_kernel_dacl(handle: RawHandle, sddl: &str) -> io::Result<()> {
+        let descriptor = SecurityDescriptor::from_sddl(sddl)?;
+        let mut present: Bool = 0;
+        let mut defaulted: Bool = 0;
+        let mut acl: *mut u8 = std::ptr::null_mut();
+        // SAFETY: a descriptor the system made, alive across the call; `acl` points into it.
+        check(unsafe {
+            GetSecurityDescriptorDacl((descriptor.0).0, &mut present, &mut acl, &mut defaulted)
+        })?;
+        if present == 0 || acl.is_null() {
+            return Err(io::Error::other(format!("{sddl:?} carries no DACL")));
+        }
+        // SAFETY: a handle the caller holds and an ACL within `descriptor`, both alive across the
+        // call; no owner, group or SACL is set.
+        let error = unsafe {
+            SetSecurityInfo(
+                handle.cast(),
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                acl.cast(),
+                std::ptr::null(),
+            )
+        };
+        if error == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(error as i32))
+        }
+    }
+
+    /// Gives this process the DACL `sddl` describes, protected, through its own pseudo-handle,
+    /// which carries every right whatever the DACL grants.
+    ///
+    /// # Errors
+    /// Returns why it could not be set.
+    pub fn set_this_process_dacl(sddl: &str) -> io::Result<()> {
+        // SAFETY: the pseudo-handle of this process, which needs no closing.
+        set_kernel_dacl(unsafe { GetCurrentProcess() }, sddl)
+    }
+
+    /// The DACL this process holds, as SDDL.
+    ///
+    /// # Errors
+    /// Returns why it could not be read.
+    pub fn this_process_dacl() -> io::Result<String> {
+        // SAFETY: the pseudo-handle of this process, which needs no closing.
+        security_text(unsafe { GetCurrentProcess() }, DACL_SECURITY_INFORMATION)
+    }
+
+    /// Gives the calling thread the DACL `sddl` describes, protected, through its own
+    /// pseudo-handle.
+    ///
+    /// # Errors
+    /// Returns why it could not be set.
+    pub fn set_this_thread_dacl(sddl: &str) -> io::Result<()> {
+        // SAFETY: the pseudo-handle of the calling thread, which needs no closing.
+        set_kernel_dacl(unsafe { GetCurrentThread() }, sddl)
+    }
+
+    /// The id of the calling thread.
+    #[must_use]
+    pub fn this_thread_id() -> u32 {
+        // SAFETY: no arguments; it cannot fail.
+        unsafe { GetCurrentThreadId() }
+    }
+
+    /// The ids of every thread of this process, from a snapshot of the system's threads.
+    ///
+    /// # Errors
+    /// Returns why the snapshot could not be taken.
+    pub fn threads_of_this_process() -> io::Result<Vec<u32>> {
+        let me = std::process::id();
+        // SAFETY: a snapshot of every thread; the handle is owned below.
+        let snapshot = owned(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
+        let mut entry = ThreadEntry {
+            size: std::mem::size_of::<ThreadEntry>() as u32,
+            ..ThreadEntry::default()
+        };
+        let mut threads = Vec::new();
+        // SAFETY: a valid snapshot and an entry whose size is set.
+        let mut more = unsafe { Thread32First(snapshot.as_raw_handle().cast(), &mut entry) };
+        while more != 0 {
+            if entry.owner_process_id == me {
+                threads.push(entry.thread_id);
+            }
+            // SAFETY: as above.
+            more = unsafe { Thread32Next(snapshot.as_raw_handle().cast(), &mut entry) };
+        }
+        Ok(threads)
+    }
+
+    /// The thread `thread_id` opened for `access`; `None` where it has ended.
+    fn open_thread(thread_id: u32, access: u32) -> io::Result<Option<OwnedHandle>> {
+        // SAFETY: opens a thread by id; the handle is owned below.
+        match owned(unsafe { OpenThread(access, 0, thread_id) }) {
+            Ok(thread) => Ok(Some(thread)),
+            Err(e) if e.raw_os_error() == Some(GONE) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The DACL the thread `thread_id` holds, as SDDL; `None` where it has ended.
+    ///
+    /// # Errors
+    /// Returns why it could not be opened for `READ_CONTROL` or read.
+    pub fn thread_dacl(thread_id: u32) -> io::Result<Option<String>> {
+        open_thread(thread_id, READ_CONTROL)?
+            .map(|thread| security_text(thread.as_raw_handle(), DACL_SECURITY_INFORMATION))
+            .transpose()
+    }
+
+    /// Gives the thread `thread_id` the DACL `sddl` describes, protected, on its own handle;
+    /// whether it still ran to be given it.
+    ///
+    /// # Errors
+    /// Returns why it could not be opened for `WRITE_DAC`, or the DACL set.
+    pub fn set_thread_dacl(thread_id: u32, sddl: &str) -> io::Result<bool> {
+        match open_thread(thread_id, WRITE_DAC)? {
+            Some(thread) => set_kernel_dacl(thread.as_raw_handle(), sddl).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    /// The process `pid` opened to ask about it and wait for it (`SYNCHRONIZE |
+    /// PROCESS_QUERY_LIMITED_INFORMATION`): while the handle is open, the id names that process
+    /// and no other (ADR-0064).
+    ///
+    /// # Errors
+    /// Returns why it could not be opened: one that has ended among them.
+    pub fn process_to_check(pid: u32) -> io::Result<OwnedHandle> {
+        // SAFETY: no pointers; the handle is owned below.
+        owned(unsafe { OpenProcess(super::PROCESS_ASK_AND_WAIT, 0, pid) })
+    }
 }
 
 #[cfg(test)]
@@ -1818,6 +2022,35 @@ mod tests {
         assert!(sddl.contains("D:P"), "inherits nothing");
         for nobody in ["WD", "AN", "SY", "BA", "BU", "AU"] {
             assert!(!sddl.contains(&format!(";;;{nobody})")), "{nobody}: {sddl}");
+        }
+    }
+
+    /// The second service's process leaves the process account and the Client's account the right
+    /// to ask about it and wait for it, its owner the right to read its DACL, and `LocalSystem` and
+    /// the Administrators everything; each thread the same, without the Client's account
+    /// (ADR-0064).
+    /// Verifies: ADR-0064
+    #[test]
+    fn the_second_services_process_and_threads_leave_its_account_only_asking_and_waiting() {
+        let own = Sid::parse("S-1-5-80-1-2-3-4-5").expect("sid");
+        let client = Sid::parse("S-1-5-80-6-7-8-9-10").expect("sid");
+        assert_eq!(
+            process_sddl(&own, &client),
+            "D:P(A;;0x101000;;;S-1-5-80-1-2-3-4-5)(A;;0x101000;;;S-1-5-80-6-7-8-9-10)\
+             (A;;RC;;;OW)(A;;0x1fffff;;;SY)(A;;0x1fffff;;;BA)"
+        );
+        assert_eq!(
+            thread_sddl(&own),
+            "D:P(A;;0x100800;;;S-1-5-80-1-2-3-4-5)(A;;RC;;;OW)(A;;0x1fffff;;;SY)\
+             (A;;0x1fffff;;;BA)"
+        );
+        // Neither PROCESS_VM_READ, PROCESS_VM_WRITE, PROCESS_DUP_HANDLE, PROCESS_CREATE_THREAD nor
+        // PROCESS_TERMINATE; neither THREAD_SET_CONTEXT nor THREAD_SUSPEND_RESUME.
+        for right in [0x0010, 0x0020, 0x0040, 0x0002, 0x0001] {
+            assert_eq!(PROCESS_ASK_AND_WAIT & right, 0, "{right:#x}");
+        }
+        for right in [0x0010, 0x0002, 0x0001] {
+            assert_eq!(THREAD_ASK_AND_WAIT & right, 0, "{right:#x}");
         }
     }
 
