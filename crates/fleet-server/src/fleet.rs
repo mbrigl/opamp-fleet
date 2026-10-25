@@ -543,6 +543,8 @@ pub struct AppState {
     /// What the client CA signed and what is revoked (ADR-0021); `None` only where a test serves
     /// without it.
     revocations: Option<Arc<Revocations>>,
+    /// The floor of each Agent type (ADR-0060); `None` only where a test serves without it.
+    floors: Option<Arc<crate::floors::PackageFloors>>,
     /// The audit record every security decision goes to (ADR-0022); `None` only in tests.
     audit: Option<Arc<dyn Audit>>,
     /// How often an admitted peer may be heard (ADR-0013); `None` only in tests.
@@ -631,6 +633,7 @@ impl AppState {
             enrolment: None,
             bootstrap: None,
             revocations: None,
+            floors: None,
             audit: None,
             agent_rate: None,
             clock,
@@ -910,6 +913,18 @@ impl AppState {
     /// The register and the revocation list.
     pub fn revocations(&self) -> Option<&Arc<Revocations>> {
         self.revocations.as_ref()
+    }
+
+    /// Arms the floors (ADR-0060).
+    #[must_use]
+    pub fn with_floors(mut self, floors: Option<Arc<crate::floors::PackageFloors>>) -> Self {
+        self.floors = floors;
+        self
+    }
+
+    /// The floor of each Agent type.
+    pub fn floors(&self) -> Option<&Arc<crate::floors::PackageFloors>> {
+        self.floors.as_ref()
     }
 
     /// Arms the audit record (ADR-0022).

@@ -650,7 +650,7 @@ fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
 }
 
-/// Verifies: ADR-0023, ADR-0026, ADR-0033, ADR-0034, G-5
+/// Verifies: ADR-0023, ADR-0026, ADR-0033, ADR-0034, ADR-0060, G-5
 #[tokio::test]
 async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
@@ -695,14 +695,17 @@ async fn the_openapi_document_describes_the_contract() {
         silent.is_empty(),
         "responses without a description: {silent:?}"
     );
-    // Deployments and entry signatures are part of the contract (ADR-0026, ADR-0033) — a portal
-    // generates against this document, and a route it cannot see is a route it cannot call.
+    // Deployments, entry signatures and floors are part of the contract (ADR-0026, ADR-0033,
+    // ADR-0060) — a portal generates against this document, and a route it cannot see is a route
+    // it cannot call.
     for route in [
         "/api/v1/deployments",
         "/api/v1/deployments/{name}",
         "/api/v1/deployments/{name}/selector",
         "/api/v1/deployments/{name}/packages/{agent_type}/{version}",
         "/api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature",
+        "/api/v1/package-floors",
+        "/api/v1/package-floors/{agent_type}",
     ] {
         assert!(paths.contains_key(route), "{route} is described");
     }

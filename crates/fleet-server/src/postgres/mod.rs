@@ -18,6 +18,7 @@ pub mod bootstrap;
 pub mod configs;
 pub mod deployments;
 pub mod enrolment;
+pub mod floors;
 pub mod import;
 pub mod ledger;
 pub mod packages;

@@ -378,6 +378,9 @@ async fn admit_download(
 /// Where a Gateway fetches the revoked certificates it refuses (ADR-0021 clause 43).
 pub const GATEWAY_REVOCATIONS_PATH: &str = "/v1/gateway/revocations";
 
+/// Where every member fetches the floor of each Agent type (ADR-0060 clause 2).
+pub const PACKAGE_FLOORS_PATH: &str = "/v1/package-floors";
+
 pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
     // The limits the Baseline requires of the Server, on both transports and in both directions.
     let settings = Settings::new(state.max_message_size());
@@ -386,6 +389,7 @@ pub fn router(state: Arc<AppState>, admission: Admission) -> Router {
             GATEWAY_REVOCATIONS_PATH,
             axum::routing::get(gateway_revocations),
         )
+        .route(PACKAGE_FLOORS_PATH, axum::routing::get(package_floors))
         .with_state(state.clone());
     let fleet = Fleet(state, admission.issuers.clone());
     let mut router = opamp::server::router(Arc::new(fleet), settings).merge(gateways);
@@ -460,6 +464,46 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
             (header::ETAG, etag),
         ],
         body,
+    )
+        .into_response()
+}
+
+/// Every floor the Server stores, for every admitted member (ADR-0060 clause 2): a JSON object
+/// that maps an Agent type to its version and its signature in hex. Admitted as `/v1/opamp` is, by
+/// the layer around both; an enrolling host is no member yet, and is refused. Each Client checks
+/// the signatures itself, so the Server serves what it stores whatever its own check found.
+async fn package_floors(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    if let Some(Peer::Enrolling { .. }) = request.extensions().get::<Peer>() {
+        state.audit_refusal(
+            Entry::new("package_floors.refused", "refused")
+                .peer(peer_ip(&request))
+                .with("plane", "agent")
+                .with("check", "enrolling"),
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "the package floors are for members of the fleet",
+        )
+            .into_response();
+    }
+    let floors: serde_json::Map<String, serde_json::Value> = state
+        .floors()
+        .map(|floors| floors.all())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(agent_type, floor)| {
+            (
+                agent_type,
+                serde_json::json!({
+                    "version": floor.version,
+                    "signature": hex::encode(floor.signature),
+                }),
+            )
+        })
+        .collect();
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::Value::Object(floors).to_string(),
     )
         .into_response()
 }
