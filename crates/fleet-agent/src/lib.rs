@@ -21,6 +21,7 @@ pub mod config_init;
 pub mod connection;
 pub mod csr;
 pub mod engine;
+pub mod floors;
 pub mod gateway;
 pub mod host;
 pub mod install;

@@ -1,6 +1,7 @@
 //! A Gateway refuses what its Server revoked, end to end (ADR-0015 clause 14, ADR-0021 clause 43):
 //! the real Server on mutual TLS with its register, the real Gateway fetching the list from it,
-//! and a downstream peer whose certificate the Server revokes.
+//! and a downstream peer whose certificate the Server revokes. The floors the Gateway hands down
+//! are held to the same admission (ADR-0060 clause 3).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -139,11 +140,18 @@ impl Fleet {
             assert!(revocations.set_gateway(&gateway_host, true).expect("mark"));
         }
 
+        // One floor stored before the Gateway starts, which fetches it at once (ADR-0060).
+        let floors = fleet_server::floors::PackageFloors::open(Box::new(
+            fleet_server::fs::FsFloorStore::open(&pki.join("fleet-configs")),
+        ))
+        .expect("floors");
+        floors.put("otelcol", "2.0.0", vec![7; 64]).expect("floor");
         let state = Arc::new(
             AppState::new(pki.join("fleet-configs"))
                 .expect("state")
                 .with_client_ca(Some(signer))
                 .with_revocations(Some(revocations.clone()))
+                .with_floors(Some(Arc::new(floors)))
                 .with_agent_rate(agent_rate.map(|limits| {
                     Arc::new(fleet_server::agent_rate::AgentRate::new(limits, 100, clock))
                 })),
@@ -232,6 +240,22 @@ impl Fleet {
             .id
             .serial;
         (cert, key, serial)
+    }
+
+    /// `GET /v1/package-floors` from the Gateway as the peer `(cert, key)`.
+    async fn floors(&self, cert: &str, key: &str) -> reqwest::Response {
+        let mut pem = key.as_bytes().to_vec();
+        pem.extend_from_slice(cert.as_bytes());
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .tls_certs_only([reqwest::Certificate::from_pem(self.ca.pem.as_bytes()).expect("ca")])
+            .identity(reqwest::Identity::from_pem(&pem).expect("identity"))
+            .build()
+            .expect("client")
+            .get(format!("https://{}/v1/package-floors", self.gateway))
+            .send()
+            .await
+            .expect("send")
     }
 
     /// One plain-HTTP report through the Gateway as the peer `(cert, key)`; the status it gets.
@@ -408,6 +432,50 @@ async fn a_certificate_the_server_revokes_is_refused_behind_the_gateway() {
 
 /// A Gateway whose host the operator has not marked is handed no list, and so admits nobody.
 /// Verifies: ADR-0015, ADR-0021
+/// A host behind the Gateway is handed the floors the Gateway fetched from its Server, as the
+/// Server serves them; once the Server revokes the host's certificate, the floors are refused to
+/// it as its reports are.
+/// Verifies: ADR-0060
+#[tokio::test]
+async fn a_host_behind_the_gateway_is_handed_the_floors_it_fetched_behind_the_admission() {
+    let fleet = Fleet::start(true).await;
+    let (cert, key, serial) = fleet.peer("edge-01");
+    let mut handed = None;
+    for _ in 0..100 {
+        let response = fleet.floors(&cert, &key).await;
+        if response.status() == reqwest::StatusCode::OK {
+            handed = Some(response.json::<serde_json::Value>().await.expect("json"));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        handed.expect("the Gateway hands the floors down"),
+        serde_json::json!({
+            "otelcol": { "version": "2.0.0", "signature": hex::encode([7u8; 64]) }
+        })
+    );
+
+    fleet
+        .revocations
+        .revoke_certificate("client", &serial)
+        .expect("revoke");
+    let mut status = reqwest::StatusCode::OK;
+    for _ in 0..100 {
+        status = fleet.floors(&cert, &key).await.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        fleet.post(&cert, &key).await,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "as its reports are"
+    );
+}
+
 #[tokio::test]
 async fn an_unmarked_gateway_admits_nobody() {
     let fleet = Fleet::start(false).await;

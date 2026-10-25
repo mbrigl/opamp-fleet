@@ -156,6 +156,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("floors", Adapter),
             ("gateway", Adapter),
             ("gateway::cache", Adapter),
+            ("gateway::floors", Adapter),
             ("gateway::policy", Core),
             ("gateway::pool", Adapter),
             ("gateway::registry", Adapter),
