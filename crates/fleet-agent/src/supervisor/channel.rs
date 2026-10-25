@@ -2475,8 +2475,16 @@ async fn check_process(
     };
     let socket = socket.display();
     let peer = peer.map_err(|e| {
+        // A process named by its id that could not be opened (Windows) is logged by that id.
+        #[cfg(windows)]
+        let pid = e
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<windows::Unopened>())
+            .map(|unopened| unopened.pid);
+        #[cfg(not(windows))]
+        let pid = None;
         refused(
-            None,
+            pid,
             format!("the process serving {socket} cannot be read: {e}"),
         )
     })?;

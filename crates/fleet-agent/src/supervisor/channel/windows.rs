@@ -205,9 +205,25 @@ pub(super) fn server_process(stream: &NamedPipeClient) -> io::Result<super::Peer
 /// Returns why it could not be opened, naming it.
 pub(super) fn peer_process(pid: u32) -> io::Result<super::PeerProcess> {
     let handle = win32::process_to_check(pid)
-        .map_err(|e| io::Error::new(e.kind(), format!("process {pid} cannot be opened: {e}")))?;
+        .map_err(|error| io::Error::new(error.kind(), Unopened { pid, error }))?;
     Ok(super::PeerProcess { pid, handle })
 }
+
+/// The process the pipe names as its server, which could not be opened: by its id, so that the
+/// refusal names it in the log as it names a process that differs.
+#[derive(Debug)]
+pub(super) struct Unopened {
+    pub(super) pid: u32,
+    error: io::Error,
+}
+
+impl std::fmt::Display for Unopened {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "process {} cannot be opened: {}", self.pid, self.error)
+    }
+}
+
+impl std::error::Error for Unopened {}
 
 /// A program's job: every process it starts is in it too, and ends with it.
 pub(super) struct Tree(Job);
@@ -1103,6 +1119,11 @@ mod tests {
         .await
         .expect_err("a process it cannot open passed");
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
+        assert_eq!(
+            super::super::other_process(&refused),
+            Some(Some(pid)),
+            "logged by its id: {refused}"
+        );
         assert!(refused.to_string().contains("cannot be read"), "{refused}");
         assert!(
             refused
