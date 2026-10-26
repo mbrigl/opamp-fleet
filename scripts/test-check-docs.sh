@@ -806,6 +806,25 @@ sed_in "$d/scripts/check-all.sh" '/^# On instruction: scripts\/gate-windows.sh$/
 expect fail "a script a workflow runs that the local runner neither runs nor names" "$d" \
   "does not run 'scripts/gate-windows.sh', which a workflow runs"
 
+# publishing <dir> — a workflow that publishes, its commands inline, as a release's are.
+publishing() {
+  printf 'jobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo build --release\n' \
+    > "$1/.github/workflows/release.yml"
+}
+
+d="$(repo not-a-gate)"
+publishing "$d"
+echo "# Not a gate: .github/workflows/release.yml" >> "$d/scripts/check-all.sh"
+expect pass "a workflow named as no gate, its job running commands of its own" "$d"
+
+d="$(repo not-a-gate-unnamed)"
+publishing "$d"
+expect fail "a publishing workflow nobody names as no gate" "$d" "job 'publish' runs no script under scripts/"
+
+d="$(repo not-a-gate-missing)"
+echo "# Not a gate: .github/workflows/gone.yml" >> "$d/scripts/check-all.sh"
+expect fail "a '# Not a gate:' line naming no workflow" "$d" "names '.github/workflows/gone.yml' on a '# Not a gate:' line"
+
 d="$(repo required-unknown)"
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
 sed_in "$d/README.md" 's|^`docs`$|`docs`, `nowhere`|'

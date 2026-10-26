@@ -72,6 +72,8 @@
 #      local runner cannot run. The README may also name a job of .github/workflows/ci.yml as a
 #      required check; that job has to exist and carry neither a 'name:' nor a matrix, or its
 #      check reports under a rendered name the ruleset never sees.
+#      A workflow check-all.sh names on a '# Not a gate:' line publishes rather than checks, as a
+#      release does; its jobs may run commands of their own.
 #  10. Project Layout integrity: every path listed in the 'Project Layout' block of README.md
 #      exists, a trailing '/' meaning a directory. The block is written by hand and nothing else
 #      tells a reader that one of its lines has gone stale. A path with a '*' matches at least one
@@ -1017,15 +1019,25 @@ check_check_lists() {
   # which appends its values to the name.
   local rel_ci=".github/workflows/ci.yml" is_ci
   local ci_jobs=() ci_renamed=()
+  # A workflow that check-all.sh names on a line '# Not a gate: .github/workflows/<file>' publishes
+  # rather than checks, as a release does: its jobs may run commands of their own, and the scripts
+  # they run still count.
+  local not_gate=() gate=1 path
+  while IFS= read -r path; do
+    [[ -f "$ROOT/$path" ]] \
+      || add_error "$rel_all: names '$path' on a '# Not a gate:' line, which is no workflow of this repository"
+    not_gate+=("$path")
+  done < <(sed -n 's/^#[[:space:]]*Not a gate:[[:space:]]*\(\.github\/workflows\/[A-Za-z0-9._-]*\).*/\1/p' "$all")
   # job_done — report the job just parsed when none of its steps ran a script.
   job_done() {
-    [[ -n "$job" ]] && ((job_scripts == 0)) \
+    ((gate)) && [[ -n "$job" ]] && ((job_scripts == 0)) \
       && add_error "$rel: job '$job' runs no script under scripts/ — the local gate cannot run what it does"
     job=""
   }
   for file in "$ROOT"/.github/workflows/*.yml "$ROOT"/.github/workflows/*.yaml; do
     [[ -f "$file" ]] || continue
-    rel="${file#"$ROOT"/}" in_jobs=0 job="" job_scripts=0 is_checks=0
+    rel="${file#"$ROOT"/}" in_jobs=0 job="" job_scripts=0 is_checks=0 gate=1
+    _contains "$rel" "${not_gate[@]}" && gate=0
     [[ "$file" == "$wf" ]] && is_checks=1
     is_ci=0
     [[ "$rel" == "$rel_ci" ]] && is_ci=1
