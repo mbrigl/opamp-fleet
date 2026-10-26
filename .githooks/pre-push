@@ -15,6 +15,13 @@ set -uo pipefail
 
 root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 
+# Git hands a hook the variables that bind it to this repository: GIT_DIR in a linked worktree,
+# GIT_CONFIG_PARAMETERS after 'git -c', credential helpers included. The checks build fixture
+# repositories of their own, and with these inherited every git command in a fixture would act on
+# this repository and could push from it. The checks find the repository from their own path.
+# shellcheck disable=SC2046 # one variable name per word
+unset $(git rev-parse --local-env-vars)
+
 if [[ -n "$root" && -f "$root/scripts/check-all.sh" ]]; then
   if ! bash "$root/scripts/check-all.sh"; then
     echo >&2
