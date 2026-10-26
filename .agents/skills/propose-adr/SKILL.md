@@ -55,8 +55,5 @@ alternative to reject.
 
 ## 4. Submit
 
-Commit on a branch and hand the ADR to the human as its **own pull request**, status `proposed`,
-with no implementation in it. What follows is rule 4 of
-[`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules): review findings return as revisions in ADR-only
-pull requests, implementation starts once the human has reviewed, and the `Status` line is never
-yours to change.
+Commit on a branch and hand the ADR to the human as rule 3 of
+[`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) asks. What follows is rule 4.

@@ -55,11 +55,19 @@ restates nothing, and a rule this file does not state is not a rule of this proj
    last however cheap it is to reverse. No ADR for implementing within an accepted ADR, bug
    fixes, interface-preserving refactorings, tests, docs, formatting, and dev-only tooling. When
    genuinely unsure, prefer a short `proposed` ADR over a silent decision.
-3. **Develop the ADR with the human, critically.** Submit it with status `proposed` **in its own
-   pull request**, never mixed with implementation. Skill: `propose-adr`.
-4. **After human review, implement while the ADR is still `proposed`.** Findings return as
-   revisions, each in its own ADR-only pull request. **Only a human changes the status;** the
-   flip to `accepted` may land with the implementation.
+3. **Develop the ADR with the human, critically.** Submit it with status `proposed` **in
+   commits of ADRs only**, and hand those commits to the human before anything is implemented
+   against them. They go on the branch of the work they belong to, or on a branch of their own
+   for an ADR that waits for its decision while other work goes on. ADRs the same human decides
+   may travel together; each stays one decision. One the human sends back leaves the work's
+   branch for a branch of its own, so the work's pull request does not carry it, and nothing is
+   implemented against it until it is settled. Skill: `propose-adr`.
+4. **After human review, implement while the ADR is still `proposed`,** after its commits on
+   the same branch, or on a branch stacked on the ADR's. A commit that changes the text of an
+   ADR changes no path outside `docs/adr/`, and a sensor lists one that does. Findings return as
+   revisions, each a commit of ADRs only. The pull request names the commit of ADRs the human
+   reviewed before the implementation. **Only a human changes the status;** the flip to
+   `accepted`, a header line and no text, may land with the implementation.
 5. **Accepted ADRs are binding and immutable.** Never violate or work around one; change it only
    by superseding it. The sole permitted edit is the `Status` line, flipped by a human. ADR
    numbers are permanent. If the specification and an ADR conflict, the specification wins:
@@ -126,7 +134,8 @@ restates nothing, and a rule this file does not state is not a rule of this proj
   it. The reviewer gets the diff, the task, the doubts, and the standards, never the reasoning,
   and reports on two axes: does it do what was asked; does it meet this bar, simplicity first.
   Findings are fixed before the pull request opens, and every existing test the diff changes or
-  removes needs a reason. Skill: `review`.
+  removes needs a reason. The pull request names the commit the review saw, and a sensor lists
+  what landed after it. Skill: `review`.
 - **A feature spec closes only after a design revision** in a fresh session over the modules its
   tickets touched, the ADRs that bind them, and the criteria they serve, filed as tickets, checks,
   a `proposed` ADR, or a drafted specification change; with no spec open, one runs when the

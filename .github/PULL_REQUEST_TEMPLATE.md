@@ -10,6 +10,8 @@
 
 - Closes #  <!-- the ticket this lands, or the issue it resolves (ADR-0004) -->
 - Implements / relates to ADR-
+- ADRs reviewed at:  <!-- the commit of ADRs only the human reviewed before the implementation,
+     or none (AGENTS.md [§3](../AGENTS.md#3-adr-rules), rule 4) -->
 
 ## Proof
 
@@ -40,7 +42,8 @@
 
 <!-- One statement each, verifiable against the diff. ADR: new, revised, or none, and why none
      (AGENTS.md [§3](../AGENTS.md#3-adr-rules), rule 2); a new or revised `proposed` ADR ships in
-     its own pull request. ARCHITECTURE.md: updated, or unchanged because the structure is
+     commits of ADRs only, ahead of its implementation (rules 3 and 4). ARCHITECTURE.md: updated,
+     or unchanged because the structure is
      ([§5](../AGENTS.md#5-quality-bar--definition-of-done)). Glossary: the terms this change
      settled, or none. Specification: the accepted ADRs a change to it moves
      ([§3](../AGENTS.md#3-adr-rules), rule 7), or untouched. -->
@@ -55,4 +58,7 @@
 <!-- The fresh-context review that ran before this pull request opened, the review skill under
      .agents/skills/ ([§5](../AGENTS.md#5-quality-bar--definition-of-done)): who or what reviewed,
      its findings on the two axes (does it do what was asked, does it meet the bar), and what
-     was fixed. -->
+     was fixed. The commit the review saw, by hash: scripts/sensor-review-binding.sh lists what
+     landed after it. -->
+
+- Reviewed at:

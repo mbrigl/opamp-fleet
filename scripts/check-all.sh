@@ -52,6 +52,8 @@ run "Tests-kept sensor self-test" scripts/test-sensor-tests-kept.sh
 run "Tests-kept sensor" scripts/sensor-tests-kept.sh
 run "Revision-due sensor self-test" scripts/test-sensor-revision-due.sh
 run "Revision-due sensor" scripts/sensor-revision-due.sh
+run "Review binding sensor self-test" scripts/test-sensor-review-binding.sh
+run "Review binding sensor" scripts/sensor-review-binding.sh
 run "Git hooks self-test" scripts/test-git-hooks.sh
 run "Fixture isolation" scripts/test-fixture-isolation.sh
 run "Shell lint" scripts/check-shell.sh

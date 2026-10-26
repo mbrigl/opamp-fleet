@@ -1,0 +1,46 @@
+name: Review binding
+
+# Runs scripts/sensor-review-binding.sh again when a pull request's description is edited. The
+# sensors job of checks.yml runs it on every push to the pull request, with the description as
+# the hand-off of the whole branch; the description also changes without a push, as when the
+# 'Reviewed at:' line is filled in after the last one. This workflow re-reads it then, on an edit
+# only, and runs nothing else, so an edit reruns none of the required checks. The sensor reports
+# for the reviewer and fails on nothing it finds; this workflow is no required check.
+#
+# The job is bounded by a timeout, and the checkout runs with 'persist-credentials: false', as in
+# checks.yml.
+
+on:
+  pull_request:
+    types: [edited]
+
+permissions:
+  contents: read
+
+# A later edit makes the previous run's report stale.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-binding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The full history: the sensor reads the merges and commits between the base and the head.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # As in checks.yml: against the pull request's head, the checkout being a synthetic merge of
+      # the two, and the description passed through the environment and a file, never through
+      # the script's text.
+      - name: Write the pull request's description, the hand-off of the branch, to a file
+        run: printf '%s\n' "$HAND_OFF" > "$RUNNER_TEMP/hand-off.md"
+        env:
+          HAND_OFF: ${{ github.event.pull_request.body }}
+      - name: Report the merges and commits whose review saw less than the branch, and commits mixing ADRs with other paths
+        run: bash scripts/sensor-review-binding.sh --hand-off "$RUNNER_TEMP/hand-off.md" "$BASE" "$HEAD_SHA"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}

@@ -59,4 +59,7 @@ the suite and is the first finding.
 
 Findings, concrete and ranked, with file and line, and what the reviewer itself could not
 verify. No fixes applied. The implementer fixes them before the pull request opens and records in
-the pull request's *Review* section who reviewed, the findings on both axes, and what was fixed.
+the pull request's *Review* section who reviewed, the findings on both axes, what was fixed, and
+the commit the reviewer was handed, on its `Reviewed at:` line. The fixes come after that commit;
+[`scripts/sensor-review-binding.sh`](../../../scripts/sensor-review-binding.sh) lists them for the
+human who decides the merge, unless a second review sees them first and the line moves.
