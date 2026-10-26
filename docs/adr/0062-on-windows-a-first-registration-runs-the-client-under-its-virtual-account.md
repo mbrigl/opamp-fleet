@@ -1,6 +1,6 @@
 # ADR-0062: On Windows a first registration runs the Client under its virtual account, and `LocalSystem` only where an operator names it
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-26
 - **Deciders:** Markus Brigl
 - **Applies to:** the account a Windows `service install` chooses and accepts in `crates/fleet-agent/src/service/run_as.rs` and sets in `crates/fleet-agent/src/service/windows_config.rs`, what the install prints about it, and every document that states which account the Windows service runs as
