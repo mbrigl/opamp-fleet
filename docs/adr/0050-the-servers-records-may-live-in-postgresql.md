@@ -1,6 +1,6 @@
 # ADR-0050: The Server's records may live in PostgreSQL
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clause 2 superseded by [ADR-0061](0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)
 - **Date:** 2026-10-23
 - **Deciders:** Markus Brigl
 - **Applies to:** every storage port in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`) and every PostgreSQL adapter beside the filesystem adapters, the embedded schema and its migrations, the wiring in `crates/fleet-server/src/main.rs`, the `[database]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `server migrate-to-postgres` command, the `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls` dependencies in `Cargo.toml` and `deny.toml`, the PostgreSQL adapter's tests and the CI job that runs them, the postgres service in `observability/compose.yaml` and its forward into the Dev Container, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its records

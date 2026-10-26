@@ -4,7 +4,7 @@
 - **Date:** 2026-10-25
 - **Deciders:** Markus Brigl
 - **Applies to:** the floor statement in `crates/fleet-core/src/package.rs`, the `package floor` command of `opamp-fleetctl` in `crates/fleet-tools/`, the floors' store in `crates/fleet-server/src/fs/` and `crates/fleet-server/src/postgres/`, the `/api/v1/package-floors` routes in `crates/fleet-server/src/api.rs`, the `/v1/package-floors` route on the Agent plane in `crates/fleet-server/src/transport.rs` and downstream of a Gateway in `crates/fleet-agent/src/gateway/`, the Client's fetch of the floors, the file `package-floors.json` under its `state_dir`, the Supervisor's check of a package offer in `crates/fleet-agent/src/supervisor/agent/packages.rs`, the self-update's check of an offered version in `crates/fleet-agent/src/update/`, and every document that tells an operator how to keep an old signed build off the fleet
-- **Supersedes:** [ADR-0043](0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md) clause 13
+- **Supersedes:** [ADR-0043](0043-a-package-version-is-semver-and-never-installed-below-the-high-water-mark.md) clause 13; [ADR-0031](0031-opamp-fleetctl-extracts-a-bootstrap-pkcs12-file-into-pem.md) clause 2; [ADR-0050](0050-the-servers-records-may-live-in-postgresql.md) clause 2
 
 ## Context
 
@@ -53,39 +53,45 @@ offer of that type below it, the Client's own update included.
    it checks each floor when it is written and reports it valid or invalid, as it does for a
    package signature: feedback only, since the Client's check decides. The floors are stored as the
    Server stores its other records, in its data directory or in PostgreSQL
-   ([ADR-0050](0050-the-servers-records-may-live-in-postgresql.md)). Every action is audited. On
+   ([ADR-0050](0050-the-servers-records-may-live-in-postgresql.md)), in the data directory as the
+   file clause 10 adds to its layout. Every action is audited. On
    the Agent plane `GET /v1/package-floors` answers every admitted member with all floors as a JSON
    object that maps an Agent type to its version and signature, behind the admission of
    `/v1/opamp`.
 
-3. **A Gateway serves the floors it holds to the hosts behind it.** A Gateway fetches the floors as
-   any Client does (clause 4) and answers `GET /v1/package-floors` on its downstream listener with
-   what it last fetched, behind the handshake and the revocation verdict of its `/v1/opamp`. It
-   checks no signature on their behalf; each host checks its own.
+3. **A Gateway serves the floors it holds to the hosts behind it.** A Gateway fetches the floors
+   from its Server when it starts and then once an hour, and answers `GET /v1/package-floors` on
+   its downstream listener with what it last fetched, behind the handshake and the revocation
+   verdict of its `/v1/opamp`; an enrolling peer is refused them. It checks no signature on their
+   behalf; each host checks its own. A host behind a Gateway therefore takes a floor only after the
+   Gateway's next fetch, and keeps the old ones while the Gateway's fetches fail.
 
-4. **A Client keeps the highest verified floor of each Agent type.** It fetches the floors at
-   startup, once an hour, and before it decides a package offer when its last fetch is more than a
-   minute old. It verifies each against `[packages] verification_key` and keeps, per Agent type,
-   the highest version that verifies, in `<state_dir>/package-floors.json`, a JSON object that maps
-   an Agent type to a version and the signature it came with, written owner-only through a
-   temporary file and a rename. A floor that does not verify, or that orders below the one kept, is
-   ignored and logged. A failed fetch keeps the floors held and is logged, and an offer is decided
-   against them. The file lies outside `supervisor_dir` and its name holds a `.`, so no purge
-   reaches it (ADR-0043 clause 8). A floor is verified when it is kept, not again when the file is
-   read, so a later change of the key does not undo it. A file that exists but does not parse, or
-   maps a type to a value that is not SemVer, is never read as empty: every package offer, the
-   Client's own included, is refused and reported with a reason that names the file, until the
-   operator repairs or deletes it.
+4. **A Client keeps the highest verified floor of each Agent type.** It fetches the floors from its
+   endpoint after its first reply, then once an hour while it is connected, and before it decides a
+   package offer when its last fetch is more than a minute old. It verifies each against
+   `[packages] verification_key` and keeps, per Agent type, the highest version that verifies, in
+   `<state_dir>/package-floors.json`, a JSON object that maps an Agent type to a version and the
+   signature it came with, written owner-only through a temporary file and a rename. A floor that
+   does not verify, or that orders below the one kept, is ignored and logged. A failed fetch keeps
+   the floors held and is logged, and an offer is decided against them. The file lies outside
+   `supervisor_dir` and its name holds a `.`, so no purge reaches it (ADR-0043 clause 8). A floor
+   is verified when it is kept, not again when the file is read, so a later change of the key does
+   not undo it. A file that exists but does not parse, or maps a type to a value that is not
+   SemVer, is never read as empty: every package offer, the Client's own included, is refused and
+   reported with a reason that names the file, until the operator repairs or deletes it.
 
 5. **No package below its type's floor is taken.** A Supervisor refuses an offer whose version
    SemVer orders below the floor kept for its Agent type, before anything is downloaded, and
    reports it `InstallFailed` with a reason that names the version and the floor. The check stands
    beside the high-water mark and the installed record of ADR-0043 clause 7; the stricter one
-   decides.
+   decides. An offer of the package the Supervisor already runs is no install: it is answered as
+   installed, below the floor too (clause 6).
 
 6. **What is installed stays.** A Managed Process whose installed version lies below its type's
-   floor keeps running, and so does the Client. The Supervisor reports in its Agent's health that
+   floor keeps running, and so does the Client. A Supervisor reports in its Agent's health that
    it runs below the floor, naming both versions, and takes the next offer at or above the floor.
+   The Client's own Agent reports no such health: its version is the running build's, and its
+   next update at or above the floor replaces it.
    The rollback of ADR-0026 clause 62 puts back the installed predecessor whatever the floor says,
    since it takes no offer, and the health then says so too.
 
@@ -95,11 +101,55 @@ offer of that type below it, the Client's own update included.
    the file, and starts the Client. The Server's `DELETE` only stops serving a floor to the Clients
    that have not kept it.
 
-8. **Restates ADR-0043 clause 13. The Client's own floor is the higher of its running build and the
-   floor of its Agent type.** It refuses an offered version that is not SemVer, one that orders
+8. **Restates ADR-0043 clause 13, with the floor added and "not a version" narrowed to "not
+   SemVer". The Client's own floor is the higher of its running build and the floor of its Agent
+   type.** It refuses an offered version that is not SemVer (ADR-0043 clause 2), one that orders
    below the running build (ADR-0018 clause 4), and one that orders below the floor kept for its
-   Agent type. It keeps no high-water mark. The crash-loop pointer move back to the previous
+   Agent type. It keeps no high-water mark: the Client's Agent type is not a key in
+   `package-high-water.json`. The crash-loop pointer move back to the previous
    version is local, takes no offer, and stays as ADR-0018 decides it.
+
+9. **Restates ADR-0031 clause 2, with `floor` added. One program, two command trees.**
+   `opamp-fleetctl package` holds `fetch`, `pack`, `sha256`, `sign`, `keygen` and `public-key`,
+   each with the options and output it has today, and `floor` as clause 1 states it.
+   `opamp-fleetctl pki` holds `init`, `server-cert`, `bootstrap-ca` and `status` as
+   [ADR-0028](0028-one-operator-program-that-makes-the-fleets-certificates.md) states them, and
+   `p12-extract` as ADR-0031 states it. `opamp-fleetctl --version` prints the version every binary
+   of this project prints ([ADR-0012](0012-versions-resolved-in-the-internal-crate.md)). No other
+   program name exists for any of these commands: no alias, no wrapper, no symlink.
+
+10. **Restates ADR-0050 clause 2, with `package-floors.json` added. The layout of `data_dir` is
+    fixed, and no other is read.** With `store = "fs"`, under `data_dir`:
+
+    | Path | One file per | Domain |
+    |---|---|---|
+    | `configurations/<name>.json` | Configuration, with its retained revisions | Configurations ([ADR-0034](0034-a-deployment-carries-configurations-and-is-the-one-thing-rolled-out.md)) |
+    | `deployments/<name>.json` | Deployment | Deployments |
+    | `packages/<agent_type>@<version>.json` | Package: identity and entries, no bytes | Packages ([ADR-0033](0033-a-package-entry-carries-its-signature-and-every-artifact-is-uploaded.md)) |
+    | `blobs/<sha256>` | artifact, with the filesystem blob store | Blobs ([ADR-0049](0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md)) |
+    | `agents/<instance_uid>.json` | Agent: report, assignment, labels | Fleet ([ADR-0035](0035-a-host-is-what-a-client-certificate-names-and-its-agents-inherit-from-it.md)) |
+    | `hosts/<host>.json` | Host | Hosts |
+    | `certificates/<issuer>-<serial>.json` | certificate the Server signed | Certificate register |
+    | `revocations.json` | the revocation list | Revocations |
+    | `bootstrap/<issuer>-<serial>.json`, `.p12` | bootstrap certificate the Server issued | Bootstrap |
+    | `enrolment.json` | the window and its pending requests | Enrolment (ADR-0050 clause 9) |
+    | `package-floors.json` | the floor of every Agent type | Package floors (clause 2) |
+    | `audit/audit-<first seq>.jsonl` | audit file | Audit |
+
+    With `store = "postgres"`, `data_dir` holds `audit/` and, with the filesystem blob store,
+    `blobs/`, and nothing else. Beside a bucket, a `blobs/` an earlier filesystem blob store left is
+    accepted too, as the place
+    [ADR-0049](0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md) clause 7 copies
+    from; the Server does not create it there.
+
+    `<issuer>` is the first 16 hex characters of the SHA-256 of the issuer's DER name, and `<serial>`
+    is the serial in the register's lowercase hex form. A file or directory the layout does not
+    name, a file that does not parse, or a file whose name disagrees with its content fails startup,
+    naming the path. A path of the filesystem layout found under a `data_dir` used with
+    `"postgres"` fails startup naming it and `server migrate-to-postgres`. The one exception is a
+    temporary file the Server's own write left behind — a regular file whose name ends in `.tmp`,
+    whose rename never happened: it is removed at startup, since the record beside it is the one
+    before the write.
 
 **Out of scope:** a list of withdrawn builds by hash; an expiry or a signing time in the package
 statement; rotating the package key; a floor per Platform or per Deployment; the floors in the
@@ -158,10 +208,13 @@ the Client reaches one that serves it.
   updates too.
 - Negative / trade-offs: one more signed statement, store, route and state file. A Server or
   Gateway can withhold a floor, so it takes effect on a host only once a Server or Gateway that
-  serves it has been reached. A floor set too high cannot be taken back from the Server. Each host
-  must be lowered by hand, or the operator publishes the old content as a new, greater version
-  (ADR-0043 clause 12). Every Client asks for the floors once an hour, and before an offer at most
-  once a minute. The floors' store is a schema change for PostgreSQL.
+  serves it has been reached, and behind a Gateway only after the Gateway's next fetch. A
+  floor set too high cannot be taken back from the Server. Each host must be lowered by hand, or
+  the operator publishes the old content as a new, greater version (ADR-0043 clause 12). Every
+  Client asks for the floors once an hour, and before an offer at most once a minute. The floors'
+  store is a schema change for PostgreSQL. With the filesystem store it is a file the layout of an
+  earlier Server does not name, so that Server refuses to start on the data directory until the
+  file is moved away.
 - Follow-ups: the floors in the bundled UI; a list of withdrawn builds beside the floor; rotating
   the package key.
 
@@ -169,17 +222,19 @@ the Client reaches one that serves it.
 
 Tests that will carry `Verifies: ADR-0061`:
 
-- In `crates/fleet-core/`: the floor statement is the three lines of clause 1, and a package
-  signature does not verify as a floor, nor a floor as a package.
+- In `crates/fleet-core/`: the floor statement is the three lines of clause 1.
+- In `crates/fleet-tools/`: the `package` tree names `floor` (clause 9).
 - In `crates/fleet-server/`: `PUT`, `GET` and `DELETE` of `/api/v1/package-floors` in both stores,
   a `PUT` below the stored floor answered `409`, the check against `[packages] verification_key`
-  reported but never refused, and `GET /v1/package-floors` admitted as `/v1/opamp` is and
-  refused to a revoked certificate.
-- In `crates/fleet-agent/src/gateway/`: a host behind a Gateway receives the floors the Gateway last
-  fetched, behind the downstream admission.
-- In `crates/fleet-agent/src/`: a floor that does not verify, or that is lower than the kept one, is
-  ignored; a failed fetch keeps the kept floors; an unreadable `package-floors.json` refuses every
-  offer, the Client's own included; a Supervisor refuses an offer below its type's floor before
-  downloading and reports `InstallFailed`; a Managed Process below the floor keeps running and its
-  health says so; a rollback to a predecessor below the floor still happens; the self-update
-  refuses a version below its type's floor.
+  reported but never refused, a package signature reported as no floor, every change audited,
+  the floors' file part of the `data_dir` layout (clause 10), and `GET /v1/package-floors`
+  admitted as `/v1/opamp` is, refused to a revoked certificate and to an enrolling host.
+- In `crates/fleet-agent/tests/`: a host behind a Gateway receives the floors the Gateway last
+  fetched, behind the downstream admission, and an enrolling peer is refused them.
+- In `crates/fleet-agent/src/`: a floor that does not verify, a package signature among them, or
+  that is lower than the kept one, is ignored; a failed fetch keeps the kept floors; an unreadable
+  `package-floors.json` refuses every offer, the Client's own included; a Supervisor refuses an
+  offer below its type's floor before downloading and reports `InstallFailed`, and answers an offer
+  of what it runs as installed; a Managed Process below the floor keeps running and its health says
+  so; a rollback to a predecessor below the floor still happens; the self-update refuses a version
+  below its type's floor.
