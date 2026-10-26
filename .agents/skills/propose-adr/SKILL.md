@@ -1,6 +1,6 @@
 ---
 name: propose-adr
-description: Develop and submit an Architecture Decision Record. Use when a change is architecture-relevant, when a decision is costly to reverse or constrains future choices, when a reader without this conversation would take a choice for a mistake, or when the human asks for an ADR.
+description: Develop and submit an Architecture Decision Record. Use when a change is architecture-relevant, when a decision is costly to reverse or constrains future choices, when a reader without this conversation would take a choice for a mistake, when a change takes an early decision no ADR decides, such as the shape of the code, the environment, or the supply chain (it carries a catalogue of architecture and project concepts to propose from), or when the human asks for an ADR.
 ---
 
 # Propose an ADR
@@ -12,11 +12,9 @@ rule of its own ([ADR-0005](../../../docs/adr/0005-procedures-as-skills.md)).
 ## 1. Calibrate
 
 Decide with rule 2 of [`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) whether this needs an ADR
-at all. No ADR for implementing within an accepted ADR, a bug fix, an interface-preserving
-refactoring, tests, docs, formatting, and dev-only tooling. The rule's third case, what a reader
-without this conversation would take for a mistake, is the deliberate deviation from the obvious
-path; record it, or the next session "fixes" it. When no ADR is needed, say so and stop here.
-When genuinely unsure, prefer a short `proposed` ADR.
+at all. The rule's third case, what a reader without this conversation would take for a mistake,
+is the deliberate deviation from the obvious path; record it, or the next session "fixes" it.
+When no ADR is needed, say so and stop here.
 
 ## 2. Interrogate the request
 
@@ -34,13 +32,26 @@ decision, at least:
 Question the framing and your own draft. A draft written ahead of the answers is the first
 alternative to reject.
 
+When the catalogue has an entry for the decision, read it in
+[`concepts/README.md`](concepts/README.md) before the first round and put its candidates to the
+human: the two or three whose *Fits when* matches the quality goals, what each one's *Does not
+fit* says about this project, and the simplest form as one of them. Between candidates that fit
+equally, prefer the one whose rule a test or check can decide: what a computational sensor holds
+needs no reviewer to remember it. The human chooses; a candidate nobody chose is an alternative
+in the record.
+
 ## 3. Write the record
 
-1. Copy [`docs/adr/template.md`](../../../docs/adr/template.md) to `NNNN-short-title.md` with the
-   next free number. Complete the header and delete the instruction paragraph.
+1. Copy [`docs/adr/template.md`](../../../docs/adr/template.md) to `draft-<slug>.md` and head it
+   `# ADR-draft-<slug>`; the number comes with the pull request into `main`
+   ([mechanics](../../../docs/adr/README.md#mechanics)). Complete the header and delete the
+   instruction paragraph.
 2. One decision per ADR: one "We will …" sentence. A second one is a second ADR, unless the
    decision is the interplay of an integration ([§3](../../../AGENTS.md#3-adr-rules), rule 1).
-3. **Alternatives:** every one the interrogation surfaced, each with why not.
+3. **Alternatives:** every one the interrogation surfaced, each with why not. For a concept of
+   the catalogue, its entry's sections carry over: *Fits when* and *Does not fit* into the
+   Context, *Alternatives* and *Sources* as they stand, checked against this project, and *The
+   rule a test decides* into the Enforcement.
 4. **Sources:** what was consulted. A decision costly to reverse is researched first, external
    sources included, and nothing recalled is passed off as verified
    ([§4](../../../AGENTS.md#4-working-style)).

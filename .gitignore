@@ -1,6 +1,6 @@
 # Dev Container: .devcontainer/devcontainer-lock.json is deliberately NOT ignored — the resolved
 # Feature versions and digests are tracked, so the same commit yields the same environment until
-# the lock is refreshed on purpose (ADR-0002, AGENTS.md, section 6).
+# the lock is refreshed on purpose (ADR-0002).
 
 # Build artifacts
 /dist/

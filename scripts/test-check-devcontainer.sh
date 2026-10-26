@@ -3,10 +3,13 @@
 # Self-test of scripts/check-devcontainer.sh. Verifies: ADR-0002
 #
 # Each case builds a fixture under a temporary directory — a devcontainer.json with comments and
-# one pinned Feature, the lock that resolves it, and the editor settings that pin the
-# container-management extension to the host — runs the check against it, and asserts the exit
-# code and, for a failing case, the message that names the violation. The baseline passes; every
-# other case breaks one thing ADR-0002 decides.
+# one pinned Feature and the postStartCommand that enables the git hooks, the lock that resolves
+# it, and the editor settings that pin the container-management extension to the host — runs the
+# check against it, and asserts the exit code and, for a failing case, the message that names the
+# violation. The baseline passes; every other case breaks one thing ADR-0002 decides, or drops a
+# git setting from the postStartCommand.
+#
+# Inputs: scripts/check-devcontainer.sh scripts/lib/
 #
 # Usage:
 #     scripts/test-check-devcontainer.sh
@@ -14,17 +17,19 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/selftest.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/selftest.sh"
 CHECK="$ROOT/scripts/check-devcontainer.sh"
 
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# The postStartCommand that enables the git hooks and the merge settings, as the repository's own
+# writes it; config writes the value of post_start, none when it is empty.
+DRIVER="merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'"
+POST_START='{ "hooks": "git config core.hooksPath .githooks", "merge": "git config merge.ff false && git config pull.ff only", "index": "git config '"$DRIVER"'" }'
+post_start="$POST_START"
 
-failed=0
-passed=0
-
-# config <dir> <feature id> [extra json lines...] — write devcontainer.json with one Feature and,
-# before the features block, any extra top-level lines given.
+# config <dir> <feature id> [extra json lines...] — write devcontainer.json with one Feature, the
+# postStartCommand post_start holds, and, before the features block, any extra top-level lines
+# given.
 config() {
   local dir="$1" feature="$2"; shift 2
   {
@@ -32,6 +37,7 @@ config() {
     echo '  "name": "fixture",'
     echo '  // A comment: the container has no socket mount — see ADR-0002.'
     echo '  "image": "mcr.microsoft.com/devcontainers/base:debian",'
+    [[ -z "$post_start" ]] || echo "  \"postStartCommand\": $post_start,"
     printf '  %s\n' "$@"
     echo '  "features": {'
     echo '    // The one Feature.'
@@ -118,6 +124,11 @@ config "$d" "ghcr.io/devcontainers/features/docker-outside-of-docker:1"
 lock "$d" "ghcr.io/devcontainers/features/docker-outside-of-docker:1"
 expect fail "a Feature that mounts the socket" "$d" "would mount the host Docker socket"
 
+d="$(repo engine-inside)"
+config "$d" "ghcr.io/devcontainers/features/docker-in-docker:2"
+lock "$d" "ghcr.io/devcontainers/features/docker-in-docker:2"
+expect pass "an engine inside the container talks to no host engine and is the project's choice" "$d" "1 Features pinned and locked"
+
 d="$(repo unpinned-feature)"
 config "$d" "ghcr.io/devcontainers/features/github-cli:latest"
 lock "$d" "ghcr.io/devcontainers/features/github-cli:latest"
@@ -169,11 +180,49 @@ d="$(repo no-devcontainer)"
 rm -r "$d/.devcontainer"
 expect fail "no Dev Container at all" "$d" "devcontainer.json: not found"
 
+d="$(repo post-start-string)"
+post_start='"git config core.hooksPath .githooks && git config merge.ff false && git config pull.ff only && git config '"$DRIVER"'"'
+config "$d" "ghcr.io/devcontainers/features/github-cli:1"
+post_start="$POST_START"
+expect pass "the git settings in a postStartCommand string pass" "$d" "git hooks enabled"
+
+d="$(repo post-start-braces)"
+# shellcheck disable=SC2016  # the variable is devcontainer.json's, not the shell's
+post_start='{ "cd": "cd ${containerWorkspaceFolder}", "list": ["a]b"], "hooks": "git config core.hooksPath .githooks", "merge": "git config merge.ff false && git config pull.ff only", "index": "git config '"$DRIVER"'" }'
+config "$d" "ghcr.io/devcontainers/features/github-cli:1"
+post_start="$POST_START"
+expect pass "a brace or bracket in an entry before the git settings" "$d" "git hooks enabled"
+
+for setting in "core.hooksPath .githooks" "merge.ff false" "pull.ff only" "$DRIVER"; do
+  d="$(repo "post-start-without-${setting%% *}")"
+  post_start="${POST_START/"git config $setting"/}"
+  config "$d" "ghcr.io/devcontainers/features/github-cli:1"
+  post_start="$POST_START"
+  expect fail "a postStartCommand without 'git config $setting'" "$d" \
+    "postStartCommand does not run 'git config $setting'"
+done
+
+d="$(repo post-start-driver-args)"
+post_start="${POST_START/" %O %A %B %S %X %Y"/}"
+config "$d" "ghcr.io/devcontainers/features/github-cli:1"
+post_start="$POST_START"
+expect fail "the merge driver without the arguments git passes it" "$d" \
+  "postStartCommand does not run 'git config $DRIVER'"
+
+d="$(repo post-start-missing)"
+post_start=""
+config "$d" "ghcr.io/devcontainers/features/github-cli:1"
+post_start="$POST_START"
+expect fail "no postStartCommand at all" "$d" "postStartCommand does not run 'git config core.hooksPath .githooks'"
+
+d="$(repo post-start-elsewhere)"
+post_start='"echo started"'
+config "$d" "ghcr.io/devcontainers/features/github-cli:1" \
+  '"postCreateCommand": "git config core.hooksPath .githooks && git config merge.ff false && git config pull.ff only",'
+post_start="$POST_START"
+expect fail "the git settings in another command than postStartCommand" "$d" \
+  "postStartCommand does not run 'git config core.hooksPath .githooks'"
+
 # --- summary -------------------------------------------------------------------------------
 
-if ((failed)); then
-  echo "Dev Container self-test FAILED ($failed of $((passed + failed)) cases)." >&2
-  exit 1
-fi
-echo "Dev Container self-test passed ($passed cases)."
-exit 0
+summary "Dev Container self-test"

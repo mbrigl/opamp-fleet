@@ -104,14 +104,15 @@ Selector, Package, Deployment, …) are defined in [`docs/SPECIFICATION.md`](doc
   [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
   extension, or any DevContainer-compatible IDE
 - Docker / Podman (rootless) available on the host
+- Outside the Dev Container: bash 4.4 or later for the checks, 3.2 for the git hooks
+  ([ADR-0003](docs/adr/0003-decisions-verified-by-tests.md)); macOS ships 3.2
 
 ## Getting Started
 
 1. Open the repository in VS Code and choose **Reopen in Container**. The Dev Container and the
    preconfigured agent extensions build automatically, and the container enables the repository's
-   git hooks ([`.githooks/`](.githooks/)): no commit on `main`, and the checks run before a push.
-   Working outside the container? Enable them yourself, once per clone:
-   `git config core.hooksPath .githooks`.
+   git hooks with the merge settings they rely on ([Git hooks](#git-hooks)). Working outside the
+   container? Run the three commands listed there yourself, once per clone.
 2. Authenticate your coding agent inside the container (for Claude Code: `claude login`).
 3. Start working with the agent. Drive the work from the specification and the ADRs.
 
@@ -371,35 +372,59 @@ service that will not start.
 
 ```
 README.md             # overview & setup for humans
+TEMPLATE-SETUP.md     # one-time template setup; delete it when the project is yours
 CHANGELOG.md          # operator-facing changes: what an upgrade needs edited or moved
 AGENTS.md             # single source of truth for coding agents
-docs/manual/         # the user manual: setting up a fleet, then Server, Client, and the operator tools, option by option
-docs/SPECIFICATION.md # the specification: problem, goals, vocabulary
+CONTRIBUTING.md       # how to contribute, pointing at the rules
+SECURITY.md           # how to report a vulnerability, and what the configuration guarantees
+CODE_OF_CONDUCT.md    # the standards everyone taking part is held to
+LICENSE               # the license the project is released under
+NOTICE                # the copyright notice the Apache License asks to be carried along
+docs/SPECIFICATION.md # the specification: problem, goals, success criteria
 docs/GLOSSARY.md      # the vocabulary everyone uses, kept current inline
 docs/CONVENTIONS.md   # how this project writes what no check decides, kept current inline
 docs/ARCHITECTURE.md  # the system as it currently stands
 docs/CONFORMANCE.md   # OpAMP Protocol Baseline + capability conformance matrix
-docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog, not decisions)
+docs/HARDENING.md     # candidate hardening measures for the Client-Server link (a backlog)
 docs/adr/             # Architecture Decision Records (+ template)
-crates/               # Cargo workspace: opamp (shared) · fleet-core · fleet-server · fleet-agent · fleet-tools (operator CLIs)
-config/               # annotated example configuration files (server.toml, supervisor.toml)
-packaging/            # what release.yml packs with: Linux maintainer scripts, the WiX sources, the Server's Containerfile
-scripts/              # consistency checks and sensors (check-all.sh runs them all), run in CI
-scripts/check-docs.sh # documentation & protocol-baseline consistency checks
-interop/              # the Go side of the interop check against opamp-go (ADR-0011)
-observability/        # the development observability stack — Collector, ClickHouse, Grafana — run on the host
+docs/manual/          # the user manual: setting up a fleet, then Server, Client, and the tools
+docs/images/          # the figures the documents show
+docs/plan/            # open work: feature specs and their tickets, deleted as they land
+Cargo.toml            # the Cargo workspace and the product's version
+Cargo.lock            # the resolved dependency graph, committed
 rust-toolchain.toml   # pinned Rust toolchain (an exact stable release + rustfmt + clippy)
-.githooks/            # git hooks: refuse a commit on main and a push while the checks are red
-.github/              # CI workflows, Dependabot, issue & pull request templates, code owners
+deny.toml             # cargo-deny: advisories, licences, sources and banned crates
+crates/               # opamp (shared) · fleet-core · fleet-server · fleet-agent · fleet-tools
+config/               # annotated example configuration files (server.toml, supervisor.toml)
+packaging/            # what release.yml packs with: Linux maintainer scripts, WiX, Containerfile
+fuzz/                 # the fuzz targets of every parser that reads untrusted bytes
+interop/              # the Go side of the interop check against opamp-go
+observability/        # the development observability stack, run on the host
+scripts/check-all.sh  # runs the checks, sensors, and self-tests, as the hooks and CI do
+scripts/check-*.sh    # checks: each fails on what breaks a rule; check-rust.sh builds and tests
+scripts/sensor-*.sh   # sensors: report for the reviewer; sensor-repo-settings.sh runs by hand
+scripts/test-*.sh     # self-tests of the checks, the sensors, the hooks, the setup, and the scripts
+                      # run by hand
+scripts/lib/          # what the scripts share: the ADR header, git, the ticket path, the self-tests
+scripts/*.sh          # run by hand: number-adrs.sh, ready-for-main.sh, drop-merged-branch.sh
+                      # (steps 7 and 8 of the integration branches), and the development tools
+                      # dev-pki.sh, install_tools.sh, seed_test_configs.sh, vendor-shiki.sh
+.githooks/            # git hooks: nothing lands on main locally; checks before a merge and a push
+.github/workflows/    # checks.yml runs the checks; ci.yml, release.yml and the scheduled workflows;
+                      # review-binding.yml reads each pull request's hand-off
+.github/              # Dependabot, issue & pull request templates, code owners
 .devcontainer/        # Dev Container definition (base image + Features + the OTLP forwarder)
 .vscode/              # shared editor settings
 .editorconfig         # editor-neutral formatting baseline
-.gitattributes        # line-ending normalization (LF everywhere)
-.agents/skills/       # the procedures of AGENTS.md as Agent Skills, one directory each (ADR-0005)
+.gitattributes        # line-ending normalization (LF everywhere), the ADR index merged by its driver
+.gitignore            # what git leaves out, .scratch/ for session artifacts among it
+.agents/skills/       # the procedures of AGENTS.md as Agent Skills, one directory each (ADR-0005),
+                      # with the scripts and templates they carry (claim.sh, remap.sh, ticket.md)
 .claude/CLAUDE.md     # pointer for Claude Code to read AGENTS.md
 .claude/skills/       # pointers (one symlink per skill) for Claude Code to read .agents/skills/
 .claude/settings.json # Claude Code permissions: deny reading .env files (see SECURITY.md)
 ```
+
 
 ## Dev Container
 
@@ -449,19 +474,102 @@ exists for one gap only: Claude Code loads `CLAUDE.md`, not `AGENTS.md`, tracked
 [anthropics/claude-code#34235](https://github.com/anthropics/claude-code/issues/34235). Once that
 lands, delete the pointer file rather than keeping a second file to maintain.
 
-The procedures those rules name (proposing an ADR, planning a feature, reviewing a change,
-revising the design) are Agent Skills under [`.agents/skills/`](.agents/skills/), the open format
-and the directory Codex, Gemini CLI, and Cursor read
+The procedures those rules name (proposing an ADR, planning a feature, working its tickets
+alone or in parallel, reviewing a change, revising the design, normalizing the record) are Agent
+Skills under [`.agents/skills/`](.agents/skills/), the open format and the directory Codex,
+Gemini CLI, and Cursor read
 ([ADR-0005](docs/adr/0005-procedures-as-skills.md)). An agent invokes one by name (`/review`) or
 picks it up when the task matches its description. Claude Code reads `.claude/skills/` only, so
 that directory holds one symlink per skill into `.agents/skills/`; a directory-level symlink is
 not followed. The symlinks are pointers of the same kind as `CLAUDE.md`, tracked upstream as
 [anthropics/claude-code#31005](https://github.com/anthropics/claude-code/issues/31005). Delete them
 when that lands, and add one for every skill added meanwhile; the documentation check fails on a
-skill without its pointer. A rule is enforced only by what every agent hits: the git hooks under
-[`.githooks/`](.githooks/), the checks, and the repository settings below. A tool's own
-configuration is not used to enforce one, because a gate that one agent honours and the next does
-not looks like a rule and is not one.
+skill without its pointer. What enforces a rule is what every agent hits
+([`AGENTS.md` §6](AGENTS.md#6-project-rules)): the git hooks under [`.githooks/`](.githooks/),
+the checks, and the repository settings below.
+
+Agents work tickets in parallel without any one vendor's mechanism: a dispatching session claims
+each ticket by its branch in a git worktree of its own and starts a fresh session there, with the
+non-interactive command of whichever agent the project's harness ADR names, and the session works
+the ticket through the `work-tickets` skill.
+
+## Git hooks
+
+Git does not version its hooks, so the repository keeps them under [`.githooks/`](.githooks/).
+They hold for every agent and every human. The Dev Container enables them, with the merge
+settings they rely on, on every start; outside it, run once per clone:
+
+```sh
+git config core.hooksPath .githooks
+git config merge.ff false
+git config pull.ff only
+git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'
+```
+
+`merge.ff false` makes every merge a merge commit, as a `feat/` branch keeps them
+([`AGENTS.md` §6](AGENTS.md#6-project-rules)); a fast-forward would make no commit and run no
+hook. `pull.ff only` keeps a pull from then making a merge. Without the two settings the hooks
+still hold: a fast-forward skips the documentation check of `pre-merge-commit`, and the push
+still gates what it brought. The merge driver of the ADR index keeps the rows both sides add and
+stops on its prose ([`.githooks/merge-adr-index`](.githooks/merge-adr-index)); without it, every
+row two branches append conflicts.
+
+| Hook | Refuses | Bypassed by |
+|---|---|---|
+| `reference-transaction` | moving the local `main` to a commit `origin/main` lacks: by a commit, merge, cherry-pick, reset, or `git branch -f`. It lets through `git merge --ff-only origin/main`, a reset to it, `git fetch origin main:main`, a write of `main` where it already is, and a deletion. Needs git 2.28 or later. | running git without the hooks (`git -c core.hooksPath=/dev/null`), or moving `origin/main` by hand; not by `--no-verify` |
+| `pre-commit` | a commit on `main`; the conclusion of a conflicted merge while `scripts/check-all.sh --changed` is red | `--no-verify` |
+| `pre-merge-commit` | a merge on `main`; a merge into any other branch while `scripts/check-docs.sh` is red | `--no-verify` |
+| `pre-push` | a push to the remote's `main`, a deletion included; any other push while `scripts/check-all.sh --changed` is red, except one that only deletes, and one from a clean working tree whose tree the checks passed on before, as after a rework that only regroups | `--no-verify`, as the claim on a ticket does ([`AGENTS.md` §6](AGENTS.md#6-project-rules)); a tree written by hand into `checks-green-trees` of the git directory |
+
+With `--changed`, the self-tests of what the branch left untouched since `main` are skipped; CI
+runs every one before anything reaches `main`. A bypass is a deliberate act, not a default;
+[`AGENTS.md` §6](AGENTS.md#6-project-rules) says when an agent may. Each refusal says what to do
+instead.
+[`scripts/test-git-hooks.sh`](scripts/test-git-hooks.sh) exercises every row.
+
+## Integration branches
+
+A change reaches `main` through a pull request. Several branches may integrate first on a
+`feat/` branch, by local merges or by pull requests against it, and it stays the human's to
+rework until its pull request into `main` merges ([`AGENTS.md` §6](AGENTS.md#6-project-rules)).
+Each step waits for a human's instruction.
+
+1. Start it at the remote's `main`: `git fetch origin`, then
+   `git switch -c feat/<topic> origin/main`.
+2. Merge a reviewed branch into it with its hand-off as the message, written to a file since an
+   editor strips its headings: `git merge --no-ff -F .scratch/<hand-off>.md <branch>`. The
+   documentation check gates the merge, and the push of step 6 runs the rest. One that stops on a
+   conflict is concluded, once resolved and staged, with `git commit -F .scratch/<hand-off>.md`,
+   and all the checks gate that commit.
+3. Or merge it by a pull request against the `feat/` branch, so that its pipelines run first
+   ([`AGENTS.md` §6](AGENTS.md#6-project-rules)). With both branches pushed, on the branch:
+   `gh pr create --base feat/<topic> --body-file .scratch/<hand-off>.md`, and once it is green,
+   `gh pr merge <number> --merge --body-file .scratch/<hand-off>.md`, never by the web interface,
+   whose merge commit drops the hand-off. Then, on the `feat/` branch, `git fetch origin` and
+   `git merge --ff-only origin/feat/<topic>`.
+4. Rework it as often as needed: rebase it, regroup its commits, or drop what did not hold,
+   with `git rebase -i --autosquash --rebase-merges`. `--autosquash` folds in the fixups a review
+   leaves, as the `review` skill says; without `--rebase-merges` the merges flatten, and their
+   hand-offs with them. A pull request still open against the `feat/` branch is rebased onto the
+   rework.
+5. After a rework, review the whole branch at its head
+   ([`AGENTS.md` §5](AGENTS.md#5-quality-bar--definition-of-done)) and name that commit on the
+   `Reviewed at:` line of the pull request of step 6, which
+   [`review-binding.yml`](.github/workflows/review-binding.yml) reads on every push and edit.
+6. Test it in the pipelines: `git push -u origin feat/<topic>`, then open a draft pull request,
+   `gh pr create --draft --base main`, which runs them on every push against what the merge
+   into `main` would produce. A branch kept without a pull request, such as an experiment, runs
+   them by hand: `gh workflow run checks.yml --ref feat/<topic>`. A rework already pushed goes out
+   with `git push --force-with-lease`.
+7. Make the pull request ready: [`scripts/ready-for-main.sh`](scripts/ready-for-main.sh) refuses
+   a fixup steps 4 to 6 left, takes up the remote's `main`, and numbers the draft ADRs
+   ([ADR-0003](docs/adr/0003-decisions-verified-by-tests.md)); then the push it names and
+   `gh pr ready`. What `main` gains later is taken up the same way, and an ADR it gains moves the
+   branch's numbers on ([mechanics](docs/adr/README.md#mechanics)).
+8. Once the pull request into `main` has merged as a merge commit, take it up and drop the branch:
+   on it, [`scripts/drop-merged-branch.sh`](scripts/drop-merged-branch.sh) refuses a branch
+   `origin/main` lacks, takes up the remote's `main`, and deletes the local branch; then the
+   `git push origin --delete feat/<topic>` it names.
 
 ## Repository settings
 
@@ -469,15 +577,18 @@ Some of this project's rules cannot be enforced by files in the repository
 ([`AGENTS.md` §6](AGENTS.md#6-project-rules)). They are settings on the GitHub repository itself,
 configured once by a maintainer and worth re-checking after a repository move or transfer:
 
-- a **ruleset on `main`** that requires pull requests, requires the
+- a **ruleset on `main`** that requires pull requests and allows the merge method **merge commit**
+  only, since squash and rebase discard the merges a `feat/` branch carries and the commits it
+  was reworked into ([`AGENTS.md` §6](AGENTS.md#6-project-rules)); requires the
   <!-- required-checks begin — compared with the workflow's jobs by scripts/check-docs.sh -->
   `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, `shell`, `rust`,
   `client-windows`, `client-macos`, `s3-store`, and `postgres-store`
   <!-- required-checks end -->
-  jobs as required status checks — every job of the **Checks** workflow, the Client's Windows and
+  jobs as required status checks: every job of the **Checks** workflow, the Client's Windows and
   macOS jobs of the **CI** workflow, and its jobs that run the S3 and PostgreSQL stores' tests
-  against a real store (rulesets list checks by their job name) — and
-  blocks force pushes and branch deletion;
+  against a real store (rulesets list checks by their job name); requires a branch up to date
+  with `main` before it merges, so that the checks see what the merge produces, such as two ADRs
+  proposed in parallel under one number; and blocks force pushes and branch deletion;
 - enable **require a review from Code Owners** on that ruleset, so the two artifacts only a human
   decides, [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) and everything under
   [`docs/adr/`](docs/adr/) ([`AGENTS.md` §3](AGENTS.md#3-adr-rules)), cannot be merged without the
@@ -491,9 +602,13 @@ configured once by a maintainer and worth re-checking after a repository move or
   workflow publishes for the first time is private, and operators pull the image without an account
   ([ADR-0052](docs/adr/0052-the-server-ships-as-a-container-image-built-from-its-attested-release-binary.md)).
 
+[`scripts/sensor-repo-settings.sh`](scripts/sensor-repo-settings.sh) reads these settings
+through `gh` and reports each one that differs from this list. It runs on a human's
+instruction ([ADR-0003](docs/adr/0003-decisions-verified-by-tests.md)).
+
 ## Template
 
-- **Template release:** unreleased — the release of [NUC](https://github.com/hivevm/nuc) this
+- **Template release:** v0.5.0 — the release of [NUC](https://github.com/hivevm/nuc) this
   repository carries; a project moves the line when it takes up a later one
   ([ADR-0008](docs/adr/0008-template-releases.md)).
 

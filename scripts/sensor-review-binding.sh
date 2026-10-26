@@ -46,7 +46,9 @@
 # any other, and the human reads them as such.
 #
 # Pure bash + git. Usage:
-#     scripts/sensor-review-binding.sh [--hand-off <file>] [base [head]]
+#     scripts/sensor-review-binding.sh [--root <dir>] [--hand-off <file>] [base [head]]
+# It reads the repository it lives in, as the checks do; --root names another, as its self-test
+# does with each fixture.
 # The head defaults to HEAD, the feat/ branch checked out. Without a base, the merge base of head
 # with origin/main (else main) is used: the merges of the branch not yet on the remote's main. CI
 # passes the pull request's base and head, never its synthetic merge commit, and its description
@@ -56,10 +58,19 @@
 
 set -uo pipefail
 
+# shellcheck source-path=SCRIPTDIR source=lib/git.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
+
+caller="$PWD"
+enter_root "Review binding sensor" "${BASH_SOURCE[0]}" "$@"
+shift "$ROOT_TAKEN"
+
+# The hand-off is a path from where the sensor was called.
 hand_off=""
 if [[ "${1:-}" == "--hand-off" ]]; then
   hand_off="${2:-}"
   shift 2 2>/dev/null || shift $#
+  [[ -z "$hand_off" || "$hand_off" == /* ]] || hand_off="$caller/$hand_off"
   [[ -f "$hand_off" ]] \
     || { echo "Review binding sensor: hand-off '$hand_off' is no file." >&2; exit 2; }
 fi
@@ -68,13 +79,7 @@ base="${1:-}"
 head="${2:-HEAD}"
 
 [[ "$base" =~ ^0+$ ]] && base=""
-if [[ -z "$base" ]]; then
-  for candidate in origin/main main; do
-    if git rev-parse --verify -q "$candidate^{commit}" >/dev/null; then
-      base="$(git merge-base "$candidate" "$head" 2>/dev/null)" && break
-    fi
-  done
-fi
+[[ -n "$base" ]] || base="$(main_merge_base "$head")"
 if [[ -z "$base" ]]; then
   echo "Review binding sensor: nothing to compare — no base given and no main to compare with."
   exit 0
@@ -124,7 +129,7 @@ bind() {
 # lines aside.
 adr_text() {
   git diff-tree -r --root --no-commit-id -p -U0 --no-color "$1" \
-    -- ':(glob)docs/adr/[0-9][0-9][0-9][0-9]-*.md' | awk '
+    -- ':(glob)docs/adr/[0-9][0-9][0-9][0-9]-*.md' ':(glob)docs/adr/draft-*.md' | awk '
     /^diff --git / { file = $NF; sub(/^b\//, "", file); next }
     /^(\+\+\+|---) / { next }
     /^[-+]/ && !/^[-+]- \*\*(Status|Date|Deciders):\*\*/ && !(file in seen) { seen[file]; print file }

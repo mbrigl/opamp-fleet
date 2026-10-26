@@ -1,19 +1,76 @@
 #!/usr/bin/env bash
 #
-# Git pre-push hook: the checks pass before anything is pushed.
+# Git pre-push hook: nothing is pushed to the remote's main, and the checks pass before anything
+# else is pushed.
 #
-# AGENTS.md, section 5 requires scripts/check-all.sh to pass before a push, and CI runs the same
-# checks on every pull request. This hook runs them first, so a red push never leaves the machine
-# and the permission prompt an agent answers on 'git push' is only ever about a green one. Enabled
-# through 'git config core.hooksPath .githooks', which the Dev Container sets on creation
-# (.devcontainer/devcontainer.json); outside it, run that command once per clone.
+# Changes reach main through a pull request (AGENTS.md, section 6); a push to it would skip that,
+# and a ruleset that an administrator may bypass is no reason to try. AGENTS.md, section 5 requires
+# scripts/check-all.sh to pass before a push, and CI runs the same checks on every pull request.
+# This hook runs them first, so a red push never leaves the machine, and it is where the merges a
+# feat/ branch took up since its last push are held to all of them; pre-merge-commit runs only the
+# documentation check on each. It runs them with --changed: the self-tests of what the branch left
+# untouched since main are skipped, since CI runs them, and every check itself still runs;
+# check-all.sh says which run. Enabled as the README's "Git hooks" says.
 #
-# A repository without scripts/check-all.sh has nothing to run, and the push proceeds.
-# Bypassable with 'git push --no-verify'. scripts/test-git-hooks.sh exercises this hook.
+# A push whose every ref is a deletion, such as that of a merged branch, sends nothing to check
+# and proceeds without the checks; a deletion of the remote's main is still refused. A repository
+# without scripts/check-all.sh has nothing to run, and the push proceeds.
+#
+# A tree the checks passed on before passes again without a second run: a rework that only
+# regroups the commits ends on the tree it started from. The checks read the working tree, so a
+# tree counts only when the working tree is clean, nothing changed and nothing untracked, and is
+# then the tree of HEAD. The hook keeps the last 50 green trees in 'checks-green-trees' of the
+# repository's git directory, shared by its worktrees.
+# Bypassable with 'git push --no-verify', or by writing a tree into that file by hand; AGENTS.md,
+# section 6 says who may.
+#
+# A push that sends a draft ADR is told how many it carries and where they take their numbers:
+# on the branch of the pull request into main, by scripts/ready-for-main.sh, as step 7 of the
+# README's Integration branches says. The notice passes or refuses nothing and asks for nothing:
+# a branch under rework carries drafts on purpose, and check 16 of scripts/check-docs.sh fails on
+# a draft in a pull request into main that is ready for review.
+# scripts/test-git-hooks.sh exercises this hook.
 
 set -uo pipefail
 
+# Git hands the hook one line per ref on its standard input: local ref, local object, remote ref,
+# remote object. A deletion of the remote's main is refused like any other push to it. A deletion
+# sends a local object of zeros.
+refs=0
+sent=0
+while read -r _ local_object remote_ref _; do
+  if [[ "$remote_ref" == "refs/heads/main" ]]; then
+    echo "pre-push: refused — changes reach main through a pull request, not a push (AGENTS.md, section 6). Push a branch of its own and open one: gh pr create --base main" >&2
+    exit 1
+  fi
+  refs=$((refs + 1))
+  [[ "$local_object" =~ ^0+$ ]] && continue
+  sent=$((sent + 1))
+  # A draft ADR takes its number on the branch of its pull request into main (ADR-0003); the
+  # notice says so on every push that carries one, and decides nothing.
+  drafts="$(git ls-tree --name-only "$local_object" docs/adr/ 2>/dev/null | grep -c '^docs/adr/draft-.*\.md$')"
+  if ((drafts > 0)); then
+    echo "pre-push: ${remote_ref#refs/heads/} carries $drafts draft ADR(s); they take their numbers on the branch of the pull request into main, by scripts/ready-for-main.sh (README, Integration branches, step 7)." >&2
+  fi
+done
+
+# A push that only deletes sends nothing to check.
+((refs > 0 && sent == 0)) && exit 0
+
 root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
+# The tree of a clean working tree, and the record of green ones, read while git still knows this
+# repository by the variables unset below.
+green="" tree=""
+if [[ -n "$root" ]]; then
+  green="$(cd "$(git rev-parse --git-common-dir)" && pwd)/checks-green-trees"
+  [[ -z "$(git status --porcelain 2>/dev/null)" ]] \
+    && tree="$(git rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null || true)"
+fi
+if [[ -n "$tree" && -f "$green" ]] && grep -qxF "$tree" "$green"; then
+  echo "pre-push: the checks passed on this tree before; not run again." >&2
+  exit 0
+fi
 
 # Git hands a hook the variables that bind it to this repository: GIT_DIR in a linked worktree,
 # GIT_CONFIG_PARAMETERS after 'git -c', credential helpers included. The checks build fixture
@@ -23,10 +80,14 @@ root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 unset $(git rev-parse --local-env-vars)
 
 if [[ -n "$root" && -f "$root/scripts/check-all.sh" ]]; then
-  if ! bash "$root/scripts/check-all.sh"; then
+  if ! bash "$root/scripts/check-all.sh" --changed; then
     echo >&2
     echo "pre-push: refused — the checks are red, and they pass before anything is pushed (AGENTS.md, section 5). Fix them, then push again." >&2
     exit 1
+  fi
+  if [[ -n "$tree" ]]; then
+    { grep -vxF "$tree" "$green" 2>/dev/null | tail -n 49; echo "$tree"; } > "$green.$$" \
+      && mv "$green.$$" "$green"
   fi
 fi
 

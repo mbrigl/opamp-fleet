@@ -7,33 +7,29 @@ adds only the contributor-facing procedure.
 
 ## Before you start
 
-Read, in this order:
+Read what [`AGENTS.md` §2](AGENTS.md#2-start-here) names before any non-trivial work, then
+[`AGENTS.md`](AGENTS.md) itself, the working rules for humans and agents alike, and
+[`docs/CONVENTIONS.md`](docs/CONVENTIONS.md), how this project writes code and tests where no
+check decides it.
 
-1. [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md): the constitution, with problem, goals, and
-   success criteria, written in the vocabulary of [`docs/GLOSSARY.md`](docs/GLOSSARY.md).
-2. [`docs/adr/`](docs/adr/): the Architecture Decision Records. **Accepted ADRs are binding.**
-3. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): the system as it stands today, its parts,
-   their responsibilities, and how they fit together.
-4. [`AGENTS.md`](AGENTS.md): the working rules, with principles, the ADR process, the quality bar
-   (Definition of Done), and all conventions, including language and vocabulary.
-
-Authority runs **specification → accepted ADRs → individual change**.
+Authority runs **specification → accepted ADRs → task**
+([`AGENTS.md` §3](AGENTS.md#3-adr-rules)).
 
 ## Workflow
 
-1. **Open an issue first** when scope or intent is not yet agreed
+1. **Settle scope and intent first** when they are not yet agreed
    ([`AGENTS.md` §4](AGENTS.md#4-working-style)).
 2. **Follow [`AGENTS.md`](AGENTS.md)**: when a decision needs an ADR and how it is reviewed
    ([§3](AGENTS.md#3-adr-rules)), when a change counts as done
    ([§5](AGENTS.md#5-quality-bar--definition-of-done)), and the git and project rules
    ([§6](AGENTS.md#6-project-rules)). Run [`scripts/check-all.sh`](scripts/check-all.sh) locally
    before pushing ([§5](AGENTS.md#5-quality-bar--definition-of-done)). It runs the same checks CI
-   runs on every pull request, in the same order. With the repository's git hooks enabled (the Dev
-   Container does it; otherwise `git config core.hooksPath .githooks`) a push runs them for you
-   and stops while they are red. They need only bash and coreutils, already in the Dev Container.
-   Only the shell lint additionally needs [ShellCheck](https://www.shellcheck.net) and skips
-   itself where that is missing; CI runs it always.
-3. **Open a pull request** against `main`, fill in the PR template, and link the issue or ADR.
+   runs on every pull request, and the repository's git hooks run them for you
+   ([README → Git hooks](README.md#git-hooks)). They need bash 4.4 or later and coreutils,
+   already in the Dev Container.
+   Only the shell lint additionally needs [ShellCheck](https://www.shellcheck.net), which the Dev
+   Container installs; elsewhere it skips itself where that is missing, and CI runs it always.
+3. **Open a pull request** against `main` and fill in the PR template.
 
 ## License of contributions
 

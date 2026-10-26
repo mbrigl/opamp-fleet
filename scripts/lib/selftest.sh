@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Shared by the self-tests under scripts/ (scripts/test-*.sh), sourced as their first act: the
 # repository root, a temporary directory for the fixtures, the counters, the guard on a fixture's
-# path, and the summary.
+# path, one counted assertion, and the summary.
 #
 # The checks a self-test exercises build fixture repositories under $work. Git hands a hook, a
 # linked worktree, and 'git -c' variables that bind every git command to one repository;
@@ -31,6 +31,12 @@ passed=0
 fixture() {
   [[ -n "${1:-}" && "$1" == "$work"/* && -d "$1/.git" ]] \
     || { echo "fixture: '${1:-}' is no fixture repository under $work" >&2; exit 1; }
+}
+
+# check <name> <condition...> — count one assertion.
+check() {
+  local name="$1"; shift
+  if "$@"; then passed=$((passed + 1)); else failed=$((failed + 1)); echo "FAIL: $name" >&2; fi
 }
 
 # summary <name> — the result line, and the exit code: 0 when every case passed, 1 otherwise.

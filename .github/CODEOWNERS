@@ -1,7 +1,8 @@
 # Code owners for the two artifacts only a human decides: the specification, and the decision
-# record — an ADR's Status line included. The rules themselves are stated in AGENTS.md, section
-# 3; the review this file drives is a repository setting, listed under "Repository settings" in
-# ../README.md, and until that setting is enabled this file changes nothing.
+# record — an ADR's Status line included. The rules themselves are stated in
+# AGENTS.md, section 3; the review this file drives is a repository setting, listed under
+# "Repository settings" in ../README.md, and until that setting is enabled this file changes
+# nothing.
 #
 # TODO: add a code owner — a GitHub handle (@user) or a team (@org/team) with write access — and
 # uncomment the two rules below. They ship commented out on purpose: an owner GitHub does not

@@ -12,29 +12,63 @@ supersession. This section carries only the mechanics of the record;
 [`scripts/check-docs.sh`](../../scripts/check-docs.sh) names in its header which of them it
 verifies.
 
-- **File.** Copy [`template.md`](template.md) to `NNNN-short-title.md` with the next free number.
-  The `# ADR-NNNN` heading matches the filename, and the numbers run `0001..N` without gaps.
-- **Index.** The tables below change in the same pull request as the ADR it describes, for
+- **File.** Copy [`template.md`](template.md) to `draft-<slug>.md`, the slug in lower case letters
+  and digits joined by hyphens. Until it reaches `main` the ADR is a draft: its heading and every
+  reference name it `ADR-draft-<slug>`, its index row links it as `draft-<slug>`, and no number
+  is taken ([ADR-0003](0003-decisions-verified-by-tests.md)). On the branch whose pull request
+  brings it to `main`, once that branch has taken up the current `main`,
+  [`scripts/number-adrs.sh`](../../scripts/number-adrs.sh) gives it the next free number. A
+  numbered ADR is `NNNN-short-title.md`, its `# ADR-NNNN` heading matches the filename, and the
+  numbers run `0001..N` without gaps.
+- **Index.** The tables below change in the same commit as the ADR they describe, for
   additions, supersessions, and status flips alike. The status is shown via the legend's bullet
   and the ADR's `Applies to` header is mirrored verbatim in its own column. The index routes a
   reader from a change to the decisions that bind it, so a row says what its ADR governs without
   the file being opened. Two tables keep what a session reads apart from what it looks up: an
   accepted or proposed ADR sits under **Binding**, a superseded or rejected one under
   **Superseded and rejected**, and a status flip moves the row.
-- **Numbers are permanent.** Never renumber, delete, or merge ADRs: other ADRs, commits
-  (`Implements ADR-NNNN`), and code may reference a number. A superseded ADR keeps its file and
-  its body. Its `Status` line flips to `⚪ superseded by ADR-NNNN` in the pull request that lands
-  the superseding ADR, whose `Supersedes` field names it back.
+- **Numbers are permanent once on `main`, until a normalization.** Between two normalizations,
+  never renumber, delete, or merge an ADR there: other ADRs, commits (`Implements ADR-NNNN`), and
+  code may reference a number. No draft reaches `main`. A branch that already carries a numbered
+  proposed ADR whose number another branch brought to `main` first gives it the next free number
+  before it merges, in every reference its own branch makes to it. Until a normalization, a
+  superseded ADR keeps its file and its body. Its `Status` line flips to `⚪ superseded by
+  ADR-NNNN` in the change that lands the superseding ADR, whose `Supersedes` field names it back.
 - **A supersession may name clauses** ([ADR-0009](0009-an-adr-may-supersede-named-clauses-of-another.md)).
   A `Supersedes` entry that names numbered clauses of the Decision — `ADR-NNNN clause 2`,
   `… clauses 1 and 4` — replaces only those. The old ADR keeps its status, its row in the binding
   table and its `Date`, and its `Status` line gains `· clause 2 superseded by ADR-NNNN`, one
-  suffix per successor, in the pull request that proposes the successor. The successor restates
-  the clauses it names and nothing else. An entry without clauses is a whole supersession.
-- **Sprawl is curbed by supersession, never by editing.** One ADR may supersede several whose
-  decisions have grown into one. Its `Supersedes` field names each, and each flips its status in
-  the same pull request, so the set an agent reads for a change shrinks while every number and
-  every body stays.
+  suffix per successor, in the change that proposes the successor. The successor restates the
+  clauses it names and nothing else. An entry without clauses is a whole supersession.
+- **Between normalizations, sprawl is curbed by supersession, never by editing.** One ADR may
+  supersede several whose decisions have grown into one. Its `Supersedes` field names each, and
+  each flips its status in the same change, so the set an agent reads for a change shrinks
+  while every number and every body stays.
+- **A normalization restates the record** ([`AGENTS.md` §3](../../AGENTS.md#3-adr-rules), rule
+  5).
+  - **Start.** The tree has no proposed ADR, no feature spec or ticket under `docs/plan/`, and
+    green checks.
+  - **Steps.** Three, in this order on one branch, each handed to the human and confirmed
+    before the next begins: the restated specification, whose `G-n` and `Q-n` run from 1; the
+    supersessions it calls for; and the restated record. The record begins once the human has
+    decided each supersession. One pull request lands them, merged by a human.
+  - **Order.** The record numbers the ADRs in force `0001..N` by what they govern. The document
+    set and the ADR process come first, then the founding decisions in the order of the setup,
+    then the rest in groups. An inherited ADR takes its place like any other, and may be merged
+    with the project's own.
+  - **Clauses.** Every clause of an old ADR lives on in one new ADR. The hand-off of the
+    record lists each clause with the new ADR that carries it.
+  - **Header.** A new ADR keeps the status of the ADRs it restates. Its `Deciders` name all of
+    theirs, its `Date` is the latest of theirs, and it has no `Supersedes` field. In an
+    adoption, an ADR the project had accepted stays accepted. A decision found outside any
+    record enters as proposed.
+  - **Dead ADRs.** Superseded and rejected ADRs are deleted. What one of them chose, and why it
+    did not stand, becomes an entry under *Alternatives considered* in the new ADR that governs
+    its topic.
+  - **References.** Each step moves its references with a map, old to new, applied by the map
+    script of the `normalize` skill. The map stands in the hand-off and the
+    commit body, and in no document. A commit older than the normalization cites the numbers it
+    had then.
 - **Cite only what exists.** Every `ADR-NNNN` reference names a file already in this directory.
   An anticipated follow-up is described by topic ("a follow-up ADR on session storage"), never by
   a number. In Markdown, cite an ADR as a link to its own file.
@@ -42,11 +76,11 @@ verifies.
 ## Index
 
 An ADR whose `Deciders` line names the **NUC maintainer** is inherited from the template. It
-binds a derived project once its own maintainer adds their name to `Deciders` and flips the
-`Status` line to `🟢 accepted` ([`AGENTS.md` §3](../../AGENTS.md#3-adr-rules)). Change an
-inherited decision by superseding it, never by editing. Once the template setup is done, check
-12 of [`scripts/check-docs.sh`](../../scripts/check-docs.sh) fails on an inherited ADR still
-proposed.
+binds a derived project once its own maintainer adds their name to `Deciders` and its `Status`
+line reads `🟢 accepted` ([`AGENTS.md` §3](../../AGENTS.md#3-adr-rules)). Change an inherited
+decision by superseding it, never by editing. Once the template setup is done, check 12 of
+[`scripts/check-docs.sh`](../../scripts/check-docs.sh) fails on an inherited ADR in force that
+names no decider of the project, or that is still proposed.
 
 **Status legend:** 🟢 accepted · 🟡 proposed · 🔴 rejected · ⚪ superseded
 
@@ -154,7 +188,7 @@ REST API, the fleet record, rollouts, packages and deployments, and the operator
 ### Superseded and rejected
 
 The record of what was decided against or replaced: read one when a change touches what it
-governed, to learn why the current decision stands. A row moves here in the pull request that
+governed, to learn why the current decision stands. A row moves here in the change that
 flips its status.
 
 | ADR | Title | Applies to | Status |
