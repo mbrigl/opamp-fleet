@@ -2,7 +2,7 @@
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-09-18
-- **Deciders:** NUC maintainer
+- **Deciders:** NUC maintainer, Markus Brigl
 - **Applies to:** `.agents/skills/`, the pointers under `.claude/skills/`, and every document that describes how a procedure of `AGENTS.md` is carried out
 
 ## Context

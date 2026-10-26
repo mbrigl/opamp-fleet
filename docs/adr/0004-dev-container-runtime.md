@@ -2,7 +2,7 @@
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-09-05
-- **Deciders:** NUC maintainer
+- **Deciders:** NUC maintainer, Markus Brigl
 - **Applies to:** `.devcontainer/`, `.vscode/settings.json`, `scripts/check-devcontainer.sh`, and everything the container pulls in
 
 ## Context

@@ -2,7 +2,7 @@
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-09-20
-- **Deciders:** NUC maintainer
+- **Deciders:** NUC maintainer, Markus Brigl
 - **Applies to:** the tags of the template repository, its own ADRs, the **Template** section of `README.md`, check 14 of `scripts/check-docs.sh`, and the pull request that lands a release
 
 ## Context

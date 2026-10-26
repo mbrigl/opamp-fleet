@@ -2,7 +2,7 @@
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-09-16
-- **Deciders:** NUC maintainer
+- **Deciders:** NUC maintainer, Markus Brigl
 - **Applies to:** every accepted ADR, the identifiers by which ADRs are cited, the Goals and Quality Goals of `docs/SPECIFICATION.md`, the tests that verify them, the checks and sensors under `scripts/`, and the git hooks under `.githooks/`
 
 ## Context
