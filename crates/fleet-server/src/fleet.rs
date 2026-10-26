@@ -4576,7 +4576,7 @@ mod tests {
     /// An artifact is fetched by a host only through an Agent it speaks for: the host whose Agent
     /// it was released to, not another host, not a host the register does not know, and not for
     /// another Platform or version — until that other host is marked as a Gateway.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0026, Q-4
     #[test]
     fn an_artifact_is_offered_to_a_host_only_through_an_agent_it_speaks_for() {
         let dir = tempfile::tempdir().expect("tempdir");

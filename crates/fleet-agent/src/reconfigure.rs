@@ -2105,7 +2105,7 @@ mod tests {
     /// again follow. The mark file survives the purge — here with `supervisor_dir` at `state_dir`
     /// itself — and each re-added Supervisor refuses `0.109.0` naming the mark, and takes
     /// `0.110.0+other` and `0.111.0` (ADR-0043 clauses 8 and 14).
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0043, Q-6
     #[test]
     fn a_purged_and_re_added_supervisor_is_held_to_its_types_mark() {
         use crate::storage::{HighWaterFile, Storage, HIGH_WATER_FILE};
