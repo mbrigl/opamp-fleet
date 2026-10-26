@@ -598,8 +598,10 @@ expect fail "a wrapped Supersedes field, the name on the second line not flipped
 # insert_line <file> <before|after> <ERE> <line> — put a line before or after the first line that
 # matches, the same way on GNU and BSD.
 insert_line() {
-  awk -v where="$2" -v re="$3" -v text="$4" '
-    !done && $0 ~ re { if (where == "after") print; print text; if (where == "before") print; done = 1; next }
+  # Through the environment, not -v: gawk reads escapes in a -v value and takes '\*' for '*'.
+  WHERE="$2" RE="$3" TEXT="$4" awk '
+    !done && $0 ~ ENVIRON["RE"] { if (ENVIRON["WHERE"] == "after") print; print ENVIRON["TEXT"]
+                                  if (ENVIRON["WHERE"] == "before") print; done = 1; next }
     { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 
