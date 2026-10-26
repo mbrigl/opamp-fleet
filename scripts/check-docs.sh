@@ -574,17 +574,6 @@ supersedes_entries() {
   done
 }
 
-# adr_refs <text> — sets REFS to every ADR identifier the text cites, in order.
-REFS=()
-adr_refs() {
-  local rest="$1"
-  REFS=()
-  while [[ "$rest" =~ $ADR_REF_RE ]]; do
-    REFS+=("${BASH_REMATCH[0]}")
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
-  done
-}
-
 # A supersession is written into two files in one pull request: the new ADR's '**Supersedes:**'
 # field and the old ADR's status line (docs/adr/README.md). Nothing else compares
 # them — check_adr_index only mirrors the index against whatever status a file carries, so a half

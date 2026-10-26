@@ -19,13 +19,5 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 
-# Git Bash hands a Windows program its temporary directory by the 8.3 short name (RUNNER~1); the
-# Windows tests compare the paths a walk reports with the ones they made, so they get the long one.
-if command -v cygpath >/dev/null; then
-  TMP="$(cygpath -w -l "${TMP:-$TEMP}")"
-  TEMP="$TMP"
-  export TMP TEMP
-fi
-
 cargo clippy -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
 cargo test -p fleet-agent --locked
