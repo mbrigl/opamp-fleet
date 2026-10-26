@@ -206,6 +206,18 @@ run "Build, test and lint" scripts/check-rust.sh
 # On instruction: scripts/install_tools.sh
 # On instruction: scripts/seed_test_configs.sh
 # On instruction: scripts/vendor-shiki.sh
+# The gates a workflow runs where the local runner cannot: on Windows and macOS, against a real
+# object store and database, as a release build, against the advisory database, under a nightly
+# fuzzer, against opamp-go, and as a real service. Each runs on a human's instruction here.
+# On instruction: scripts/check-client-platform.sh
+# On instruction: scripts/check-store.sh
+# On instruction: scripts/check-release-build.sh
+# On instruction: scripts/check-deny.sh
+# On instruction: scripts/check-fuzz.sh
+# On instruction: scripts/check-interop.sh
+# On instruction: scripts/check-service-smoke.sh
+# The release publishes; it is no gate, and check-build-hardening.sh holds its steps.
+# Not a gate: .github/workflows/release.yml
 
 wait
 

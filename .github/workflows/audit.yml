@@ -40,9 +40,7 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny
+      # The workspace and the fuzz targets, which have a lockfile of their own (fuzz/Cargo.lock).
       - name: cargo deny
-        run: cargo deny check
-      # The fuzz targets have a lockfile of their own (fuzz/Cargo.lock); the same gate holds.
-      - name: cargo deny (fuzz targets)
-        run: cargo deny --manifest-path fuzz/Cargo.toml check
+        run: bash scripts/check-deny.sh
 

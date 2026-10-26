@@ -33,10 +33,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Clippy
-        run: cargo clippy -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
-      - name: Test
-        run: cargo test -p fleet-agent --locked
+      # Git Bash: the runner's default shell is PowerShell, where 'bash' may name WSL's.
+      - name: Clippy and test
+        shell: bash
+        run: bash scripts/check-client-platform.sh
 
   client-macos:
     runs-on: macos-latest
@@ -45,10 +45,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Clippy
-        run: cargo clippy -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
-      - name: Test
-        run: cargo test -p fleet-agent --locked
+      - name: Clippy and test
+        run: bash scripts/check-client-platform.sh
 
   # ADR-0049 clause 9: the S3 store's tests, which a plain `cargo test` skips, run here against a
   # rustfs service, its image pinned by digest. The key pair is the throwaway one of this job's
@@ -82,21 +80,16 @@ jobs:
           done
           echo "rustfs did not create the bucket" >&2
           exit 1
+      - name: Write the secret key file
+        run: (umask 077 && printf '%s' fleet-ci-secret > "$RUNNER_TEMP/s3-secret")
+      # Skipped is not passed: the store is named, so every S3 test must reach it.
       - name: Test against rustfs
         env:
           FLEET_TEST_S3_ENDPOINT: http://127.0.0.1:9000
           FLEET_TEST_S3_BUCKET: fleet
           FLEET_TEST_S3_ACCESS_KEY_ID: fleet-ci
           FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE: ${{ runner.temp }}/s3-secret
-        run: |
-          set -euo pipefail
-          (umask 077 && printf '%s' fleet-ci-secret > "$FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE")
-          cargo test -p fleet-server --lib --locked s3:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/s3.log"
-          # Skipped is not passed: the store was named, so every S3 test must have reached it.
-          if grep -q "skipped: no S3 store" "$RUNNER_TEMP/s3.log"; then
-            echo "an S3 test was skipped although a store is named" >&2
-            exit 1
-          fi
+        run: bash scripts/check-store.sh s3
 
   postgres-store:
     runs-on: ubuntu-latest
@@ -138,8 +131,11 @@ jobs:
           done
           docker logs postgres >&2
           exit 1
+      - name: Write the password file
+        run: (umask 077 && printf '%s' fleet-ci > "$RUNNER_TEMP/postgres-password")
       - name: Test against PostgreSQL
         # Over TLS against the CA above; each test works in a schema of its own (clause 16).
+        # Skipped is not passed: the database is named, so every PostgreSQL test must reach it.
         env:
           FLEET_TEST_POSTGRES_HOST: 127.0.0.1
           FLEET_TEST_POSTGRES_PORT: "5432"
@@ -147,16 +143,7 @@ jobs:
           FLEET_TEST_POSTGRES_USER: fleet
           FLEET_TEST_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/postgres-password
           FLEET_TEST_POSTGRES_CA_FILE: ${{ runner.temp }}/postgres-tls/ca.pem
-        run: |
-          set -euo pipefail
-          (umask 077 && printf '%s' fleet-ci > "$FLEET_TEST_POSTGRES_PASSWORD_FILE")
-          cargo test -p fleet-server --lib --locked postgres:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/postgres.log"
-          # Skipped is not passed: the database was named, so every PostgreSQL test must have
-          # reached it.
-          if grep -q "skipped: no PostgreSQL" "$RUNNER_TEMP/postgres.log"; then
-            echo "a PostgreSQL test was skipped although a database is named" >&2
-            exit 1
-          fi
+        run: bash scripts/check-store.sh postgres
 
   # The Client ships on Linux, macOS, and Windows; the Server on Linux only.
   release-build:
@@ -175,8 +162,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Git Bash on Windows: the runner's default shell is PowerShell, where 'bash' may name WSL's.
       - name: Build (release)
-        run: cargo build -p ${{ matrix.package }} --release --locked
+        shell: bash
+        run: bash scripts/check-release-build.sh ${{ matrix.package }}
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}

@@ -31,15 +31,8 @@ jobs:
         with:
           go-version-file: interop/go.mod
           cache-dependency-path: interop/go.sum
-      # The harness is code too: formatted and vetted before anything runs it.
-      - name: Lint the Go harness
-        working-directory: interop
-        run: |
-          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-          go vet ./...
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # Built as its own step so a compile failure is not reported as an interop failure.
-      - name: Build
-        run: cargo test -p fleet-agent --test interop_opamp_go --locked --no-run
+      # The harness linted, the test built, then both ends against opamp-go on both transports;
+      # the script says which of the three failed.
       - name: Both ends against opamp-go, on both transports
-        run: cargo test -p fleet-agent --test interop_opamp_go --locked -- --ignored --nocapture --test-threads=1
+        run: bash scripts/check-interop.sh
