@@ -8,7 +8,7 @@ they speak of "the sensors the toolchain ADR names".
 The sensors come in three kinds:
 
 - **Behaviour:** the tests, and the `Verifies:` markers that tie them to the decisions and
-  criteria they protect ([ADR-0003](../../../../docs/adr/0003-decisions-verified-by-tests.md)).
+  criteria they protect ([ADR-0002](../../../../docs/adr/0002-decisions-verified-by-tests.md)).
 - **Maintainability:** what agents get wrong most: a module or function grown too large or too
   complex, logic written a second time, code nothing calls, a test removed or skipped, and a
   suite that passes without asserting much, which mutation testing measures.

@@ -1,6 +1,7 @@
 # A host's life: installation, enrolment, updates
 
-[← User Manual](README.md) · [Setting up a fleet](setup.md) · [The Client](client.md) · [Rollout walkthrough](rollout.md)
+[← User Manual](README.md) · [Setting up a fleet](setup.md) · [The Client](client.md) · [Rollout
+walkthrough](rollout.md)
 
 This page follows one managed host through its whole life, from the first file you copy to it to
 the updates it takes years later. It says what happens at each stage, who acts, and where, and links
@@ -40,7 +41,8 @@ In the UI, open the **Enrolments** tab and go to **Bootstrap certificates**:
 1. Fill in what the hosts' certificates are to carry: the **country** (C, chosen from a list), the
    **state** (ST), the **locality** (L), the **customer** (O), the **site** (OU) and a **customer
    number** (organizationIdentifier). The customer and the site are required, so every host names
-   both and a Selector on them reaches it; the others are optional. The approver sees them on every request
+   both and a Selector on them reaches it; the others are optional. The approver sees them on every
+   request
    this certificate carries, every host certificate issued from it carries them, and its Agents
    carry them as `fleet.host.*` for Selectors to match. They grant nothing. A value stays until a
    host enrols again, so name only what is stable.
@@ -62,7 +64,8 @@ holds it can ask for a certificate only while the enrolment window is open, and 
 when you approve it. To withdraw a pair early, press **Revoke** in its row. A revoked certificate
 stays in the list until it ends; **Delete** in its row removes it sooner, and it stays revoked.
 
-Details: [Bootstrap certificates, issued by the Server](server.md#bootstrap-certificates-issued-by-the-server).
+Details: [Bootstrap certificates, issued by the
+Server](server.md#bootstrap-certificates-issued-by-the-server).
 
 ## 2. Install the Client
 
@@ -113,7 +116,8 @@ window and your approval, and the host's private key never leaves the host.
    ```
 
 3. **The request waits in the queue.** The **Enrolments** tab lists it with its arrival time, the
-   address it came from — or the Gateway it came through — the key fingerprint, and the bootstrap certificate it carries: customer,
+   address it came from — or the Gateway it came through — the key fingerprint, and the bootstrap
+   certificate it carries: customer,
    site, serial and end. A certificate the Server did not issue is marked *not issued here*.
 4. **Check two things, then approve.** The key fingerprint must match the one the host logged, and
    the bootstrap certificate must be the one you gave that host. Press **Approve**. Press **Reject**

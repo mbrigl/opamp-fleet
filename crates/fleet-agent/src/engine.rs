@@ -105,11 +105,11 @@ pub struct Engine {
     /// The self-Agent's received configuration awaiting the Supervisor-set apply (ADR-0017),
     /// taken by the transport exactly once.
     pending_self_config: Option<AgentRemoteConfig>,
-    /// A connection-settings offer awaiting the transport's verification (ADR-0014). The offer
+    /// A connection-settings offer awaiting the transport's verification (ADR-0013). The offer
     /// arrives per Agent but the settings are connection-scoped, so the Engine keeps exactly one
     /// pending offer — n Agents receiving the same offer verify and switch once.
     pending_connection_offer: Option<ConnectionSettingsOffers>,
-    /// Packages awaiting the transport's download and verification (ADR-0026), each tagged with
+    /// Packages awaiting the transport's download and verification (ADR-0027), each tagged with
     /// the owning Agent's index so the verified artifact routes back to the right Supervisor.
     pending_package_downloads: Vec<(usize, PackageDownload)>,
     /// How the Client updates *itself* (ADR-0018). Unarmed when `[packages] self_update = false`, in
@@ -121,14 +121,14 @@ pub struct Engine {
     /// The certificate request last queued on this connection (ADR-0021): a new one goes out at
     /// once, the same one again only with the next report.
     last_csr: Option<Vec<u8>>,
-    /// The high-water marks every Supervisor of this Client shares (ADR-0043 clause 8), kept so a
+    /// The high-water marks every Supervisor of this Client shares (ADR-0028 clause 8), kept so a
     /// Supervisor a set apply adds at runtime is held to the same marks.
     high_water: Option<Arc<dyn HighWaterMarks>>,
-    /// The floors every Agent of this Client is held to (ADR-0061 clause 4), kept so a Supervisor
+    /// The floors every Agent of this Client is held to (ADR-0028 clause 17), kept so a Supervisor
     /// a set apply adds at runtime is held to them too.
     floors: Option<Arc<dyn PackageFloors>>,
     /// The plugins this Client's Supervisors were started with, kept so a Supervisor a set apply
-    /// adds at runtime starts its Managed Process the same way (ADR-0059 clause 3).
+    /// adds at runtime starts its Managed Process the same way (ADR-0020 clause 18).
     plugins: Option<Arc<dyn PluginRegistry>>,
 }
 
@@ -186,7 +186,7 @@ impl Engine {
 
     /// Arms self-update (ADR-0018) with what installs a new version and commits this one if it is
     /// itself freshly installed.
-    /// Gives the Engine the high-water marks its Supervisors share (ADR-0043 clause 8).
+    /// Gives the Engine the high-water marks its Supervisors share (ADR-0028 clause 8).
     pub fn set_high_water(&mut self, marks: Arc<dyn HighWaterMarks>) {
         self.high_water = Some(marks);
     }
@@ -197,7 +197,7 @@ impl Engine {
         self.high_water.clone()
     }
 
-    /// Holds every Agent of this Engine, and every one added later, to `floors` (ADR-0061).
+    /// Holds every Agent of this Engine, and every one added later, to `floors` (ADR-0028).
     pub fn set_floors(&mut self, floors: Arc<dyn PackageFloors>) {
         for agent in &mut self.agents {
             agent.state.set_floors(floors.clone());
@@ -206,7 +206,7 @@ impl Engine {
     }
 
     /// Refuses each queued download whose version now lies below its Supervisor's floor — what a
-    /// fetch made right before the downloads may have raised (ADR-0061 clauses 4, 5). Each is
+    /// fetch made right before the downloads may have raised (ADR-0028 clauses 17 and 18). Each is
     /// reported `InstallFailed` with the reason, and nothing of it is downloaded.
     pub fn hold_downloads_to_floors(&mut self) {
         for (index, download) in std::mem::take(&mut self.pending_package_downloads) {
@@ -227,7 +227,7 @@ impl Engine {
         }
     }
 
-    /// Gives the Engine the plugins its Supervisors were started with (ADR-0059 clause 3).
+    /// Gives the Engine the plugins its Supervisors were started with (ADR-0020 clause 18).
     pub fn set_plugins(&mut self, plugins: Arc<dyn PluginRegistry>) {
         self.plugins = Some(plugins);
     }
@@ -253,7 +253,7 @@ impl Engine {
         agent.package_applied(hash, result);
     }
 
-    /// Restores previously applied connection settings on every Agent (ADR-0014), so a restarted
+    /// Restores previously applied connection settings on every Agent (ADR-0013), so a restarted
     /// Client reports `APPLIED` and is not re-offered what it already runs.
     pub fn adopt_connection_settings(&mut self, hash: &[u8]) {
         for agent in &mut self.agents {
@@ -341,7 +341,7 @@ impl Engine {
         }
     }
 
-    /// The enrolment report (ADR-0039 clause 11): `csr` alone, on the Client's own Agent — the one
+    /// The enrolment report (ADR-0015 clause 24): `csr` alone, on the Client's own Agent — the one
     /// the identity of the connection belongs to, as [`request_certificate`] rides it. `None`
     /// without such an Agent.
     ///
@@ -356,24 +356,24 @@ impl Engine {
     }
 
     /// The connection-settings offer the transport must verify by actually connecting, taken
-    /// exactly once (ADR-0014).
+    /// exactly once (ADR-0013).
     pub fn take_connection_offer(&mut self) -> Option<ConnectionSettingsOffers> {
         self.pending_connection_offer.take()
     }
 
-    /// Whether a package waits for the transport to download it (ADR-0026).
+    /// Whether a package waits for the transport to download it (ADR-0027).
     #[must_use]
     pub fn has_package_downloads(&self) -> bool {
         !self.pending_package_downloads.is_empty()
     }
 
-    /// The packages the transport must download and verify (ADR-0026), each with its Agent's
+    /// The packages the transport must download and verify (ADR-0027), each with its Agent's
     /// index — drained so each is dispatched once.
     pub fn take_package_downloads(&mut self) -> Vec<(usize, PackageDownload)> {
         std::mem::take(&mut self.pending_package_downloads)
     }
 
-    /// Records download progress for the Agent whose package is being fetched (ADR-0026), so the
+    /// Records download progress for the Agent whose package is being fetched (ADR-0027), so the
     /// next report carries `Downloading` with its details instead of a silent `Installing`.
     pub fn package_downloading(
         &mut self,
@@ -386,7 +386,7 @@ impl Engine {
         }
     }
 
-    /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0026),
+    /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0027),
     /// or — for the Client's own Agent — installs it as a new version of the Client (ADR-0018).
     /// The Supervisor's `PackageApplied` event closes the lifecycle. A missing adapter, or one not
     /// accepting commands, fails the install (reported, not silent).
@@ -465,7 +465,7 @@ impl Engine {
         }
     }
 
-    /// A package download or verification failed (ADR-0026): the owning Agent reports
+    /// A package download or verification failed (ADR-0027): the owning Agent reports
     /// `InstallFailed` — a rejected package is a report, not a silence.
     pub fn package_download_failed(&mut self, index: usize, hash: Vec<u8>, error: String) {
         if let Some(agent) = self.agents.get_mut(index) {
@@ -482,7 +482,7 @@ impl Engine {
         }
     }
 
-    /// One Agent's next report, for the plain-HTTP verification probe (ADR-0014): a real
+    /// One Agent's next report, for the plain-HTTP verification probe (ADR-0013): a real
     /// exchange needs a real report. Delivered on success; a failed probe leaves a sequence gap
     /// the Baseline's `ReportFullState` recovery heals on the next exchange.
     pub fn probe_report(&mut self) -> Option<AgentToServer> {
@@ -498,7 +498,7 @@ impl Engine {
 
     /// Whether any Agent this Engine runs takes Server-offered packages — a self-update or a managed
     /// process's package. What the startup check uses to decide whether an unconfigured verification
-    /// key is worth warning about (ADR-0026).
+    /// key is worth warning about (ADR-0027).
     pub fn installs_packages(&self) -> bool {
         self.agents.iter().any(|a| a.state.accepts_packages())
     }
@@ -935,7 +935,7 @@ mod tests {
 
     /// A new certificate request is owed at once, so it never waits for a heartbeat; the same one
     /// re-sent while it waits for an operator rides the next report, so it never answers every
-    /// answer (ADR-0021 clause 21).
+    /// answer (ADR-0022 clause 9).
     /// Verifies: ADR-0021
     #[test]
     fn a_new_certificate_request_is_owed_at_once_and_a_repeated_one_is_not() {
@@ -1102,7 +1102,7 @@ mod tests {
 
     /// A download queued before a fetch raised its Supervisor's floor is refused before anything
     /// is downloaded, and reported `InstallFailed` naming the version and the floor.
-    /// Verifies: ADR-0061, Q-6
+    /// Verifies: ADR-0028, Q-6
     #[test]
     fn a_queued_download_below_a_floor_raised_since_is_refused() {
         use opamp::proto::{

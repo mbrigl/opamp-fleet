@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-review-binding.sh. Verifies: ADR-0060
+# Self-test of scripts/sensor-review-binding.sh. Verifies: ADR-0001
 #
 # Each case builds a throwaway git repository under a temporary directory with a main tagged
 # 'base' and a feat/ branch at it, merges one or more branches into that with --no-ff and a chosen
@@ -12,7 +12,7 @@
 # and code together and apart: the text of an ADR with other paths is listed, its Status, Date,
 # and Deciders lines and the index are not, inside a merged branch too.
 #
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 # Inputs: scripts/sensor-review-binding.sh scripts/lib/
 #
 # Usage:
@@ -369,7 +369,7 @@ expect 0 "the mixed commit names its ADR and its other path" "$d" \
   "decide and implement: changes the text of docs/adr/0001-one.md together with a.py"
 
 d="$(adr_repo adr-new)"
-printf '# ADR-0003: Two\n' > "$d/docs/adr/0002-two.md"
+printf '# ADR-0002: Two\n' > "$d/docs/adr/0002-two.md"
 echo "code" > "$d/a.py"
 commit_all "$d" "propose and implement"
 expect 0 "a new ADR in a commit with code is listed" "$d" "changes the text of docs/adr/0002-two.md"

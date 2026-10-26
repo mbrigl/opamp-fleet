@@ -1,6 +1,6 @@
 //! The Operator plane's credential check (ADR-0021 clause 2).
 //!
-//! Nothing configured authenticates on its own (ADR-0021 clause 26): a Basic password is kept as an
+//! Nothing configured authenticates on its own (ADR-0021 clause 21): a Basic password is kept as an
 //! Argon2id hash and verified against it, and a success is remembered for a while by the hash of
 //! the whole header, so a browser that re-sends the header with every request pays the password
 //! hash once and not per request.
@@ -112,7 +112,7 @@ impl Credentials {
     /// one address cannot hold every slot.
     pub async fn check(self: &Arc<Self>, peer: Option<IpAddr>, headers: &HeaderMap) -> Verdict {
         // The header carries the password until it is verified, so it is held in a buffer wiped
-        // when it is dropped (ADR-0057); the copy `hyper` keeps is its own.
+        // when it is dropped (ADR-0014); the copy `hyper` keeps is its own.
         let presented = Zeroizing::new(
             headers
                 .get(header::AUTHORIZATION)
@@ -222,7 +222,7 @@ impl Credentials {
             return true;
         }
         // The decoded credential is held in a buffer wiped when it is dropped, and the user and
-        // the password are borrowed from it (ADR-0057).
+        // the password are borrowed from it (ADR-0014).
         let Ok(decoded) = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map(Zeroizing::new)

@@ -1,7 +1,8 @@
 # Development observability stack
 
 OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry (ADR-0016), stored
-in one place — twice: in ClickHouse and, side by side, in Apache Doris. It is a Compose project of its own ([`compose.yaml`](compose.yaml)) that runs on the
+in one place — twice: in ClickHouse and, side by side, in Apache Doris. It is a Compose project of
+its own ([`compose.yaml`](compose.yaml)) that runs on the
 host, apart from the Dev Container: start it when you want to look, leave it off when you do not.
 This is a **development tool**: nothing shipped depends on it, it holds no credentials worth having,
 and it retains 24 h of data on a local volume.
@@ -73,7 +74,8 @@ usual and make sure the machine has network access. Without it, Grafana starts w
 and every panel reports one.
 
 **Every port but the stores' is published on every interface of the host**, as the stack has
-always been; rustfs and PostgreSQL are on the host's loopback ([below](#reaching-it-from-the-dev-container)). On a
+always been; rustfs and PostgreSQL are on the host's loopback
+([below](#reaching-it-from-the-dev-container)). On a
 machine that sits on a network you do not trust, bind them to the loopback instead:
 
 ```sh
@@ -86,7 +88,7 @@ container engine and its network mode, so check with the `curl` under
 
 ### Reaching it from the Dev Container
 
-The Dev Container has no Docker socket ([ADR-0002](../docs/adr/0002-dev-container-runtime.md)) and
+The Dev Container has no Docker socket ([ADR-0004](../docs/adr/0004-dev-container-runtime.md)) and
 needs none for this: it reaches the Collector **through the host**, over the ports published above.
 
 The Client sends own telemetry in plaintext to a loopback IP literal and nowhere else
@@ -142,7 +144,7 @@ store is reached, a connection error that it is not.
 ### The S3 store
 
 The stack carries rustfs, an S3-compatible store, for a development Server that keeps its
-artifacts in a bucket ([ADR-0049](../docs/adr/0049-artifact-bytes-may-live-in-an-s3-compatible-object-store.md)).
+artifacts in a bucket ([ADR-0029](../docs/adr/0029-the-servers-state-and-its-stores.md)).
 It is published on port 9100 and forwarded onto the Dev Container's loopback like the Collector,
 so `http://127.0.0.1:9100` is the same store on the host and in the container. The Server creates
 no bucket; create `fleet` once, with the development key pair of `compose.yaml`:
@@ -162,7 +164,7 @@ fleet-server s3::`.
 ### The database
 
 The stack carries PostgreSQL for a development Server that keeps its records in a database
-([ADR-0050](../docs/adr/0050-the-servers-records-may-live-in-postgresql.md)). It is published on
+([ADR-0029](../docs/adr/0029-the-servers-state-and-its-stores.md)). It is published on
 port 5432 and forwarded onto the Dev Container's loopback like the Collector, so `127.0.0.1:5432` is
 the same database on the host and in the container. The image creates the database and the role
 `fleet`, password `fleet`, on its first start; the Server creates its own tables. Point the Server
@@ -191,7 +193,8 @@ logs_endpoint    = "http://127.0.0.1:4318/v1/logs"
 
 Two things this stack is shaped around:
 
-- **Full URLs with path.** The Server appends no `/v1/metrics` for you, and the Collector's OTLP/HTTP
+- **Full URLs with path.** The Server appends no `/v1/metrics` for you, and the Collector's
+  OTLP/HTTP
   receiver routes on that path. An endpoint without it disappears into a 404.
 - **`http://` only to `127.0.0.1` or `[::1]`.** The Client refuses every other cleartext
   destination — a private address, a host name, even `localhost` — and reports the refusal rather
@@ -201,7 +204,8 @@ Two things this stack is shaped around:
   front of the Collector and offer the `https://` URL.
 
 Agents receive the offer only if they declare the matching capability (`ReportsOwnMetrics`,
-`ReportsOwnTraces`, `ReportsOwnLogs`), and each signal is independent — offer one, two, or all three.
+`ReportsOwnTraces`, `ReportsOwnLogs`), and each signal is independent — offer one, two, or all
+three.
 
 **The Collector is not optional any more.** ClickHouse speaks no OTLP, so unlike Tempo, Loki and
 Prometheus there is no backend to point an Agent at directly when the Collector is the broken thing.
@@ -227,7 +231,7 @@ latter. Metric names are stored unmodified — `process.memory.usage`, `process.
 `process.uptime` — with no Prometheus-style normalisation to unpick.
 
 **The platform is on the Resource too.** `ResourceAttributes['os.type']` and `['host.arch']` — the
-two halves ADR-0026 selects a package variant by — plus `['os.description']` for the readable form.
+two halves ADR-0027 selects a package variant by — plus `['os.description']` for the readable form.
 They describe the *host*, not one Agent: this Client samples its own process and the Managed
 Processes it holds the pids of, so everything in one export runs on the machine the Resource names.
 Nothing else from the `AgentDescription`'s non-identifying attributes is sent — not the host's
@@ -279,7 +283,8 @@ Two things follow, and both are visible here:
   missing and every operation after it is there. A Client that already holds persisted settings puts
   the exporter in force at startup and does not have the gap.
 
-Drop any further dashboard JSON into `grafana/dashboards/` — it is picked up within 30 s, no restart.
+Drop any further dashboard JSON into `grafana/dashboards/` — it is picked up within 30 s, no
+restart.
 
 ### Why the line panels set an interval and a null threshold
 
@@ -324,7 +329,8 @@ same tables. It is not in Grafana's plugin catalog and it is unsigned: the one-s
 `grafana-doris-app` service installs a pinned release checked against its SHA-256, and
 `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS` names it.
 
-**The twins are generated, never edited.** [`grafana/doris-dashboards.py`](grafana/doris-dashboards.py)
+**The twins are generated, never edited.**
+[`grafana/doris-dashboards.py`](grafana/doris-dashboards.py)
 copies each ClickHouse dashboard — layout, units, options — and replaces the datasource, the SQL,
 the title, the uid and the links. After changing a ClickHouse dashboard, run it again; a panel it
 has no Doris query for fails the run, so a new panel cannot ship without its twin.
@@ -346,11 +352,13 @@ the other, and every panel shifts by the difference.
 
 **Fixed addresses.** The Doris images register FE and BE with each other by IP only, so the
 project network has a subnet of its own, `10.250.0.0/24`. If that collides with a network on the
-host, set `DORIS_SUBNET_PREFIX` (e.g. `DORIS_SUBNET_PREFIX=10.251.7`) — before the first start, since
+host, set `DORIS_SUBNET_PREFIX` (e.g. `DORIS_SUBNET_PREFIX=10.251.7`) — before the first start,
+since
 the BE's address is stored in the FE's metadata volume; afterwards, `down -v` first.
 
 **`vm.max_map_count`.** Doris asks the host for 2000000, far above common defaults (262144 on
-many hosts), and rootless Podman cannot change it. The BE image skips that check, so it starts anyway — fine for a development
+many hosts), and rootless Podman cannot change it. The BE image skips that check, so it starts
+anyway — fine for a development
 load. For more, on the host: `sudo sysctl -w vm.max_map_count=2000000`.
 
 **Neither store depends on the other at runtime.** Each exporter queues on its own: a Doris that is

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Claims a ticket under docs/plan/ by its branch, ticket/<spec>/<NN>-<slug> (ADR-0004).
+# Claims a ticket under docs/plan/ by its branch, ticket/<spec>/<NN>-<slug> (ADR-0006).
 #
 # Without a remote, the claim is the local branch, created at main: it holds among the sessions
 # that share this repository, its worktrees included, because git refuses a branch that exists.

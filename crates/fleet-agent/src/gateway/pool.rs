@@ -3,7 +3,7 @@
 //! Two rules do the work. The pool **grows lazily** to its configured cap — a Gateway in front of
 //! three Agents holds three connections, not ten — and an Agent is **stuck to its connection** by
 //! `instance_uid` for as long as that connection lives and the Gateway carries the Agent: while a
-//! downstream WebSocket that reported for it is open, or while its binding stands (ADR-0058). Its
+//! downstream WebSocket that reported for it is open, or while its binding stands (ADR-0015). Its
 //! place goes the moment the Gateway stops carrying it, and its next report is placed anew.
 //! Nothing in the protocol requires the stickiness; it keeps one Agent's `sequence_num` stream and
 //! its `ReportFullState` exchanges on a single socket, which is what makes a fleet debuggable.
@@ -13,7 +13,7 @@
 //!
 //! Any live connection carries any downstream Agent: every one is opened with this Gateway's own
 //! identity and nothing else, so nothing on it depends on the peer an Agent came through
-//! (ADR-0058).
+//! (ADR-0015).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

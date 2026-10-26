@@ -8,7 +8,7 @@ description: Set a project up from this template interactively, one question at 
 The steps and what each one decides are [`TEMPLATE-SETUP.md`](../../../TEMPLATE-SETUP.md); the
 rules on ADRs are [`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules). This skill is the order of
 the conversation and states no rule of its own
-([ADR-0005](../../../docs/adr/0005-procedures-as-skills.md)).
+([ADR-0003](../../../docs/adr/0003-procedures-as-skills.md)).
 
 ## How the conversation runs
 
@@ -84,7 +84,7 @@ documents of `docs/` get the project's name in their title.
 
 Step 4, one decision at a time through [`propose-adr`](../propose-adr/SKILL.md), weighed against
 the specification just written: the simplest fitting concepts proposed, the human chooses, each
-choice an ADR ([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules), rule 3). ADR-0002 is taken up
+choice an ADR ([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules), rule 3). ADR-0004 is taken up
 beside the environment, as the setup file says. For the harness, ask whether
 agents are to work tickets in parallel; if so, the ADR takes the catalogue's form *Parallel
 tickets under a cap* and names the command that starts each agent without a human.

@@ -1,11 +1,11 @@
-//! The floor of each Agent type on this Client (ADR-0061 clause 4): fetched from the endpoint —
+//! The floor of each Agent type on this Client (ADR-0028 clause 17): fetched from the endpoint —
 //! the Server, or the Gateway this Client sits behind — verified against `[packages]
 //! verification_key`, and kept, the highest version per type, in `<state_dir>/package-floors.json`.
-//! Every package offer is held to it, the Client's own included (clauses 5 and 8).
+//! Every package offer is held to it, the Client's own included (ADR-0028 clauses 18 and 21).
 //!
 //! A floor only rises here. A floor that does not verify, or that orders below the one kept, is
 //! ignored; a failed fetch keeps what is held; and nothing the Server sends lowers a floor — only
-//! the host does, by editing or deleting the file while the Client is stopped (clause 7).
+//! the host does, by editing or deleting the file while the Client is stopped (ADR-0028 clause 20).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::config::ClientConfig;
 
-/// The file under `state_dir` that holds the floors. Like the high-water marks (ADR-0043 clause 8)
+/// The file under `state_dir` that holds the floors. Like the high-water marks (ADR-0028 clause 8)
 /// it sits outside `supervisor_dir`, and its name holds a `.`, which no Supervisor name can: no
 /// purge of a Supervisor's directory deletes it.
 pub const FILE: &str = "package-floors.json";
@@ -61,8 +61,8 @@ pub fn parse(body: &[u8]) -> Result<Floors, String> {
     serde_json::from_slice(body).map_err(|e| e.to_string())
 }
 
-/// Whether `floor` is the operator's for `agent_type`: its version SemVer (ADR-0043 clause 2) and
-/// its signature one `key` verifies over the floor statement (ADR-0061 clause 1).
+/// Whether `floor` is the operator's for `agent_type`: its version SemVer (ADR-0028 clause 2) and
+/// its signature one `key` verifies over the floor statement (ADR-0028 clause 14).
 #[must_use]
 pub fn verifies(key: &[u8], agent_type: &str, floor: &Floor) -> bool {
     let Ok(signature) = hex::decode(&floor.signature) else {
@@ -83,11 +83,11 @@ pub fn verifies(key: &[u8], agent_type: &str, floor: &Floor) -> bool {
 /// was kept, so a later change of the key does not undo it. A file that exists but does not parse,
 /// or maps a type to a version that is not SemVer, is never read as empty: every floor then
 /// answers the reason, which refuses every package offer until the operator repairs or deletes the
-/// file (ADR-0061 clause 4).
+/// file (ADR-0028 clause 17).
 pub struct FloorFile {
     path: PathBuf,
     /// `[packages] verification_key`: without it nothing verifies, so nothing is fetched or kept —
-    /// and no package is taken anyway (ADR-0026).
+    /// and no package is taken anyway (ADR-0027).
     key: Option<Vec<u8>>,
     kept: Mutex<Result<Floors, String>>,
     /// When a fetch was last tried, whatever came of it.
@@ -180,8 +180,8 @@ impl FloorFile {
         crate::storage::write_private(&self.path, &json)
     }
 
-    /// Fetches the floors from `config`'s endpoint and keeps what verifies (clause 4). A failed
-    /// fetch keeps the floors held, and is logged. Nothing is fetched without a key.
+    /// Fetches the floors from `config`'s endpoint and keeps what verifies (ADR-0028 clause 17). A
+    /// failed fetch keeps the floors held, and is logged. Nothing is fetched without a key.
     pub async fn update(&self, config: &ClientConfig) {
         if self.key.is_none() {
             return;
@@ -291,7 +291,7 @@ mod tests {
     /// A served floor that verifies is kept and written owner-only; a higher one raises it; one
     /// that does not verify — signed by another key, over another type, or a package signature —
     /// or that orders below the one kept is ignored, and the file keeps the highest.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0028
     #[test]
     fn a_floor_that_does_not_verify_or_orders_below_the_kept_one_is_ignored() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -346,7 +346,7 @@ mod tests {
 
     /// A floor is verified when it is kept, not again when the file is read: a Client whose key
     /// changed keeps it.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0028
     #[test]
     fn a_kept_floor_is_not_verified_again_when_the_file_is_read() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -363,7 +363,7 @@ mod tests {
 
     /// A file that does not parse, or maps a type to a version that is not SemVer, is never read
     /// as empty: every floor answers a reason naming the file, and nothing fetched replaces it.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0028
     #[test]
     fn an_unreadable_floors_file_answers_every_floor_with_its_name() {
         let operator = keypair();
@@ -396,7 +396,7 @@ mod tests {
 
     /// A fetch that fails keeps the floors held; one that succeeds keeps what verifies; and a
     /// fetch is due again only once the last try is older than asked.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0028
     #[tokio::test]
     async fn a_failed_fetch_keeps_the_kept_floors() {
         opamp::tls::install_ring_provider();

@@ -282,7 +282,7 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
 /// settings offer ends the transport run, and the gateway task is restarted with the new
 /// configuration (ADR-0015) — because the pool dials the endpoint an offer can move. The
 /// Supervisors must live straight through it, and the Gateway must come back serving.
-/// Verifies: ADR-0015, ADR-0014
+/// Verifies: ADR-0015, ADR-0013
 #[tokio::test]
 async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_running() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -441,8 +441,8 @@ async fn a_gateway_that_cannot_bind_is_loud() {
 
 /// A Gateway whose store of bindings cannot be read refuses every downstream Agent, and the host
 /// goes on: the Client's own Agent and the process it supervises reach the Server, while a
-/// WebSocket upgrade at the Gateway is answered `503` (ADR-0058 clause 3).
-/// Verifies: ADR-0058
+/// WebSocket upgrade at the Gateway is answered `503` (ADR-0015 clause 16).
+/// Verifies: ADR-0015
 #[tokio::test]
 async fn an_unreadable_store_of_bindings_refuses_downstream_and_the_host_goes_on() {
     let (addr, state, dir) = spawn_server().await;

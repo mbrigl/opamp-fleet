@@ -7,7 +7,7 @@
 //! Supervisor's. It is not a Server in the specification's sense — it manages no fleet, holds
 //! no configuration, and serves exactly one local process; for a Foreign Agent nothing ever
 //! connects, and that is the whole of the handling. The communication itself is
-//! `opamp::server`'s, the same endpoint the Server and the Gateway sit on (ADR-0010).
+//! `opamp::server`'s, the same endpoint the Server and the Gateway sit on (ADR-0008).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ pub struct Endpoint {
     /// How long a connection may take to send its request headers.
     header_read_timeout: Duration,
     /// What a connection must present as `Authorization: Bearer …` (ADR-0015); empty asks nothing.
-    /// Wiped when it is dropped (ADR-0057).
+    /// Wiped when it is dropped (ADR-0014).
     token: Zeroizing<String>,
 }
 
@@ -75,7 +75,7 @@ impl Endpoint {
     }
 
     /// Tightens the header bound — what a test waits out instead of the 30 seconds every OpAMP
-    /// listener applies (ADR-0010).
+    /// listener applies (ADR-0008).
     #[must_use]
     pub fn with_header_read_timeout(mut self, timeout: Duration) -> Self {
         self.header_read_timeout = timeout;
@@ -110,7 +110,7 @@ impl Endpoint {
                 any_path: true,
             },
         );
-        // On the listener every OpAMP endpoint is served on (ADR-0010), so a local process that
+        // On the listener every OpAMP endpoint is served on (ADR-0008), so a local process that
         // falls silent mid-request is bounded as a remote one is.
         let handle = Handle::new();
         let trigger = handle.clone();
@@ -135,13 +135,13 @@ struct Folding {
     events: EventSender,
     shutdown: Shutdown,
     /// The `Authorization` value a connection must carry; `None` asks nothing. Wiped when it is
-    /// dropped (ADR-0057).
+    /// dropped (ADR-0014).
     expected: Option<Zeroizing<String>>,
 }
 
 /// A fresh token for one Supervisor start (ADR-0015): 32 bytes from the system's secure random
 /// source, hex. The bytes and the token are held in buffers wiped when they are dropped, the token
-/// sized up front so it is never grown (ADR-0057).
+/// sized up front so it is never grown (ADR-0014).
 ///
 /// # Errors
 /// Returns an error when no secure random source is available.
@@ -159,7 +159,7 @@ pub fn new_token() -> Result<Zeroizing<String>, String> {
     Ok(token)
 }
 
-/// `Bearer <token>`, sized up front so the buffer is never grown and left behind (ADR-0057).
+/// `Bearer <token>`, sized up front so the buffer is never grown and left behind (ADR-0014).
 fn bearer(token: &str) -> Zeroizing<String> {
     const SCHEME: &str = "Bearer ";
     let mut value = Zeroizing::new(String::with_capacity(SCHEME.len() + token.len()));
@@ -416,7 +416,7 @@ mod tests {
     /// the WebSocket upgrade is dropped, other connections are served while it hangs, and the
     /// endpoint serves the next one afterwards — the measure, since a listener that died would
     /// drop the first connection too.
-    /// Verifies: ADR-0010
+    /// Verifies: ADR-0008
     #[tokio::test]
     async fn a_half_finished_upgrade_is_dropped_and_the_endpoint_keeps_serving() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

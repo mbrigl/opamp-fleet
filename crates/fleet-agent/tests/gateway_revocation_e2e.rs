@@ -1,7 +1,7 @@
-//! A Gateway refuses what its Server revoked, end to end (ADR-0015 clause 14, ADR-0021 clause 43):
+//! A Gateway refuses what its Server revoked, end to end (ADR-0015 clause 14, ADR-0021 clause 34):
 //! the real Server on mutual TLS with its register, the real Gateway fetching the list from it,
 //! and a downstream peer whose certificate the Server revokes. The floors the Gateway hands down
-//! are held to the same admission (ADR-0061 clause 3).
+//! are held to the same admission (ADR-0028 clause 16).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -78,7 +78,7 @@ impl Fleet {
         Fleet::start_with(mark, None).await
     }
 
-    /// The same, with the Server's rate limit on the Agent plane armed (ADR-0013).
+    /// The same, with the Server's rate limit on the Agent plane armed (ADR-0012).
     async fn start_with(mark: bool, agent_rate: Option<fleet_server::agent_rate::Limits>) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -140,7 +140,7 @@ impl Fleet {
             assert!(revocations.set_gateway(&gateway_host, true).expect("mark"));
         }
 
-        // One floor stored before the Gateway starts, which fetches it at once (ADR-0061).
+        // One floor stored before the Gateway starts, which fetches it at once (ADR-0028).
         let floors = fleet_server::floors::PackageFloors::open(Box::new(
             fleet_server::fs::FsFloorStore::open(&pki.join("fleet-configs")),
         ))
@@ -433,7 +433,7 @@ async fn a_certificate_the_server_revokes_is_refused_behind_the_gateway() {
 /// A host behind the Gateway is handed the floors the Gateway fetched from its Server, as the
 /// Server serves them; once the Server revokes the host's certificate, the floors are refused to
 /// it as its reports are.
-/// Verifies: ADR-0061
+/// Verifies: ADR-0028
 #[tokio::test]
 async fn a_host_behind_the_gateway_is_handed_the_floors_it_fetched_behind_the_admission() {
     let fleet = Fleet::start(true).await;
@@ -513,7 +513,7 @@ async fn a_gateway_whose_list_goes_stale_admits_nobody() {
 /// `Unavailable`, routed back to it by its `instance_uid`; its neighbour's reports keep being
 /// processed, because behind a marked Gateway each Agent has a bucket of its own inside the
 /// Gateway's aggregate.
-/// Verifies: ADR-0013, ADR-0015
+/// Verifies: ADR-0012, ADR-0015
 #[tokio::test]
 async fn a_throttled_agent_behind_a_gateway_hears_unavailable_and_its_neighbour_does_not() {
     let unavailable = |reply: &opamp::proto::ServerToAgent| {

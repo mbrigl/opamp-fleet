@@ -116,7 +116,7 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
     common::stop_client(&mut client);
 }
 
-/// ADR-0026 end to end: a Supervisor configured for a package that is a whole tree runs the
+/// ADR-0027 end to end: a Supervisor configured for a package that is a whole tree runs the
 /// program from inside it. The tree is put in place here rather than delivered, because what this
 /// has to prove is the half the unit tests cannot — that the path the *configuration* resolves to
 /// at startup is the path the process is actually spawned from, across the process boundary.
@@ -213,9 +213,9 @@ fn a_collector_supervisor_passes_each_config_entry_as_a_config_flag() {
     common::stop_client(&mut client);
 }
 
-/// ADR-0023: supplementary content is on disk next to the configuration — that is what makes a
+/// ADR-0025: supplementary content is on disk next to the configuration — that is what makes a
 /// `${file:...}` reference resolve — but it is never handed to the Collector as `--config`.
-// Verifies: ADR-0023
+// Verifies: ADR-0025
 #[test]
 fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -264,7 +264,7 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
     common::stop_client(&mut client);
 }
 
-/// ADR-0017 clause 53 end to end: a listed Collector runs on the files the operator placed in its
+/// ADR-0017 clause 50 end to end: a listed Collector runs on the files the operator placed in its
 /// `config/` directory, and the Server's last configuration stored there before the switch is not
 /// among what it is started with.
 /// Verifies: ADR-0017
@@ -369,11 +369,11 @@ fn sigterm_stops_the_managed_process_and_the_client_cleanly() {
 
 /// Where the Client's command line names the second service — as the unit `service install
 /// --process-account` writes does — the shipped Client starts its Managed Process through it, not
-/// itself (ADR-0059 clause 3): the stub's parent is the second service. Run without a second
+/// itself (ADR-0020 clause 18): the stub's parent is the second service. Run without a second
 /// account: the service runs in this test, under this test's uid, which the Client is told is the
 /// process account's, and as this test's process, which a `systemctl` on the Client's `PATH`
-/// names as the one systemd runs as the second service (ADR-0059 clause 4).
-/// Verifies: ADR-0059
+/// names as the one systemd runs as the second service (ADR-0020 clause 19).
+/// Verifies: ADR-0020
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_client_told_of_the_second_service_starts_its_program_through_it() {

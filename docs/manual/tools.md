@@ -24,7 +24,8 @@ deliberately does not do.
 Every release publishes it for Linux and macOS, on amd64 and arm64, as
 `opamp-fleetctl_<version>_<os>_<arch>.tar.gz` beside the Client's assets, with its CycloneDX SBOM
 `opamp-fleetctl_<version>_<os>_<arch>.cdx.json`, covered by the same `SHA256SUMS` and by the
-release's build-provenance attestation. Verify the archive before you run it, since this program makes the fleet's keys: the attestation
+release's build-provenance attestation. Verify the archive before you run it, since this program
+makes the fleet's keys: the attestation
 proves it was built by this repository's release workflow, and its hash must match its line in
 `SHA256SUMS` (`sha256sum`, or `shasum -a 256` on macOS). The archive holds the one program,
 executable:
@@ -76,7 +77,8 @@ Four things it does on every run:
   the host is unbroken.
 - **It uploads the agent's default configuration with the package** — but only the ones the
   Server does not already have, see [below](#the-default-configuration).
-- **It never distributes anything.** Uploading stores a Package and saves a Configuration; reaching a
+- **It never distributes anything.** Uploading stores a Package and saves a Configuration; reaching
+  a
   host is the rollout act, which stays yours
   ([step 6 of the walkthrough](rollout.md#6-roll-it-out)).
 
@@ -222,7 +224,8 @@ The Server decides some uploads before it reads a byte of the artifact, and says
 | `413 …` | The artifact is past `max_package_size_bytes`. |
 
 Because the refusal arrives while the artifact is still being sent, the connection can reset before
-the answer is read; the tool then asks the Server once more with an empty body to recover the reason,
+the answer is read; the tool then asks the Server once more with an empty body to recover the
+reason,
 so what you see is the status and message above rather than a bare connection error. A message that
 does still begin `cannot reach` is what it says — the Server was not answering — and it carries the
 underlying cause (DNS, refused connection, TLS) rather than only the request that failed.
@@ -234,7 +237,8 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
   signature on each entry it uploaded
   ([step 4](rollout.md#4-give-it-to-the-server)). Until then the entries are offered to nobody.
 - **It does not aim, and it does not roll out.** A Package reaches a host only once a Deployment
-  holds it, and which channel that is is not a decision a fetch tool should make. What it stores sits
+  holds it, and which channel that is is not a decision a fetch tool should make. What it stores
+  sits
   in the store, visible as `in no deployment`, until you put it somewhere
   ([step 5](rollout.md#5-put-it-in-a-deployment)); the tool prints the call.
 
@@ -375,6 +379,8 @@ The fleet's certificates, made without `openssl` or any other tool.
 | `p12-extract <bootstrap.p12> --out <dir> [--password-file <file>]` | writes the file's certificate as `bootstrap.pem` and its key, unencrypted and owner-only, as `bootstrap-key.pem`, the pair a Client's install takes; asks for the password with input hidden, or reads it from the first line of `--password-file`; overwrites neither file |
 
 None of them makes a bootstrap certificate: the Server issues those, on
-`POST /api/v1/bootstrap-certificates` ([Setting up a fleet](setup.md#4-configure-and-install-a-client)).
-The Server makes no CA and no server certificate. Its own `server pki status --config <server.toml>` says when the
+`POST /api/v1/bootstrap-certificates` ([Setting up a
+fleet](setup.md#4-configure-and-install-a-client)).
+The Server makes no CA and no server certificate. Its own `server pki status --config <server.toml>`
+says when the
 certificates of the Server host end, by the same rule.

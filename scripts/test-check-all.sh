@@ -120,9 +120,9 @@ expect_exit() {
 d="$(repo full)"
 expect "without --changed everything runs" "$d" "${scripts[*]}" ""
 
-# The bash floor (ADR-0003): below it the runner stops before any check and names both versions;
+# The bash floor (ADR-0002): below it the runner stops before any check and names both versions;
 # at it, the guard says nothing.
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 d="$(repo old-bash)"
 out="$(CHECK_ALL_BASH_VERSION=3.2 bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
 if ((rc == 2)) && [[ "$out" == *"need bash 4.4 or later"* && "$out" == *"this is bash 3.2"* && "$out" != *"RAN "* ]]; then

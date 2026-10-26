@@ -3,7 +3,7 @@
 # item '- **<Name>:** …' that docs/adr/template.md writes (ADR-0001). check-docs.sh fails on a
 # field written in any other form, so every other reader may take the list item for granted.
 # The identifier of an ADR is read one way too: its number, or the draft identifier of an ADR that
-# has not reached main, 'ADR-draft-<slug>' in the file 'draft-<slug>.md' (ADR-0003).
+# has not reached main, 'ADR-draft-<slug>' in the file 'draft-<slug>.md' (ADR-0002).
 # Sourced by scripts/check-docs.sh, scripts/check-traceability.sh,
 # scripts/sensor-binding-adrs.sh, and scripts/number-adrs.sh.
 
@@ -11,7 +11,7 @@
 ADR_SLUG_RE='[a-z0-9]+(-[a-z0-9]+)*'
 # An ADR as it is cited: 'ADR-' and the key of its file, its number or 'draft-<slug>'.
 ADR_REF_RE="ADR-([0-9]{4}|draft-$ADR_SLUG_RE)"
-# An identifier a 'Verifies:' marker cites: an ADR, a goal, or a quality goal (ADR-0003).
+# An identifier a 'Verifies:' marker cites: an ADR, a goal, or a quality goal (ADR-0002).
 # shellcheck disable=SC2034 # ADR_ID_RE is the sourcing script's
 ADR_ID_RE="$ADR_REF_RE|[GQ]-[0-9]+"
 

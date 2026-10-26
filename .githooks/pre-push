@@ -46,7 +46,7 @@ while read -r _ local_object remote_ref _; do
   refs=$((refs + 1))
   [[ "$local_object" =~ ^0+$ ]] && continue
   sent=$((sent + 1))
-  # A draft ADR takes its number on the branch of its pull request into main (ADR-0003); the
+  # A draft ADR takes its number on the branch of its pull request into main (ADR-0002); the
   # notice says so on every push that carries one, and decides nothing.
   drafts="$(git ls-tree --name-only "$local_object" docs/adr/ 2>/dev/null | grep -c '^docs/adr/draft-.*\.md$')"
   if ((drafts > 0)); then

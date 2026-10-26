@@ -16,7 +16,7 @@ pub struct Resolved<'a> {
     pub plugin: &'a dyn Plugin,
     pub settings: toml::Table,
     pub program: Program,
-    /// Where the program sits inside a package tree (ADR-0026); `None` for a single file.
+    /// Where the program sits inside a package tree (ADR-0027); `None` for a single file.
     pub program_path: Option<PathBuf>,
     pub service_name: String,
     pub timing: Timing,
@@ -136,7 +136,7 @@ pub fn take_program(
     Ok((settings, program, program_path))
 }
 
-/// Where the program sits inside a package tree (ADR-0026): the block's answer, or the one the kind
+/// Where the program sits inside a package tree (ADR-0027): the block's answer, or the one the kind
 /// knows (ADR-0017). A kind that knows it refuses a block that states it, for the reason
 /// [`take_program`] refuses a program name.
 ///
@@ -219,7 +219,7 @@ pub struct Timing {
     pub retain_previous: Duration,
 }
 
-/// The Agent type this Supervisor presents, whatever its Managed Process reports (ADR-0055): the
+/// The Agent type this Supervisor presents, whatever its Managed Process reports (ADR-0016): the
 /// kind's, the block's, else the program's file name.
 ///
 /// The file-name fallback is what the operator already wrote in this very block; it is read from

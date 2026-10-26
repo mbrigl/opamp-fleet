@@ -82,7 +82,8 @@ starts the Supervisor — the walkthrough's remaining steps are the same either 
 Server-delivered block may name its program **only by a bare file name** — one this Client owns and
 updates from signed packages; a block that names an absolute path is refused, because
 that would let the Server spawn a machine binary that never passed through package signing. An
-absolute-path Supervisor is the operator's to write in `supervisor.toml` on the host, not the Server's
+absolute-path Supervisor is the operator's to write in `supervisor.toml` on the host, not the
+Server's
 to push.
 
 ## 2. Build the artifact
@@ -146,7 +147,8 @@ archive_key = "…the same value…"
 
 Already have an upstream release? Then it is already a `.tar.gz` and needs no repacking — that is
 the point of the design. The OpenTelemetry Collector, for instance, publishes its distributions on
-the [collector releases page](https://github.com/open-telemetry/opentelemetry-collector-releases/releases),
+the [collector releases
+page](https://github.com/open-telemetry/opentelemetry-collector-releases/releases),
 one artifact per platform named `<distribution>_<version>_<os>_<arch>.tar.gz`:
 
 ```console
@@ -265,8 +267,10 @@ $ curl --cacert ca.pem -X PUT https://127.0.0.1:4321/api/v1/deployments/canary/p
 Each Selector pair must equal an attribute the Agent reported — `channel` here comes from
 `[attributes]` in `supervisor.toml`, or from a label you set on the Server. **The Server prescribes
 no key**: `channel` says which stream of versions a host follows, `region` where it runs, `tenant`
-whose it is, and all three are yours to invent (see the Server manual, *Channels are a partition*). **The Selector may not
-be empty**: an Agent belongs to at most one Deployment, so a channel matching everybody would collide
+whose it is, and all three are yours to invent (see the Server manual, *Channels are a partition*).
+**The Selector may not
+be empty**: an Agent belongs to at most one Deployment, so a channel matching everybody would
+collide
 with every other one. That is the price of the model and it is worth saying out loud — **there is
 no "everyone" shortcut.** A host that carries no such value belongs to no Deployment and waits.
 
@@ -288,7 +292,8 @@ Package and the platforms it is unsigned for, and nothing is released.
 
 Check the channel's counts first — they are on `GET /api/v1/deployments` and on its row in the UI.
 `claiming_agents` is who is in the channel: `0` means the Selector missed. `targeted_agents` is who
-the act would actually move, which is what the press changes. `conflicting_agents` is who this channel
+the act would actually move, which is what the press changes. `conflicting_agents` is who this
+channel
 cannot reach because a second Deployment claims them too — resolve that by narrowing a Selector,
 because the Server will not pick between two channels.
 
@@ -309,7 +314,8 @@ is refused while a second one claims it too: naming one here would sidestep the 
 than fix it.
 
 **Finishing the rollout** is giving the stable channel the same version and pressing again. Widening
-the canary channel instead is *not* how it ends: both channels would then claim the same hosts, which is
+the canary channel instead is *not* how it ends: both channels would then claim the same hosts,
+which is
 a conflict, not a rollout.
 
 ## 7. Send its configuration
@@ -362,7 +368,8 @@ on `apply_grace_secs`** — a version that will not stay up is rolled back to it
 ## 9. Ship an update
 
 An update is steps 2 to 6 again with a new version — a new version is a new Package, and the
-old one stays in the store beside it. The channel is the constant; **what it holds is what changes**,
+old one stays in the store beside it. The channel is the constant; **what it holds is what
+changes**,
 which is why the swap is explicit:
 
 ```console
@@ -380,14 +387,17 @@ Without `?replace=true` the fourth line answers `409` naming 3.0.0 — a channel
 Agent type, and swapping the version it runs is meant to be something you say rather than
 something that happens.
 
-The channel is untouched, and 3.0.0 stays in the store beside 3.1.0 — but **putting 3.0.0 back in the
-channel is not how you take 3.1.0 back**. A Package reaches an Agent only as an upgrade over the version
+The channel is untouched, and 3.0.0 stays in the store beside 3.1.0 — but **putting 3.0.0 back in
+the
+channel is not how you take 3.1.0 back**. A Package reaches an Agent only as an upgrade over the
+version
 that Agent reports installed, so once the channel reports
 3.1.0 the older one reaches nobody: the channel's act answers `{"assigned_agents": 0}` and the
 per-Agent act answers `409`. An Agent that reports no version for the package is measured by the
 version it reports *running* instead,
 so this holds on a host the fleet has never installed anything on — and where an Agent reports both,
-the version it reports *running* decides and the package status is not read beside it, so a record left behind by an
+the version it reports *running* decides and the package status is not read beside it, so a record
+left behind by an
 install that did not take cannot strand the host.
 
 What takes a bad version back is the host: the version 3.1.0 superseded is kept for

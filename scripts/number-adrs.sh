@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Gives every draft ADR its number (ADR-0003). A draft is named ADR-draft-<slug>, in the file
+# Gives every draft ADR its number (ADR-0002). A draft is named ADR-draft-<slug>, in the file
 # docs/adr/draft-<slug>.md, until the pull request that brings it to main; on the branch of that
 # pull request, once it has taken up the current main, this script gives the drafts the next free
 # numbers, in the order their files were added on the branch, and commits twice:

@@ -151,7 +151,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "[attributes]\n",
             "env = \"prod\"\n\n",
             // The set the Server delivers below carries arguments; the operator consents to that
-            // here, where the Server cannot (ADR-0017 clause 38).
+            // here, where the Server cannot (ADR-0017 clause 35).
             "[supervisors]\n",
             "delivered_args = true\n\n",
             "{otelcol_block}\n",
@@ -213,7 +213,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // The operator distributes a Configuration for the supervised type, and a YAML one typed for
     // the Client itself — saved, put into a Deployment claiming all three, then rolled out,
-    // because saving alone distributes nothing (ADR-0025, ADR-0034); the act assigns every Agent
+    // because saving alone distributes nothing (ADR-0026); the act assigns every Agent
     // the Deployment claims, fits each Configuration to its type, and the Server pushes the
     // release over the socket.
     common::save(&state, "fleet", "receivers: {}\n", otelcol_type);
@@ -245,7 +245,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     .await;
     assert_ne!(restarted_stub_pid, first_stub_pid);
 
-    // The written entry files carry the Configuration's name (ADR-0023) and are what the
+    // The written entry files carry the Configuration's name (ADR-0025) and are what the
     // processes were pointed at.
     let collector_argv = std::fs::read_to_string(&otelcol_marker).expect("collector marker");
     assert!(collector_argv.contains("--config"));
@@ -275,7 +275,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     .await;
 
     // The Client's own Agent reports the Client's version instead — never a Managed Process's,
-    // because it has none (ADR-0018 makes it visible; ADR-0012 supplies the version).
+    // because it has none (ADR-0018 makes it visible; ADR-0033 supplies the version).
     let snapshot = state.snapshot();
     let client_agent = view(&snapshot, "Supervisor Agent").expect("the client's own agent");
     assert_ne!(client_agent.service_version, "9.9.9");
@@ -285,7 +285,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     );
 
     // The Client-wide attributes arrived — they describe the *host*, so both Agents carry them
-    // (ADR-0023).
+    // (ADR-0025).
     let agents = state.snapshot();
     let stub = view(&agents, "stub").expect("stub view");
     let otelcol = view(&agents, "otelcol").expect("otelcol view");
@@ -327,7 +327,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // …and a Deployment aimed at it reaches that Agent and no other. The label replaced the
     // Agent's labels, so the stub has left the fleet-wide channel: an Agent belongs to one
-    // Deployment, and this one holds both Configurations (ADR-0034).
+    // Deployment, and this one holds both Configurations (ADR-0026).
     common::save(&state, "edge-extra", "processors: {}\n", otelcol_type);
     assert_eq!(
         common::release(
@@ -393,8 +393,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // ——— The Server manages the Client's own Supervisor set (ADR-0017) ———
 
     // The YAML Configuration typed for the Client keeps poisoning its composed map. A pinned
-    // Configuration cannot be deleted (ADR-0034), and taking it out of the Deployment withdraws
-    // nothing already rolled out (ADR-0025) — the Client keeps its pinned assignment until the
+    // Configuration cannot be deleted (ADR-0026), and taking it out of the Deployment withdraws
+    // nothing already rolled out (ADR-0026) — the Client keeps its pinned assignment until the
     // next press. So the recovery is to take it out and press the Deployments again: the Client's
     // release drops it, while the Supervisors' revision — body and role unchanged — keeps its hash.
     assert!(
@@ -607,7 +607,7 @@ async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
 /// ADR-0017 over one connection: a released Configuration reaches the unlisted Supervisor and not
 /// the listed one, whose Agent declares neither remote-configuration capability. Switched back on,
 /// the next start declares both, is offered what is released, and the stored offer replaces every
-/// file in `config/`, the operator's included (clauses 3 and 8).
+/// file in `config/`, the operator's included (ADR-0017 clause 52).
 /// Verifies: ADR-0017
 #[tokio::test]
 async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
@@ -718,7 +718,7 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
 /// set that would add a block reaches neither `supervisor.toml` nor the running Supervisors, and
 /// the Client's own Agent declares neither remote-configuration capability and reports no status.
 /// Switched back on, the next start is offered the released set, and it replaces the
-/// `[[supervisor]]` array, the operator's block included (clauses 22, 25 and 27).
+/// `[[supervisor]]` array, the operator's block included (ADR-0017 clause 44).
 /// Verifies: ADR-0017
 #[tokio::test]
 async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {

@@ -12,17 +12,17 @@ name: Checks
 # references once a project runs that sensor with --require; their self-tests fail like any
 # check's. The sensors job checks out the full history because three sensors read it. The review
 # binding sensor runs in review-binding.yml, the repository settings sensor on a human's
-# instruction (ADR-0003); this workflow runs the self-test of each.
+# instruction (ADR-0002); this workflow runs the self-test of each.
 #
 # The actions job holds the supply chain: every third-party action pinned to a commit SHA whose
 # release tag still points to it, every first-party action on its major tag, Dependabot raising
-# both (ADR-0044), checked by scripts/check-action-refs.sh --resolve, which reads the tags with git
+# both (ADR-0010), checked by scripts/check-action-refs.sh --resolve, which reads the tags with git
 # ls-remote; and scripts/check-build-hardening.sh: no checkout keeps the token, the release is gated
 # on advisories and built uncached with pinned tools, and the compiler, the release profile's
 # overflow checks and the crates that forbid unsafe code are as that script lists.
 #
 # The rust job builds, tests, and lints the Cargo workspace with scripts/check-rust.sh, the commands
-# of README.md → "Build, Test & Run" on the stack of ADR-0010, the same script scripts/check-all.sh
+# of README.md → "Build, Test & Run" on the stack of ADR-0008, the same script scripts/check-all.sh
 # runs, so the build and the tests gate a push as they gate a merge. It is the one job of this
 # workflow that installs something: rustup reads rust-toolchain.toml on first use, and the cache
 # keeps the build within its timeout.
@@ -79,7 +79,7 @@ jobs:
         run: bash scripts/test-check-protocol-baseline.sh
       # Check 16 reads the branch the change lands on from GitHub's own variables: a draft ADR
       # fails on a pull request into main once it is ready for review, and on a push to main
-      # (ADR-0003). A draft pull request tests a feat/ branch still under rework, and passes.
+      # (ADR-0002). A draft pull request tests a feat/ branch still under rework, and passes.
       - name: Check documentation consistency
         run: bash scripts/check-docs.sh
         env:
@@ -177,7 +177,7 @@ jobs:
         run: bash scripts/sensor-action-refs.sh
       - name: Self-test the review binding sensor
         run: bash scripts/test-sensor-review-binding.sh
-      # The repository settings sensor itself runs on a human's instruction (ADR-0003).
+      # The repository settings sensor itself runs on a human's instruction (ADR-0002).
       - name: Self-test the repository settings sensor
         run: bash scripts/test-sensor-repo-settings.sh
 

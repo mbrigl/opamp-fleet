@@ -7,9 +7,9 @@ description: Revisit the design of what recent work touched — the tickets of a
 
 The rule is [`AGENTS.md` §5](../../../AGENTS.md#5-quality-bar--definition-of-done); that a spec
 closes only after this has run, and that it is due after a number of changes without a spec, is
-decided in [ADR-0004](../../../docs/adr/0004-feature-layer.md). This skill runs in a fresh
+decided in [ADR-0006](../../../docs/adr/0006-feature-layer.md). This skill runs in a fresh
 session and states no rule of its own
-([ADR-0005](../../../docs/adr/0005-procedures-as-skills.md)).
+([ADR-0003](../../../docs/adr/0003-procedures-as-skills.md)).
 
 ## 1. Scope
 
@@ -68,7 +68,7 @@ Then it is an entry in [`docs/CONVENTIONS.md`](../../../docs/CONVENTIONS.md).
 
 Then the reverse: a convention or a check that prevented nothing during the work in scope is
 dropped, unless an ADR or a criterion cites it
-([ADR-0003](../../../docs/adr/0003-decisions-verified-by-tests.md)).
+([ADR-0002](../../../docs/adr/0002-decisions-verified-by-tests.md)).
 
 Then the rules added since the last revision: every rule written into
 [`AGENTS.md`](../../../AGENTS.md), the [README](../../../README.md), or the

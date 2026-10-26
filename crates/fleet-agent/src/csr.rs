@@ -32,7 +32,7 @@ const RENEW_AFTER: f64 = 2.0 / 3.0;
 /// right now.
 ///
 /// A request in flight is re-sent unchanged until it is answered: an enrolment waits for an
-/// operator, and the Server's queue knows a request by its public key (ADR-0021 clause 21).
+/// operator, and the Server's queue knows a request by its public key (ADR-0022 clause 9).
 /// Generating one **writes the private key** to the state directory before the request goes out,
 /// as a pending key beside the one in force, so an answer arriving after a restart is still usable
 /// and the certificate in force keeps its own key until the new one is proved.
@@ -76,9 +76,9 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
         ));
     }
     // Whole or not at all, through a temporary name and a rename in the held directory, so a link
-    // the service's account put at either name is replaced rather than written through (ADR-0054).
+    // the service's account put at either name is replaced rather than written through (ADR-0020).
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0059 clause 6).
+    // may pass through (ADR-0020 clause 21).
     held(state_dir)?
         .write(PENDING_CERT_FILE, cert_pem, 0o600)
         .map_err(|e| format!("cannot store the issued certificate: {e}"))?;
@@ -86,7 +86,7 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
 }
 
 /// The state directory, held without following a link at its name: an install enrols as root in a
-/// directory that belongs to the service's account (ADR-0054).
+/// directory that belongs to the service's account (ADR-0020).
 fn held(state_dir: &Path) -> Result<HeldDir, String> {
     HeldDir::open(state_dir).map_err(|e| format!("cannot open {}: {e}", state_dir.display()))
 }
@@ -157,8 +157,8 @@ fn certifies(dir: &HeldDir, cert_pem: &[u8], key_name: &str) -> bool {
 }
 
 /// The SHA-256 fingerprint of the key a request in flight asks to be certified — the one logged
-/// when the request was generated, and the `id` the Server's queue lists it under (ADR-0021
-/// clause 22). `None` when no request is in flight or its key cannot be read.
+/// when the request was generated, and the `id` the Server's queue lists it under (ADR-0022
+/// clause 10). `None` when no request is in flight or its key cannot be read.
 #[must_use]
 pub fn pending_fingerprint(state_dir: &Path) -> Option<String> {
     use sha2::{Digest, Sha256};
@@ -226,20 +226,20 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     // Server to match on (ADR-0021): identity is `instance_uid`, and the Server may re-key it.
     let mut params = CertificateParams::new(vec![config.name.clone()])
         .map_err(|e| format!("cannot build a certificate request: {e}"))?;
-    // The subject an operator reads in the enrolment queue (ADR-0021 clause 22); rcgen's default
+    // The subject an operator reads in the enrolment queue (ADR-0022 clause 10); rcgen's default
     // names every host alike.
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, config.name.clone());
-    // A renewal says which certificate it renews, signed with that certificate's key (ADR-0021
-    // clause 27): the Server carries the host on from it even when a Gateway is in between.
+    // A renewal says which certificate it renews, signed with that certificate's key (ADR-0015
+    // clause 18): the Server carries the host on from it even when a Gateway is in between.
     if let Some(proof) = renewal_proof(config, &key) {
         let uri = rcgen::string::Ia5String::try_from(proof)
             .map_err(|e| format!("cannot build a renewal proof: {e}"))?;
         params.subject_alt_names.push(rcgen::SanType::URI(uri));
     } else if let Some(proof) = bootstrap_proof(config, &key) {
         // An enrolment says which bootstrap certificate it enrols with, signed with its key
-        // (ADR-0039): the Server files the request under it, directly or through a Gateway.
+        // (ADR-0015): the Server files the request under it, directly or through a Gateway.
         let uri = rcgen::string::Ia5String::try_from(proof)
             .map_err(|e| format!("cannot build a bootstrap proof: {e}"))?;
         params.subject_alt_names.push(rcgen::SanType::URI(uri));
@@ -252,7 +252,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
 
     // Held without following a link at its name, and each file written whole over a link at its
     // own: an install enrols as root in a directory that belongs to the service's account
-    // (ADR-0054). Passed through by the process group where one is registered (ADR-0059 clause 6).
+    // (ADR-0020). Passed through by the process group where one is registered (ADR-0020 clause 21).
     crate::storage::create_shared_dir(
         &config.state_dir,
         &config.state_dir,
@@ -273,10 +273,10 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     )
     .map_err(|e| format!("cannot store the private key: {e}"))?;
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0059 clause 6).
+    // may pass through (ADR-0020 clause 21).
     dir.write(PENDING_CSR_FILE, csr.as_bytes(), 0o600)
         .map_err(|e| format!("cannot store the certificate request: {e}"))?;
-    // What the operator matches in the enrolment queue (ADR-0021 clause 22): the same SHA-256 the
+    // What the operator matches in the enrolment queue (ADR-0022 clause 10): the same SHA-256 the
     // Server lists as the request's key fingerprint.
     {
         use sha2::{Digest, Sha256};
@@ -312,7 +312,7 @@ fn renewal_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
     ))
 }
 
-/// The bootstrap proof for `new_key` (ADR-0039), while this Client holds no certificate the Server
+/// The bootstrap proof for `new_key` (ADR-0015), while this Client holds no certificate the Server
 /// issued: the certificate it presents — the bootstrap certificate it enrols with — and a signature
 /// with that certificate's key. `None` with nothing to present, or when the pair cannot be read or
 /// its key cannot sign; the Server then reads the certificate from the handshake of a direct
@@ -326,7 +326,7 @@ fn bootstrap_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
         return None;
     }
     let identity = crate::tls::client_tls(config).ok()?.identity?;
-    // Read here only to sign: the key moves into a buffer wiped on drop (ADR-0057).
+    // Read here only to sign: the key moves into a buffer wiped on drop (ADR-0014).
     let key_pem = Zeroizing::new(identity.key_pem);
     let certificate = opamp::tls::certificates(&identity.cert_pem).ok()?;
     let leaf = certificate.first()?;
@@ -416,7 +416,7 @@ mod tests {
 
     /// Where a process account is registered, its group passes through the state directory, and
     /// the request and the certificate are the Client's alone: `0600`, beside the key.
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[test]
     fn with_a_process_account_the_request_and_the_certificate_are_owner_only() {
@@ -670,7 +670,7 @@ mod tests {
     /// An enrolling Client proves in its request the bootstrap certificate it presents — from the
     /// configured pair, and from the identity a `bootstrap.p12` opened to — signed with its key;
     /// once it holds a certificate the Server issued, its renewal carries a renewal proof alone.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0015
     #[test]
     fn an_enrolment_request_proves_its_bootstrap_certificate() {
         let dir = tempfile::tempdir().expect("tempdir");

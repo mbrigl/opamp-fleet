@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Sensor: the frontier of the plan (ADR-0004).
+# Sensor: the frontier of the plan (ADR-0006).
 #
 # Reads every ticket under docs/plan/ — a file docs/plan/<spec>/<NN>-<slug>.md — and sorts it
 # into one of three lists: claimed, when the branch ticket/<spec>/<NN>-<slug> exists, locally or
@@ -109,7 +109,7 @@ for t in "${tickets[@]}"; do
 done
 
 if ((${#errors[@]})); then
-  echo "Plan frontier sensor: $((${#errors[@]})) ticket(s) unreadable (ADR-0004):" >&2
+  echo "Plan frontier sensor: $((${#errors[@]})) ticket(s) unreadable (ADR-0006):" >&2
   printf '  - %s\n' "${errors[@]}" >&2
   exit 1
 fi

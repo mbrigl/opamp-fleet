@@ -8,7 +8,7 @@
 # unchanged repository reports nothing; every other case is one thing the sensor reports, or one
 # it must stay silent on.
 #
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 # Inputs: scripts/sensor-tests-kept.sh scripts/lib/ .agents/skills/propose-adr/concepts/toolchain.md
 #
 # Usage:
@@ -126,7 +126,7 @@ expect 0 "every marker the catalogue's table names is one the sensor finds" "$d"
 
 # Called by its path from a subdirectory of another repository, the sensor reads the one it lives
 # in, as the checks do: the tag 'base' exists only there.
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 d="$(repo own-repository)"
 mkdir -p "$d/scripts/lib" && cp "$SENSOR" "$d/scripts/" && cp "$ROOT/scripts/lib/git.sh" "$d/scripts/lib/"
 git -C "${d:?}" rm -q tests/a_test.py

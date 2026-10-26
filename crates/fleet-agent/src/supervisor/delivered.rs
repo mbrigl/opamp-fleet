@@ -1,5 +1,5 @@
 //! What a Server-delivered `[[supervisor]]` block may bring, checked against the configuration
-//! in force (ADR-0017 clauses 38, 39 and 54). The rules are the core's; the plugin registry
+//! in force (ADR-0017 clauses 35, 36 and 51). The rules are the core's; the plugin registry
 //! that names the kinds stays with the composition root, which hands the plugins in.
 
 use crate::config::{ClientConfig, SupervisorBlock};
@@ -27,7 +27,7 @@ pub fn check(
         .map(|existing| &existing.settings);
     if running.remote_config_disabled(&block.name) {
         // A listed Supervisor's block is the operator's whole: repeated as it runs, or added
-        // naming its program and nothing else (ADR-0017 clause 54).
+        // naming its program and nothing else (ADR-0017 clause 51).
         let named = running
             .supervisors
             .iter()
@@ -55,7 +55,7 @@ pub fn check(
 
 /// A delivered block for a Supervisor whose remote configuration is switched off configures
 /// nothing, whatever `delivered_args` and `delivered_env` allow: any key it may change would be a
-/// configuration by another route (ADR-0017 clause 54). With a block of that name running, the
+/// configuration by another route (ADR-0017 clause 51). With a block of that name running, the
 /// delivered one equals it whole; added, it carries `type`, `name` and — where the kind does not
 /// name its own program — the kind's program key, and nothing else.
 fn check_listed_block(
@@ -136,7 +136,7 @@ fn check_listed_block(
 
 /// Variables that steer which code a program loads — the dynamic loader's, `PATH` and Windows'
 /// `PATHEXT` and `COMSPEC`, the hooks and search paths of common runtimes — refused in a delivered
-/// block whatever `delivered_env` allows (ADR-0017 clause 38). Compared without regard to case, as
+/// block whatever `delivered_env` allows (ADR-0017 clause 35). Compared without regard to case, as
 /// Windows compares environment names.
 const LOADING_NAMES: &[&str] = &[
     "PATH",

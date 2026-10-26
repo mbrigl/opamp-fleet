@@ -1,4 +1,4 @@
-//! The audit record on the filesystem (ADR-0022): the default adapter behind
+//! The audit record on the filesystem (ADR-0023): the default adapter behind
 //! [`AuditStore`](crate::audit_log::AuditStore).
 
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -14,7 +14,7 @@ pub struct FsAuditStore {
 }
 
 impl FsAuditStore {
-    /// Opens the store in the data directory `root`, creating `audit/` owner-only (ADR-0037). The
+    /// Opens the store in the data directory `root`, creating `audit/` owner-only (ADR-0029). The
     /// newest file is continued.
     ///
     /// # Errors
@@ -23,7 +23,7 @@ impl FsAuditStore {
     pub fn open(root: &Path) -> Result<Self, String> {
         let dir = root.join(super::AUDIT);
         super::create_private_dir(&dir)?;
-        // The directory's own name, durable before the first file in it is (ADR-0022).
+        // The directory's own name, durable before the first file in it is (ADR-0023).
         super::sync_dir_of(&dir)?;
         for (name, path) in super::entries(&dir)? {
             if !path.is_file() || seq_in(&name).is_none() {
@@ -96,7 +96,7 @@ fn open_append(path: &Path) -> Result<(std::fs::File, u64), String> {
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?
         .len();
     // A new file's name is durable only once its directory is: without that, a crash can take the
-    // file and every entry synced into it (ADR-0022).
+    // file and every entry synced into it (ADR-0023).
     if size == 0 {
         super::sync_dir_of(path)?;
     }
@@ -243,7 +243,7 @@ impl AuditStore for FsAuditStore {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0023
     #[test]
     fn the_record_is_owner_only_and_continues_where_it_ended() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -292,7 +292,7 @@ mod tests {
 
     /// A record a crash cut mid-line goes on from its last whole entry, on a line of its own, and
     /// says it was torn; an empty newest file is passed over.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0023
     #[test]
     fn a_torn_record_goes_on_from_its_last_whole_entry() {
         let dir = tempfile::tempdir().expect("tempdir");

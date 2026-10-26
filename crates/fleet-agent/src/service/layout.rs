@@ -1,4 +1,4 @@
-//! The versioned install layout (ADR-0019): what makes a future self-update a pointer switch.
+//! The versioned install layout (ADR-0020): what makes a future self-update a pointer switch.
 //!
 //! ```text
 //! <root>/versions/supervisor-<MAJOR.MINOR.PATCH>-<hash>/supervisor
@@ -7,11 +7,11 @@
 //!
 //! The default state directory is [`STATE_DIR_NAME`] under the *data* root — the same directory
 //! as this layout's root everywhere except Linux system installs, where the layout executes from
-//! `/opt` while data stays in `/var/lib` (ADR-0019 clause 8).
+//! `/opt` while data stays in `/var/lib` (ADR-0019 clause 12).
 //!
 //! The directory name is Elastic Agent's `<component>-<version>-<hash>` scheme: always the bare
 //! version base and the commit short-hash, never the pre-release — whether a directory holds a
-//! release or a dev build is answered by the manifest inside it, which records the full ADR-0012
+//! release or a dev build is answered by the manifest inside it, which records the full ADR-0033
 //! version string and the binary's SHA-256 (what a future self-update verifies against). The
 //! service's program is `<root>/current/supervisor`, so switching versions never
 //! re-registers the service.
@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::nofollow::HeldDir;
 
-/// The platform's binary filename inside a version directory (ADR-0019).
+/// The platform's binary filename inside a version directory (ADR-0019, ADR-0020).
 ///
 /// It is two contracts at once: the program a service unit is registered against, and the archive
 /// member a self-update extracts from an offered package. Changing it after a release is therefore
@@ -37,17 +37,17 @@ pub const BINARY_FILENAME: &str = if cfg!(windows) {
 /// [`BINARY_FILENAME`] carries without its Windows extension. One definition, so the directory and
 /// the file it holds cannot drift.
 ///
-/// Not the product's, and not the service's. ADR-0019 clause 3 registers the service under
-/// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME), and clause 9 keeps this constant off it on
-/// purpose: the version directory and the archive member a self-update extracts are identical in
+/// Not the product's, and not the service's. ADR-0020 clause 17 registers the service under
+/// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME), and ADR-0020 clause 6 keeps this constant off it
+/// on purpose: the version directory and the archive member a self-update extracts are identical in
 /// every variant build, which is what lets one published package Set serve them all.
 pub const COMPONENT: &str = "supervisor";
 
 /// The manifest inside each version directory: the full version string and the content hash.
 const MANIFEST_FILENAME: &str = "manifest.toml";
 
-/// The state directory's name under its root (ADR-0019) — the *data* root, which ADR-0019
-/// clause 3 places beside the configuration rather than inside the executable layout on Linux
+/// The state directory's name under its root (ADR-0019) — the *data* root, which ADR-0020
+/// clause 17 places beside the configuration rather than inside the executable layout on Linux
 /// system installs.
 pub const STATE_DIR_NAME: &str = "state";
 
@@ -91,7 +91,7 @@ impl Layout {
     ///
     /// On Unix this is atomic: a temporary symlink is `rename`d over `current` (never
     /// unlink-then-relink, which leaves a window with no pointer). On Windows the junction is
-    /// recreated; callers only switch while the service is stopped (ADR-0019).
+    /// recreated; callers only switch while the service is stopped (ADR-0020).
     ///
     /// # Errors
     /// Returns an error if the pointer cannot be created.
@@ -113,7 +113,7 @@ impl Layout {
                     .map_err(|e| format!("cannot remove the current junction: {e}"))?;
             }
             // A directory junction needs no symlink privilege (unlike a real symlink), which is
-            // why ADR-0019 uses one. `mklink /J` is the canonical way to create it.
+            // why ADR-0020 uses one. `mklink /J` is the canonical way to create it.
             //
             // Both paths go through `backslashed` first: `mklink` is a `cmd` builtin, and `cmd`
             // reads `/` as the start of a switch. A root an operator wrote as `C:/fleet` — which
@@ -147,7 +147,7 @@ impl Layout {
         Some((Layout::new(root), version_dir.to_path_buf()))
     }
 
-    /// Self-heal a torn pointer switch (ADR-0019): if `current` does not resolve to
+    /// Self-heal a torn pointer switch (ADR-0020): if `current` does not resolve to
     /// `running_dir` — the version directory this binary actually runs from — repoint it.
     /// Returns whether a repair happened.
     ///
@@ -183,8 +183,8 @@ impl Layout {
     }
 }
 
-/// The version-directory name for a full ADR-0012 version string:
-/// `supervisor-<MAJOR.MINOR.PATCH>-<hash>` — never the pre-release (ADR-0019).
+/// The version-directory name for a full ADR-0033 version string:
+/// `supervisor-<MAJOR.MINOR.PATCH>-<hash>` — never the pre-release (ADR-0020).
 #[must_use]
 pub fn version_dir_name(full_version: &str) -> String {
     let (base, metadata) = full_version.split_once('+').unwrap_or((full_version, ""));
@@ -266,7 +266,7 @@ fn plain(path: PathBuf) -> PathBuf {
 
 /// What a `service` verb knows of where an installed Client lives before it reads the
 /// configuration: its two roots, and the state directory an administrator named — by
-/// `--state-dir`, or by the registration an earlier install wrote (ADR-0053 clause 3).
+/// `--state-dir`, or by the registration an earlier install wrote (ADR-0019 clause 14).
 #[derive(Debug, Clone)]
 pub struct Roots {
     /// The absolute `--state-dir` this command was given.
@@ -282,10 +282,10 @@ pub struct Roots {
 /// Whether `dir` lies beneath one of `roots`, through real directories only: the test a directory
 /// taken from `supervisor.toml` passes before `service install` or `service config` acts on it.
 ///
-/// The file belongs to the service's account (ADR-0042 clause 2), and the install runs as root or
+/// The file belongs to the service's account (ADR-0020 clause 1), and the install runs as root or
 /// an Administrator, creates what it names, restricts it on Windows and hands it over to that
 /// account. A directory the file names is therefore that account's word, and it is taken only where
-/// the install's own roots already are (ADR-0053 clause 4): lexically beneath one of them, with no
+/// the install's own roots already are (ADR-0019 clause 15): lexically beneath one of them, with no
 /// `.` or `..` after the root, and with every component below the root that exists a directory and
 /// not a symbolic link or junction — a link the account planted there would carry what the install
 /// does out of the root. The roots are the operator's, named by flag or by platform default, and
@@ -362,10 +362,10 @@ fn manifest(written_by: &str, version: &str, sha256: &str) -> String {
 /// (`<root>/current/supervisor`). Staging an already-present version replaces its contents — an
 /// idempotent re-install, never a silent mix of two builds — except when the staged binary
 /// already holds these exact bytes, which is skipped rather than rewritten: `service install`
-/// can arrive through the `PATH` symlink (ADR-0019) and then *runs from* the staged file, and
+/// can arrive through the `PATH` symlink (ADR-0020) and then *runs from* the staged file, and
 /// Linux refuses to write over a running executable (`ETXTBSY`).
 ///
-/// The layout root belongs to the service's account (ADR-0054), and this runs as root. So
+/// The layout root belongs to the service's account (ADR-0020), and this runs as root. So
 /// `versions/` and the version directory are each opened without following a link at their name,
 /// and the program and the manifest are written whole to new temporary names and renamed into
 /// place, the program executable from its creation: a link the account put anywhere below the root
@@ -418,7 +418,7 @@ pub fn stage_current_exe(layout: &Layout) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0020
     #[test]
     fn the_directory_name_is_base_plus_hash_never_the_prerelease() {
         assert_eq!(
@@ -446,9 +446,9 @@ mod tests {
     }
 
     /// Runs on every platform, because the pointer is *not* the same thing on every platform: a
-    /// symlink on Unix, a junction created through `cmd` on Windows (ADR-0019). Gating this to Unix
+    /// symlink on Unix, a junction created through `cmd` on Windows (ADR-0020). Gating this to Unix
     /// left the mechanism with the more moving parts as the untested one.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0020
     #[test]
     fn set_current_points_and_repoints() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -495,7 +495,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0020
     #[cfg(unix)]
     #[test]
     fn stage_writes_binary_manifest_and_pointer() {
@@ -529,10 +529,10 @@ mod tests {
     }
 
     /// `service install` reached through the `PATH` symlink runs *from* the staged file
-    /// (ADR-0019); rewriting it would be refused (`ETXTBSY`), so identical bytes must be left
+    /// (ADR-0020); rewriting it would be refused (`ETXTBSY`), so identical bytes must be left
     /// alone. Observed via the modification time: pinned to the epoch, it only stays there when
     /// no write happened.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0020
     #[cfg(unix)]
     #[test]
     fn restaging_identical_bytes_leaves_the_staged_binary_untouched() {
@@ -564,7 +564,7 @@ mod tests {
 
     /// The skip is by content, never by presence: a staged binary holding the wrong bytes — a
     /// torn write, a tamper — is replaced, which is the idempotent re-install staging promises.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0020
     #[cfg(unix)]
     #[test]
     fn restaging_replaces_a_staged_binary_with_different_bytes() {
@@ -587,7 +587,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0020
     #[cfg(unix)]
     #[test]
     fn a_torn_pointer_is_healed_a_correct_one_left_alone() {
@@ -607,9 +607,9 @@ mod tests {
         assert!(!layout.heal_current(&b).expect("heal again"));
     }
 
-    /// What tells the second service that a self-update left it behind (ADR-0059 clause 2):
+    /// What tells the second service that a self-update left it behind (ADR-0020 clause 17):
     /// `current` names one version directory, and no other.
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[test]
     fn current_names_the_version_it_points_at_and_no_other() {
@@ -627,8 +627,8 @@ mod tests {
 
     /// Only a `current` that resolves to another version is evidence of a switch: one that does
     /// not resolve — missing, or dangling — is none, so the second service does not end on it
-    /// (ADR-0059 clause 2).
-    /// Verifies: ADR-0059
+    /// (ADR-0020 clause 17).
+    /// Verifies: ADR-0020
     #[cfg(unix)]
     #[test]
     fn a_pointer_that_does_not_resolve_names_no_other_version() {
@@ -665,7 +665,7 @@ mod tests {
     /// path `current_exe` hands back — the pointer, not the version directory behind it. The
     /// layout is invisible from there, so the resolution has to happen before anything looks for
     /// it. Provoked here with a symbolic link, which is what the pointer is on this platform anyway.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0019, ADR-0020
     #[cfg(unix)]
     #[test]
     fn the_layout_is_found_from_the_pointer_the_service_was_registered_against() {

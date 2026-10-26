@@ -18,7 +18,7 @@ use tracing::debug;
 use crate::supervisor::ports::{parse_settings, Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
 
-/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0010.
+/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
 /// `binary` is not among them: the core takes it out and resolves it (ADR-0017), and what arrives
 /// here is [`SupervisorContext::program`].
@@ -44,7 +44,7 @@ fn collector_spec(
     extra_args: &[String],
     env: &[(String, String)],
 ) -> Option<ProcessSpec> {
-    // Only the entries that *are* configuration: supplementary content (ADR-0023) sits in the same
+    // Only the entries that *are* configuration: supplementary content (ADR-0025) sits in the same
     // directory for the Collector to read by path, and handing it over as `--config` is exactly
     // what the role exists to prevent.
     let entries = crate::storage::config_entries(config_dir);
@@ -72,7 +72,7 @@ fn collector_spec(
         args,
         env: env.to_vec(),
         working_dir: None,
-        // One process, no worker of its own — signalling a group would gain nothing (ADR-0017 clause 56).
+        // One process, no worker of its own — signalling a group would gain nothing (ADR-0017 clause 53).
         own_process_group: false,
         // A Collector writes nothing outside what the install and the config
         // directory already provide.
@@ -80,7 +80,7 @@ fn collector_spec(
     })
 }
 
-/// The Collector kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0059).
+/// The Collector kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0020).
 #[derive(Default)]
 pub struct CollectorPlugin {
     pub spawner: Spawner,
@@ -133,7 +133,7 @@ impl Plugin for CollectorPlugin {
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
             retain_previous: ctx.retain_previous,
-            // A package (ADR-0026) swaps this Collector's program — one file, or a whole tree.
+            // A package (ADR-0027) swaps this Collector's program — one file, or a whole tree.
             install: Some(install),
             archive_key: ctx.archive_key,
             // The Collector states its version on `--version`, so even one without the
@@ -163,7 +163,7 @@ impl Plugin for CollectorPlugin {
             // the generic behaviour (ADR-0017), which is also what the reference supervisor does.
             reload_signal: None,
             // The Client itself, or the second service where a process account is registered
-            // (ADR-0059 clause 3): the registry says which.
+            // (ADR-0020 clause 18): the registry says which.
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
             supervisor_dir: ctx.supervisor_dir.clone(),

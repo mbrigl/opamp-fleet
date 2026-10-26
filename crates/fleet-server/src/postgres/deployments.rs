@@ -1,4 +1,4 @@
-//! Deployments in PostgreSQL (ADR-0050 clause 13): the PostgreSQL adapter behind
+//! Deployments in PostgreSQL (ADR-0029 clause 6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment, each
 //! call one transaction.
 
@@ -190,14 +190,14 @@ mod tests {
         assert_eq!(open().load().expect("load"), [deployment("stable", None)]);
     }
 
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0029
     #[test]
     fn the_deployment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0029
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), [before]);
     }
 
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0029
     #[test]
     fn a_put_that_fails_leaves_the_deployment_as_it_was_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -232,7 +232,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0029
     #[test]
     fn a_put_that_fails_leaves_the_deployment_as_it_was_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -245,8 +245,8 @@ mod tests {
         );
     }
 
-    /// A row that does not decode fails the load naming it (clause 13).
-    /// Verifies: ADR-0050
+    /// A row that does not decode fails the load naming it (ADR-0029 clause 6).
+    /// Verifies: ADR-0029
     #[test]
     fn a_deployment_row_that_does_not_decode_fails_the_load_naming_it() {
         let Some(test) = TestDatabase::named() else {

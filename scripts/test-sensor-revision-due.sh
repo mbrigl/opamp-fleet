@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-revision-due.sh. Verifies: ADR-0004
+# Self-test of scripts/sensor-revision-due.sh. Verifies: ADR-0006
 #
 # Each case builds a throwaway git repository under a temporary directory with a
 # docs/ARCHITECTURE.md carrying the 'Last design revision' line and commits on chosen dates,
@@ -9,7 +9,7 @@
 # counted (a docs-only commit, a merge, a change of the number), the due message with its
 # directories and their changes, and the three ways the line fails to read.
 #
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 # Inputs: scripts/sensor-revision-due.sh scripts/lib/
 #
 # Usage:

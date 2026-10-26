@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-traceability.sh. Verifies: ADR-0003
+# Self-test of scripts/check-traceability.sh. Verifies: ADR-0002
 #
 # Each case builds a throwaway git repository under a temporary directory — a specification with
 # the two criteria sections, a few ADRs, and a file carrying markers — runs the check against it,
@@ -182,7 +182,7 @@ adr "$d" 0002 "🟢 accepted"
 mark "G-1 $(adr_id 1) $(adr_id 2)" > "$d/tests/t.txt"
 expect fail "marker citing a superseded ADR" "$d" "'$(adr_id 1)', which is superseded or rejected"
 
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 # A draft is cited by its draft identifier, assembled for the same reason as adr_id.
 draft_id() { printf 'ADR-%s-%s' draft "$1"; }
 

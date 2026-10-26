@@ -77,7 +77,7 @@ impl SigningFile {
         if self.agent_type.is_empty() || self.version.is_empty() {
             return Err("the agent_type and the version must both be named".to_string());
         }
-        // The key never signs a version a Client would refuse (ADR-0043 clause 4).
+        // The key never signs a version a Client would refuse (ADR-0028 clause 4).
         crate::package::require_semver(&self.version)?;
         if self.entries.is_empty() {
             return Err("there are no entries to sign".to_string());

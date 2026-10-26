@@ -1,4 +1,4 @@
-//! The proof a certificate renewal carries (ADR-0021 clause 27): the certificate being renewed, and
+//! The proof a certificate renewal carries (ADR-0015 clause 18): the certificate being renewed, and
 //! a signature made with its key over the new key. The Server reads which host a renewal is for from
 //! the proof, not from the connection it arrives on — behind a Gateway that connection presents the
 //! Gateway's certificate.

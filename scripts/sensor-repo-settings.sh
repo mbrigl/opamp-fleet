@@ -4,7 +4,7 @@
 #
 # Some rules of this project only the GitHub repository can enforce; README.md lists them under
 # 'Repository settings'. This sensor reads them through the GitHub CLI and reports each one that
-# differs from that list (ADR-0003, sensors of the GitHub repository):
+# differs from that list (ADR-0002, sensors of the GitHub repository):
 #
 #   1. The rules in effect on main, from every ruleset that targets it: a pull request required,
 #      merge commit the only merge method, with no linear history required and a merge queue,

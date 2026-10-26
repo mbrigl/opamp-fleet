@@ -8,7 +8,7 @@ description: Normalize the project on a human's instruction — restate the spec
 The rule is rule 5 of [`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules), with rules 3 and 7; the
 mechanics of a normalization are in [`docs/adr/README.md`](../../../docs/adr/README.md#mechanics).
 This skill is the order of work and states no rule of its own
-([ADR-0005](../../../docs/adr/0005-procedures-as-skills.md)).
+([ADR-0003](../../../docs/adr/0003-procedures-as-skills.md)).
 
 ## 1. Entry point and inputs
 
@@ -44,7 +44,7 @@ with its files:
   for an adoption all of it, for a release what changed in the template's section between the
   two tags, such as the merge method or a required check.
   [`scripts/sensor-repo-settings.sh`](../../../scripts/sensor-repo-settings.sh), run on the
-  maintainer's instruction ([ADR-0003](../../../docs/adr/0003-decisions-verified-by-tests.md)),
+  maintainer's instruction ([ADR-0002](../../../docs/adr/0002-decisions-verified-by-tests.md)),
   reports what differs once the new README is in.
   A ruleset that still requires a check the workflow no longer runs blocks the merge; one that
   lacks a new check lets the merge through while that check fails.
@@ -113,5 +113,5 @@ cut, the clause table, and the review in its hand-off. One pull request lands th
 ([`AGENTS.md` §6](../../../AGENTS.md#6-project-rules)).
 
 In the template, the release that lands a normalization is a major, and its notes carry the map
-([ADR-0008](../../../docs/adr/0008-template-releases.md)). In a derived project that took up a
+([ADR-0005](../../../docs/adr/0005-template-releases.md)). In a derived project that took up a
 release, the `Template release` line moves to it in the same change.

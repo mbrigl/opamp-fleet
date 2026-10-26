@@ -7,7 +7,7 @@ description: Develop and submit an Architecture Decision Record. Use when a chan
 
 The rule is [`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules); the mechanics of the record are in
 [`docs/adr/README.md`](../../../docs/adr/README.md). This skill is the order of work. It states no
-rule of its own ([ADR-0005](../../../docs/adr/0005-procedures-as-skills.md)).
+rule of its own ([ADR-0003](../../../docs/adr/0003-procedures-as-skills.md)).
 
 ## 1. Calibrate
 
@@ -59,7 +59,7 @@ in the record.
    never by a number that does not exist yet.
 6. **Enforcement:** the test that will cite this ADR with a `Verifies:` marker, or a paragraph
    starting `**Not mechanically decidable:**` with the reason
-   ([ADR-0003](../../../docs/adr/0003-decisions-verified-by-tests.md)).
+   ([ADR-0002](../../../docs/adr/0002-decisions-verified-by-tests.md)).
 7. Add the index row in [`docs/adr/README.md`](../../../docs/adr/README.md), status and *Applies
    to* mirrored verbatim. For a supersession, flip the old ADR's status line in the same change.
 8. Run [`scripts/check-docs.sh`](../../../scripts/check-docs.sh).

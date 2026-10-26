@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0005 ADR-0008 ADR-0009
+# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0003 ADR-0005
 #
 # Each case builds a throwaway git repository under a temporary directory — a rule file with
 # numbered sections, a README with a Project Layout block, the required-checks markers, and the
@@ -595,79 +595,6 @@ d="$(repo consolidation-wrapped-half)"
 consolidation "$d" no wrap
 expect fail "a wrapped Supersedes field, the name on the second line not flipped" "$d" "0002-decision.md: 0003-decision.md supersedes it"
 
-# insert_line <file> <before|after> <ERE> <line> — put a line before or after the first line that
-# matches, the same way on GNU and BSD.
-insert_line() {
-  awk -v where="$2" -v re="$3" -v text="$4" '
-    !done && $0 ~ re { if (where == "after") print; print text; if (where == "before") print; done = 1; next }
-    { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
-}
-
-# partial <dir> <status of ADR 1> <Supersedes entry suffix> — ADR 2 supersedes ADR 1, whole or by
-# clause (ADR-0009); ADR 1 carries the given status line, ADR 2 the given text after its link.
-partial() {
-  local dir="$1" status="$2" suffix="$3"
-  adr "$dir" 1 "$status"
-  adr "$dir" 2 "🟡 proposed"
-  insert_line "$dir/docs/adr/0002-decision.md" before '^- \*\*Applies to:\*\*' \
-    "- **Supersedes:** [$(adr_id 1)](0001-decision.md)$suffix"
-  {
-    echo "# Architecture Decision Records"
-    echo
-    echo "### Binding"
-    echo
-    echo "| ADR | Title | Applies to | Status |"
-    echo "|-----|-------|------------|--------|"
-    [[ "$status" == ⚪* ]] || index_row 1 "$status"
-    index_row 2 "🟡 proposed"
-    echo
-    echo "### Superseded and rejected"
-    echo
-    echo "| ADR | Title | Applies to | Status |"
-    echo "|-----|-------|------------|--------|"
-    [[ "$status" == ⚪* ]] && index_row 1 "$status"
-  } > "$dir/docs/adr/README.md"
-}
-
-# --- cases: clause supersession (check 8). Verifies: ADR-0009 -------------------------------
-
-d="$(repo partial)"
-partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md)" " clause 2"
-expect pass "named clauses superseded, the old ADR active with the suffix" "$d"
-
-d="$(repo partial-no-suffix)"
-partial "$d" "🟢 accepted" " clauses 1 and 3"
-expect fail "named clauses superseded, the old ADR without the suffix" "$d" "0001-decision.md: 0002-decision.md supersedes it"
-
-d="$(repo partial-flipped)"
-partial "$d" "⚪ superseded by [$(adr_id 2)](0002-decision.md)" " clause 2"
-expect fail "named clauses superseded, the old ADR flipped to superseded whole" "$d" "supersedes only named clauses of it"
-
-d="$(repo whole-suffix-only)"
-partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md)" ""
-expect fail "a whole supersession, the old ADR left active with a clause suffix" "$d" "supersedes it whole, but its status is 🟢"
-
-d="$(repo partial-unclaimed)"
-partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md)" " clause 2"
-sed_in "$d/docs/adr/0002-decision.md" '/^- \*\*Supersedes:\*\*/d'
-expect fail "a clause suffix whose successor does not claim it" "$d" "0002-decision.md: 0001-decision.md says it supersedes"
-
-d="$(repo partial-two)"
-partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md) · clause 4 superseded by [$(adr_id 3)](0003-decision.md)" " clause 2"
-adr "$d" 3 "🟡 proposed"
-insert_line "$d/docs/adr/0003-decision.md" before '^- \*\*Applies to:\*\*' \
-  "- **Supersedes:** [$(adr_id 1)](0001-decision.md) clause 4"
-insert_line "$d/docs/adr/README.md" after '^\| \[0002\]' "$(index_row 3 '🟡 proposed')"
-expect pass "two successors superseding different clauses of one ADR" "$d"
-
-# A link target is a file name, and the word 'clauses' in it names no clause.
-d="$(repo whole-clause-word-in-target)"
-partial "$d" "⚪ superseded by [$(adr_id 2)](0002-decision.md)" ""
-sed_in "$d/docs/adr/0002-decision.md" "s|(0001-decision.md)|(0001-named-clauses.md)|"
-mv "$d/docs/adr/0001-decision.md" "$d/docs/adr/0001-named-clauses.md"
-sed_in "$d/docs/adr/README.md" "s|(0001-decision.md)|(0001-named-clauses.md)|"
-expect pass "a whole supersession whose link target carries the word 'clauses'" "$d"
-
 # --- cases: a citation into an external specification (check 4) ---------------------------
 
 d="$(repo rfc-markdown)"
@@ -716,7 +643,7 @@ d="$(repo check-lists)"
 echo 'run "Extra" scripts/check-extra.sh' >> "$d/scripts/check-all.sh"
 expect fail "a check the local runner has and CI does not" "$d" "CI and the local gate disagree"
 
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 d="$(repo script-in-no-list)"
 echo 'echo new' > "$d/scripts/check-new.sh"
 expect fail "a script that neither list runs" "$d" "scripts/check-new.sh: no workflow and not scripts/check-all.sh runs it"
@@ -867,7 +794,7 @@ expect pass "docs/plan/ named while there is no open work" "$d"
 
 # --- cases: drafts (checks 1, 2, 5, 6, 8, and 16) ---------------------------------------
 
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 DRAFT="draft"
 # draft_id <slug> — the draft identifier of a slug, assembled for the same reason as adr_id.
 draft_id() { printf 'ADR-%s-%s' "$DRAFT" "$1"; }

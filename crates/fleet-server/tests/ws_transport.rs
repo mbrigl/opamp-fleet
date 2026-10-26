@@ -1,4 +1,4 @@
-//! The WebSocket transport end to end (ADR-0013): framed exchange, the pushed offer on a config
+//! The WebSocket transport end to end (ADR-0012): framed exchange, the pushed offer on a config
 //! change, and disconnect handling.
 
 mod support;
@@ -55,7 +55,7 @@ async fn recv(socket: &mut Socket) -> ServerToAgent {
     }
 }
 
-/// Verifies: ADR-0013
+/// Verifies: ADR-0012
 #[tokio::test]
 async fn a_framed_report_is_answered() {
     let server = spawn().await;
@@ -105,9 +105,9 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
     assert!(nothing.is_err(), "no redundant reconfiguration is pushed");
 }
 
-/// ADR-0023: the operator's role reaches the Agent in `AgentConfigObject.role`, verbatim, and a
+/// ADR-0025: the operator's role reaches the Agent in `AgentConfigObject.role`, verbatim, and a
 /// Configuration without one leaves the field unset.
-// Verifies: ADR-0023
+// Verifies: ADR-0025
 #[tokio::test]
 async fn a_configuration_role_reaches_the_agent_verbatim() {
     let server = spawn().await;
@@ -139,7 +139,7 @@ async fn a_configuration_role_reaches_the_agent_verbatim() {
 /// Each Deployment's Selector aims at a subset; every Configuration a Deployment holds is one named
 /// entry of the offered config map, and one Configuration may sit in several Deployments. An Agent
 /// whose Deployment did not change is left alone.
-/// Verifies: ADR-0034, G-9
+/// Verifies: ADR-0026, G-9
 #[tokio::test]
 async fn selectors_target_a_subset_and_compose_named_entries() {
     let server = spawn().await;
@@ -379,7 +379,7 @@ async fn two_agents_share_one_connection() {
 
 /// The Baseline (message size limits): a WebSocket message past the receive limit is malformed,
 /// and the Server closes the connection with status code 1009 rather than acting on it.
-/// Verifies: ADR-0013
+/// Verifies: ADR-0012
 #[tokio::test]
 async fn an_oversized_frame_closes_the_connection_with_1009() {
     let server = support::spawn_with_limit(1024).await;
@@ -426,7 +426,7 @@ const SMALL: fleet_server::agent_rate::Limits = fleet_server::agent_rate::Limits
 /// A member past its burst is answered `Unavailable` with a `retry_info` of exactly 30 s, addressed
 /// to the Agent that sent the message; the session stays open, the Agent's record is untouched, and
 /// once the bucket refills the next message is processed and asked for a full report.
-/// Verifies: ADR-0013
+/// Verifies: ADR-0012
 #[tokio::test]
 async fn a_session_past_its_burst_is_answered_unavailable_with_retry_info() {
     use opamp::proto::server_error_response::Details;
@@ -477,7 +477,7 @@ async fn a_session_past_its_burst_is_answered_unavailable_with_retry_info() {
 /// work. A session is told why it ends — the close code for a server going away — and it is over,
 /// its Agent marked disconnected, by the time `serve` returns.
 ///
-/// Verifies: ADR-0013, ADR-0024
+/// Verifies: ADR-0012, ADR-0024
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shutdown_closes_the_websocket_sessions_before_serve_returns() {
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;

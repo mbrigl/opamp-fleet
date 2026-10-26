@@ -103,12 +103,14 @@ What it makes, so you need not:
 - **Three CAs with names of their own**, `OpAMP Fleet Server CA`, `OpAMP Fleet Client CA` and
   `OpAMP Fleet Bootstrap CA`, none able to sign a further CA. `--product` replaces `OpAMP Fleet`
   in all three, and `--organization` and `--organizational-unit` add an O and an OU to every
-  certificate `init` makes, for whoever audits them. The server CA and the client CA are valid for ten years; replacing either means
+  certificate `init` makes, for whoever audits them. The server CA and the client CA are valid for
+  ten years; replacing either means
   touching every host. The bootstrap CA is valid for one year; replacing it touches only the
   Server ([step 6](#6-living-with-the-certificates)).
 - **A server certificate** valid for 397 days, which keeps it within every browser's limit. Its
   subject says what it is, `OpAMP Fleet Server Certificate`; the names it is dialled by are in
-  its subject alternative names. It carries every `--name`, and always `127.0.0.1` and `::1` as well, so your browser and `curl`
+  its subject alternative names. It carries every `--name`, and always `127.0.0.1` and `::1` as
+  well, so your browser and `curl`
   reach the Operator plane through an SSH tunnel (step 2). A wildcard or a name that is neither a
   DNS name nor an address is refused.
 - **Keys the Server can read:** ECDSA P-256 in PKCS#8, the one form the client CA's key must have.
@@ -243,7 +245,8 @@ WantedBy=multi-user.target
 
 `ProtectSystem=strict` leaves the whole file system read-only to the Server except its
 `StateDirectory`, `/var/lib/opamp-fleet-server`, which holds `data_dir` in the configuration above.
-A `data_dir` anywhere else needs a `ReadWritePaths=` line naming it. A `listen` or `[rest] listen` port below 1024 needs
+A `data_dir` anywhere else needs a `ReadWritePaths=` line naming it. A `listen` or `[rest] listen`
+port below 1024 needs
 `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and `AmbientCapabilities=CAP_NET_BIND_SERVICE` instead
 of the empty lines. `systemd-analyze security opamp-fleet-server` rates what the unit leaves open.
 
@@ -330,7 +333,8 @@ takes it without a question when it is not interactive
 holds the `[tls]` section that names them there.
 
 **Install the Client** from the release's `.deb`, `.rpm` or `.msi`. The package registers the
-service and leaves it stopped (see [Installing from a native package](client.md#installing-from-a-native-package)).
+service and leaves it stopped (see [Installing from a native
+package](client.md#installing-from-a-native-package)).
 On Linux the service runs as the system account `opamp-fleet`, which the package creates. The
 install hands the files under the data root to it; a file you name elsewhere, such as under
 `/etc/opamp/`, the service reads only if that account may — give the key to the account, not to
@@ -427,7 +431,8 @@ INFO certificate request generated; an enrolling host waits for an operator's ap
 **Approve it.** Open the UI's **Enrolments** tab: it lists each waiting host with its full key
 fingerprint, its peer address, and the bootstrap certificate it carries: the subject values its
 host certificate will carry, and the serial and end it was issued with, or *not issued here* for
-one the Server did not issue. Compare the fingerprint with the one the host logged, check that the bootstrap
+one the Server did not issue. Compare the fingerprint with the one the host logged, check that the
+bootstrap
 certificate is the one you gave that host, then press **Approve**. The same over the API:
 
 ```console
@@ -559,7 +564,8 @@ ok        3649 days  2036-10-06  serial 2068…  O=Example Org, CN=OpAMP Fleet B
 
 **The server CA and the client CA outlast everything else**, so they live ten years. This
 project's own ends accept a CA past its end, but a browser or another OpAMP implementation may
-not, which is why its end is announced. Replacing the server CA means giving every host the new `ca_file`. Replacing the client
+not, which is why its end is announced. Replacing the server CA means giving every host the new
+`ca_file`. Replacing the client
 CA means every host enrols again: the Server renews only a certificate its current client CA
 issued.
 

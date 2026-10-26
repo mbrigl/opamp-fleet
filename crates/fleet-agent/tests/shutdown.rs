@@ -54,10 +54,10 @@ fn sigterm_shuts_the_client_down_cleanly() {
     }
 }
 
-/// The second service is a daemon too: `SIGHUP` leaves it serving (ADR-0019 clause 12), where the
+/// The second service is a daemon too: `SIGHUP` leaves it serving (ADR-0019 clause 18), where the
 /// default disposition would end it and leave every program it started running without it.
 /// `SIGTERM` still stops it, and it removes its socket on the way out.
-/// Verifies: ADR-0059
+/// Verifies: ADR-0020
 #[test]
 fn sighup_leaves_the_agents_service_running() {
     let dir = tempfile::tempdir().expect("create a tempdir");

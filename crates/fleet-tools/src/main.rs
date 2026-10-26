@@ -1,4 +1,4 @@
-//! `opamp-fleetctl` — the operator tool (ADR-0028): what an operator makes before a fleet does
+//! `opamp-fleetctl` — the operator tool (ADR-0032): what an operator makes before a fleet does
 //! anything useful, on the operator's own machine. `package` fetches, packs, hashes and signs
 //! package artifacts and makes the signing key; `pki` makes the fleet's certificates and says when
 //! they end. Neither the Server nor a Client depends on it, and a managed host never runs it.
@@ -21,7 +21,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "opamp-fleetctl",
     about = "The OpAMP Fleet operator tool: package artifacts and the fleet's certificates",
-    // The git-derived version baked in at build time (ADR-0012) — never clap's default, which
+    // The git-derived version baked in at build time (ADR-0033) — never clap's default, which
     // would report the static crate version.
     version = fleet_core::version::current()
 )]
@@ -30,7 +30,7 @@ struct Cli {
     tree: Tree,
 }
 
-/// The two command trees, and nothing else (ADR-0028 clause 15).
+/// The two command trees, and nothing else (ADR-0028 clause 22).
 #[derive(Subcommand)]
 enum Tree {
     /// Fetch, pack, hash and sign package artifacts, and make the package signing key.
@@ -44,7 +44,7 @@ enum Tree {
 
 fn main() -> ExitCode {
     // reqwest is built with `rustls-no-provider`, which refuses to construct a TLS client until a
-    // process-wide provider exists (ADR-0013).
+    // process-wide provider exists (ADR-0012).
     opamp::tls::install_ring_provider();
     let result = match Cli::parse().tree {
         Tree::Package(command) => package::run(command).map(|()| 0),
@@ -71,7 +71,7 @@ mod tests {
             .collect()
     }
 
-    // Verifies: ADR-0028, ADR-0031, ADR-0061
+    // Verifies: ADR-0032, ADR-0028
     #[test]
     fn the_program_has_two_trees_holding_the_operator_commands() {
         let cli = Cli::command();
@@ -102,11 +102,11 @@ mod tests {
         );
         assert!(
             Cli::try_parse_from(["opamp-fleetctl", "pki", "bootstrap-cert", "--out", "b"]).is_err(),
-            "the Server issues bootstrap certificates (ADR-0028)"
+            "the Server issues bootstrap certificates (ADR-0022)"
         );
     }
 
-    // Verifies: ADR-0028
+    // Verifies: ADR-0032
     #[test]
     fn the_version_flag_reports_the_baked_version() {
         let err = Cli::try_parse_from(["opamp-fleetctl", "--version"])

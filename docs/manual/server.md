@@ -516,7 +516,8 @@ gateway_burst = 10000
 
 See [Moving the fleet](#moving-the-fleet-connection-settings). Either key or both is valid, but
 not an empty section. The `endpoint` is `wss://` or `https://`; a `ws://` or `http://` endpoint
-is refused at startup, on the loopback too. The section carries no credential: `bearer_token_file`, `username`,
+is refused at startup, on the loopback too. The section carries no credential: `bearer_token_file`,
+`username`,
 `password_file`, `bearer_token` and `password` are each refused at startup by name.
 
 ```toml
@@ -558,7 +559,8 @@ letters, digits, `.`, `_` and `-` has it written as `%XX` in its file name.
 - **One step per write.** Every record is written to a temporary file beside it and renamed into
   place, so a crash leaves the old document or the new one. The register, the revocation list,
   the Hosts, the bootstrap records, the enrolment window, the floors and the audit reach the disk
-  before the decision they answer is. A temporary file a crash left behind is removed at the next start.
+  before the decision they answer is. A temporary file a crash left behind is removed at the next
+  start.
 - **Nothing else is read.** A file or directory the layout does not name, a file that does not
   parse, or one whose name disagrees with what it holds stops the start, naming the path — a store
   that merely looked empty would be worse. Every artifact is hashed again at startup — in a bucket,
@@ -673,7 +675,8 @@ refused, and no refusal carries a `WWW-Authenticate` challenge.
 A certificate proves **fleet membership, not identity**. Its subject is the Server's, the client
 CA's name with ` CA` turned into ` Certificate`, whatever the request asks for, and the Server does
 not match it against an Agent's `instance_uid`: the Server itself may re-key an Agent at any time
-(`AgentIdentification`), and a certificate that a re-key invalidates is an outage of your own making.
+(`AgentIdentification`), and a certificate that a re-key invalidates is an outage of your own
+making.
 
 ### Issuing certificates: the CSR flow
 
@@ -865,7 +868,8 @@ The file holds the certificate and its key and nothing else, not the server CA: 
 password (PBKDF2-HMAC-SHA-256, 600 000 iterations) and carries an HMAC-SHA-256 MAC, so OpenSSL 3
 opens it with its defaults (`openssl pkcs12 -in bootstrap.p12 -info`). The Server keeps it beside
 the certificate's record under `data_dir/bootstrap/`, as `<issuer>-<serial>.p12`, readable by its
-own account only. **The password is kept nowhere** — not in the file's directory, not in a log, not in the
+own account only. **The password is kept nowhere** — not in the file's directory, not in a log, not
+in the
 audit — so give it to the host by another way than the file. Every download is recorded in the
 audit as `enrolment.bootstrap_p12_downloaded` with the serial; a download is answered `503` while
 the audit record cannot be written, and `404` for a certificate with no file, a revoked one, an
@@ -902,7 +906,8 @@ $ curl --cacert ca.pem https://127.0.0.1:4321/api/v1/bootstrap-certificates
 ```
 
 The list holds every valid bootstrap certificate the Server issued, oldest first; an ended one is
-dropped, and so is every one of a bootstrap CA since replaced. Revoke one by its serial with the authority `bootstrap`
+dropped, and so is every one of a bootstrap CA since replaced. Revoke one by its serial with the
+authority `bootstrap`
 ([Revocation](#revocation-withdrawing-a-certificate)).
 
 A revoked one stays in the list, marked revoked, until it ends. To drop it sooner, delete it —
@@ -922,7 +927,8 @@ nothing is deleted and the answer is `503`.
 When issuing, the Server holds at most 10 000 valid ones, revoked ones included until they end or
 are deleted, and answers a request beyond that `409`. It answers `409` too while it holds no
 `bootstrap_ca_key_file` or once the bootstrap CA has ended, `503` while the audit record cannot be
-written, since no key is handed out unrecorded, and `400` for a subject attribute it does not know, a value out of bounds,
+written, since no key is handed out unrecorded, and `400` for a subject attribute it does not know,
+a value out of bounds,
 `validity_days` outside 1 to 90, or a password outside 8 to 128 characters.
 
 **The window is closed by default.** Open it for as long as you are enrolling hosts, from 1 to
@@ -990,7 +996,8 @@ also be a `PrintableString`, as older PKIs write it; the host certificate carrie
 `UTF8String`. An attribute that appears twice, a value of another string type or of the wrong
 length, or a country that is not two upper-case letters makes the approval fail with `409` naming
 the attribute, nothing is signed, and the request waits. Issue the host a bootstrap certificate
-that fits, and reject the request. The host stores it as `client-cert.pem` in its state directory and reconnects with it
+that fits, and reject the request. The host stores it as `client-cert.pem` in its state directory
+and reconnects with it
 as a member; from then on it renews by itself. Rejecting answers the request `BadRequest` and
 closes the connection. An unknown or expired id is answered `404`, and every enrolment route
 answers `404` while `[enrolment]` is not configured. A bootstrap certificate that arrives while
@@ -1041,7 +1048,8 @@ bounds what that costs (see [How often a member may be heard](#how-often-a-membe
 
 ## Revocation: withdrawing a certificate
 
-A certificate stays valid until it expires. To shut a host out sooner, revoke its certificate. The Server refuses it from then on, on both
+A certificate stays valid until it expires. To shut a host out sooner, revoke its certificate. The
+Server refuses it from then on, on both
 transports and on the package download, and closes at once every WebSocket session it admitted,
 with close code `1008`. No other session is touched, and no restart is needed. The list lives
 in `data_dir/revocations.json` and survives a restart.
@@ -1130,7 +1138,8 @@ host. The record also goes to the Server's log under the target `audit`.
 The Server never takes a decision it cannot record: when the record cannot be written — a full
 disk, a failed device — it admits no Agent and runs no operator act, answering `503`, until it
 can. A certificate request in that time is answered `Unavailable` with a time to retry, and the
-Agent asks again. Refusals past ten a second from one address are counted into one line, not dropped.
+Agent asks again. Refusals past ten a second from one address are counted into one line, not
+dropped.
 `[audit] max_file_bytes` (64 MiB) and `keep_files` (16) bound the space it takes.
 
 ## Configurations: what the fleet runs
@@ -1226,7 +1235,8 @@ declares the capability only while the store holds a Package. Two objects, and t
 whole of the model:
 
 - A **Package** is *what* an Agent type runs at a version. Its identity is the **Agent type and
-  the version**, the version a SemVer 2.0.0 version, and it holds one entry per platform — the Linux build, the macOS builds, the
+  the version**, the version a SemVer 2.0.0 version, and it holds one entry per platform — the Linux
+  build, the macOS builds, the
   Windows build — each an uploaded artifact with its SHA-256 and the operator's **signature**.
   Nothing else: no name of its own, no Selector. It aims at nobody and is never rolled out.
 - A **Deployment** is *where that goes*. A name, the **channel** it aims at, one Package per Agent
@@ -1391,7 +1401,8 @@ uploaded, signed, put in a channel and then released together, and the window in
 half-described release is already reaching the fleet does not exist. An Agent that enrols — or is
 labelled into the channel — later waits, marked pending on its fleet row, for an act of its own.
 
-**A channel holds at most one Package per Agent type**, because an Agent has one binary to replace. A
+**A channel holds at most one Package per Agent type**, because an Agent has one binary to replace.
+A
 second is refused `409` naming the one in the way; `?replace=true` is how you say you mean to swap
 the version the channel runs. Adding the same one again is the same request arriving twice and
 succeeds.
@@ -1424,13 +1435,16 @@ $ curl --cacert ca.pem -X PUT -d '{"selector": {"channel": "beta"}}'   … /api/
 
 There are two ways to move, and with a `channel` key the second is the ordinary one:
 
-- **Move a host** — change its label from `stable` to `beta`, and it takes what the beta channel holds.
+- **Move a host** — change its label from `stable` to `beta`, and it takes what the beta channel
+  holds.
   This is how a single machine is tried first.
-- **Move the release** — give the `stable` channel the version `beta` already carries and press again.
+- **Move the release** — give the `stable` channel the version `beta` already carries and press
+  again.
   The hosts never move; the channel they subscribe to is handed the next version. This is how a
   rollout *finishes*.
 
-**Widening the beta channel instead is not how it ends** — it would make both channels claim the same
+**Widening the beta channel instead is not how it ends** — it would make both channels claim the
+same
 hosts, which is a conflict, not a rollout.
 
 ### Fit runs before aim, and it is mandatory
@@ -1549,7 +1563,8 @@ it to this Server's own origin and to no other host. Guarding the Operator plane
 break a rollout. The content hash and the signature are what protect an installed binary.
 
 `keygen` prints the public key as hex — that value is the Client's `[packages] verification_key`.
-A Client without it takes no package at all, its own update included, and says so at startup. Give every Client the
+A Client without it takes no package at all, its own update included, and says so at startup. Give
+every Client the
 key.
 
 ### A host fetches only what its Agents are offered
@@ -1641,7 +1656,8 @@ The package routes answer `404` while package delivery is not configured on this
 
 The counts live on the **Deployment**, because that is what aims (see *Reading the counts* above).
 A Package carries no count of its own — it aims at nobody — and answers the question by naming the
-channels that hold it. A Package in no channel is stored and unreachable, which is the state a Selector
+channels that hold it. A Package in no channel is stored and unreachable, which is the state a
+Selector
 matching nobody used to be.
 
 `targeted_agents` is the Agents a rollout act would change — their release differs from what their
@@ -1675,14 +1691,16 @@ The same call carries any other partition: `{"labels": {"region": "eu-central"}}
 `{"labels": {"tenant": "acme"}}`. The Server treats all of them identically, because it knows none
 of them — see [Channels are a partition](#channels-are-a-partition-not-a-default).
 
-It takes effect at once: a connected Agent is pushed whatever its new channel gets, rather than waiting
+It takes effect at once: a connected Agent is pushed whatever its new channel gets, rather than
+waiting
 for its next poll.
 
 **A label may not restate an attribute the Agent reports** — that is refused with `409`, naming the
 key. Reported attributes are not annotations: `os.type` and `host.arch` decide which artifact fits
 the machine and `service.name` decides which packages fit it at all. If a
 label could outrank them, a slip here would offer a host a binary built for another one. Where an
-Agent reports something wrong, the fix belongs in that host's `supervisor.toml`, where the wrong value
+Agent reports something wrong, the fix belongs in that host's `supervisor.toml`, where the wrong
+value
 comes from.
 
 If an Agent *starts* reporting a key that was labelled earlier, the reported value wins and the
@@ -1726,7 +1744,8 @@ about that Agent.
 **It does nothing on the machine.** No process is stopped, nothing is uninstalled, and nothing is
 revoked: a certificate proves *fleet membership* and its host, never which Agent is speaking, so
 forgetting one Agent has nothing of it to take away. To shut a host out, [revoke its
-certificate](#revocation-withdrawing-a-certificate). A Client that is still running and still pointed at this
+certificate](#revocation-withdrawing-a-certificate). A Client that is still running and still
+pointed at this
 Server reports again within its polling or heartbeat interval and the row comes back. Forgetting
 tidies the view; **to remove an agent for good, stop it on the host** (`supervisor service
 uninstall`) and then forget it here.
@@ -1851,7 +1870,8 @@ honours the protocol's error and retry semantics as well, and answers malformed 
 `BAD_REQUEST`.
 
 Every refusal is recorded as `agent_rate.throttled`, naming the host (or the serial and the CA's
-role), the `instance_uid`, the `bucket` that was empty (`agent`, `host` or `gateway`; for an enrolment request through a
+role), the `instance_uid`, the `bucket` that was empty (`agent`, `host` or `gateway`; for an
+enrolment request through a
 Gateway `bootstrap` for its certificate's bucket, `enrolment` for the Gateway's enrolment
 aggregate, `unchecked_enrolment` for its bucket for unchecked enrolments) and the
 `route` (`opamp` with its `transport`, or `download`). Past ten a second from one address they are

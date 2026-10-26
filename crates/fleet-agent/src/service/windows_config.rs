@@ -1,6 +1,6 @@
 //! What `service-manager` leaves undone on Windows: the recovery actions that make ADR-0019's
 //! "restart on failure" true there as well, the display name of ADR-0019, and the logon account
-//! of ADR-0019.
+//! of ADR-0020.
 //!
 //! On systemd and launchd the restart policy handed to `service-manager` is written straight into
 //! the unit (`Restart=on-failure`) or the plist (`KeepAlive{SuccessfulExit:false}`). Its Windows
@@ -40,7 +40,7 @@
 //! Everything here is a no-op on Unix.
 
 /// Configure what the Windows backend does not: failure recovery, the display name, the
-/// description — and the logon account a system registration runs as (ADR-0019, ADR-0062).
+/// description — and the logon account a system registration runs as (ADR-0019, ADR-0020).
 ///
 /// # Errors
 /// Returns an error if the service cannot be opened or reconfigured. On Unix this never fails —
@@ -80,8 +80,8 @@ pub fn configure(
         )
         .map_err(|e| format!("cannot open the service {service_name}: {e}"))?;
 
-    // The logon account (ADR-0019), on every registration, the default virtual account and a
-    // named `LocalSystem` included (ADR-0062), and first: until it is set the SCM runs a new entry
+    // The logon account (ADR-0020), on every registration, the default virtual account and a
+    // named `LocalSystem` included (ADR-0020), and first: until it is set the SCM runs a new entry
     // as `LocalSystem`. `service-manager`'s `sc.exe` backend ignores the ctx's `username`, so the
     // account is set here — and set *without* a `password=`, which every form `run_as` admits
     // (the service's virtual account, a gMSA, the built-ins, `LocalSystem`) is defined not to
@@ -140,7 +140,7 @@ pub fn configure(
     Ok(())
 }
 
-/// The privileges the second service keeps (ADR-0059 clause 2): `SeChangeNotifyPrivilege` alone,
+/// The privileges the second service keeps (ADR-0020 clause 17): `SeChangeNotifyPrivilege` alone,
 /// which the SCM never removes anyway and which lets the Managed Processes pass through the
 /// Client's directories to what is shared with them. Every other privilege of its account —
 /// `SeImpersonatePrivilege` first, which a `LocalService`-like account holds — is removed from the
@@ -151,7 +151,7 @@ pub const AGENTS_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
 
 /// Configure the second service as [`configure`] configures the Client — recovery actions, display
 /// name, description, the logon account `account` — and cut its privileges to
-/// [`AGENTS_PRIVILEGES`] (ADR-0059 clause 2).
+/// [`AGENTS_PRIVILEGES`] (ADR-0020 clause 17).
 ///
 /// # Errors
 /// Returns an error if the service cannot be opened or reconfigured. Never on Unix.
@@ -276,7 +276,7 @@ pub fn activity(service_name: &str) -> Result<super::manager::Activity, String> 
 
 /// The process the SCM runs as the service `service_name` (`QueryServiceStatusEx`,
 /// `SERVICE_STATUS_PROCESS.dwProcessId`): `None` where it runs none, or knows no such service
-/// (ADR-0059 clause 4).
+/// (ADR-0020 clause 19).
 ///
 /// # Errors
 /// Returns every other refusal of the SCM.
@@ -345,7 +345,7 @@ fn confirmed_process<H>(
 /// terminated at any time" after it (SetServiceStatus) — still running then, under the service's
 /// account. So the process is opened before the stop is sent, and its end is what the wait ends
 /// on. For the second service that end is also the end of every program it started: the last
-/// handle to each job closes with it, and the job kills what it holds (ADR-0059 clause 4).
+/// handle to each job closes with it, and the job kills what it holds (ADR-0020 clause 19).
 ///
 /// # Errors
 /// Returns why the SCM cannot be asked or the service stopped, and that it, or its process, had
@@ -433,7 +433,7 @@ pub fn stop_and_wait(service_name: &str, within: std::time::Duration) -> Result<
 }
 
 /// The registration of the service `service_name` as the SCM holds it: its registry key, and the
-/// logon account it names (ADR-0059 clause 1). `None` where no such service is registered.
+/// logon account it names (ADR-0020 clause 16). `None` where no such service is registered.
 ///
 /// # Errors
 /// Returns an error if the SCM cannot be asked.
@@ -498,7 +498,7 @@ mod tests {
 
     /// A refusal of the SCM is read as a stopped service only where the SCM knows no such service
     /// (1060); access denied, and every other refusal, says nothing of what it is doing.
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0020
     #[test]
     fn only_a_service_the_scm_does_not_know_is_stopped() {
         assert_eq!(
@@ -513,8 +513,8 @@ mod tests {
     /// A stop waits for the process it confirmed: the one opened, named again by the SCM and the
     /// service not stopped. One that changed is looked at again, and one that changed at every one
     /// of three looks fails the stop, so that a stop for a change starts again what it stopped
-    /// (ADR-0059 clauses 1 and 2).
-    /// Verifies: ADR-0059
+    /// (ADR-0020 clauses 16 and 17).
+    /// Verifies: ADR-0020
     #[test]
     fn a_stop_waits_for_the_process_it_confirmed_and_fails_on_one_that_keeps_changing() {
         let running = |pid| Look {

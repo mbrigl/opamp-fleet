@@ -1,5 +1,5 @@
-//! Which host a Gateway takes to speak for an `instance_uid` (ADR-0058 clause 2, after ADR-0036
-//! clause 2): the host of the first report for it, kept across the Gateway's restarts in its store
+//! Which host a Gateway takes to speak for an `instance_uid` (ADR-0015 clause 15, after ADR-0022
+//! clause 11): the host of the first report for it, kept across the Gateway's restarts in its store
 //! ([`store`](crate::gateway::store)). What the Gateway forwards, relays and passes on for an Agent
 //! is decided against this binding; the state is the core's, and the package cache holds it and
 //! asks it.
@@ -32,7 +32,7 @@ pub enum Bound {
     Waiting,
 }
 
-/// Where a host's certificate ends, as the Gateway keeps it (ADR-0058 clause 3): the latest
+/// Where a host's certificate ends, as the Gateway keeps it (ADR-0015 clause 16): the latest
 /// `notAfter` among the valid certificates the host reported under, and that certificate as the
 /// revocation list names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub struct End {
     pub serial: String,
 }
 
-/// One change to the bindings, as the store keeps it (ADR-0058 clause 3).
+/// One change to the bindings, as the store keeps it (ADR-0015 clause 16).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     /// An `instance_uid` is bound to a host.
@@ -93,7 +93,7 @@ pub struct Outcome {
     /// The `instance_uid` whose binding made room, if one did, so what else the Gateway holds for
     /// it can go too.
     pub evicted: Vec<InstanceUid>,
-    /// What the store must hold before the report is forwarded (ADR-0058 clause 3): the new
+    /// What the store must hold before the report is forwarded (ADR-0015 clause 16): the new
     /// binding, the removals that made room for it, and the host's certificate end where the
     /// report moved it. Empty when the report changed nothing the store keeps.
     pub changes: Vec<Change>,
@@ -160,12 +160,12 @@ impl Bindings {
     /// most recently reported; another host's report for it changes nothing. A host binds at most
     /// `limits.per_host`, and the Gateway at most `limits.total`: past either the host's own least
     /// recently reported binding whose `instance_uid` is `idle` makes room, so a host whose Agents
-    /// come and go is not shut out by its own past, and never another host's (ADR-0058 clause 2).
+    /// come and go is not shut out by its own past, and never another host's (ADR-0015 clause 15).
     /// Without one nothing is bound.
     ///
     /// A report under a certificate whose `notAfter` has passed by `now` binds nothing and moves
-    /// no end (ADR-0058 clause 4); one under a certificate that ends later than the one the host's
-    /// end was kept from moves it to `end` (clause 2). A new binding is pending until
+    /// no end (ADR-0015 clause 17); one under a certificate that ends later than the one the host's
+    /// end was kept from moves it to `end` (ADR-0015 clause 17). A new binding is pending until
     /// [`Bindings::commit`], and a moved end until the write settles it: a pending binding makes
     /// no room, a report for it binds nothing, and a report of its host that relies on a moved end
     /// is [`Bound::Waiting`], so nothing is relied on before the store holds it.
@@ -369,7 +369,7 @@ impl Bindings {
     }
 
     /// The bindings reported since the last call: what keeps their order across a restart
-    /// (ADR-0058 clause 3).
+    /// (ADR-0015 clause 16).
     pub fn reports(&mut self) -> Reports {
         Reports(
             std::mem::take(&mut self.reported)
@@ -380,8 +380,7 @@ impl Bindings {
     }
 
     /// Ends every binding of each host whose kept certificate end has passed by `now`, or, when
-    /// `revoked` is given, whose certificate it says the revocation list names (ADR-0058 clause
-    /// 3). Returns each such host, and the `instance_uid`s it held. The ends that have passed are
+    /// `revoked` is given, whose certificate it says the revocation list names (ADR-0015 clause 16). Returns each such host, and the `instance_uid`s it held. The ends that have passed are
     /// found by their order; the revocation list is asked about every host's end.
     pub fn end(
         &mut self,
@@ -439,7 +438,7 @@ impl Bindings {
         }
     }
 
-    /// The bindings `changes` leave, applied in order: the store read back (ADR-0058 clause 3). A
+    /// The bindings `changes` leave, applied in order: the store read back (ADR-0015 clause 16). A
     /// later report orders a binding after the earlier ones, and a removal of what is not bound
     /// changes nothing.
     ///
@@ -577,7 +576,7 @@ mod tests {
     }
 
     /// The first report binds, and a later one from another host leaves the binding where it was.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0027
     #[test]
     fn the_first_reporting_host_keeps_the_binding() {
         let mut bindings = Bindings::default();
@@ -590,7 +589,7 @@ mod tests {
 
     /// Past its share a host gives up its own least recently reported idle binding, never another
     /// host's, and with none of its own idle nothing is bound.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0015
     #[test]
     fn past_its_share_a_host_gives_up_its_own_idle_binding() {
         let mut bindings = Bindings::default();
@@ -619,7 +618,7 @@ mod tests {
     /// At the total, a host's report for a new `instance_uid` takes the place of the host's own
     /// least recently reported idle binding — a report refreshing how recent a binding is — and
     /// never another host's: a host without one of its own binds nothing.
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0015
     #[test]
     fn at_the_total_only_the_reporting_hosts_own_idle_binding_makes_room() {
         let mut bindings = Bindings::default();
@@ -680,7 +679,7 @@ mod tests {
 
     /// Replaying a store keeps each host's last certificate end and only for a host left with a
     /// binding; a binding whose host has no end is a damaged store.
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0015
     #[test]
     fn a_replayed_binding_keeps_its_hosts_last_end() {
         let (kept, gone) = (InstanceUid::default(), InstanceUid::default());
@@ -710,7 +709,7 @@ mod tests {
     /// the host's certificate end among it; a report for it meanwhile binds nothing, and it makes
     /// no room. A later certificate moves the end, an earlier one does not, and a binding the store
     /// could not take is not made.
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0015
     #[test]
     fn a_new_binding_waits_for_the_store() {
         let mut bindings = Bindings::default();
@@ -758,7 +757,7 @@ mod tests {
     /// host's bindings end once its kept end has passed, or once the revocation list names the
     /// certificate it was kept from; another host's are left, and the `instance_uid` is free to
     /// bind anew.
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0015
     #[test]
     fn a_hosts_bindings_end_with_its_certificate() {
         let mut bindings = Bindings::default();
@@ -801,7 +800,7 @@ mod tests {
 
     /// A host of one binding that gives it up for another keeps its certificate end: a report
     /// under an earlier certificate does not move it back.
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0015
     #[test]
     fn giving_up_its_last_binding_keeps_the_hosts_end() {
         let limits = Limits {
@@ -831,7 +830,7 @@ mod tests {
     /// A moved end is pending until the store settles it: a report of the host that relies on it
     /// waits, one under a certificate the store's end covers does not, and a failed write puts the
     /// end the store holds back. A host's first end is pending the same way.
-    /// Verifies: ADR-0058
+    /// Verifies: ADR-0015
     #[test]
     fn a_moved_end_is_pending_until_written() {
         let mut bindings = Bindings::default();
