@@ -1,4 +1,4 @@
-//! The listener an OpAMP endpoint is served on (ADR-0010): TLS from the material the application
+//! The listener an OpAMP endpoint is served on (ADR-0009): TLS from the material the application
 //! hands it, the bounds on connection setup of ADR-0013, and what the handshake learned carried
 //! into every request.
 //!
@@ -62,11 +62,11 @@ pub const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shuts listeners down. One handle may drain several; how long a drain may take is the caller's
-/// to state (ADR-0010 clause 6).
+/// to state (ADR-0009 clause 6).
 ///
 /// It is `axum_server`'s handle plus what that one cannot reach: the WebSocket sessions, which
 /// outlive the HTTP connection they were upgraded from and so are not counted by its drain. A
-/// shutdown tells them at once, and the same deadline bounds them (ADR-0013 clause 13).
+/// shutdown tells them at once, and the same deadline bounds them (ADR-0013 clause 17).
 #[derive(Clone, Debug)]
 pub struct Handle {
     server: axum_server::Handle<SocketAddr>,
@@ -256,7 +256,7 @@ impl Listener {
     }
 
     /// Sets the floor on the pace of bodies and messages, [`PACE_WINDOW`] and [`MIN_PACE_BYTES`]
-    /// unless stated. For a test to drive it short: the floor is no setting (ADR-0013 clause 14).
+    /// unless stated. For a test to drive it short: the floor is no setting (ADR-0013 clause 18).
     #[doc(hidden)]
     #[must_use]
     pub fn with_pace(mut self, window: Duration, min_bytes: u64) -> Self {

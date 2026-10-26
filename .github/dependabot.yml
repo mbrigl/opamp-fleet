@@ -36,7 +36,7 @@ updates:
         patterns:
           - "*"
 
-  # The Actions the CI and release workflows use (ADR-0044). For a first-party action (actions/*,
+  # The Actions the CI and release workflows use (ADR-0011). For a first-party action (actions/*,
   # on its major tag) it raises the pull request for a new major; for a third-party action, pinned
   # to a commit SHA with '# vX.Y.Z' beside it, it raises one for every release and rewrites the SHA
   # and the comment together.
@@ -49,8 +49,7 @@ updates:
         patterns:
           - "*"
 
-  # The Server image's base, pinned by digest in packaging/container/Containerfile (ADR-0052 clause
-  # 13): a new digest of the `nonroot` tag arrives as a pull request, reviewed like any other. Where
+  # The Server image's base, pinned by digest in packaging/container/Containerfile (ADR-0035 clause 20): a new digest of the `nonroot` tag arrives as a pull request, reviewed like any other. Where
   # Dependabot does not read a file named `Containerfile`, the digest is raised by a reviewed commit
   # on the schedule of the packaging tools.
   - package-ecosystem: "docker"

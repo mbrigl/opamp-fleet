@@ -7,7 +7,7 @@
 > them in the change that lands it. Project conventions go into
 > [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md), into checks, and into ADRs. A procedure is a skill
 > under [`.agents/skills/`](.agents/skills/). It cites a rule here and states none of its own
-> ([ADR-0005](docs/adr/0005-procedures-as-skills.md)).
+> ([ADR-0003](docs/adr/0003-procedures-as-skills.md)).
 
 ## 1. Principles
 
@@ -88,7 +88,7 @@ restates nothing. A rule this file does not state is not a rule of this project.
    permitted, both by a human. One flips the `Status` line. The other adds the project's decider
    to the `Deciders` line of an ADR inherited from the template, when the project accepts it as
    its own. ADR numbers are permanent between normalizations. The template repository corrects
-   its own ADRs in place ([ADR-0008](docs/adr/0008-template-releases.md)). If the specification
+   its own ADRs in place ([ADR-0005](docs/adr/0005-template-releases.md)). If the specification
    and an ADR conflict, the specification wins. Raise the conflict; never choose silently.
 
    **A normalization restates the record, only on a human's instruction.** The specification is
@@ -118,7 +118,7 @@ restates nothing. A rule this file does not state is not a rule of this project.
   ([§5](#5-quality-bar--definition-of-done)). One that constrains future choices becomes an ADR.
 - **Plan work larger than one session in the tree, under `docs/plan/`.** A feature spec is cut
   into tracer-bullet tickets. The change that lands a ticket's work deletes its file
-  ([ADR-0004](docs/adr/0004-feature-layer.md)). Skill: `plan-feature`. The skill `work-tickets`
+  ([ADR-0006](docs/adr/0006-feature-layer.md)). Skill: `plan-feature`. The skill `work-tickets`
   works the tickets, one at a time or in parallel.
 - **Work with the human:** small steps, reasoning surfaced, feedback sought early. A task runs
   unattended only when its ticket answers for all of the following:
@@ -160,7 +160,7 @@ restates nothing. A rule this file does not state is not a rule of this project.
   against the new implementation.
 - **Every accepted ADR, and every specification criterion (`G-n`, `Q-n`) a change meets, is
   cited by a test** with a `Verifies: <id>` marker
-  ([ADR-0003](docs/adr/0003-decisions-verified-by-tests.md)). An ADR no test can decide says so
+  ([ADR-0002](docs/adr/0002-decisions-verified-by-tests.md)). An ADR no test can decide says so
   in its *Enforcement* section. A criterion no test cites yet is pending work.
 - **Never weaken the suite to make it pass. A flaky test is a defect, not noise:** no retries, no
   re-running until green.
@@ -175,7 +175,7 @@ restates nothing. A rule this file does not state is not a rule of this project.
   its tickets touched, the ADRs that bind them, and the criteria they serve. It files what it
   finds as tickets, checks, a `proposed` ADR, or a drafted specification change. With no spec
   open, a revision runs when the revision sensor says it is due
-  ([ADR-0004](docs/adr/0004-feature-layer.md)). A sensor is a script that reports to the reviewer
+  ([ADR-0006](docs/adr/0006-feature-layer.md)). A sensor is a script that reports to the reviewer
   and fails nothing. Skill: `design-revision`.
 - **A mistake a check could have caught becomes a check,** shipped with the fix. A rule in prose
   is the fallback for what no check can decide. The design revision drops what prevented nothing.
@@ -192,7 +192,7 @@ restates nothing. A rule this file does not state is not a rule of this project.
   next one. A standing instruction may cover one push only: the claim on a ticket across clones,
   where the harness ADR grants it. A claim reserves a ticket by creating its branch and
   nothing else; across clones, with an empty commit. The session releases a local claim, a
-  human one on a remote ([ADR-0004](docs/adr/0004-feature-layer.md)). The git hooks
+  human one on a remote ([ADR-0006](docs/adr/0006-feature-layer.md)). The git hooks
   under [`.githooks/`](.githooks/) enforce what a file can of this section and of
   [§5](#5-quality-bar--definition-of-done); what each refuses is under
   [Git hooks](README.md#git-hooks). **An agent never bypasses this repository's hooks:** no

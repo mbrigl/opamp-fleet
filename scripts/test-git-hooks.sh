@@ -9,7 +9,7 @@
 # A push case ships its own scripts/check-all.sh, green or red, so the test decides what the hook
 # finds.
 #
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 # Inputs: .githooks/ scripts/lib/
 #
 # Usage:

@@ -1,10 +1,10 @@
-//! End to end (ADR-0017): the real Server in-process, the real Client binary with two
+//! End to end (ADR-0018): the real Server in-process, the real Client binary with two
 //! Supervisors — a Collector-type on the stub and a command-type Foreign Agent — over one
 //! WebSocket connection. A configuration change reaches both Agents, restarts their processes
 //! on the written files, and comes back `APPLIED` and in sync. A Configuration typed for the
-//! Client itself then changes its Supervisor set at runtime (ADR-0017): an added block starts
+//! Client itself then changes its Supervisor set at runtime (ADR-0018): an added block starts
 //! and appears as a new Agent, unchanged ones ride through untouched, a removed one stops,
-//! says goodbye, and its directory is purged (ADR-0017) — and `supervisor.toml` is rewritten around
+//! says goodbye, and its directory is purged (ADR-0018) — and `supervisor.toml` is rewritten around
 //! the operator's globals each time.
 
 mod common;
@@ -70,18 +70,18 @@ fn stub_pid(marker: &Path) -> Option<u32> {
 }
 
 /// Finds an Agent by the operator's name for it — `service.instance.name`, the `[[supervisor]]`
-/// block's `name` (ADR-0016). Deliberately not `service.name`: that is the Agent *type*, and both
+/// block's `name` (ADR-0017). Deliberately not `service.name`: that is the Agent *type*, and both
 /// Supervisors below run the same stub program, so it does not tell them apart.
 fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
 
-/// What this Client presents: its two Supervisors, plus itself (ADR-0018).
+/// What this Client presents: its two Supervisors, plus itself (ADR-0019).
 const AGENTS: usize = 3;
 
 /// The stub binary's own file name — what a **bare** program name resolves to inside a Supervisor's
 /// owned `program/` directory. Blocks below name their program bare (not by absolute path), because
-/// a Server-delivered Supervisor set may run only a program this Client owns (ADR-0017), and the
+/// a Server-delivered Supervisor set may run only a program this Client owns (ADR-0018), and the
 /// operator-local blocks use the same shape so the delivered set can restate them verbatim.
 fn stub_program_name() -> String {
     Path::new(env!("CARGO_BIN_EXE_stub_agent"))
@@ -92,7 +92,7 @@ fn stub_program_name() -> String {
 }
 
 /// Places the stub binary where a bare program name resolves — `<state_dir>/supervisors/<name>/
-/// program/<program>` (ADR-0017) — standing in for the package install that would normally put it
+/// program/<program>` (ADR-0018) — standing in for the package install that would normally put it
 /// there. A Supervisor whose owned program is present starts it; one whose program is absent waits
 /// for a package, which is not what this test exercises.
 fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
@@ -111,7 +111,7 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: ADR-0017, ADR-0015, G-1, G-6, G-14
+// Verifies: ADR-0018, ADR-0016, G-1, G-6, G-14
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (addr, state, dir) = spawn_server().await;
@@ -151,7 +151,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "[attributes]\n",
             "env = \"prod\"\n\n",
             // The set the Server delivers below carries arguments; the operator consents to that
-            // here, where the Server cannot (ADR-0017 clause 38).
+            // here, where the Server cannot (ADR-0018 clause 35).
             "[supervisors]\n",
             "delivered_args = true\n\n",
             "{otelcol_block}\n",
@@ -167,15 +167,15 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         .expect("write supervisor.toml");
 
     // Both owned Supervisors have their program staged before the Client starts, so they run at
-    // once rather than waiting for a package (ADR-0017 makes the delivery path owned-only).
+    // once rather than waiting for a package (ADR-0018 makes the delivery path owned-only).
     stage_owned_program(&state_dir, "otelcol", &program);
     stage_owned_program(&state_dir, "stub", &program);
 
     let _client = spawn_client(&config_path);
 
     // Both Supervisors appear as their own connected Agents — over the one WebSocket connection
-    // this Client maintains (ADR-0015: routed by instance_uid alone) — and so does the Client
-    // itself, which is an Agent (ADR-0018) whether or not it supervises anything.
+    // this Client maintains (ADR-0016: routed by instance_uid alone) — and so does the Client
+    // itself, which is an Agent (ADR-0019) whether or not it supervises anything.
     let agents = wait_until("every agent connected", || {
         let snapshot = state.snapshot();
         (snapshot.len() == AGENTS && snapshot.iter().all(|a| a.connected)).then_some(snapshot)
@@ -185,10 +185,10 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     assert!(view(&agents, "stub").is_some());
     assert!(
         view(&agents, "Supervisor Agent").is_some(),
-        "the Client is its own Agent (ADR-0018)"
+        "the Client is its own Agent (ADR-0019)"
     );
     // The two Supervisors run the *same* stub program, so they report the same Agent type — which
-    // is what a type is for, and exactly why it cannot double as the name (ADR-0016). They stay
+    // is what a type is for, and exactly why it cannot double as the name (ADR-0017). They stay
     // apart because the operator's name is its own attribute, out of reach of the fold.
     let otelcol_type = &view(&agents, "otelcol").expect("otelcol view").service_name;
     let stub_type = &view(&agents, "stub").expect("stub view").service_name;
@@ -213,7 +213,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // The operator distributes a Configuration for the supervised type, and a YAML one typed for
     // the Client itself — saved, put into a Deployment claiming all three, then rolled out,
-    // because saving alone distributes nothing (ADR-0025, ADR-0034); the act assigns every Agent
+    // because saving alone distributes nothing (ADR-0027); the act assigns every Agent
     // the Deployment claims, fits each Configuration to its type, and the Server pushes the
     // release over the socket.
     common::save(&state, "fleet", "receivers: {}\n", otelcol_type);
@@ -222,7 +222,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // Both Supervisors acknowledge APPLIED and are in sync; the processes restarted on the
     // files. The Client's own Agent receives the one typed for it — its configuration is its
-    // Supervisor set (ADR-0017), and a YAML body is not one: the Client refuses it loudly rather
+    // Supervisor set (ADR-0018), and a YAML body is not one: the Client refuses it loudly rather
     // than pretend it took effect.
     wait_until("the supervised agents in sync, the client refusing", || {
         let snapshot = state.snapshot();
@@ -245,7 +245,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     .await;
     assert_ne!(restarted_stub_pid, first_stub_pid);
 
-    // The written entry files carry the Configuration's name (ADR-0023) and are what the
+    // The written entry files carry the Configuration's name (ADR-0026) and are what the
     // processes were pointed at.
     let collector_argv = std::fs::read_to_string(&otelcol_marker).expect("collector marker");
     assert!(collector_argv.contains("--config"));
@@ -275,7 +275,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     .await;
 
     // The Client's own Agent reports the Client's version instead — never a Managed Process's,
-    // because it has none (ADR-0018 makes it visible; ADR-0012 supplies the version).
+    // because it has none (ADR-0019 makes it visible; ADR-0034 supplies the version).
     let snapshot = state.snapshot();
     let client_agent = view(&snapshot, "Supervisor Agent").expect("the client's own agent");
     assert_ne!(client_agent.service_version, "9.9.9");
@@ -285,7 +285,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     );
 
     // The Client-wide attributes arrived — they describe the *host*, so both Agents carry them
-    // (ADR-0023).
+    // (ADR-0026).
     let agents = state.snapshot();
     let stub = view(&agents, "stub").expect("stub view");
     let otelcol = view(&agents, "otelcol").expect("otelcol view");
@@ -300,13 +300,13 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         );
         assert!(
             !agent.non_identifying_attributes.contains_key("role"),
-            "no block tags one Agent any more (ADR-0017)"
+            "no block tags one Agent any more (ADR-0018)"
         );
     }
 
     // Tagging *one* Agent among several is the fleet's job now: one label, keyed by the Agent's
     // uid, matched by the same Selectors — and it takes effect without touching the host's file
-    // (ADR-0024, ADR-0017).
+    // (ADR-0025, ADR-0018).
     let uid = opamp::uid::InstanceUid::parse(&stub.instance_uid).expect("the uid the Server holds");
     assert!(state
         .set_labels(&uid, [("role".to_string(), "edge".to_string())].into())
@@ -327,7 +327,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // …and a Deployment aimed at it reaches that Agent and no other. The label replaced the
     // Agent's labels, so the stub has left the fleet-wide channel: an Agent belongs to one
-    // Deployment, and this one holds both Configurations (ADR-0034).
+    // Deployment, and this one holds both Configurations (ADR-0027).
     common::save(&state, "edge-extra", "processors: {}\n", otelcol_type);
     assert_eq!(
         common::release(
@@ -390,11 +390,11 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     )
     .await;
 
-    // ——— The Server manages the Client's own Supervisor set (ADR-0017) ———
+    // ——— The Server manages the Client's own Supervisor set (ADR-0018) ———
 
     // The YAML Configuration typed for the Client keeps poisoning its composed map. A pinned
-    // Configuration cannot be deleted (ADR-0034), and taking it out of the Deployment withdraws
-    // nothing already rolled out (ADR-0025) — the Client keeps its pinned assignment until the
+    // Configuration cannot be deleted (ADR-0027), and taking it out of the Deployment withdraws
+    // nothing already rolled out (ADR-0027) — the Client keeps its pinned assignment until the
     // next press. So the recovery is to take it out and press the Deployments again: the Client's
     // release drops it, while the Supervisors' revision — body and role unchanged — keeps its hash.
     assert!(
@@ -438,7 +438,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         program = program,
         added_marker = added_marker.to_string_lossy(),
     );
-    // The added Supervisor is owned too (ADR-0017): stage its program before the set is delivered,
+    // The added Supervisor is owned too (ADR-0018): stage its program before the set is delivered,
     // so the block the Server pushes starts a process instead of waiting for a package.
     stage_owned_program(&state_dir, "added", &program);
     let stub_pid_before = stub_pid(&stub_marker).expect("the stub runs");
@@ -504,7 +504,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         "the unchanged supervisors ride through the removal too"
     );
 
-    // A removed Supervisor is purged (ADR-0017): its whole directory — identity, program, written
+    // A removed Supervisor is purged (ADR-0018): its whole directory — identity, program, written
     // configuration — goes with it, while the supervisors that stay keep theirs.
     wait_until("the removed supervisor's directory to be purged", || {
         (!state_dir.join("supervisors/added").exists()).then_some(())
@@ -519,7 +519,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 /// A delivered Supervisor set with one block the Client refuses is refused whole: the running
 /// Supervisor keeps its process, `supervisor.toml` keeps every byte, and the Client's own Agent
 /// reports the refusal.
-/// Verifies: ADR-0017
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
     let (addr, state, dir) = spawn_server().await;
@@ -604,11 +604,11 @@ async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
     );
 }
 
-/// ADR-0017 over one connection: a released Configuration reaches the unlisted Supervisor and not
+/// ADR-0018 over one connection: a released Configuration reaches the unlisted Supervisor and not
 /// the listed one, whose Agent declares neither remote-configuration capability. Switched back on,
 /// the next start declares both, is offered what is released, and the stored offer replaces every
-/// file in `config/`, the operator's included (clauses 3 and 8).
-/// Verifies: ADR-0017
+/// file in `config/`, the operator's included (ADR-0018 clause 52).
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
     let (addr, state, dir) = spawn_server().await;
@@ -714,12 +714,12 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
     );
 }
 
-/// ADR-0017 over one connection: a host that keeps its Supervisor set is offered none. A released
+/// ADR-0018 over one connection: a host that keeps its Supervisor set is offered none. A released
 /// set that would add a block reaches neither `supervisor.toml` nor the running Supervisors, and
 /// the Client's own Agent declares neither remote-configuration capability and reports no status.
 /// Switched back on, the next start is offered the released set, and it replaces the
-/// `[[supervisor]]` array, the operator's block included (clauses 22, 25 and 27).
-/// Verifies: ADR-0017
+/// `[[supervisor]]` array, the operator's block included (ADR-0018 clause 44).
+/// Verifies: ADR-0018
 #[tokio::test]
 async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {
     let (addr, state, dir) = spawn_server().await;
@@ -833,7 +833,7 @@ fn running(pid: u32) -> bool {
 
 /// Dropping the Client under test stops it as its service manager would, so the programs it
 /// started itself end with it: a kill alone left them running after every test.
-/// Verifies: ADR-0017
+/// Verifies: ADR-0018
 #[cfg(unix)]
 #[tokio::test]
 async fn a_dropped_client_leaves_none_of_its_programs_running() {

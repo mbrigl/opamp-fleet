@@ -67,4 +67,4 @@ informed the decision. Write "None — trivial/reversible" only when that is gen
 What keeps this decision true and where it lives: the check, test, CI job, or review step that
 fails when it is violated. Name the test that cites this ADR, or write a paragraph starting
 `**Not mechanically decidable:**` with the reason no test can decide it.
-Accepting an ADR that has neither fails CI ([ADR-0003](0003-decisions-verified-by-tests.md)).
+Accepting an ADR that has neither fails CI ([ADR-0002](0002-decisions-verified-by-tests.md)).

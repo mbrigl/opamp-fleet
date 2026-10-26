@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# GitHub Actions reference check for this repository (ADR-0044).
+# GitHub Actions reference check for this repository (ADR-0011).
 #
-# ADR-0044 pins every third-party action to a commit SHA with its release in a comment, keeps every
+# ADR-0011 pins every third-party action to a commit SHA with its release in a comment, keeps every
 # first-party action on its major version tag, and lets Dependabot raise both. This check reads the
 # files the decision names and fails on what would break it:
 #
@@ -10,21 +10,22 @@
 #      of two classes, told apart by the owner.
 #      - First-party, owner 'actions': its major version tag, 'actions/name@vN' or
 #        'actions/name/path@vN'. A commit SHA, a branch, a full version and an untagged reference
-#        fail (clause 2).
+#        fail (ADR-0011 clause 2).
 #      - Third-party, every other owner ('github' included): a full 40-character lowercase commit
 #        SHA, 'owner/action@<sha>' or 'owner/action/path@<sha>', on a line that ends in a comment
 #        '# vX.Y.Z' naming the release the SHA was taken from. A tag, a branch, a short or
 #        uppercase SHA, a SHA without the comment and a comment naming only a major fail
-#        (clause 3). A reusable workflow is classified by the same rule.
+#        (ADR-0011 clause 3). A reusable workflow is classified by the same rule.
 #      A local action ('./…') is exempt; a 'docker://' image carries an explicit ':<tag>'
-#      (clause 6).
+#      (ADR-0011 clause 6).
 #   1b. Resolution, with --resolve only: for each third-party reference, 'git ls-remote' on
 #      https://github.com/<owner>/<name> reads the commented tag, and the commit it points to —
 #      the peeled commit for an annotated tag, never the tag object — must be the pinned SHA. A
-#      missing tag, or one that points elsewhere, fails (clause 4). Each repository and tag is
-#      looked up once. This needs the network; the offline run checks 1 and 2 only.
+#      missing tag, or one that points elsewhere, fails (ADR-0011 clause 4). Each repository and tag
+#      is looked up once. This needs the network; the offline run checks 1 and 2 only.
 #   2. Dependabot: .github/dependabot.yml exists and has an entry with
-#      'package-ecosystem: github-actions', the one that raises both kinds of update (clause 5).
+#      'package-ecosystem: github-actions', the one that raises both kinds of update
+#      (ADR-0011 clause 5).
 #
 # A 'uses:' inside a full-line '#' comment is not read: a comment is not a reference. A trailing
 # comment after the reference is read as the release comment and then dropped, and quotes around
@@ -60,7 +61,7 @@ workflows=("$ROOT/$WORKFLOWS"/*.yml "$ROOT/$WORKFLOWS"/*.yaml)
 shopt -u nullglob
 
 if ((${#workflows[@]} == 0)); then
-  add_error "$WORKFLOWS: no workflow found — ADR-0044 governs the action references there"
+  add_error "$WORKFLOWS: no workflow found — ADR-0011 governs the action references there"
 fi
 
 # 1. References.
@@ -82,25 +83,25 @@ for wf in "${workflows[@]}"; do
         # The tag sits on the last path segment; a registry port ('host:5000/image') is not one.
         image="${value#docker://}"
         [[ "${image##*/}" == *:* ]] \
-          || add_error "$rel:$n: '$value' carries no tag — an image is referenced with an explicit ':<tag>' (ADR-0044 clause 6)"
+          || add_error "$rel:$n: '$value' carries no tag — an image is referenced with an explicit ':<tag>' (ADR-0011 clause 6)"
         ;;
       *)
         owner="${value%%/*}"
         if [[ "$owner" == "actions" ]]; then
           first=$((first + 1))
           if [[ "$value" != *@* ]]; then
-            add_error "$rel:$n: '$value' names no ref — reference it by its major version tag, 'actions/name@vN' (ADR-0044 clause 2)"
+            add_error "$rel:$n: '$value' names no ref — reference it by its major version tag, 'actions/name@vN' (ADR-0011 clause 2)"
           elif ! [[ "$value" =~ $FIRST_PARTY_RE ]]; then
-            add_error "$rel:$n: '$value' is first-party — reference it by its major version tag, 'actions/name@vN'; a SHA, a branch and a full version are not used (ADR-0044 clause 2)"
+            add_error "$rel:$n: '$value' is first-party — reference it by its major version tag, 'actions/name@vN'; a SHA, a branch and a full version are not used (ADR-0011 clause 2)"
           fi
         else
           third=$((third + 1))
           if ! [[ "$value" =~ $THIRD_PARTY_RE ]]; then
-            add_error "$rel:$n: '$value' is a third-party action not pinned to a full commit SHA — pin it to the 40-character lowercase SHA of a release and name the release in a comment, 'owner/action@<sha> # vX.Y.Z' (ADR-0044 clause 3)"
+            add_error "$rel:$n: '$value' is a third-party action not pinned to a full commit SHA — pin it to the 40-character lowercase SHA of a release and name the release in a comment, 'owner/action@<sha> # vX.Y.Z' (ADR-0011 clause 3)"
           elif ! [[ "$comment" =~ $VERSION_COMMENT_RE ]]; then
             # The single quotes are part of the message, inside double quotes.
             # shellcheck disable=SC2016
-            add_error "$rel:$n: '$value' ${comment:+carries '# $comment', }not '# vX.Y.Z' — end the line in a comment naming the release tag the SHA was taken from, as three numbers (ADR-0044 clause 3)"
+            add_error "$rel:$n: '$value' ${comment:+carries '# $comment', }not '# vX.Y.Z' — end the line in a comment naming the release tag the SHA was taken from, as three numbers (ADR-0011 clause 3)"
           else
             pinned+=("$rel:$n|$value|$comment")
           fi
@@ -129,22 +130,22 @@ if ((RESOLVE)); then
         resolved[$key]="${peeled:-${plain:-missing}}"
       else
         resolved[$key]="unreachable"
-        add_error "$where: '$value': git ls-remote of $owner/$name failed — $(head -n 1 <<< "$out") (ADR-0044 clause 4)"
+        add_error "$where: '$value': git ls-remote of $owner/$name failed — $(head -n 1 <<< "$out") (ADR-0011 clause 4)"
         continue
       fi
     fi
     got="${resolved[$key]}"
     [[ "$got" == "unreachable" || "$got" == "$sha" ]] \
-      || add_error "$where: '$value': tag $tag of $owner/$name is $got, not the pinned commit (ADR-0044 clause 4)"
+      || add_error "$where: '$value': tag $tag of $owner/$name is $got, not the pinned commit (ADR-0011 clause 4)"
   done
 fi
 
 # 2. Dependabot.
 if [[ ! -f "$ROOT/$DEPENDABOT" ]]; then
-  add_error "$DEPENDABOT: not found — Dependabot raises the pull request for a new major of a first-party action and a new release of a pinned one (ADR-0044 clause 5)"
+  add_error "$DEPENDABOT: not found — Dependabot raises the pull request for a new major of a first-party action and a new release of a pinned one (ADR-0011 clause 5)"
 elif ! grep -vE '^[[:space:]]*#' "$ROOT/$DEPENDABOT" \
        | grep -qE "^[[:space:]]*(- )?package-ecosystem:[[:space:]]*[\"']?github-actions[\"']?[[:space:]]*(#.*)?$"; then
-  add_error "$DEPENDABOT: has no 'package-ecosystem: github-actions' entry — without it no pull request arrives when an action publishes a new release (ADR-0044 clause 5)"
+  add_error "$DEPENDABOT: has no 'package-ecosystem: github-actions' entry — without it no pull request arrives when an action publishes a new release (ADR-0011 clause 5)"
 fi
 
 if ((${#errors[@]})); then

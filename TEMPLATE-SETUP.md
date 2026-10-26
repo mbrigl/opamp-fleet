@@ -101,7 +101,7 @@ place of steps 2 and 3: the project's own decisions and the inherited ADRs becom
      the shape is the one entropy erodes first.
    - **The environment:** the base of the Dev Container (an image, a `Dockerfile`, or Compose)
      and how the work reaches the containers it needs, or none, as `.devcontainer/` ships it;
-     with it, whether the inherited [ADR-0002](docs/adr/0002-dev-container-runtime.md) is kept
+     with it, whether the inherited [ADR-0004](docs/adr/0004-dev-container-runtime.md) is kept
      or superseded.
    - **The supply chain:** how the workflows reference actions, by major version tag as the
      template ships them, and, where the specification names credentials as an asset, where
@@ -113,7 +113,7 @@ place of steps 2 and 3: the project's own decisions and the inherited ADRs becom
    accepted with what decides it:
    - **The shape and the toolchain** flip with the golden path of step 7 and its tests.
    - **The environment** flips with `scripts/check-devcontainer.sh` and what its ADR adds. If
-     ADR-0002 is kept, its decider is added as step 2 describes. An ADR superseding it is
+     ADR-0004 is kept, its decider is added as step 2 describes. An ADR superseding it is
      proposed here, and what it removes follows in a commit after the reviewed ADRs, where it
      flips to accepted ([`AGENTS.md` §3](AGENTS.md#3-adr-rules), rule 4).
    - **The supply chain** flips with
@@ -147,7 +147,7 @@ place of steps 2 and 3: the project's own decisions and the inherited ADRs becom
    "golden path", which `--open` looks for. The specification says *what*; this is where
    an agent learns *how* this project does it, and what it copies from is what you get more of.
    Where the project chose a shape, its rule lands here as a **structural test**, cited with a
-   `Verifies:` marker ([ADR-0003](docs/adr/0003-decisions-verified-by-tests.md)), and the shape
+   `Verifies:` marker ([ADR-0002](docs/adr/0002-decisions-verified-by-tests.md)), and the shape
    ADR flips to accepted with it; the toolchain ADR flips with the golden path's tests. What the
    golden path shows that no check decides and a reader could not guess, the why behind a shape,
    is the first entry in [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).
@@ -167,15 +167,15 @@ name.
 
 A tool, a library, or a one-person project pays for the steps above only where they buy
 something. The chain stays intact as long as three inherited ADRs stand: ADR-0001 (the
-documents the checks read), ADR-0003 (a `Verifies:` marker per accepted decision, one line of
-cost), and ADR-0005 (the skills and their pointers, which cost nothing until invoked).
-[ADR-0008](docs/adr/0008-template-releases.md) costs nothing to accept: it is one line of the
+documents the checks read), ADR-0002 (a `Verifies:` marker per accepted decision, one line of
+cost), and ADR-0003 (the skills and their pointers, which cost nothing until invoked).
+[ADR-0005](docs/adr/0005-template-releases.md) costs nothing to accept: it is one line of the
 README. What can go, and how:
 
-- **No Dev Container?** Supersede [ADR-0002](docs/adr/0002-dev-container-runtime.md) with an ADR
+- **No Dev Container?** Supersede [ADR-0004](docs/adr/0004-dev-container-runtime.md) with an ADR
   that says where the work runs instead, proposed with the founding decisions of step 4, and
   remove what the container brings in the change that implements it:
-  - `.devcontainer/`, and the check that holds ADR-0002: `scripts/check-devcontainer.sh` and its
+  - `.devcontainer/`, and the check that holds ADR-0004: `scripts/check-devcontainer.sh` and its
     self-test, which cites the superseded ADR;
   - the `devcontainer` job and its bullet in the header of
     [`checks.yml`](.github/workflows/checks.yml), its `run` lines in
@@ -196,7 +196,7 @@ README. What can go, and how:
   so its own links hold while the path is walked.
 - **No shape worth a decision?** A script or a thin CLI keeps what the template ships, no
   prescribed shape, in a mini-ADR that says so.
-- **Work never exceeds a session?** [ADR-0004](docs/adr/0004-feature-layer.md) stays accepted and
+- **Work never exceeds a session?** [ADR-0006](docs/adr/0006-feature-layer.md) stays accepted and
   costs nothing: it applies only above that threshold, and the threshold is a judgement under
   proportionality ([`AGENTS.md` §1](AGENTS.md#1-principles)).
 - **The harness and the toolchain** take the smallest form of their catalogue entries: one agent
@@ -233,7 +233,7 @@ entries.
 - **The work** is planned under `docs/plan/` from the start, through the
   [`plan-feature`](.agents/skills/plan-feature/SKILL.md) skill; the golden path of step 7 is the
   tracer bullet of the first spec. A ticket is claimed on `main`
-  ([ADR-0004](docs/adr/0004-feature-layer.md)), so the setup's pull request lands steps 1 to 6
+  ([ADR-0006](docs/adr/0006-feature-layer.md)), so the setup's pull request lands steps 1 to 6
   first, and the founding ADRs reach `main` as `proposed`; step 7 follows as that spec.
 - **A second maintainer** makes the Code Owners review of the repository settings possible; keep
   it required. With several, a team is the code owner in

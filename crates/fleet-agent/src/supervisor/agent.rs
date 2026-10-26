@@ -3,7 +3,7 @@
 //!
 //! Transport-agnostic on purpose (ADR-0013): the WebSocket and plain-HTTP loops feed the same
 //! state machine, so transport is carriage, never semantics. The [`Engine`](crate::engine)
-//! carries n of these over one connection (ADR-0015, ADR-0017) — a Supervisor-backed Agent and
+//! carries n of these over one connection (ADR-0016, ADR-0018) — a Supervisor-backed Agent and
 //! the self-Agent fallback are the same state machine.
 
 mod connection_settings;
@@ -41,7 +41,7 @@ pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::ReportsHealth as u64
     | AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
     | AgentCapabilities::ReportsConnectionSettingsStatus as u64
-    // The Agent's own telemetry (ADR-0016). Declared unconditionally, unlike the capabilities that
+    // The Agent's own telemetry (ADR-0017). Declared unconditionally, unlike the capabilities that
     // describe something this end *has*: these say the Client can report to a destination the
     // Server names, which is true before any destination exists — and declaring them only once one
     // is in force would mean the Server could never make the first offer.
@@ -50,7 +50,7 @@ pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::ReportsOwnLogs as u64;
 
 /// What a Supervisor's Agent declares when the operator switched its remote configuration off
-/// (ADR-0017 clause 50): the base set without either remote-configuration bit.
+/// (ADR-0018 clause 47): the base set without either remote-configuration bit.
 pub const AGENT_CAPABILITIES_WITHOUT_REMOTE_CONFIG: u64 = AGENT_CAPABILITIES
     & !(AgentCapabilities::AcceptsRemoteConfig as u64
         | AgentCapabilities::ReportsRemoteConfig as u64);
@@ -67,51 +67,51 @@ pub struct Handled {
     /// machine has already acknowledged `APPLYING`; the transport owns the verification, the
     /// switch, and reporting the outcome back through the [`Engine`](crate::engine).
     pub connection_offer: Option<ConnectionSettingsOffers>,
-    /// A package to download, verify, and hand to the Supervisor (ADR-0026). The state machine
+    /// A package to download, verify, and hand to the Supervisor (ADR-0028). The state machine
     /// has acknowledged `Installing`; the transport owns the download and verification.
     pub package_download: Option<PackageDownload>,
 }
 
-/// The Agent type the Client's own Agent presents as `service.name` (ADR-0016, ADR-0019): the role
+/// The Agent type the Client's own Agent presents as `service.name` (ADR-0017, ADR-0020): the role
 /// it plays on the host, the Agent that supervises the others. A constant, not the configured
 /// instance name — every Client in a fleet is the same kind of thing, and that is what a type says.
 ///
-/// It is also the shipped program's name and its configuration file's (ADR-0019) — see
+/// It is also the shipped program's name and its configuration file's (ADR-0020) — see
 /// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which holds the same string as a
-/// **separate** constant. It is *not* the service's name: ADR-0019 clause 3 gives the service the
-/// product's name, and clause 9 keeps this one off
+/// **separate** constant. It is *not* the service's name: ADR-0021 clause 17 gives the service the
+/// product's name, and ADR-0021 clause 6 keeps this one off
 /// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME) deliberately — the archive member a self-update
 /// extracts is the same in every variant build, which is what lets one published package Set
 /// serve them all. Derive this from the product and the fleet carries N products where it has one.
 ///
 /// The package that carries this Client is named after the type, and the self-update takes no other
-/// name (ADR-0018).
+/// name (ADR-0019).
 pub const CLIENT_AGENT_TYPE: &str = "supervisor";
 
 pub struct AgentState {
     /// What OpAMP defines about this Agent: identity, sequence numbers, the two Capability Sets,
-    /// what the next report owes, and the status messages (ADR-0010).
+    /// what the next report owes, and the status messages (ADR-0009).
     protocol: AgentProtocol,
     /// What this Client reports about it.
     local: Local,
     storage: Box<dyn AgentStorage>,
     /// A received configuration awaiting dispatch to the process adapter.
     pending_apply: Option<AgentRemoteConfig>,
-    /// The self-Agent's configuration in flight (ADR-0017): stored only once the apply succeeded,
+    /// The self-Agent's configuration in flight (ADR-0018): stored only once the apply succeeded,
     /// so a Client restarted mid-apply reports nothing as applied and is re-offered — a status of
     /// `APPLIED` on restart must mean the file was actually rewritten.
     applying: Option<AgentRemoteConfig>,
     /// A Server-commanded restart awaiting dispatch to the process adapter.
     pending_restart: bool,
     /// The SHA-256 of each remote configuration hash ignored since start, when the operator
-    /// switched remote configuration off for this Agent (ADR-0017); `None` when it takes
+    /// switched remote configuration off for this Agent (ADR-0018); `None` when it takes
     /// them. A digest and not the hash itself, and at most [`IGNORED_CONFIGS_CAP`] of them,
     /// because the hash is whatever the Server sends.
     ignored_configs: Option<std::collections::HashSet<[u8; 32]>>,
 }
 
 /// How many ignored remote configuration hashes a Supervisor with remote configuration switched
-/// off remembers before it starts over (ADR-0017 clause 51).
+/// off remembers before it starts over (ADR-0018 clause 48).
 const IGNORED_CONFIGS_CAP: usize = 1024;
 
 /// A Server-sent hash as a log field: hex, cut after its first 32 bytes, since its length is the
@@ -126,16 +126,16 @@ fn logged_hash(hash: &[u8]) -> String {
 }
 
 /// What this Client reports about one Agent, and the package bookkeeping behind its status — the
-/// content the protocol asks for (ADR-0010).
+/// content the protocol asks for (ADR-0009).
 struct Local {
-    /// What the host says about itself (ADR-0016).
+    /// What the host says about itself (ADR-0017).
     host: Box<dyn HostFacts>,
-    /// The operator's name for this Agent, reported as `service.instance.name` (ADR-0016): the
+    /// The operator's name for this Agent, reported as `service.instance.name` (ADR-0017): the
     /// `[[supervisor]]` block's `name`, or the top-level one for the Client's own Agent. Never
     /// `service.name` — that is the type below.
     instance_name: String,
     /// The Agent *type*, reported as `service.name`: the Supervisor's alone, which a Managed
-    /// Process reporting one of its own never replaces (ADR-0055).
+    /// Process reporting one of its own never replaces (ADR-0017).
     service_name: String,
     start_time_ns: u64,
     /// The last stored remote configuration; what `effective_config` echoes unless the Managed
@@ -144,7 +144,7 @@ struct Local {
     /// A Managed Process stands behind this Agent: a received configuration is acknowledged
     /// `APPLYING` and handed to the process adapter; `APPLIED`/`FAILED` follow its outcome.
     managed: bool,
-    /// The Managed Process's health — derived or self-reported (ADR-0017). Absent for the
+    /// The Managed Process's health — derived or self-reported (ADR-0018). Absent for the
     /// self-Agent, whose health is being alive.
     process_health: Option<ComponentHealth>,
     /// The Managed Process's self-reported description, folded into ours (goal 16).
@@ -154,14 +154,14 @@ struct Local {
     /// The Managed Process's available components, relayed from the Supervisor Endpoint.
     /// Routine reports carry only the hash; the full map goes out when the Server asks.
     available_components: Option<AvailableComponents>,
-    /// The pid of the Managed Process while it runs (ADR-0016) — what own metrics are sampled
+    /// The pid of the Managed Process while it runs (ADR-0017) — what own metrics are sampled
     /// from. `None` for the Client's own Agent, whose process is this one, and for a Supervisor
     /// between restarts.
     process_pid: Option<u32>,
-    /// Whether this Agent's Managed Process is updated from Server-offered packages (ADR-0026).
+    /// Whether this Agent's Managed Process is updated from Server-offered packages (ADR-0028).
     /// Which package that is, is the Server's choice — this side only consents.
     accepts_packages: bool,
-    /// The only package name this Agent will install (ADR-0018); `None` takes whichever top-level
+    /// The only package name this Agent will install (ADR-0019); `None` takes whichever top-level
     /// package the Server offers, which is what a Supervisor does.
     expected_package: Option<String>,
     /// The name of the top-level package the Server last offered. Learned from the offer, not
@@ -170,7 +170,7 @@ struct Local {
     offered_name: Option<String>,
     /// The package currently installed, persisted across restarts.
     installed_package: Option<InstalledPackage>,
-    /// Progress of the artifact download in flight (ADR-0026), reported as `Downloading` with
+    /// Progress of the artifact download in flight (ADR-0028), reported as `Downloading` with
     /// `PackageDownloadDetails`; `None` once the bytes are on disk. `[Development]` upstream.
     downloading: Option<PackageDownloadDetails>,
     /// The package hash currently downloading/installing, so a repeated offer of the same hash is
@@ -187,13 +187,13 @@ struct Local {
     /// installing or after a failure).
     server_offered: Option<(String, Vec<u8>)>,
     /// The last install failure for this Agent's package, reported alongside the status — or,
-    /// while it is `Installing`, why it waits for the second service (ADR-0059 clause 2).
+    /// while it is `Installing`, why it waits for the second service (ADR-0021 clause 17).
     package_error: String,
     /// A failure in processing the *offer itself* rather than one package — the Baseline's
     /// `PackageStatuses.error_message`, "set if the Agent encountered an error when processing the
     /// PackagesAvailable message and that error is not related to any particular single package".
     offer_error: String,
-    /// Operator-defined attributes from `supervisor.toml` (ADR-0023), reported as non-identifying
+    /// Operator-defined attributes from `supervisor.toml` (ADR-0026), reported as non-identifying
     /// attributes so Selectors can target them. Reported attributes win on key collision.
     configured_attributes: Vec<(String, String)>,
     /// The deployment's `service.namespace`, when it has one. The Baseline asks for it "if it is
@@ -202,15 +202,15 @@ struct Local {
     namespace: Option<String>,
     /// Handling an offer changed the package status; the protocol is told once it is done.
     package_status_owed: bool,
-    /// The high-water marks every Supervisor of this Client shares (ADR-0043 clause 8): an offer
+    /// The high-water marks every Supervisor of this Client shares (ADR-0029 clause 8): an offer
     /// below its Agent type's mark is refused, and an `Installed` raises it. `None` for the
-    /// Client's own Agent, which keeps no mark (clause 13).
+    /// Client's own Agent, which keeps no mark (ADR-0029 clause 21).
     high_water: Option<std::sync::Arc<dyn HighWaterMarks>>,
-    /// The floor of each Agent type this Client keeps (ADR-0061 clause 4): a Supervisor refuses
+    /// The floor of each Agent type this Client keeps (ADR-0029 clause 17): a Supervisor refuses
     /// an offer below its type's floor, and its health says when what it runs lies below it.
-    /// The Client's own Agent is held to its floor by the self-update (clause 8).
+    /// The Client's own Agent is held to its floor by the self-update (ADR-0029 clause 21).
     floors: Option<std::sync::Arc<dyn PackageFloors>>,
-    /// What the health last said about the floor (ADR-0061 clause 6): empty while the installed
+    /// What the health last said about the floor (ADR-0029 clause 19): empty while the installed
     /// version is at or above it.
     below_floor: String,
 }
@@ -230,7 +230,7 @@ impl AgentState {
         Self::restore(instance_name, storage, host, true)
     }
 
-    /// The Client's own Agent on a host that keeps its Supervisor set from the Server (ADR-0017):
+    /// The Client's own Agent on a host that keeps its Supervisor set from the Server (ADR-0018):
     /// it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores no stored
     /// set, and ignores a set that arrives anyway. Every other capability is the one
     /// [`new`](Self::new) declares.
@@ -243,7 +243,7 @@ impl AgentState {
     }
 
     /// [`new`](Self::new), with `remote_config` saying whether this Agent takes remote
-    /// configuration at all (ADR-0017): without it the Agent declares neither remote-configuration
+    /// configuration at all (ADR-0018): without it the Agent declares neither remote-configuration
     /// capability, restores no stored configuration, and ignores every offer.
     fn restore(
         instance_name: String,
@@ -306,11 +306,11 @@ impl AgentState {
         })
     }
 
-    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0017). Only
+    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, ADR-0018). Only
     /// such an Agent accepts a restart command — the self-Agent has no process to restart.
     ///
     /// The type is a parameter rather than a builder default because there is no sensible default
-    /// for it (ADR-0016): the Client's own type would be a lie, and the instance name in that slot
+    /// for it (ADR-0017): the Client's own type would be a lie, and the instance name in that slot
     /// is exactly the confusion this signature exists to prevent. The caller always knows one —
     /// the block's `service_name`, or the program's file name.
     pub fn supervised(
@@ -323,7 +323,7 @@ impl AgentState {
     }
 
     /// A Supervisor-backed Agent whose remote configuration the operator switched off
-    /// (ADR-0017): it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores
+    /// (ADR-0018): it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores
     /// no stored configuration, and ignores an offer that arrives anyway. Built without the bits
     /// rather than stripped of them afterwards, because a declared capability only ever grows.
     pub fn supervised_without_remote_config(
@@ -364,14 +364,14 @@ impl AgentState {
         self.protocol.uid()
     }
 
-    /// The operator's name for this Agent (ADR-0016). The Supervisor's own value, never the
+    /// The operator's name for this Agent (ADR-0017). The Supervisor's own value, never the
     /// Managed Process's: a process reporting under that key is ignored in `describe`, so this is
     /// the one answer to "which Agent is this" that a human can read.
     pub fn instance_name(&self) -> &str {
         &self.local.instance_name
     }
 
-    /// The Agent *type* this Agent is reported under — `service.name` (ADR-0055).
+    /// The Agent *type* this Agent is reported under — `service.name` (ADR-0017).
     ///
     /// The Supervisor's, whatever its Managed Process reports: the same value `describe` reports,
     /// so what the fleet view shows for an Agent and what its telemetry is labelled with are the
@@ -387,7 +387,7 @@ impl AgentState {
         self.name_the_wait();
     }
 
-    /// What waits for the second service says so (ADR-0059 clause 2): while the Supervisor's
+    /// What waits for the second service says so (ADR-0021 clause 17): while the Supervisor's
     /// health says that the service is not reached, a configuration that is `APPLYING` and a
     /// package that is `Installing` name that as the reason, and nothing once it is reached.
     fn name_the_wait(&mut self) {
@@ -425,14 +425,14 @@ impl AgentState {
     }
 
     /// The next `AgentToServer`: which fields it carries is the protocol's to decide, what they
-    /// hold is this Agent's (ADR-0010).
+    /// hold is this Agent's (ADR-0009).
     pub fn next_report(&mut self) -> AgentToServer {
         self.note_floor();
         self.protocol.next_report(&self.local)
     }
 
     /// Says in the health whether what this Supervisor runs lies below its type's floor
-    /// (ADR-0061 clause 6) — asked before every report, since a fetch raises a floor without
+    /// (ADR-0029 clause 19) — asked before every report, since a fetch raises a floor without
     /// telling the Agent.
     fn note_floor(&mut self) {
         let note = self.local.floor_note();
@@ -442,7 +442,7 @@ impl AgentState {
         }
     }
 
-    /// A report carrying `csr` alone, as an enrolling host sends it (ADR-0039 clause 11).
+    /// A report carrying `csr` alone, as an enrolling host sends it (ADR-0016 clause 24).
     pub fn csr_report(&mut self, csr: Vec<u8>) -> AgentToServer {
         self.protocol.csr_report(csr)
     }
@@ -487,8 +487,7 @@ impl AgentState {
 
         if let Some(remote_config) = received.remote_config {
             if let Some(ignored) = &mut self.ignored_configs {
-                // Not declared, so not acted on and not reported (ADR-0017 clauses 51
-                // and 3); said once per hash, so a Server resending its offer on every exchange
+                // Not declared, so not acted on and not reported (ADR-0018 clauses 3 and 48); said once per hash, so a Server resending its offer on every exchange
                 // does not flood the log.
                 use sha2::Digest as _;
                 let seen: [u8; 32] = sha2::Sha256::digest(&remote_config.config_hash).into();
@@ -506,7 +505,7 @@ impl AgentState {
                              off for this supervisor in [supervisors] remote_config_disabled"
                         );
                     } else {
-                        // The Client's own Agent, offered a Supervisor set (ADR-0017 clause 43).
+                        // The Client's own Agent, offered a Supervisor set (ADR-0018 clause 40).
                         warn!(
                             hash = %logged_hash(&remote_config.config_hash),
                             "ignoring a supervisor set: this Client keeps its supervisor set \
@@ -544,7 +543,7 @@ impl AgentState {
             }
         }
 
-        // A package offer (ADR-0026): act only on this Agent's package. Download and verification
+        // A package offer (ADR-0028): act only on this Agent's package. Download and verification
         // are the transport's; the state machine acknowledges Installing and hands over the
         // coordinates.
         if let Some(available) = received.packages_available {
@@ -563,7 +562,7 @@ impl AgentState {
         self.local.managed
     }
 
-    /// This Agent's description, for the Resource of its own telemetry (ADR-0016).
+    /// This Agent's description, for the Resource of its own telemetry (ADR-0017).
     pub fn description(&self) -> AgentDescription {
         self.describe()
     }
@@ -572,7 +571,7 @@ impl AgentState {
         self.local.describe(&self.protocol.uid())
     }
 
-    /// The Managed Process's pid changed — it started, or it is gone (ADR-0016).
+    /// The Managed Process's pid changed — it started, or it is gone (ADR-0017).
     pub fn set_process_pid(&mut self, pid: Option<u32>) {
         self.local.process_pid = pid;
     }
@@ -586,7 +585,7 @@ impl AgentState {
         }
     }
 
-    /// Queues a certificate signing request for the next report (ADR-0021).
+    /// Queues a certificate signing request for the next report (ADR-0022).
     pub fn request_certificate(&mut self, csr: Vec<u8>) {
         self.protocol.request_certificate(csr);
     }
@@ -629,7 +628,7 @@ impl ReportContent for Local {
 }
 
 impl Local {
-    /// The process's health, with what the floor says about it (ADR-0061 clause 6) in its
+    /// The process's health, with what the floor says about it (ADR-0029 clause 19) in its
     /// `last_error`, which the fleet view shows.
     fn health(&self) -> ComponentHealth {
         let mut health = self.process_health();
@@ -726,7 +725,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0017
     #[test]
     fn configured_attributes_are_reported_but_never_shadow_reported_ones() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -787,7 +786,7 @@ mod tests {
 
     /// Every reported attribute as `key -> value`, both lists together: what the Server actually
     /// receives, and therefore what a Selector matches against. A string array (`host.ip`,
-    /// `host.mac`, ADR-0016) reads joined, as the Server's view joins it.
+    /// `host.mac`, ADR-0017) reads joined, as the Server's view joins it.
     fn reported(description: &AgentDescription) -> std::collections::BTreeMap<String, String> {
         description
             .identifying_attributes
@@ -826,12 +825,12 @@ mod tests {
         }
     }
 
-    /// The defect ADR-0016 exists for: a Collector's `opampextension` reports the type it was built
+    /// The defect ADR-0017 exists for: a Collector's `opampextension` reports the type it was built
     /// with, and folding that into the operator's name for the Supervisor would overwrite it — so
     /// every Collector of one distribution would collapse onto one name in the fleet view. Neither
-    /// the type nor the name is the process's to state: both stay the Supervisor's (ADR-0055).
-    /// Verifies: ADR-0055
-    // Verifies: ADR-0016, ADR-0041
+    /// the type nor the name is the process's to state: both stay the Supervisor's (ADR-0017).
+    /// Verifies: ADR-0017
+    // Verifies: ADR-0017
     #[test]
     fn a_process_reporting_its_type_does_not_take_the_operators_name_with_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -881,7 +880,7 @@ mod tests {
     /// process reporting either of them among its *identifying* attributes would otherwise win
     /// every Selector — the Server resolves those before the non-identifying ones — while the fleet
     /// row, which reads the other list, went on showing the operator's value.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0017
     #[test]
     fn the_supervisors_own_attributes_survive_whichever_list_a_process_reports_them_in() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -926,9 +925,9 @@ mod tests {
     }
 
     /// The Client's own Agent is one *kind* of thing across the whole fleet, so its type is the
-    /// constant `supervisor` (ADR-0019) and not whatever the operator called this instance — which
-    /// is what lets one Selector on the type aim at every Client in the fleet at once (ADR-0016).
-    /// Verifies: ADR-0019
+    /// constant `supervisor` (ADR-0020) and not whatever the operator called this instance — which
+    /// is what lets one Selector on the type aim at every Client in the fleet at once (ADR-0017).
+    /// Verifies: ADR-0020
     #[test]
     fn the_clients_own_agent_reports_its_type_and_its_configured_name_separately() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -946,25 +945,25 @@ mod tests {
         );
     }
 
-    /// ADR-0019 pins the value, not just the separation: the type is `supervisor`. ADR-0019 also
+    /// ADR-0020 pins the value, not just the separation: the type is `supervisor`. ADR-0020 also
     /// gives the program, its service and its configuration file the same word, so the Agent's
     /// *role* is the one name this thing has anywhere — which is the point, and
     /// which is why the two constants are asserted to agree rather than to differ.
-    /// Verifies: ADR-0019
+    /// Verifies: ADR-0020
     #[test]
     fn the_clients_own_agent_type_is_the_one_name_this_program_has() {
         assert_eq!(CLIENT_AGENT_TYPE, "supervisor");
         assert_eq!(
             CLIENT_AGENT_TYPE,
             crate::service::layout::COMPONENT,
-            "the type, the program and the service are one word (ADR-0019)"
+            "the type, the program and the service are one word (ADR-0020)"
         );
     }
 
     /// `[supervisor.attributes]` is a fallback for keys nothing else reports, so it must not be a
     /// second way to set the two attributes the Supervisor itself owns.
-    /// Verifies: ADR-0041
-    // Verifies: ADR-0016
+    /// Verifies: ADR-0017
+    // Verifies: ADR-0017
     #[test]
     fn configured_attributes_cannot_restate_the_type_or_the_instance_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -994,7 +993,7 @@ mod tests {
         );
     }
 
-    /// ADR-0026 twice offers "a Selector matching that host's `host.name`" as the way to pin one
+    /// ADR-0028 twice offers "a Selector matching that host's `host.name`" as the way to pin one
     /// host to one artifact. That only works if an Agent reports the attribute, which for a long
     /// time it did not.
     #[cfg(unix)]
@@ -1123,7 +1122,7 @@ mod tests {
     /// claims it. Whichever list the process states another type in, the description carries the
     /// Supervisor's, once, among the identifying attributes, while the same report's version is
     /// the Agent's — and the accessor the telemetry label reads answers the same.
-    /// Verifies: ADR-0055
+    /// Verifies: ADR-0017
     #[test]
     fn the_type_is_the_supervisors_whatever_the_process_reports() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1169,7 +1168,7 @@ mod tests {
     /// the process starts to report: a report repeated every few seconds must not flood the log,
     /// and a process stating the Supervisor's own type has nothing to warn about. The warning
     /// names the Supervisor, both values and the block key that would present the process's.
-    /// Verifies: ADR-0055
+    /// Verifies: ADR-0017
     #[test]
     fn a_differing_reported_type_is_warned_about_once_per_value() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1214,7 +1213,7 @@ mod tests {
 
     /// The reported type is the process's word, so it reaches the log escaped and cut short: a
     /// value carrying a line break cannot forge a log line, and a long one cannot fill the log.
-    /// Verifies: ADR-0055
+    /// Verifies: ADR-0017
     #[test]
     fn a_reported_type_reaches_the_log_escaped_and_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1319,7 +1318,7 @@ mod tests {
     /// its claim in: another host would draw that host's Configurations, another platform another
     /// machine's artifact, and a `supervisor.kind.*` key would make a second Client Agent. Only
     /// its `service.*` attributes are laid over the Supervisor's.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0017
     #[test]
     fn a_process_states_its_own_service_attributes_and_nothing_about_the_host() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1386,7 +1385,7 @@ mod tests {
         assert_eq!(
             after.get("service.name").map(String::as_str),
             Some("otelcol"),
-            "the type is the Supervisor's (ADR-0055)"
+            "the type is the Supervisor's (ADR-0017)"
         );
         assert_eq!(
             after.get("service.version").map(String::as_str),
@@ -1398,7 +1397,7 @@ mod tests {
     /// `[attributes]` entry the code does not report is the operator's word, and so is
     /// `service.namespace` once `service_namespace` is set. Unset, the namespace is the process's
     /// to state.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0017
     #[test]
     fn a_process_never_overrides_what_the_operator_set() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1448,7 +1447,7 @@ mod tests {
     /// An admitted key the process states in both lists is reported once, among the identifying
     /// attributes, with its identifying value: the Server reads `service.version` from there, so a
     /// version left among the non-identifying ones would be no version at all.
-    /// Verifies: ADR-0055
+    /// Verifies: ADR-0017
     #[test]
     fn a_key_stated_in_both_lists_is_reported_once_among_the_identifying_attributes() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1535,11 +1534,11 @@ mod tests {
         assert!(!this.take_pending_restart());
     }
 
-    /// ADR-0018: the Client's own Agent takes one named package and refuses everything else. A
-    /// package with an empty Selector reaches every consenting Agent (ADR-0026), so without this
+    /// ADR-0019: the Client's own Agent takes one named package and refuses everything else. A
+    /// package with an empty Selector reaches every consenting Agent (ADR-0028), so without this
     /// the first fleet-wide Collector artifact an operator uploads would be written over the
     /// Client and take the host out of reach.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0019
     #[test]
     fn the_self_agent_refuses_a_package_not_named_after_its_agent_type() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
@@ -1701,7 +1700,7 @@ mod tests {
             .store_package(&InstalledPackage {
                 name: "opamp-client".to_string(),
                 // What the Server was told to offer: the release, without the build metadata this
-                // binary carries (ADR-0012).
+                // binary carries (ADR-0034).
                 version: fleet_core::version::parse(fleet_core::version::current())
                     .expect("this build's version parses")
                     .identity()
@@ -1739,13 +1738,13 @@ mod tests {
         );
     }
 
-    /// ADR-0025 point 15: for the package that carries this Client, *already installed* is what
+    /// ADR-0027 clause 18: for the package that carries this Client, *already installed* is what
     /// this process runs — never a hash in a record. The same bytes can be published under a new
     /// version, and a record about a binary that is gone must not swallow the offer that would
     /// replace it: the Server offers because the Agent reports running something older, and a
     /// Client that answered "in sync" from its record would strand the host on what it runs, for
     /// good.
-    // Verifies: ADR-0025
+    // Verifies: ADR-0027
     #[test]
     fn the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1807,7 +1806,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0028
     #[test]
     fn a_package_offer_for_the_named_package_is_acknowledged_installing_and_handed_over() {
         use opamp::proto::{
@@ -1944,7 +1943,7 @@ mod tests {
     /// An `Addon` is not a Managed Process's binary, and the only thing this Client can do with a
     /// package is *be* that binary — so an offer carrying nothing but addons is refused rather
     /// than installed over the process they were meant to extend, and the refusal is reported.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0028
     #[test]
     fn an_addon_package_is_refused_instead_of_overwriting_the_binary() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
@@ -2002,7 +2001,7 @@ mod tests {
 
     /// An offer of two top-level packages is refused whole: an Agent has one binary to replace,
     /// and picking one of the two would let the order of a map decide what runs.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0028
     #[test]
     fn an_offer_of_two_top_level_packages_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2039,7 +2038,7 @@ mod tests {
 
     /// A Supervisor takes a package only for its own Agent type, and never one older than it
     /// runs: both are refused before anything is downloaded, and the reason is reported.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0028
     #[test]
     fn a_package_for_another_type_or_an_older_version_is_refused() {
         use crate::supervisor::ports::AgentStorage as _;
@@ -2120,8 +2119,8 @@ mod tests {
     }
 
     /// A Supervisor with no installed record and no mark refuses an offer at `1.19`: nothing is
-    /// downloaded, and the reason names the version (ADR-0043 clause 7).
-    /// Verifies: ADR-0043
+    /// downloaded, and the reason names the version (ADR-0029 clause 7).
+    /// Verifies: ADR-0029
     #[test]
     fn a_supervisor_refuses_an_offer_whose_version_is_not_semver() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2144,8 +2143,8 @@ mod tests {
 
     /// The mark rises on `Installed` and on nothing else: a failed apply, which rolled back to the
     /// predecessor, leaves it and the version reported where they were; an `Installed` raises it
-    /// and writes the file owner-only (ADR-0043 clause 8).
-    /// Verifies: ADR-0043
+    /// and writes the file owner-only (ADR-0029 clause 8).
+    /// Verifies: ADR-0029
     #[test]
     fn the_mark_rises_only_when_a_package_is_installed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2182,8 +2181,8 @@ mod tests {
     }
 
     /// An installed record an older Client wrote under `1.19` is dropped at load: the Agent
-    /// reports no `agent_has_version`, and nothing enters the mark (ADR-0043 clause 10).
-    /// Verifies: ADR-0043
+    /// reports no `agent_has_version`, and nothing enters the mark (ADR-0029 clause 10).
+    /// Verifies: ADR-0029
     #[test]
     fn an_installed_record_whose_version_is_not_semver_is_dropped_at_load() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2259,7 +2258,7 @@ mod tests {
         assert!(agent.next_report().package_statuses.is_some());
     }
 
-    /// And the optimistic half (clause 1): before the Server has said anything there is nothing to
+    /// And the optimistic half (ADR-0014 clause 12): before the Server has said anything there is nothing to
     /// obey, so the first report — which necessarily precedes any declaration — carries everything.
     /// Verifies: ADR-0014
     #[test]
@@ -2311,7 +2310,7 @@ mod tests {
         assert_eq!(status.last_connection_settings_hash, b"offer-1");
     }
 
-    /// The other side of clause 2, and the only shape where the gate is actually observable: a
+    /// The other side of ADR-0014 clause 12, and the only shape where the gate is actually observable: a
     /// **restarted** Client holds a status from its persisted settings (ADR-0014) without any offer
     /// having arrived in this process. Sent to a Server that declares only the mandatory bit, that
     /// status exercises a capability the Server never claimed — so it is withheld until the Server
@@ -2381,9 +2380,9 @@ mod tests {
     }
 
     /// The headers a `DownloadableFile` names travel to the download that has to use them — the
-    /// credential a referenced source needs (ADR-0026), which the Server fills from the operator's
+    /// credential a referenced source needs (ADR-0028), which the Server fills from the operator's
     /// configuration.
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0028
     #[test]
     fn a_package_offer_hands_its_download_headers_to_the_transport() {
         use opamp::proto::{
@@ -2448,7 +2447,7 @@ mod tests {
     /// A configuration that waits for the second service stays `APPLYING` and names why, as the
     /// Supervisor's health says it — down or refused; once a start reaches the service the reason
     /// goes, and the acknowledgement closes it. A health that comes after it changes nothing.
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0021
     #[test]
     fn a_configuration_that_waits_for_the_second_service_stays_applying_and_says_why() {
         use crate::supervisor::ports::{REFUSED, UNREACHABLE};
@@ -2498,7 +2497,7 @@ mod tests {
     /// A package that waits for the second service stays `Installing` and names why, as the
     /// Supervisor's health says it; a package still downloading does not, and the outcome
     /// replaces the reason.
-    /// Verifies: ADR-0059
+    /// Verifies: ADR-0021
     #[test]
     fn a_package_that_waits_for_the_second_service_stays_installing_and_says_why() {
         use crate::supervisor::ports::UNREACHABLE;
@@ -2549,7 +2548,7 @@ mod tests {
         assert!(installed.error_message.is_empty(), "{installed:?}");
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: ADR-0028
     #[test]
     fn a_failed_package_reports_installed_failed_and_keeps_the_old_version() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2732,7 +2731,7 @@ mod tests {
     }
 
     /// The self-Agent's offer is acknowledged `APPLYING` and left pending for the Engine's
-    /// Supervisor-set apply (ADR-0017); the verdict closes the lifecycle, and only then does the
+    /// Supervisor-set apply (ADR-0018); the verdict closes the lifecycle, and only then does the
     /// configuration echo as effective.
     /// Verifies: ADR-0014
     #[test]
@@ -2762,7 +2761,7 @@ mod tests {
     }
 
     /// A restart reports `APPLIED` only for a configuration whose apply actually finished
-    /// (ADR-0017): the offer is persisted on the verdict, never on receipt, so a Client
+    /// (ADR-0018): the offer is persisted on the verdict, never on receipt, so a Client
     /// restarted mid-apply reports nothing and the Server offers again.
     #[test]
     fn the_applied_config_survives_a_restart() {
@@ -2868,8 +2867,8 @@ mod tests {
     }
 
     /// A listed Supervisor's Agent is built without either remote-configuration bit, and keeps
-    /// every other capability a Supervisor declares (ADR-0017 clause 50).
-    /// Verifies: ADR-0017
+    /// every other capability a Supervisor declares (ADR-0018 clause 47).
+    /// Verifies: ADR-0018
     #[test]
     fn a_supervisor_with_remote_config_disabled_declares_neither_remote_config_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2893,8 +2892,8 @@ mod tests {
     }
 
     /// An offer that arrives anyway is ignored: nothing stored, no entry file, nothing pending for
-    /// the process adapter, and no status reported (ADR-0017 clause 51).
-    /// Verifies: ADR-0017
+    /// the process adapter, and no status reported (ADR-0018 clause 48).
+    /// Verifies: ADR-0018
     #[test]
     fn a_remote_config_offered_anyway_is_neither_stored_nor_applied_nor_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2923,9 +2922,8 @@ mod tests {
         assert!(agent.next_report().remote_config_status.is_none());
     }
 
-    /// The warning about an ignored offer is said once per hash seen since start (ADR-0017 clause
-    /// 31), so a Server resending the same offer does not flood the log.
-    /// Verifies: ADR-0017
+    /// The warning about an ignored offer is said once per hash seen since start (ADR-0018 clause 30), so a Server resending the same offer does not flood the log.
+    /// Verifies: ADR-0018
     #[test]
     fn an_ignored_remote_config_is_logged_once_per_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2950,8 +2948,8 @@ mod tests {
 
     /// What an ignored offer leaves behind is bounded whatever the Server sends: at most
     /// `IGNORED_CONFIGS_CAP` remembered digests however many distinct hashes arrive, and a long
-    /// hash cut short in the log (ADR-0017 clause 51).
-    /// Verifies: ADR-0017
+    /// hash cut short in the log (ADR-0018 clause 48).
+    /// Verifies: ADR-0018
     #[test]
     fn what_ignored_remote_configs_leave_behind_is_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2988,8 +2986,8 @@ mod tests {
 
     /// The Client's own Agent on a host that keeps its set is built without either
     /// remote-configuration bit and keeps everything else it declares, self-update included
-    /// (ADR-0017 clause 42).
-    /// Verifies: ADR-0017
+    /// (ADR-0018 clause 39).
+    /// Verifies: ADR-0018
     #[test]
     fn the_own_agent_of_a_host_that_keeps_its_set_declares_neither_remote_config_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3017,8 +3015,8 @@ mod tests {
     }
 
     /// A set offered anyway is not stored, not handed to the Supervisor-set apply, and not
-    /// answered (ADR-0017 clause 43).
-    /// Verifies: ADR-0017
+    /// answered (ADR-0018 clause 40).
+    /// Verifies: ADR-0018
     #[test]
     fn a_set_offered_anyway_to_a_host_that_keeps_it_is_neither_stored_nor_applied_nor_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3050,8 +3048,8 @@ mod tests {
     }
 
     /// The warning about an ignored set is said once per hash and names the key that keeps the
-    /// set on the host (ADR-0017 clause 43).
-    /// Verifies: ADR-0017
+    /// set on the host (ADR-0018 clause 40).
+    /// Verifies: ADR-0018
     #[test]
     fn a_set_ignored_by_a_host_that_keeps_it_is_logged_once_per_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3147,7 +3145,7 @@ mod tests {
     /// A Supervisor refuses an offer below its type's floor before anything is downloaded, and
     /// reports the package `InstallFailed` with a reason naming the version and the floor; an
     /// offer at the floor is taken.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0029
     #[test]
     fn a_supervisor_refuses_an_offer_below_its_floor_and_reports_install_failed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3192,7 +3190,7 @@ mod tests {
     /// An offer of the package a Supervisor below its floor already runs is answered as installed,
     /// not refused: it is no install, and what runs stays. Other bytes under the same version are
     /// an install, and refused below the floor.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0029
     #[test]
     fn an_offer_of_what_runs_below_the_floor_is_answered_as_installed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3231,7 +3229,7 @@ mod tests {
     }
 
     /// Floors that cannot be read refuse every Supervisor offer, with a reason naming the file.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0029
     #[test]
     fn unreadable_floors_refuse_every_supervisor_offer() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3264,7 +3262,7 @@ mod tests {
     /// A Managed Process whose installed version lies below its type's floor keeps running —
     /// nothing is commanded of it — and its health says so, naming both versions, once the floor
     /// is raised; at the floor, the health says nothing of it.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0029
     #[test]
     fn a_managed_process_below_its_floor_keeps_running_and_its_health_says_so() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3298,7 +3296,7 @@ mod tests {
     /// An offer at or above the floor is taken by a Supervisor that runs below it; when the new
     /// program does not stay up, the rollback puts the predecessor below the floor back all the
     /// same, and the health then says it runs below the floor.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0029
     #[test]
     fn a_rollback_to_a_predecessor_below_the_floor_still_happens() {
         let dir = tempfile::tempdir().expect("tempdir");

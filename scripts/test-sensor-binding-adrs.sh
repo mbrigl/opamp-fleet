@@ -8,7 +8,7 @@
 # path its prose only resembles, an ADR no longer in force, an ADR the change itself adds, a
 # change no ADR names, nothing to compare, and a base that does not resolve.
 #
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 # Inputs: scripts/sensor-binding-adrs.sh scripts/lib/
 #
 # Usage:

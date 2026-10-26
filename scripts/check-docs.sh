@@ -6,7 +6,7 @@
 # docs/adr/README.md:
 #
 #   1. ADR index integrity: every docs/adr/NNNN-*.md file and every draft docs/adr/draft-*.md
-#      (ADR-0003) is listed in the index table in
+#      (ADR-0002) is listed in the index table in
 #      docs/adr/README.md once, every index row points to an existing file, and the status and the
 #      'Applies to' cell shown in the index match the **Status:** and **Applies to:** lines
 #      inside each ADR — the index routes a reader from a change to the ADRs that bind it
@@ -18,7 +18,7 @@
 #   2. ADR numbering integrity: the ADR files run 0001..N without gaps, and every file's
 #      '# ADR-NNNN' heading matches its filename (docs/adr/README.md). A draft is outside the
 #      count: its slug is lower case letters and digits joined by hyphens, and its heading reads
-#      '# ADR-draft-<slug>' for the file 'draft-<slug>.md' (ADR-0003).
+#      '# ADR-draft-<slug>' for the file 'draft-<slug>.md' (ADR-0002).
 #   3. Relative-link integrity: every relative Markdown link in every tracked .md file resolves
 #      to a file or directory that exists. Links inside fenced code blocks are illustrations,
 #      not claims about files on disk, and are skipped (here and in check 6); so is a target that
@@ -58,7 +58,7 @@
 #      each other, by number or by draft identifier. Both are written in the same pull request but in two files
 #      (docs/adr/README.md), and check 1 cannot see a missing half: it only mirrors the index
 #      against whatever status the file carries. Every name of a Supersedes field counts, on
-#      whichever line it sits. An entry that names clauses supersedes only those (ADR-0009): its
+#      whichever line it sits. An entry that names clauses supersedes only those (ADR-0007): its
 #      ADR keeps an active status and carries a 'clause N superseded by ADR-NNNN' suffix, while
 #      an entry without clauses needs the ⚪ flip.
 #   9. Check-list agreement: the jobs of .github/workflows/checks.yml and the required status
@@ -78,12 +78,12 @@
 #      exists, a trailing '/' meaning a directory. The block is written by hand and nothing else
 #      tells a reader that one of its lines has gone stale. A path with a '*' matches at least one
 #      file, and docs/plan/ may be absent, since open work lives there only while there is some
-#      (ADR-0004). The reverse holds for the top level only: every tracked top-level file and
+#      (ADR-0006). The reverse holds for the top level only: every tracked top-level file and
 #      directory is named, by itself or by a path under it. Below it the block is a tour of the
 #      parts a newcomer needs, not a file listing.
 #  11. Skill pointer integrity: every skill under .agents/skills/ (a directory with a SKILL.md)
 #      has a symlink of the same name under .claude/skills/ that resolves to it, and every entry
-#      under .claude/skills/ is such a symlink (ADR-0005). Claude Code reads only the pointer
+#      under .claude/skills/ is such a symlink (ADR-0003). Claude Code reads only the pointer
 #      directory, so a skill without its pointer is invisible to it and to no other agent —
 #      nobody notices; a copy instead of a symlink is a second source that drifts, and a skill
 #      that lives only in the pointer directory is one no other agent finds. Each message says
@@ -106,7 +106,7 @@
 #      placeholder that survives the setup describes the template, not the project. A file that
 #      does not exist has nothing to check.
 #  14. Template release named: README.md carries a '**Template release:**' line naming a
-#      'vX.Y.Z' tag or 'unreleased' (ADR-0008). Tags do not travel with GitHub's template
+#      'vX.Y.Z' tag or 'unreleased' (ADR-0005). Tags do not travel with GitHub's template
 #      mechanism, so the line is the one thing that tells a derived project which release of the
 #      template it carries; a release moves it, and a project that takes a release up moves it.
 #  15. Prose width: a line of Markdown prose is at most 100 columns, so a diff shows the sentence
@@ -117,7 +117,7 @@
 #      prose.
 #  16. No draft on main: a change that lands on main carries no draft ADR — a draft takes its
 #      number on the branch whose pull request brings it there, by scripts/number-adrs.sh
-#      (ADR-0003). The branch a change lands on is the one CI names: the base of a pull request,
+#      (ADR-0002). The branch a change lands on is the one CI names: the base of a pull request,
 #      else the branch a push runs on. A draft pull request passes, since it tests a feat/ branch
 #      still under rework, and so does a run outside CI, where nothing names the branch; the
 #      workflow says in PULL_REQUEST_DRAFT whether a pull request is a draft.
@@ -452,7 +452,7 @@ check_adr_numbering() {
     fi
   done
 
-  # A draft stands outside the count; its slug and heading follow its file name (ADR-0003).
+  # A draft stands outside the count; its slug and heading follow its file name (ADR-0002).
   for f in "${ADR_LIST[@]}"; do
     base="${f##*/}"
     [[ "$base" == draft-* ]] || continue
@@ -485,7 +485,7 @@ check_no_draft_on_main() {
   [[ "${PULL_REQUEST_DRAFT:-}" == "true" ]] && return
   local f
   while IFS= read -r f; do
-    add_error "$(basename "$f"): a draft lands on main — give it its number first with scripts/number-adrs.sh (ADR-0003)"
+    add_error "$(basename "$f"): a draft lands on main — give it its number first with scripts/number-adrs.sh (ADR-0002)"
   done < <(find "$ADR_DIR" -maxdepth 1 -type f -name 'draft-*.md' | LC_ALL=C sort)
 }
 
@@ -539,7 +539,7 @@ check_adr_headers() {
 # superseding_keys <status line> — sets SUCCESSORS to the key, a four-digit number or
 # 'draft-<slug>', of every 'superseded by ADR-NNNN' the status line names: the whole-supersession
 # flip ('⚪ superseded by ADR-NNNN') and every clause suffix ('🟢 accepted · clause 2 superseded by
-# ADR-NNNN', ADR-0009) alike; empty when it names none. The citation may be plain or a Markdown
+# ADR-NNNN', ADR-0007) alike; empty when it names none. The citation may be plain or a Markdown
 # link, so the bracket is optional (docs/adr/README.md asks for the link form).
 SUCCESSORS=()
 superseding_keys() {
@@ -553,7 +553,7 @@ superseding_keys() {
 }
 
 # supersedes_entries <Supersedes field> — sets ENTRIES to one item per ADR the field names, its
-# key followed by ' clause' when the entry names clauses (ADR-0009), alone for a whole
+# key followed by ' clause' when the entry names clauses (ADR-0007), alone for a whole
 # supersession. An entry runs from its ADR's identifier to the next one, wrapped lines included.
 ENTRIES=()
 supersedes_entries() {
@@ -591,7 +591,7 @@ adr_refs() {
 # performed flip passes it. Both directions are verified here; a cited number that names no file
 # is left to check_adr_refs, which reports it repository-wide. A Supersedes field wraps at the
 # line width like any other header field, and a name on its second line counts. An entry that
-# names clauses supersedes only those (ADR-0009): the old ADR stays active and its status line
+# names clauses supersedes only those (ADR-0007): the old ADR stays active and its status line
 # carries a clause suffix instead of the ⚪ flip.
 check_adr_supersessions() {
   local f base nr line entry target kind target_file target_line succ succ_file named
@@ -1075,7 +1075,7 @@ check_check_lists() {
   fi
 
   # A script named on a line '# On instruction: scripts/<name>.sh' of the local runner runs on a
-  # human's instruction, as a sensor that reads GitHub (ADR-0003), and may run in a workflow
+  # human's instruction, as a sensor that reads GitHub (ADR-0002), and may run in a workflow
   # alone: a gate on another platform or against a real store, which the local runner cannot run.
   local on_instruction=() name
   while IFS= read -r name; do on_instruction+=("$name"); done \
@@ -1169,7 +1169,7 @@ check_project_layout() {
       compgen -G "$ROOT/$path" >/dev/null \
         || add_error "README.md: Project Layout lists '$path', which matches nothing in this repository"
     elif [[ "$path" == */ ]]; then
-      # Open work lives under docs/plan/ only while there is some (ADR-0004).
+      # Open work lives under docs/plan/ only while there is some (ADR-0006).
       [[ -d "$ROOT/${path%/}" || "$path" == "docs/plan/" ]] \
         || add_error "README.md: Project Layout lists '$path', which is not a directory of this repository"
     else
@@ -1217,7 +1217,7 @@ check_skill_pointers() {
     if [[ ! -L "$p" ]]; then
       # A copy of an existing skill was reported above; what is left is a skill living here only.
       [[ -f "$skills/$name/SKILL.md" ]] \
-        || add_error ".claude/skills/$name: is not a symlink into .agents/skills/ — a skill lives there, where every agent reads it, and is pointed at from here (ADR-0005)"
+        || add_error ".claude/skills/$name: is not a symlink into .agents/skills/ — a skill lives there, where every agent reads it, and is pointed at from here (ADR-0003)"
       continue
     fi
     if ! target="$(cd -P "$p" 2>/dev/null && pwd -P)"; then
@@ -1337,14 +1337,14 @@ check_prose_width() {
 # bold label is allowed, the version may be written as a link or in backticks, and what follows
 # it — a sentence, a link target — is not read. After the version only a space, a punctuation
 # mark, or the end of the line may follow: a pre-release suffix, build metadata, and a fourth
-# number are not a tag ADR-0008 cuts, and SemVer allows no leading zero.
+# number are not a tag ADR-0005 cuts, and SemVer allows no leading zero.
 check_template_release() {
   local readme="$ROOT/README.md"
   [[ -f "$readme" ]] || return   # check 10 reports the missing README
   local line value
   line="$(grep -m1 -E '^[[:space:]]*([-*] )?\*\*Template release:\*\*' "$readme")"
   if [[ -z "$line" ]]; then
-    add_error "README.md: no '**Template release:**' line — the Template section names the release of the template this repository carries, or 'unreleased' (ADR-0008)"
+    add_error "README.md: no '**Template release:**' line — the Template section names the release of the template this repository carries, or 'unreleased' (ADR-0005)"
     return
   fi
   value="${line#*\*\*Template release:\*\*}"
@@ -1353,7 +1353,7 @@ check_template_release() {
   # shellcheck disable=SC2016  # the backticks are Markdown to match, not a command substitution
   local re='^[[`]?(v'"$num"'\.'"$num"'\.'"$num"'|unreleased)($|[][:space:],;:)`]|\.([[:space:]]|$))'
   [[ "$value" =~ $re ]] \
-    || add_error "README.md: the Template release line names neither a 'vX.Y.Z' tag nor 'unreleased' — a release moves it to the tag it cuts (ADR-0008)"
+    || add_error "README.md: the Template release line names neither a 'vX.Y.Z' tag nor 'unreleased' — a release moves it to the tag it cuts (ADR-0005)"
 }
 
 # Check 17 (see the header).

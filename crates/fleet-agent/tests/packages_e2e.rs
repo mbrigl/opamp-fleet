@@ -1,4 +1,4 @@
-//! Package delivery end to end (ADR-0026): the real Server armed with a package store,
+//! Package delivery end to end (ADR-0028): the real Server armed with a package store,
 //! the real Client binary running a `command` Supervisor that consents to package updates — which
 //! artifact it gets is the Server's choice, not this configuration's. The Client downloads the
 //! offered artifact, verifies its content hash and Ed25519 signature, swaps it over the managed
@@ -16,9 +16,9 @@ use fleet_server::packages::{PackageStore, Platform};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
 /// Puts a Package into a ring aimed at the Agent type it is built for, with the artifact's signature
-/// on the ring — where a signature lives (ADR-0026) — and hands back the ring's name. A Package
+/// on the ring — where a signature lives (ADR-0028) — and hands back the ring's name. A Package
 /// reaches nobody by itself, so a test that wants one delivered has to say which ring the host is
-/// in, and a Client installs nothing unsigned (ADR-0026).
+/// in, and a Client installs nothing unsigned (ADR-0028).
 fn ring_holding_signed(
     state: &fleet_server::fleet::AppState,
     id: &fleet_server::packages::PackageId,
@@ -33,7 +33,7 @@ fn ring_holding_signed(
     deployments
         .put_package("stable", id, true)
         .expect("package into the ring");
-    // The signature is the entry's own (ADR-0033).
+    // The signature is the entry's own (ADR-0028).
     if let Some((platform, bytes)) = signature {
         state
             .packages()
@@ -44,7 +44,7 @@ fn ring_holding_signed(
     "stable".to_string()
 }
 
-/// The Platform this test's Client will report about itself (ADR-0026) — an artifact stored for
+/// The Platform this test's Client will report about itself (ADR-0028) — an artifact stored for
 /// any other one would not fit it, and would rightly never be offered. `std::env::consts` is the
 /// same source the Client reports from, and the store canonicalises both the same way.
 fn this_host() -> Platform {
@@ -76,7 +76,7 @@ async fn spawn_server(
     spawn_server_with(store, None).await
 }
 
-/// [`spawn_server`], serving `floors` to the fleet (ADR-0061).
+/// [`spawn_server`], serving `floors` to the fleet (ADR-0029).
 async fn spawn_server_with(
     store: PackageStore,
     floors: Option<fleet_server::floors::PackageFloors>,
@@ -113,7 +113,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
     )
 }
 
-/// Finds an Agent by the operator's name for it — `service.instance.name` (ADR-0016), which is the
+/// Finds an Agent by the operator's name for it — `service.instance.name` (ADR-0017), which is the
 /// `[[supervisor]]` block's `name`. The block below is deliberately named something other than its
 /// program, so looking up by `service.name` would find nothing: that attribute is the Agent type,
 /// and with no `service_name` set it falls back to the program's file name.
@@ -121,7 +121,7 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
     agents.iter().find(|a| a.service_instance_name == name)
 }
 
-/// Verifies: ADR-0026, G-10
+/// Verifies: ADR-0028, G-10
 #[tokio::test]
 async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed() {
     // The artifact is the stub binary itself — a real executable that stays up when swapped in.
@@ -141,7 +141,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    // The Set's identity states the Agent type it is built for (ADR-0026): the
+    // The Set's identity states the Agent type it is built for (ADR-0028): the
     // Supervisor below names its program `managed-agent` and sets no `service_name`, so that file
     // name is the type it reports.
     let set = fleet_server::packages::PackageId::new("managed-agent", "2.0.0").expect("package id");
@@ -154,7 +154,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 
     // The managed binary starts as a copy of the stub, in the Supervisor's own `program/`
     // directory — which is what a bare `command` names, and what consents to the update
-    // (ADR-0017). The package swap replaces it there.
+    // (ADR-0018). The package swap replaces it there.
     let state_dir = dir.path().join("client-state");
     let program_dir = state_dir.join("supervisors/myagent/program");
     std::fs::create_dir_all(&program_dir).expect("create the program dir");
@@ -191,7 +191,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 
     let _client = spawn_client(&config_path);
 
-    // A saved Set reaches nobody (ADR-0025): the rollout act releases it, retried until the
+    // A saved Set reaches nobody (ADR-0027): the rollout act releases it, retried until the
     // Agent has reported and can be assigned — which is the decision, not an accident of the
     // test.
     wait_until("the rollout act to reach the agent", || {
@@ -212,7 +212,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type (ADR-0026 clause 16) — the program's file name here, since
+        // The wire name is the Agent type (ADR-0028 clause 9) — the program's file name here, since
         // the block states no `service_name`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "Installed" && package.version == "2.0.0").then_some(())
@@ -221,7 +221,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 
     // Name and type are the two things this block states separately, and they differ here: the
     // operator called the Supervisor `myagent`, its program is `managed-agent`, and with no
-    // `service_name` set the program's file name is what the Agent reports as its type (ADR-0016).
+    // `service_name` set the program's file name is what the Agent reports as its type (ADR-0017).
     let agent = view(&state.snapshot(), "myagent")
         .expect("the agent is found by the operator's name for it")
         .service_name
@@ -236,7 +236,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         .exists());
 }
 
-/// ADR-0017 clause 57's preflight, reached through the `command` kind's own configuration: `version_args`
+/// ADR-0018 clause 54's preflight, reached through the `command` kind's own configuration: `version_args`
 /// is the arguments an operator has declared safe to invoke the program with, so they are also
 /// what proves a *staged* program runs before the running one is stopped.
 ///
@@ -247,7 +247,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 #[tokio::test]
 async fn a_package_that_fails_the_configured_version_check_is_refused() {
     let artifact = std::fs::read(env!("CARGO_BIN_EXE_stub_agent")).expect("read stub");
-    // Signed, as everything a Client installs is (ADR-0026): the refusal under test is the version
+    // Signed, as everything a Client installs is (ADR-0028): the refusal under test is the version
     // check's, not the signature policy's.
     let rng = ring::rand::SystemRandom::new();
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
@@ -328,7 +328,7 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
     let error = wait_until("the package to be reported InstallFailed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type (ADR-0026 clause 16) — the program's file name here, since
+        // The wire name is the Agent type (ADR-0028 clause 9) — the program's file name here, since
         // the block states no `service_name`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "InstallFailed").then(|| package.error.clone())
@@ -355,7 +355,7 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
 /// The Client fetches the floor its Server serves, keeps it in `package-floors.json`, and refuses
 /// a validly signed package below it before downloading anything: the Supervisor reports it
 /// `InstallFailed`, naming the version and the floor, and the program it runs keeps running.
-/// Verifies: ADR-0061
+/// Verifies: ADR-0029
 #[tokio::test]
 async fn a_signed_package_below_the_floor_the_server_serves_is_refused() {
     let artifact = std::fs::read(env!("CARGO_BIN_EXE_stub_agent")).expect("read stub");

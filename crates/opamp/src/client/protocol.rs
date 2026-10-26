@@ -1,4 +1,4 @@
-//! One Agent's OpAMP state machine, as the specification defines it (ADR-0010).
+//! One Agent's OpAMP state machine, as the specification defines it (ADR-0009).
 //!
 //! It decides **which** fields a report carries — a full snapshot or only what changed, and only
 //! what the Server's Capability Set licenses — and settles what a reply means for the protocol:
@@ -69,7 +69,7 @@ pub struct AgentProtocol {
     settings_offered: bool,
     remote_config_status: Option<RemoteConfigStatus>,
     connection_settings_status: Option<ConnectionSettingsStatus>,
-    /// A certificate signing request to send once (ADR-0021).
+    /// A certificate signing request to send once (ADR-0022).
     pending_csr: Option<Vec<u8>>,
     // What the next report owes: a full snapshot, or each part that changed.
     send_full: bool,
@@ -174,7 +174,7 @@ impl AgentProtocol {
         self.send_components_full = true;
     }
 
-    /// Queues a certificate signing request for the next report (ADR-0021).
+    /// Queues a certificate signing request for the next report (ADR-0022).
     pub fn request_certificate(&mut self, csr: Vec<u8>) {
         self.pending_csr = Some(csr);
     }

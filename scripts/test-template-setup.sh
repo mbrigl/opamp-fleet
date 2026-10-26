@@ -15,7 +15,7 @@
 #      no row knows of fails here.
 #   2. The remaining steps done, as an agent would do them from the steps' wording: no token is
 #      left, and check-docs.sh, check-traceability.sh, and check-devcontainer.sh pass.
-#   3. The same, on the path 'No Dev Container?' of 'A small project': ADR-0002 superseded and
+#   3. The same, on the path 'No Dev Container?' of 'A small project': ADR-0004 superseded and
 #      what the container brings removed as the path lists it. check-docs.sh and
 #      check-traceability.sh pass. It runs while the path is open, before a project has begun it.
 #   4. --close, run by a copy's own script: it refuses on the template's tree, and after step 1,
@@ -389,7 +389,7 @@ fi
 # Only while the path is still open: a project that has walked it, or begun to, has no container
 # left to remove, and case 2 covers what it has.
 if [[ -d "$ROOT/.devcontainer" && -f "$ROOT/scripts/check-devcontainer.sh" ]] \
-  && grep -q '^- \*\*Status:\*\* 🟢 accepted$' "$ROOT/docs/adr/0002-dev-container-runtime.md" 2>/dev/null; then
+  && grep -q '^- \*\*Status:\*\* 🟢 accepted$' "$ROOT/docs/adr/0004-dev-container-runtime.md" 2>/dev/null; then
   d="$(copy no-container)"
   setup_steps "$d"
   # A check of the project's own in the devcontainer job, as a project adds one for its
@@ -415,7 +415,7 @@ if [[ -d "$ROOT/.devcontainer" && -f "$ROOT/scripts/check-devcontainer.sh" ]] \
 - **Date:** 2026-01-01
 - **Deciders:** Fixture Owner
 - **Applies to:** the development environment
-- **Supersedes:** [ADR-0002](0002-dev-container-runtime.md)
+- **Supersedes:** [ADR-0004](0004-dev-container-runtime.md)
 
 ## Context
 
@@ -443,12 +443,12 @@ None — cheap to reverse.
 
 **Not mechanically decidable:** where a maintainer works is outside the tree.
 ADR
-  edit "$d" docs/adr/0002-dev-container-runtime.md \
+  edit "$d" docs/adr/0004-dev-container-runtime.md \
     "s/^- \*\*Status:\*\* 🟢 accepted\$/- **Status:** ⚪ superseded by $id/"
   # The index: the new row among the binding ones, the old row under the superseded ones.
-  row="$(grep -F '| [0002](0002-dev-container-runtime.md) |' "$d/docs/adr/README.md" | sed 's/🟢 accepted/⚪ superseded/')"
+  row="$(grep -F '| [0004](0004-dev-container-runtime.md) |' "$d/docs/adr/README.md" | sed 's/🟢 accepted/⚪ superseded/')"
   awk -v row="$row" -v new="| [$(printf '%04d' "$((n + 1))")]($file) | The work runs on the host | the development environment | 🟢 accepted |" '
-    index($0, "| [0002](0002-dev-container-runtime.md) |") == 1 { next }
+    index($0, "| [0004](0004-dev-container-runtime.md) |") == 1 { next }
     /^### Superseded and rejected/ { print new; print ""; print; superseded = 1; next }
     superseded && $0 == "None yet." { print "| ADR | Title | Applies to | Status |"; print "|-----|-------|------------|--------|"; print row; next }
     { print }' "$d/docs/adr/README.md" > "$d/docs/adr/README.md.new" && mv "$d/docs/adr/README.md.new" "$d/docs/adr/README.md"
@@ -475,7 +475,7 @@ ADR
   # shellcheck disable=SC2016  # the backticks are Markdown, not a command substitution
   edit "$d" README.md 's/`devcontainer`, //'
   edit "$d" .vscode/settings.json '/^  \/\/ Manage the \*host/,/^  }$/d'
-  edit "$d" .gitignore '/^# Dev Container:/,/(ADR-0002)\.$/d'
+  edit "$d" .gitignore '/^# Dev Container:/,/(ADR-0004)\.$/d'
   edit "$d" README.md '/^## Dev Container$/,/^## Coding Agents$/{/^## Coding Agents$/!d;}'
   edit "$d" README.md '/^\.devcontainer\/ /d'
   edit "$d" README.md '/^This Dev Container preinstalls/,/^$/d'

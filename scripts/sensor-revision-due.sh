@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Sensor: design revision due (ADR-0004).
+# Sensor: design revision due (ADR-0006).
 #
 # Reads the 'Last design revision' line of docs/ARCHITECTURE.md — the date of the last revision,
 # or 'none yet', and the number of changes after which the next is due — counts the commits that
@@ -28,16 +28,16 @@ OVERVIEW="docs/ARCHITECTURE.md"
 LINE_RE='\*\*Last design revision:\*\*[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2}|none yet),[[:space:]]+due after[[:space:]]+([1-9][0-9]*)[[:space:]]+changes\.'
 
 if [[ ! -f "$ROOT/$OVERVIEW" ]]; then
-  echo "Design revision sensor: $OVERVIEW not found — the 'Last design revision' line lives there (ADR-0004)." >&2
+  echo "Design revision sensor: $OVERVIEW not found — the 'Last design revision' line lives there (ADR-0006)." >&2
   exit 1
 fi
 line="$(grep -m1 -F '**Last design revision:**' "$ROOT/$OVERVIEW")"
 if [[ -z "$line" ]]; then
-  echo "Design revision sensor: $OVERVIEW has no '**Last design revision:**' line — add one: '**Last design revision:** none yet, due after 20 changes.' (ADR-0004)" >&2
+  echo "Design revision sensor: $OVERVIEW has no '**Last design revision:**' line — add one: '**Last design revision:** none yet, due after 20 changes.' (ADR-0006)" >&2
   exit 1
 fi
 if ! [[ "$line" =~ $LINE_RE ]]; then
-  echo "Design revision sensor: the 'Last design revision' line of $OVERVIEW is unreadable — it reads '<YYYY-MM-DD or none yet>, due after <N> changes.' (ADR-0004)" >&2
+  echo "Design revision sensor: the 'Last design revision' line of $OVERVIEW is unreadable — it reads '<YYYY-MM-DD or none yet>, due after <N> changes.' (ADR-0006)" >&2
   exit 1
 fi
 date="${BASH_REMATCH[1]}"
@@ -63,7 +63,7 @@ if ((count < number)); then
   echo "Design revision sensor: $count of $number changes outside docs/ since $from — not yet due."
   exit 0
 fi
-echo "Design revision sensor: $count changes outside docs/ since $from, due after $number — DUE: run the design-revision skill over the directories they touched, then move the line (ADR-0004)."
+echo "Design revision sensor: $count changes outside docs/ since $from, due after $number — DUE: run the design-revision skill over the directories they touched, then move the line (ADR-0006)."
 # One line per top-level entry and commit, so the number beside it counts changes, not files.
 while read -r n entry; do
   [[ -e "$ROOT/${entry%/}" ]] && printf '  - %s (%s change%s)\n' "$entry" "$n" "$( ((n == 1)) || echo s)"

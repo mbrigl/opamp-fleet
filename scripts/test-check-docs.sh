@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0005 ADR-0008 ADR-0009
+# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0003 ADR-0005 ADR-0007
 #
 # Each case builds a throwaway git repository under a temporary directory — a rule file with
 # numbered sections, a README with a Project Layout block, the required-checks markers, and the
@@ -604,7 +604,7 @@ insert_line() {
 }
 
 # partial <dir> <status of ADR 1> <Supersedes entry suffix> — ADR 2 supersedes ADR 1, whole or by
-# clause (ADR-0009); ADR 1 carries the given status line, ADR 2 the given text after its link.
+# clause (ADR-0007); ADR 1 carries the given status line, ADR 2 the given text after its link.
 partial() {
   local dir="$1" status="$2" suffix="$3"
   adr "$dir" 1 "$status"
@@ -629,7 +629,7 @@ partial() {
   } > "$dir/docs/adr/README.md"
 }
 
-# --- cases: clause supersession (check 8). Verifies: ADR-0009 -------------------------------
+# --- cases: clause supersession (check 8). Verifies: ADR-0007 -------------------------------
 
 d="$(repo partial)"
 partial "$d" "🟢 accepted · clause 2 superseded by [$(adr_id 2)](0002-decision.md)" " clause 2"
@@ -716,7 +716,7 @@ d="$(repo check-lists)"
 echo 'run "Extra" scripts/check-extra.sh' >> "$d/scripts/check-all.sh"
 expect fail "a check the local runner has and CI does not" "$d" "CI and the local gate disagree"
 
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 d="$(repo script-in-no-list)"
 echo 'echo new' > "$d/scripts/check-new.sh"
 expect fail "a script that neither list runs" "$d" "scripts/check-new.sh: no workflow and not scripts/check-all.sh runs it"
@@ -867,7 +867,7 @@ expect pass "docs/plan/ named while there is no open work" "$d"
 
 # --- cases: drafts (checks 1, 2, 5, 6, 8, and 16) ---------------------------------------
 
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 DRAFT="draft"
 # draft_id <slug> — the draft identifier of a slug, assembled for the same reason as adr_id.
 draft_id() { printf 'ADR-%s-%s' "$DRAFT" "$1"; }

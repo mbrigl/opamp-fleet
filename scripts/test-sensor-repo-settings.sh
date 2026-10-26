@@ -8,7 +8,7 @@
 # settings README.md lists report nothing; every other case is one setting that differs. What
 # the --jq expressions make of GitHub's JSON is not run here, since it needs gh; that is review.
 #
-# Verifies: ADR-0003
+# Verifies: ADR-0002
 # Inputs: scripts/sensor-repo-settings.sh scripts/lib/
 #
 # Usage:

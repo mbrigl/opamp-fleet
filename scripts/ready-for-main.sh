@@ -8,7 +8,7 @@
 #   2. Takes up origin/main by a merge, unless the branch already contains it. A merge that stops
 #      on a conflict, or that the pre-merge-commit hook refuses, stops this script; once the merge
 #      is concluded, it runs again.
-#   3. Numbers the draft ADRs with scripts/number-adrs.sh (ADR-0003), which commits twice.
+#   3. Numbers the draft ADRs with scripts/number-adrs.sh (ADR-0002), which commits twice.
 #
 # It pushes nothing and touches no pull request: it ends by naming the push, with
 # --force-with-lease where the branch was reworked after its last push, and 'gh pr ready'. The

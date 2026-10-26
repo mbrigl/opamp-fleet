@@ -1,10 +1,10 @@
-//! The bootstrap PKCS#12 file written and read with `p12-keystore` (ADR-0029 clauses 1 and 7).
+//! The bootstrap PKCS#12 file written and read with `p12-keystore` (ADR-0023 clauses 4 and 15).
 //!
 //! Reading is bounded: a file over [`MAX_FILE_BYTES`] is refused before it is parsed, and
 //! `p12-keystore` itself refuses work factors above a million iterations. Before anything is
-//! decrypted, the file's structure is held to clause 1's family: a MAC of HMAC with SHA-2, and every
-//! encryption PBES2 with PBKDF2-HMAC-SHA-2 and AES-CBC — no PBES1, no scrypt, no AES-GCM, no key in
-//! the clear. `p12-keystore` would read several of those.
+//! decrypted, the file's structure is held to ADR-0023 clause 4's family: a MAC of HMAC with SHA-2,
+//! and every encryption PBES2 with PBKDF2-HMAC-SHA-2 and AES-CBC — no PBES1, no scrypt, no AES-GCM,
+//! no key in the clear. `p12-keystore` would read several of those.
 
 use std::fmt;
 
@@ -50,7 +50,7 @@ pub fn seal(
 }
 
 /// What a file holds: the certificate and its key, DER, the key PKCS#8 and wiped when it is dropped
-/// (ADR-0057). Its `Debug` names neither.
+/// (ADR-0015). Its `Debug` names neither.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Identity {
     pub certificate_der: Vec<u8>,
@@ -81,7 +81,7 @@ impl fmt::Display for OpenError {
     }
 }
 
-/// The certificate and key in `bytes`, under `password` (ADR-0029 clause 7).
+/// The certificate and key in `bytes`, under `password` (ADR-0023 clause 15).
 ///
 /// # Errors
 /// [`OpenError::WrongPassword`] when the MAC fails, and [`OpenError::Invalid`] for a file over
@@ -106,7 +106,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<Identity, OpenError> {
             archive.keys.len()
         )));
     };
-    // `p12-keystore` keeps its own copy, which it does not wipe (ADR-0057 clause 4).
+    // `p12-keystore` keeps its own copy, which it does not wipe (ADR-0015 clause 4).
     let private_key_der = Zeroizing::new(key.key.as_der().to_vec());
     let public = rcgen::KeyPair::try_from(private_key_der.as_slice())
         .map_err(|e| invalid(format!("its private key cannot be read: {e}")))?;
@@ -138,7 +138,7 @@ const PBES2: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.5
 const DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");
 const ENCRYPTED_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.6");
 
-/// Whether the file is of clause 1's family, read from its structure before anything is
+/// Whether the file is of ADR-0023 clause 4's family, read from its structure before anything is
 /// decrypted: a MAC — without one anyone could swap the certificate without the password — of
 /// HMAC with SHA-2, and every encrypted part PBES2 with PBKDF2-HMAC-SHA-2 and AES-CBC. A key in the
 /// clear, and any bag but an encrypted key and a certificate, is refused.
@@ -255,7 +255,7 @@ mod tests {
 
     const PASSWORD: &str = "correct horse battery";
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0023
     #[test]
     fn a_sealed_file_opens_under_its_password_to_exactly_the_certificate_and_its_key() {
         let (certificate, key) = pair("bootstrap");
@@ -275,7 +275,7 @@ mod tests {
 
     /// The key a file opens to is held in a buffer wiped when it is dropped: were it a plain
     /// buffer again, this would not compile.
-    /// Verifies: ADR-0057
+    /// Verifies: ADR-0015
     #[test]
     fn the_key_a_file_opens_to_is_held_in_a_zeroizing_buffer() {
         fn key_of(identity: Identity) -> Zeroizing<Vec<u8>> {
@@ -290,9 +290,9 @@ mod tests {
         assert_eq!(*key_of(identity), [1, 2, 3]);
     }
 
-    /// The file is the scheme ADR-0029 clause 1 names: PBES2 with AES-256 and a SHA-256 MAC, at
+    /// The file is the scheme ADR-0023 clause 4 names: PBES2 with AES-256 and a SHA-256 MAC, at
     /// 600 000 iterations.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0023
     #[test]
     fn a_sealed_file_is_pbes2_with_aes_256_and_a_sha_256_mac() {
         let (certificate, key) = pair("bootstrap");
@@ -313,7 +313,7 @@ mod tests {
         assert!(text.contains(aes256), "AES-256-CBC");
     }
 
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0023
     #[test]
     fn a_file_is_refused_when_large_without_a_mac_or_not_one_key_with_its_certificate() {
         assert!(matches!(

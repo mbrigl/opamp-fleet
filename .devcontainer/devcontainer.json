@@ -28,7 +28,7 @@
   "initializeCommand": "mkdir \"${localEnv:HOME}${localEnv:USERPROFILE}/.claude\" || exit 0",
 
   // DevContainer Features layered on top of the base image. The container intentionally has NO
-  // access to the host Docker daemon (no socket mount) — see ADR-0002. Manage the host's containers
+  // access to the host Docker daemon (no socket mount) — see ADR-0004. Manage the host's containers
   // from a host-side VS Code extension instead (README → "Host container management").
   "features": {
     // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
@@ -36,7 +36,7 @@
     // (AGENTS.md, section 6).
     "ghcr.io/devcontainers/features/github-cli:1": {},
     // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
-    // toolchain (ADR-0010). The build chain needs no system protoc (ADR-0011 uses the
+    // toolchain (ADR-0009). The build chain needs no system protoc (ADR-0012 uses the
     // pure-Rust protox), so no extra system packages are required here.
     "ghcr.io/devcontainers/features/rust:1": {}
   },
@@ -64,9 +64,9 @@
   // "Git hooks" in the README. The development observability stack runs on the host,
   // apart from this container (observability/compose.yaml); this puts its Collector on the
   // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
-  // plaintext to a loopback IP literal alone (ADR-0016), the stack's rustfs on :9100, the S3
-  // store a development Server may use (ADR-0049), and its PostgreSQL on :5432, the database it may
-  // keep its records in (ADR-0050). See observability/README.md.
+  // plaintext to a loopback IP literal alone (ADR-0017), the stack's rustfs on :9100, the S3
+  // store a development Server may use (ADR-0030), and its PostgreSQL on :5432, the database it may
+  // keep its records in (ADR-0030). See observability/README.md.
   "postStartCommand": {
     "hooks": "git config core.hooksPath .githooks",
     "merge": "git config merge.ff false && git config pull.ff only",

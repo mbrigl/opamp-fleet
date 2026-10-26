@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-devcontainer.sh. Verifies: ADR-0002
+# Self-test of scripts/check-devcontainer.sh. Verifies: ADR-0004
 #
 # Each case builds a fixture under a temporary directory — a devcontainer.json with comments and
 # one pinned Feature and the postStartCommand that enables the git hooks, the lock that resolves
 # it, and the editor settings that pin the container-management extension to the host — runs the
 # check against it, and asserts the exit code and, for a failing case, the message that names the
-# violation. The baseline passes; every other case breaks one thing ADR-0002 decides, or drops a
+# violation. The baseline passes; every other case breaks one thing ADR-0004 decides, or drops a
 # git setting from the postStartCommand.
 #
 # Inputs: scripts/check-devcontainer.sh scripts/lib/
@@ -35,7 +35,7 @@ config() {
   {
     echo '{'
     echo '  "name": "fixture",'
-    echo '  // A comment: the container has no socket mount — see ADR-0002.'
+    echo '  // A comment: the container has no socket mount — see ADR-0004.'
     echo '  "image": "mcr.microsoft.com/devcontainers/base:debian",'
     [[ -z "$post_start" ]] || echo "  \"postStartCommand\": $post_start,"
     printf '  %s\n' "$@"

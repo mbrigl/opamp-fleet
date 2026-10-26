@@ -1,5 +1,5 @@
 //! How the Server's two planes are served (ADR-0013). The listener, its TLS and its bounds on
-//! connection setup are `opamp`'s (ADR-0010); what is the Server's is that both planes share one
+//! connection setup are `opamp`'s (ADR-0009); what is the Server's is that both planes share one
 //! handle and one idea of shutting down.
 
 use std::net::TcpListener;
@@ -14,7 +14,7 @@ use rustls::ServerConfig;
 /// Bounded on purpose: an Agent's WebSocket is idle most of the time and would otherwise decide
 /// how long a restart takes. Its session is told to close at once, with the close code for a server
 /// going away; whatever has not ended by the deadline is cut, and only then does the record flush
-/// that follows shutdown (ADR-0024) run.
+/// that follows shutdown (ADR-0025) run.
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(10);
 
 /// A plane on an already-bound listener, over TLS when `tls` is given, holding at most

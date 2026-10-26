@@ -3,8 +3,8 @@
 # Lints and tests the Client on the platform it runs on: the 'client-windows' and 'client-macos'
 # jobs of .github/workflows/ci.yml run it on Windows and macOS. The Client carries
 # platform-specific service paths, the Windows SCM shim and launchd's semantics, that a lint on
-# Linux never compiles (ADR-0019). fleet-tools is linted too: every Client archive carries
-# `opamp-fleetctl`, Windows included (ADR-0028). On Linux, scripts/check-rust.sh covers the same
+# Linux never compiles (ADR-0020). fleet-tools is linted too: every Client archive carries
+# `opamp-fleetctl`, Windows included (ADR-0033). On Linux, scripts/check-rust.sh covers the same
 # and more, so scripts/check-all.sh names this one on an '# On instruction:' line.
 #
 # Needs the Rust toolchain of rust-toolchain.toml.

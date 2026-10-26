@@ -1,5 +1,5 @@
 //! Files and directories reached one handle at a time, never through a link, and their owner and
-//! DACL read and set through that handle (ADR-0059 clauses 6 and 10) — what `storage::handle` is on
+//! DACL read and set through that handle (ADR-0021 clauses 1 and 21) — what `storage::handle` is on
 //! Unix.
 //!
 //! Every entry is opened as itself (`FILE_FLAG_OPEN_REPARSE_POINT`): a symbolic link or a junction
@@ -469,8 +469,8 @@ mod tests {
 
     /// A directory held is held: while the hold is open it cannot be renamed — the open for the
     /// rename asks to delete, which the hold shares with nobody (`ERROR_SHARING_VIOLATION`) — and
-    /// once it is closed it can (ADR-0059 clause 6).
-    /// Verifies: ADR-0059
+    /// once it is closed it can (ADR-0021 clause 21).
+    /// Verifies: ADR-0021
     #[test]
     fn a_held_directory_cannot_be_renamed() {
         /// ERROR_SHARING_VIOLATION.

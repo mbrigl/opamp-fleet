@@ -1,4 +1,4 @@
-//! Enrolment through a Gateway, end to end (ADR-0039): the real Server with enrolment and its
+//! Enrolment through a Gateway, end to end (ADR-0016): the real Server with enrolment and its
 //! register, the real Gateway in front of it trusting the bootstrap CA, and an enrolling host
 //! behind it — a raw plain-HTTP peer, and the real Client binary.
 
@@ -60,8 +60,8 @@ impl Ca {
         (cert.pem(), key.serialize_pem())
     }
 
-    /// A bootstrap certificate naming the customer and the site an approval requires (ADR-0036
-    /// clause 3), written like [`issue`](Self::issue).
+    /// A bootstrap certificate naming the customer and the site an approval requires (ADR-0016
+    /// clause 23), written like [`issue`](Self::issue).
     fn issue_bootstrap(&self, dir: &Path, file: &str) -> (String, String) {
         let key = KeyPair::generate().expect("key");
         let mut params = CertificateParams::new(vec![file.to_string()]).expect("params");
@@ -396,7 +396,7 @@ fn with_csr(uid: &InstanceUid, csr: Vec<u8>) -> AgentToServer {
 /// report carrying a CSR with a bootstrap proof, which reaches the Server's queue naming the
 /// Gateway's host. Its WebSocket upgrade is refused `403`, and so is a report that carries more
 /// than the CSR or a CSR without a proof.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0016
 #[tokio::test]
 async fn a_gateway_admits_a_bootstrap_certificate_for_one_enrolment_request() {
     let fleet = Fleet::start(true).await;
@@ -460,7 +460,7 @@ async fn a_gateway_admits_a_bootstrap_certificate_for_one_enrolment_request() {
 
 /// An enrolling peer is no member yet: the Gateway refuses it the floors `403`, as it refuses it
 /// everything but its one enrolment request.
-/// Verifies: ADR-0061
+/// Verifies: ADR-0029
 #[tokio::test]
 async fn a_gateway_refuses_the_floors_to_an_enrolling_peer() {
     let fleet = Fleet::start(true).await;
@@ -483,7 +483,7 @@ async fn a_gateway_refuses_the_floors_to_an_enrolling_peer() {
 }
 
 /// A Gateway without `bootstrap_ca_file` refuses a bootstrap certificate in the handshake.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0016
 #[tokio::test]
 async fn a_gateway_without_a_bootstrap_ca_refuses_a_bootstrap_certificate() {
     let fleet = Fleet::start(false).await;
@@ -500,7 +500,7 @@ async fn a_gateway_without_a_bootstrap_ca_refuses_a_bootstrap_certificate() {
 /// The real Client enrols through the Gateway: its request waits in the queue naming the Gateway's
 /// host, an approval mints a new host, the Client collects its certificate in a later reply, and
 /// then reports through the Gateway as a member under its own `instance_uid`.
-/// Verifies: ADR-0039
+/// Verifies: ADR-0016
 #[tokio::test(flavor = "multi_thread")]
 async fn the_client_enrols_through_a_gateway_and_then_reports_through_it() {
     let fleet = Fleet::start(true).await;

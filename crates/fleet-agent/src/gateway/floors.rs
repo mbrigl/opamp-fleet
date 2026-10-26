@@ -1,4 +1,4 @@
-//! The floors a Gateway hands the hosts behind it (ADR-0061 clause 3): fetched from its Server when
+//! The floors a Gateway hands the hosts behind it (ADR-0029 clause 16): fetched from its Server when
 //! it starts and once an hour, and answered on the downstream `GET /v1/package-floors` as they were
 //! last fetched, behind the handshake and the revocation verdict of its `/v1/opamp`. The Gateway
 //! checks no signature on their behalf: each host checks its own and keeps what verifies.
@@ -96,7 +96,7 @@ async fn serve(
         .and_then(|peer| peer.0.as_ref())
         .map(|cert| cert.as_ref().to_vec())
         .unwrap_or_default();
-    // The admission of `/v1/opamp`, as the download route holds to it (ADR-0058 clause 2).
+    // The admission of `/v1/opamp`, as the download route holds to it (ADR-0016 clause 15).
     match downstream.revocations.verdict(&certificate) {
         Verdict::Admit => {}
         Verdict::Revoked => {

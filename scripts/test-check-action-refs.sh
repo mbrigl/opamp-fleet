@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-action-refs.sh. Verifies: ADR-0044
+# Self-test of scripts/check-action-refs.sh. Verifies: ADR-0011
 #
 # Each case builds a fixture under a temporary directory — one workflow with one 'uses:' line and
 # a dependabot.yml with the github-actions ecosystem — runs the check against it, and asserts the
 # exit code and, for a failing case, the message that names the violation. The baseline passes;
-# every other case breaks one thing ADR-0044 decides, or writes a reference in a form the check
+# every other case breaks one thing ADR-0011 decides, or writes a reference in a form the check
 # has to read like the plain one.
 #
 # Usage:
@@ -170,7 +170,7 @@ workflow "$d" "# - uses: actions/checkout@main" "- uses: actions/checkout@v7"
 expect pass "a commented-out reference is not read" "$d" "1 references"
 
 d="$(repo trailing-comment)"
-workflow "$d" "- uses: actions/checkout@v7 # the major tag, ADR-0044"
+workflow "$d" "- uses: actions/checkout@v7 # the major tag, ADR-0011"
 expect pass "a trailing comment after the reference" "$d" "1 references"
 
 d="$(repo quoted)"
@@ -206,7 +206,7 @@ expect fail "a third-party action on its major tag" "$d" "is a third-party actio
 
 d="$(repo third-party-full-version)"
 workflow "$d" "- uses: Swatinem/rust-cache@v2.9.2"
-expect fail "a third-party action on a full version tag" "$d" "(ADR-0044 clause 3)"
+expect fail "a third-party action on a full version tag" "$d" "(ADR-0011 clause 3)"
 
 d="$(repo third-party-no-ref)"
 workflow "$d" "- uses: Swatinem/rust-cache"
@@ -222,7 +222,7 @@ expect fail "a SHA whose comment names only a major" "$d" "carries '# v2', not '
 
 d="$(repo third-party-unprefixed-comment)"
 workflow "$d" "- uses: Swatinem/rust-cache@$S # 2.9.2"
-expect fail "a SHA whose comment has no leading v" "$d" "(ADR-0044 clause 3)"
+expect fail "a SHA whose comment has no leading v" "$d" "(ADR-0011 clause 3)"
 
 d="$(repo third-party-short-sha)"
 workflow "$d" "- uses: Swatinem/rust-cache@6323deb # v2.9.2"
@@ -281,7 +281,7 @@ expect pass "an annotated tag whose peeled commit is the pinned one, inside a re
 
 d="$(repo resolve-tag-object)"
 workflow "$d" "- uses: owner/annotated@$T # v2.9.2"
-expect fail "the tag object's own ID pinned in place of its commit" "$d" "tag v2.9.2 of owner/annotated is $S, not the pinned commit (ADR-0044 clause 4)"
+expect fail "the tag object's own ID pinned in place of its commit" "$d" "tag v2.9.2 of owner/annotated is $S, not the pinned commit (ADR-0011 clause 4)"
 
 d="$(repo resolve-moved)"
 workflow "$d" "- uses: owner/moved@$S # v1.0.0"

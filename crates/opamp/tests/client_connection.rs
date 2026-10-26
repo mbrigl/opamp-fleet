@@ -1,4 +1,4 @@
-//! One upstream connection built from its description (ADR-0010): the client's TLS, credential and
+//! One upstream connection built from its description (ADR-0009): the client's TLS, credential and
 //! transport against the server's listener, through the probe and through a full run.
 
 use std::sync::Arc;
@@ -140,7 +140,7 @@ fn report() -> Option<AgentToServer> {
 
 /// The probe proves a connection over either transport with the trust, the identity and the
 /// credential the description names — and fails without the identity the server asks for.
-/// Verifies: ADR-0010
+/// Verifies: ADR-0009
 #[tokio::test]
 async fn the_probe_connects_with_the_described_material_on_both_transports() {
     let pki = Pki::new();
@@ -162,7 +162,7 @@ async fn the_probe_connects_with_the_described_material_on_both_transports() {
 }
 
 /// An OpAMP endpoint never legitimately redirects, so the client does not follow one.
-/// Verifies: ADR-0010
+/// Verifies: ADR-0009
 #[tokio::test]
 async fn a_redirect_is_not_followed() {
     let pki = Pki::new();

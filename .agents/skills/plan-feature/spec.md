@@ -5,7 +5,7 @@
      is disposable: the design revision deletes it once its tickets have merged, and whatever has
      to last moves into docs/SPECIFICATION.md, an ADR, docs/ARCHITECTURE.md, docs/GLOSSARY.md, or
      docs/CONVENTIONS.md first. No file paths or code; they go stale. How it is written is the
-     plan-feature skill under .agents/skills/. Decided in docs/adr/0004-feature-layer.md. -->
+     plan-feature skill under .agents/skills/. Decided in docs/adr/0006-feature-layer.md. -->
 
 ## Problem
 

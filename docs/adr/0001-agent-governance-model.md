@@ -1,9 +1,9 @@
 # ADR-0001: The document set: one specification, one ADR record, one `AGENTS.md`, one overview, one glossary, one conventions file
 
 - **Status:** 🟢 accepted
-- **Date:** 2026-09-05
-- **Deciders:** NUC maintainer
-- **Applies to:** every document that carries rules for humans or agents, the architecture overview, the glossary, and the conventions
+- **Date:** 2026-10-26
+- **Deciders:** NUC maintainer, Markus Brigl
+- **Applies to:** every document that carries rules for humans or agents, `AGENTS.md` among them, the architecture overview, the glossary, the conventions, `scripts/check-docs.sh`, `scripts/sensor-binding-adrs.sh`, and the map script of the `normalize` skill, `.agents/skills/normalize/remap.sh`
 
 ## Context
 
@@ -52,24 +52,40 @@ that carry a rule:
   sentences what it *is*, and lists under _Avoid:_ the synonyms it displaces, where there are any.
   Only terms specific to the domain belong. The specification is written in this vocabulary and
   carries none of its own.
-- `docs/CONVENTIONS.md` — the **conventions**: how this project writes code
+- [`docs/CONVENTIONS.md`](../CONVENTIONS.md) — the **conventions**: how this project writes code
   and tests where no check can decide it. An entry says in a sentence or two what is done and why,
   and is updated inline by whoever settles a convention — an agent included — in the same change
   as the review or code that settled it. Two things are never entries: a convention a check can
-  decide, which becomes the check ([`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done)),
-  and one that constrains future choices, which is an ADR. The reviewer always has this document;
-  the implementer reads it when it needs it.
+  decide, which becomes the check
+  ([`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done)), and one that constrains
+  future choices, which is an ADR. The reviewer always has this document; the implementer reads
+  it when it needs it.
 
 Every other document — [`README.md`](../../README.md), [`CONTRIBUTING.md`](../../CONTRIBUTING.md),
-[`SECURITY.md`](../../SECURITY.md), issue and pull request templates, per-agent pointers — points at
-the rule file and holds no rule of its own. The exception is a document holding the mechanics of a
-record the rule file delegates to it: [`docs/adr/README.md`](README.md) and its
-[`template.md`](template.md), delegated by [`AGENTS.md` §3](../../AGENTS.md#3-adr-rules).
+[`SECURITY.md`](../../SECURITY.md), `TEMPLATE-SETUP.md` while it exists, issue and pull
+request templates, per-agent pointers, the catalogue of concepts in the `propose-adr` skill —
+points at the rule file and holds no rule of its own. The exception is a document holding the
+mechanics the rule file delegates to it: [`docs/adr/README.md`](README.md) and its
+[`template.md`](template.md), delegated by [`AGENTS.md` §3](../../AGENTS.md#3-adr-rules), and the
+sections *Git hooks*, *Integration branches*, and *Repository settings* of
+[`README.md`](../../README.md), delegated by [`AGENTS.md` §6](../../AGENTS.md#6-project-rules).
+They say how the rule is carried out, what each hook refuses, the steps of an integration, the
+settings, and add no rule the rule file does not state. A per-agent configuration may close a
+path for its one agent as defence in depth, such as reading `.env` files; it enforces no rule,
+and no rule rests on it.
 
 **The load-bearing clause is that there is exactly one rule file.** An ADR that supersedes any other
 part of this record restates it. The ADR rules of [`AGENTS.md` §3](../../AGENTS.md#3-adr-rules)
-are the one block with no ADR behind it — accepted here, and reversible by an ADR on the ADR
-process.
+are the one block with no ADR behind it — accepted here. In the template repository the block
+changes as this ADR is corrected in place, and the release notes say so
+([ADR-0005](0005-template-releases.md)); in a derived project, by an ADR on the ADR process,
+which edits the block in the change that lands it, so the rule file stays true as it is read.
+Rules 1 and 3 of that block belong to it like the rest: the catalogue is what a decision
+is proposed from, and ADRs the same human decides may travel together in commits of ADRs only,
+the founding decisions of a new project always, so that they are proposed as one start and
+revised while proposed. Rule 5 belongs to it with its normalization: on a human's instruction the
+record is restated in reading order, without its dead ADRs, and no decision changes. A record
+that only grows costs every session the reconstruction the overview exists to spare it.
 
 **Out of scope:** what `AGENTS.md` says and how other documents cite it; which agents a project uses
 and which need a pointer file; how the ADR record is kept; the notation and depth of the overview;
@@ -137,20 +153,27 @@ created from this template drops.
   so the documents have to stay small enough for review to see it. A stale overview is worse than
   none because it is believed, and no check can tell the two apart. Naming the ADRs a
   specification change moves is a judgement no check makes. The conventions will attract entries a
-  check should decide, and only the retro at the close of a feature spec
+  check should decide, and only the design revision
   ([`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done)) moves them out.
 - Follow-ups: a context map for repositories with more than one bounded context.
 
 ## Enforcement
 
 [`scripts/check-docs.sh`](../../scripts/check-docs.sh) (job `docs` in
-[`checks.yml`](../../.github/workflows/checks.yml)) verifies what is mechanically checkable: that the
-ADR record and its index agree, that links between the documents resolve, and that section
+[`checks.yml`](../../.github/workflows/checks.yml)) verifies what is mechanically checkable:
+that the ADR record and its index agree, that links between the documents resolve, and that section
 references point at the section they name — which is why a document cites a rule as a link to
 its section anchor and never restates it: a renumbering breaks the link, and the check catches
-it, where a restated rule would drift unseen. One gate routes a specification change to a human
+it, where a restated rule would drift unseen.
+[`scripts/sensor-binding-adrs.sh`](../../scripts/sensor-binding-adrs.sh) (job `sensors`) lists
+the ADRs in force whose *Applies to* names a path a change touches, so that the session and its
+reviewer start from the same list; it reads paths only, never fails, and its self-test cites
+this ADR. The self-test of the `normalize` skill's map script
+([`scripts/test-normalize-remap.sh`](../../scripts/test-normalize-remap.sh), job `docs`) cites
+this ADR too: it decides that a map moves every reference once, a swap included, and leaves the
+record it describes to the normalization. One gate routes a specification change to a human
 without judging it: [`.github/CODEOWNERS`](../../.github/CODEOWNERS) requires the owner's review
 once the repository enables it ([**Repository settings**](../../README.md#repository-settings)).
 That no other document holds a rule, that the
-overview matches the system, that the glossary's terms are the ones in use, and that no convention
-stands where a check could, is review only.
+overview matches the system, that the glossary's terms are the ones in use, that no convention
+stands where a check could, and that a normalization changed no decision, is review only.

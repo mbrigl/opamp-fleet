@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
 # Installs, starts, kills, restarts, stops, and uninstalls the Client as a real service on the
-# platform it runs on, with the process account of ADR-0059 and the enrolment of the install
-# (ADR-0029 clause 11); .github/workflows/service-smoke.yml says per platform what that asserts.
+# platform it runs on, with the process account of ADR-0021 and the enrolment of the install
+# (ADR-0023 clause 19); .github/workflows/service-smoke.yml says per platform what that asserts.
 # The 'smoke' job runs it on Windows, Linux, and macOS. It registers services and accounts on the
 # machine, so scripts/check-all.sh names it on an '# On instruction:' line, for a throwaway
 # machine only.
 #
 # On Linux and macOS the test runs as root through `sudo -E`, the toolchain's PATH kept; on
 # Windows the runner's shell is already elevated. On Linux two tests run as root besides: no link
-# of root's beneath the Client's directories is followed (ADR-0059 clause 6), and the second
-# service follows the Client's links above the Supervisors' root, not its own (clause 5).
+# of root's beneath the Client's directories is followed (ADR-0021 clause 21), and the second
+# service follows the Client's links above the Supervisors' root, not its own (ADR-0021 clause 20).
 #
 # Needs the Rust toolchain of rust-toolchain.toml, and passwordless sudo on Linux and macOS.
 #

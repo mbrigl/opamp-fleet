@@ -1,8 +1,8 @@
 #!/bin/sh
-# Post-removal for the `.deb` and the `.rpm` alike (ADR-0019).
+# Post-removal for the `.deb` and the `.rpm` alike (ADR-0021).
 #
 # `service uninstall` (already run in the pre-removal) deliberately deletes nothing — that rule
-# (ADR-0019) protects the *manual* flows, where the layout is the operator's. A package removal is
+# (ADR-0020) protects the *manual* flows, where the layout is the operator's. A package removal is
 # different: the operator asked this host to stop being managed, and what the package flow created
 # it cleanly takes back —
 #
@@ -13,7 +13,7 @@
 #            configuration included. Purge is dpkg's word for "leave nothing"; rpm has no
 #            equivalent and stays at remove-level cleanup.
 #
-# That distinction is ADR-0019's, with the paths redrawn across the two roots by ADR-0019 clause 8.
+# That distinction is ADR-0020's, with the paths redrawn across the two roots by ADR-0020 clause 12.
 #
 # Only on a real removal. dpkg calls `postrm upgrade <new>` mid-upgrade, where the new version's
 # post-install re-lays the link; rpm's `%postun` gets the count of remaining instances, where `1`
@@ -23,8 +23,7 @@
 # crates/fleet-agent/src/service/manager.rs) — the only roots a packaged install ever uses. An install
 # rooted elsewhere with `--root` is a manual one and is deliberately not touched.
 #
-# No hook removes the account `opamp-fleet` or its group, on removal or on purge (ADR-0042 clause
-# 4): files it owns outside the two roots, such as a Managed Process's output, would pass to
+# No hook removes the account `opamp-fleet` or its group, on removal or on purge (ADR-0021 clause 5): files it owns outside the two roots, such as a Managed Process's output, would pass to
 # whichever account is later given the same uid.
 #
 # `-L` guards the symlink removal: only a symlink is ours to delete. A regular file at that path

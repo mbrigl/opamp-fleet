@@ -1,19 +1,19 @@
 //! `opamp-fleetctl package` — fetching, building, hashing and signing OpAMP Fleet packages
-//! (ADR-0026, ADR-0028).
+//! (ADR-0028, ADR-0033).
 //!
 //! Package signatures are **raw Ed25519** over a statement of what the artifact is — its Agent
-//! type, its version and its SHA-256 (`fleet_core::package::statement`, ADR-0026) — verified by
+//! type, its version and its SHA-256 (`fleet_core::package::statement`, ADR-0028) — verified by
 //! the Client with the `ring` provider. A signature therefore holds only for the type and version
 //! it was made for. This tool produces exactly that format — a
 //! `keygen`/`sign` counterpart to the Client's verify. `pack` is the same idea one step earlier:
 //! it writes container formats [`fleet_agent::archive`] can open, with the member named the way the
 //! Supervisor will look for it, and its tests open what it wrote with that same module.
 //!
-//! It is part of the operator tool, which lives in its own crate for that reason (ADR-0010,
-//! ADR-0028): nothing the Server or Client runtime does depends on it, and a managed host never
+//! It is part of the operator tool, which lives in its own crate for that reason (ADR-0009,
+//! ADR-0033): nothing the Server or Client runtime does depends on it, and a managed host never
 //! runs it. `fetch` is [`crate::fetch`]; the rest is here.
 //!
-//! Typical use — build an artifact, upload it, sign its entry (ADR-0033):
+//! Typical use — build an artifact, upload it, sign its entry (ADR-0028):
 //!
 //! ```text
 //! opamp-fleetctl package keygen --out fleet-signing.pk8   # prints the public key (hex) to stdout
@@ -27,7 +27,7 @@
 //!      -H 'content-type: application/json' --data "{\"signature\": \"$sig\"}"
 //! ```
 //!
-//! Keeping every build below a version off the fleet — a signed floor (ADR-0061):
+//! Keeping every build below a version off the fleet — a signed floor (ADR-0029):
 //!
 //! ```text
 //! sig=$(opamp-fleetctl package floor --key fleet-signing.pk8 --agent-type promtail --version 3.0.0)
@@ -45,7 +45,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-/// The commands of `opamp-fleetctl package` (ADR-0028 clause 15).
+/// The commands of `opamp-fleetctl package` (ADR-0029 clause 22).
 #[derive(Subcommand)]
 pub enum Command {
     /// Fetch a release of a known agent, verify it against upstream's checksum, and optionally
@@ -59,8 +59,8 @@ pub enum Command {
         out: PathBuf,
     },
     /// Sign an artifact and print the signature (hex) — the value of that Package entry's signature
-    /// (ADR-0033). Or, with --signing-info, sign every entry of a Package's signing file from the
-    /// UI and write the signatures into it (ADR-0027).
+    /// (ADR-0028). Or, with --signing-info, sign every entry of a Package's signing file from the
+    /// UI and write the signatures into it (ADR-0028).
     Sign {
         /// The PKCS#8 private key from `keygen`.
         #[arg(long)]
@@ -86,7 +86,7 @@ pub enum Command {
         out: Option<PathBuf>,
     },
     /// Sign a floor and print the signature (hex): below `--version`, no Client takes a package of
-    /// `--agent-type` any more, its own update included (ADR-0061). Store it on the Server with
+    /// `--agent-type` any more, its own update included (ADR-0029). Store it on the Server with
     /// `PUT /api/v1/package-floors/{agent_type}`.
     Floor {
         /// The PKCS#8 private key from `keygen`.
@@ -114,7 +114,7 @@ pub enum Command {
     /// the names already agree; `--program-name` is for when they do not.
     ///
     /// Two of the three containers the Client can open are produced. There is deliberately no
-    /// `zip`: the Client reads one (ADR-0026 clause 66) so that a build published as a zip travels as
+    /// `zip`: the Client reads one (ADR-0028 clause 62) so that a build published as a zip travels as
     /// published, which is the opposite of a reason to *write* one here — a zip carries no Unix
     /// modes, and packing an artifact into it would be choosing the one container that cannot say
     /// the program is executable.
@@ -145,7 +145,7 @@ pub enum Command {
     },
 }
 
-/// The package container formats a Client can open (ADR-0026).
+/// The package container formats a Client can open (ADR-0028).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     /// A gzip-compressed tar — what `opentelemetry-collector-releases` and most projects publish.
@@ -222,7 +222,7 @@ pub fn run(command: Command) -> Result<(), String> {
                 return Err("sign needs --agent-type, --version and the artifact".to_string());
             };
             // Before the key is read: it never signs a version a Client would refuse
-            // (ADR-0043 clause 4).
+            // (ADR-0029 clause 4).
             require_semver(&version)?;
             let keypair = load_key(&key)?;
             let bytes = std::fs::read(&artifact)
@@ -253,7 +253,7 @@ pub fn run(command: Command) -> Result<(), String> {
             archive_key,
         } => {
             // Moved into a buffer wiped when it is dropped; what `clap` keeps of the command line
-            // is its own (ADR-0057).
+            // is its own (ADR-0015).
             let archive_key = archive_key.map(Zeroizing::new);
             if !program.is_file() {
                 return Err(format!(
@@ -382,7 +382,7 @@ fn pack_7z(
     //
     // Only off Windows, which is 7-Zip's own rule: bit 15 means `FILE_ATTRIBUTE_INTEGRITY_STREAM`
     // there, and the Windows build neither writes nor expects the Unix extension. It costs the
-    // release nothing — each artifact is packed on a runner of its own platform (ADR-0019), so the
+    // release nothing — each artifact is packed on a runner of its own platform (ADR-0035), so the
     // Linux and macOS ones carry the mode and `client.exe`, which has no use for it, does not.
     #[cfg(unix)]
     {
@@ -418,10 +418,10 @@ pub(crate) fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
     Ok(hasher.finalize().to_vec())
 }
 
-/// A new package signing key (ADR-0026): the private key as PKCS#8 DER, and its public half in
+/// A new package signing key (ADR-0028): the private key as PKCS#8 DER, and its public half in
 /// hex, the form `[packages] verification_key` takes. `keygen` and `pki init` make it alike. The
 /// private key is wiped when it is dropped; the `ring` document it is copied from is not
-/// (ADR-0057).
+/// (ADR-0015).
 ///
 /// # Errors
 /// Returns the message to print when no key can be made.
@@ -437,7 +437,7 @@ pub(crate) fn signing_key() -> Result<(Zeroizing<Vec<u8>>, String), String> {
     ))
 }
 
-/// Refuses a Package version that is not SemVer (ADR-0043 clauses 2 and 4), naming it — the
+/// Refuses a Package version that is not SemVer (ADR-0029 clauses 2 and 4), naming it — the
 /// predicate the Server and the Client ask too, so what is signed here is what they take.
 ///
 /// # Errors
@@ -455,8 +455,8 @@ pub(crate) fn require_semver(version: &str) -> Result<(), String> {
 }
 
 /// The signature, hex, over the floor statement of `agent_type` at `version`
-/// (`fleet_core::package::floor_statement`, ADR-0061 clause 1). A version that is not SemVer is
-/// refused before the key is read, as `sign` refuses it (ADR-0043 clause 4).
+/// (`fleet_core::package::floor_statement`, ADR-0029 clause 14). A version that is not SemVer is
+/// refused before the key is read, as `sign` refuses it (ADR-0029 clause 4).
 fn floor_signature(key: &PathBuf, agent_type: &str, version: &str) -> Result<String, String> {
     if !fleet_core::version::is_semver(version) {
         return Err(format!(
@@ -471,7 +471,7 @@ fn floor_signature(key: &PathBuf, agent_type: &str, version: &str) -> Result<Str
 }
 
 fn load_key(path: &PathBuf) -> Result<Ed25519KeyPair, String> {
-    // Wiped once `ring` holds the key (ADR-0057).
+    // Wiped once `ring` holds the key (ADR-0015).
     let pkcs8 = std::fs::read(path)
         .map(Zeroizing::new)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -541,8 +541,8 @@ mod tests {
 
     /// `sign --version 1.19` and a signing file at `1.19` each fail naming the version, before
     /// the key is read: the key named here does not exist, so reading it would fail with another
-    /// message (ADR-0043 clause 4).
-    /// Verifies: ADR-0043
+    /// message (ADR-0029 clause 4).
+    /// Verifies: ADR-0029
     #[test]
     fn sign_refuses_a_version_that_is_not_semver_before_reading_the_key() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -617,7 +617,7 @@ mod tests {
         );
     }
 
-    /// Encryption is the whole reason ADR-0026 admits `.7z`: the artifact stays unreadable
+    /// Encryption is the whole reason ADR-0028 admits `.7z`: the artifact stays unreadable
     /// wherever it is stored, and the key never reaches the Server.
     #[test]
     fn a_packed_7z_opens_with_the_archive_key_and_not_without_it() {
@@ -643,8 +643,8 @@ mod tests {
     }
 
     /// An operator who unpacks a published artifact by hand must get a file that runs — the release
-    /// ships `.tar.gz` (ADR-0019), and `.7z` stays the container an artifact may be encrypted in
-    /// (ADR-0026). Both therefore carry an executable mode of their own — the tar in its header,
+    /// ships `.tar.gz` (ADR-0035), and `.7z` stays the container an artifact may be encrypted in
+    /// (ADR-0028). Both therefore carry an executable mode of their own — the tar in its header,
     /// the 7z in 7-Zip's Unix-attribute convention — rather than relying on the Client, which sets
     /// the mode itself but only on the path where *it* installs the package.
     #[test]
@@ -761,7 +761,7 @@ mod tests {
         assert!(pack(&source, &artifact, Format::TarGz, None, Some("s3cret")).is_err());
     }
 
-    /// A package delivers exactly one program (ADR-0026), so a directory is refused where the
+    /// A package delivers exactly one program (ADR-0028), so a directory is refused where the
     /// operator can still see why — not on every host at rollout time.
     #[test]
     fn packing_something_that_is_not_a_file_is_refused() {
@@ -807,7 +807,7 @@ mod tests {
     /// `package floor` signs the floor statement of the type and the version, which verifies
     /// against the public key `keygen` printed; a version that is not SemVer is refused before the
     /// key is read.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0029
     #[test]
     fn floor_signs_the_floor_statement_and_refuses_a_version_that_is_not_semver() {
         let dir = tempfile::tempdir().expect("tempdir");

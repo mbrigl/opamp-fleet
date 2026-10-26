@@ -1,4 +1,4 @@
-//! The signing file (ADR-0027): what a Package's signatures cover, carried from the bundled UI to
+//! The signing file (ADR-0028): what a Package's signatures cover, carried from the bundled UI to
 //! the machine that holds the key, and the signatures carried back.
 //!
 //! The file is read whole and checked whole before anything is signed — a file with one bad entry
@@ -6,7 +6,7 @@
 //! bytes `package sign` signs from an artifact, so the Client cannot tell the two forms apart.
 //!
 //! What it does **not** do is check a hash against anything: the hashes are the Server's, and
-//! comparing them with upstream's checksums or with the files is the operator's duty (ADR-0027
+//! comparing them with upstream's checksums or with the files is the operator's duty (ADR-0028
 //! point 4). The tool prints each one as it signs it so the comparison has something to look at.
 
 use ring::signature::Ed25519KeyPair;
@@ -77,7 +77,7 @@ impl SigningFile {
         if self.agent_type.is_empty() || self.version.is_empty() {
             return Err("the agent_type and the version must both be named".to_string());
         }
-        // The key never signs a version a Client would refuse (ADR-0043 clause 4).
+        // The key never signs a version a Client would refuse (ADR-0029 clause 4).
         crate::package::require_semver(&self.version)?;
         if self.entries.is_empty() {
             return Err("there are no entries to sign".to_string());
@@ -168,7 +168,7 @@ mod tests {
 
     /// Every signature written back verifies, with the public key, over exactly the statement the
     /// Client checks — Agent type, version and that entry's hash — and over no other entry's.
-    /// Verifies: ADR-0027
+    /// Verifies: ADR-0028
     #[test]
     fn every_entry_is_signed_as_the_client_verifies_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -225,7 +225,7 @@ mod tests {
     /// A file that is not exactly this format — another `format`, a hash of the wrong shape, a
     /// platform twice, a field nobody defined, nothing to sign — is refused at reading, so nothing
     /// in it reaches the key.
-    /// Verifies: ADR-0027
+    /// Verifies: ADR-0028
     #[test]
     fn a_file_that_is_not_exactly_the_format_is_refused_before_anything_is_signed() {
         let dir = tempfile::tempdir().expect("tempdir");

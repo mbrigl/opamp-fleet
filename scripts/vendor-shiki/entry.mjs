@@ -1,7 +1,7 @@
-// The entry of crates/fleet-server/static/shiki.js, bundled by scripts/vendor-shiki.sh (ADR-0038).
+// The entry of crates/fleet-server/static/shiki.js, bundled by scripts/vendor-shiki.sh (ADR-0032).
 // Shiki's fine-grained core: the JavaScript regex engine (no WebAssembly), the CSS-variables theme
 // with this project's TOML and INI token rules (each look's stylesheet defines the colours) and
-// only the grammars ADR-0038 clause 3 names.
+// only the grammars ADR-0032 clause 3 names.
 import { createCssVariablesTheme, createHighlighterCore, hastToHtml } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import ini from "shiki/langs/ini.mjs";
@@ -11,7 +11,7 @@ import yaml from "shiki/langs/yaml.mjs";
 // The CSS-variables theme leaves TOML table headers, keys, dates and brackets and INI section
 // headers in the foreground colour. These rules give them the variables YAML's keys and values
 // already use, so the three languages look alike and no stylesheet needs a variable of its own
-// (ADR-0038 clause 4). INI's unquoted values carry no scope of their own and stay as they are.
+// (ADR-0032 clause 4). INI's unquoted values carry no scope of their own and stay as they are.
 const base = createCssVariablesTheme({ name: "css-variables" });
 const theme = {
   ...base,

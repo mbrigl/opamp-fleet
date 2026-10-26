@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Runs both ends against opamp-go, on both transports (ADR-0011): the Go harness under interop/
+# Runs both ends against opamp-go, on both transports (ADR-0012): the Go harness under interop/
 # is formatted and vetted first, the test is built next, so that a compile failure does not read
 # as an interop failure, and then run. The 'interop' job of .github/workflows/interop.yml runs it
 # on a schedule; interop/README.md says what it covers and how a red run is triaged.

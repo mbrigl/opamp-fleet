@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# A ticket's path and the branch that claims it, written once (ADR-0004). Sourced by
+# A ticket's path and the branch that claims it, written once (ADR-0006). Sourced by
 # scripts/sensor-plan-frontier.sh, which lists the tickets, and by
 # .agents/skills/work-tickets/claim.sh, which claims them, so the frontier offers no ticket the
 # claim refuses.

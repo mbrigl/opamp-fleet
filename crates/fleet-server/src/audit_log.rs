@@ -1,4 +1,4 @@
-//! The audit record on disk (ADR-0022), the adapter behind [`crate::audit::Audit`]: one JSON line
+//! The audit record on disk (ADR-0024), the adapter behind [`crate::audit::Audit`]: one JSON line
 //! per security decision, each carrying the SHA-256 of the line before it, written by one task in
 //! the order the decisions were taken. What is queued together is written and synced together, up
 //! to [`WRITE_BATCH`] lines, so how fast the channel empties is not bound by how often the disk
@@ -7,11 +7,12 @@
 //! A decision is recorded through [`AuditLog::record`], which never waits on the disk: the entry goes
 //! through a bounded channel to the writer task. When the channel is full, or the last write failed,
 //! the call answers [`Unavailable`], and the caller refuses what it was about to allow — a security
-//! decision is never taken without its record (clause 6). Refusals are aggregated per event and
-//! peer past ten a second, never dropped (clause 5), and counted before they reach the channel,
-//! where they may take no more than [`REFUSAL_SHARE`] of it: a flood of refusals from however many
-//! peers cannot leave an admission or an operator act without room for its record. The store behind the writer is a port; the
-//! filesystem adapter is [`crate::fs::FsAuditStore`].
+//! decision is never taken without its record (ADR-0024 clause 5). Refusals are aggregated per
+//! event and peer past ten a second, never dropped (ADR-0024 clause 4), and counted before they
+//! reach the channel, where they may take no more than [`REFUSAL_SHARE`] of it: a flood of refusals
+//! from however many peers cannot leave an admission or an operator act without room for its
+//! record. The store behind the writer is a port; the filesystem adapter is
+//! [`crate::fs::FsAuditStore`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -25,7 +26,7 @@ use tracing::{error, info};
 use crate::audit::{Audit, Entry, Field, Unavailable};
 use crate::fleet::Clock;
 
-/// The entries waiting for the writer at most (clause 6).
+/// The entries waiting for the writer at most (ADR-0024 clause 5).
 pub const CHANNEL_CAPACITY: usize = 10_000;
 
 /// The refusals of one event from one peer written per second before the rest are counted.
@@ -52,7 +53,7 @@ pub struct Tail {
     pub torn: bool,
 }
 
-/// The record's port (ADR-0006): where the lines go.
+/// The record's port (ADR-0010): where the lines go.
 pub trait AuditStore: Send {
     /// Where the record left off, if it holds anything.
     ///
@@ -269,7 +270,7 @@ impl AuditLog {
 
     /// Waits until every entry queued so far is written, for at most `timeout`; `false` when it
     /// was not, in time or at all because the record is failing. The process exits after this at shutdown, and the writer thread with it, so what
-    /// is still queued would otherwise be lost without a trace (ADR-0022).
+    /// is still queued would otherwise be lost without a trace (ADR-0024).
     #[must_use]
     pub fn drain(&self, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
@@ -570,7 +571,7 @@ fn rfc3339(ms: u64) -> String {
 }
 
 /// Walks lines in order and names the first whose `prev` does not match the line before it
-/// (clause 3); `Ok(count)` when the whole chain holds.
+/// (ADR-0024 clause 3); `Ok(count)` when the whole chain holds.
 ///
 /// # Errors
 /// Returns the position of the first break.
@@ -715,7 +716,7 @@ mod tests {
 
     /// Draining returns only once every entry queued before it is written, so the shutdown that
     /// follows it loses none of them.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[test]
     fn a_drain_returns_once_everything_queued_is_written() {
         let slow = Slow::default();
@@ -733,7 +734,7 @@ mod tests {
 
     /// A drain over a failing record says so, so the shutdown that follows does not pass the lost
     /// entries over in silence.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[test]
     fn a_drain_over_a_failing_record_answers_false() {
         let memory = Memory::default();
@@ -768,7 +769,7 @@ mod tests {
 
     /// Entries that queue while the store is busy are synced together, in the order they were
     /// queued, so a flood empties the channel at more than the disk's sync rate.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[test]
     fn entries_queued_together_are_synced_together_in_order() {
         let counting = Counting::default();
@@ -806,7 +807,7 @@ mod tests {
 
     /// A batch is counted against the file it goes into: a file full before the batch ends is
     /// closed there, never filled past its limit by more than the line that reached it.
-    /// Verifies: ADR-0022, ADR-0037
+    /// Verifies: ADR-0024, ADR-0030
     #[test]
     fn a_batch_rotates_where_a_single_line_would() {
         const MAX: u64 = 1_000;
@@ -840,7 +841,7 @@ mod tests {
 
     /// An append that fails loses every line of its batch, as it loses a single one: none of them
     /// is kept, each is counted unrecorded, and the chain goes on from the line before them.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[test]
     fn a_failed_append_loses_every_line_of_its_batch() {
         let memory = Memory::default();
@@ -880,7 +881,7 @@ mod tests {
         assert_eq!(chain_of(&memory), Ok(2));
     }
 
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[tokio::test]
     async fn each_entry_carries_the_hash_of_the_one_before() {
         let memory = Memory::default();
@@ -911,7 +912,7 @@ mod tests {
         .is_err());
     }
 
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[tokio::test]
     async fn the_chain_survives_a_restart_and_a_rotation() {
         let memory = Memory::default();
@@ -953,7 +954,7 @@ mod tests {
         assert!(chain_of(&memory).is_ok(), "{lines:#?}");
     }
 
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[tokio::test]
     async fn a_truncated_file_is_recorded_as_a_broken_chain() {
         let memory = Memory::default();
@@ -983,7 +984,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[tokio::test]
     async fn refusals_beyond_ten_a_second_are_aggregated_with_their_count() {
         let memory = Memory::default();
@@ -1014,7 +1015,7 @@ mod tests {
 
     /// A refusal of the rate limit never waits for its entry: one that finds the channel full is
     /// counted, and the next entry written says so in `unrecorded_before`.
-    /// Verifies: ADR-0013, ADR-0022
+    /// Verifies: ADR-0013, ADR-0024
     #[test]
     fn a_throttle_refusal_that_finds_the_channel_full_is_counted_unrecorded() {
         let memory = Memory::default();
@@ -1057,7 +1058,7 @@ mod tests {
 
     /// A flood of refusals — from one peer, and from as many peers as the channel holds entries —
     /// never leaves an admission without room for its record, even while the writer is stalled.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[test]
     fn a_flood_of_refusals_leaves_room_for_every_other_record() {
         let memory = Memory::default();
@@ -1113,7 +1114,7 @@ mod tests {
     /// While the writer is stalled, the refusals it has yet to account for are counted for a
     /// bounded number of events and peers; a refusal of one more is unrecorded, not remembered.
     /// The bound is on memory, which no interface shows, so the table is looked at directly.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[test]
     fn a_stalled_writer_counts_refusals_for_a_bounded_number_of_peers() {
         let memory = Memory::default();
@@ -1133,7 +1134,7 @@ mod tests {
         drop(held);
     }
 
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0024
     #[tokio::test]
     async fn a_write_that_fails_refuses_until_one_succeeds() {
         let memory = Memory::default();

@@ -62,7 +62,7 @@ async fn a_report_is_answered_and_the_agent_appears_in_the_fleet() {
     )
     .expect("json");
     assert_eq!(agents.as_array().expect("array").len(), 1);
-    // Type and name are two columns now (ADR-0016): `service_name` is what kind of Agent this is,
+    // Type and name are two columns now (ADR-0017): `service_name` is what kind of Agent this is,
     // `service_instance_name` is which one.
     assert_eq!(agents[0]["service_name"], support::AGENT_TYPE);
     assert_eq!(agents[0]["service_instance_name"], "itest");
@@ -136,7 +136,7 @@ async fn the_offer_is_gated_by_the_config_hash() {
 
 /// A Configuration held by a Deployment reaches the Agents the Deployment's Selector matches, and
 /// an Agent outside it is offered nothing and keeps what it runs.
-/// Verifies: G-9, ADR-0034
+/// Verifies: G-9, ADR-0027
 #[tokio::test]
 async fn a_selector_aims_a_configuration_at_part_of_the_fleet() {
     let server = spawn().await;

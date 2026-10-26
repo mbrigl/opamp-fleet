@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/number-adrs.sh. Verifies: ADR-0003
+# Self-test of scripts/number-adrs.sh. Verifies: ADR-0002
 #
 # Each case builds a throwaway repository under a temporary directory: a main with one numbered
 # ADR, a branch that adds drafts and cites them from the record, a script, and a document, and a

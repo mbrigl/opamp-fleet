@@ -5,7 +5,7 @@
      or verifiable on its own, sized to one fresh agent session. Claim it by creating the branch
      ticket/<spec>/<NN>-<slug> BEFORE any work, so parallel sessions sharing the repository skip
      it. The branch that lands it deletes this file. Decided in
-     docs/adr/0004-feature-layer.md. -->
+     docs/adr/0006-feature-layer.md. -->
 
 ## What to build
 
