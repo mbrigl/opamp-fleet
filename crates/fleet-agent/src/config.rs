@@ -1720,6 +1720,7 @@ mod tests {
     /// makes a path absolute, on Windows nothing does until it names a drive. Written per platform
     /// rather than with one string that only happens to work on the machine the tests were first
     /// run on.
+    /// Verifies: Q-5
     #[test]
     fn an_absolute_program_path_is_refused_and_names_the_way_across() {
         let dir = PathBuf::from("/srv/fleet/otelcol");

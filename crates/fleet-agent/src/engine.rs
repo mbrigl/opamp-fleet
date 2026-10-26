@@ -1102,7 +1102,7 @@ mod tests {
 
     /// A download queued before a fetch raised its Supervisor's floor is refused before anything
     /// is downloaded, and reported `InstallFailed` naming the version and the floor.
-    /// Verifies: ADR-0061
+    /// Verifies: ADR-0061, Q-6
     #[test]
     fn a_queued_download_below_a_floor_raised_since_is_refused() {
         use opamp::proto::{

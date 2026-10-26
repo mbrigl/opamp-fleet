@@ -2335,6 +2335,7 @@ mod tests {
         assert_eq!(entry_names(dir.path()), vec!["base", "extra"]);
     }
 
+    /// Verifies: Q-5
     #[test]
     fn entry_names_cannot_escape_the_config_directory() {
         assert_eq!(entry_file_name("../../etc/passwd"), "_.._etc_passwd");

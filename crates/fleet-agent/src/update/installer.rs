@@ -708,7 +708,7 @@ mod tests {
     /// even though it may be validly signed — the refusal happens ahead of the layout check, so it
     /// holds regardless of where this test binary runs from. `0.0.1` is below any release this
     /// project builds.
-    /// Verifies: ADR-0018, ADR-0043
+    /// Verifies: ADR-0018, ADR-0043, Q-6
     #[test]
     fn install_refuses_a_downgrade() {
         let dir = tempfile::tempdir().expect("tempdir");
