@@ -13,8 +13,7 @@ pub struct ClientUnderTest(Child);
 
 impl Drop for ClientUnderTest {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        crate::common::stop_client(&mut self.0);
     }
 }
 

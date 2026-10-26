@@ -43,7 +43,11 @@ fn main() {
             marker.push_str(arg);
             marker.push('\n');
         }
-        std::fs::write(path, marker).expect("write the marker file");
+        // Whole or not at all: a test waits for the file to exist and then reads it, so it is
+        // written beside its place and renamed into it.
+        let partial = format!("{path}.partial");
+        std::fs::write(&partial, marker).expect("write the marker file");
+        std::fs::rename(&partial, path).expect("move the marker file into place");
     }
 
     let exit_code: Option<i32> = flag("--exit-code").and_then(|v| v.parse().ok());

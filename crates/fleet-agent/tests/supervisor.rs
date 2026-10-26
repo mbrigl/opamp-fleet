@@ -113,8 +113,7 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
         "an unknown placeholder is the process's own business: {argv}"
     );
 
-    client.kill().expect("kill the client");
-    let _ = client.wait();
+    common::stop_client(&mut client);
 }
 
 /// ADR-0026 end to end: a Supervisor configured for a package that is a whole tree runs the
@@ -153,8 +152,7 @@ fn a_command_supervisor_runs_its_program_from_inside_an_unpacked_tree() {
         marker.exists()
     });
 
-    client.kill().expect("kill the client");
-    let _ = client.wait();
+    common::stop_client(&mut client);
 }
 
 #[test]
@@ -173,8 +171,7 @@ fn a_command_supervisor_spawns_the_configured_process() {
         "marker carries the argv: {content}"
     );
 
-    client.kill().expect("kill the client");
-    let _ = client.wait();
+    common::stop_client(&mut client);
 }
 
 #[test]
@@ -213,8 +210,7 @@ fn a_collector_supervisor_passes_each_config_entry_as_a_config_flag() {
         "argv names the entry file: {content}"
     );
 
-    client.kill().expect("kill the client");
-    let _ = client.wait();
+    common::stop_client(&mut client);
 }
 
 /// ADR-0023: supplementary content is on disk next to the configuration — that is what makes a
@@ -265,8 +261,7 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
         "supplementary content stays on disk to be read by path"
     );
 
-    client.kill().expect("kill the client");
-    let _ = client.wait();
+    common::stop_client(&mut client);
 }
 
 /// ADR-0017 clause 53 end to end: a listed Collector runs on the files the operator placed in its
@@ -330,8 +325,7 @@ fn a_listed_collector_runs_on_the_entries_the_operator_placed() {
     assert!(!config_dir.join("fleet").exists());
     assert!(!supervisor_dir.join("remote-config.pb").exists());
 
-    client.kill().expect("kill the client");
-    let _ = client.wait();
+    common::stop_client(&mut client);
 }
 
 #[cfg(unix)]

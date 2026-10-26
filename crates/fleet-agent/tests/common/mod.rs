@@ -8,6 +8,7 @@ use std::path::Path;
 /// The Client refuses to start without a client certificate (ADR-0021). The test Servers serve
 /// plaintext with an open admission and do not check it, so the files only have to exist and
 /// parse.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this support
 pub fn client_identity(dir: &Path) -> String {
     let key = rcgen::KeyPair::generate().expect("generate a key");
     let cert = rcgen::CertificateParams::new(vec!["test-agent".into()])
@@ -115,4 +116,53 @@ pub fn release_to_every_agent(
         );
     }
     release(state, FLEET_DEPLOYMENT, &[CHANNEL], configurations)
+}
+
+/// How long [`stop_client`] waits for the Client to exit on `SIGTERM` before it kills it: well
+/// above the Client's own default `stop_timeout_secs` of 10, within which it stops its programs
+/// before it says goodbye.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this support
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Stops the Client the way its service manager does: `SIGTERM`, on which it stops the programs it
+/// started itself before it exits, and a kill only once it has not exited within [`STOP_GRACE`].
+/// A kill alone leaves those programs running without it, one set per test run. On Windows it is a
+/// kill only, and the programs a Client started itself outlive it there.
+///
+/// A Client already reaped is left alone: its pid is no longer its own. On a multi-thread runtime
+/// the wait gives up its worker, so a Server in the same test keeps answering the Client's
+/// goodbyes; a current-thread runtime blocks while it waits, which holds a Server that a plain-HTTP
+/// Client's goodbye waits on, so such a test runs on a multi-thread runtime.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this support
+pub fn stop_client(child: &mut std::process::Child) {
+    if let Ok(Some(_)) = child.try_wait() {
+        return;
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| stop(child));
+        }
+        _ => stop(child),
+    }
+}
+
+/// [`stop_client`]'s signal and wait.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this support
+fn stop(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: signals the child, which `try_wait` found running and which has not been reaped
+        // since, so its pid is still its own.
+        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+            let deadline = std::time::Instant::now() + STOP_GRACE;
+            while std::time::Instant::now() < deadline {
+                if let Ok(Some(_)) = child.try_wait() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }

@@ -3,6 +3,7 @@
 //! request, and it renews what it was issued — each step costing the register exactly one
 //! certificate.
 
+mod common;
 mod enrolling;
 
 use std::path::Path;
@@ -56,7 +57,7 @@ async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_websocket() 
 
 /// The same over plain HTTP polling.
 /// Verifies: ADR-0021, ADR-0039
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_http() {
     enrol_and_renew("https").await;
 }
