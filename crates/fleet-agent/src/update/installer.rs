@@ -29,6 +29,7 @@ use tracing::{info, warn};
 use super::{SelfInstall, SelfUpdater, SELF_CHECK_TOKEN};
 use crate::install;
 use crate::service::layout::{self, Layout, BINARY_FILENAME};
+use crate::supervisor::ports::PackageFloors;
 
 /// The file [`install`] leaves for the next process to find, in the Client's state directory —
 /// which survives the version switch because it is outside `versions/`.
@@ -140,12 +141,13 @@ fn store_marker(state_dir: &Path, marker: &UpdateMarker) -> Result<(), String> {
 }
 
 /// The [`SelfUpdater`] on this host (ADR-0018): the state directory the marker lives in, the key
-/// that opens an encrypted archive, and the marker this process commits if it is itself a freshly
-/// installed version.
+/// that opens an encrypted archive, the marker this process commits if it is itself a freshly
+/// installed version, and the floors its own Agent type is held to (ADR-0061 clause 8).
 pub struct Installer {
     state_dir: PathBuf,
     archive_key: Option<zeroize::Zeroizing<String>>,
     probation: Option<UpdateMarker>,
+    floors: Option<(String, std::sync::Arc<dyn PackageFloors>)>,
 }
 
 impl Installer {
@@ -159,18 +161,36 @@ impl Installer {
             state_dir,
             archive_key,
             probation,
+            floors: None,
         }
+    }
+
+    /// Holds every offered version to the floor `floors` keeps for `agent_type`, this Client's own
+    /// Agent type (ADR-0061 clause 8).
+    #[must_use]
+    pub fn with_floors(
+        mut self,
+        agent_type: impl Into<String>,
+        floors: std::sync::Arc<dyn PackageFloors>,
+    ) -> Self {
+        self.floors = Some((agent_type.into(), floors));
+        self
     }
 }
 
 impl SelfUpdater for Installer {
     fn install(&self, staged: &Path, version: &str, hash: &[u8]) -> Result<SelfInstall, String> {
+        let floor = match &self.floors {
+            Some((agent_type, floors)) => floors.floor(agent_type),
+            None => Ok(None),
+        };
         let installed = install(
             &self.state_dir,
             staged,
             version,
             hash,
             self.archive_key.as_deref().map(String::as_str),
+            floor,
         );
         // Whatever the outcome, the staged artifact has served its purpose.
         let _ = std::fs::remove_file(staged);
@@ -187,16 +207,21 @@ impl SelfUpdater for Installer {
 /// Installs a verified artifact as a new version of *this Client* and points `current` at it
 /// (ADR-0018).
 ///
+/// `floor` is what the floors say of this Client's own Agent type (ADR-0061 clause 8): its floor,
+/// none, or why the floors cannot be read.
+///
 /// # Errors
-/// Returns an error — with the previous version still current and still running — when this
-/// executable is not in an ADR-0019 layout, when the artifact cannot be staged, or when the staged
-/// binary does not answer for itself.
+/// Returns an error — with the previous version still current and still running — when the
+/// offered version is not SemVer, orders below the running build or below `floor`, or `floor` is
+/// unreadable; when this executable is not in an ADR-0019 layout; when the artifact cannot be
+/// staged; or when the staged binary does not answer for itself.
 pub fn install(
     state_dir: &Path,
     artifact: &Path,
     version: &str,
     package_hash: &[u8],
     archive_key: Option<&str>,
+    floor: Result<Option<String>, String>,
 ) -> Result<SelfInstall, String> {
     // The version is Server-controlled and becomes an on-disk directory name below (ADR-0019).
     // Refuse anything that is not a well-formed version *before* it names a path: a value carrying
@@ -204,9 +229,12 @@ pub fn install(
     // repoint `current` at it — an escape the content hash and signature never cover, because they
     // sign the bytes, not the destination. The probe's own version check (ADR-0012) is too late; it
     // runs only after the artifact is already staged on disk.
-    if fleet_core::version::parse(version).is_none() {
+    //
+    // A Package version is SemVer (ADR-0043 clause 2), which is held to the same identifier set.
+    if !fleet_core::version::is_semver(version) {
         return Err(format!(
-            "the offered version {version:?} is not a valid version; refusing to self-update"
+            "the offered version {version:?} is not a valid version — a package version is a \
+             SemVer 2.0.0 version; refusing to self-update"
         ));
     }
 
@@ -222,6 +250,17 @@ pub fn install(
         return Err(format!(
             "the offered version {version:?} is older than the running {running:?}; \
              refusing to downgrade"
+        ));
+    }
+    // The higher of the running build and the floor the operator signed for this Client's own
+    // Agent type is its floor (ADR-0061 clause 8). The running build is held to above; an old
+    // build numbered above it is held to the signed floor here.
+    if let Some(floor) = floor?.filter(|floor| {
+        fleet_core::version::precedence(version, floor) == Some(std::cmp::Ordering::Less)
+    }) {
+        return Err(format!(
+            "the offered version {version:?} is below {floor}, the floor the operator signed for \
+             this Client's Agent type; refusing to self-update"
         ));
     }
 
@@ -641,13 +680,28 @@ mod tests {
             r"1.0.0+a\b",
             "latest",
         ] {
-            let err = install(dir.path(), &artifact, bad, b"\x00", None)
+            let err = install(dir.path(), &artifact, bad, b"\x00", None, Ok(None))
                 .expect_err("a path-escaping version must be refused");
             assert!(
                 err.contains("not a valid version"),
                 "{bad:?} was not refused as a version: {err}"
             );
         }
+    }
+
+    /// A value that reads as a version but is not SemVer is refused as a Package version is: a
+    /// numeric pre-release identifier with a leading zero, `1.0.0-01`, which the version parser
+    /// accepts and SemVer 2.0.0 does not.
+    /// Verifies: ADR-0061
+    #[test]
+    fn install_refuses_a_version_that_is_not_semver() {
+        assert!(fleet_core::version::parse("1.0.0-01").is_some());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("artifact");
+        std::fs::write(&artifact, b"payload").expect("write the artifact");
+        let err = install(dir.path(), &artifact, "1.0.0-01", b"\x00", None, Ok(None))
+            .expect_err("a version that is not SemVer must be refused");
+        assert!(err.contains("SemVer"), "{err}");
     }
 
     /// A Server offering an older release than the one running is refused before it can be staged,
@@ -661,12 +715,61 @@ mod tests {
         let artifact = dir.path().join("artifact");
         std::fs::write(&artifact, b"payload").expect("write the artifact");
 
-        let err = install(dir.path(), &artifact, "0.0.1", b"\x00", None)
+        let err = install(dir.path(), &artifact, "0.0.1", b"\x00", None, Ok(None))
             .expect_err("an older release must be refused");
         assert!(
             err.contains("refusing to downgrade"),
             "an older version was not refused as a downgrade: {err}"
         );
+    }
+
+    /// An offered version below the floor kept for this Client's own Agent type is refused, though
+    /// it orders above the running build; one at the floor passes that check; and floors that
+    /// cannot be read refuse every version, naming why. Each refusal comes before the layout
+    /// check, so it holds wherever this test binary runs from.
+    /// Verifies: ADR-0061
+    #[test]
+    fn the_self_update_refuses_a_version_below_its_types_floor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("artifact");
+        std::fs::write(&artifact, b"payload").expect("write the artifact");
+
+        let below = install(
+            dir.path(),
+            &artifact,
+            "99.0.0",
+            b"\x00",
+            None,
+            Ok(Some("100.0.0".to_string())),
+        )
+        .expect_err("below the floor");
+        assert!(
+            below.contains("99.0.0") && below.contains("100.0.0") && below.contains("floor"),
+            "{below}"
+        );
+        let at = install(
+            dir.path(),
+            &artifact,
+            "100.0.0",
+            b"\x00",
+            None,
+            Ok(Some("100.0.0".to_string())),
+        )
+        .expect_err("not in an install layout");
+        assert!(
+            !at.contains("the floor the operator signed"),
+            "the floor passed it: {at}"
+        );
+        let unreadable = install(
+            dir.path(),
+            &artifact,
+            "100.0.0",
+            b"\x00",
+            None,
+            Err("the package floors file x/package-floors.json cannot be read".to_string()),
+        )
+        .expect_err("unreadable floors");
+        assert!(unreadable.contains("package-floors.json"), "{unreadable}");
     }
 
     #[test]

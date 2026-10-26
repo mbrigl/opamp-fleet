@@ -14,7 +14,9 @@ use tracing::{info, warn};
 
 use crate::supervisor::agent::PackageDownload;
 use crate::supervisor::agent::{AgentState, Handled};
-use crate::supervisor::ports::{HighWaterMarks, PluginRegistry, ProcessCommand, ProcessEvent};
+use crate::supervisor::ports::{
+    HighWaterMarks, PackageFloors, PluginRegistry, ProcessCommand, ProcessEvent,
+};
 use crate::update::{SelfInstall, SelfUpdate, SelfUpdater};
 
 /// The Engine index of the Client's own Agent (ADR-0018). It is built first, so a Supervisor's
@@ -122,6 +124,9 @@ pub struct Engine {
     /// The high-water marks every Supervisor of this Client shares (ADR-0043 clause 8), kept so a
     /// Supervisor a set apply adds at runtime is held to the same marks.
     high_water: Option<Arc<dyn HighWaterMarks>>,
+    /// The floors every Agent of this Client is held to (ADR-0061 clause 4), kept so a Supervisor
+    /// a set apply adds at runtime is held to them too.
+    floors: Option<Arc<dyn PackageFloors>>,
     /// The plugins this Client's Supervisors were started with, kept so a Supervisor a set apply
     /// adds at runtime starts its Managed Process the same way (ADR-0059 clause 3).
     plugins: Option<Arc<dyn PluginRegistry>>,
@@ -170,6 +175,7 @@ impl Engine {
             sampling: Arc::new(Mutex::new(Vec::new())),
             last_csr: None,
             high_water: None,
+            floors: None,
             plugins: None,
         };
         // The Client's own Agent samples this process, and that is true from the start — only a
@@ -189,6 +195,36 @@ impl Engine {
     /// Engine not built by [`build_engine`](crate::supervisor::build_engine).
     pub fn high_water(&self) -> Option<Arc<dyn HighWaterMarks>> {
         self.high_water.clone()
+    }
+
+    /// Holds every Agent of this Engine, and every one added later, to `floors` (ADR-0061).
+    pub fn set_floors(&mut self, floors: Arc<dyn PackageFloors>) {
+        for agent in &mut self.agents {
+            agent.state.set_floors(floors.clone());
+        }
+        self.floors = Some(floors);
+    }
+
+    /// Refuses each queued download whose version now lies below its Supervisor's floor — what a
+    /// fetch made right before the downloads may have raised (ADR-0061 clauses 4, 5). Each is
+    /// reported `InstallFailed` with the reason, and nothing of it is downloaded.
+    pub fn hold_downloads_to_floors(&mut self) {
+        for (index, download) in std::mem::take(&mut self.pending_package_downloads) {
+            let refusal = self
+                .agents
+                .get(index)
+                .and_then(|agent| agent.state.floor_refusal(&download.version));
+            match refusal {
+                Some(reason) => {
+                    warn!(
+                        package = %download.name, reason = %reason,
+                        "refusing a package below its floor"
+                    );
+                    self.package_download_failed(index, download.hash, reason);
+                }
+                None => self.pending_package_downloads.push((index, download)),
+            }
+        }
     }
 
     /// Gives the Engine the plugins its Supervisors were started with (ADR-0059 clause 3).
@@ -323,6 +359,12 @@ impl Engine {
     /// exactly once (ADR-0014).
     pub fn take_connection_offer(&mut self) -> Option<ConnectionSettingsOffers> {
         self.pending_connection_offer.take()
+    }
+
+    /// Whether a package waits for the transport to download it (ADR-0026).
+    #[must_use]
+    pub fn has_package_downloads(&self) -> bool {
+        !self.pending_package_downloads.is_empty()
     }
 
     /// The packages the transport must download and verify (ADR-0026), each with its Agent's
@@ -658,6 +700,9 @@ impl Engine {
     /// snapshot on the next flush — a fresh state's first report is a full one.
     pub fn add_supervisor(&mut self, agent: EngineAgent) {
         let mut agent = SupervisedAgent::live(agent);
+        if let Some(floors) = &self.floors {
+            agent.state.set_floors(floors.clone());
+        }
         agent.owes_report = true;
         self.agents.push(agent);
         self.refresh_sampling();
@@ -1044,5 +1089,80 @@ mod tests {
             ..Default::default()
         });
         assert!(handled.send_report);
+    }
+
+    /// A floor a test raises at will.
+    struct RaisedFloor(Mutex<Option<String>>);
+
+    impl PackageFloors for RaisedFloor {
+        fn floor(&self, _agent_type: &str) -> Result<Option<String>, String> {
+            Ok(self.0.lock().expect("floor lock").clone())
+        }
+    }
+
+    /// A download queued before a fetch raised its Supervisor's floor is refused before anything
+    /// is downloaded, and reported `InstallFailed` naming the version and the floor.
+    /// Verifies: ADR-0061
+    #[test]
+    fn a_queued_download_below_a_floor_raised_since_is_refused() {
+        use opamp::proto::{
+            DownloadableFile, PackageAvailable, PackageStatusEnum, PackagesAvailable,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let own = AgentState::new(
+            "self".to_string(),
+            Storage::new(dir.path().join("self")).expect("storage"),
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        let mut supervised = AgentState::supervised(
+            "otelcol".to_string(),
+            "otelcol".to_string(),
+            Storage::new(dir.path().join("otelcol")).expect("storage"),
+            crate::host::SystemHost,
+        )
+        .expect("agent");
+        supervised.accept_packages();
+        let mut engine = Engine::new(vec![own, supervised]);
+        let floor = Arc::new(RaisedFloor(Mutex::new(None)));
+        engine.set_floors(floor.clone());
+        let uid = engine.poll_reports()[1].instance_uid.clone();
+        engine.handle(&ServerToAgent {
+            instance_uid: uid.clone(),
+            packages_available: Some(PackagesAvailable {
+                packages: [(
+                    "otelcol".to_string(),
+                    PackageAvailable {
+                        version: "1.5.0".to_string(),
+                        file: Some(DownloadableFile {
+                            download_url: "/x".to_string(),
+                            ..Default::default()
+                        }),
+                        hash: b"v150".to_vec(),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                all_packages_hash: b"agg".to_vec(),
+            }),
+            ..Default::default()
+        });
+        assert!(engine.has_package_downloads(), "taken under no floor");
+
+        *floor.0.lock().expect("floor lock") = Some("2.0.0".to_string());
+        engine.hold_downloads_to_floors();
+        assert!(!engine.has_package_downloads(), "nothing is downloaded");
+        let report = engine
+            .owed_reports()
+            .into_iter()
+            .find(|report| report.instance_uid == uid)
+            .expect("the refusal is owed");
+        let status = &report.package_statuses.expect("statuses").packages["otelcol"];
+        assert_eq!(status.status, PackageStatusEnum::InstallFailed as i32);
+        assert!(
+            status.error_message.contains("1.5.0") && status.error_message.contains("2.0.0"),
+            "{}",
+            status.error_message
+        );
     }
 }

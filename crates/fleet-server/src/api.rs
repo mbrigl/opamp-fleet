@@ -43,7 +43,9 @@ use crate::packages::{PackageId, PackageSummary, Platform, SignatureState};
         (name = "fleet", description = "The fleet as the Server sees it"),
         (name = "configurations", description = "Configurations: content an Agent type runs, \
                                                  released only through a Deployment (ADR-0034)"),
-        (name = "packages", description = "Software packages the Server delivers (ADR-0026)"),
+        (name = "packages", description = "Software packages the Server delivers (ADR-0026), \
+                                            and the signed floor below which no Client takes \
+                                            one (ADR-0061)"),
         (name = "deployments", description = "What reaches a channel of hosts — Packages and \
                                               Configurations under one Selector, and the only \
                                               thing rolled out (ADR-0026, ADR-0034)"),
@@ -218,6 +220,8 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         // by `max_package_size_bytes` instead (ADR-0010). No other route is unbounded.
         .routes(routes!(put_package_entry, delete_package_entry).layer(DefaultBodyLimit::disable()))
         .routes(routes!(put_entry_signature, delete_entry_signature))
+        .routes(routes!(list_package_floors))
+        .routes(routes!(put_package_floor, delete_package_floor))
         .routes(routes!(list_deployments))
         .routes(routes!(get_deployment, put_deployment, delete_deployment))
         .routes(routes!(put_deployment_selector))
@@ -1766,6 +1770,189 @@ async fn delete_entry_signature(
             ),
         ),
         Err(e) => package_error(e),
+    }
+}
+
+/// One floor as the operator sets it (ADR-0061 clause 2).
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct FloorSpec {
+    /// The lowest version still taken, a SemVer 2.0.0 version.
+    version: String,
+    /// The operator's signature over the floor's statement — the Agent type and the version —
+    /// hex-encoded, as `opamp-fleetctl package floor` prints it.
+    signature: String,
+}
+
+/// One floor as the Server stores it: below `version`, no Client takes a package of `agent_type`
+/// (ADR-0061).
+#[derive(Serialize, ToSchema)]
+struct FloorView {
+    /// The Agent type the floor holds for.
+    agent_type: String,
+    /// The lowest version still taken.
+    version: String,
+    /// The operator's Ed25519 signature over the floor, hex.
+    signature: String,
+    /// What the Server found when it checked that signature against `[packages]
+    /// verification_key`. Feedback only: an `invalid` floor is stored and served, and each
+    /// Client's own check decides. Never `missing`: a floor carries its signature.
+    signature_state: SignatureStateView,
+}
+
+impl FloorView {
+    fn of(agent_type: String, floor: crate::floors::Floor, state: SignatureState) -> Self {
+        FloorView {
+            agent_type,
+            version: floor.version,
+            signature: hex::encode(floor.signature),
+            signature_state: state.into(),
+        }
+    }
+}
+
+fn floors_off() -> Response {
+    error(StatusCode::NOT_FOUND, "package floors are not configured")
+}
+
+/// Every floor the Server stores and serves to the fleet, by Agent type (ADR-0061).
+#[utoipa::path(
+    get,
+    path = "/api/v1/package-floors",
+    tag = "packages",
+    responses(
+        (status = 200, description = "Every floor, by Agent type, with its signature_state", body = Vec<FloorView>),
+        (status = 404, description = "Package floors are not configured", body = ErrorBody)
+    )
+)]
+async fn list_package_floors(State(state): State<Arc<AppState>>) -> Response {
+    let Some(floors) = state.floors() else {
+        return floors_off();
+    };
+    let list: Vec<FloorView> = floors
+        .list()
+        .into_iter()
+        .map(|(agent_type, floor, state)| FloorView::of(agent_type, floor, state))
+        .collect();
+    Json(list).into_response()
+}
+
+/// Stores the operator's signed floor of one Agent type (ADR-0061 clause 2): below its version no
+/// Client takes a package of the type, its own update included, once it has fetched the floor.
+/// A floor is raised, or removed and set anew; a version below the one stored is `409`.
+///
+/// With `[packages] verification_key` set the Server checks the signature and answers the floor's
+/// `signature_state`. An `invalid` floor is stored all the same: the Server only reports, and
+/// each Client's own verification decides.
+#[utoipa::path(
+    put,
+    path = "/api/v1/package-floors/{agent_type}",
+    tag = "packages",
+    params(("agent_type" = String, Path, description = "The Agent type")),
+    request_body = FloorSpec,
+    responses(
+        (status = 200, description = "The stored floor, with its signature_state", body = FloorView),
+        (status = 400, description = "An Agent type that is no token, a version that is not SemVer, or a signature that is not hex or not 64 bytes", body = ErrorBody),
+        (status = 404, description = "Package floors are not configured", body = ErrorBody),
+        (status = 409, description = "The version orders below the floor stored for the type", body = ErrorBody),
+        (status = 500, description = "The floor could not be persisted", body = ErrorBody)
+    )
+)]
+async fn put_package_floor(
+    State(state): State<Arc<AppState>>,
+    Path(agent_type): Path<String>,
+    Json(spec): Json<FloorSpec>,
+) -> Response {
+    use crate::floors::FloorError;
+    let Some(floors) = state.floors() else {
+        return floors_off();
+    };
+    let signature = match hex::decode(spec.signature.trim()) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "the signature must be hex, as `opamp-fleetctl package floor` prints it: {e}"
+                ),
+            );
+        }
+    };
+    match floors.put(&agent_type, &spec.version, signature.clone()) {
+        Ok(signature_state) => {
+            info!(
+                agent_type = %agent_type, version = %spec.version,
+                state = signature_state.as_str(), "package floor set"
+            );
+            note(
+                &state,
+                crate::audit::Entry::new("package_floor.set", "set")
+                    .with("agent_type", agent_type.clone())
+                    .with("version", spec.version.clone())
+                    .with("signature_state", signature_state.as_str()),
+            );
+            let floor = crate::floors::Floor {
+                version: spec.version,
+                signature,
+            };
+            Json(FloorView::of(agent_type, floor, signature_state)).into_response()
+        }
+        Err(FloorError::Invalid(e)) => error(StatusCode::BAD_REQUEST, e),
+        Err(FloorError::Lower(stored)) => error(
+            StatusCode::CONFLICT,
+            format!(
+                "the floor of {agent_type:?} is {stored}, and {} orders below it — a floor is \
+                 raised, or removed and set anew",
+                spec.version
+            ),
+        ),
+        Err(FloorError::Store(e)) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the floor could not be persisted: {e}"),
+        ),
+    }
+}
+
+/// Removes the floor of one Agent type: the Server stops serving it (ADR-0061 clause 7). A Client
+/// that has kept it keeps it; only its host lowers what it holds.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/package-floors/{agent_type}",
+    tag = "packages",
+    params(("agent_type" = String, Path, description = "The Agent type")),
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
+        (status = 404, description = "No floor for the type, or package floors are not configured", body = ErrorBody),
+        (status = 500, description = "The removal could not be persisted; the floor is kept", body = ErrorBody)
+    )
+)]
+async fn delete_package_floor(
+    State(state): State<Arc<AppState>>,
+    _csrf: SameOrigin,
+    Path(agent_type): Path<String>,
+) -> Response {
+    let Some(floors) = state.floors() else {
+        return floors_off();
+    };
+    match floors.remove(&agent_type) {
+        Ok(true) => {
+            info!(agent_type = %agent_type, "package floor removed");
+            note(
+                &state,
+                crate::audit::Entry::new("package_floor.removed", "removed")
+                    .with("agent_type", agent_type.clone()),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error(
+            StatusCode::NOT_FOUND,
+            format!("no floor for {agent_type:?}"),
+        ),
+        Err(e) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the floor could not be removed: {e}"),
+        ),
     }
 }
 

@@ -1,6 +1,6 @@
 # ADR-0043: A Package version is SemVer, and a Supervisor never installs one below the highest version its Agent type has had on the host
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clause 13 superseded by [ADR-0061](0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)
 - **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
 - **Applies to:** the version rule of `crates/fleet-core/src/version.rs` and its callers, the Package identity and the store's reading of it in `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/fs/packages.rs` and `crates/fleet-server/src/migrate.rs`, the package routes of `crates/fleet-server/src/api.rs`, the candidate test of `crates/fleet-server/src/packages.rs`, the `package sign` and `package fetch` commands of `opamp-fleetctl` in `crates/fleet-tools/`, the Supervisor's check of a package offer in `crates/fleet-agent/src/supervisor/agent/packages.rs`, the installed-package record in `crates/fleet-agent/src/storage.rs`, the file `package-high-water.json` under the Client's `state_dir`, the purge in `crates/fleet-agent/src/reconfigure.rs`, and every document that tells an operator how a Package is numbered or how a Supervisor is moved to an older version

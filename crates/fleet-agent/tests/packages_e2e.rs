@@ -74,13 +74,22 @@ async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
 async fn spawn_server(
     store: PackageStore,
 ) -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempDir) {
+    spawn_server_with(store, None).await
+}
+
+/// [`spawn_server`], serving `floors` to the fleet (ADR-0061).
+async fn spawn_server_with(
+    store: PackageStore,
+    floors: Option<fleet_server::floors::PackageFloors>,
+) -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(
         AppState::new(dir.path().join("fleet-configs"))
             .expect("configs")
             .with_packages(Some(
                 PackageOffering::new(dir.path(), store).expect("deployments"),
-            )),
+            ))
+            .with_floors(floors.map(Arc::new)),
     );
     let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -342,4 +351,126 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
         "a refused package records no installation"
     );
     assert!(marker.exists(), "the configured process kept running");
+}
+
+/// The Client fetches the floor its Server serves, keeps it in `package-floors.json`, and refuses
+/// a validly signed package below it before downloading anything: the Supervisor reports it
+/// `InstallFailed`, naming the version and the floor, and the program it runs keeps running.
+/// Verifies: ADR-0061
+#[tokio::test]
+async fn a_signed_package_below_the_floor_the_server_serves_is_refused() {
+    let artifact = std::fs::read(env!("CARGO_BIN_EXE_stub_agent")).expect("read stub");
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+    let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
+    let public_key_hex = hex::encode(keypair.public_key().as_ref());
+    let signature = keypair
+        .sign(&fleet_core::package::statement(
+            "managed-agent",
+            "2.0.0",
+            &<sha2::Sha256 as sha2::Digest>::digest(&artifact),
+        ))
+        .as_ref()
+        .to_vec();
+    let floor = keypair
+        .sign(&fleet_core::package::floor_statement(
+            "managed-agent",
+            "3.0.0",
+        ))
+        .as_ref()
+        .to_vec();
+
+    let store_dir = tempfile::tempdir().expect("store dir");
+    let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
+    let set = fleet_server::packages::PackageId::new("managed-agent", "2.0.0").expect("package id");
+    store.create(&set).expect("create package");
+    store
+        .put_entry(&set, &this_host(), artifact)
+        .expect("put entry");
+    let floors_dir = tempfile::tempdir().expect("floors dir");
+    let floors = fleet_server::floors::PackageFloors::open(Box::new(
+        fleet_server::fs::FsFloorStore::open(floors_dir.path()),
+    ))
+    .expect("floors");
+    floors
+        .put("managed-agent", "3.0.0", floor.clone())
+        .expect("floor");
+
+    let (addr, state, dir) = spawn_server_with(store, Some(floors)).await;
+
+    let state_dir = dir.path().join("client-state");
+    let program_dir = state_dir.join("supervisors/myagent/program");
+    std::fs::create_dir_all(&program_dir).expect("create the program dir");
+    let managed = program_dir.join("managed-agent");
+    std::fs::copy(env!("CARGO_BIN_EXE_stub_agent"), &managed).expect("copy stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let marker = dir.path().join("marker");
+    let toml = format!(
+        concat!(
+            "endpoint = \"ws://{addr}/v1/opamp\"\n",
+            "state_dir = {state:?}\n",
+            "heartbeat_interval_secs = 1\n\n",
+            "[packages]\n",
+            "verification_key = \"{key}\"\n\n",
+            "[[supervisor]]\n",
+            "type = \"command\"\n",
+            "name = \"myagent\"\n",
+            "apply_grace_secs = 1\n",
+            "command = \"managed-agent\"\n",
+            "args = [\"--touch\", {marker:?}]\n",
+        ),
+        addr = addr,
+        state = state_dir.to_string_lossy(),
+        key = public_key_hex,
+        marker = marker.to_string_lossy(),
+    );
+    let config_path = dir.path().join("supervisor.toml");
+    std::fs::write(&config_path, toml + &common::client_identity(dir.path()))
+        .expect("write supervisor.toml");
+
+    let _client = spawn_client(&config_path);
+
+    wait_until("the rollout act to reach the agent", || {
+        state
+            .rollout_deployment(&ring_holding_signed(
+                &state,
+                &set,
+                Some((&this_host(), signature.clone())),
+            ))
+            .ok()
+            .filter(|assigned| *assigned >= 1)
+            .map(|_| ())
+    })
+    .await;
+
+    let error = wait_until("the package to be reported InstallFailed", || {
+        let snapshot = state.snapshot();
+        let agent = view(&snapshot, "myagent")?;
+        let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
+        (package.status == "InstallFailed").then(|| package.error.clone())
+    })
+    .await;
+    assert!(
+        error.contains("2.0.0") && error.contains("3.0.0"),
+        "the reason names the version and the floor: {error}"
+    );
+    let kept: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state_dir.join("package-floors.json")).expect("the floors file"),
+    )
+    .expect("json");
+    assert_eq!(
+        kept["managed-agent"],
+        serde_json::json!({ "version": "3.0.0", "signature": hex::encode(&floor) })
+    );
+    assert!(
+        !state_dir
+            .join("supervisors/myagent/installed-package.json")
+            .exists(),
+        "nothing was installed"
+    );
+    assert!(marker.exists(), "the program it runs keeps running");
 }

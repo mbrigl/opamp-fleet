@@ -1186,6 +1186,7 @@ and macOS, and a directory junction on Windows, where junctions need no special 
     connection-settings.pb  Server-offered settings, if any
     installed-package.json  the update it last installed, if any
     package-high-water.json the highest version installed per Agent type — see "A Supervisor never goes back"
+    package-floors.json     the highest floor the operator signed per Agent type — see "A signed floor"
     packages/               staging for its own update
     logs/                   the service's rotating log
     supervisors/            one directory per Agent — see below
@@ -2139,13 +2140,55 @@ A mark file that exists but does not parse, or that maps a type to a value that 
 never read as empty: the startup logs an error naming it, and every Supervisor package offer is
 refused, naming the file, until you repair or delete it. The connection, the configurations and the
 Client's own update are unaffected. The Client's own Agent keeps no mark: its floor is the binary
-that runs ([Updating the Client itself](#updating-the-client-itself)).
+that runs, or the signed floor of its type where that is higher
+([Updating the Client itself](#updating-the-client-itself)).
 
 **Only the host lowers a mark.** To move a Supervisor to an older version on purpose: stop the
 Client, remove that type's entry from `package-high-water.json` (or delete the file, which resets
 every type no remaining record names), delete `installed-package.json` of every Supervisor of that
 type, and start the Client. The path that needs no host access is to publish the old content as a
 new, greater version.
+
+### A signed floor
+
+The mark only knows what *this* host installed, so an old build the operator once signed under a
+version above it — a long-ago `2.0.0-rc.1` while the fleet runs `1.9.4` — is still taken by a host
+that never ran it. A **floor** closes that: the operator signs, per Agent type, the version below
+which nothing of the type is taken any more (`opamp-fleetctl package floor`, see
+[the tools](tools.md#packing-and-signing)), and stores it on the Server.
+
+The Client fetches the floors from its endpoint — the Server, or the Gateway it sits behind — on
+its first reply after starting, once an hour, and before it decides a package offer when its last
+fetch is more than a minute old. Behind a Gateway it fetches the Gateway's copy, which the Gateway
+refreshes from its Server when it starts and once an hour: a new floor reaches it only after the
+Gateway's next fetch, and while the Gateway's fetches fail it keeps the floors it holds. It verifies each against `[packages]
+verification_key` and keeps, per Agent type, the highest that verifies in
+`<state_dir>/package-floors.json`, owner-only. A floor that does not verify, or that is lower than
+the one kept, is ignored and logged; a fetch that fails keeps the floors held, and offers are
+decided against them:
+
+- a Supervisor refuses an offer whose version is below its type's floor before anything is
+  downloaded, and reports the package `InstallFailed`, naming the version and the floor. The floor
+  stands beside the high-water mark; the stricter one decides. An offer of the package it already
+  runs is answered as installed, even below the floor;
+- the Client's own update refuses a version below the floor of its own Agent type before the
+  downloaded build is staged.
+
+**What is installed stays.** A Managed Process whose installed version lies below its floor keeps
+running, and so does the Client; a Supervisor's Agent says in its health that it runs below the
+floor, naming both versions, until it takes an offer at or above it. The Client's own Agent says
+nothing of it: its next update at or above the floor replaces the running build. A rollback after a
+failed update puts the predecessor back whatever the floor says.
+
+A floor file that exists but does not parse, or that maps a type to a version that is not SemVer,
+is never read as empty: every package offer, the Client's own update included, is refused, naming
+the file, until you repair or delete it. A floor kept once is not verified again when the file is
+read, so a later change of the key does not undo it.
+
+**Only the host lowers a floor.** Removing a floor on the Server only stops serving it to the
+Clients that have not kept it. To take a Client below a floor: stop it, remove that type's entry
+from `package-floors.json` (or delete the file), and start it. The path that needs no host access
+is to publish the old content as a new, greater version.
 
 ### Package updates: rollback and retention
 
@@ -2232,7 +2275,8 @@ The consent takes effect only while `verification_key` is set, and the artifact 
 carry a signature that verifies against it. An offer without a
 signature, or with one that does not verify, is reported `InstallFailed` and nothing is staged. An
 offer older than the running version is refused too: a signature carries no ordering, so an old
-release stays validly signed forever.
+release stays validly signed forever. So is a version that is not SemVer, and one below the floor
+the operator signed for `supervisor` ([A signed floor](#a-signed-floor)).
 
 An offer under any other name is refused and reported, never applied. That is one of two independent
 guards, and it is the one on this side of the wire: the Server will not offer a package built for

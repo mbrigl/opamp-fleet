@@ -13,6 +13,7 @@ mod bootstrap;
 mod configs;
 mod deployments;
 mod enrolment;
+mod floors;
 mod packages;
 mod revocation;
 
@@ -23,6 +24,7 @@ pub use bootstrap::FsBootstrapStore;
 pub use configs::FsConfigBackend;
 pub use deployments::FsDeploymentBackend;
 pub use enrolment::FsEnrolmentStore;
+pub use floors::FsFloorStore;
 pub use packages::FsPackageBackend;
 pub use revocation::FsLedgerStore;
 
@@ -51,6 +53,11 @@ pub const AUDIT: &str = "audit";
 pub const REVOCATIONS: &str = "revocations.json";
 /// The enrolment window and its pending requests.
 pub const ENROLMENT: &str = "enrolment.json";
+/// The floor of each Agent type (ADR-0061 clause 2).
+pub const PACKAGE_FLOORS: &str = "package-floors.json";
+
+/// Every file the layout names.
+const FILES: [&str; 3] = [REVOCATIONS, ENROLMENT, PACKAGE_FLOORS];
 
 /// Every directory the layout names, in the order the table of ADR-0037 clause 2 lists them.
 pub const DIRECTORIES: [&str; 9] = [
@@ -95,7 +102,7 @@ pub fn check_layout(root: &Path) -> Result<(), String> {
         let known = if DIRECTORIES.contains(&name.as_str()) {
             path.is_dir()
         } else {
-            (name == REVOCATIONS || name == ENROLMENT) && path.is_file()
+            FILES.contains(&name.as_str()) && path.is_file()
         };
         if !known {
             return Err(unknown(&path));
@@ -119,7 +126,7 @@ pub fn open_data_dir_beside_database(root: &Path, filesystem_blobs: bool) -> Res
         if (name == AUDIT || name == BLOBS) && path.is_dir() {
             continue;
         }
-        if DIRECTORIES.contains(&name.as_str()) || name == REVOCATIONS || name == ENROLMENT {
+        if DIRECTORIES.contains(&name.as_str()) || FILES.contains(&name.as_str()) {
             return Err(format!(
                 "{} is a record of the filesystem store, and [database] store = \"postgres\" — \
                  copy the records into the database with `server migrate-to-postgres --from \
@@ -377,10 +384,22 @@ mod tests {
         assert!(open_data_dir(&root, true).is_err());
     }
 
+    /// The floors' file is part of the layout (ADR-0061 clause 10): a `data_dir` that holds it
+    /// opens.
+    /// Verifies: ADR-0061
+    #[test]
+    fn the_floors_file_is_part_of_the_layout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("fleet-data");
+        open_data_dir(&root, true).expect("open an empty data directory");
+        std::fs::write(root.join(PACKAGE_FLOORS), "{}").expect("floors");
+        open_data_dir(&root, true).expect("the floors' file is named by the layout");
+    }
+
     /// With the records in PostgreSQL, `data_dir` holds `audit/` and, with the filesystem blob
     /// store, `blobs/`, and nothing else; a record of the filesystem store found there fails the
     /// open naming it and `server migrate-to-postgres`, and anything else fails as a stray entry.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0050, ADR-0061
     #[test]
     fn a_data_dir_beside_the_database_holds_the_audit_and_the_blobs_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -402,7 +421,14 @@ mod tests {
         open_data_dir_beside_database(&bucket, false).expect("open");
         assert!(!bucket.join(BLOBS).exists(), "no blobs/ beside a bucket");
 
-        for record in [AGENTS, CONFIGURATIONS, CERTIFICATES, REVOCATIONS, ENROLMENT] {
+        for record in [
+            AGENTS,
+            CONFIGURATIONS,
+            CERTIFICATES,
+            REVOCATIONS,
+            ENROLMENT,
+            PACKAGE_FLOORS,
+        ] {
             let path = root.join(record);
             if record.ends_with(".json") {
                 std::fs::write(&path, "{}").expect("write");

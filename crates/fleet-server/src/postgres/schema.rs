@@ -28,7 +28,7 @@ pub const SCHEMA_TABLE: &str = "fleet_schema";
 
 /// Every table the migrations create, so that a database holding any of them is recognised as one
 /// the Server already wrote ([`super::Database::server_tables`]).
-pub const TABLES: [&str; 14] = [
+pub const TABLES: [&str; 15] = [
     "configurations",
     "configuration_revisions",
     "deployments",
@@ -42,16 +42,25 @@ pub const TABLES: [&str; 14] = [
     "bootstrap_certificates",
     "enrolment_window",
     "enrolment_requests",
+    "package_floors",
     // Not tables of the records, but the Server's all the same.
     SCHEMA_TABLE,
 ];
 
 /// The schema, in order.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    oldest_server: "0.6.1",
-    sql: RECORDS,
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        oldest_server: "0.6.1",
+        sql: RECORDS,
+    },
+    // A table only added: the release before it runs on the schema after it, never reading it.
+    Migration {
+        version: 2,
+        oldest_server: "0.6.1",
+        sql: PACKAGE_FLOORS,
+    },
+];
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables
 /// of their own (ADR-0050 clauses 3, 8, 10 to 14). Unsigned integers are kept as `bigint` with
@@ -177,6 +186,16 @@ CREATE TABLE enrolment_requests (
     id text PRIMARY KEY,
     position integer NOT NULL,
     request json NOT NULL
+);
+";
+
+/// The floor of each Agent type (ADR-0061 clause 2): one row per type, the signature as its
+/// bytes.
+const PACKAGE_FLOORS: &str = r"
+CREATE TABLE package_floors (
+    agent_type text PRIMARY KEY,
+    version text NOT NULL,
+    signature bytea NOT NULL
 );
 ";
 

@@ -1,6 +1,6 @@
 # ADR-0031: `opamp-fleetctl pki p12-extract` writes a bootstrap PKCS#12 file's certificate and key as PEM
 
-- **Status:** 🟢 accepted
+- **Status:** 🟢 accepted · clause 2 superseded by [ADR-0061](0061-a-signed-floor-per-agent-type-below-which-no-package-is-taken.md)
 - **Date:** 2026-10-15
 - **Deciders:** Markus Brigl
 - **Applies to:** the `pki` command tree of `opamp-fleetctl` in `crates/fleet-tools/src/main.rs` and `crates/fleet-tools/src/pki.rs`, the dependencies of `crates/fleet-tools/Cargo.toml`, the reading of a PKCS#12 file in `crates/fleet-core/src/pkcs12/` and in `pkcs12_identity` of `crates/fleet-agent/src/tls.rs`, the reading of a password file in `read_password_file` of `crates/fleet-agent/src/config_init.rs`, and every document that names an operator command or tells an operator how to hand out a bootstrap certificate

@@ -24,6 +24,7 @@ use crate::config::PostgresConfig;
 use crate::configs::{ConfigBackend as _, Configuration};
 use crate::deployments::{Deployment, DeploymentBackend as _};
 use crate::enrolment::{EnrolmentStore as _, Persisted};
+use crate::floors::{Floor, FloorStore as _};
 use crate::fs;
 use crate::packages::{Package, PackageBackend as _};
 use crate::revocation::{Ledger, LedgerStore as _};
@@ -43,6 +44,7 @@ struct Records {
     ledger: Ledger,
     bootstrap: Vec<(BootstrapEntry, Option<Vec<u8>>)>,
     enrolment: Option<Persisted>,
+    floors: std::collections::BTreeMap<String, Floor>,
 }
 
 impl Records {
@@ -62,6 +64,7 @@ impl Records {
             ledger: fs::FsLedgerStore::open(root)?.load()?,
             bootstrap,
             enrolment: fs::FsEnrolmentStore::open(root).load()?,
+            floors: fs::FsFloorStore::open(root).load()?,
         })
     }
 
@@ -100,6 +103,7 @@ impl Records {
                         .unwrap_or(0)
                 })
             ),
+            format!("{} package floors", self.floors.len()),
         ]
     }
 
@@ -136,6 +140,9 @@ impl Records {
         }
         if let Some(enrolment) = &self.enrolment {
             super::enrolment::write(client, enrolment).await?;
+        }
+        for (agent_type, floor) in &self.floors {
+            super::floors::write(client, agent_type, floor).await?;
         }
         Ok(())
     }
@@ -545,6 +552,15 @@ mod tests {
                     .expect("window"),
             )
             .expect("enrolment");
+        fs::FsFloorStore::open(root)
+            .put(
+                "otelcol",
+                &Floor {
+                    version: "2.0.0".to_string(),
+                    signature: vec![7; 64],
+                },
+            )
+            .expect("floor");
         let audit = crate::audit_log::AuditLog::start(
             Box::new(fs::FsAuditStore::open(root).expect("open")),
             crate::audit_log::Limits::default(),
@@ -643,6 +659,8 @@ mod tests {
             records.enrolment().load().expect("load"),
             expected.enrolment
         );
+        assert_eq!(records.floors().load().expect("load"), expected.floors);
+        assert_eq!(expected.floors.len(), 1, "the fixture holds a floor");
         let packages = records.packages().expect("p").load().expect("load");
         // Every Package whole: its identity and each entry's platform, hash, size and signature.
         let shown = |packages: &[Package]| -> Vec<_> {
