@@ -1,6 +1,6 @@
 # ADR-0060: An ADR is handed to the human in commits of ADRs only, and its implementation follows on the same branch
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-10-26
 - **Deciders:** Markus Brigl
 - **Applies to:** rules 3 and 4 of the ADR rules in `AGENTS.md`, the submit step of the `propose-adr` skill under `.agents/skills/`, the ADR line and the `ADRs reviewed at:` line of `.github/PULL_REQUEST_TEMPLATE.md`, the check for commits mixing the text of an ADR with other paths in `scripts/sensor-review-binding.sh` and `scripts/test-sensor-review-binding.sh`, the sensors job of `.github/workflows/checks.yml` and `.github/workflows/review-binding.yml` that run it, and every branch and pull request that carries the text of an ADR
