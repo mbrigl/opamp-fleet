@@ -1774,6 +1774,14 @@ mod tests {
             .status()
             .expect("run mklink");
         assert!(symlinked.success(), "cannot make the directory symlink");
+        // What the test makes is the Administrators', as an elevated install's is, whatever owner
+        // the shell above it leaves in the token: Git Bash's runtime makes it the account itself,
+        // which stands in for the process account here.
+        for path in [&root, &data, &outside, &outside.join("secret"), &elsewhere] {
+            Entry::open(path, Access::Owner, false)
+                .and_then(|entry| entry.set_owner("BA"))
+                .expect("owned by the Administrators");
+        }
         let owned = data.join("owned");
         std::fs::create_dir(&owned).expect("owned");
         std::fs::write(owned.join("state"), b"x").expect("state");
@@ -1815,6 +1823,9 @@ mod tests {
         };
         let theirs = data.join("theirs");
         std::fs::create_dir(&theirs).expect("theirs");
+        Entry::open(&theirs, Access::Owner, false)
+            .and_then(|entry| entry.set_owner("BA"))
+            .expect("owned by the Administrators");
         let _held = (hold(&owned), hold(&theirs));
         let mut skipped = client
             .hand_over(&[&root], Some(&process))
