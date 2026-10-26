@@ -1,4 +1,4 @@
-# ADR-draft-rule-5-names-the-clause-suffix: Rule 5 of `AGENTS.md` names the clause suffix among the edits it permits
+# ADR-0036: Rule 5 of `AGENTS.md` names the clause suffix among the edits it permits
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-27

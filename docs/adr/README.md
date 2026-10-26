@@ -115,7 +115,7 @@ How this project's record changes beyond what the template decides.
 | ADR | Title | Applies to | Status |
 |-----|-------|------------|--------|
 | [0007](0007-an-adr-may-supersede-named-clauses-of-another.md) | An ADR may supersede named clauses of another, which stays accepted for the rest | the supersession mechanics of `docs/adr/README.md` and `docs/adr/template.md`, the `Supersedes` field and `Status` line of every ADR, and the supersession check of `scripts/check-docs.sh` | 🟢 accepted |
-| [draft-rule-5-names-the-clause-suffix](draft-rule-5-names-the-clause-suffix.md) | Rule 5 of `AGENTS.md` names the clause suffix among the edits it permits | rule 5 of the ADR rules in `AGENTS.md` | 🟡 proposed |
+| [0036](0036-rule-5-names-the-clause-suffix.md) | Rule 5 of `AGENTS.md` names the clause suffix among the edits it permits | rule 5 of the ADR rules in `AGENTS.md` | 🟡 proposed |
 
 #### Founding decisions
 
