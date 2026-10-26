@@ -134,6 +134,11 @@ core module names an adapter or a technology, and when a module has no role.
   `PackageOffering::new` and `BootstrapCertificates::on_disk`. `migrate` is the one module that
   reads the layout of an older Server, for `server migrate`, and nothing in the running Server
   calls it.
+- **The golden path** — a Server store: the port `FloorStore` in the core module `floors`, its
+  filesystem adapter in `fs::floors`, its PostgreSQL adapter in `postgres::floors`, and the one
+  `contract` test there that runs on both stores. A new store copies its shape and its test
+  ([ADR-0010](adr/0010-ports-and-adapters.md),
+  [ADR-0030](adr/0030-the-servers-state-and-its-stores.md)).
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
