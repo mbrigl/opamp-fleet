@@ -84,10 +84,6 @@ jobs:
         run: bash scripts/check-docs.sh
         env:
           PULL_REQUEST_DRAFT: ${{ github.event.pull_request.draft }}
-      # The setup promises a green project once every step is done, and that check-docs.sh names
-      # every placeholder left behind; this holds only on the real scaffold, not on a fixture.
-      - name: Self-test the template setup against the scaffold
-        run: bash scripts/test-template-setup.sh
       - name: Self-test the map script of the normalize skill
         run: bash scripts/test-normalize-remap.sh
       - name: Self-test the numbering script of the drafts

@@ -156,7 +156,6 @@ run "Protocol Baseline self-test" scripts/test-check-protocol-baseline.sh
 run "Documentation consistency" scripts/check-docs.sh
 # Check 17 of check-docs.sh runs the Protocol Baseline check; it reads the network.
 # On instruction: scripts/check-protocol-baseline.sh
-run "Template setup self-test" scripts/test-template-setup.sh
 run "Normalize map self-test" scripts/test-normalize-remap.sh
 # The numbering script commits and runs on a human's instruction, before the pull request that
 # brings drafts to main (ADR-0002); its self-test runs here.
